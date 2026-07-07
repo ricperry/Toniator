@@ -20,15 +20,18 @@ export function generateHalftoneSvg({
   sampleProvider = defaultSampleProvider,
 }) {
   const { outputWidth, outputHeight, markMode } = settings;
+  const enabledChannelKeys = CHANNEL_ORDER.filter((key) => channels[key]?.enabled);
+  const renderSettings = { ...settings, enabledChannelKeys };
   const parts = [
     `<svg xmlns="http://www.w3.org/2000/svg" width="${round(outputWidth)}" height="${round(outputHeight)}" viewBox="0 0 ${round(outputWidth)} ${round(outputHeight)}" role="img" aria-label="Vector halftone output">`,
     `<defs><clipPath id="toniator-artboard-clip"><rect x="0" y="0" width="${round(outputWidth)}" height="${round(outputHeight)}"/></clipPath></defs>`,
     `<rect width="100%" height="100%" fill="white"/>`,
   ];
 
-  if (includePreviewBackground && source?.dataUrl) {
+  const previewSourceUrl = source?.previewDataUrl || source?.dataUrl;
+  if (includePreviewBackground && previewSourceUrl) {
     parts.push(
-      `<image href="${escapeAttr(source.dataUrl)}" x="0" y="0" width="${round(outputWidth)}" height="${round(outputHeight)}" preserveAspectRatio="none" opacity="0.22"/>`,
+      `<image href="${escapeAttr(previewSourceUrl)}" x="0" y="0" width="${round(outputWidth)}" height="${round(outputHeight)}" preserveAspectRatio="none" opacity="0.22"/>`,
     );
   }
 
@@ -36,15 +39,15 @@ export function generateHalftoneSvg({
     const channel = channels[key];
     if (!channel.enabled) continue;
 
-    const channelGrid = getChannelGrid({ source, baseGrid: grid, settings, channel });
+    const channelGrid = getChannelGrid({ source, baseGrid: grid, settings: renderSettings, channel });
     const channelSamples = sampleProvider({
       source,
       grid: channelGrid,
       channelKey: key,
-      settings,
+      settings: renderSettings,
       channel,
     });
-    const markPath = resolveChannelPath(key, settings, channels);
+    const markPath = resolveChannelPath(key, renderSettings, channels);
     const pathFragments =
       markMode === "curve"
         ? buildCurveElements({
@@ -52,7 +55,7 @@ export function generateHalftoneSvg({
             d: markPath,
             samples: channelSamples,
             grid: channelGrid,
-            settings,
+            settings: renderSettings,
             channel,
           })
         : buildShapeElements({
@@ -60,14 +63,15 @@ export function generateHalftoneSvg({
             d: markPath,
             samples: channelSamples,
             grid: channelGrid,
-            settings,
+            settings: renderSettings,
             channel,
           });
 
     if (pathFragments.length > 0) {
       const clipAttr = markMode === "curve" ? ` clip-path="url(#toniator-artboard-clip)"` : "";
+      const renderColor = crosshatchLuminanceMode(renderSettings) ? "#111111" : channel.color;
       parts.push(
-        `<g id="${CHANNEL_IDS[key]}"${clipAttr} fill="${escapeAttr(channel.color)}" stroke="${escapeAttr(channel.color)}" opacity="${round(channel.opacity)}" style="mix-blend-mode:multiply">`,
+        `<g id="${CHANNEL_IDS[key]}"${clipAttr} fill="${escapeAttr(renderColor)}" stroke="${escapeAttr(renderColor)}" opacity="${round(channel.opacity)}" style="mix-blend-mode:multiply">`,
         `<path d="${escapeAttr(pathFragments.join(" "))}" fill-rule="nonzero" stroke="none"/>`,
         `</g>`,
       );
@@ -76,6 +80,10 @@ export function generateHalftoneSvg({
 
   parts.push("</svg>");
   return parts.join("\n");
+}
+
+function crosshatchLuminanceMode(settings) {
+  return settings.valueMode === "crosshatch-luminance";
 }
 
 function defaultSampleProvider({ source, grid }) {
@@ -269,7 +277,7 @@ function resolveChannelPath(key, settings, channels) {
         ? settings.sharedPath.trim() || getPresetPath("curve", settings.sharedPreset)
         : channel.customPath?.trim() ||
         settings.sharedPath.trim() ||
-        getPresetPath("curve", settings.sharedPreset),
+        getPresetPath("curve", channel.preset || settings.sharedPreset),
       channel,
     );
   }
@@ -309,6 +317,7 @@ function sampleChannelValue({ key, sample, settings, channel }) {
     sample,
     settings.valueMode,
     settings.singleChannel,
+    settings.enabledChannelKeys,
   );
   const rawValue = values[key] ?? 0;
   return mapThreshold(rawValue, channel.threshold);

@@ -102,6 +102,47 @@ button:disabled {
   margin-top: 0.75rem;
 }
 
+.export-dialog {
+  width: min(32rem, calc(100vw - 2rem));
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  padding: 0;
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 1.5rem 5rem rgba(0, 0, 0, 0.55);
+}
+
+.export-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.58);
+}
+
+.export-dialog-form {
+  padding: 1rem;
+}
+
+.dialog-title-row,
+.dialog-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.dialog-title-row h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.dialog-actions {
+  justify-content: flex-end;
+  margin-top: 1rem;
+}
+
+.png-aspect-lock {
+  align-self: end;
+  min-height: 2.65rem;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: minmax(22rem, 29rem) minmax(0, 1fr);
@@ -223,6 +264,10 @@ input[type="color"] {
 }
 
 .channel-card.inactive-settings-target {
+  display: none;
+}
+
+.channel-card.channel-disabled-settings > :not(.channel-title) {
   display: none;
 }
 

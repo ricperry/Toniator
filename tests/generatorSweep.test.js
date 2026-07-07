@@ -4,6 +4,7 @@ import { aspectLockedDimensions } from "../src/aspect.js";
 import { normalizeCurvePathForEditor } from "../src/curveEditor.js";
 import { bezziatorDocumentToPathData } from "../src/curveImport.js";
 import { pathDataWithEndpointSettings } from "../src/curvePath.js";
+import { mapPixelToChannels } from "../src/color.js";
 import { generateHalftoneSvg } from "../src/svgGenerator.js";
 
 const outputWidth = 360;
@@ -921,6 +922,51 @@ const testThresholdBoundaryWithMidGray = () => {
   assert.ok(pathCount(belowOrAtMid) > pathCount(aboveMid), "threshold boundary should omit mid-gray above threshold");
 };
 
+const testCrosshatchValueMapping = () => {
+  assert.deepEqual(
+    mapPixelToChannels([255, 255, 255, 255], "crosshatch-luminance"),
+    { c: 0, m: 0, y: 0, k: 0 },
+    "white should not activate crosshatch channels",
+  );
+
+  assert.deepEqual(
+    mapPixelToChannels([0, 0, 0, 255], "crosshatch-luminance"),
+    { c: 0.25, m: 0.25, y: 0.25, k: 0.25 },
+    "black should split darkness across all crosshatch channels",
+  );
+
+  const lightGray = mapPixelToChannels([192, 192, 192, 255], "crosshatch-luminance");
+  assert.ok(lightGray.k > 0 && lightGray.k < 0.25, "light gray should partially activate the first hatch layer");
+  assert.equal(lightGray.c, 0, "light gray should not activate the second hatch layer");
+  assert.equal(lightGray.m, 0, "light gray should not activate the third hatch layer");
+  assert.equal(lightGray.y, 0, "light gray should not activate the fourth hatch layer");
+
+  const darkGray = mapPixelToChannels([64, 64, 64, 255], "crosshatch-luminance");
+  assert.equal(darkGray.k, 0.25, "dark gray should fill the first hatch layer budget");
+  assert.equal(darkGray.c, 0.25, "dark gray should fill the second hatch layer budget");
+  assert.ok(darkGray.m > 0.24 && darkGray.m < 0.25, "dark gray should nearly fill the third hatch layer budget");
+  assert.equal(darkGray.y, 0, "dark gray should not activate the fourth hatch layer yet");
+
+  assert.deepEqual(
+    mapPixelToChannels([0, 0, 0, 255], "crosshatch-luminance", "k", ["c", "k"]),
+    { c: 0.5, m: 0, y: 0, k: 0.5 },
+    "black should split darkness across only enabled crosshatch channels",
+  );
+
+  assert.deepEqual(
+    mapPixelToChannels([0, 0, 0, 255], "crosshatch-luminance", "k", ["m"]),
+    { c: 0, m: 1, y: 0, k: 0 },
+    "a single enabled crosshatch channel should receive full darkness",
+  );
+
+  const svg = run({
+    settings: { valueMode: "crosshatch-luminance", markMode: "curve" },
+    channels: enabledChannels,
+  });
+  assert.doesNotMatch(svg, /fill="#00aeef"|fill="#ec008c"|fill="#ffd400"/, "crosshatch output should be monochrome");
+  assert.match(svg, /fill="#111111"/, "crosshatch output should use black hatch geometry");
+};
+
 const testShapeOffsetPeriodicity = () => {
   const zero = run({
     settings: { markMode: "shape", sharedPreset: "circle", sharedPath: "" },
@@ -1000,6 +1046,7 @@ testShapeGridRotationAndPivot();
 testAllShapePresets();
 testFullInputConfigurationSurface();
 testThresholdBoundaryWithMidGray();
+testCrosshatchValueMapping();
 testShapeOffsetPeriodicity();
 testAspectLocking();
 testEditorCurveNormalization();

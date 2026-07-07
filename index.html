@@ -17,12 +17,11 @@
         </p>
       </div>
       <div class="header-actions">
-        <button id="renderButton" type="button">Render</button>
-        <button id="resetDefaultsButton" type="button" class="secondary">
-          Reset Defaults
-        </button>
         <button id="exportButton" type="button" class="secondary">
           Export SVG
+        </button>
+        <button id="exportPngButton" type="button" class="secondary">
+          Export PNG
         </button>
       </div>
     </header>
@@ -56,6 +55,9 @@
             </button>
             <button id="loadPresetButton" type="button" class="secondary small">
               Load .tntr
+            </button>
+            <button id="resetDefaultsButton" type="button" class="secondary small">
+              Reset Defaults
             </button>
             <input id="presetFileInput" class="hidden" type="file" accept=".tntr,application/json" />
           </div>
@@ -103,6 +105,7 @@
             <select id="valueMode">
               <option value="cmyk">CMYK from RGB</option>
               <option value="luminance">Luminance drives enabled channels</option>
+              <option value="crosshatch-luminance">Grayscale into multiple channels (crosshatching)</option>
               <option value="inverted-luminance">Inverted luminance drives enabled channels</option>
               <option value="single-channel">Grayscale into one channel</option>
             </select>
@@ -227,7 +230,7 @@
               <label>Shape/Curve Rotation Δ° <input id="cmyk-rotationDelta" type="number" min="-360" max="360" step="1" value="0" /></label>
               <label>Grid Rotation Δ° <input id="cmyk-gridRotationDelta" type="number" min="-360" max="360" step="1" value="0" /></label>
             </div>
-            <div class="grid two">
+            <div class="grid two" data-grid-pivot-controls="cmyk">
               <label>Grid Pivot X Δ <input id="cmyk-gridPivotXDelta" type="number" min="-4000" max="4000" step="0.5" value="0" /></label>
               <label>Grid Pivot Y Δ <input id="cmyk-gridPivotYDelta" type="number" min="-4000" max="4000" step="0.5" value="0" /></label>
             </div>
@@ -247,23 +250,23 @@
               <label>X Offset Δ <input id="cmyk-offsetXDelta" type="number" min="-1000" max="1000" step="0.5" value="0" /></label>
               <label>Y Offset Δ <input id="cmyk-offsetYDelta" type="number" min="-1000" max="1000" step="0.5" value="0" /></label>
             </div>
-            <div class="grid two" data-mode="curve">
+            <div class="grid two" data-mode="curve" data-curve-layout="motif-pattern">
               <label>Tile Count Δ <input id="cmyk-tileCountDelta" type="number" min="-200" max="200" step="1" value="0" /></label>
               <label>Tile Spacing Δ <input id="cmyk-tileSpacingDelta" type="number" min="-1000" max="1000" step="0.5" value="0" /></label>
             </div>
-            <div class="grid two" data-mode="curve">
+            <div class="grid two" data-mode="curve" data-curve-layout="motif-pattern">
               <label>Tile Angle Δ° <input id="cmyk-tileAngleDelta" type="number" min="-360" max="360" step="1" value="0" /></label>
               <label>Tile Offset Δ <input id="cmyk-tileOffsetDelta" type="number" min="-1000" max="1000" step="0.5" value="0" /></label>
             </div>
-            <div class="grid two" data-mode="curve">
+            <div class="grid two" data-mode="curve" data-curve-layout="motif-pattern">
               <label>Stack Count Δ <input id="cmyk-stackCountDelta" type="number" min="-200" max="200" step="1" value="0" /></label>
               <label>Stack Spacing Δ <input id="cmyk-stackSpacingDelta" type="number" min="-1000" max="1000" step="0.5" value="0" /></label>
             </div>
-            <div class="grid two" data-mode="curve">
+            <div class="grid two" data-mode="curve" data-curve-layout="motif-pattern">
               <label>Stack Angle Δ° <input id="cmyk-stackAngleDelta" type="number" min="-360" max="360" step="1" value="0" /></label>
               <label>Stack Offset Δ <input id="cmyk-stackOffsetDelta" type="number" min="-1000" max="1000" step="0.5" value="0" /></label>
             </div>
-            <label data-mode="curve">Alternate Stack Offset Δ <input id="cmyk-alternateStackOffsetDelta" type="number" min="-1000" max="1000" step="0.5" value="0" /></label>
+            <label data-mode="curve" data-curve-layout="motif-pattern">Alternate Stack Offset Δ <input id="cmyk-alternateStackOffsetDelta" type="number" min="-1000" max="1000" step="0.5" value="0" /></label>
           </article>
           <div id="channelControls" class="channels"></div>
         </section>
@@ -301,6 +304,39 @@
         </div>
       </section>
     </main>
+
+    <dialog id="pngExportDialog" class="export-dialog">
+      <form method="dialog" class="export-dialog-form">
+        <div class="dialog-title-row">
+          <h2>Export PNG</h2>
+          <button id="pngExportCancelButton" type="button" class="secondary small">Cancel</button>
+        </div>
+        <p id="pngExportInfo" class="hint"></p>
+        <div class="grid two">
+          <label>
+            DPI
+            <input id="pngExportDpi" type="number" min="1" max="2400" step="1" value="300" />
+          </label>
+          <label class="check png-aspect-lock">
+            <input id="pngExportLockAspect" type="checkbox" checked />
+            Lock aspect
+          </label>
+        </div>
+        <div class="grid two">
+          <label>
+            Width px
+            <input id="pngExportWidth" type="number" min="1" max="32000" step="1" value="900" />
+          </label>
+          <label>
+            Height px
+            <input id="pngExportHeight" type="number" min="1" max="32000" step="1" value="620" />
+          </label>
+        </div>
+        <div class="dialog-actions">
+          <button id="pngExportConfirmButton" type="button">Export PNG</button>
+        </div>
+      </form>
+    </dialog>
 
     <script type="module" src="./src/main.js"></script>
   </body>

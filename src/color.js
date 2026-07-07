@@ -22,7 +22,7 @@ export function luminance(r, g, b) {
   return clamp01(1 - lightness);
 }
 
-export function mapPixelToChannels(pixel, mode, singleChannel = "k") {
+export function mapPixelToChannels(pixel, mode, singleChannel = "k", enabledChannels = null) {
   const [r, g, b, a] = pixel;
   if (a === 0) {
     return { c: 0, m: 0, y: 0, k: 0 };
@@ -33,6 +33,10 @@ export function mapPixelToChannels(pixel, mode, singleChannel = "k") {
   }
 
   const dark = luminance(r, g, b);
+
+  if (mode === "crosshatch-luminance") {
+    return crosshatchLuminanceChannels(dark, enabledChannels);
+  }
 
   if (mode === "inverted-luminance") {
     const inverted = 1 - dark;
@@ -49,6 +53,32 @@ export function mapPixelToChannels(pixel, mode, singleChannel = "k") {
   }
 
   return { c: dark, m: dark, y: dark, k: dark };
+}
+
+function crosshatchLuminanceChannels(darkness, enabledChannels) {
+  const layerOrder = ["k", "c", "m", "y"].filter((channel) =>
+    Array.isArray(enabledChannels) ? enabledChannels.includes(channel) : true,
+  );
+  if (layerOrder.length === 0) return { c: 0, m: 0, y: 0, k: 0 };
+
+  const layerSpan = 1 / layerOrder.length;
+  const normalizedDarkness = snapUnitInterval(darkness);
+  const values = { c: 0, m: 0, y: 0, k: 0 };
+
+  layerOrder.forEach((channel, index) => {
+    values[channel] = snapUnitInterval(
+      Math.min(layerSpan, Math.max(0, normalizedDarkness - index * layerSpan)),
+    );
+  });
+
+  return values;
+}
+
+function snapUnitInterval(value) {
+  const clamped = clamp01(value);
+  if (clamped <= 1e-12) return 0;
+  if (clamped >= 1 - 1e-12) return 1;
+  return clamped;
 }
 
 export function clamp01(value) {

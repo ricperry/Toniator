@@ -155,9 +155,17 @@ const els = {
   channelSettingsTarget: document.querySelector("#channelSettingsTarget"),
   cmykDeltaControls: document.querySelector("#cmykDeltaControls"),
   channelControls: document.querySelector("#channelControls"),
-  renderButton: document.querySelector("#renderButton"),
   resetDefaultsButton: document.querySelector("#resetDefaultsButton"),
   exportButton: document.querySelector("#exportButton"),
+  exportPngButton: document.querySelector("#exportPngButton"),
+  pngExportDialog: document.querySelector("#pngExportDialog"),
+  pngExportInfo: document.querySelector("#pngExportInfo"),
+  pngExportDpi: document.querySelector("#pngExportDpi"),
+  pngExportWidth: document.querySelector("#pngExportWidth"),
+  pngExportHeight: document.querySelector("#pngExportHeight"),
+  pngExportLockAspect: document.querySelector("#pngExportLockAspect"),
+  pngExportCancelButton: document.querySelector("#pngExportCancelButton"),
+  pngExportConfirmButton: document.querySelector("#pngExportConfirmButton"),
   fitPreviewButton: document.querySelector("#fitPreviewButton"),
   previewFrame: document.querySelector("#previewFrame"),
   infoOverlayMenu: document.querySelector("#infoOverlayMenu"),
@@ -189,7 +197,7 @@ function init() {
   updateModeUi();
   updateMarkPreviews();
   updateFitPreviewButton();
-  els.exportButton.disabled = true;
+  setExportButtonsEnabled(false);
   loadSample();
 }
 
@@ -214,9 +222,14 @@ function bindEvents() {
     updateModeUi();
     updateMarkPreviews();
   });
-  els.renderButton.addEventListener("click", render);
   els.resetDefaultsButton.addEventListener("click", resetDefaults);
   els.exportButton.addEventListener("click", exportSvg);
+  els.exportPngButton.addEventListener("click", openPngExportDialog);
+  els.pngExportCancelButton.addEventListener("click", () => els.pngExportDialog.close());
+  els.pngExportConfirmButton.addEventListener("click", exportPngFromDialog);
+  els.pngExportDpi.addEventListener("input", updatePngSizeFromDpi);
+  els.pngExportWidth.addEventListener("input", () => updatePngSizeFromDimension("width"));
+  els.pngExportHeight.addEventListener("input", () => updatePngSizeFromDimension("height"));
   bindOverlayMenu();
   els.fitPreviewButton.addEventListener("click", () => {
     state.fitPreview = !state.fitPreview;
@@ -347,7 +360,7 @@ function controlHint(id) {
     maxMark: "Largest mark size generated from sampled values.",
     curveTileCells: "Length, in grid cells, used by tiled full-width/full-height curve layouts.",
     testingPreset: "Loads a saved test scenario that exercises a known combination of modes and channel settings.",
-    valueMode: "Chooses how source pixels are converted into channel values before thresholding and mark sizing.",
+    valueMode: "Chooses how source pixels are converted into channel values before thresholding and mark sizing. Crosshatching mode splits grayscale density across the enabled channels as monochrome hatch layers.",
     singleChannel: "Chooses which CMYK channel receives grayscale values in single-channel mode.",
     markMode: "Switches between repeated shape marks and variable-width curve marks.",
     curveSpan: "Chooses whether curves span the document, tile across an axis, or use motif tiling/stacking.",
@@ -652,7 +665,7 @@ function resetDefaults({ renderAfter = true } = {}) {
   if (state.source && renderAfter) {
     render();
   } else if (!state.source) {
-    els.exportButton.disabled = true;
+    setExportButtonsEnabled(false);
     els.renderStats.textContent = "Load a source file to begin.";
   }
 }
@@ -1005,28 +1018,14 @@ async function render() {
   renderInfoOverlay();
   updateCurveEditOverlayLayout();
   els.emptyState.classList.add("hidden");
-  els.exportButton.disabled = false;
+  setExportButtonsEnabled(true);
   els.renderStats.textContent = `${grid.cols}×${grid.rows} base cells · ${describeChannelResolutions(channels, settings.longEdgeCells)} · rendered in ${elapsed.toFixed(1)}ms`;
 }
 
 function exportSvg() {
   if (!state.latestSvg) return;
 
-  const exportSettings = readSettings();
-  const grid = calculateGrid(
-    state.source,
-    exportSettings.outputWidth,
-    exportSettings.outputHeight,
-    exportSettings.longEdgeCells,
-  );
-  const svg = generateHalftoneSvg({
-    source: state.source,
-    grid,
-    settings: exportSettings,
-    channels: readChannels(),
-    includePreviewBackground: false,
-  });
-
+  const svg = exportSvgMarkup();
   const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
@@ -1034,6 +1033,236 @@ function exportSvg() {
   link.download = `${sourceBaseName()}-toniator-halftone.svg`;
   link.click();
   URL.revokeObjectURL(url);
+}
+
+function openPngExportDialog() {
+  if (!state.latestSvg) return;
+
+  const defaults = defaultPngExportSize();
+  setControlValue(els.pngExportDpi, defaults.dpi);
+  setControlValue(els.pngExportWidth, defaults.width);
+  setControlValue(els.pngExportHeight, defaults.height);
+  els.pngExportInfo.textContent = pngExportInfoText(defaults);
+  if (typeof els.pngExportDialog.showModal === "function") {
+    els.pngExportDialog.showModal();
+  } else {
+    els.pngExportDialog.setAttribute("open", "");
+  }
+}
+
+async function exportPngFromDialog() {
+  if (!state.latestSvg) return;
+
+  const width = clampInteger(readNumber(els.pngExportWidth, readSettings().outputWidth), 1, 32000);
+  const height = clampInteger(readNumber(els.pngExportHeight, readSettings().outputHeight), 1, 32000);
+  const dpi = clampInteger(readNumber(els.pngExportDpi, 300), 1, 2400);
+  els.pngExportDialog.close();
+
+  const svg = exportSvgMarkup();
+  const svgBlob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
+  const svgUrl = URL.createObjectURL(svgBlob);
+
+  try {
+    const image = await loadImage(svgUrl);
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    const pngBlob = await addPngDpiMetadata(await canvasToBlob(canvas, "image/png"), dpi);
+    const pngUrl = URL.createObjectURL(pngBlob);
+    const link = document.createElement("a");
+    link.href = pngUrl;
+    link.download = `${sourceBaseName()}-toniator-halftone.png`;
+    link.click();
+    URL.revokeObjectURL(pngUrl);
+  } finally {
+    URL.revokeObjectURL(svgUrl);
+  }
+}
+
+function defaultPngExportSize() {
+  const settings = readSettings();
+  const physicalSize = sourcePhysicalSize();
+  const dpi = Math.max(1, Math.round(physicalSize.dpi || 300));
+  return {
+    dpi,
+    width: Math.max(1, Math.round(physicalSize.widthInches * dpi)),
+    height: Math.max(1, Math.round(physicalSize.heightInches * dpi)),
+    physicalSize,
+    outputAspect: settings.outputWidth / settings.outputHeight,
+  };
+}
+
+function updatePngSizeFromDpi() {
+  const physicalSize = sourcePhysicalSize();
+  const dpi = clampInteger(readNumber(els.pngExportDpi, 300), 1, 2400);
+  setControlValue(els.pngExportWidth, Math.max(1, Math.round(physicalSize.widthInches * dpi)));
+  setControlValue(els.pngExportHeight, Math.max(1, Math.round(physicalSize.heightInches * dpi)));
+  els.pngExportInfo.textContent = pngExportInfoText({ dpi, physicalSize });
+}
+
+function updatePngSizeFromDimension(dimension) {
+  const physicalSize = sourcePhysicalSize();
+  const width = clampInteger(readNumber(els.pngExportWidth, 1), 1, 32000);
+  const height = clampInteger(readNumber(els.pngExportHeight, 1), 1, 32000);
+  const aspect = physicalSize.widthInches / physicalSize.heightInches;
+
+  if (els.pngExportLockAspect.checked && dimension === "width") {
+    const nextHeight = Math.max(1, Math.round(width / aspect));
+    setControlValue(els.pngExportHeight, nextHeight);
+    setControlValue(els.pngExportDpi, Math.max(1, Math.round(width / physicalSize.widthInches)));
+    return;
+  }
+
+  if (els.pngExportLockAspect.checked && dimension === "height") {
+    const nextWidth = Math.max(1, Math.round(height * aspect));
+    setControlValue(els.pngExportWidth, nextWidth);
+    setControlValue(els.pngExportDpi, Math.max(1, Math.round(height / physicalSize.heightInches)));
+    return;
+  }
+
+  const dpiFromEditedAxis =
+    dimension === "width"
+      ? width / physicalSize.widthInches
+      : height / physicalSize.heightInches;
+  setControlValue(els.pngExportDpi, Math.max(1, Math.round(dpiFromEditedAxis)));
+}
+
+function sourcePhysicalSize() {
+  const source = state.source;
+  if (source?.physicalSize?.widthInches > 0 && source?.physicalSize?.heightInches > 0) {
+    return {
+      ...source.physicalSize,
+      dpi:
+        source.physicalSize.dpi ||
+        averageDpi(source.physicalSize.dpiX, source.physicalSize.dpiY) ||
+        96,
+    };
+  }
+
+  const settings = readSettings();
+  return {
+    widthInches: settings.outputWidth / 96,
+    heightInches: settings.outputHeight / 96,
+    dpi: 96,
+    source: "pixel",
+  };
+}
+
+function pngExportInfoText({ dpi, physicalSize }) {
+  const basis =
+    physicalSize.source === "embedded"
+      ? `embedded size ${formatNumber(physicalSize.widthInches)}×${formatNumber(physicalSize.heightInches)} in`
+      : `pixel size treated as ${formatNumber(physicalSize.widthInches)}×${formatNumber(physicalSize.heightInches)} in at 96 DPI`;
+  return `${basis} · ${Math.round(dpi)} DPI`;
+}
+
+function averageDpi(dpiX, dpiY) {
+  const values = [dpiX, dpiY].filter((value) => Number.isFinite(value) && value > 0);
+  if (values.length === 0) return 0;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function exportSvgMarkup(exportSettings = readSettings()) {
+  const grid = calculateGrid(
+    state.source,
+    exportSettings.outputWidth,
+    exportSettings.outputHeight,
+    exportSettings.longEdgeCells,
+  );
+  return generateHalftoneSvg({
+    source: state.source,
+    grid,
+    settings: exportSettings,
+    channels: readChannels(),
+    includePreviewBackground: false,
+  });
+}
+
+function loadImage(url) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("Could not rasterize SVG for PNG export."));
+    image.src = url;
+  });
+}
+
+function canvasToBlob(canvas, type) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) {
+        resolve(blob);
+      } else {
+        reject(new Error("Could not create PNG export."));
+      }
+    }, type);
+  });
+}
+
+async function addPngDpiMetadata(blob, dpi) {
+  const source = new Uint8Array(await blob.arrayBuffer());
+  if (!isPngBytes(source)) return blob;
+
+  const pixelsPerMeter = Math.max(1, Math.round(dpi / 0.0254));
+  const chunk = createPngPhysChunk(pixelsPerMeter, pixelsPerMeter);
+  const insertOffset = 8 + 25;
+  const result = new Uint8Array(source.length + chunk.length);
+  result.set(source.slice(0, insertOffset), 0);
+  result.set(chunk, insertOffset);
+  result.set(source.slice(insertOffset), insertOffset + chunk.length);
+  return new Blob([result], { type: "image/png" });
+}
+
+function isPngBytes(bytes) {
+  const signature = [137, 80, 78, 71, 13, 10, 26, 10];
+  return bytes.length > 33 && signature.every((byte, index) => bytes[index] === byte);
+}
+
+function createPngPhysChunk(xPixelsPerMeter, yPixelsPerMeter) {
+  const type = new Uint8Array([112, 72, 89, 115]);
+  const data = new Uint8Array(9);
+  writeUint32(data, 0, xPixelsPerMeter);
+  writeUint32(data, 4, yPixelsPerMeter);
+  data[8] = 1;
+
+  const chunk = new Uint8Array(21);
+  writeUint32(chunk, 0, data.length);
+  chunk.set(type, 4);
+  chunk.set(data, 8);
+  writeUint32(chunk, 17, crc32(concatBytes(type, data)));
+  return chunk;
+}
+
+function concatBytes(a, b) {
+  const result = new Uint8Array(a.length + b.length);
+  result.set(a, 0);
+  result.set(b, a.length);
+  return result;
+}
+
+function writeUint32(bytes, offset, value) {
+  bytes[offset] = (value >>> 24) & 0xff;
+  bytes[offset + 1] = (value >>> 16) & 0xff;
+  bytes[offset + 2] = (value >>> 8) & 0xff;
+  bytes[offset + 3] = value & 0xff;
+}
+
+function crc32(bytes) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function setExportButtonsEnabled(enabled) {
+  els.exportButton.disabled = !enabled;
+  els.exportPngButton.disabled = !enabled;
 }
 
 function renderInfoOverlay() {
@@ -1470,13 +1699,13 @@ function renderChannelControls() {
         </button>
         <div id="${key}-preview" class="mark-preview"></div>
         <div class="grid two">
-          <label>Color <input id="${key}-color" type="color" value="${defaults.color}" /></label>
+          <label data-channel-color>Color <input id="${key}-color" type="color" value="${defaults.color}" /></label>
           <label>Shape/Curve Rotation ° <input id="${key}-rotation" type="number" min="-360" max="360" step="1" value="${defaults.rotation}" /></label>
         </div>
         <div class="curve-pattern-controls channel-grid-controls">
           <h4>Channel Grid Controls</h4>
           <label>Grid Rotation ° <input id="${key}-gridRotation" type="number" min="-360" max="360" step="1" value="0" /></label>
-          <div class="grid two">
+          <div class="grid two" data-grid-pivot-controls="${key}">
             <label>Grid Pivot X <input id="${key}-gridPivotX" type="number" min="-4000" max="4000" step="0.5" value="0" /></label>
             <label>Grid Pivot Y <input id="${key}-gridPivotY" type="number" min="-4000" max="4000" step="0.5" value="0" /></label>
           </div>
@@ -1498,7 +1727,7 @@ function renderChannelControls() {
           <label>Y offset <input id="${key}-offsetY" type="number" min="-200" max="200" step="0.5" value="0" /></label>
         </div>
         <p class="hint" data-mode="shape">In shape mode, offsets are wrapped grid phases; mark placement and image sampling move together.</p>
-        <div class="curve-pattern-controls" data-mode="curve">
+        <div class="curve-pattern-controls" data-mode="curve" data-curve-layout="motif-pattern">
           <h4>Source Curve Scale</h4>
           <div class="grid two">
             <label>Source Curve Scale <input id="${key}-curveScale" type="number" min="0.1" max="500" step="0.5" value="32" /></label>
@@ -1533,7 +1762,7 @@ function renderChannelControls() {
         </div>
         <div class="channel-mark">
           <p class="hint channel-mark-hint">Channel ${defaults.name} mark geometry. Custom path overrides the preset.</p>
-          <label>Preset <select id="${key}-preset"></select></label>
+          <label data-mode="shape">Preset <select id="${key}-preset"></select></label>
           <label data-mode="shape">Custom path <span class="muted">(optional SVG d)</span><textarea id="${key}-path" rows="2" spellcheck="false"></textarea></label>
           <label data-mode="curve">Import Bezziator/SVG curve <input id="${key}-curveFile" data-curve-file="${key}" type="file" accept=".bezvg,.bezziator,.svg,image/svg+xml" /></label>
         </div>
@@ -1590,7 +1819,8 @@ function updateModeUi() {
     "hidden",
     els.markMode.value !== "curve" ||
       !els.syncCurveChannels.checked ||
-      !els.sharedConnectEndpoints.checked,
+      !els.sharedConnectEndpoints.checked ||
+      els.curveSpan.value === "motif-pattern",
   );
 
   if (els.markMode.value !== "curve") {
@@ -1635,6 +1865,7 @@ function updateModeUi() {
       "hidden",
       els.markMode.value !== "curve" ||
         els.syncCurveChannels.checked ||
+        els.curveSpan.value === "motif-pattern" ||
         !document.querySelector(`#${key}-connectEndpoints`).checked,
     );
   }
@@ -1676,6 +1907,8 @@ function updateModeUi() {
       : els.geometryMode.value === "shared"
       ? "One shape/curve definition is used for C, M, Y, and K. Each channel keeps its own rotation and XY offset."
       : "Each channel can use its own preset or arbitrary SVG path for the current shape/curve mode.";
+
+  updateEffectiveChannelControlVisibility();
 }
 
 function updateModeSpecificControls(mode) {
@@ -1683,6 +1916,51 @@ function updateModeSpecificControls(mode) {
     const supportedModes = control.dataset.mode.split(/\s+/u);
     control.classList.toggle("hidden", !supportedModes.includes(mode));
   }
+}
+
+function updateEffectiveChannelControlVisibility() {
+  const curveMode = els.markMode.value === "curve";
+  const motifCurveLayout = curveMode && els.curveSpan.value === "motif-pattern";
+  const crosshatchMode = els.valueMode.value === "crosshatch-luminance";
+  const deltas = readCmykDeltas();
+  const channels = readBaseChannels();
+
+  for (const control of document.querySelectorAll("[data-curve-layout]")) {
+    control.classList.toggle(
+      "hidden",
+      !curveMode || control.dataset.curveLayout !== els.curveSpan.value,
+    );
+  }
+
+  for (const control of document.querySelectorAll("[data-channel-color]")) {
+    control.classList.toggle("hidden", crosshatchMode);
+  }
+
+  for (const card of document.querySelectorAll(".channel-card[data-channel-card]")) {
+    const channel = channels[card.dataset.channelCard];
+    card.classList.toggle("channel-disabled-settings", !channel?.enabled);
+  }
+
+  for (const control of document.querySelectorAll("[data-grid-pivot-controls]")) {
+    const target = control.dataset.gridPivotControls;
+    const hasEffectiveGridRotation =
+      target === "cmyk"
+        ? Object.values(channels).some((channel) =>
+            channel.enabled &&
+            Math.abs(channel.gridRotation + deltas.gridRotationDelta) > 0.0001,
+          )
+        : Math.abs((channels[target]?.gridRotation ?? 0) + deltas.gridRotationDelta) > 0.0001;
+
+    control.classList.toggle("hidden", !hasEffectiveGridRotation);
+  }
+
+  els.sharedSmoothSeam.closest("label")?.classList.toggle(
+    "hidden",
+    !curveMode ||
+      motifCurveLayout ||
+      !els.syncCurveChannels.checked ||
+      !els.sharedConnectEndpoints.checked,
+  );
 }
 
 function updateChannelSettingsTargetUi() {
@@ -1989,7 +2267,7 @@ function resolveChannelPreviewPath(settings, channel) {
       ? settings.sharedPath.trim() || getPresetPath("curve", settings.sharedPreset)
       : channel.customPath.trim() ||
       settings.sharedPath.trim() ||
-      getPresetPath("curve", settings.sharedPreset);
+      getPresetPath("curve", channel.preset || settings.sharedPreset);
   }
 
   return settings.useSharedMark
@@ -2068,6 +2346,10 @@ function readNumber(input, fallback) {
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
+}
+
+function clampInteger(value, min, max) {
+  return Math.round(clamp(value, min, max));
 }
 
 function sourceBaseName() {

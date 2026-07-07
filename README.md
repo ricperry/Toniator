@@ -40,7 +40,7 @@ npm run preview
 
 - A built-in sample loads automatically so the demo is usable immediately.
 - Load PNG, JPG, WebP, or SVG input.
-- SVG input is rendered to an internal canvas for sampling.
+- SVG input is rendered to an internal canvas for sampling and preview comparison so the displayed source and sampled source share the same raster basis.
 - Sample on a proportional grid using “cells on long edge”.
 - When source aspect preservation is enabled, editing either Width or Height updates the other dimension from the source aspect ratio; changing dimensions changes output/sampling size without distorting the source.
 - Generate real SVG output grouped by channel:
@@ -51,6 +51,7 @@ npm run preview
 - Mapping modes:
   - RGB to CMYK-like values
   - luminance driving all enabled channels
+  - luminance split across enabled channels for monochrome curve-mode crosshatching; one enabled channel receives the full grayscale value, while multiple enabled channels divide the density budget across hatch directions
   - inverted luminance driving all enabled channels
   - grayscale into one selected channel
 - Shape mode with preset or custom SVG path marks.
@@ -67,25 +68,28 @@ npm run preview
 - Connected-cell curve mode auto-connects adjacent active cells into horizontal, vertical, or diagonal chains based on channel rotation.
 - Synchronized mark geometry for all channels with separate per-channel rotation/offset.
 - Independent arbitrary preset/custom SVG path geometry per channel.
+- Channel settings hide controls that do not affect the active mode/layout, including disabled-channel controls, shape-only/curve-only controls, motif-only curve tiling/stacking controls, unused grid-pivot controls, and channel color in monochrome crosshatch mode.
 - Per-channel color, rotation, scale, resolution multiplier, threshold, max size/stroke, x/y offset, and opacity.
 - Per-channel resolution multipliers let channels render at different grid densities, such as low-resolution K with higher-resolution CMY.
-- Live preview and SVG export.
+- Live preview, SVG export, and PNG export.
+- PNG export prompts for output size. Users can enter DPI or pixel width/height; DPI derives pixels from embedded source physical size when available, or from source pixel dimensions treated as 96 DPI when no physical size metadata is available. Exported PNGs include DPI metadata.
 
 ## Current limitations
 
 - CMYK conversion is intentionally simple and browser-side; it is not color-managed.
-- SVG input is rasterized for sampling. The exported halftone is vector, but it is based on sampled pixels.
+- SVG input is rasterized for sampling and preview comparison. The exported halftone SVG is vector, but it is based on sampled pixels.
 - Custom SVG paths should be authored around the origin and roughly fit a `-0.5..0.5` coordinate box.
 - Large cell counts can generate very large SVGs because every mark and curve connector is emitted as vector path geometry.
 - Connected-cell curve chaining estimates custom curve endpoints from the first and last coordinate pair in the SVG path.
 - Document-scale curve sampling uses browser SVG path measurement when available, with a Bezier-aware parser fallback for non-browser tests.
 - The preview background toggle is for visual comparison only; exported SVGs do not embed the source raster/SVG.
+- Embedded physical-size metadata detection is limited to SVG length units, PNG `pHYs`, and JPEG JFIF density. Other raster metadata falls back to 96 DPI.
 
 ## Code layout
 
-- `src/imageLoader.js` — raster/SVG file loading.
+- `src/imageLoader.js` — raster/SVG file loading, SVG rasterization, and physical-size metadata extraction.
 - `src/sampling.js` — proportional grid calculation and canvas sampling.
 - `src/color.js` — RGB to CMYK-like conversion and luminance mapping.
 - `src/presets.js` — built-in curve and shape path presets.
 - `src/svgGenerator.js` — channel grouping and SVG mark generation.
-- `src/main.js` — UI state, live rendering, and export.
+- `src/main.js` — UI state, live rendering, mode-specific control visibility, and export.
