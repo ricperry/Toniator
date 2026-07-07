@@ -1,0 +1,18 @@
+{
+  "name": "toniator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Proof-of-concept browser vector halftone generator.",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "test": "npm run test:generator && npm run test:preview",
+    "test:generator": "node tests/generatorSweep.test.js",
+    "test:preview": "node tests/previewScreenshots.test.js"
+  },
+  "devDependencies": {
+    "vite": "^7.0.0"
+  }
+}

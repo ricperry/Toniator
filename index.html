@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Toniator Vector Halftone POC</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <p class="eyebrow">Toniator proof of concept</p>
+        <h1>Vector halftone generator</h1>
+        <p>
+          Load a raster image or SVG, sample it on a proportional grid, and
+          generate real SVG halftone marks per CMYK channel.
+        </p>
+      </div>
+      <div class="header-actions">
+        <button id="renderButton" type="button">Render</button>
+        <button id="resetDefaultsButton" type="button" class="secondary">
+          Reset Defaults
+        </button>
+        <button id="exportButton" type="button" class="secondary">
+          Export SVG
+        </button>
+      </div>
+    </header>
+
+    <main class="app-shell">
+      <aside class="controls" aria-label="Halftone controls">
+        <section class="panel">
+          <h2>Input</h2>
+          <label>
+            Raster or SVG file
+            <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml,.svg" />
+          </label>
+          <button id="sampleButton" type="button" class="secondary small">
+            Load built-in sample
+          </button>
+          <p id="sourceInfo" class="hint">No source loaded.</p>
+        </section>
+
+        <section class="panel">
+          <h2>Presets</h2>
+          <label>
+            Testing preset
+            <select id="testingPreset"></select>
+          </label>
+          <div class="preset-actions">
+            <button id="applyTestingPresetButton" type="button" class="secondary small">
+              Apply Testing Preset
+            </button>
+            <button id="savePresetButton" type="button" class="secondary small">
+              Save .tntr
+            </button>
+            <button id="loadPresetButton" type="button" class="secondary small">
+              Load .tntr
+            </button>
+            <input id="presetFileInput" class="hidden" type="file" accept=".tntr,application/json" />
+          </div>
+          <p class="hint">Presets save Toniator settings and channel controls as JSON.</p>
+        </section>
+
+        <section class="panel">
+          <h2>Output and sampling</h2>
+          <div class="grid two">
+            <label>
+              Width
+              <input id="outputWidth" type="number" min="32" max="4000" step="1" value="900" />
+            </label>
+            <label>
+              Height
+              <input id="outputHeight" type="number" min="32" max="4000" step="1" value="600" />
+            </label>
+          </div>
+          <label class="check">
+            <input id="preserveAspect" type="checkbox" checked />
+            Preserve source aspect ratio
+          </label>
+          <div class="grid two">
+            <label>
+              Cells on long edge
+              <input id="longEdgeCells" type="number" min="8" max="220" step="1" value="90" />
+            </label>
+            <label>
+              Cell fill %
+              <input id="gridScale" type="number" min="10" max="160" step="1" value="92" />
+            </label>
+          </div>
+          <div class="grid two">
+            <label>
+              Min mark %
+              <input id="minMark" type="number" min="0" max="100" step="1" value="0" />
+            </label>
+            <label>
+              Max mark %
+              <input id="maxMark" type="number" min="1" max="200" step="1" value="85" />
+            </label>
+          </div>
+          <label>
+            Value mapping
+            <select id="valueMode">
+              <option value="cmyk">CMYK from RGB</option>
+              <option value="luminance">Luminance drives enabled channels</option>
+              <option value="inverted-luminance">Inverted luminance drives enabled channels</option>
+              <option value="single-channel">Grayscale into one channel</option>
+            </select>
+          </label>
+          <label id="singleChannelRow" class="hidden">
+            Grayscale channel
+            <select id="singleChannel">
+              <option value="k">Black</option>
+              <option value="c">Cyan</option>
+              <option value="m">Magenta</option>
+              <option value="y">Yellow</option>
+            </select>
+          </label>
+          <label>
+            Mark mode
+            <select id="markMode">
+              <option value="shape">Shape mode</option>
+              <option value="curve">Curve mode</option>
+            </select>
+          </label>
+          <label id="curveSpanRow">
+            Curve layout
+            <select id="curveSpan">
+              <option value="full-width">Full width curve</option>
+              <option value="full-height">Full height curve</option>
+              <option value="tiled-width">Tiled across width</option>
+              <option value="tiled-height">Tiled across height</option>
+              <option value="motif-pattern">Tiled/stacked motif pattern</option>
+              <option value="cell-chain">Connected cell chains</option>
+            </select>
+          </label>
+          <label id="curveTileCellsRow">
+            Legacy connected tile length <span class="muted">(grid cells)</span>
+            <input id="curveTileCells" type="number" min="1" max="120" step="0.5" value="12" />
+          </label>
+          <label id="syncCurveChannelsRow" class="check">
+            <input id="syncCurveChannels" type="checkbox" checked />
+            Synchronize channel curve shapes
+          </label>
+          <p id="curveModeHint" class="hint">
+            Source-curve editing is non-destructive. Motif controls build
+            tiled and stacked curve instances before image values are sampled
+            along each instance. Halftone Sample Density controls image
+            sampling only, while Curve Output Quality controls variable-width
+            outline resampling.
+          </p>
+          <label class="check">
+            <input id="showBackground" type="checkbox" checked />
+            Show source as preview background
+          </label>
+        </section>
+
+        <section class="panel">
+          <h2>Mark geometry</h2>
+          <label>
+            Geometry source
+            <select id="geometryMode">
+              <option value="shared">Synchronized mark, separate rotation/offset</option>
+              <option value="independent">Independent mark per channel</option>
+            </select>
+          </label>
+          <p id="geometryModeHint" class="hint"></p>
+          <div id="sharedGeometryControls">
+            <label>
+              Synchronized preset
+              <select id="sharedPreset"></select>
+            </label>
+            <label data-mode="shape">
+              Synchronized custom path <span class="muted">(optional SVG d)</span>
+              <textarea id="sharedPath" rows="3" spellcheck="false" placeholder="M -0.45 0 L 0.45 0"></textarea>
+            </label>
+            <label class="curve-import">
+              Import Bezziator/SVG curve
+              <input id="sharedCurveFile" type="file" accept=".bezvg,.bezziator,.svg,image/svg+xml" />
+            </label>
+            <div id="sharedCurveEditControls" class="curve-shared-edit hidden">
+              <div class="channel-title">
+                <h3>Shared base curve</h3>
+                <button id="sharedCurveEditButton" type="button" class="secondary small">
+                  Edit Shared Curve
+                </button>
+              </div>
+              <div class="curve-continuity">
+                <label class="check">
+                  <input id="sharedConnectEndpoints" type="checkbox" />
+                  Connect endpoints
+                </label>
+                <label class="check">
+                  <input id="sharedSmoothSeam" type="checkbox" checked />
+                  Smooth seam tangents
+                </label>
+              </div>
+              <div id="sharedCurvePreview" class="mark-preview"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Channels</h2>
+          <label>
+            Settings target
+            <select id="channelSettingsTarget">
+              <option value="cmyk">CMYK combined deltas</option>
+              <option value="c">Cyan</option>
+              <option value="m">Magenta</option>
+              <option value="y">Yellow</option>
+              <option value="k">Black</option>
+            </select>
+          </label>
+          <p class="hint">
+            Rotation, width scale, XY offset, curve endpoint connection,
+            tiling, stacking, sample density, output quality, and curve seam
+            smoothing are per-channel. In curve mode, every channel has its
+            own controls even when source curve shapes are synchronized.
+          </p>
+          <article id="cmykDeltaControls" class="channel-card">
+            <div class="channel-title">
+              <h3>CMYK combined deltas</h3>
+            </div>
+            <p class="hint">These controls render as relative deltas over each enabled channel without changing individual channel values.</p>
+            <div class="grid two">
+              <label>Shape/Curve Rotation Δ° <input id="cmyk-rotationDelta" type="number" min="-360" max="360" step="1" value="0" /></label>
+              <label>Grid Rotation Δ° <input id="cmyk-gridRotationDelta" type="number" min="-360" max="360" step="1" value="0" /></label>
+            </div>
+            <div class="grid two">
+              <label>Grid Pivot X Δ <input id="cmyk-gridPivotXDelta" type="number" min="-4000" max="4000" step="0.5" value="0" /></label>
+              <label>Grid Pivot Y Δ <input id="cmyk-gridPivotYDelta" type="number" min="-4000" max="4000" step="0.5" value="0" /></label>
+            </div>
+            <div class="grid two">
+              <label>Width Scale × <input id="cmyk-scaleMultiplier" type="number" min="0" max="5" step="0.05" value="1" /></label>
+              <label data-mode="curve">Source Curve Scale × <input id="cmyk-curveScaleMultiplier" type="number" min="0.05" max="10" step="0.05" value="1" /></label>
+            </div>
+            <div class="grid two">
+              <label>Halftone Sample Density × <input id="cmyk-resolutionMultiplier" type="number" min="0.1" max="4" step="0.1" value="1" /></label>
+              <label data-mode="curve">Curve Output Quality × <input id="cmyk-outputQualityMultiplier" type="number" min="0.25" max="6" step="0.25" value="1" /></label>
+            </div>
+            <div class="grid two">
+              <label>Max Size × <input id="cmyk-maxSizeMultiplier" type="number" min="0" max="5" step="0.05" value="1" /></label>
+              <label>Opacity × <input id="cmyk-opacityMultiplier" type="number" min="0" max="2" step="0.05" value="1" /></label>
+            </div>
+            <div class="grid two">
+              <label>X Offset Δ <input id="cmyk-offsetXDelta" type="number" min="-1000" max="1000" step="0.5" value="0" /></label>
+              <label>Y Offset Δ <input id="cmyk-offsetYDelta" type="number" min="-1000" max="1000" step="0.5" value="0" /></label>
+            </div>
+            <div class="grid two" data-mode="curve">
+              <label>Tile Count Δ <input id="cmyk-tileCountDelta" type="number" min="-200" max="200" step="1" value="0" /></label>
+              <label>Tile Spacing Δ <input id="cmyk-tileSpacingDelta" type="number" min="-1000" max="1000" step="0.5" value="0" /></label>
+            </div>
+            <div class="grid two" data-mode="curve">
+              <label>Tile Angle Δ° <input id="cmyk-tileAngleDelta" type="number" min="-360" max="360" step="1" value="0" /></label>
+              <label>Tile Offset Δ <input id="cmyk-tileOffsetDelta" type="number" min="-1000" max="1000" step="0.5" value="0" /></label>
+            </div>
+            <div class="grid two" data-mode="curve">
+              <label>Stack Count Δ <input id="cmyk-stackCountDelta" type="number" min="-200" max="200" step="1" value="0" /></label>
+              <label>Stack Spacing Δ <input id="cmyk-stackSpacingDelta" type="number" min="-1000" max="1000" step="0.5" value="0" /></label>
+            </div>
+            <div class="grid two" data-mode="curve">
+              <label>Stack Angle Δ° <input id="cmyk-stackAngleDelta" type="number" min="-360" max="360" step="1" value="0" /></label>
+              <label>Stack Offset Δ <input id="cmyk-stackOffsetDelta" type="number" min="-1000" max="1000" step="0.5" value="0" /></label>
+            </div>
+            <label data-mode="curve">Alternate Stack Offset Δ <input id="cmyk-alternateStackOffsetDelta" type="number" min="-1000" max="1000" step="0.5" value="0" /></label>
+          </article>
+          <div id="channelControls" class="channels"></div>
+        </section>
+      </aside>
+
+      <section class="workspace">
+        <div class="preview-toolbar">
+          <p id="renderStats" class="hint">Load a source file to begin.</p>
+          <button id="fitPreviewButton" type="button" class="secondary small">
+            Actual size
+          </button>
+        </div>
+        <div id="previewFrame" class="preview-frame">
+          <div id="infoOverlayMenu" class="info-overlay-menu hidden" aria-label="Informational overlays">
+            <strong>Overlays</strong>
+            <label class="check"><input id="overlayGridPivots" type="checkbox" checked /> Grid pivots</label>
+            <label class="check"><input id="overlayGridRotation" type="checkbox" checked /> Grid rotation vectors</label>
+            <label class="check"><input id="overlayChannelGrid" type="checkbox" /> Channel grids</label>
+            <label class="check"><input id="overlayTileVectors" type="checkbox" checked /> Tile vectors</label>
+            <label class="check"><input id="overlayStackVectors" type="checkbox" checked /> Stack vectors</label>
+            <label class="check"><input id="overlayChannelOffsets" type="checkbox" /> Channel offsets</label>
+          </div>
+          <div id="emptyState" class="empty-state">
+            <strong>No preview yet.</strong>
+            <span>Choose an image or SVG, then render.</span>
+          </div>
+          <div id="previewMount" class="preview-mount"></div>
+          <div id="curveEditOverlay" class="curve-edit-overlay hidden">
+            <div class="curve-edit-overlay-header">
+              <strong id="curveEditOverlayTitle">Editing curve</strong>
+              <button id="curveEditOverlayClose" type="button" class="secondary small">Stop Editing</button>
+            </div>
+            <div id="curveEditOverlayMount" class="mark-preview"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>
