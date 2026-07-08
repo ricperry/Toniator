@@ -43,13 +43,10 @@
         <section class="panel">
           <h2>Presets</h2>
           <label>
-            Testing preset
+            Preset
             <select id="testingPreset"></select>
           </label>
           <div class="preset-actions">
-            <button id="applyTestingPresetButton" type="button" class="secondary small">
-              Apply Testing Preset
-            </button>
             <button id="savePresetButton" type="button" class="secondary small">
               Save .tntr
             </button>
@@ -61,7 +58,7 @@
             </button>
             <input id="presetFileInput" class="hidden" type="file" accept=".tntr,application/json" />
           </div>
-          <p class="hint">Presets save Toniator settings and channel controls as JSON.</p>
+          <p class="hint">Move saved .tntr files into the presets folder to show them in this menu.</p>
         </section>
 
         <section class="panel">
@@ -131,15 +128,8 @@
             <select id="curveSpan">
               <option value="full-width">Full width curve</option>
               <option value="full-height">Full height curve</option>
-              <option value="tiled-width">Tiled across width</option>
-              <option value="tiled-height">Tiled across height</option>
               <option value="motif-pattern">Tiled/stacked motif pattern</option>
-              <option value="cell-chain">Connected cell chains</option>
             </select>
-          </label>
-          <label id="curveTileCellsRow">
-            Legacy connected tile length <span class="muted">(grid cells)</span>
-            <input id="curveTileCells" type="number" min="1" max="120" step="0.5" value="12" />
           </label>
           <label id="syncCurveChannelsRow" class="check">
             <input id="syncCurveChannels" type="checkbox" checked />
@@ -225,9 +215,9 @@
             <div class="channel-title">
               <h3>CMYK combined deltas</h3>
             </div>
-            <p class="hint">These controls render as relative deltas over each enabled channel without changing individual channel values.</p>
+            <p class="hint">These controls render as deltas, multipliers, or neutral overrides over each enabled channel without changing individual channel values.</p>
             <div class="grid two">
-              <label>Shape/Curve Rotation Δ° <input id="cmyk-rotationDelta" type="number" min="-360" max="360" step="1" value="0" /></label>
+              <label data-mode="shape">Shape Rotation Δ° <input id="cmyk-rotationDelta" type="number" min="-360" max="360" step="1" value="0" /></label>
               <label>Grid Rotation Δ° <input id="cmyk-gridRotationDelta" type="number" min="-360" max="360" step="1" value="0" /></label>
             </div>
             <div class="grid two" data-grid-pivot-controls="cmyk">
@@ -243,27 +233,50 @@
               <label data-mode="curve">Curve Output Quality × <input id="cmyk-outputQualityMultiplier" type="number" min="0.25" max="6" step="0.25" value="1" /></label>
             </div>
             <div class="grid two">
+              <label>Threshold Δ% <input id="cmyk-thresholdDelta" type="number" min="-100" max="100" step="1" value="0" /></label>
               <label>Max Size × <input id="cmyk-maxSizeMultiplier" type="number" min="0" max="5" step="0.05" value="1" /></label>
+            </div>
+            <div class="grid two">
               <label>Opacity × <input id="cmyk-opacityMultiplier" type="number" min="0" max="2" step="0.05" value="1" /></label>
+            </div>
+            <div class="grid two" data-mode="curve" data-curve-layout="motif-pattern">
+              <label>
+                Coverage Mode Override
+                <select id="cmyk-motifCoverageModeOverride">
+                  <option value="">Keep per-channel</option>
+                  <option value="auto">Auto cover artboard</option>
+                  <option value="manual">Manual tile/stack counts</option>
+                </select>
+              </label>
+              <label>Bleed Δ, cells <input id="cmyk-motifBleedDelta" type="number" min="-24" max="24" step="0.5" value="0" /></label>
             </div>
             <div class="grid two">
               <label>X Offset Δ <input id="cmyk-offsetXDelta" type="number" min="-1000" max="1000" step="0.5" value="0" /></label>
               <label>Y Offset Δ <input id="cmyk-offsetYDelta" type="number" min="-1000" max="1000" step="0.5" value="0" /></label>
             </div>
             <div class="grid two" data-mode="curve" data-curve-layout="motif-pattern">
-              <label>Tile Count Δ <input id="cmyk-tileCountDelta" type="number" min="-200" max="200" step="1" value="0" /></label>
-              <label>Tile Spacing Δ <input id="cmyk-tileSpacingDelta" type="number" min="-1000" max="1000" step="0.5" value="0" /></label>
+              <label>Tile Count Δ, manual <input id="cmyk-tileCountDelta" type="number" min="-200" max="200" step="1" value="0" /></label>
+              <label class="hidden">Along-curve Spacing Δ <input id="cmyk-tileSpacingDelta" type="number" min="-1000" max="1000" step="0.5" value="0" /></label>
             </div>
             <div class="grid two" data-mode="curve" data-curve-layout="motif-pattern">
-              <label>Tile Angle Δ° <input id="cmyk-tileAngleDelta" type="number" min="-360" max="360" step="1" value="0" /></label>
+              <label>Along-curve Angle Δ° <input id="cmyk-tileAngleDelta" type="number" min="-360" max="360" step="1" value="0" /></label>
               <label>Tile Offset Δ <input id="cmyk-tileOffsetDelta" type="number" min="-1000" max="1000" step="0.5" value="0" /></label>
             </div>
+            <label data-mode="curve" data-curve-layout="motif-pattern">
+              Alternate Tile Transform Override
+              <select id="cmyk-alternateTileTransformOverride">
+                <option value="">Keep per-channel</option>
+                <option value="none">None</option>
+                <option value="flip">Flip alternating tiles</option>
+                <option value="rotate-180">Rotate alternating tiles 180°</option>
+              </select>
+            </label>
             <div class="grid two" data-mode="curve" data-curve-layout="motif-pattern">
-              <label>Stack Count Δ <input id="cmyk-stackCountDelta" type="number" min="-200" max="200" step="1" value="0" /></label>
-              <label>Stack Spacing Δ <input id="cmyk-stackSpacingDelta" type="number" min="-1000" max="1000" step="0.5" value="0" /></label>
+              <label>Stack Count Δ, manual <input id="cmyk-stackCountDelta" type="number" min="-200" max="200" step="1" value="0" /></label>
+              <label>Row Spacing Δ <input id="cmyk-stackSpacingDelta" type="number" min="-1000" max="1000" step="0.5" value="0" /></label>
             </div>
             <div class="grid two" data-mode="curve" data-curve-layout="motif-pattern">
-              <label>Stack Angle Δ° <input id="cmyk-stackAngleDelta" type="number" min="-360" max="360" step="1" value="0" /></label>
+              <label>Row Angle Offset Δ° <input id="cmyk-stackAngleDelta" type="number" min="-360" max="360" step="1" value="0" /></label>
               <label>Stack Offset Δ <input id="cmyk-stackOffsetDelta" type="number" min="-1000" max="1000" step="0.5" value="0" /></label>
             </div>
             <label data-mode="curve" data-curve-layout="motif-pattern">Alternate Stack Offset Δ <input id="cmyk-alternateStackOffsetDelta" type="number" min="-1000" max="1000" step="0.5" value="0" /></label>
@@ -305,6 +318,38 @@
       </section>
     </main>
 
+    <dialog id="presetChangesDialog" class="export-dialog">
+      <form method="dialog" class="export-dialog-form">
+        <div class="dialog-title-row">
+          <h2>Unsaved preset changes</h2>
+        </div>
+        <p id="presetChangesMessage" class="hint">
+          Save the current settings before applying the selected preset?
+        </p>
+        <div class="dialog-actions">
+          <button value="cancel" type="submit" class="secondary small">Cancel</button>
+          <button value="discard" type="submit" class="secondary small">Discard</button>
+          <button value="save" type="submit">Save .tntr</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="svgExportDialog" class="export-dialog">
+      <form method="dialog" class="export-dialog-form">
+        <div class="dialog-title-row">
+          <h2>Export SVG</h2>
+          <button id="svgExportCancelButton" type="button" class="secondary small">Cancel</button>
+        </div>
+        <label>
+          Filename
+          <input id="svgExportFileName" type="text" value="toniator-halftone.svg" />
+        </label>
+        <div class="dialog-actions">
+          <button id="svgExportConfirmButton" type="button">Export SVG</button>
+        </div>
+      </form>
+    </dialog>
+
     <dialog id="pngExportDialog" class="export-dialog">
       <form method="dialog" class="export-dialog-form">
         <div class="dialog-title-row">
@@ -312,6 +357,18 @@
           <button id="pngExportCancelButton" type="button" class="secondary small">Cancel</button>
         </div>
         <p id="pngExportInfo" class="hint"></p>
+        <label>
+          Filename
+          <input id="pngExportFileName" type="text" value="toniator-halftone.png" />
+        </label>
+        <label class="check">
+          <input id="pngExportTransparentBackground" type="checkbox" />
+          Transparent background (alpha)
+        </label>
+        <label class="check">
+          <input id="pngExportSeparateChannels" type="checkbox" />
+          Export enabled channels separately
+        </label>
         <div class="grid two">
           <label>
             DPI
@@ -336,6 +393,16 @@
           <button id="pngExportConfirmButton" type="button">Export PNG</button>
         </div>
       </form>
+    </dialog>
+
+    <dialog id="pngExportProgressDialog" class="export-dialog export-progress-dialog">
+      <div class="export-dialog-form">
+        <div class="dialog-title-row">
+          <h2>Exporting PNG</h2>
+        </div>
+        <progress id="pngExportProgress" max="100" value="0"></progress>
+        <p id="pngExportProgressText" class="hint">Preparing export...</p>
+      </div>
     </dialog>
 
     <script type="module" src="./src/main.js"></script>

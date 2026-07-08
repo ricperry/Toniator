@@ -1,0 +1,82 @@
+{
+  "format": "toniator-preset",
+  "version": 1,
+  "name": "Connected Curve Weave",
+  "description": "Motif curves chained across tiles with dense stacked rows.",
+  "settings": {
+    "markMode": "curve",
+    "curveSpan": "motif-pattern",
+    "syncCurveChannels": true,
+    "sharedPreset": "wave",
+    "sharedPath": "M -0.5 0 C -0.28 -0.32 0.28 0.32 0.5 0",
+    "sharedConnectEndpoints": true,
+    "sharedSmoothSeamTangents": true,
+    "valueMode": "cmyk",
+    "outputWidth": 900,
+    "outputHeight": 620,
+    "longEdgeCells": 88,
+    "gridScale": 70,
+    "minMark": 0,
+    "maxMark": 92,
+    "showBackground": true,
+    "preserveAspect": false
+  },
+  "channels": {
+    "c": {
+      "rotation": 0,
+      "gridRotation": 12,
+      "curveScale": 26,
+      "tileCount": 36,
+      "tileSpacing": 28,
+      "stackCount": 34,
+      "stackSpacing": 18,
+      "stackOffset": 0,
+      "alternateStackOffset": 12,
+      "connectEndpoints": true,
+      "smoothSeamTangents": true,
+      "opacity": 0.72
+    },
+    "m": {
+      "rotation": 32,
+      "gridRotation": -9,
+      "curveScale": 24,
+      "tileCount": 36,
+      "tileSpacing": 28,
+      "stackCount": 34,
+      "stackSpacing": 18,
+      "stackOffset": 7,
+      "alternateStackOffset": 8,
+      "connectEndpoints": true,
+      "smoothSeamTangents": true,
+      "opacity": 0.76
+    },
+    "y": {
+      "rotation": -18,
+      "gridRotation": 0,
+      "curveScale": 22,
+      "tileCount": 34,
+      "tileSpacing": 30,
+      "stackCount": 28,
+      "stackSpacing": 22,
+      "stackOffset": 3,
+      "alternateStackOffset": 0,
+      "connectEndpoints": true,
+      "smoothSeamTangents": true,
+      "opacity": 0.62
+    },
+    "k": {
+      "rotation": 47,
+      "gridRotation": 5,
+      "curveScale": 28,
+      "tileCount": 38,
+      "tileSpacing": 26,
+      "stackCount": 32,
+      "stackSpacing": 20,
+      "stackOffset": -4,
+      "alternateStackOffset": 10,
+      "connectEndpoints": true,
+      "smoothSeamTangents": true,
+      "opacity": 0.9
+    }
+  }
+}

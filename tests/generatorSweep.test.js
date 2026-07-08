@@ -27,7 +27,6 @@ const baseSettings = {
   singleChannel: "k",
   markMode: "curve",
   curveSpan: "full-width",
-  curveTileCells: 8,
   useSharedMark: true,
   sharedPreset: "line",
   sharedPath: "",
@@ -133,7 +132,13 @@ const loadBezziatorFixture = () =>
     ? readFileSync(bezziatorFixturePath, "utf8")
     : fallbackBezziatorFixture;
 
-const run = ({ settings = {}, channel = {}, channels = null, sampleProvider = allBlackSampleProvider } = {}) =>
+const run = ({
+  settings = {},
+  channel = {},
+  channels = null,
+  sampleProvider = allBlackSampleProvider,
+  generatorOptions = {},
+} = {}) =>
   generateHalftoneSvg({
     source: null,
     grid: baseGrid,
@@ -145,6 +150,7 @@ const run = ({ settings = {}, channel = {}, channels = null, sampleProvider = al
       k: { ...enabledK, ...channel },
     },
     sampleProvider,
+    ...generatorOptions,
   });
 
 const assertValidSvg = (svg, label) => {
@@ -208,6 +214,9 @@ const firstGeneratedTransform = (svg) =>
 const firstGeneratedPathData = (svg) =>
   svg.match(/<path\b[^>]*\sd="([^"]+)"/)?.[1] ?? "";
 
+const commandCount = (pathData, command) =>
+  (pathData.match(new RegExp(`\\b${command}\\b`, "g")) ?? []).length;
+
 const assertCurveCoversArtboard = (svg, label) => {
   const bounds = pathCoordinateBounds(svg);
   const tolerance = Math.min(baseGrid.cellWidth, baseGrid.cellHeight) * 2;
@@ -239,15 +248,69 @@ const testCurveGeometrySpansArtboardAndClips = () => {
   assert.match(svg, /clip-path="url\(#toniator-artboard-clip\)"/, "curve channel should be clipped to artboard");
   assert.ok(bounds.minX <= tolerance, `curve geometry should start at the artboard left edge (${bounds.minX})`);
   assert.ok(bounds.maxX >= outputWidth - tolerance, `curve geometry should reach the artboard right edge (${bounds.maxX})`);
+
+  for (const layout of ["full-width", "full-height"]) {
+    const scaledSvg = run({
+      settings: {
+        markMode: "curve",
+        curveSpan: layout,
+        sharedPath: "M -0.45 0 L 0.45 0",
+      },
+      channel: { rotation: 0, curveScale: 16 },
+    });
+    const scaledBounds = generatedPathCoordinateBounds(scaledSvg);
+    assert.ok(
+      scaledBounds.minX <= tolerance,
+      `${layout} should ignore source curve scale and reach the left edge (${scaledBounds.minX})`,
+    );
+    assert.ok(
+      scaledBounds.maxX >= outputWidth - tolerance,
+      `${layout} should ignore source curve scale and reach the right edge (${scaledBounds.maxX})`,
+    );
+    assert.ok(
+      scaledBounds.minY <= tolerance,
+      `${layout} should ignore source curve scale and reach the top edge (${scaledBounds.minY})`,
+    );
+    assert.ok(
+      scaledBounds.maxY >= outputHeight - tolerance,
+      `${layout} should ignore source curve scale and reach the bottom edge (${scaledBounds.maxY})`,
+    );
+  }
+
+  for (const layout of ["full-width", "full-height"]) {
+    const rotatedGridSvg = run({
+      settings: {
+        markMode: "curve",
+        curveSpan: layout,
+        sharedPath: "M -0.45 0 L 0.45 0",
+      },
+      channel: { rotation: 0, gridRotation: 30, gridPivotX: 90, gridPivotY: -60 },
+    });
+    const rotatedBounds = generatedPathCoordinateBounds(rotatedGridSvg);
+    assert.ok(
+      rotatedBounds.minX <= tolerance,
+      `${layout} with rotated grid should reach the left edge (${rotatedBounds.minX})`,
+    );
+    assert.ok(
+      rotatedBounds.maxX >= outputWidth - tolerance,
+      `${layout} with rotated grid should reach the right edge (${rotatedBounds.maxX})`,
+    );
+    assert.ok(
+      rotatedBounds.minY <= tolerance,
+      `${layout} with rotated grid should reach the top edge (${rotatedBounds.minY})`,
+    );
+    assert.ok(
+      rotatedBounds.maxY >= outputHeight - tolerance,
+      `${layout} with rotated grid should reach the bottom edge (${rotatedBounds.maxY})`,
+    );
+  }
 };
 
 const testCurveRotations = () => {
-  const layouts = ["full-width", "full-height", "tiled-width", "tiled-height"];
+  const layouts = ["full-width", "full-height"];
   const presets = {
     "full-width": "M -0.45 0 L 0.45 0",
     "full-height": "M -0.45 0 L 0.45 0",
-    "tiled-width": "M -0.5 0 C -0.25 -0.25 0.25 0.25 0.5 0",
-    "tiled-height": "M -0.5 0 C -0.25 -0.25 0.25 0.25 0.5 0",
   };
 
   for (const layout of layouts) {
@@ -271,16 +334,14 @@ const testCurveRotations = () => {
 };
 
 const testAllChannelCurveRotations = () => {
-  for (const layout of ["full-width", "tiled-width"]) {
+  for (const layout of ["full-width", "full-height"]) {
     for (let rotation = 0; rotation <= 180; rotation += 15) {
       const label = `all-channel curve ${layout} rotation ${rotation}`;
       const svg = run({
         settings: {
           markMode: "curve",
           curveSpan: layout,
-          sharedPath: layout === "tiled-width"
-            ? "M -0.5 0 C -0.25 -0.25 0.25 0.25 0.5 0"
-            : "M -0.45 0 L 0.45 0",
+          sharedPath: "M -0.45 0 L 0.45 0",
         },
         channels: Object.fromEntries(
           Object.entries(enabledChannels).map(([key, channel]) => [
@@ -446,6 +507,154 @@ const testCurvePatternTilingAndStacking = () => {
       outputQuality: 1,
     },
   });
+  const autoCoveragePattern = run({
+    settings: {
+      markMode: "curve",
+      curveSpan: "motif-pattern",
+      sharedPath: "M -0.5 0 L 0.5 0",
+    },
+    channel: {
+      rotation: 0,
+      curveScale: 18,
+      motifCoverageMode: "auto",
+      motifBleed: 2,
+      tileCount: 1,
+      stackCount: 1,
+      tileSpacing: 24,
+      tileAngle: 16,
+      stackSpacing: 20,
+      stackAngle: 106,
+      outputQuality: 1,
+    },
+  });
+  const autoCoverageBounds = generatedPathCoordinateBounds(autoCoveragePattern);
+  const autoCoverageTolerance = Math.min(baseGrid.cellWidth, baseGrid.cellHeight) * 2;
+  const defaultFloodPattern = run({
+    settings: {
+      markMode: "curve",
+      curveSpan: "motif-pattern",
+      sharedPath: "M -0.5 0 L 0.5 0",
+    },
+    channel: {
+      rotation: 0,
+      curveScale: 32,
+      motifCoverageMode: "auto",
+      motifBleed: 2,
+      stackSpacing: 36,
+      stackAngle: 0,
+      outputQuality: 1,
+    },
+  });
+  const defaultFloodBounds = generatedPathCoordinateBounds(defaultFloodPattern);
+  const defaultSpacingPattern = run({
+    settings: {
+      markMode: "curve",
+      curveSpan: "motif-pattern",
+      sharedPath: "M -0.5 0 L 0.5 0",
+    },
+    channel: {
+      rotation: 0,
+      curveScale: 32,
+      motifCoverageMode: "manual",
+      tileCount: 4,
+      stackCount: 1,
+      stackSpacing: 36,
+      stackAngle: 0,
+      outputQuality: 1,
+    },
+  });
+  const explicitSpacingPattern = run({
+    settings: {
+      markMode: "curve",
+      curveSpan: "motif-pattern",
+      sharedPath: "M -0.5 0 L 0.5 0",
+    },
+    channel: {
+      rotation: 0,
+      curveScale: 32,
+      motifCoverageMode: "manual",
+      tileCount: 4,
+      tileSpacing: 32,
+      stackCount: 1,
+      stackSpacing: 36,
+      stackAngle: 0,
+      outputQuality: 1,
+    },
+  });
+  const noGapRowPattern = run({
+    settings: {
+      markMode: "curve",
+      curveSpan: "motif-pattern",
+      sharedPath: "M -0.5 0 L 0.5 0",
+    },
+    channel: {
+      rotation: 0,
+      curveScale: 32,
+      motifCoverageMode: "manual",
+      tileCount: 8,
+      tileSpacing: 33,
+      stackCount: 1,
+      stackSpacing: 36,
+      stackAngle: 0,
+      outputQuality: 1,
+    },
+  });
+  const noGapPathData = firstGeneratedPathData(noGapRowPattern);
+  const alternatingFlipPattern = run({
+    settings: {
+      markMode: "curve",
+      curveSpan: "motif-pattern",
+      sharedPath: "M -0.5 0 C -0.25 -0.2 0.25 0.2 0.5 0",
+    },
+    channel: {
+      rotation: 0,
+      curveScale: 32,
+      motifCoverageMode: "manual",
+      tileCount: 30,
+      stackCount: 1,
+      stackSpacing: 36,
+      stackAngle: 0,
+      alternateTileTransform: "flip",
+      outputQuality: 1,
+    },
+  });
+  const alternatingRotatePattern = run({
+    settings: {
+      markMode: "curve",
+      curveSpan: "motif-pattern",
+      sharedPath: "M -0.5 0 C -0.25 -0.2 0.25 0.2 0.5 0",
+    },
+    channel: {
+      rotation: 0,
+      curveScale: 32,
+      motifCoverageMode: "manual",
+      tileCount: 30,
+      stackCount: 1,
+      stackSpacing: 36,
+      stackAngle: 0,
+      alternateTileTransform: "rotate-180",
+      outputQuality: 1,
+    },
+  });
+  const alternatingFlipBounds = generatedPathCoordinateBounds(alternatingFlipPattern);
+  const alternatingRotateBounds = generatedPathCoordinateBounds(alternatingRotatePattern);
+  const clippedRotatedPattern = run({
+    settings: {
+      markMode: "curve",
+      curveSpan: "motif-pattern",
+      sharedPath: "M -0.5 -0.08 C -0.18 -0.2 0.2 0.2 0.5 0.08",
+    },
+    channel: {
+      rotation: 0,
+      curveScale: 32,
+      motifCoverageMode: "auto",
+      motifBleed: 2,
+      gridRotation: 45,
+      stackSpacing: 6,
+      outputQuality: 3,
+    },
+  });
+  const clippedRotatedBounds = generatedPathCoordinateBounds(clippedRotatedPattern);
 
   assertValidSvg(basePattern, "curve pattern tiling/stacking");
   assertCurveOutputIsFilledGeometry(basePattern, "curve pattern tiling/stacking");
@@ -454,6 +663,11 @@ const testCurvePatternTilingAndStacking = () => {
     pathCount(highQualityPattern),
     pathCount(basePattern),
     "output quality must not change compound channel path count",
+  );
+  assert.ok(
+    commandCount(firstGeneratedPathData(highQualityPattern), "C") >=
+      commandCount(firstGeneratedPathData(basePattern), "C"),
+    "output quality should preserve at least the base motif row detail after path simplification",
   );
   assert.equal(
     pathCount(moreTilesPattern),
@@ -469,6 +683,77 @@ const testCurvePatternTilingAndStacking = () => {
     connectedPattern,
     /fill-rule="evenodd"/,
     "connected motif tiles should not close individual source curves",
+  );
+  assert.ok(
+    autoCoverageBounds.minX <= autoCoverageTolerance,
+    `auto motif coverage should reach left edge (${autoCoverageBounds.minX})`,
+  );
+  assert.ok(
+    autoCoverageBounds.maxX >= outputWidth - autoCoverageTolerance,
+    `auto motif coverage should reach right edge (${autoCoverageBounds.maxX})`,
+  );
+  assert.ok(
+    autoCoverageBounds.minY <= autoCoverageTolerance,
+    `auto motif coverage should reach top edge (${autoCoverageBounds.minY})`,
+  );
+  assert.ok(
+    autoCoverageBounds.maxY >= outputHeight - autoCoverageTolerance,
+    `auto motif coverage should reach bottom edge (${autoCoverageBounds.maxY})`,
+  );
+  assert.ok(
+    defaultFloodBounds.minX <= autoCoverageTolerance,
+    `default motif flood should reach left edge (${defaultFloodBounds.minX})`,
+  );
+  assert.ok(
+    defaultFloodBounds.maxX >= outputWidth - autoCoverageTolerance,
+    `default motif flood should reach right edge (${defaultFloodBounds.maxX})`,
+  );
+  assert.ok(
+    defaultFloodBounds.minY <= autoCoverageTolerance,
+    `default motif flood should reach top edge (${defaultFloodBounds.minY})`,
+  );
+  assert.ok(
+    defaultFloodBounds.maxY >= outputHeight - autoCoverageTolerance,
+    `default motif flood should reach bottom edge (${defaultFloodBounds.maxY})`,
+  );
+  assert.equal(
+    firstGeneratedPathData(defaultSpacingPattern),
+    firstGeneratedPathData(explicitSpacingPattern),
+    "legacy motif tile spacing should not change endpoint-chained rows",
+  );
+  assert.equal(
+    commandCount(noGapPathData, "M"),
+    1,
+    "one motif row should render as one continuous outline, not separate gapped tile outlines",
+  );
+  for (const [label, bounds] of [
+    ["flipped alternating motif tiles", alternatingFlipBounds],
+    ["180-degree alternating motif tiles", alternatingRotateBounds],
+  ]) {
+    assert.ok(
+      bounds.minX <= autoCoverageTolerance,
+      `${label} should continue forward to the left edge instead of bouncing (${bounds.minX})`,
+    );
+    assert.ok(
+      bounds.maxX >= outputWidth - autoCoverageTolerance,
+      `${label} should continue forward to the right edge instead of bouncing (${bounds.maxX})`,
+    );
+  }
+  assert.ok(
+    clippedRotatedBounds.minX >= -autoCoverageTolerance * 2,
+    `rotated motif output should be culled near the left artboard edge (${clippedRotatedBounds.minX})`,
+  );
+  assert.ok(
+    clippedRotatedBounds.maxX <= outputWidth + autoCoverageTolerance * 2,
+    `rotated motif output should be culled near the right artboard edge (${clippedRotatedBounds.maxX})`,
+  );
+  assert.ok(
+    clippedRotatedBounds.minY >= -autoCoverageTolerance * 2,
+    `rotated motif output should be culled near the top artboard edge (${clippedRotatedBounds.minY})`,
+  );
+  assert.ok(
+    clippedRotatedBounds.maxY <= outputHeight + autoCoverageTolerance * 2,
+    `rotated motif output should be culled near the bottom artboard edge (${clippedRotatedBounds.maxY})`,
   );
 };
 
@@ -503,7 +788,7 @@ const testCurveLayoutSelectionOverridesMotifControls = () => {
     channel: motifControls,
   });
   const cellChain = run({
-    settings: { markMode: "curve", curveSpan: "cell-chain", sharedPath, curveTileCells: 4 },
+    settings: { markMode: "curve", curveSpan: "cell-chain", sharedPath },
     channel: motifControls,
   });
 
@@ -525,14 +810,19 @@ const testCurveLayoutSelectionOverridesMotifControls = () => {
   assert.notEqual(
     firstGeneratedPathData(cellChain),
     firstGeneratedPathData(fullWidthBase),
-    "connected cell chains should use tiled-width chain behavior",
+    "legacy connected cell chains should map to motif-pattern behavior",
+  );
+  assert.equal(
+    firstGeneratedPathData(cellChain),
+    firstGeneratedPathData(motifPattern),
+    "legacy connected cell chains should preserve compatibility as motif-pattern output",
   );
 };
 
 const testBezziatorFixtureCurveRotations = () => {
   const pathData = bezziatorDocumentToPathData(loadBezziatorFixture());
 
-  for (const layout of ["full-width", "full-height", "tiled-width", "tiled-height"]) {
+  for (const layout of ["full-width", "full-height"]) {
     for (let rotation = 0; rotation <= 180; rotation += 15) {
       const label = `Bezziator fixture ${layout} rotation ${rotation}`;
       const svg = run({
@@ -540,7 +830,6 @@ const testBezziatorFixtureCurveRotations = () => {
           markMode: "curve",
           curveSpan: layout,
           sharedPath: pathData,
-          curveTileCells: 12,
         },
         channel: { rotation },
       });
@@ -727,7 +1016,7 @@ const testFullInputConfigurationSurface = () => {
       },
     },
     {
-      label: "curve synchronized full controls",
+      label: "curve synchronized motif controls",
       settings: {
         outputWidth: 300,
         outputHeight: 360,
@@ -738,8 +1027,7 @@ const testFullInputConfigurationSurface = () => {
         valueMode: "single-channel",
         singleChannel: "k",
         markMode: "curve",
-        curveSpan: "tiled-width",
-        curveTileCells: 5,
+        curveSpan: "motif-pattern",
         syncCurveChannels: true,
         sharedConnectEndpoints: true,
         sharedSmoothSeamTangents: true,
@@ -752,6 +1040,8 @@ const testFullInputConfigurationSurface = () => {
           ...enabledChannels.c,
           rotation: 0,
           scale: 0.75,
+          motifCoverageMode: "manual",
+          motifBleed: 2,
           resolutionScale: 0.4,
           threshold: 0,
           maxSize: 45,
@@ -766,6 +1056,8 @@ const testFullInputConfigurationSurface = () => {
           ...enabledChannels.m,
           rotation: 45,
           scale: 1.1,
+          motifCoverageMode: "manual",
+          motifBleed: 2,
           resolutionScale: 1,
           threshold: 0.2,
           maxSize: 75,
@@ -780,6 +1072,8 @@ const testFullInputConfigurationSurface = () => {
           ...enabledChannels.y,
           rotation: 90,
           scale: 1.5,
+          motifCoverageMode: "manual",
+          motifBleed: 2,
           resolutionScale: 1.6,
           threshold: 0.4,
           maxSize: 100,
@@ -794,6 +1088,8 @@ const testFullInputConfigurationSurface = () => {
           ...enabledChannels.k,
           rotation: 135,
           scale: 1.9,
+          motifCoverageMode: "manual",
+          motifBleed: 2,
           resolutionScale: 2,
           threshold: 0.6,
           maxSize: 125,
@@ -819,7 +1115,6 @@ const testFullInputConfigurationSurface = () => {
         singleChannel: "c",
         markMode: "curve",
         curveSpan: "full-height",
-        curveTileCells: 9,
         syncCurveChannels: false,
         sharedConnectEndpoints: false,
         sharedSmoothSeamTangents: false,
@@ -967,6 +1262,26 @@ const testCrosshatchValueMapping = () => {
   assert.match(svg, /fill="#111111"/, "crosshatch output should use black hatch geometry");
 };
 
+const testExportBackgroundAndChannelFiltering = () => {
+  const transparent = run({
+    settings: { markMode: "shape", sharedPreset: "circle", sharedPath: "" },
+    generatorOptions: { includeBackground: false },
+  });
+  assert.doesNotMatch(
+    transparent,
+    /<rect width="100%" height="100%" fill="white"\/>/,
+    "transparent export should omit the white background rect",
+  );
+
+  const cyanOnly = run({
+    settings: { markMode: "shape", sharedPreset: "circle", sharedPath: "" },
+    channels: enabledChannels,
+    generatorOptions: { includeBackground: false, renderChannelKeys: ["c"] },
+  });
+  assert.match(cyanOnly, /id="halftone-cyan"/, "channel-filtered export should include the requested channel");
+  assert.doesNotMatch(cyanOnly, /id="halftone-magenta"|id="halftone-yellow"|id="halftone-black"/, "channel-filtered export should omit other channel groups");
+};
+
 const testShapeOffsetPeriodicity = () => {
   const zero = run({
     settings: { markMode: "shape", sharedPreset: "circle", sharedPath: "" },
@@ -1047,6 +1362,7 @@ testAllShapePresets();
 testFullInputConfigurationSurface();
 testThresholdBoundaryWithMidGray();
 testCrosshatchValueMapping();
+testExportBackgroundAndChannelFiltering();
 testShapeOffsetPeriodicity();
 testAspectLocking();
 testEditorCurveNormalization();

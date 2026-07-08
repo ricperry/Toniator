@@ -2,105 +2,36 @@ import { createSampleSource, loadSourceFile } from "./imageLoader.js";
 import { aspectLockedDimensions } from "./aspect.js";
 import { calculateGrid } from "./sampling.js";
 import { getPresetNames, getPresetPath } from "./presets.js";
-import { generateHalftoneSvg, renderMarkPreview } from "./svgGenerator.js";
+import { computeMotifAutoCounts, generateHalftoneSvg, renderMarkPreview } from "./svgGenerator.js";
 import { loadCurvePathFromFile, svgSourceToPathData } from "./curveImport.js";
 import { clearCurveEditor, mountCurveEditor } from "./curveEditor.js";
 import { curveBounds, editableCurveToPathData, pathDataToEditableCurve } from "./curvePath.js";
 
 const CHANNELS = {
-  c: { name: "Cyan", color: "#00aeef", rotation: 15 },
-  m: { name: "Magenta", color: "#ec008c", rotation: 75 },
+  c: { name: "Cyan", color: "#00aeef", rotation: 0 },
+  m: { name: "Magenta", color: "#ec008c", rotation: 0 },
   y: { name: "Yellow", color: "#ffd400", rotation: 0 },
-  k: { name: "Black", color: "#111111", rotation: 45 },
+  k: { name: "Black", color: "#111111", rotation: 0 },
 };
 
 const PRESET_FORMAT = "toniator-preset";
 const PRESET_VERSION = 1;
-const TESTING_PRESETS = [
-  {
-    name: "Rotated CMYK Circle Screens",
-    description: "Shape-mode circles with independently rotated channel grids.",
-    settings: {
-      markMode: "shape",
-      geometryMode: "shared",
-      sharedPreset: "circle",
-      valueMode: "cmyk",
-      outputWidth: 900,
-      outputHeight: 620,
-      longEdgeCells: 92,
-      gridScale: 76,
-      minMark: 4,
-      maxMark: 90,
-      showBackground: true,
-      preserveAspect: false,
-    },
-    channels: {
-      c: { rotation: 0, gridRotation: 15, gridPivotX: -80, gridPivotY: 0, scale: 0.95, opacity: 0.72 },
-      m: { rotation: 0, gridRotation: 75, gridPivotX: 70, gridPivotY: -20, scale: 0.95, opacity: 0.72 },
-      y: { rotation: 0, gridRotation: 0, gridPivotX: 0, gridPivotY: 50, scale: 0.9, opacity: 0.68 },
-      k: { rotation: 0, gridRotation: 45, gridPivotX: 20, gridPivotY: -70, scale: 1, opacity: 0.85 },
-    },
-  },
-  {
-    name: "Connected Curve Weave",
-    description: "Motif curves chained across tiles with dense stacked rows.",
-    settings: {
-      markMode: "curve",
-      curveSpan: "motif-pattern",
-      syncCurveChannels: true,
-      sharedPreset: "wave",
-      sharedPath: "M -0.5 0 C -0.28 -0.32 0.28 0.32 0.5 0",
-      sharedConnectEndpoints: true,
-      sharedSmoothSeamTangents: true,
-      valueMode: "cmyk",
-      outputWidth: 900,
-      outputHeight: 620,
-      longEdgeCells: 88,
-      gridScale: 70,
-      minMark: 0,
-      maxMark: 92,
-      showBackground: true,
-      preserveAspect: false,
-    },
-    channels: {
-      c: { rotation: 0, gridRotation: 12, curveScale: 26, tileCount: 36, tileSpacing: 28, stackCount: 34, stackSpacing: 18, stackOffset: 0, alternateStackOffset: 12, connectEndpoints: true, smoothSeamTangents: true, opacity: 0.72 },
-      m: { rotation: 32, gridRotation: -9, curveScale: 24, tileCount: 36, tileSpacing: 28, stackCount: 34, stackSpacing: 18, stackOffset: 7, alternateStackOffset: 8, connectEndpoints: true, smoothSeamTangents: true, opacity: 0.76 },
-      y: { rotation: -18, gridRotation: 0, curveScale: 22, tileCount: 34, tileSpacing: 30, stackCount: 28, stackSpacing: 22, stackOffset: 3, alternateStackOffset: 0, connectEndpoints: true, smoothSeamTangents: true, opacity: 0.62 },
-      k: { rotation: 47, gridRotation: 5, curveScale: 28, tileCount: 38, tileSpacing: 26, stackCount: 32, stackSpacing: 20, stackOffset: -4, alternateStackOffset: 10, connectEndpoints: true, smoothSeamTangents: true, opacity: 0.9 },
-    },
-  },
-  {
-    name: "Independent Curve Stress Test",
-    description: "Independent source curves, mixed grid pivots, and varied motif controls.",
-    settings: {
-      markMode: "curve",
-      curveSpan: "motif-pattern",
-      syncCurveChannels: false,
-      sharedPreset: "line",
-      valueMode: "cmyk",
-      outputWidth: 840,
-      outputHeight: 560,
-      longEdgeCells: 78,
-      gridScale: 66,
-      minMark: 3,
-      maxMark: 96,
-      showBackground: true,
-      preserveAspect: false,
-    },
-    channels: {
-      c: { customPath: "M -0.5 0 C -0.2 -0.28 0.2 0.28 0.5 0", rotation: 0, gridRotation: 18, gridPivotX: -110, gridPivotY: 50, curveScale: 22, tileCount: 24, tileSpacing: 31, stackCount: 22, stackSpacing: 21, alternateStackOffset: 12, connectEndpoints: true, smoothSeamTangents: true, opacity: 0.72 },
-      m: { customPath: "M -0.5 0 L 0 0.24 L 0.5 0", rotation: 38, gridRotation: -14, gridPivotX: 80, gridPivotY: -60, curveScale: 24, tileCount: 24, tileSpacing: 32, stackCount: 22, stackSpacing: 22, alternateTileTransform: "rotate-180", connectEndpoints: false, smoothSeamTangents: false, opacity: 0.74 },
-      y: { customPath: "M -0.5 0 C -0.12 0.36 0.12 -0.36 0.5 0", rotation: -24, gridRotation: 8, gridPivotX: 30, gridPivotY: 90, curveScale: 20, tileCount: 26, tileSpacing: 30, stackCount: 18, stackSpacing: 26, alternateTileTransform: "flip", connectEndpoints: false, smoothSeamTangents: false, opacity: 0.64 },
-      k: { customPath: "M -0.5 -0.08 C -0.22 0.18 0.22 -0.18 0.5 0.08", rotation: 54, gridRotation: 0, gridPivotX: 0, gridPivotY: 0, curveScale: 28, tileCount: 28, tileSpacing: 28, stackCount: 24, stackSpacing: 20, alternateStackOffset: 10, connectEndpoints: true, smoothSeamTangents: true, opacity: 0.95 },
-    },
-  },
-];
+const PRESET_MODULES = import.meta.glob("../presets/*.{json,tntr}", {
+  eager: true,
+  import: "default",
+  query: "?raw",
+});
+const FOLDER_PRESETS = loadFolderPresetDocuments();
 
 const state = {
   source: null,
   latestSvg: "",
   fitPreview: true,
   activeCurveEditTarget: null,
+  activePresetId: "",
+  pendingPresetId: "",
+  presetControlSnapshot: "",
+  suppressPresetSelectChange: false,
   infoOverlayMenuOpen: false,
   pivotDrag: null,
   infoOverlays: {
@@ -118,10 +49,11 @@ const els = {
   sampleButton: document.querySelector("#sampleButton"),
   sourceInfo: document.querySelector("#sourceInfo"),
   testingPreset: document.querySelector("#testingPreset"),
-  applyTestingPresetButton: document.querySelector("#applyTestingPresetButton"),
   savePresetButton: document.querySelector("#savePresetButton"),
   loadPresetButton: document.querySelector("#loadPresetButton"),
   presetFileInput: document.querySelector("#presetFileInput"),
+  presetChangesDialog: document.querySelector("#presetChangesDialog"),
+  presetChangesMessage: document.querySelector("#presetChangesMessage"),
   outputWidth: document.querySelector("#outputWidth"),
   outputHeight: document.querySelector("#outputHeight"),
   preserveAspect: document.querySelector("#preserveAspect"),
@@ -135,8 +67,6 @@ const els = {
   markMode: document.querySelector("#markMode"),
   curveSpanRow: document.querySelector("#curveSpanRow"),
   curveSpan: document.querySelector("#curveSpan"),
-  curveTileCellsRow: document.querySelector("#curveTileCellsRow"),
-  curveTileCells: document.querySelector("#curveTileCells"),
   syncCurveChannelsRow: document.querySelector("#syncCurveChannelsRow"),
   syncCurveChannels: document.querySelector("#syncCurveChannels"),
   curveModeHint: document.querySelector("#curveModeHint"),
@@ -157,15 +87,25 @@ const els = {
   channelControls: document.querySelector("#channelControls"),
   resetDefaultsButton: document.querySelector("#resetDefaultsButton"),
   exportButton: document.querySelector("#exportButton"),
+  svgExportDialog: document.querySelector("#svgExportDialog"),
+  svgExportFileName: document.querySelector("#svgExportFileName"),
+  svgExportCancelButton: document.querySelector("#svgExportCancelButton"),
+  svgExportConfirmButton: document.querySelector("#svgExportConfirmButton"),
   exportPngButton: document.querySelector("#exportPngButton"),
   pngExportDialog: document.querySelector("#pngExportDialog"),
   pngExportInfo: document.querySelector("#pngExportInfo"),
+  pngExportFileName: document.querySelector("#pngExportFileName"),
+  pngExportTransparentBackground: document.querySelector("#pngExportTransparentBackground"),
+  pngExportSeparateChannels: document.querySelector("#pngExportSeparateChannels"),
   pngExportDpi: document.querySelector("#pngExportDpi"),
   pngExportWidth: document.querySelector("#pngExportWidth"),
   pngExportHeight: document.querySelector("#pngExportHeight"),
   pngExportLockAspect: document.querySelector("#pngExportLockAspect"),
   pngExportCancelButton: document.querySelector("#pngExportCancelButton"),
   pngExportConfirmButton: document.querySelector("#pngExportConfirmButton"),
+  pngExportProgressDialog: document.querySelector("#pngExportProgressDialog"),
+  pngExportProgress: document.querySelector("#pngExportProgress"),
+  pngExportProgressText: document.querySelector("#pngExportProgressText"),
   fitPreviewButton: document.querySelector("#fitPreviewButton"),
   previewFrame: document.querySelector("#previewFrame"),
   infoOverlayMenu: document.querySelector("#infoOverlayMenu"),
@@ -198,6 +138,7 @@ function init() {
   updateMarkPreviews();
   updateFitPreviewButton();
   setExportButtonsEnabled(false);
+  markPresetControlsClean();
   loadSample();
 }
 
@@ -213,17 +154,20 @@ function bindEvents() {
     updateMarkPreviews();
   });
   els.sampleButton.addEventListener("click", loadSample);
-  els.applyTestingPresetButton.addEventListener("click", applySelectedTestingPreset);
+  els.testingPreset.addEventListener("change", handlePresetSelection);
   els.savePresetButton.addEventListener("click", savePresetFile);
   els.loadPresetButton.addEventListener("click", () => els.presetFileInput.click());
   els.presetFileInput.addEventListener("change", handlePresetFileChange);
+  els.presetChangesDialog.addEventListener("close", handlePresetChangesDialogClose);
   els.curveEditOverlayClose.addEventListener("click", () => {
     state.activeCurveEditTarget = null;
     updateModeUi();
     updateMarkPreviews();
   });
   els.resetDefaultsButton.addEventListener("click", resetDefaults);
-  els.exportButton.addEventListener("click", exportSvg);
+  els.exportButton.addEventListener("click", openSvgExportDialog);
+  els.svgExportCancelButton.addEventListener("click", () => els.svgExportDialog.close());
+  els.svgExportConfirmButton.addEventListener("click", exportSvgFromDialog);
   els.exportPngButton.addEventListener("click", openPngExportDialog);
   els.pngExportCancelButton.addEventListener("click", () => els.pngExportDialog.close());
   els.pngExportConfirmButton.addEventListener("click", exportPngFromDialog);
@@ -245,7 +189,12 @@ function bindEvents() {
   window.addEventListener("keydown", handleGlobalKeyDown);
 
   for (const input of document.querySelectorAll("input, select, textarea")) {
-    if (input === els.fileInput || input === els.presetFileInput || input.dataset.boundRange === "true") continue;
+    if (
+      input === els.fileInput ||
+      input === els.presetFileInput ||
+      input === els.testingPreset ||
+      input.dataset.boundRange === "true"
+    ) continue;
     input.addEventListener("input", () => {
       if (input === els.outputWidth || input === els.outputHeight) {
         applyAspectFromEditedDimension(input === els.outputHeight ? "height" : "width");
@@ -358,12 +307,11 @@ function controlHint(id) {
     gridScale: "Controls the filled portion of each halftone cell before per-channel sizing.",
     minMark: "Smallest mark size generated from sampled values.",
     maxMark: "Largest mark size generated from sampled values.",
-    curveTileCells: "Length, in grid cells, used by tiled full-width/full-height curve layouts.",
-    testingPreset: "Loads a saved test scenario that exercises a known combination of modes and channel settings.",
+    testingPreset: "Applies a preset from the presets folder.",
     valueMode: "Chooses how source pixels are converted into channel values before thresholding and mark sizing. Crosshatching mode splits grayscale density across the enabled channels as monochrome hatch layers.",
     singleChannel: "Chooses which CMYK channel receives grayscale values in single-channel mode.",
     markMode: "Switches between repeated shape marks and variable-width curve marks.",
-    curveSpan: "Chooses whether curves span the document, tile across an axis, or use motif tiling/stacking.",
+    curveSpan: "Chooses whether curves span the document or repeat as a tiled/stacked motif pattern.",
     syncCurveChannels: "Uses one shared source curve for all channels while preserving each channel's independent render controls.",
     showBackground: "Shows the loaded source image/SVG behind the generated preview for visual alignment.",
     geometryMode: "Chooses whether shape-mode mark geometry is shared by all channels or set independently per channel.",
@@ -378,46 +326,54 @@ function controlHint(id) {
     "cmyk-scaleMultiplier": "Multiplies every channel's generated mark width scale.",
     "cmyk-curveScaleMultiplier": "Multiplies every channel's source-curve scale for curve rendering.",
     "cmyk-resolutionMultiplier": "Multiplies every channel's sampling density.",
-    "cmyk-outputQualityMultiplier": "Multiplies every channel's variable-width curve resampling quality.",
+    "cmyk-outputQualityMultiplier": "Multiplies every channel's variable-width curve and motif powerstroke resampling quality.",
+    "cmyk-thresholdDelta": "Adds to every channel's threshold percentage before rendering.",
     "cmyk-maxSizeMultiplier": "Multiplies every channel's maximum mark size cap.",
     "cmyk-opacityMultiplier": "Multiplies every channel's preview/render opacity.",
+    "cmyk-motifCoverageModeOverride": "Optionally forces every enabled channel to use auto coverage or manual motif counts without changing individual channel values.",
+    "cmyk-motifBleedDelta": "Adds bleed cells to every channel's motif coverage.",
     "cmyk-offsetXDelta": "Adds a horizontal offset to every channel's phase or curve placement.",
     "cmyk-offsetYDelta": "Adds a vertical offset to every channel's phase or curve placement.",
     "cmyk-tileCountDelta": "Adds to every channel's curve motif tile count.",
-    "cmyk-tileSpacingDelta": "Adds artboard-space distance between motif tile origins for every channel.",
+    "cmyk-tileSpacingDelta": "Legacy motif spacing delta; motif rows now advance by endpoint geometry.",
     "cmyk-tileAngleDelta": "Adds degrees to every channel's motif tile direction.",
     "cmyk-tileOffsetDelta": "Adds offset along each channel's tile direction.",
+    "cmyk-alternateTileTransformOverride": "Optionally forces every enabled channel to use the same alternating tile transform.",
     "cmyk-stackCountDelta": "Adds to every channel's motif stack row count.",
     "cmyk-stackSpacingDelta": "Adds artboard-space distance between stack rows for every channel.",
-    "cmyk-stackAngleDelta": "Adds degrees to every channel's motif stack direction.",
+    "cmyk-stackAngleDelta": "Adds degrees to every channel's motif row direction, relative to the natural perpendicular row direction.",
     "cmyk-stackOffsetDelta": "Adds offset along each channel's stack direction.",
     "cmyk-alternateStackOffsetDelta": "Adds alternating-row tile-direction offset for every channel's motif stacks.",
+    "-motifCoverageMode": "Auto coverage computes enough motif tiles and rows to flood the artboard; manual mode uses the tile and stack count fields.",
+    "-motifBleed": "Extra motif coverage beyond the artboard, measured in current base grid cells.",
   };
   if (exact[id]) return exact[id];
 
   const suffixHints = [
     ["-enabled", "Toggles whether this channel contributes to the rendered halftone."],
     ["-color", "Rendered color for this channel and its preview overlays."],
-    ["-rotation", "Rotates the mark or source curve shape within each channel."],
+    ["-rotation", "Rotates shape-mode marks within each channel."],
     ["-gridRotation", "Rotates this channel's sampling and placement grid around its grid pivot."],
     ["-gridPivotX", "Horizontal offset of the grid rotation pivot from the artboard center. Drag the matching preview pivot to edit it visually."],
     ["-gridPivotY", "Vertical offset of the grid rotation pivot from the artboard center. Drag the matching preview pivot to edit it visually."],
     ["-scale", "Scales generated mark width for this channel."],
     ["-threshold", "Suppresses marks below this sampled value."],
     ["-resolutionScale", "Multiplies this channel's image sampling density."],
-    ["-outputQuality", "Controls resampling density for variable-width curve outlines."],
+    ["-outputQuality", "Controls resampling density for variable-width curve outlines and motif powerstroke smoothing."],
     ["-maxSize", "Caps this channel's largest generated mark size."],
     ["-opacity", "Preview/render opacity for this channel."],
     ["-offsetX", "Horizontal phase/placement offset for this channel."],
     ["-offsetY", "Vertical phase/placement offset for this channel."],
     ["-curveScale", "Scales source curves for full-document and motif curve rendering."],
-    ["-tileCount", "Number of curve motif tiles emitted per stack row."],
-    ["-tileSpacing", "Distance between curve motif tile origins."],
-    ["-tileAngle", "Direction used to advance curve motif tiles."],
+    ["-motifCoverageMode", "Auto coverage computes enough motif tiles and rows to flood the artboard; manual mode uses the tile and stack count fields."],
+    ["-motifBleed", "Extra motif coverage beyond the artboard, measured in current base grid cells."],
+    ["-tileCount", "Manual number of curve motif tiles emitted per row."],
+    ["-tileSpacing", "Legacy motif spacing; motif rows now advance by endpoint geometry."],
+    ["-tileAngle", "Direction used to advance curve motif tiles along each row."],
     ["-tileOffset", "Offset along the tile direction."],
-    ["-stackCount", "Number of stacked rows for curve motif patterns."],
+    ["-stackCount", "Manual number of stacked rows for curve motif patterns."],
     ["-stackSpacing", "Distance between stack rows."],
-    ["-stackAngle", "Direction used to advance stack rows."],
+    ["-stackAngle", "Row direction offset from the natural perpendicular row direction."],
     ["-stackOffset", "Offset along the stack direction."],
     ["-alternateStackOffset", "Additional tile-direction offset applied to alternating stack rows."],
     ["-connectEndpoints", "Connects this channel's curve tile endpoints to neighboring tiles in the rendered output."],
@@ -430,31 +386,131 @@ function controlHint(id) {
   return "";
 }
 
-function renderTestingPresetOptions() {
-  els.testingPreset.innerHTML = TESTING_PRESETS
-    .map((preset, index) => `<option value="${index}">${preset.name}</option>`)
-    .join("");
+function loadFolderPresetDocuments() {
+  return Object.entries(PRESET_MODULES)
+    .sort(([leftPath], [rightPath]) => leftPath.localeCompare(rightPath))
+    .flatMap(([path, source]) => {
+      try {
+        const preset = parsePresetDocument(source);
+        return [
+          {
+            ...preset,
+            id: path,
+            fileName: path.split("/").pop() || path,
+          },
+        ];
+      } catch (error) {
+        console.warn(`Skipping preset ${path}: ${error.message}`);
+        return [];
+      }
+    });
 }
 
-function applySelectedTestingPreset() {
-  const preset = TESTING_PRESETS[Number(els.testingPreset.value)] ?? TESTING_PRESETS[0];
+function renderTestingPresetOptions() {
+  const selectedId = state.activePresetId || els.testingPreset.value;
+  const options = [
+    `<option value="">Select a preset...</option>`,
+    ...FOLDER_PRESETS.map(
+      (preset) => `<option value="${escapeAttribute(preset.id)}">${escapeHtml(preset.name)}</option>`,
+    ),
+  ];
+  els.testingPreset.innerHTML = options.join("");
+  if (FOLDER_PRESETS.some((preset) => preset.id === selectedId)) {
+    els.testingPreset.value = selectedId;
+  }
+}
+
+function handlePresetSelection() {
+  if (state.suppressPresetSelectChange) return;
+
+  const presetId = els.testingPreset.value;
+  if (!presetId) {
+    state.activePresetId = "";
+    return;
+  }
+
+  if (hasUnsavedPresetChanges()) {
+    state.pendingPresetId = presetId;
+    const preset = findFolderPreset(presetId);
+    els.presetChangesMessage.textContent = `Save the current settings before applying "${preset?.name || "the selected preset"}"?`;
+    if (typeof els.presetChangesDialog.showModal === "function") {
+      els.presetChangesDialog.showModal();
+    } else {
+      handlePresetChangesFallback(presetId);
+    }
+    restoreActivePresetSelection();
+    return;
+  }
+
+  applyFolderPreset(presetId);
+}
+
+function handlePresetChangesDialogClose() {
+  const action = els.presetChangesDialog.returnValue;
+  const presetId = state.pendingPresetId;
+  state.pendingPresetId = "";
+  els.presetChangesDialog.returnValue = "";
+
+  if (!presetId || action === "cancel") {
+    restoreActivePresetSelection();
+    return;
+  }
+
+  if (action === "save") {
+    savePresetFile();
+  }
+
+  if (action === "save" || action === "discard") {
+    applyFolderPreset(presetId);
+  } else {
+    restoreActivePresetSelection();
+  }
+}
+
+function handlePresetChangesFallback(presetId) {
+  const shouldSave = window.confirm("Save the current settings before applying the selected preset?");
+  if (shouldSave) {
+    savePresetFile();
+    applyFolderPreset(presetId);
+    return;
+  }
+
+  const shouldDiscard = window.confirm("Discard current setting changes and apply the selected preset?");
+  if (shouldDiscard) {
+    applyFolderPreset(presetId);
+  } else {
+    state.pendingPresetId = "";
+    restoreActivePresetSelection();
+  }
+}
+
+function applyFolderPreset(presetId) {
+  const preset = findFolderPreset(presetId);
+  if (!preset) {
+    restoreActivePresetSelection();
+    els.renderStats.textContent = "Could not find selected preset.";
+    return;
+  }
+
   applyPresetDocument(preset);
-  els.renderStats.textContent = `Applied testing preset: ${preset.name}`;
+  state.activePresetId = presetId;
+  restoreActivePresetSelection();
+  markPresetControlsClean();
+  els.renderStats.textContent = `Applied preset: ${preset.name}`;
+}
+
+function restoreActivePresetSelection() {
+  state.suppressPresetSelectChange = true;
+  els.testingPreset.value = state.activePresetId;
+  state.suppressPresetSelectChange = false;
+}
+
+function findFolderPreset(presetId) {
+  return FOLDER_PRESETS.find((preset) => preset.id === presetId);
 }
 
 function savePresetFile() {
-  const preset = {
-    format: PRESET_FORMAT,
-    version: PRESET_VERSION,
-    name: sourceBaseName() ? `${sourceBaseName()} Toniator preset` : "Toniator preset",
-    savedAt: new Date().toISOString(),
-    settings: {
-      ...readSettings(),
-      preserveAspect: els.preserveAspect.checked,
-    },
-    cmykDeltas: readCmykDeltas(),
-    channels: readBaseChannels(),
-  };
+  const preset = createPresetDocument();
   const blob = new Blob([`${JSON.stringify(preset, null, 2)}\n`], {
     type: "application/json;charset=utf-8",
   });
@@ -464,6 +520,48 @@ function savePresetFile() {
   link.download = `${sanitizeFileName(preset.name)}.tntr`;
   link.click();
   URL.revokeObjectURL(url);
+  markPresetControlsClean();
+}
+
+function createPresetDocument() {
+  return {
+    format: PRESET_FORMAT,
+    version: PRESET_VERSION,
+    name: activePresetName() || (sourceBaseName() ? `${sourceBaseName()} Toniator preset` : "Toniator preset"),
+    savedAt: new Date().toISOString(),
+    settings: {
+      ...readSettings(),
+      preserveAspect: els.preserveAspect.checked,
+    },
+    cmykDeltas: readCmykDeltas(),
+    channels: readBaseChannels(),
+  };
+}
+
+function activePresetName() {
+  return findFolderPreset(state.activePresetId)?.name || "";
+}
+
+function hasUnsavedPresetChanges() {
+  return Boolean(
+    state.presetControlSnapshot &&
+      state.presetControlSnapshot !== createPresetControlSnapshot(),
+  );
+}
+
+function markPresetControlsClean() {
+  state.presetControlSnapshot = createPresetControlSnapshot();
+}
+
+function createPresetControlSnapshot() {
+  return JSON.stringify({
+    settings: {
+      ...readSettings(),
+      preserveAspect: els.preserveAspect.checked,
+    },
+    cmykDeltas: readCmykDeltas(),
+    channels: readBaseChannels(),
+  });
 }
 
 async function handlePresetFileChange(event) {
@@ -473,6 +571,9 @@ async function handlePresetFileChange(event) {
   try {
     const preset = parsePresetDocument(await file.text());
     applyPresetDocument(preset);
+    state.activePresetId = "";
+    restoreActivePresetSelection();
+    markPresetControlsClean();
     els.renderStats.textContent = `Loaded preset: ${preset.name || file.name}`;
   } catch (error) {
     console.error(error);
@@ -510,6 +611,7 @@ function applyPresetDocument(preset) {
 
   state.activeCurveEditTarget = null;
   finalizePresetControlChanges();
+  markPresetControlsClean();
 }
 
 function applyCmykDeltaPreset(deltas) {
@@ -521,14 +623,24 @@ function applyCmykDeltaPreset(deltas) {
   setControlValue(document.querySelector("#cmyk-curveScaleMultiplier"), deltas.curveScaleMultiplier);
   setControlValue(document.querySelector("#cmyk-resolutionMultiplier"), deltas.resolutionMultiplier);
   setControlValue(document.querySelector("#cmyk-outputQualityMultiplier"), deltas.outputQualityMultiplier);
+  setControlValue(document.querySelector("#cmyk-thresholdDelta"), deltas.thresholdDelta);
   setControlValue(document.querySelector("#cmyk-maxSizeMultiplier"), deltas.maxSizeMultiplier);
   setControlValue(document.querySelector("#cmyk-opacityMultiplier"), deltas.opacityMultiplier);
+  setControlValue(
+    document.querySelector("#cmyk-motifCoverageModeOverride"),
+    deltas.motifCoverageModeOverride,
+  );
+  setControlValue(document.querySelector("#cmyk-motifBleedDelta"), deltas.motifBleedDelta);
   setControlValue(document.querySelector("#cmyk-offsetXDelta"), deltas.offsetXDelta);
   setControlValue(document.querySelector("#cmyk-offsetYDelta"), deltas.offsetYDelta);
   setControlValue(document.querySelector("#cmyk-tileCountDelta"), deltas.tileCountDelta);
   setControlValue(document.querySelector("#cmyk-tileSpacingDelta"), deltas.tileSpacingDelta);
   setControlValue(document.querySelector("#cmyk-tileAngleDelta"), deltas.tileAngleDelta);
   setControlValue(document.querySelector("#cmyk-tileOffsetDelta"), deltas.tileOffsetDelta);
+  setControlValue(
+    document.querySelector("#cmyk-alternateTileTransformOverride"),
+    deltas.alternateTileTransformOverride,
+  );
   setControlValue(document.querySelector("#cmyk-stackCountDelta"), deltas.stackCountDelta);
   setControlValue(document.querySelector("#cmyk-stackSpacingDelta"), deltas.stackSpacingDelta);
   setControlValue(document.querySelector("#cmyk-stackAngleDelta"), deltas.stackAngleDelta);
@@ -546,8 +658,7 @@ function applySettingsPreset(settings) {
   setControlValue(els.valueMode, settings.valueMode);
   setControlValue(els.singleChannel, settings.singleChannel);
   setControlValue(els.markMode, settings.markMode);
-  setControlValue(els.curveSpan, settings.curveSpan);
-  setControlValue(els.curveTileCells, settings.curveTileCells);
+  setControlValue(els.curveSpan, normalizeEditCurveLayout(settings.curveSpan));
   setControlValue(els.geometryMode, settings.geometryMode);
   setControlValue(els.sharedPreset, settings.sharedPreset);
   setControlValue(els.sharedPath, settings.sharedPath);
@@ -571,6 +682,13 @@ function applyChannelsPreset(channels) {
     setControlValue(document.querySelector(`#${key}-gridPivotY`), channel.gridPivotY);
     setControlValue(document.querySelector(`#${key}-scale`), channel.scale);
     setControlValue(document.querySelector(`#${key}-curveScale`), channel.curveScale);
+    setControlValue(
+      document.querySelector(`#${key}-motifCoverageMode`),
+      channel.motifCoverageMode ??
+        channel.coverageMode ??
+        (channel.tileCount !== undefined || channel.stackCount !== undefined ? "manual" : undefined),
+    );
+    setControlValue(document.querySelector(`#${key}-motifBleed`), channel.motifBleed);
     setControlValue(document.querySelector(`#${key}-tileCount`), channel.tileCount);
     setControlValue(document.querySelector(`#${key}-tileSpacing`), channel.tileSpacing);
     setControlValue(document.querySelector(`#${key}-tileAngle`), channel.tileAngle);
@@ -636,6 +754,8 @@ function percentageValue(value) {
 function resetDefaults({ renderAfter = true } = {}) {
   window.clearTimeout(renderTimer);
   state.activeCurveEditTarget = null;
+  state.activePresetId = "";
+  state.pendingPresetId = "";
   state.fitPreview = true;
   els.previewMount.classList.remove("actual-size");
 
@@ -661,6 +781,8 @@ function resetDefaults({ renderAfter = true } = {}) {
   updateModeUi();
   updateMarkPreviews();
   updateFitPreviewButton();
+  restoreActivePresetSelection();
+  markPresetControlsClean();
 
   if (state.source && renderAfter) {
     render();
@@ -751,7 +873,7 @@ function applyUrlParams() {
     renderChannelPresetOptions();
   }
 
-  setSelectFromParam(els.curveSpan, params.get("curveSpan"));
+  setSelectFromParam(els.curveSpan, normalizeEditCurveLayout(params.get("curveSpan")));
   setSelectFromParam(els.geometryMode, params.get("geometryMode"));
   setSelectFromParam(els.valueMode, params.get("valueMode"));
   setSelectFromParam(els.singleChannel, params.get("singleChannel"));
@@ -764,7 +886,6 @@ function applyUrlParams() {
   setInputValueFromParam(els.gridScale, params.get("gridScale"));
   setInputValueFromParam(els.minMark, params.get("minMark"));
   setInputValueFromParam(els.maxMark, params.get("maxMark"));
-  setInputValueFromParam(els.curveTileCells, params.get("curveTileCells"));
   applyChannelUrlParams(params);
 
   if (params.has("preserveAspect")) {
@@ -853,6 +974,14 @@ function applyChannelUrlParams(params) {
     setInputValueFromParam(
       document.querySelector(`#${key}-curveScale`),
       params.get(`${key}CurveScale`),
+    );
+    setSelectFromParam(
+      document.querySelector(`#${key}-motifCoverageMode`),
+      params.get(`${key}MotifCoverageMode`),
+    );
+    setInputValueFromParam(
+      document.querySelector(`#${key}-motifBleed`),
+      params.get(`${key}MotifBleed`),
     );
     setInputValueFromParam(
       document.querySelector(`#${key}-tileCount`),
@@ -951,7 +1080,7 @@ async function loadSample() {
   try {
     els.sourceInfo.textContent = "Loading built-in sample…";
     state.source = await createSampleSource();
-    els.sourceInfo.textContent = `${state.source.fileName} · ${state.source.width}×${state.source.height} · sample SVG`;
+    els.sourceInfo.textContent = `${state.source.fileName} · ${state.source.width}×${state.source.height} · sample ${state.source.type.toUpperCase()}`;
     if (els.preserveAspect.checked) {
       applyAspectFromEditedDimension("width");
     }
@@ -1022,15 +1151,28 @@ async function render() {
   els.renderStats.textContent = `${grid.cols}×${grid.rows} base cells · ${describeChannelResolutions(channels, settings.longEdgeCells)} · rendered in ${elapsed.toFixed(1)}ms`;
 }
 
-function exportSvg() {
+function openSvgExportDialog() {
   if (!state.latestSvg) return;
 
+  setControlValue(els.svgExportFileName, defaultExportFileName("svg"));
+  if (typeof els.svgExportDialog.showModal === "function") {
+    els.svgExportDialog.showModal();
+  } else {
+    els.svgExportDialog.setAttribute("open", "");
+  }
+}
+
+function exportSvgFromDialog() {
+  if (!state.latestSvg) return;
+
+  const fileName = normalizedExportFileName(els.svgExportFileName.value, "svg");
+  els.svgExportDialog.close();
   const svg = exportSvgMarkup();
   const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = `${sourceBaseName()}-toniator-halftone.svg`;
+  link.download = fileName;
   link.click();
   URL.revokeObjectURL(url);
 }
@@ -1039,6 +1181,7 @@ function openPngExportDialog() {
   if (!state.latestSvg) return;
 
   const defaults = defaultPngExportSize();
+  setControlValue(els.pngExportFileName, defaultExportFileName("png"));
   setControlValue(els.pngExportDpi, defaults.dpi);
   setControlValue(els.pngExportWidth, defaults.width);
   setControlValue(els.pngExportHeight, defaults.height);
@@ -1056,29 +1199,130 @@ async function exportPngFromDialog() {
   const width = clampInteger(readNumber(els.pngExportWidth, readSettings().outputWidth), 1, 32000);
   const height = clampInteger(readNumber(els.pngExportHeight, readSettings().outputHeight), 1, 32000);
   const dpi = clampInteger(readNumber(els.pngExportDpi, 300), 1, 2400);
+  const baseFileName = normalizedExportFileName(els.pngExportFileName.value, "png");
+  const includeBackground = !els.pngExportTransparentBackground.checked;
+  const separateChannels = els.pngExportSeparateChannels.checked;
+  const jobs = pngExportJobs({ baseFileName, separateChannels });
   els.pngExportDialog.close();
 
-  const svg = exportSvgMarkup();
-  const svgBlob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
-  const svgUrl = URL.createObjectURL(svgBlob);
+  openPngExportProgress();
+  await updatePngExportProgress(5, "Preparing PNG export...");
 
   try {
+    for (let index = 0; index < jobs.length; index += 1) {
+      await exportPngJob({
+        job: jobs[index],
+        jobIndex: index,
+        jobCount: jobs.length,
+        width,
+        height,
+        dpi,
+        includeBackground,
+      });
+    }
+    await updatePngExportProgress(100, "PNG export complete.");
+  } finally {
+    closePngExportProgressSoon();
+  }
+}
+
+async function exportPngJob({
+  job,
+  jobIndex,
+  jobCount,
+  width,
+  height,
+  dpi,
+  includeBackground,
+}) {
+  const label = jobCount > 1 ? `${job.label} (${jobIndex + 1}/${jobCount})` : "combined image";
+  const progressBase = jobCount > 1 ? (jobIndex / jobCount) * 90 : 0;
+  const progressSpan = jobCount > 1 ? 90 / jobCount : 90;
+  const progress = (amount) => Math.round(5 + progressBase + progressSpan * amount);
+  let svgUrl = "";
+
+  try {
+    await updatePngExportProgress(progress(0.12), `Generating SVG for ${label}...`);
+    const svg = exportSvgMarkup(readSettings(), {
+      includeBackground,
+      renderChannelKeys: job.channelKey ? [job.channelKey] : null,
+    });
+    const svgBlob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
+    svgUrl = URL.createObjectURL(svgBlob);
+
+    await updatePngExportProgress(progress(0.42), `Rasterizing ${label}...`);
     const image = await loadImage(svgUrl);
+    await updatePngExportProgress(progress(0.6), `Drawing ${width}×${height}px canvas...`);
     const canvas = document.createElement("canvas");
     canvas.width = width;
     canvas.height = height;
     const context = canvas.getContext("2d");
+    context.clearRect(0, 0, canvas.width, canvas.height);
     context.drawImage(image, 0, 0, canvas.width, canvas.height);
-    const pngBlob = await addPngDpiMetadata(await canvasToBlob(canvas, "image/png"), dpi);
-    const pngUrl = URL.createObjectURL(pngBlob);
-    const link = document.createElement("a");
-    link.href = pngUrl;
-    link.download = `${sourceBaseName()}-toniator-halftone.png`;
-    link.click();
-    URL.revokeObjectURL(pngUrl);
+    await updatePngExportProgress(progress(0.78), `Encoding ${label} PNG...`);
+    const encodedBlob = await canvasToBlob(canvas, "image/png");
+    await updatePngExportProgress(progress(0.9), `Writing ${label} DPI metadata...`);
+    const pngBlob = await addPngDpiMetadata(encodedBlob, dpi);
+    await updatePngExportProgress(progress(0.98), `Starting ${label} download...`);
+    downloadBlob(pngBlob, job.fileName);
   } finally {
-    URL.revokeObjectURL(svgUrl);
+    if (svgUrl) URL.revokeObjectURL(svgUrl);
   }
+}
+
+function pngExportJobs({ baseFileName, separateChannels }) {
+  if (!separateChannels) {
+    return [{ fileName: baseFileName, label: "Combined", channelKey: null }];
+  }
+
+  const channels = readChannels();
+  const jobs = Object.entries(CHANNELS)
+    .filter(([key]) => channels[key]?.enabled)
+    .map(([key, channel]) => ({
+      fileName: exportFileNameWithSuffix(baseFileName, key, "png"),
+      label: channel.name,
+      channelKey: key,
+    }));
+  return jobs.length > 0 ? jobs : [{ fileName: baseFileName, label: "Combined", channelKey: null }];
+}
+
+function downloadBlob(blob, fileName) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function openPngExportProgress() {
+  els.pngExportProgress.value = 0;
+  els.pngExportProgressText.textContent = "Preparing export...";
+  if (typeof els.pngExportProgressDialog.showModal === "function") {
+    els.pngExportProgressDialog.showModal();
+  } else {
+    els.pngExportProgressDialog.setAttribute("open", "");
+  }
+}
+
+async function updatePngExportProgress(value, text) {
+  els.pngExportProgress.value = value;
+  els.pngExportProgressText.textContent = text;
+  await nextPaint();
+}
+
+function closePngExportProgressSoon() {
+  window.setTimeout(() => {
+    if (els.pngExportProgressDialog.open) {
+      els.pngExportProgressDialog.close();
+    }
+  }, 450);
+}
+
+function nextPaint() {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(resolve));
+  });
 }
 
 function defaultPngExportSize() {
@@ -1164,7 +1408,10 @@ function averageDpi(dpiX, dpiY) {
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
-function exportSvgMarkup(exportSettings = readSettings()) {
+function exportSvgMarkup(
+  exportSettings = readSettings(),
+  { includeBackground = true, renderChannelKeys = null } = {},
+) {
   const grid = calculateGrid(
     state.source,
     exportSettings.outputWidth,
@@ -1177,6 +1424,8 @@ function exportSvgMarkup(exportSettings = readSettings()) {
     settings: exportSettings,
     channels: readChannels(),
     includePreviewBackground: false,
+    includeBackground,
+    renderChannelKeys,
   });
 }
 
@@ -1330,7 +1579,7 @@ function appendChannelInfoOverlay(svg, key, channel, settings, baseGrid) {
   const vectorLength = Math.max(28, Math.min(settings.outputWidth, settings.outputHeight) * 0.09);
   const gridDirection = unitVector(finite(channel.gridRotation));
   const tileDirection = unitVector(finite(channel.tileAngle));
-  const stackDirection = unitVector(finite(channel.stackAngle, 90));
+  const stackDirection = unitVector(finite(channel.tileAngle) + 90 + finite(channel.stackAngle, 0));
   const markCenter = {
     x: center.x + finite(channel.offsetX),
     y: center.y + finite(channel.offsetY),
@@ -1557,7 +1806,6 @@ function readSettings() {
     singleChannel: els.singleChannel.value,
     markMode: els.markMode.value,
     curveSpan: els.curveSpan.value,
-    curveTileCells: readNumber(els.curveTileCells, 12),
     syncCurveChannels: els.syncCurveChannels.checked,
     sharedConnectEndpoints: els.sharedConnectEndpoints.checked,
     sharedSmoothSeamTangents:
@@ -1586,13 +1834,15 @@ function readBaseChannels() {
       gridPivotY: readNumber(document.querySelector(`#${key}-gridPivotY`), 0),
       scale: readNumber(document.querySelector(`#${key}-scale`), 1),
       curveScale: readNumber(document.querySelector(`#${key}-curveScale`), 32),
+      motifCoverageMode: document.querySelector(`#${key}-motifCoverageMode`).value,
+      motifBleed: readNumber(document.querySelector(`#${key}-motifBleed`), 2),
       tileCount: readNumber(document.querySelector(`#${key}-tileCount`), 1),
-      tileSpacing: readNumber(document.querySelector(`#${key}-tileSpacing`), 36),
+      tileSpacing: readNumber(document.querySelector(`#${key}-tileSpacing`), 32),
       tileAngle: readNumber(document.querySelector(`#${key}-tileAngle`), 0),
       tileOffset: readNumber(document.querySelector(`#${key}-tileOffset`), 0),
       stackCount: readNumber(document.querySelector(`#${key}-stackCount`), 1),
       stackSpacing: readNumber(document.querySelector(`#${key}-stackSpacing`), 36),
-      stackAngle: readNumber(document.querySelector(`#${key}-stackAngle`), 90),
+      stackAngle: readNumber(document.querySelector(`#${key}-stackAngle`), 0),
       stackOffset: readNumber(document.querySelector(`#${key}-stackOffset`), 0),
       alternateStackOffset: readNumber(document.querySelector(`#${key}-alternateStackOffset`), 0),
       alternateTileTransform: document.querySelector(`#${key}-alternateTileTransform`).value,
@@ -1624,14 +1874,18 @@ function readCmykDeltas() {
     curveScaleMultiplier: readNumber(document.querySelector("#cmyk-curveScaleMultiplier"), 1),
     resolutionMultiplier: readNumber(document.querySelector("#cmyk-resolutionMultiplier"), 1),
     outputQualityMultiplier: readNumber(document.querySelector("#cmyk-outputQualityMultiplier"), 1),
+    thresholdDelta: readNumber(document.querySelector("#cmyk-thresholdDelta"), 0) / 100,
     maxSizeMultiplier: readNumber(document.querySelector("#cmyk-maxSizeMultiplier"), 1),
     opacityMultiplier: readNumber(document.querySelector("#cmyk-opacityMultiplier"), 1),
+    motifCoverageModeOverride: document.querySelector("#cmyk-motifCoverageModeOverride").value,
+    motifBleedDelta: readNumber(document.querySelector("#cmyk-motifBleedDelta"), 0),
     offsetXDelta: readNumber(document.querySelector("#cmyk-offsetXDelta"), 0),
     offsetYDelta: readNumber(document.querySelector("#cmyk-offsetYDelta"), 0),
     tileCountDelta: readNumber(document.querySelector("#cmyk-tileCountDelta"), 0),
     tileSpacingDelta: readNumber(document.querySelector("#cmyk-tileSpacingDelta"), 0),
     tileAngleDelta: readNumber(document.querySelector("#cmyk-tileAngleDelta"), 0),
     tileOffsetDelta: readNumber(document.querySelector("#cmyk-tileOffsetDelta"), 0),
+    alternateTileTransformOverride: document.querySelector("#cmyk-alternateTileTransformOverride").value,
     stackCountDelta: readNumber(document.querySelector("#cmyk-stackCountDelta"), 0),
     stackSpacingDelta: readNumber(document.querySelector("#cmyk-stackSpacingDelta"), 0),
     stackAngleDelta: readNumber(document.querySelector("#cmyk-stackAngleDelta"), 0),
@@ -1654,14 +1908,19 @@ function applyCmykDeltas(channels, deltas) {
         curveScale: channel.curveScale * deltas.curveScaleMultiplier,
         resolutionScale: channel.resolutionScale * deltas.resolutionMultiplier,
         outputQuality: channel.outputQuality * deltas.outputQualityMultiplier,
+        threshold: clamp(channel.threshold + deltas.thresholdDelta, 0, 1),
         maxSize: channel.maxSize * deltas.maxSizeMultiplier,
         opacity: clamp(channel.opacity * deltas.opacityMultiplier, 0, 1),
+        motifCoverageMode: deltas.motifCoverageModeOverride || channel.motifCoverageMode,
+        motifBleed: Math.max(0, channel.motifBleed + deltas.motifBleedDelta),
         offsetX: channel.offsetX + deltas.offsetXDelta,
         offsetY: channel.offsetY + deltas.offsetYDelta,
         tileCount: Math.max(1, channel.tileCount + deltas.tileCountDelta),
         tileSpacing: Math.max(0, channel.tileSpacing + deltas.tileSpacingDelta),
         tileAngle: channel.tileAngle + deltas.tileAngleDelta,
         tileOffset: channel.tileOffset + deltas.tileOffsetDelta,
+        alternateTileTransform:
+          deltas.alternateTileTransformOverride || channel.alternateTileTransform,
         stackCount: Math.max(1, channel.stackCount + deltas.stackCountDelta),
         stackSpacing: Math.max(0, channel.stackSpacing + deltas.stackSpacingDelta),
         stackAngle: channel.stackAngle + deltas.stackAngleDelta,
@@ -1700,7 +1959,7 @@ function renderChannelControls() {
         <div id="${key}-preview" class="mark-preview"></div>
         <div class="grid two">
           <label data-channel-color>Color <input id="${key}-color" type="color" value="${defaults.color}" /></label>
-          <label>Shape/Curve Rotation ° <input id="${key}-rotation" type="number" min="-360" max="360" step="1" value="${defaults.rotation}" /></label>
+          <label data-mode="shape">Shape Rotation ° <input id="${key}-rotation" type="number" min="-360" max="360" step="1" value="${defaults.rotation}" /></label>
         </div>
         <div class="curve-pattern-controls channel-grid-controls">
           <h4>Channel Grid Controls</h4>
@@ -1733,13 +1992,24 @@ function renderChannelControls() {
             <label>Source Curve Scale <input id="${key}-curveScale" type="number" min="0.1" max="500" step="0.5" value="32" /></label>
             <span></span>
           </div>
+          <h4>Coverage</h4>
+          <label>Coverage Mode
+            <select id="${key}-motifCoverageMode">
+              <option value="auto" selected>Auto cover artboard</option>
+              <option value="manual">Manual tile/stack counts</option>
+            </select>
+          </label>
+          <div class="grid two">
+            <label>Bleed, cells <input id="${key}-motifBleed" type="number" min="0" max="24" step="0.5" value="2" /></label>
+            <p id="${key}-motifAutoReadout" class="hint motif-auto-readout">Auto: -- tiles x -- rows</p>
+          </div>
           <h4>Tile Controls</h4>
           <div class="grid two">
-            <label>Tile Count <input id="${key}-tileCount" type="number" min="1" max="200" step="1" value="1" /></label>
-            <label>Tile Spacing <input id="${key}-tileSpacing" type="number" min="0" max="1000" step="0.5" value="36" /></label>
+            <label data-motif-manual="${key}">Tile Count, manual <input id="${key}-tileCount" type="number" min="1" max="200" step="1" value="1" /></label>
+            <label class="hidden">Along-curve spacing <input id="${key}-tileSpacing" type="number" min="0" max="1000" step="0.5" value="0" /></label>
           </div>
           <div class="grid two">
-            <label>Tile Angle ° <input id="${key}-tileAngle" type="number" min="-360" max="360" step="1" value="0" /></label>
+            <label>Along-curve angle ° <input id="${key}-tileAngle" type="number" min="-360" max="360" step="1" value="0" /></label>
             <label>Tile Offset <input id="${key}-tileOffset" type="number" min="-1000" max="1000" step="0.5" value="0" /></label>
           </div>
           <label>Alternate Tile Transform
@@ -1751,11 +2021,11 @@ function renderChannelControls() {
           </label>
           <h4>Stack Controls</h4>
           <div class="grid two">
-            <label>Stack Count <input id="${key}-stackCount" type="number" min="1" max="200" step="1" value="1" /></label>
-            <label>Stack Spacing <input id="${key}-stackSpacing" type="number" min="0" max="1000" step="0.5" value="36" /></label>
+            <label data-motif-manual="${key}">Stack Count, manual <input id="${key}-stackCount" type="number" min="1" max="200" step="1" value="1" /></label>
+            <label>Row spacing <input id="${key}-stackSpacing" type="number" min="0" max="1000" step="0.5" value="36" /></label>
           </div>
           <div class="grid two">
-            <label>Stack Angle ° <input id="${key}-stackAngle" type="number" min="-360" max="360" step="1" value="90" /></label>
+            <label>Row angle offset ° <input id="${key}-stackAngle" type="number" min="-360" max="360" step="1" value="0" /></label>
             <label>Stack Offset <input id="${key}-stackOffset" type="number" min="-1000" max="1000" step="0.5" value="0" /></label>
           </div>
           <label>Alternate Stack Offset <input id="${key}-alternateStackOffset" type="number" min="-1000" max="1000" step="0.5" value="0" /></label>
@@ -1805,15 +2075,17 @@ function updateModeUi() {
     els.valueMode.value !== "single-channel",
   );
   els.curveSpanRow.classList.toggle("hidden", els.markMode.value !== "curve");
-  els.curveTileCellsRow.classList.toggle(
-    "hidden",
-    els.markMode.value !== "curve" || !els.curveSpan.value.startsWith("tiled"),
-  );
   els.curveModeHint.classList.toggle("hidden", els.markMode.value !== "curve");
   els.syncCurveChannelsRow.classList.toggle("hidden", els.markMode.value !== "curve");
   els.sharedCurveEditControls.classList.toggle(
     "hidden",
     els.markMode.value !== "curve" || !els.syncCurveChannels.checked,
+  );
+  els.sharedConnectEndpoints.closest("label")?.classList.toggle(
+    "hidden",
+    els.markMode.value !== "curve" ||
+      !els.syncCurveChannels.checked ||
+      els.curveSpan.value === "motif-pattern",
   );
   els.sharedSmoothSeam.closest("label")?.classList.toggle(
     "hidden",
@@ -1842,7 +2114,9 @@ function updateModeUi() {
   for (const block of document.querySelectorAll(".curve-continuity")) {
     block.classList.toggle(
       "hidden",
-      els.markMode.value !== "curve" || els.syncCurveChannels.checked,
+      els.markMode.value !== "curve" ||
+        els.syncCurveChannels.checked ||
+        els.curveSpan.value === "motif-pattern",
     );
   }
 
@@ -1922,8 +2196,16 @@ function updateEffectiveChannelControlVisibility() {
   const curveMode = els.markMode.value === "curve";
   const motifCurveLayout = curveMode && els.curveSpan.value === "motif-pattern";
   const crosshatchMode = els.valueMode.value === "crosshatch-luminance";
+  const settings = readSettings();
+  const grid = calculateGrid(
+    state.source,
+    settings.outputWidth,
+    settings.outputHeight,
+    settings.longEdgeCells,
+  );
   const deltas = readCmykDeltas();
   const channels = readBaseChannels();
+  const effectiveChannels = applyCmykDeltas(channels, deltas);
 
   for (const control of document.querySelectorAll("[data-curve-layout]")) {
     control.classList.toggle(
@@ -1939,6 +2221,25 @@ function updateEffectiveChannelControlVisibility() {
   for (const card of document.querySelectorAll(".channel-card[data-channel-card]")) {
     const channel = channels[card.dataset.channelCard];
     card.classList.toggle("channel-disabled-settings", !channel?.enabled);
+  }
+
+  for (const control of document.querySelectorAll("[data-motif-manual]")) {
+    const channel = effectiveChannels[control.dataset.motifManual];
+    control.classList.toggle(
+      "hidden",
+      !motifCurveLayout || channel?.motifCoverageMode !== "manual",
+    );
+  }
+
+  for (const readout of document.querySelectorAll(".motif-auto-readout")) {
+    const key = readout.id.replace("-motifAutoReadout", "");
+    const channel = effectiveChannels[key];
+    const autoMode = motifCurveLayout && channel?.motifCoverageMode === "auto";
+    readout.classList.toggle("hidden", !autoMode);
+    if (autoMode) {
+      const counts = computeMotifAutoCounts({ settings, channel, grid });
+      readout.textContent = `Auto: ${counts.tileCount} tiles x ${counts.stackCount} rows`;
+    }
   }
 
   for (const control of document.querySelectorAll("[data-grid-pivot-controls]")) {
@@ -1989,7 +2290,7 @@ function updateMarkPreviews() {
         mode: settings.markMode,
         d,
         color: channel.color,
-        rotation: channel.rotation,
+        rotation: 0,
       });
     } else {
       clearCurveEditor(mount);
@@ -2056,7 +2357,7 @@ function updateCurveEditOverlay(settings, channels) {
     mount: els.curveEditOverlayMount,
     d: editorPath,
     color: editingShared ? "#f8fafc" : channel.color,
-    rotation: editingShared ? 0 : channel.rotation,
+    rotation: 0,
     connectEndpoints: editingShared
       ? settings.sharedConnectEndpoints
       : channel.connectEndpoints,
@@ -2113,8 +2414,8 @@ function createDocumentCurveEdit(pathData, settings, channel) {
 }
 
 function createDocumentCurveTransform(curve, settings, channel, layout) {
-  const baselineAngle = (layout.endsWith("height") ? 90 : 0) + finite(channel.rotation);
-  const targetLength = artboardProjectionSpan(settings, baselineAngle) * documentCurveScaleFactor(channel);
+  const baselineAngle = layout.endsWith("height") ? 90 : 0;
+  const targetLength = artboardProjectionSpan(settings, baselineAngle);
   const nodes = curve.nodes ?? [];
   const start = nodes[0].position;
   const end = nodes.at(-1).position;
@@ -2186,7 +2487,9 @@ function normalizeEditCurveLayout(layout) {
   if (layout === "document-width") return "full-width";
   if (layout === "document-height") return "full-height";
   if (layout === "document-fit") return "full-width";
-  if (layout === "cell-chain") return "tiled-width";
+  if (layout === "cell-chain" || layout === "tiled-width" || layout === "tiled-height") {
+    return "motif-pattern";
+  }
   return layout || "full-width";
 }
 
@@ -2200,11 +2503,6 @@ function artboardProjectionSpan(settings, angle) {
     Math.abs(settings.outputWidth * Math.cos(radians)) +
     Math.abs(settings.outputHeight * Math.sin(radians))
   );
-}
-
-function documentCurveScaleFactor(channel) {
-  const curveScale = finite(channel.curveScale, 32);
-  return curveScale > 0 ? curveScale / 32 : 1;
 }
 
 function rotatePoint(point, center, degrees) {
@@ -2360,12 +2658,38 @@ function sourceBaseName() {
     .toLowerCase();
 }
 
+function defaultExportFileName(extension) {
+  return normalizedExportFileName(`${sourceBaseName() || "halftone"}-toniator-halftone`, extension);
+}
+
+function normalizedExportFileName(value, extension) {
+  return `${sanitizeFileName(value || defaultExportFileName(extension))}.${extension}`;
+}
+
+function exportFileNameWithSuffix(fileName, suffix, extension) {
+  const baseName = sanitizeFileName(fileName);
+  return `${baseName}-${sanitizeFileName(suffix)}.${extension}`;
+}
+
 function sanitizeFileName(value) {
   return String(value || "toniator-preset")
     .replace(/\.[^.]+$/, "")
     .replace(/[^a-z0-9_-]+/gi, "-")
     .replace(/^-+|-+$/g, "")
     .toLowerCase() || "toniator-preset";
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function escapeAttribute(value) {
+  return escapeHtml(value);
 }
 
 function describeChannelResolutions(channels, baseLongEdgeCells) {

@@ -143,6 +143,20 @@ button:disabled {
   min-height: 2.65rem;
 }
 
+.export-progress-dialog progress {
+  width: 100%;
+  height: 0.8rem;
+  margin-top: 1rem;
+  accent-color: var(--accent-2);
+}
+
+.motif-auto-readout {
+  align-self: end;
+  min-height: 2.45rem;
+  display: flex;
+  align-items: center;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: minmax(22rem, 29rem) minmax(0, 1fr);

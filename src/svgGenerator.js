@@ -17,16 +17,24 @@ export function generateHalftoneSvg({
   settings,
   channels,
   includePreviewBackground = false,
+  includeBackground = true,
+  renderChannelKeys = null,
   sampleProvider = defaultSampleProvider,
 }) {
   const { outputWidth, outputHeight, markMode } = settings;
   const enabledChannelKeys = CHANNEL_ORDER.filter((key) => channels[key]?.enabled);
+  const channelKeysToRender = Array.isArray(renderChannelKeys)
+    ? renderChannelKeys
+    : enabledChannelKeys;
   const renderSettings = { ...settings, enabledChannelKeys };
   const parts = [
     `<svg xmlns="http://www.w3.org/2000/svg" width="${round(outputWidth)}" height="${round(outputHeight)}" viewBox="0 0 ${round(outputWidth)} ${round(outputHeight)}" role="img" aria-label="Vector halftone output">`,
     `<defs><clipPath id="toniator-artboard-clip"><rect x="0" y="0" width="${round(outputWidth)}" height="${round(outputHeight)}"/></clipPath></defs>`,
-    `<rect width="100%" height="100%" fill="white"/>`,
   ];
+
+  if (includeBackground) {
+    parts.push(`<rect width="100%" height="100%" fill="white"/>`);
+  }
 
   const previewSourceUrl = source?.previewDataUrl || source?.dataUrl;
   if (includePreviewBackground && previewSourceUrl) {
@@ -38,6 +46,7 @@ export function generateHalftoneSvg({
   for (const key of CHANNEL_ORDER) {
     const channel = channels[key];
     if (!channel.enabled) continue;
+    if (!channelKeysToRender.includes(key)) continue;
 
     const channelGrid = getChannelGrid({ source, baseGrid: grid, settings: renderSettings, channel });
     const channelSamples = sampleProvider({
@@ -179,18 +188,24 @@ function buildCurveElements({ key, d, samples, grid, settings, channel }) {
 function buildDocumentCurveElements({ key, d, samples, grid, settings, channel, layout }) {
   const nodeCount = getDocumentCurveNodeCount(layout, grid, settings, channel);
   const localPoints = samplePathPoints(d, nodeCount);
-  const baselineAngle = getCurveBaselineAngle(layout, channel.rotation);
-  const points = layout.startsWith("tiled")
-    ? buildTiledCurveBaseline(localPoints, grid, settings, channel, layout, baselineAngle)
-    : buildFullCurveBaseline(localPoints, settings, channel, layout, baselineAngle);
+  const baselineAngle = getCurveBaselineAngle(layout);
+  const coverageAngle = baselineAngle + normalizeFinite(channel.gridRotation, 0);
+  const channelGridTransform = createDocumentCurveGridTransform(settings, channel, baselineAngle);
+  const points = buildFullCurveBaseline(
+    localPoints,
+    settings,
+    channel,
+    layout,
+    baselineAngle,
+    coverageAngle,
+  );
   const repeatedPointSets = repeatDocumentCurvePoints(
     points,
     grid,
     settings,
     baselineAngle,
-  ).map((pointSet) =>
-    pointSet.map((point) => applyChannelGridTransform(point, settings, channel)),
-  );
+    channelGridTransform,
+  ).map((pointSet) => pointSet.map(channelGridTransform));
 
   return repeatedPointSets.flatMap((pointSet) => {
     const nodes = pointSet.map((point) => ({
@@ -208,22 +223,12 @@ function buildDocumentCurveElements({ key, d, samples, grid, settings, channel, 
     const connected = curveEndpointsConnected(settings, channel);
     if (connected) {
       return nodes.some((node) => node.width > 0)
-        ? [variableWidthCurveToPathData(nodes, { closed: true })]
+        ? [variableWidthCurveToPathData(simplifyVariableWidthSegment(nodes, grid, channel), { closed: true })]
         : [];
     }
 
-    const segments = splitActiveCurveSegments(nodes);
-
-    return segments
-      .filter((segment) => segment.length >= 2)
-      .map((segment) =>
-        variableWidthCurveToPathData(segment, {
-          closed:
-            connected &&
-            segments.length === 1 &&
-            segment.length === nodes.length,
-        }),
-      );
+    return activeCurvePathSegments(nodes, { settings, grid, channel })
+      .map((segment) => variableWidthCurveToPathData(segment));
   });
 }
 
@@ -232,11 +237,10 @@ function buildPatternCurveElements({ key, d, samples, grid, settings, channel })
     samplePathPoints(d, getPatternCurveNodeCount(channel)),
     normalizePositive(channel.curveScale, 32),
   );
-  const stacks = buildCurvePatternStacks(localPoints, settings, channel);
-  const connected = curveEndpointsConnected(settings, channel);
-  const pointSets = connected
-    ? stacks.map((stack) => chainTilePointSets(stack))
-    : stacks.flat();
+  const stacks = buildCurvePatternStacks(localPoints, grid, settings, channel);
+  const pointSets = stacks.map((stack) =>
+    resampleMotifRowPoints(chainTilePointSets(stack), grid, channel),
+  );
 
   return pointSets.flatMap((pointSet) => {
     const margin = normalizePositive(channel.curveScale, 32) * 2 + maxCurveWidth(settings, grid, channel);
@@ -254,14 +258,7 @@ function buildPatternCurveElements({ key, d, samples, grid, settings, channel })
       }),
     }));
 
-    if (connected) {
-      return nodes.some((node) => node.width > 0)
-        ? [variableWidthCurveToPathData(nodes)]
-        : [];
-    }
-
-    return splitActiveCurveSegments(nodes)
-      .filter((segment) => segment.length >= 2)
+    return activeCurvePathSegments(nodes, { settings, grid, channel })
       .map((segment) => variableWidthCurveToPathData(segment));
   });
 }
@@ -613,7 +610,7 @@ function clampIndex(index, length) {
   return Math.min(length - 1, Math.max(0, index));
 }
 
-function repeatDocumentCurvePoints(points, grid, settings, baselineAngle) {
+function repeatDocumentCurvePoints(points, grid, settings, baselineAngle, visibilityTransform = (point) => point) {
   const spacing = Math.max(1, Math.min(grid.cellWidth, grid.cellHeight));
   const repeatRadius = Math.ceil(
     Math.hypot(settings.outputWidth, settings.outputHeight) / spacing,
@@ -628,12 +625,42 @@ function repeatDocumentCurvePoints(points, grid, settings, baselineAngle) {
       y: point.y + normal.y * offset,
     }));
 
-    if (pointSetIntersectsArtboard(copy, settings, spacing * 2)) {
+    const visibleCopy = copy.map(visibilityTransform);
+    if (pointSetIntersectsArtboard(visibleCopy, settings, spacing * 2)) {
       repeated.push(copy);
     }
   }
 
   return repeated;
+}
+
+function createDocumentCurveGridTransform(settings, channel, baselineAngle) {
+  const gridRotation = normalizeFinite(channel.gridRotation, 0);
+  if (Math.abs(gridRotation) <= 0.0001) {
+    return (point) => point;
+  }
+
+  const pivot = channelGridPivot(settings, channel);
+  const pageCenter = {
+    x: settings.outputWidth / 2,
+    y: settings.outputHeight / 2,
+  };
+  const finalTangent = unitVector(baselineAngle + gridRotation);
+  const rotatedCenter = rotatePointAround(pageCenter, pivot, gridRotation);
+  const centerShift = {
+    x: rotatedCenter.x - pageCenter.x,
+    y: rotatedCenter.y - pageCenter.y,
+  };
+  const tangentShift =
+    centerShift.x * finalTangent.x + centerShift.y * finalTangent.y;
+
+  return (point) => {
+    const rotated = rotatePointAround(point, pivot, gridRotation);
+    return {
+      x: rotated.x - finalTangent.x * tangentShift,
+      y: rotated.y - finalTangent.y * tangentShift,
+    };
+  };
 }
 
 function screenNormalFromRotation(rotation) {
@@ -655,12 +682,11 @@ function pointSetIntersectsArtboard(points, settings, margin) {
 }
 
 function documentCurveWidthAtPoint({ key, point, samples, grid, settings, channel }) {
-  const col = clampIndex(Math.floor(point.x / grid.cellWidth), grid.cols);
-  const row = clampIndex(Math.floor(point.y / grid.cellHeight), grid.rows);
-
-  const value = sampleChannelValue({
+  const value = sampleInterpolatedChannelValue({
     key,
-    sample: samples[row * grid.cols + col],
+    point,
+    samples,
+    grid,
     settings,
     channel,
   });
@@ -669,15 +695,63 @@ function documentCurveWidthAtPoint({ key, point, samples, grid, settings, channe
     return 0;
   }
 
-  const metrics = getMarkMetrics({ value, col, row, grid, settings, channel });
-  return metrics.size;
+  return curveWidthFromValue(value, grid, settings, channel);
+}
+
+function sampleInterpolatedChannelValue({ key, point, samples, grid, settings, channel }) {
+  const x = point.x / grid.cellWidth - 0.5;
+  const y = point.y / grid.cellHeight - 0.5;
+  const x0 = Math.floor(x);
+  const y0 = Math.floor(y);
+  const tx = clamp01(x - x0);
+  const ty = clamp01(y - y0);
+  const rows = [];
+
+  for (let rowOffset = -1; rowOffset <= 2; rowOffset += 1) {
+    rows.push(
+      cubicInterpolate(
+        sampleRawChannelValueAtCell({ key, col: x0 - 1, row: y0 + rowOffset, samples, grid, settings }),
+        sampleRawChannelValueAtCell({ key, col: x0, row: y0 + rowOffset, samples, grid, settings }),
+        sampleRawChannelValueAtCell({ key, col: x0 + 1, row: y0 + rowOffset, samples, grid, settings }),
+        sampleRawChannelValueAtCell({ key, col: x0 + 2, row: y0 + rowOffset, samples, grid, settings }),
+        tx,
+      ),
+    );
+  }
+
+  return mapThreshold(
+    clamp01(cubicInterpolate(rows[0], rows[1], rows[2], rows[3], ty)),
+    channel.threshold,
+  );
+}
+
+function sampleRawChannelValueAtCell({ key, col, row, samples, grid, settings }) {
+  const clampedCol = clampIndex(col, grid.cols);
+  const clampedRow = clampIndex(row, grid.rows);
+  const values = mapPixelToChannels(
+    samples[clampedRow * grid.cols + clampedCol],
+    settings.valueMode,
+    settings.singleChannel,
+    settings.enabledChannelKeys,
+  );
+
+  return values[key] ?? 0;
+}
+
+function curveWidthFromValue(value, grid, settings, channel) {
+  const cellSize = Math.min(grid.cellWidth, grid.cellHeight);
+  const min = Math.max(0, settings.minMark / 100);
+  const max = Math.max(min, settings.maxMark / 100) * (channel.maxSize / 100);
+  return cellSize * (min + (max - min) * value) * channel.scale;
 }
 
 function normalizeCurveLayout(layout) {
   if (layout === "document-width") return "full-width";
   if (layout === "document-height") return "full-height";
   if (layout === "document-fit") return "full-width";
-  if (layout === "cell-chain") return "tiled-width";
+  if (layout === "cell-chain" || layout === "tiled-width" || layout === "tiled-height") {
+    return "motif-pattern";
+  }
   return layout || "full-width";
 }
 
@@ -689,80 +763,22 @@ function getDocumentCurveNodeCount(layout, grid, settings, channel) {
   const cellSize = Math.max(1, Math.min(grid.cellWidth, grid.cellHeight));
   const quality = normalizeOutputQuality(channel);
 
-  if (layout.startsWith("tiled")) {
-    return Math.max(4, Math.ceil((settings.curveTileCells || 12) * 2 * quality));
-  }
-
   const dimension = layout.endsWith("height")
     ? settings.outputHeight
     : settings.outputWidth;
   return Math.max(2, Math.ceil((dimension / cellSize) * quality));
 }
 
-function getCurveBaselineAngle(layout, channelRotation) {
+function getCurveBaselineAngle(layout) {
   const dimensionAngle = layout.endsWith("height") ? 90 : 0;
-  return channelRotation + dimensionAngle;
+  return dimensionAngle;
 }
 
-function buildFullCurveBaseline(localPoints, settings, channel, layout, baselineAngle) {
-  const targetLength =
-    artboardProjectionSpan(settings, baselineAngle) * documentCurveScaleFactor(channel);
+function buildFullCurveBaseline(localPoints, settings, channel, layout, baselineAngle, coverageAngle) {
+  const targetLength = artboardProjectionSpan(settings, coverageAngle);
   const scaled = scaleCurveToLength(localPoints, targetLength);
   const bounds = getPointBounds(scaled);
   const centered = scaled.map((point) => ({
-    x: point.x - bounds.minX + (settings.outputWidth - bounds.width) / 2,
-    y: point.y - bounds.minY + (settings.outputHeight - bounds.height) / 2,
-  }));
-
-  return centered.map((point) => {
-    const rotated = rotatePoint(
-      point,
-      settings.outputWidth / 2,
-      settings.outputHeight / 2,
-      baselineAngle,
-    );
-
-    return {
-      x: rotated.x + channel.offsetX,
-      y: rotated.y + channel.offsetY,
-    };
-  });
-}
-
-function buildTiledCurveBaseline(localPoints, grid, settings, channel, layout, baselineAngle) {
-  const cellSize = Math.max(1, Math.min(grid.cellWidth, grid.cellHeight));
-  const tileLength =
-    Math.max(cellSize, (settings.curveTileCells || 12) * cellSize) *
-    documentCurveScaleFactor(channel);
-  const tile = curveEndpointsConnected(settings, channel)
-    ? scaleCurveToLengthByBounds(localPoints, tileLength)
-    : scaleCurveForEndpointTiling(localPoints, tileLength);
-  const advance = curveEndpointsConnected(settings, channel)
-    ? { x: tileLength, y: 0 }
-    : tile.at(-1) ?? { x: tileLength, y: 0 };
-  const advanceLength = Math.max(1, Math.hypot(advance.x, advance.y));
-  const coverLength = artboardProjectionSpan(settings, baselineAngle) + artboardPadding(settings) + tileLength * 4;
-  const tileCount = Math.ceil(coverLength / advanceLength);
-  const points = [];
-  let anchor = { x: 0, y: 0 };
-
-  for (let tileIndex = 0; tileIndex <= tileCount; tileIndex += 1) {
-    for (let pointIndex = 0; pointIndex < tile.length; pointIndex += 1) {
-      if (tileIndex > 0 && pointIndex === 0) continue;
-      const point = tile[pointIndex];
-      points.push({
-        x: anchor.x + point.x,
-        y: anchor.y + point.y,
-      });
-    }
-    anchor = {
-      x: anchor.x + advance.x,
-      y: anchor.y + advance.y,
-    };
-  }
-
-  const bounds = getPointBounds(points);
-  const centered = points.map((point) => ({
     x: point.x - bounds.minX + (settings.outputWidth - bounds.width) / 2,
     y: point.y - bounds.minY + (settings.outputHeight - bounds.height) / 2,
   }));
@@ -808,19 +824,30 @@ function normalizeMotifPoints(points, curveScale) {
   }));
 }
 
-function buildCurvePatternStacks(localPoints, settings, channel) {
-  const tileCount = normalizeInteger(channel.tileCount, 1, 10000, 1);
-  const stackCount = normalizeInteger(channel.stackCount, 1, 10000, 1);
-  const tileSpacing = normalizeFinite(channel.tileSpacing, 36);
+function buildCurvePatternStacks(localPoints, grid, settings, channel) {
+  const markRotation = 0;
+  const forwardTile = transformMotifTile(localPoints, { rotation: markRotation });
+  const rowAdvance = motifRowAdvance(forwardTile, channel);
+  const tileAdvanceLength = Math.hypot(rowAdvance.x, rowAdvance.y);
+  const autoCoverage = motifCoverageMode(channel) === "auto";
+  const autoCounts = autoCoverage
+    ? computeMotifAutoCounts({
+        settings,
+        channel,
+        grid,
+        motifRadius: motifPointRadius(localPoints),
+        tileAdvanceLength,
+      })
+    : null;
+  const tileCount = autoCounts?.tileCount ?? normalizeInteger(channel.tileCount, 1, 10000, 1);
+  const stackCount = autoCounts?.stackCount ?? normalizeInteger(channel.stackCount, 1, 10000, 1);
   const stackSpacing = normalizeFinite(channel.stackSpacing, 36);
-  const markRotation = normalizeFinite(channel.rotation, 0);
-  const tileDirection = unitVector(normalizeFinite(channel.tileAngle, 0));
-  const stackDirection = unitVector(normalizeFinite(channel.stackAngle, 90));
-  const tileVector = scaleVector(tileDirection, tileSpacing);
+  const stackDirection = unitVector(motifStackAngle(channel));
   const stackVector = scaleVector(stackDirection, stackSpacing);
   const tileOffset = normalizeFinite(channel.tileOffset, 0);
   const stackOffset = normalizeFinite(channel.stackOffset, 0);
   const alternateStackOffset = normalizeFinite(channel.alternateStackOffset, 0);
+  const tileDirection = normalizeVector(rowAdvance);
   const tileOrigin = (tileCount - 1) / 2;
   const stackOrigin = (stackCount - 1) / 2;
   const center = {
@@ -831,40 +858,179 @@ function buildCurvePatternStacks(localPoints, settings, channel) {
 
   for (let stackIndex = 0; stackIndex < stackCount; stackIndex += 1) {
     const stack = [];
+    let rowAnchor = null;
     for (let tileIndex = 0; tileIndex < tileCount; tileIndex += 1) {
       const alternate = (tileIndex + stackIndex) % 2 === 1;
+      const tile = orientMotifTileForRow(
+        transformMotifTile(localPoints, {
+          rotation: markRotation,
+          flip: alternate && channel.alternateTileTransform === "flip",
+          rotate180: alternate && channel.alternateTileTransform === "rotate-180",
+        }),
+        rowAdvance,
+      );
       const instanceCenter = {
         x:
           center.x +
-          (tileIndex - tileOrigin) * tileVector.x +
           (stackIndex - stackOrigin) * stackVector.x +
           tileDirection.x * tileOffset +
           stackDirection.x * stackOffset +
           (stackIndex % 2 === 1 ? tileDirection.x * alternateStackOffset : 0),
         y:
           center.y +
-          (tileIndex - tileOrigin) * tileVector.y +
           (stackIndex - stackOrigin) * stackVector.y +
           tileDirection.y * tileOffset +
           stackDirection.y * stackOffset +
           (stackIndex % 2 === 1 ? tileDirection.y * alternateStackOffset : 0),
       };
-
-      stack.push(
-        localPoints.map((point) => {
-          const motifPoint = transformMotifPoint(point, instanceCenter, {
-            rotation: markRotation,
-            flip: alternate && channel.alternateTileTransform === "flip",
-            rotate180: alternate && channel.alternateTileTransform === "rotate-180",
-          });
-          return applyChannelGridTransform(motifPoint, settings, channel);
-        }),
+      if (!rowAnchor) {
+        rowAnchor = {
+          x: instanceCenter.x - tileOrigin * rowAdvance.x,
+          y: instanceCenter.y - tileOrigin * rowAdvance.y,
+        };
+      }
+      const tileStart = tile[0] ?? { x: 0, y: 0 };
+      const tileOriginPoint = {
+        x: rowAnchor.x - tileStart.x,
+        y: rowAnchor.y - tileStart.y,
+      };
+      const placedTile = tile.map((point) =>
+        applyChannelGridTransform(
+          {
+            x: tileOriginPoint.x + point.x,
+            y: tileOriginPoint.y + point.y,
+          },
+          settings,
+          channel,
+        ),
       );
+
+      stack.push(placedTile);
+      rowAnchor = {
+        x: tileOriginPoint.x + (tile.at(-1)?.x ?? tileStart.x),
+        y: tileOriginPoint.y + (tile.at(-1)?.y ?? tileStart.y),
+      };
     }
     stacks.push(stack);
   }
 
   return stacks;
+}
+
+function transformMotifTile(points, options) {
+  return points.map((point) =>
+    transformMotifPoint(point, options),
+  );
+}
+
+function tileEndpointAdvance(tile) {
+  const start = tile[0] ?? { x: 0, y: 0 };
+  const end = tile.at(-1) ?? start;
+  return {
+    x: end.x - start.x,
+    y: end.y - start.y,
+  };
+}
+
+function motifTileDirection(tile, fallbackAngle) {
+  const advance = tileEndpointAdvance(tile);
+  const length = Math.hypot(advance.x, advance.y);
+  return length > 0.0001
+    ? { x: advance.x / length, y: advance.y / length }
+    : unitVector(fallbackAngle);
+}
+
+function motifRowAdvance(tile, channel) {
+  const advance = tileEndpointAdvance(tile);
+  const length = Math.hypot(advance.x, advance.y);
+
+  if (length > 0.0001) {
+    return advance;
+  }
+
+  return scaleVector(
+    unitVector(normalizeFinite(channel.tileAngle, 0)),
+    normalizePositive(channel.curveScale, 32),
+  );
+}
+
+function orientMotifTileForRow(tile, rowAdvance) {
+  const advance = tileEndpointAdvance(tile);
+  const dot = advance.x * rowAdvance.x + advance.y * rowAdvance.y;
+
+  return dot < 0 ? [...tile].reverse() : tile;
+}
+
+export function computeMotifAutoCounts({
+  settings,
+  channel,
+  grid,
+  motifRadius = null,
+  tileAdvanceLength = null,
+}) {
+  const cellSize = Math.max(1, Math.min(grid?.cellWidth || 1, grid?.cellHeight || 1));
+  const bleedCells = normalizeFinite(channel.motifBleed, 2);
+  const bleed = Math.max(0, bleedCells) * cellSize;
+  const radius =
+    Number.isFinite(motifRadius) && motifRadius > 0
+      ? motifRadius
+      : Math.max(1, normalizePositive(channel.curveScale, 32) / 2);
+  const gridRotation = normalizeFinite(channel.gridRotation, 0);
+  const nominalTile = transformMotifTile(
+    [
+      { x: -normalizePositive(channel.curveScale, 32) / 2, y: 0 },
+      { x: normalizePositive(channel.curveScale, 32) / 2, y: 0 },
+    ],
+    { rotation: 0 },
+  );
+  const tileDirection = rotateVector(
+    motifTileDirection(nominalTile, normalizeFinite(channel.tileAngle, 0)),
+    gridRotation,
+  );
+  const stackDirection = unitVector(motifStackAngle(channel) + gridRotation);
+  const tileSpacing = Math.max(
+    1,
+    Number.isFinite(tileAdvanceLength) && tileAdvanceLength > 0
+      ? tileAdvanceLength
+      : normalizePositive(channel.curveScale, 32),
+  );
+  const stackSpacing = Math.max(1, Math.abs(normalizeFinite(channel.stackSpacing, 36)));
+  const margin = bleed + radius * 2 + Math.hypot(settings.outputWidth, settings.outputHeight) * 0.08;
+  const coveragePad = Math.max(4, Math.ceil(Math.max(0, bleedCells)));
+
+  return {
+    tileCount: clampInteger(
+      Math.ceil((artboardProjectionForVector(settings, tileDirection) + margin * 2) / tileSpacing) +
+        coveragePad,
+      1,
+      10000,
+    ),
+    stackCount: clampInteger(
+      Math.ceil((artboardProjectionForVector(settings, stackDirection) + margin * 2) / stackSpacing) +
+        coveragePad,
+      1,
+      10000,
+    ),
+  };
+}
+
+function motifCoverageMode(channel) {
+  return channel.motifCoverageMode || channel.coverageMode || "manual";
+}
+
+function motifStackAngle(channel) {
+  return normalizeFinite(channel.tileAngle, 0) + 90 + normalizeFinite(channel.stackAngle, 0);
+}
+
+function artboardProjectionForVector(settings, vector) {
+  return Math.abs(settings.outputWidth * vector.x) + Math.abs(settings.outputHeight * vector.y);
+}
+
+function motifPointRadius(points) {
+  return Math.max(
+    1,
+    ...points.map((point) => Math.hypot(point.x, point.y)),
+  );
 }
 
 function chainTilePointSets(tilePointSets) {
@@ -884,7 +1050,35 @@ function chainTilePointSets(tilePointSets) {
   return chained;
 }
 
-function transformMotifPoint(point, center, options) {
+function resampleMotifRowPoints(points, grid, channel) {
+  if (points.length < 2) {
+    return points;
+  }
+
+  const quality = normalizeOutputQuality(channel);
+  const cellSize = Math.max(1, Math.min(grid.cellWidth, grid.cellHeight));
+  const targetSpacing = Math.max(0.5, cellSize / Math.max(1, quality));
+  const length = polylineLength(points);
+  const count = clampInteger(
+    Math.ceil(length / targetSpacing) + 1,
+    points.length,
+    20000,
+  );
+
+  return samplePolylinePoints(points, count);
+}
+
+function polylineLength(points) {
+  let length = 0;
+
+  for (let index = 1; index < points.length; index += 1) {
+    length += Math.sqrt(squaredDistance(points[index - 1], points[index]));
+  }
+
+  return length;
+}
+
+function transformMotifPoint(point, options = {}) {
   const source = {
     x: options.flip ? -point.x : point.x,
     y: point.y,
@@ -894,10 +1088,7 @@ function transformMotifPoint(point, center, options) {
     : source;
   const rotated = rotateVector(rotatedAlternate, options.rotation);
 
-  return {
-    x: center.x + rotated.x,
-    y: center.y + rotated.y,
-  };
+  return rotated;
 }
 
 function maxCurveWidth(settings, grid, channel) {
@@ -905,11 +1096,6 @@ function maxCurveWidth(settings, grid, channel) {
   const min = Math.max(0, settings.minMark / 100);
   const max = Math.max(min, settings.maxMark / 100) * (channel.maxSize / 100);
   return cellSize * (min + (max - min)) * channel.scale;
-}
-
-function documentCurveScaleFactor(channel) {
-  const curveScale = channel.curveScale;
-  return Number.isFinite(curveScale) && curveScale > 0 ? curveScale / 32 : 1;
 }
 
 function normalizeOutputQuality(channel) {
@@ -930,6 +1116,26 @@ function normalizeInteger(value, min, max, fallback) {
   const number = Math.round(Number(value));
   if (!Number.isFinite(number)) return fallback;
   return Math.min(max, Math.max(min, number));
+}
+
+function clampInteger(value, min, max) {
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+function clamp01(value) {
+  return Math.min(1, Math.max(0, value));
+}
+
+function cubicInterpolate(p0, p1, p2, p3, amount) {
+  const t2 = amount * amount;
+  const t3 = t2 * amount;
+
+  return 0.5 * (
+    2 * p1 +
+    (-p0 + p2) * amount +
+    (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 +
+    (-p0 + 3 * p1 - 3 * p2 + p3) * t3
+  );
 }
 
 function unitVector(angle) {
@@ -1011,10 +1217,6 @@ function artboardProjectionSpan(settings, angle) {
     Math.abs(settings.outputWidth * Math.cos(radians)) +
     Math.abs(settings.outputHeight * Math.sin(radians))
   );
-}
-
-function artboardPadding(settings) {
-  return Math.hypot(settings.outputWidth, settings.outputHeight);
 }
 
 function scaleCurveForEndpointTiling(points, targetLength) {
@@ -1114,6 +1316,168 @@ function variableWidthCurveToPathData(points, { closed = false } = {}) {
       ];
 
   return commands.join(" ");
+}
+
+function activeCurvePathSegments(nodes, { settings, grid, channel }) {
+  const margin = maxCurveWidth(settings, grid, channel) * 1.5 + 2;
+  return splitActiveCurveSegments(nodes)
+    .flatMap((segment) => clipVariableWidthSegmentToArtboard(segment, settings, margin))
+    .map((segment) => simplifyVariableWidthSegment(segment, grid, channel))
+    .filter((segment) => segment.length >= 2);
+}
+
+function clipVariableWidthSegmentToArtboard(points, settings, margin) {
+  if (points.length < 2) return [];
+
+  const bounds = {
+    minX: -margin,
+    minY: -margin,
+    maxX: settings.outputWidth + margin,
+    maxY: settings.outputHeight + margin,
+  };
+  const clippedSegments = [];
+  let current = [];
+
+  for (let index = 1; index < points.length; index += 1) {
+    const clipped = clipLineSegmentToBounds(points[index - 1], points[index], bounds);
+    if (!clipped) {
+      if (current.length >= 2) clippedSegments.push(current);
+      current = [];
+      continue;
+    }
+
+    if (current.length === 0 || !sameVariableWidthPoint(current.at(-1), clipped.start)) {
+      if (current.length >= 2) clippedSegments.push(current);
+      current = [clipped.start];
+    }
+
+    current.push(clipped.end);
+  }
+
+  if (current.length >= 2) clippedSegments.push(current);
+  return clippedSegments;
+}
+
+function clipLineSegmentToBounds(start, end, bounds) {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  let t0 = 0;
+  let t1 = 1;
+
+  const tests = [
+    [-dx, start.x - bounds.minX],
+    [dx, bounds.maxX - start.x],
+    [-dy, start.y - bounds.minY],
+    [dy, bounds.maxY - start.y],
+  ];
+
+  for (const [p, q] of tests) {
+    if (Math.abs(p) <= 0.000001) {
+      if (q < 0) return null;
+      continue;
+    }
+
+    const r = q / p;
+    if (p < 0) {
+      if (r > t1) return null;
+      t0 = Math.max(t0, r);
+    } else {
+      if (r < t0) return null;
+      t1 = Math.min(t1, r);
+    }
+  }
+
+  if (t0 > t1) return null;
+  return {
+    start: interpolateVariableWidthPoint(start, end, t0),
+    end: interpolateVariableWidthPoint(start, end, t1),
+  };
+}
+
+function interpolateVariableWidthPoint(start, end, amount) {
+  return {
+    x: start.x + (end.x - start.x) * amount,
+    y: start.y + (end.y - start.y) * amount,
+    width: start.width + ((end.width ?? 0) - (start.width ?? 0)) * amount,
+  };
+}
+
+function sameVariableWidthPoint(a, b) {
+  return (
+    a &&
+    b &&
+    Math.abs(a.x - b.x) <= 0.001 &&
+    Math.abs(a.y - b.y) <= 0.001 &&
+    Math.abs((a.width ?? 0) - (b.width ?? 0)) <= 0.001
+  );
+}
+
+function simplifyVariableWidthSegment(points, grid, channel) {
+  if (points.length <= 3) return points;
+
+  const tolerance = variableWidthSimplificationTolerance(grid, channel);
+  const keep = new Set([0, points.length - 1]);
+  simplifyVariableWidthRange(points, 0, points.length - 1, tolerance, keep);
+
+  return [...keep]
+    .sort((a, b) => a - b)
+    .map((index) => points[index]);
+}
+
+function simplifyVariableWidthRange(points, startIndex, endIndex, tolerance, keep) {
+  if (endIndex <= startIndex + 1) return;
+
+  let farthestIndex = -1;
+  let farthestDistance = 0;
+
+  for (let index = startIndex + 1; index < endIndex; index += 1) {
+    const distance = variableWidthPointDistanceToSegment(
+      points[index],
+      points[startIndex],
+      points[endIndex],
+    );
+    if (distance > farthestDistance) {
+      farthestDistance = distance;
+      farthestIndex = index;
+    }
+  }
+
+  if (farthestDistance <= tolerance || farthestIndex < 0) return;
+
+  keep.add(farthestIndex);
+  simplifyVariableWidthRange(points, startIndex, farthestIndex, tolerance, keep);
+  simplifyVariableWidthRange(points, farthestIndex, endIndex, tolerance, keep);
+}
+
+function variableWidthPointDistanceToSegment(point, start, end) {
+  const dw = (end.width ?? 0) - (start.width ?? 0);
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const lengthSquared = dx * dx + dy * dy + dw * dw;
+
+  if (lengthSquared <= 0.000001) {
+    return Math.hypot(point.x - start.x, point.y - start.y, (point.width ?? 0) - (start.width ?? 0));
+  }
+
+  const t = clamp01(
+    ((point.x - start.x) * dx +
+      (point.y - start.y) * dy +
+      ((point.width ?? 0) - (start.width ?? 0)) * dw) /
+      lengthSquared,
+  );
+  const projected = interpolateVariableWidthPoint(start, end, t);
+
+  return Math.hypot(
+    point.x - projected.x,
+    point.y - projected.y,
+    (point.width ?? 0) - (projected.width ?? 0),
+  );
+}
+
+function variableWidthSimplificationTolerance(grid, channel) {
+  const cellSize = Math.max(1, Math.min(grid.cellWidth, grid.cellHeight));
+  const quality = Math.sqrt(normalizeOutputQuality(channel));
+  return Math.min(0.75, Math.max(0.15, (cellSize * 0.04) / quality));
 }
 
 function removeDuplicateClosingPoint(points) {
@@ -1555,7 +1919,7 @@ function mapThreshold(value, threshold) {
 }
 
 function round(value) {
-  return Number.parseFloat(Number(value).toFixed(4));
+  return Number.parseFloat(Number(value).toFixed(3));
 }
 
 function escapeAttr(value) {
