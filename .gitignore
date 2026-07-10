@@ -3,4 +3,4 @@ dist/
 test-artifacts/screenshots/
 .DS_Store
 *.log
-.agents
+.agents/
