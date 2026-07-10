@@ -44,10 +44,11 @@ npm run preview
 - Sample on a proportional grid using “cells on long edge”.
 - When source aspect preservation is enabled, editing either Width or Height updates the other dimension from the source aspect ratio; changing dimensions changes output/sampling size without distorting the source.
 - Generate real SVG output grouped by channel:
-  - `halftone-cyan`
-  - `halftone-magenta`
-  - `halftone-yellow`
-  - `halftone-black`
+  - `toniator-cyan`
+  - `toniator-magenta`
+  - `toniator-yellow`
+  - `toniator-black`
+  - each channel group is marked as an Inkscape layer with a readable channel label
 - Mapping modes:
   - RGB to CMYK-like values
   - luminance driving all enabled channels
@@ -64,7 +65,7 @@ npm run preview
 - Full-width/full-height curve layouts scale the user-defined curve from its start point to its end point across the selected document dimension.
 - Document-scale curve output is exported as filled variable-width SVG outline paths, not production `stroke-width`; halftone resolution controls the generated virtual samples along the curve edges and the perpendicular repeat spacing.
 - Motif-pattern curve layout supports auto artboard coverage. Each row is chained by placing every motif start point on the previous motif end point, so rows are continuous by endpoint geometry rather than by an arbitrary spacing value. Auto mode computes tile and stack counts from motif endpoint advance, row spacing, row angle offsets, grid rotation, output size, and bleed; manual mode keeps explicit tile/stack counts. A zero row angle offset stacks rows perpendicular to the along-curve direction.
-- Motif rows use a powerstroke-style filled SVG outline. Curve Output Quality controls row resampling density, smoothing variable-width transitions across chained motif segments without changing the number of rendered channel paths.
+- Motif rows use a powerstroke-style filled SVG outline. Curve Output Quality controls row resampling density, smoothing variable-width transitions across chained motif segments without changing the number of exported centerline-row paths.
 - Curve mode can import unclosed contours from Bezziator `.bezvg`/legacy `.bezziator` working files, SVG files, copied `<path>` elements, or raw SVG path `d` data.
 - Saved `.tntr` preset files can be placed in the root-level `presets/` folder to populate the Presets menu. Selecting a preset applies it immediately; if current settings have unsaved changes, Toniator prompts to save or discard those changes first.
 - Synchronized mark geometry for all channels with separate per-channel rotation/offset.

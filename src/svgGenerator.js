@@ -5,10 +5,22 @@ import { calculateGrid, sampleImage } from "./sampling.js";
 
 const CHANNEL_ORDER = ["c", "m", "y", "k"];
 const CHANNEL_IDS = {
-  c: "halftone-cyan",
-  m: "halftone-magenta",
-  y: "halftone-yellow",
-  k: "halftone-black",
+  c: "toniator-cyan",
+  m: "toniator-magenta",
+  y: "toniator-yellow",
+  k: "toniator-black",
+};
+const CHANNEL_LABELS = {
+  c: "Cyan",
+  m: "Magenta",
+  y: "Yellow",
+  k: "Black",
+};
+const CHANNEL_SLUGS = {
+  c: "cyan",
+  m: "magenta",
+  y: "yellow",
+  k: "black",
 };
 
 export function generateHalftoneSvg({
@@ -21,14 +33,14 @@ export function generateHalftoneSvg({
   renderChannelKeys = null,
   sampleProvider = defaultSampleProvider,
 }) {
-  const { outputWidth, outputHeight, markMode } = settings;
+  const { outputWidth, outputHeight } = settings;
   const enabledChannelKeys = CHANNEL_ORDER.filter((key) => channels[key]?.enabled);
   const channelKeysToRender = Array.isArray(renderChannelKeys)
     ? renderChannelKeys
     : enabledChannelKeys;
   const renderSettings = { ...settings, enabledChannelKeys };
   const parts = [
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${round(outputWidth)}" height="${round(outputHeight)}" viewBox="0 0 ${round(outputWidth)} ${round(outputHeight)}" role="img" aria-label="Vector halftone output">`,
+    `<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd" width="${round(outputWidth)}" height="${round(outputHeight)}" viewBox="0 0 ${round(outputWidth)} ${round(outputHeight)}" role="img" aria-label="Vector halftone output">`,
     `<defs><clipPath id="toniator-artboard-clip"><rect x="0" y="0" width="${round(outputWidth)}" height="${round(outputHeight)}"/></clipPath></defs>`,
   ];
 
@@ -48,42 +60,18 @@ export function generateHalftoneSvg({
     if (!channel.enabled) continue;
     if (!channelKeysToRender.includes(key)) continue;
 
-    const channelGrid = getChannelGrid({ source, baseGrid: grid, settings: renderSettings, channel });
-    const channelSamples = sampleProvider({
+    const channelGeometry = buildChannelGeometry({
+      key,
       source,
-      grid: channelGrid,
-      channelKey: key,
       settings: renderSettings,
+      baseGrid: grid,
+      channels,
       channel,
+      sampleProvider,
     });
-    const markPath = resolveChannelPath(key, renderSettings, channels);
-    const pathFragments =
-      markMode === "curve"
-        ? buildCurveElements({
-            key,
-            d: markPath,
-            samples: channelSamples,
-            grid: channelGrid,
-            settings: renderSettings,
-            channel,
-          })
-        : buildShapeElements({
-            key,
-            d: markPath,
-            samples: channelSamples,
-            grid: channelGrid,
-            settings: renderSettings,
-            channel,
-          });
 
-    if (pathFragments.length > 0) {
-      const clipAttr = markMode === "curve" ? ` clip-path="url(#toniator-artboard-clip)"` : "";
-      const renderColor = crosshatchLuminanceMode(renderSettings) ? "#111111" : channel.color;
-      parts.push(
-        `<g id="${CHANNEL_IDS[key]}"${clipAttr} fill="${escapeAttr(renderColor)}" stroke="${escapeAttr(renderColor)}" opacity="${round(channel.opacity)}" style="mix-blend-mode:multiply">`,
-        `<path d="${escapeAttr(pathFragments.join(" "))}" fill-rule="nonzero" stroke="none"/>`,
-        `</g>`,
-      );
+    if (channelGeometry.chunks.length > 0) {
+      parts.push(serializeChannelGeometry(channelGeometry));
     }
   }
 
@@ -97,6 +85,92 @@ function crosshatchLuminanceMode(settings) {
 
 function defaultSampleProvider({ source, grid }) {
   return sampleImage(source, grid.cols, grid.rows);
+}
+
+function buildChannelGeometry({
+  key,
+  source,
+  settings,
+  baseGrid,
+  channels,
+  channel,
+  sampleProvider,
+}) {
+  const grid = getChannelGrid({ source, baseGrid, settings, channel });
+  const samples = sampleProvider({
+    source,
+    grid,
+    channelKey: key,
+    settings,
+    channel,
+  });
+  const d = resolveChannelPath(key, settings, channels);
+  const chunks =
+    settings.markMode === "curve"
+      ? buildCurveChunks({ key, d, samples, grid, settings, channel })
+      : buildShapeChunks({ key, d, samples, grid, settings, channel });
+
+  return {
+    key,
+    id: CHANNEL_IDS[key],
+    legacyId: `halftone-${CHANNEL_SLUGS[key]}`,
+    label: CHANNEL_LABELS[key],
+    color: crosshatchLuminanceMode(settings) ? "#111111" : channel.color,
+    opacity: channel.opacity,
+    clipToArtboard: settings.markMode === "curve",
+    chunks,
+  };
+}
+
+function serializeChannelGeometry(geometry) {
+  const clipAttr = geometry.clipToArtboard ? ` clip-path="url(#toniator-artboard-clip)"` : "";
+  const attrs = [
+    `id="${escapeAttr(geometry.id)}"`,
+    `data-legacy-id="${escapeAttr(geometry.legacyId)}"`,
+    `inkscape:groupmode="layer"`,
+    `inkscape:label="${escapeAttr(geometry.label)}"`,
+    clipAttr.trim(),
+    `fill="${escapeAttr(geometry.color)}"`,
+    `stroke="${escapeAttr(geometry.color)}"`,
+    `opacity="${round(geometry.opacity)}"`,
+    `style="mix-blend-mode:multiply"`,
+  ].filter(Boolean);
+  const parts = [`<g ${attrs.join(" ")}>`];
+
+  for (const chunk of geometry.chunks) {
+    const outlinePathData = serializeChunkPathData(chunk);
+    if (!outlinePathData) continue;
+    const nodeTypes = serializeChunkNodeTypes(chunk);
+    const nodeTypesAttr = nodeTypes ? ` sodipodi:nodetypes="${escapeAttr(nodeTypes)}"` : "";
+
+    parts.push(
+      `<path id="${escapeAttr(chunk.id)}" d="${escapeAttr(outlinePathData)}" fill-rule="${escapeAttr(chunk.fillRule)}" stroke="none"${nodeTypesAttr}/>`,
+    );
+  }
+
+  parts.push(`</g>`);
+  return parts.join("\n");
+}
+
+function serializeChunkPathData(chunk) {
+  if (typeof chunk.outlinePathData === "string") {
+    return chunk.outlinePathData;
+  }
+
+  return (chunk.outlineSegments ?? [])
+    .map((segment) => variableWidthCurveToPathData(segment.points, { closed: segment.closed }))
+    .filter(Boolean)
+    .join(" ");
+}
+
+function serializeChunkNodeTypes(chunk) {
+  if (chunk.kind !== "centerline") {
+    return "";
+  }
+
+  return (chunk.outlineSegments ?? [])
+    .map((segment) => variableWidthCurveNodeTypes(segment.points, { closed: segment.closed }))
+    .join("");
 }
 
 export function renderMarkPreview({ mode, d, color, rotation }) {
@@ -140,7 +214,7 @@ function getChannelGrid({ source, baseGrid, settings, channel }) {
   };
 }
 
-function buildShapeElements({ key, d, samples, grid, settings, channel }) {
+function buildShapeChunks({ key, d, samples, grid, settings, channel }) {
   const pathFragments = [];
   const ranges = getShapeGridRanges({ grid, settings, channel });
 
@@ -172,20 +246,32 @@ function buildShapeElements({ key, d, samples, grid, settings, channel }) {
     }
   }
 
-  return pathFragments;
+  if (pathFragments.length === 0) {
+    return [];
+  }
+
+  return [
+    createGeometryChunk({
+      key,
+      kind: "marks",
+      index: 0,
+      outlinePathData: pathFragments.join(" "),
+      fillRule: "nonzero",
+    }),
+  ];
 }
 
-function buildCurveElements({ key, d, samples, grid, settings, channel }) {
+function buildCurveChunks({ key, d, samples, grid, settings, channel }) {
   const layout = normalizeCurveLayout(settings.curveSpan);
 
   if (usesCurvePatternLayout(layout, channel)) {
-    return buildPatternCurveElements({ key, d, samples, grid, settings, channel });
+    return buildPatternCurveChunks({ key, d, samples, grid, settings, channel });
   }
 
-  return buildDocumentCurveElements({ key, d, samples, grid, settings, channel, layout });
+  return buildDocumentCurveChunks({ key, d, samples, grid, settings, channel, layout });
 }
 
-function buildDocumentCurveElements({ key, d, samples, grid, settings, channel, layout }) {
+function buildDocumentCurveChunks({ key, d, samples, grid, settings, channel, layout }) {
   const nodeCount = getDocumentCurveNodeCount(layout, grid, settings, channel);
   const localPoints = samplePathPoints(d, nodeCount);
   const baselineAngle = getCurveBaselineAngle(layout);
@@ -206,8 +292,9 @@ function buildDocumentCurveElements({ key, d, samples, grid, settings, channel, 
     baselineAngle,
     channelGridTransform,
   ).map((pointSet) => pointSet.map(channelGridTransform));
+  const chunks = [];
 
-  return repeatedPointSets.flatMap((pointSet) => {
+  repeatedPointSets.forEach((pointSet) => {
     const nodes = pointSet.map((point) => ({
       ...point,
       width: documentCurveWidthAtPoint({
@@ -222,17 +309,43 @@ function buildDocumentCurveElements({ key, d, samples, grid, settings, channel, 
 
     const connected = curveEndpointsConnected(settings, channel);
     if (connected) {
-      return nodes.some((node) => node.width > 0)
-        ? [variableWidthCurveToPathData(simplifyVariableWidthSegment(nodes, grid, channel), { closed: true })]
-        : [];
+      if (nodes.some((node) => node.width > 0)) {
+        chunks.push(
+          createCenterlineChunk({
+            key,
+            index: chunks.length,
+            centerlinePoints: nodes,
+            outlineSegments: [
+              {
+                points: simplifyVariableWidthSegment(nodes, grid, channel),
+                closed: true,
+              },
+            ],
+          }),
+        );
+      }
+      return;
     }
 
-    return activeCurvePathSegments(nodes, { settings, grid, channel })
-      .map((segment) => variableWidthCurveToPathData(segment));
+    const outlineSegments = activeCurvePathSegments(nodes, { settings, grid, channel })
+      .map((segment) => ({ points: segment, closed: false }));
+
+    if (outlineSegments.length > 0) {
+      chunks.push(
+        createCenterlineChunk({
+          key,
+          index: chunks.length,
+          centerlinePoints: nodes,
+          outlineSegments,
+        }),
+      );
+    }
   });
+
+  return chunks;
 }
 
-function buildPatternCurveElements({ key, d, samples, grid, settings, channel }) {
+function buildPatternCurveChunks({ key, d, samples, grid, settings, channel }) {
   const localPoints = normalizeMotifPoints(
     samplePathPoints(d, getPatternCurveNodeCount(channel)),
     normalizePositive(channel.curveScale, 32),
@@ -241,10 +354,11 @@ function buildPatternCurveElements({ key, d, samples, grid, settings, channel })
   const pointSets = stacks.map((stack) =>
     resampleMotifRowPoints(chainTilePointSets(stack), grid, channel),
   );
+  const chunks = [];
 
-  return pointSets.flatMap((pointSet) => {
+  pointSets.forEach((pointSet) => {
     const margin = normalizePositive(channel.curveScale, 32) * 2 + maxCurveWidth(settings, grid, channel);
-    if (!pointSetIntersectsArtboard(pointSet, settings, margin)) return [];
+    if (!pointSetIntersectsArtboard(pointSet, settings, margin)) return;
 
     const nodes = pointSet.map((point) => ({
       ...point,
@@ -258,9 +372,56 @@ function buildPatternCurveElements({ key, d, samples, grid, settings, channel })
       }),
     }));
 
-    return activeCurvePathSegments(nodes, { settings, grid, channel })
-      .map((segment) => variableWidthCurveToPathData(segment));
+    const outlineSegments = activeCurvePathSegments(nodes, { settings, grid, channel })
+      .map((segment) => ({ points: segment, closed: false }));
+
+    if (outlineSegments.length > 0) {
+      chunks.push(
+        createCenterlineChunk({
+          key,
+          index: chunks.length,
+          centerlinePoints: nodes,
+          outlineSegments,
+        }),
+      );
+    }
   });
+
+  return chunks;
+}
+
+function createCenterlineChunk({ key, index, centerlinePoints, outlineSegments }) {
+  return createGeometryChunk({
+    key,
+    kind: "centerline",
+    index,
+    centerlinePoints,
+    outlineSegments,
+    fillRule: "nonzero",
+  });
+}
+
+function createGeometryChunk({
+  key,
+  kind,
+  index,
+  centerlinePoints = [],
+  outlinePathData,
+  outlineSegments = [],
+  fillRule = "nonzero",
+}) {
+  return {
+    id: `${CHANNEL_SLUGS[key]}-${kind}-${String(index + 1).padStart(3, "0")}`,
+    channelKey: key,
+    kind,
+    centerlinePoints,
+    outlinePathData,
+    outlineSegments,
+    fillRule,
+    bounds: outlinePathData
+      ? getPathDataBounds(outlinePathData)
+      : getVariableWidthSegmentsBounds(outlineSegments),
+  };
 }
 
 function resolveChannelPath(key, settings, channels) {
@@ -1274,6 +1435,31 @@ function variableWidthCurveToPathData(points, { closed = false } = {}) {
     return "";
   }
 
+  const { left, right } = variableWidthOutlinePoints(sourcePoints, { closed });
+
+  if (closed) {
+    return [
+      smoothBoundaryPath(left, { closed: true }),
+      smoothBoundaryPath([...right].reverse(), { closed: true }),
+    ].join(" ");
+  }
+
+  const startCollapsed = samePoint(left[0], right[0]);
+  const endCollapsed = samePoint(left.at(-1), right.at(-1));
+  const rightBoundary = [...right].reverse();
+
+  const commands = [
+    smoothBoundaryPath(left),
+    endCollapsed ? "" : capCurvePath(left.at(-1), right.at(-1), sourcePoints.at(-1)),
+    smoothBoundaryPath(rightBoundary, { skipMove: true }),
+    startCollapsed ? "" : capCurvePath(right[0], left[0], sourcePoints[0]),
+    "Z",
+  ];
+
+  return commands.filter(Boolean).join(" ");
+}
+
+function variableWidthOutlinePoints(sourcePoints, { closed = false } = {}) {
   const left = [];
   const right = [];
 
@@ -1302,20 +1488,56 @@ function variableWidthCurveToPathData(points, { closed = false } = {}) {
     });
   }
 
-  const commands = closed
-    ? [
-        smoothBoundaryPath(left, { closed: true }),
-        smoothBoundaryPath([...right].reverse(), { closed: true }),
-      ]
-    : [
-        smoothBoundaryPath(left),
-        roundCapPath(left.at(-1), right.at(-1), sourcePoints.at(-1)),
-        smoothBoundaryPath([...right].reverse(), { skipMove: true }),
-        roundCapPath(right[0], left[0], sourcePoints[0]),
-        "Z",
-      ];
+  return { left, right };
+}
 
-  return commands.join(" ");
+function variableWidthCurveNodeTypes(points, { closed = false } = {}) {
+  const sourcePoints = closed ? removeDuplicateClosingPoint(points) : points;
+  if (sourcePoints.length < 2) {
+    return "";
+  }
+
+  if (closed) {
+    return closedRailNodeTypes(sourcePoints.length) + closedRailNodeTypes(sourcePoints.length);
+  }
+
+  const outline = variableWidthOutlinePoints(sourcePoints);
+  return openOutlineNodeTypes(sourcePoints.length, {
+    startCollapsed: samePoint(outline.left[0], outline.right[0]),
+    endCollapsed: samePoint(outline.left.at(-1), outline.right.at(-1)),
+  });
+}
+
+function closedRailNodeTypes(pointCount) {
+  if (pointCount <= 0) return "";
+  return "s".repeat(pointCount + 1);
+}
+
+function openOutlineNodeTypes(pointCount, { startCollapsed = false, endCollapsed = false } = {}) {
+  if (pointCount <= 1) return "";
+  const leftTypes = ["c"];
+  for (let index = 1; index < pointCount - 1; index += 1) {
+    leftTypes.push("s");
+  }
+  leftTypes.push("c");
+
+  const rightTypes = [];
+  const firstRightIndex = endCollapsed ? pointCount - 2 : pointCount - 1;
+  const lastRightIndex = 0;
+  for (let index = firstRightIndex; index >= lastRightIndex; index -= 1) {
+    if (!endCollapsed && index === pointCount - 1) {
+      rightTypes.push("c");
+    } else if (!startCollapsed && index === 0) {
+      rightTypes.push("c");
+    } else {
+      rightTypes.push("s");
+    }
+  }
+
+  return [
+    leftTypes.join(""),
+    rightTypes.join(""),
+  ].join("");
 }
 
 function activeCurvePathSegments(nodes, { settings, grid, channel }) {
@@ -1498,23 +1720,8 @@ function smoothBoundaryPath(points, { closed = false, skipMove = false } = {}) {
   const segmentCount = closed ? points.length : points.length - 1;
 
   for (let index = 0; index < segmentCount; index += 1) {
-    const p0 = closed
-      ? points[(index - 1 + points.length) % points.length]
-      : points[Math.max(0, index - 1)];
-    const p1 = points[index];
-    const p2 = points[(index + 1) % points.length];
-    const p3 = closed
-      ? points[(index + 2) % points.length]
-      : points[Math.min(points.length - 1, index + 2)];
-    const c1 = {
-      x: p1.x + (p2.x - p0.x) / 6,
-      y: p1.y + (p2.y - p0.y) / 6,
-    };
-    const c2 = {
-      x: p2.x - (p3.x - p1.x) / 6,
-      y: p2.y - (p3.y - p1.y) / 6,
-    };
-    commands.push(`C ${round(c1.x)} ${round(c1.y)} ${round(c2.x)} ${round(c2.y)} ${round(p2.x)} ${round(p2.y)}`);
+    const { c1, c2, end } = smoothBoundarySegmentControls(points, index, { closed });
+    commands.push(`C ${round(c1.x)} ${round(c1.y)} ${round(c2.x)} ${round(c2.y)} ${round(end.x)} ${round(end.y)}`);
   }
 
   if (closed) {
@@ -1524,9 +1731,70 @@ function smoothBoundaryPath(points, { closed = false, skipMove = false } = {}) {
   return commands.join(" ");
 }
 
-function roundCapPath(from, to, center) {
+function smoothBoundarySegmentControls(points, index, { closed = false } = {}) {
+  const start = points[index];
+  const end = points[(index + 1) % points.length];
+  const startTangent = smoothBoundaryTangent(points, index, { closed });
+  const endTangent = smoothBoundaryTangent(points, (index + 1) % points.length, { closed });
+  const segmentLength = Math.hypot(end.x - start.x, end.y - start.y);
+  const startHandleLength = Math.min(
+    segmentLength / 3,
+    adjacentBoundaryDistance(points, index, 1, { closed }) / 3,
+  );
+  const endHandleLength = Math.min(
+    segmentLength / 3,
+    adjacentBoundaryDistance(points, (index + 1) % points.length, -1, { closed }) / 3,
+  );
+
+  return {
+    c1: {
+      x: start.x + startTangent.x * startHandleLength,
+      y: start.y + startTangent.y * startHandleLength,
+    },
+    c2: {
+      x: end.x - endTangent.x * endHandleLength,
+      y: end.y - endTangent.y * endHandleLength,
+    },
+    end,
+  };
+}
+
+function smoothBoundaryTangent(points, index, { closed = false } = {}) {
+  const previousIndex = closed
+    ? (index - 1 + points.length) % points.length
+    : Math.max(0, index - 1);
+  const nextIndex = closed
+    ? (index + 1) % points.length
+    : Math.min(points.length - 1, index + 1);
+  const previous = points[previousIndex];
+  const next = points[nextIndex];
+
+  return normalizeVector({
+    x: next.x - previous.x,
+    y: next.y - previous.y,
+  });
+}
+
+function adjacentBoundaryDistance(points, index, direction, { closed = false } = {}) {
+  const adjacentIndex = closed
+    ? positiveModulo(index + direction, points.length)
+    : Math.min(points.length - 1, Math.max(0, index + direction));
+  const adjacent = points[adjacentIndex];
+  const point = points[index];
+  return Math.hypot(adjacent.x - point.x, adjacent.y - point.y);
+}
+
+function capCurvePath(from, to, center) {
   if (!from || !to || !center) return "";
-  return `Q ${round(center.x)} ${round(center.y)} ${round(to.x)} ${round(to.y)}`;
+  const c1 = {
+    x: from.x + ((center.x - from.x) * 2) / 3,
+    y: from.y + ((center.y - from.y) * 2) / 3,
+  };
+  const c2 = {
+    x: to.x + ((center.x - to.x) * 2) / 3,
+    y: to.y + ((center.y - to.y) * 2) / 3,
+  };
+  return `C ${round(c1.x)} ${round(c1.y)} ${round(c2.x)} ${round(c2.y)} ${round(to.x)} ${round(to.y)}`;
 }
 
 function splitActiveCurveSegments(nodes) {
@@ -1867,6 +2135,25 @@ function getPointBounds(points) {
   );
 }
 
+function getPathDataBounds(d) {
+  const numbers = d
+    .match(/[-+]?(?:\d*\.)?\d+(?:e[-+]?\d+)?/gi)
+    ?.map(Number)
+    .filter(Number.isFinite) ?? [];
+  const points = [];
+
+  for (let index = 0; index + 1 < numbers.length; index += 2) {
+    points.push({ x: numbers[index], y: numbers[index + 1] });
+  }
+
+  return points.length > 0 ? getPointBounds(points) : null;
+}
+
+function getVariableWidthSegmentsBounds(segments) {
+  const points = segments.flatMap((segment) => segment.points ?? []);
+  return points.length > 0 ? getPointBounds(points) : null;
+}
+
 function rotatePoint(point, centerX, centerY, rotation) {
   const radians = (rotation * Math.PI) / 180;
   const cos = Math.cos(radians);
@@ -1894,6 +2181,10 @@ function inGrid(col, row, grid) {
 
 function squaredDistance(a, b) {
   return (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
+}
+
+function samePoint(a, b, tolerance = 0.001) {
+  return Boolean(a && b && Math.hypot(a.x - b.x, a.y - b.y) <= tolerance);
 }
 
 function positiveModulo(value, divisor) {

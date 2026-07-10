@@ -156,10 +156,11 @@ const run = ({
 const assertValidSvg = (svg, label) => {
   assert.match(svg, /^<svg /, `${label}: missing svg root`);
   assert.doesNotMatch(svg, /NaN|Infinity|-Infinity|undefined|null/, `${label}: invalid numeric output`);
-  assert.match(svg, /id="halftone-black"/, `${label}: missing black channel group`);
+  assert.match(svg, /id="toniator-black"/, `${label}: missing black channel group`);
 };
 
 const pathCount = (svg) => (svg.match(/<path\b/g) ?? []).length;
+const centerlinePathCount = (svg) => (svg.match(/id="black-centerline-\d+"/g) ?? []).length;
 
 const pathCoordinateBounds = (svg) => {
   const numbers = [...svg.matchAll(/[-+]?(?:\d*\.)?\d+(?:e[-+]?\d+)?/gi)]
@@ -216,6 +217,97 @@ const firstGeneratedPathData = (svg) =>
 
 const commandCount = (pathData, command) =>
   (pathData.match(new RegExp(`\\b${command}\\b`, "g")) ?? []).length;
+const smoothCurveCommandCount = (pathData) =>
+  commandCount(pathData, "C") + commandCount(pathData, "S");
+
+const assertNoDegenerateQuadraticCaps = (svg, label) => {
+  for (const [, pathData] of svg.matchAll(/<path\b[^>]*\sd="([^"]+)"/g)) {
+    assert.doesNotMatch(pathData, /\bQ\b/, `${label}: curve outline caps should be cubic, not quadratic`);
+    let current = { x: 0, y: 0 };
+    let subpathStart = null;
+    const tokens = pathData.match(/[A-Z]|[-+]?(?:\d*\.)?\d+(?:e[-+]?\d+)?/g) ?? [];
+
+    for (let index = 0; index < tokens.length;) {
+      const command = tokens[index++];
+      if (command === "M") {
+        current = { x: Number(tokens[index++]), y: Number(tokens[index++]) };
+        subpathStart = current;
+      } else if (command === "C") {
+        index += 4;
+        current = { x: Number(tokens[index++]), y: Number(tokens[index++]) };
+      } else if (command === "S" || command === "Q") {
+        index += 2;
+        const end = { x: Number(tokens[index++]), y: Number(tokens[index++]) };
+        if (command === "Q") {
+          assert.ok(
+            Math.hypot(current.x - end.x, current.y - end.y) > 0.001,
+            `${label}: degenerate quadratic cap at ${end.x},${end.y}`,
+          );
+        }
+        current = end;
+      } else if (command === "L") {
+        current = { x: Number(tokens[index++]), y: Number(tokens[index++]) };
+      } else if (command === "Z") {
+        current = subpathStart ?? current;
+      } else {
+        break;
+      }
+    }
+  }
+};
+
+const assertNodeTypesAligned = (svg, label) => {
+  for (const [, tag, pathData] of svg.matchAll(/(<path\b[^>]*\sd="([^"]+)"[^>]*>)/g)) {
+    const nodeTypes = tag.match(/sodipodi:nodetypes="([^"]+)"/)?.[1];
+    if (!nodeTypes) continue;
+
+    assert.equal(
+      nodeTypes.length,
+      countSodipodiNodes(pathData),
+      `${label}: nodetype count does not match exported path node count`,
+    );
+  }
+};
+
+const countSodipodiNodes = (pathData) => {
+  let count = 0;
+  let current = { x: 0, y: 0 };
+  let subpathStart = null;
+  const tokens = pathData.match(/[A-Z]|[-+]?(?:\d*\.)?\d+(?:e[-+]?\d+)?/g) ?? [];
+
+  for (let index = 0; index < tokens.length;) {
+    const command = tokens[index++];
+    if (command === "M") {
+      current = { x: Number(tokens[index++]), y: Number(tokens[index++]) };
+      subpathStart = current;
+      count += 1;
+    } else if (command === "C") {
+      index += 4;
+      current = { x: Number(tokens[index++]), y: Number(tokens[index++]) };
+      count += 1;
+    } else if (command === "S" || command === "Q") {
+      index += 2;
+      current = { x: Number(tokens[index++]), y: Number(tokens[index++]) };
+      count += 1;
+    } else if (command === "L") {
+      current = { x: Number(tokens[index++]), y: Number(tokens[index++]) };
+      count += 1;
+    } else if (command === "Z") {
+      if (
+        subpathStart &&
+        Math.hypot(current.x - subpathStart.x, current.y - subpathStart.y) <= 0.001
+      ) {
+        count -= 1;
+      }
+      current = subpathStart ?? current;
+      subpathStart = null;
+    } else {
+      break;
+    }
+  }
+
+  return count;
+};
 
 const assertCurveCoversArtboard = (svg, label) => {
   const bounds = pathCoordinateBounds(svg);
@@ -353,7 +445,8 @@ const testAllChannelCurveRotations = () => {
 
       assertValidSvg(svg, label);
       for (const id of ["cyan", "magenta", "yellow", "black"]) {
-        assert.match(svg, new RegExp(`id="halftone-${id}"`), `${label}: missing ${id}`);
+        assert.match(svg, new RegExp(`id="toniator-${id}"`), `${label}: missing ${id}`);
+        assert.match(svg, new RegExp(`inkscape:label="${id[0].toUpperCase()}${id.slice(1)}"`), `${label}: missing ${id} layer label`);
       }
       assertCurveCoversArtboard(svg, label);
       assertCurveOutputIsFilledGeometry(svg, label);
@@ -658,26 +751,35 @@ const testCurvePatternTilingAndStacking = () => {
 
   assertValidSvg(basePattern, "curve pattern tiling/stacking");
   assertCurveOutputIsFilledGeometry(basePattern, "curve pattern tiling/stacking");
-  assert.equal(pathCount(basePattern), 1, "curve pattern should emit one compound path per channel");
+  assert.match(basePattern, /xmlns:sodipodi=/, "curve export should include Inkscape node type namespace");
+  assert.match(
+    alternatingFlipPattern,
+    /<path id="black-centerline-001"[^>]*sodipodi:nodetypes="c+s+c+s+c+"/,
+    "centerline export should mark rail interiors smooth and cap junctions cusp",
+  );
+  assert.doesNotMatch(firstGeneratedPathData(alternatingFlipPattern), /\bS\b/, "smooth rail output should not force reflected symmetric handles");
+  assertNoDegenerateQuadraticCaps(alternatingFlipPattern, "curve pattern tiling/stacking");
+  assertNodeTypesAligned(alternatingFlipPattern, "curve pattern tiling/stacking");
+  assert.equal(centerlinePathCount(basePattern), 2, "curve pattern should emit one path per centerline row");
   assert.equal(
-    pathCount(highQualityPattern),
-    pathCount(basePattern),
-    "output quality must not change compound channel path count",
+    centerlinePathCount(highQualityPattern),
+    centerlinePathCount(basePattern),
+    "output quality must not change centerline row path count",
   );
   assert.ok(
-    commandCount(firstGeneratedPathData(highQualityPattern), "C") >=
-      commandCount(firstGeneratedPathData(basePattern), "C"),
+    smoothCurveCommandCount(firstGeneratedPathData(highQualityPattern)) >=
+      smoothCurveCommandCount(firstGeneratedPathData(basePattern)),
     "output quality should preserve at least the base motif row detail after path simplification",
   );
   assert.equal(
-    pathCount(moreTilesPattern),
-    1,
-    "tile count should still emit one compound path per channel",
+    centerlinePathCount(moreTilesPattern),
+    centerlinePathCount(basePattern),
+    "tile count should preserve centerline row path count",
   );
   assert.equal(
-    pathCount(connectedPattern),
-    1,
-    "connected motif tiles should emit one compound path per channel",
+    centerlinePathCount(connectedPattern),
+    centerlinePathCount(basePattern),
+    "connected motif tiles should emit one path per centerline row",
   );
   assert.doesNotMatch(
     connectedPattern,
@@ -1278,8 +1380,8 @@ const testExportBackgroundAndChannelFiltering = () => {
     channels: enabledChannels,
     generatorOptions: { includeBackground: false, renderChannelKeys: ["c"] },
   });
-  assert.match(cyanOnly, /id="halftone-cyan"/, "channel-filtered export should include the requested channel");
-  assert.doesNotMatch(cyanOnly, /id="halftone-magenta"|id="halftone-yellow"|id="halftone-black"/, "channel-filtered export should omit other channel groups");
+  assert.match(cyanOnly, /id="toniator-cyan"/, "channel-filtered export should include the requested channel");
+  assert.doesNotMatch(cyanOnly, /id="toniator-magenta"|id="toniator-yellow"|id="toniator-black"/, "channel-filtered export should omit other channel groups");
 };
 
 const testShapeOffsetPeriodicity = () => {
