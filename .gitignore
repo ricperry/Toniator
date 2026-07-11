@@ -4,5 +4,5 @@ test-artifacts/screenshots/
 .DS_Store
 *.log
 .agents/
-
 .codex/
+resume_hydration.txt

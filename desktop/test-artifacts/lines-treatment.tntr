@@ -1,0 +1,15 @@
+{
+  "format": "toniator-preset",
+  "name": "Artifact Treatment",
+  "render": {
+    "variant": "native-basic-v1"
+  },
+  "settings": {
+    "angle": -8.0,
+    "contrast": 128.0,
+    "coverage": 108.0,
+    "detail": 64.0,
+    "treatment": "lines"
+  },
+  "version": 2
+}

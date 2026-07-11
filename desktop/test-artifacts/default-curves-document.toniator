@@ -1,0 +1,283 @@
+{
+  "format": "toniator-document",
+  "version": 3,
+  "document_id": "18c113b2bdf854c6-47358-1",
+  "source": {
+    "name": "Toniator Example.svg",
+    "media_type": "image/svg+xml",
+    "bytes": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI5NjAiIGhlaWdodD0iNjgwIiB2aWV3Qm94PSIwIDAgOTYwIDY4MCI+CjxkZWZzPjxsaW5lYXJHcmFkaWVudCBpZD0id2FybSIgeDE9IjAiIHkxPSIwIiB4Mj0iMSIgeTI9IjEiPjxzdG9wIG9mZnNldD0iMCIgc3RvcC1jb2xvcj0iI2ZmY2YzMyIvPjxzdG9wIG9mZnNldD0iLjQ4IiBzdG9wLWNvbG9yPSIjZWMwMDhjIi8+PHN0b3Agb2Zmc2V0PSIxIiBzdG9wLWNvbG9yPSIjMDA0N2ZmIi8+PC9saW5lYXJHcmFkaWVudD48cmFkaWFsR3JhZGllbnQgaWQ9ImNvb2wiIGN4PSI0MiUiIGN5PSI0MCUiIHI9IjcwJSI+PHN0b3Agb2Zmc2V0PSIwIiBzdG9wLWNvbG9yPSIjZmZmIi8+PHN0b3Agb2Zmc2V0PSIuNDUiIHN0b3AtY29sb3I9IiMwMGFlZWYiLz48c3RvcCBvZmZzZXQ9IjEiIHN0b3AtY29sb3I9IiMwODExMWYiLz48L3JhZGlhbEdyYWRpZW50PjwvZGVmcz4KPHJlY3Qgd2lkdGg9IjEwMCUiIGhlaWdodD0iMTAwJSIgZmlsbD0idXJsKCN3YXJtKSIvPjxjaXJjbGUgY3g9IjMzMCIgY3k9IjMxMCIgcj0iMjM1IiBmaWxsPSJ1cmwoI2Nvb2wpIiBvcGFjaXR5PSIuOTIiLz48cmVjdCB4PSI1NjUiIHk9IjExNSIgd2lkdGg9IjI2MCIgaGVpZ2h0PSIzNjUiIHJ4PSI0NCIgZmlsbD0iIzEwMTExNCIgb3BhY2l0eT0iLjc4Ii8+PHBhdGggZD0iTTkwIDU1NSBDMjI1IDQyMCAzNTAgNjY1IDUxMCA1MzUgUzc0NSA0NDAgODcwIDU4NSIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjZmZmIiBzdHJva2Utd2lkdGg9IjU4IiBzdHJva2UtbGluZWNhcD0icm91bmQiIG9wYWNpdHk9Ii44MiIvPjx0ZXh0IHg9IjYyMCIgeT0iMzQ1IiBmb250LWZhbWlseT0ic2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMjIiIGZvbnQtd2VpZ2h0PSI4MDAiIGZpbGw9IiNmZmYiPlQ8L3RleHQ+PC9zdmc+"
+  },
+  "settings": {
+    "treatment": "dots",
+    "detail": 52.0,
+    "coverage": 92.0,
+    "contrast": 108.0,
+    "angle": 0.0
+  },
+  "render": {
+    "variant": "web-curve-v1",
+    "settings": {
+      "output_width": 900,
+      "output_height": 620,
+      "long_edge_cells": 90.0,
+      "min_mark": 0.0,
+      "max_mark": 85.0,
+      "value_mode": "cmyk",
+      "single_channel": "black",
+      "use_shared_curve": true,
+      "shared_path": {
+        "start": {
+          "x": -0.5,
+          "y": 0.0
+        },
+        "segments": [
+          {
+            "control_1": {
+              "x": -0.32,
+              "y": -0.4
+            },
+            "control_2": {
+              "x": -0.18,
+              "y": -0.4
+            },
+            "end": {
+              "x": 0.0,
+              "y": 0.0
+            }
+          },
+          {
+            "control_1": {
+              "x": 0.18,
+              "y": 0.4
+            },
+            "control_2": {
+              "x": 0.32,
+              "y": 0.4
+            },
+            "end": {
+              "x": 0.5,
+              "y": 0.0
+            }
+          }
+        ]
+      },
+      "shared_close_ends": false,
+      "shared_smooth_join": false,
+      "show_background": true,
+      "channels": {
+        "c": {
+          "enabled": true,
+          "color": "#00aeef",
+          "grid_rotation": 15.0,
+          "grid_pivot_x": 0.0,
+          "grid_pivot_y": 0.0,
+          "scale": 1.0,
+          "threshold": 0.04,
+          "max_size": 100.0,
+          "resolution_scale": 1.0,
+          "offset_x": 0.0,
+          "offset_y": 0.0,
+          "opacity": 0.92,
+          "output_quality": 1.0,
+          "path": {
+            "start": {
+              "x": -0.5,
+              "y": 0.0
+            },
+            "segments": [
+              {
+                "control_1": {
+                  "x": -0.32,
+                  "y": -0.4
+                },
+                "control_2": {
+                  "x": -0.18,
+                  "y": -0.4
+                },
+                "end": {
+                  "x": 0.0,
+                  "y": 0.0
+                }
+              },
+              {
+                "control_1": {
+                  "x": 0.18,
+                  "y": 0.4
+                },
+                "control_2": {
+                  "x": 0.32,
+                  "y": 0.4
+                },
+                "end": {
+                  "x": 0.5,
+                  "y": 0.0
+                }
+              }
+            ]
+          },
+          "close_ends": false,
+          "smooth_join": false
+        },
+        "m": {
+          "enabled": true,
+          "color": "#ec008c",
+          "grid_rotation": 75.0,
+          "grid_pivot_x": 0.0,
+          "grid_pivot_y": 0.0,
+          "scale": 1.0,
+          "threshold": 0.04,
+          "max_size": 100.0,
+          "resolution_scale": 1.0,
+          "offset_x": 0.0,
+          "offset_y": 0.0,
+          "opacity": 0.92,
+          "output_quality": 1.0,
+          "path": {
+            "start": {
+              "x": -0.5,
+              "y": 0.0
+            },
+            "segments": [
+              {
+                "control_1": {
+                  "x": -0.32,
+                  "y": -0.4
+                },
+                "control_2": {
+                  "x": -0.18,
+                  "y": -0.4
+                },
+                "end": {
+                  "x": 0.0,
+                  "y": 0.0
+                }
+              },
+              {
+                "control_1": {
+                  "x": 0.18,
+                  "y": 0.4
+                },
+                "control_2": {
+                  "x": 0.32,
+                  "y": 0.4
+                },
+                "end": {
+                  "x": 0.5,
+                  "y": 0.0
+                }
+              }
+            ]
+          },
+          "close_ends": false,
+          "smooth_join": false
+        },
+        "y": {
+          "enabled": true,
+          "color": "#ffd400",
+          "grid_rotation": 0.0,
+          "grid_pivot_x": 0.0,
+          "grid_pivot_y": 0.0,
+          "scale": 1.0,
+          "threshold": 0.04,
+          "max_size": 100.0,
+          "resolution_scale": 1.0,
+          "offset_x": 0.0,
+          "offset_y": 0.0,
+          "opacity": 0.92,
+          "output_quality": 1.0,
+          "path": {
+            "start": {
+              "x": -0.5,
+              "y": 0.0
+            },
+            "segments": [
+              {
+                "control_1": {
+                  "x": -0.32,
+                  "y": -0.4
+                },
+                "control_2": {
+                  "x": -0.18,
+                  "y": -0.4
+                },
+                "end": {
+                  "x": 0.0,
+                  "y": 0.0
+                }
+              },
+              {
+                "control_1": {
+                  "x": 0.18,
+                  "y": 0.4
+                },
+                "control_2": {
+                  "x": 0.32,
+                  "y": 0.4
+                },
+                "end": {
+                  "x": 0.5,
+                  "y": 0.0
+                }
+              }
+            ]
+          },
+          "close_ends": false,
+          "smooth_join": false
+        },
+        "k": {
+          "enabled": true,
+          "color": "#111111",
+          "grid_rotation": 45.0,
+          "grid_pivot_x": 0.0,
+          "grid_pivot_y": 0.0,
+          "scale": 1.0,
+          "threshold": 0.04,
+          "max_size": 100.0,
+          "resolution_scale": 1.0,
+          "offset_x": 0.0,
+          "offset_y": 0.0,
+          "opacity": 0.92,
+          "output_quality": 1.0,
+          "path": {
+            "start": {
+              "x": -0.5,
+              "y": 0.0
+            },
+            "segments": [
+              {
+                "control_1": {
+                  "x": -0.32,
+                  "y": -0.4
+                },
+                "control_2": {
+                  "x": -0.18,
+                  "y": -0.4
+                },
+                "end": {
+                  "x": 0.0,
+                  "y": 0.0
+                }
+              },
+              {
+                "control_1": {
+                  "x": 0.18,
+                  "y": 0.4
+                },
+                "control_2": {
+                  "x": 0.32,
+                  "y": 0.4
+                },
+                "end": {
+                  "x": 0.5,
+                  "y": 0.0
+                }
+              }
+            ]
+          },
+          "close_ends": false,
+          "smooth_join": false
+        }
+      }
+    }
+  }
+}
