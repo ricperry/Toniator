@@ -1,0 +1,493 @@
+ricperry1@fedora44:~/projects/Toniator$ ./packaging/appimage/build.sh 
+
+✔ Validation was successful: pedantic: 2
+appimage: building Toniator 0.1.0 with the locked dependency graph
+    Finished `release` profile [optimized] target(s) in 0.06s
+appimage: deploying recursive non-excluded ELF dependencies
+linuxdeploy version 1-alpha (git commit ID cc7b864), GitHub actions build 331 built on 2025-11-07 19:41:54 UTC
+
+-- Creating basic AppDir structure -- 
+Creating directory /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/bin/ 
+Creating directory /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/ 
+Creating directory /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/share/applications/ 
+Creating directory /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/share/icons/hicolor/ 
+Creating directory /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/share/pixmaps/ 
+Creating directory /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/share/icons/hicolor/16x16/apps/ 
+Creating directory /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/share/icons/hicolor/32x32/apps/ 
+Creating directory /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/share/icons/hicolor/64x64/apps/ 
+Creating directory /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/share/icons/hicolor/128x128/apps/ 
+Creating directory /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/share/icons/hicolor/256x256/apps/ 
+Creating directory /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/share/icons/hicolor/scalable/apps/ 
+
+-- Deploying dependencies for existing files in AppDir -- 
+Deploying dependencies for ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/bin/toniator 
+Deploying shared library /lib64/libadwaita-1.so.0
+Deploying shared library /lib64/libgtk-4.so.1
+Deploying shared library /lib64/libpango-1.0.so.0
+Deploying shared library /lib64/libcairo.so.2
+Deploying shared library /lib64/libgraphene-1.0.so.0
+Deploying shared library /lib64/libgio-2.0.so.0
+Deploying shared library /lib64/libgobject-2.0.so.0
+Deploying shared library /lib64/libglib-2.0.so.0
+Skipping deployment of blacklisted library /lib64/libgcc_s.so.1 
+Skipping deployment of blacklisted library /lib64/libm.so.6 
+Skipping deployment of blacklisted library /lib64/libc.so.6 
+Skipping deployment of blacklisted library /lib64/libfribidi.so.0 
+Deploying shared library /lib64/libappstream.so.5
+Deploying shared library /lib64/libgmodule-2.0.so.0
+Deploying shared library /lib64/libpangocairo-1.0.so.0
+Skipping deployment of blacklisted library /lib64/libharfbuzz.so.0 
+Deploying shared library /lib64/libharfbuzz-subset.so.0
+Deploying shared library /lib64/libcairo-gobject.so.2
+Skipping deployment of blacklisted library /lib64/libfontconfig.so.1 
+Deploying shared library /lib64/libgdk_pixbuf-2.0.so.0
+Deploying shared library /lib64/libepoxy.so.0
+Deploying shared library /lib64/libgstplay-1.0.so.0
+Deploying shared library /lib64/libgstvideo-1.0.so.0
+Deploying shared library /lib64/libgstreamer-1.0.so.0
+Deploying shared library /lib64/libgstgl-1.0.so.0
+Deploying shared library /lib64/libgstallocators-1.0.so.0
+Deploying shared library /lib64/libXi.so.6
+Skipping deployment of blacklisted library /lib64/libX11.so.6 
+Deploying shared library /lib64/libpangoft2-1.0.so.0
+Deploying shared library /lib64/libtinysparql-3.0.so.0
+Deploying shared library /lib64/libvulkan.so.1
+Deploying shared library /lib64/libpng16.so.16
+Deploying shared library /lib64/libtiff.so.6
+Deploying shared library /lib64/libjpeg.so.62
+Deploying shared library /lib64/libxkbcommon.so.0
+Skipping deployment of blacklisted library /lib64/libwayland-client.so.0 
+Deploying shared library /lib64/libwayland-egl.so.1
+Deploying shared library /lib64/libXext.so.6
+Deploying shared library /lib64/libXcursor.so.1
+Deploying shared library /lib64/libXdamage.so.1
+Deploying shared library /lib64/libXfixes.so.3
+Deploying shared library /lib64/libXrandr.so.2
+Deploying shared library /lib64/libXinerama.so.1
+Deploying shared library /lib64/libcairo-script-interpreter.so.2
+Deploying shared library /lib64/libcups.so.2
+Deploying shared library /lib64/libcolord.so.2
+Deploying shared library /lib64/libthai.so.0
+Skipping deployment of blacklisted library /lib64/libz.so.1 
+Skipping deployment of blacklisted library /lib64/libfreetype.so.6 
+Deploying shared library /lib64/libXrender.so.1
+Skipping deployment of blacklisted library /lib64/libxcb.so.1 
+Deploying shared library /lib64/libxcb-render.so.0
+Deploying shared library /lib64/libxcb-shm.so.0
+Deploying shared library /lib64/libpixman-1.so.0
+Deploying shared library /lib64/libmount.so.1
+Deploying shared library /lib64/libselinux.so.1
+Deploying shared library /lib64/libffi.so.8
+Deploying shared library /lib64/libpcre2-8.so.0
+Deploying shared library /lib64/libcurl.so.4
+Deploying shared library /lib64/libxmlb.so.2
+Deploying shared library /lib64/libxml2.so.2
+Deploying shared library /lib64/libfyaml.so.0
+Deploying shared library /lib64/libsystemd.so.0
+Deploying shared library /lib64/libzstd.so.1
+Deploying shared library /lib64/libstemmer.so.0
+Deploying shared library /lib64/libgraphite2.so.3
+Deploying shared library /lib64/libglycin-2.so.0
+Deploying shared library /lib64/libgsttag-1.0.so.0
+Deploying shared library /lib64/libgstpbutils-1.0.so.0
+Deploying shared library /lib64/libgstbase-1.0.so.0
+Deploying shared library /lib64/liborc-0.4.so.0
+Deploying shared library /lib64/libunwind.so.8
+Deploying shared library /lib64/libdw.so.1
+Skipping deployment of blacklisted library /lib64/libEGL.so.1 
+Skipping deployment of blacklisted library /lib64/libGLX.so.0 
+Deploying shared library /lib64/libwayland-cursor.so.0
+Skipping deployment of blacklisted library /lib64/libX11-xcb.so.1 
+Deploying shared library /lib64/libgudev-1.0.so.0
+Skipping deployment of blacklisted library /lib64/libdrm.so.2 
+Skipping deployment of blacklisted library /lib64/libgbm.so.1 
+Deploying shared library /lib64/libjson-glib-1.0.so.0
+Deploying shared library /lib64/libsqlite3.so.0
+Deploying shared library /lib64/libwebp.so.7
+Deploying shared library /lib64/libLerc.so.4
+Deploying shared library /lib64/libjbig.so.2.1
+Deploying shared library /lib64/liblzo2.so.2
+Deploying shared library /lib64/libgssapi_krb5.so.2
+Deploying shared library /lib64/libavahi-common.so.3
+Deploying shared library /lib64/libavahi-client.so.3
+Deploying shared library /lib64/libgnutls.so.30
+Deploying shared library /lib64/liblcms2.so.2
+Deploying shared library /lib64/libudev.so.1
+Deploying shared library /lib64/libdatrie.so.1
+Deploying shared library /lib64/libbz2.so.1
+Deploying shared library /lib64/libbrotlidec.so.1
+Deploying shared library /lib64/libXau.so.6
+Deploying shared library /lib64/libblkid.so.1
+Deploying shared library /lib64/libnghttp3.so.9
+Deploying shared library /lib64/libngtcp2_crypto_ossl.so.0
+Deploying shared library /lib64/libngtcp2.so.16
+Deploying shared library /lib64/libnghttp2.so.14
+Deploying shared library /lib64/libidn2.so.0
+Deploying shared library /lib64/libldap.so.2
+Deploying shared library /lib64/liblber.so.2
+Deploying shared library /lib64/libssh.so.4
+Deploying shared library /lib64/libpsl.so.5
+Deploying shared library /lib64/libssl.so.3
+Deploying shared library /lib64/libcrypto.so.3
+Deploying shared library /lib64/libbrotlicommon.so.1
+Deploying shared library /lib64/liblzma.so.5
+Deploying shared library /lib64/libseccomp.so.2
+Deploying shared library /lib64/libgstaudio-1.0.so.0
+Deploying shared library /lib64/libelf.so.1
+Skipping deployment of blacklisted library /lib64/libGLdispatch.so.0 
+Skipping deployment of blacklisted library /lib64/libexpat.so.1 
+Deploying shared library /lib64/libsharpyuv.so.0
+Skipping deployment of blacklisted library /lib64/libstdc++.so.6 
+Deploying shared library /lib64/libkrb5.so.3
+Deploying shared library /lib64/libk5crypto.so.3
+Skipping deployment of blacklisted library /lib64/libcom_err.so.2 
+Deploying shared library /lib64/libkrb5support.so.0
+Deploying shared library /lib64/libkeyutils.so.1
+Skipping deployment of blacklisted library /lib64/libresolv.so.2 
+Deploying shared library /lib64/libdbus-1.so.3
+Deploying shared library /lib64/libp11-kit.so.0
+Deploying shared library /lib64/libunistring.so.5
+Deploying shared library /lib64/libtasn1.so.6
+Deploying shared library /lib64/libhogweed.so.6
+Deploying shared library /lib64/libnettle.so.8
+Skipping deployment of blacklisted library /lib64/libgmp.so.10 
+Deploying shared library /lib64/libevent-2.1.so.7
+Deploying shared library /lib64/libsasl2.so.3
+Deploying shared library /lib64/libfido2.so.1
+Deploying shared library /lib64/libcrypt.so.2
+Deploying shared library /lib64/libcbor.so.0.13
+
+-- Deploying shared libraries -- 
+Deploying shared library /usr/lib64/gio/modules/libdconfsettings.so
+Deploying dependencies for ELF file /usr/lib64/gio/modules/libdconfsettings.so 
+Deploying shared library /usr/lib64/gtk-4.0/4.0.0/immodules/libim-ibus.so
+Deploying dependencies for ELF file /usr/lib64/gtk-4.0/4.0.0/immodules/libim-ibus.so 
+Deploying shared library /lib64/libibus-1.0.so.5
+
+-- Deploying executables -- 
+Deploying executable /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/bin/toniator 
+Deploying dependencies for ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/bin/toniator 
+
+-- Copying files into AppDir -- 
+Copying file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/bin/toniator to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/bin/toniator 
+Copying file /lib64/libLerc.so.4 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libLerc.so.4 
+Copying file /lib64/libXau.so.6 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libXau.so.6 
+Copying file /lib64/libXcursor.so.1 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libXcursor.so.1 
+Copying file /lib64/libXdamage.so.1 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libXdamage.so.1 
+Copying file /lib64/libXext.so.6 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libXext.so.6 
+Copying file /lib64/libXfixes.so.3 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libXfixes.so.3 
+Copying file /lib64/libXi.so.6 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libXi.so.6 
+Copying file /lib64/libXinerama.so.1 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libXinerama.so.1 
+Copying file /lib64/libXrandr.so.2 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libXrandr.so.2 
+Copying file /lib64/libXrender.so.1 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libXrender.so.1 
+Copying file /lib64/libadwaita-1.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libadwaita-1.so.0 
+Copying file /lib64/libappstream.so.5 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libappstream.so.5 
+Copying file /lib64/libavahi-client.so.3 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libavahi-client.so.3 
+Copying file /lib64/libavahi-common.so.3 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libavahi-common.so.3 
+Copying file /lib64/libblkid.so.1 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libblkid.so.1 
+Copying file /lib64/libbrotlicommon.so.1 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libbrotlicommon.so.1 
+Copying file /lib64/libbrotlidec.so.1 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libbrotlidec.so.1 
+Copying file /lib64/libbz2.so.1 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libbz2.so.1 
+Copying file /lib64/libcairo-gobject.so.2 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libcairo-gobject.so.2 
+Copying file /lib64/libcairo-script-interpreter.so.2 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libcairo-script-interpreter.so.2 
+Copying file /lib64/libcairo.so.2 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libcairo.so.2 
+Copying file /lib64/libcbor.so.0.13 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libcbor.so.0.13 
+Copying file /lib64/libcolord.so.2 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libcolord.so.2 
+Copying file /lib64/libcrypt.so.2 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libcrypt.so.2 
+Copying file /lib64/libcrypto.so.3 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libcrypto.so.3 
+Copying file /lib64/libcups.so.2 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libcups.so.2 
+Copying file /lib64/libcurl.so.4 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libcurl.so.4 
+Copying file /lib64/libdatrie.so.1 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libdatrie.so.1 
+Copying file /lib64/libdbus-1.so.3 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libdbus-1.so.3 
+Copying file /lib64/libdw.so.1 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libdw.so.1 
+Copying file /lib64/libelf.so.1 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libelf.so.1 
+Copying file /lib64/libepoxy.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libepoxy.so.0 
+Copying file /lib64/libevent-2.1.so.7 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libevent-2.1.so.7 
+Copying file /lib64/libffi.so.8 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libffi.so.8 
+Copying file /lib64/libfido2.so.1 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libfido2.so.1 
+Copying file /lib64/libfyaml.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libfyaml.so.0 
+Copying file /lib64/libgdk_pixbuf-2.0.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgdk_pixbuf-2.0.so.0 
+Copying file /lib64/libgio-2.0.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgio-2.0.so.0 
+Copying file /lib64/libglib-2.0.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libglib-2.0.so.0 
+Copying file /lib64/libglycin-2.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libglycin-2.so.0 
+Copying file /lib64/libgmodule-2.0.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgmodule-2.0.so.0 
+Copying file /lib64/libgnutls.so.30 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgnutls.so.30 
+Copying file /lib64/libgobject-2.0.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgobject-2.0.so.0 
+Copying file /lib64/libgraphene-1.0.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgraphene-1.0.so.0 
+Copying file /lib64/libgraphite2.so.3 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgraphite2.so.3 
+Copying file /lib64/libgssapi_krb5.so.2 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgssapi_krb5.so.2 
+Copying file /lib64/libgstallocators-1.0.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgstallocators-1.0.so.0 
+Copying file /lib64/libgstaudio-1.0.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgstaudio-1.0.so.0 
+Copying file /lib64/libgstbase-1.0.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgstbase-1.0.so.0 
+Copying file /lib64/libgstgl-1.0.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgstgl-1.0.so.0 
+Copying file /lib64/libgstpbutils-1.0.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgstpbutils-1.0.so.0 
+Copying file /lib64/libgstplay-1.0.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgstplay-1.0.so.0 
+Copying file /lib64/libgstreamer-1.0.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgstreamer-1.0.so.0 
+Copying file /lib64/libgsttag-1.0.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgsttag-1.0.so.0 
+Copying file /lib64/libgstvideo-1.0.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgstvideo-1.0.so.0 
+Copying file /lib64/libgtk-4.so.1 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgtk-4.so.1 
+Copying file /lib64/libgudev-1.0.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgudev-1.0.so.0 
+Copying file /lib64/libharfbuzz-subset.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libharfbuzz-subset.so.0 
+Copying file /lib64/libhogweed.so.6 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libhogweed.so.6 
+Copying file /lib64/libibus-1.0.so.5 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libibus-1.0.so.5 
+Copying file /lib64/libidn2.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libidn2.so.0 
+Copying file /lib64/libjbig.so.2.1 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libjbig.so.2.1 
+Copying file /lib64/libjpeg.so.62 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libjpeg.so.62 
+Copying file /lib64/libjson-glib-1.0.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libjson-glib-1.0.so.0 
+Copying file /lib64/libk5crypto.so.3 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libk5crypto.so.3 
+Copying file /lib64/libkeyutils.so.1 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libkeyutils.so.1 
+Copying file /lib64/libkrb5.so.3 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libkrb5.so.3 
+Copying file /lib64/libkrb5support.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libkrb5support.so.0 
+Copying file /lib64/liblber.so.2 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/liblber.so.2 
+Copying file /lib64/liblcms2.so.2 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/liblcms2.so.2 
+Copying file /lib64/libldap.so.2 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libldap.so.2 
+Copying file /lib64/liblzma.so.5 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/liblzma.so.5 
+Copying file /lib64/liblzo2.so.2 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/liblzo2.so.2 
+Copying file /lib64/libmount.so.1 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libmount.so.1 
+Copying file /lib64/libnettle.so.8 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libnettle.so.8 
+Copying file /lib64/libnghttp2.so.14 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libnghttp2.so.14 
+Copying file /lib64/libnghttp3.so.9 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libnghttp3.so.9 
+Copying file /lib64/libngtcp2.so.16 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libngtcp2.so.16 
+Copying file /lib64/libngtcp2_crypto_ossl.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libngtcp2_crypto_ossl.so.0 
+Copying file /lib64/liborc-0.4.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/liborc-0.4.so.0 
+Copying file /lib64/libp11-kit.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libp11-kit.so.0 
+Copying file /lib64/libpango-1.0.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libpango-1.0.so.0 
+Copying file /lib64/libpangocairo-1.0.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libpangocairo-1.0.so.0 
+Copying file /lib64/libpangoft2-1.0.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libpangoft2-1.0.so.0 
+Copying file /lib64/libpcre2-8.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libpcre2-8.so.0 
+Copying file /lib64/libpixman-1.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libpixman-1.so.0 
+Copying file /lib64/libpng16.so.16 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libpng16.so.16 
+Copying file /lib64/libpsl.so.5 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libpsl.so.5 
+Copying file /lib64/libsasl2.so.3 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libsasl2.so.3 
+Copying file /lib64/libseccomp.so.2 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libseccomp.so.2 
+Copying file /lib64/libselinux.so.1 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libselinux.so.1 
+Copying file /lib64/libsharpyuv.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libsharpyuv.so.0 
+Copying file /lib64/libsqlite3.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libsqlite3.so.0 
+Copying file /lib64/libssh.so.4 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libssh.so.4 
+Copying file /lib64/libssl.so.3 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libssl.so.3 
+Copying file /lib64/libstemmer.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libstemmer.so.0 
+Copying file /lib64/libsystemd.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libsystemd.so.0 
+Copying file /lib64/libtasn1.so.6 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libtasn1.so.6 
+Copying file /lib64/libthai.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libthai.so.0 
+Copying file /lib64/libtiff.so.6 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libtiff.so.6 
+Copying file /lib64/libtinysparql-3.0.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libtinysparql-3.0.so.0 
+Copying file /lib64/libudev.so.1 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libudev.so.1 
+Copying file /lib64/libunistring.so.5 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libunistring.so.5 
+Copying file /lib64/libunwind.so.8 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libunwind.so.8 
+Copying file /lib64/libvulkan.so.1 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libvulkan.so.1 
+Copying file /lib64/libwayland-cursor.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libwayland-cursor.so.0 
+Copying file /lib64/libwayland-egl.so.1 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libwayland-egl.so.1 
+Copying file /lib64/libwebp.so.7 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libwebp.so.7 
+Copying file /lib64/libxcb-render.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libxcb-render.so.0 
+Copying file /lib64/libxcb-shm.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libxcb-shm.so.0 
+Copying file /lib64/libxkbcommon.so.0 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libxkbcommon.so.0 
+Copying file /lib64/libxml2.so.2 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libxml2.so.2 
+Copying file /lib64/libxmlb.so.2 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libxmlb.so.2 
+Copying file /lib64/libzstd.so.1 to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libzstd.so.1 
+Copying file /usr/lib64/gio/modules/libdconfsettings.so to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libdconfsettings.so 
+Copying file /usr/lib64/gtk-4.0/4.0.0/immodules/libim-ibus.so to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libim-ibus.so 
+WARNING: $NO_STRIP environment variable detected, not stripping binaries 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/bin/toniator to $ORIGIN/../lib 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libLerc.so.4 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libXau.so.6 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libXcursor.so.1 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libXdamage.so.1 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libXext.so.6 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libXfixes.so.3 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libXi.so.6 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libXinerama.so.1 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libXrandr.so.2 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libXrender.so.1 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libadwaita-1.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libappstream.so.5 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libavahi-client.so.3 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libavahi-common.so.3 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libblkid.so.1 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libbrotlicommon.so.1 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libbrotlidec.so.1 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libbz2.so.1 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libcairo-gobject.so.2 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libcairo-script-interpreter.so.2 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libcairo.so.2 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libcbor.so.0.13 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libcolord.so.2 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libcrypt.so.2 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libcrypto.so.3 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libcups.so.2 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libcurl.so.4 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libdatrie.so.1 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libdbus-1.so.3 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libdconfsettings.so to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libdw.so.1 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libelf.so.1 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libepoxy.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libevent-2.1.so.7 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libffi.so.8 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libfido2.so.1 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libfyaml.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgdk_pixbuf-2.0.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgio-2.0.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libglib-2.0.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libglycin-2.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgmodule-2.0.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgnutls.so.30 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgobject-2.0.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgraphene-1.0.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgraphite2.so.3 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgssapi_krb5.so.2 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgstallocators-1.0.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgstaudio-1.0.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgstbase-1.0.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgstgl-1.0.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgstpbutils-1.0.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgstplay-1.0.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgstreamer-1.0.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgsttag-1.0.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgstvideo-1.0.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgtk-4.so.1 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libgudev-1.0.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libharfbuzz-subset.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libhogweed.so.6 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libibus-1.0.so.5 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libidn2.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libim-ibus.so to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libjbig.so.2.1 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libjpeg.so.62 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libjson-glib-1.0.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libk5crypto.so.3 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libkeyutils.so.1 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libkrb5.so.3 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libkrb5support.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/liblber.so.2 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/liblcms2.so.2 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libldap.so.2 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/liblzma.so.5 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/liblzo2.so.2 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libmount.so.1 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libnettle.so.8 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libnghttp2.so.14 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libnghttp3.so.9 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libngtcp2.so.16 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libngtcp2_crypto_ossl.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/liborc-0.4.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libp11-kit.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libpango-1.0.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libpangocairo-1.0.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libpangoft2-1.0.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libpcre2-8.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libpixman-1.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libpng16.so.16 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libpsl.so.5 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libsasl2.so.3 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libseccomp.so.2 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libselinux.so.1 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libsharpyuv.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libsqlite3.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libssh.so.4 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libssl.so.3 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libstemmer.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libsystemd.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libtasn1.so.6 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libthai.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libtiff.so.6 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libtinysparql-3.0.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libudev.so.1 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libunistring.so.5 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libunwind.so.8 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libvulkan.so.1 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libwayland-cursor.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libwayland-egl.so.1 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libwebp.so.7 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libxcb-render.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libxcb-shm.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libxkbcommon.so.0 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libxml2.so.2 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libxmlb.so.2 to $ORIGIN 
+Setting rpath in ELF file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/lib/libzstd.so.1 to $ORIGIN 
+
+-- Deploying icons -- 
+Deploying icon /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/share/icons/hicolor/scalable/apps/com.toniator.Toniator.svg 
+
+-- Deploying desktop files -- 
+Deploying desktop file /home/ricperry1/projects/Toniator/packaging/appimage/com.toniator.Toniator.desktop 
+
+-- Copying files into AppDir -- 
+Copying file /home/ricperry1/projects/Toniator/packaging/appimage/com.toniator.Toniator.desktop to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/share/applications/com.toniator.Toniator.desktop 
+Copying file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/share/icons/hicolor/scalable/apps/com.toniator.Toniator.svg to /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/share/icons/hicolor/scalable/apps/com.toniator.Toniator.svg 
+WARNING: $NO_STRIP environment variable detected, not stripping binaries 
+
+-- Deploying files into AppDir root directory -- 
+Deploying files to AppDir root using desktop file: /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/share/applications/com.toniator.Toniator.desktop 
+Deploying desktop file to AppDir root: /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/share/applications/com.toniator.Toniator.desktop 
+Creating symlink for file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/share/applications/com.toniator.Toniator.desktop in/as /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir 
+Deploying icon to AppDir root: /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/share/icons/hicolor/scalable/apps/com.toniator.Toniator.svg 
+Creating symlink for file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/share/icons/hicolor/scalable/apps/com.toniator.Toniator.svg in/as /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir 
+Deploying AppRun symlink for executable in AppDir root: /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/bin/toniator 
+Creating symlink for file /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/usr/bin/toniator in/as /home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir/AppRun 
+appimage: restoring Fedora RELR ELFs after linuxdeploy dependency discovery
+appimage: removing host-provided Vulkan loader usr/lib/libvulkan.so.1
+Warning: Schema “org.gnome.system.locale” has path “/system/locale/”.  Paths starting with “/apps/”, “/desktop/” or “/system/” are deprecated.
+Warning: Schema “org.gnome.system.proxy” has path “/system/proxy/”.  Paths starting with “/apps/”, “/desktop/” or “/system/” are deprecated.
+Warning: Schema “org.gnome.system.proxy.http” has path “/system/proxy/http/”.  Paths starting with “/apps/”, “/desktop/” or “/system/” are deprecated.
+Warning: Schema “org.gnome.system.proxy.https” has path “/system/proxy/https/”.  Paths starting with “/apps/”, “/desktop/” or “/system/” are deprecated.
+Warning: Schema “org.gnome.system.proxy.ftp” has path “/system/proxy/ftp/”.  Paths starting with “/apps/”, “/desktop/” or “/system/” are deprecated.
+Warning: Schema “org.gnome.system.proxy.socks” has path “/system/proxy/socks/”.  Paths starting with “/apps/”, “/desktop/” or “/system/” are deprecated.
+
+✔ Validation was successful: pedantic: 2
+appimage: creating /home/ricperry1/projects/Toniator/dist/Toniator-0.1.0-x86_64.AppImage
+appimagetool, continuous build (git version 8c8c91f), build 296 built on 2025-12-04 17:55:56 UTC
+Using architecture x86_64
+/home/ricperry1/projects/Toniator/target/appimage/Toniator.AppDir should be packaged as /home/ricperry1/projects/Toniator/dist/Toniator-0.1.0-x86_64.AppImage.tmp
+AppStream upstream metadata found in usr/share/metainfo/com.toniator.Toniator.appdata.xml
+Trying to validate AppStream information with the appstreamcli tool
+In case of issues, please refer to https://github.com/ximion/appstream
+com.toniator.Toniator.metainfo.xml
+
+com.toniator.Toniator.appdata.xml
+
+✔ Validation was successful: pedantic: 4
+Generating squashfs...
+Parallel mksquashfs: Using 24 processors
+Creating 4.0 filesystem on /home/ricperry1/projects/Toniator/dist/Toniator-0.1.0-x86_64.AppImage.tmp, block size 131072.
+[=============================================================================================================/] 711/711 100%
+
+Exportable Squashfs 4.0 filesystem, zstd compressed, data block size 131072
+	compressed data, compressed metadata, compressed fragments,
+	compressed xattrs, compressed ids
+	duplicates are removed
+Filesystem size 29826.84 Kbytes (29.13 Mbytes)
+	38.31% of uncompressed filesystem size (77855.98 Kbytes)
+Inode table size 4073 bytes (3.98 Kbytes)
+	30.89% of uncompressed inode table size (13185 bytes)
+Directory table size 2381 bytes (2.33 Kbytes)
+	41.88% of uncompressed directory table size (5685 bytes)
+Xattr table size 54 bytes (0.05 Kbytes)
+	100.00% of uncompressed xattr table size (54 bytes)
+Number of duplicate files found 0
+Number of inodes 198
+Number of files 160
+Number of fragments 26
+Number of symbolic links 6
+Number of device nodes 0
+Number of fifo nodes 0
+Number of socket nodes 0
+Number of directories 32
+Number of hard-links 0
+Number of ids (unique uids + gids) 1
+Number of uids 1
+	root (0)
+Number of gids 1
+	root (0)
+Embedding ELF...
+Marking the AppImage as executable...
+Embedding MD5 digest
+Success
+
+Please consider submitting your AppImage to AppImageHub, the crowd-sourced
+central directory of available AppImages, by opening a pull request
+at https://github.com/AppImage/appimage.github.io
+d6137bb4d7933b7df62cdd2450e5437dc986f5f8f85ca83e3e5dd9bafa85ac88  /home/ricperry1/projects/Toniator/dist/Toniator-0.1.0-x86_64.AppImage
+appimage: created /home/ricperry1/projects/Toniator/dist/Toniator-0.1.0-x86_64.AppImage
+ricperry1@fedora44:~/projects/Toniator$ cd dist
+ricperry1@fedora44:~/projects/Toniator/dist$ ./Toniator-0.1.0-x86_64.AppImage 
+

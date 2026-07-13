@@ -1,0 +1,38 @@
+[package]
+name = "toniator"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "Production native GTK application for creative halftone artwork"
+exclude = [
+    "archive/**",
+    "test-artifacts/**",
+]
+
+[lib]
+name = "toniator"
+path = "src/lib.rs"
+
+[[bin]]
+name = "toniator"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+base64 = "0.22"
+gtk = { package = "gtk4", version = "0.10", features = ["v4_20"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+libadwaita = { version = "0.8", features = ["v1_8"] }
+resvg = "0.45"
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = "1.0"
+svgtypes = "0.15"
+tiny-skia = "0.11"
+usvg = "0.45"
+
+[dev-dependencies]
+tempfile = "3.23"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

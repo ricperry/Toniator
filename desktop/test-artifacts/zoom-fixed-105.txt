@@ -1,5 +1,0 @@
-zoom=1.05
-inner_width=504
-inner_height=357
-viewport_width=771
-viewport_height=716

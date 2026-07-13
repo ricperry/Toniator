@@ -1,7 +1,0 @@
-zoom=fit:146.250%
-inner_width=702
-inner_height=497
-viewport_width=750
-viewport_height=724
-preview_width=1400
-preview_height=992

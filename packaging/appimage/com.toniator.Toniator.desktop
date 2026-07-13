@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Toniator
+GenericName=Halftone Artwork Editor
+Comment=Create CMYK, single-ink, and crosshatched halftone artwork
+Exec=toniator
+Icon=com.toniator.Toniator
+Terminal=false
+Categories=Graphics;2DGraphics;RasterGraphics;VectorGraphics;
+StartupNotify=true

@@ -1,9 +1,12 @@
-node_modules/
-dist/
-test-artifacts/screenshots/
+/target/
+/dist/
+/archive/webapp/node_modules/
+/archive/webapp/dist/
+/archive/webapp/test-artifacts/screenshots/
 .DS_Store
 *.log
 .agents/
 .codex/
 resume_hydration.txt
 nextPrompt.txt
+test-artifacts/
