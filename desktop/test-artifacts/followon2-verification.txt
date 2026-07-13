@@ -1,0 +1,36 @@
+Toniator follow-on correction verification (2026-07-12)
+
+Release runtime
+- Actual GTK release binary launched successfully for all evidence captures.
+- Legacy 900x900 document with a 160x90 source opened as 900x506.
+- Migrated window title displayed a dirty bullet and the exact migration toast.
+- Saving produced a canonical document; reopening showed no dirty bullet or migration toast.
+- Genuine crosshatch document is web-curve-v1 / full-width / straight.
+- Crosshatch layer angles: K 45, C -45, M 0, Y 90 degrees.
+- Crosshatch SVG: 390 curve paths, zero mark paths.
+- Crosshatch SVG labels: Layer 1 (K), Layer 2 (C), Layer 3 (M), Layer 4 (Y).
+- Crosshatch PNG: 960x680 RGBA; preview, PNG, and SVG use the same curve treatment.
+- One Ink evidence uses Cyan in the rendered output and graphical mapping hint.
+- All Inks evidence uses the four enabled CMYK colors in the graphical hint.
+- Independent shape evidence shows a noninteractive Mixed shapes state and a separate actionable Apply Mark to All control.
+- Source-view evidence was captured from the true source cache path.
+
+Deterministic behavior
+- Migrated dirty remains dirty through undo and becomes clean only after mark_clean/save.
+- Active render and both inactive treatment caches normalize to source aspect ratio.
+- Legacy shape crosshatch migration preserves crosshatch color, per-ink colors, and applicable channel values.
+- Crosshatch transition is one undoable treatment edit.
+- Four generated crosshatch layer path sets are pairwise distinct.
+- Crosshatch preset roundtrip preserves curve geometry, angles, color, and layer state.
+- Warmed Rendered/Source toggles perform zero render requests; treatment changes invalidate only Rendered.
+- New guard allows continuation only for clean, successful Save, or successful Discard.
+- Cancel, Save As cancellation, save failure, save cleanup failure, and discard cleanup failure retain the current document/path/dirty/caches/recovery and do not start New.
+
+Final gates
+- git diff --check: PASS
+- cargo fmt --check: PASS
+- cargo clippy --all-targets --all-features -- -D warnings: PASS
+- cargo test: PASS (73 library, 29 binary)
+- cargo build: PASS
+- cargo build --release: PASS
+- npm test: PASS (generator sweep, Vite build, preview screenshots)

@@ -1,0 +1,155 @@
+{
+  "format": "toniator-document",
+  "version": 3,
+  "document_id": "migration-evidence",
+  "source": {
+    "name": "wide-source.svg",
+    "media_type": "image/svg+xml",
+    "bytes": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNjAiIGhlaWdodD0iOTAiPjxyZWN0IHdpZHRoPSIxNjAiIGhlaWdodD0iOTAiIGZpbGw9IiNmZmYiLz48Y2lyY2xlIGN4PSI4MCIgY3k9IjQ1IiByPSIzNSIgZmlsbD0iIzExMSIvPjwvc3ZnPg=="
+  },
+  "settings": {
+    "treatment": "dots",
+    "detail": 52.0,
+    "coverage": 92.0,
+    "contrast": 108.0,
+    "angle": 0.0
+  },
+  "render": {
+    "variant": "web-shape-v1",
+    "settings": {
+      "output_width": 900,
+      "output_height": 506,
+      "long_edge_cells": 92.0,
+      "grid_scale": 92.0,
+      "min_mark": 0.0,
+      "max_mark": 85.0,
+      "value_mode": "cmyk",
+      "single_channel": "black",
+      "crosshatch_color": "#111111",
+      "use_shared_mark": true,
+      "shared_shape": "circle",
+      "polygon_sides": 4,
+      "custom_nodes": [
+        {
+          "x": -0.45,
+          "y": -0.45
+        },
+        {
+          "x": 0.45,
+          "y": -0.45
+        },
+        {
+          "x": 0.45,
+          "y": 0.45
+        },
+        {
+          "x": -0.45,
+          "y": 0.45
+        }
+      ],
+      "custom_shape_path": null,
+      "base_channel": {
+        "enabled": true,
+        "color": "#111111",
+        "rotation": 0.0,
+        "grid_rotation": 0.0,
+        "grid_pivot_x": 0.0,
+        "grid_pivot_y": 0.0,
+        "scale": 1.0,
+        "width_scale": 1.0,
+        "height_scale": 1.0,
+        "threshold": 0.0,
+        "max_size": 100.0,
+        "resolution_scale": 1.0,
+        "offset_x": 0.0,
+        "offset_y": 0.0,
+        "opacity": 1.0,
+        "shape": "circle",
+        "polygon_sides": 4,
+        "custom_shape_path": null
+      },
+      "channels": {
+        "c": {
+          "enabled": true,
+          "color": "#00aeef",
+          "rotation": 0.0,
+          "grid_rotation": 15.0,
+          "grid_pivot_x": 0.0,
+          "grid_pivot_y": 0.0,
+          "scale": 1.0,
+          "width_scale": 1.0,
+          "height_scale": 1.0,
+          "threshold": 0.0,
+          "max_size": 100.0,
+          "resolution_scale": 1.0,
+          "offset_x": 0.0,
+          "offset_y": 0.0,
+          "opacity": 1.0,
+          "shape": "circle",
+          "polygon_sides": 4,
+          "custom_shape_path": null
+        },
+        "m": {
+          "enabled": true,
+          "color": "#ec008c",
+          "rotation": 0.0,
+          "grid_rotation": 75.0,
+          "grid_pivot_x": 0.0,
+          "grid_pivot_y": 0.0,
+          "scale": 1.0,
+          "width_scale": 1.0,
+          "height_scale": 1.0,
+          "threshold": 0.0,
+          "max_size": 100.0,
+          "resolution_scale": 1.0,
+          "offset_x": 0.0,
+          "offset_y": 0.0,
+          "opacity": 1.0,
+          "shape": "circle",
+          "polygon_sides": 4,
+          "custom_shape_path": null
+        },
+        "y": {
+          "enabled": true,
+          "color": "#ffd400",
+          "rotation": 0.0,
+          "grid_rotation": 0.0,
+          "grid_pivot_x": 0.0,
+          "grid_pivot_y": 0.0,
+          "scale": 1.0,
+          "width_scale": 1.0,
+          "height_scale": 1.0,
+          "threshold": 0.0,
+          "max_size": 100.0,
+          "resolution_scale": 1.0,
+          "offset_x": 0.0,
+          "offset_y": 0.0,
+          "opacity": 1.0,
+          "shape": "circle",
+          "polygon_sides": 4,
+          "custom_shape_path": null
+        },
+        "k": {
+          "enabled": true,
+          "color": "#111111",
+          "rotation": 0.0,
+          "grid_rotation": 45.0,
+          "grid_pivot_x": 0.0,
+          "grid_pivot_y": 0.0,
+          "scale": 1.0,
+          "width_scale": 1.0,
+          "height_scale": 1.0,
+          "threshold": 0.0,
+          "max_size": 100.0,
+          "resolution_scale": 1.0,
+          "offset_x": 0.0,
+          "offset_y": 0.0,
+          "opacity": 1.0,
+          "shape": "circle",
+          "polygon_sides": 4,
+          "custom_shape_path": null
+        }
+      }
+    }
+  }
+}

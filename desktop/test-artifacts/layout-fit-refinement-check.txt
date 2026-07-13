@@ -1,0 +1,9 @@
+   Compiling toniator-desktop v0.1.0 (/home/ricperry1/projects/Toniator/desktop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.05s
+     Running unittests src/main.rs (target/debug/deps/toniator-ce8cd6bf9f69b3f3)
+
+running 1 test
+Fit refinement: 700x500@2x with installed 1400x700 was sufficient; enlargement to 1000x700@2x scheduled exactly one 2000px request, unchanged allocation scheduled none, generation 2 installed 2000x1000 as latest; shrink and explicit resize scheduled none
+test ui::tests::fit_enlargement_requests_one_physical_pixel_refinement_and_ignores_unchanged_ticks ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.00s

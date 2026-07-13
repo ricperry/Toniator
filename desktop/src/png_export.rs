@@ -27,18 +27,28 @@ impl PngExportOptions {
 }
 
 pub fn document_artboard(document: &Document) -> Result<(u32, u32)> {
-    match &document.render {
-        RenderVariant::NativeBasicV1 => source_dimensions(&document.source),
-        RenderVariant::WebShapeV1 { settings } => {
-            Ok((settings.output_width, settings.output_height))
-        }
-        RenderVariant::WebCurveV1 { settings } => {
-            Ok((settings.output_width, settings.output_height))
-        }
-    }
+    let source = source_dimensions(&document.source)?;
+    let long_edge = match &document.render {
+        RenderVariant::NativeBasicV1 => return Ok(source),
+        RenderVariant::WebShapeV1 { settings } => settings.output_width.max(settings.output_height),
+        RenderVariant::WebCurveV1 { settings } => settings.output_width.max(settings.output_height),
+    };
+    Ok(crate::model::aspect_locked_dimensions(
+        source.0, source.1, long_edge,
+    ))
 }
 
 pub fn png_bytes(document: &Document, options: PngExportOptions) -> Result<Vec<u8>> {
+    let (document_width, document_height) = document_artboard(document)?;
+    let expected = crate::model::aspect_locked_dimensions(
+        document_width,
+        document_height,
+        options.width.max(options.height),
+    );
+    anyhow::ensure!(
+        (options.width, options.height) == expected,
+        "PNG dimensions must preserve the source artwork aspect ratio"
+    );
     let image = render_document_output(
         document,
         options.width,
@@ -61,7 +71,10 @@ pub fn export_png(path: &Path, document: &Document, options: PngExportOptions) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{SourceArtwork, WebCurveSettings};
+    use crate::model::{
+        ClosedShapePath, ShapePoint, SourceArtwork, ValueMode, WebCurveSettings, WebShape,
+        WebShapeSettings,
+    };
     use image::{GenericImageView, ImageReader, Rgba, RgbaImage};
 
     fn source_png() -> Vec<u8> {
@@ -93,6 +106,38 @@ mod tests {
         document
     }
 
+    fn cubic_shape_document() -> Document {
+        let black = RgbaImage::from_pixel(8, 6, Rgba([0, 0, 0, 255]));
+        let mut bytes = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(black)
+            .write_to(&mut bytes, ImageFormat::Png)
+            .unwrap();
+        let mut document = Document::new(SourceArtwork {
+            name: "black.png".into(),
+            media_type: "image/png".into(),
+            bytes: std::sync::Arc::from(bytes.into_inner()),
+        });
+        let mut settings = WebShapeSettings {
+            output_width: 120,
+            output_height: 80,
+            value_mode: ValueMode::SingleChannel,
+            single_channel: Ink::Black,
+            shared_shape: WebShape::UserDefined,
+            ..Default::default()
+        };
+        let mut path = ClosedShapePath::from_polygon(&settings.custom_nodes);
+        path.anchors[0].outgoing = ShapePoint { x: 0.1, y: -0.7 };
+        path.anchors[1].incoming = ShapePoint { x: 0.2, y: -0.1 };
+        settings.custom_shape_path = Some(path);
+        for ink in Ink::ALL {
+            settings.channels.get_mut(ink).enabled = ink == Ink::Black;
+        }
+        document.render = RenderVariant::WebShapeV1 {
+            settings: Box::new(settings),
+        };
+        document
+    }
+
     #[test]
     fn png_has_exact_custom_dimensions_and_real_transparency() {
         let document = curve_document();
@@ -100,7 +145,7 @@ mod tests {
             &document,
             PngExportOptions {
                 width: 240,
-                height: 100,
+                height: 180,
                 white_background: false,
                 channel: None,
             },
@@ -111,19 +156,19 @@ mod tests {
             .unwrap()
             .decode()
             .unwrap();
-        assert_eq!(image.dimensions(), (240, 100));
+        assert_eq!(image.dimensions(), (240, 180));
         let decoded = image.to_rgba8();
         assert!(decoded.pixels().any(|pixel| pixel.0[3] == 0));
         assert_eq!(
             decoded,
-            render_document_output(&document, 240, 100, false, None).unwrap()
+            render_document_output(&document, 240, 180, false, None).unwrap()
         );
 
         let opaque = png_bytes(
             &document,
             PngExportOptions {
                 width: 120,
-                height: 80,
+                height: 90,
                 white_background: true,
                 channel: Some(Ink::Black),
             },
@@ -134,18 +179,54 @@ mod tests {
     }
 
     #[test]
+    fn nonstraight_cubic_png_decodes_to_canonical_preview_pixels() {
+        let document = cubic_shape_document();
+        let options = PngExportOptions::document_size(&document).unwrap();
+        let decoded = image::load_from_memory(&png_bytes(&document, options).unwrap())
+            .unwrap()
+            .to_rgba8();
+        let canonical = render_document_output(&document, 120, 90, true, None).unwrap();
+        assert_eq!(decoded, canonical);
+        assert!(
+            decoded
+                .pixels()
+                .any(|pixel| pixel.0 != [255, 255, 255, 255])
+        );
+    }
+
+    #[test]
     fn unsafe_pixel_count_is_rejected_before_allocation() {
         let error = png_bytes(
             &curve_document(),
             PngExportOptions {
                 width: 32_000,
-                height: 32_000,
+                height: 24_000,
                 white_background: true,
                 channel: None,
             },
         )
         .unwrap_err();
         assert!(error.to_string().contains("64 megapixel"));
+    }
+
+    #[test]
+    fn mismatched_custom_dimensions_are_rejected_before_destination_mutation() {
+        let document = curve_document();
+        let error = png_bytes(
+            &document,
+            PngExportOptions {
+                width: 120,
+                height: 80,
+                white_background: true,
+                channel: None,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("preserve the source artwork aspect ratio")
+        );
     }
 
     #[test]

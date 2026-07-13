@@ -1,0 +1,13 @@
+generation=2
+requested_view=rendered
+installed_view=rendered
+busy=true
+label=Updating rendered preview
+tooltip=Updating rendered preview
+accessible_role=Img
+phase=0.500000
+solid_layer=0.500000
+dot_layer=0.500000
+width=40
+height=28
+geometry_source=embedded-svg:assets/preview-indicator.svg#solid-t,#halftone-dots

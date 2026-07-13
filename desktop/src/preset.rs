@@ -1,7 +1,9 @@
 use crate::model::{
-    AlternateTileTransform, CubicCurveSegment, CurveLayout, CurvePath, CurvePoint, Document, Ink,
-    MotifCoverage, RenderVariant, ValueMode, WebCurveChannel, WebCurveChannels, WebCurveSettings,
-    WebShape, WebShapeChannel, WebShapeChannels, WebShapeDeltas, WebShapeSettings, parse_hex_color,
+    AlternateTileTransform, ClosedShapePath, CubicCurveSegment, CurveLayout, CurvePath, CurvePoint,
+    Document, Ink, MotifCoverage, RenderVariant, ShapeAnchor, ShapePoint, ValueMode,
+    WebCurveChannel, WebCurveChannels, WebCurveSettings, WebShape, WebShapeChannel,
+    WebShapeChannels, WebShapeDeltas, WebShapeSettings, normalize_crosshatch_render,
+    normalize_render_variant_canvas, parse_hex_color,
 };
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
@@ -14,6 +16,7 @@ const WEB_CELLS: f64 = 90.0;
 pub struct ParsedTreatment {
     pub render: RenderVariant,
     pub native_settings: Option<crate::model::Settings>,
+    pub canvas_normalized: bool,
 }
 
 pub fn parse_treatment(bytes: &[u8], source_dimensions: (u32, u32)) -> Result<ParsedTreatment> {
@@ -26,15 +29,51 @@ pub fn parse_treatment(bytes: &[u8], source_dimensions: (u32, u32)) -> Result<Pa
         );
         let preset: NativePresetV2 =
             serde_json::from_slice(bytes).context("Could not read this native treatment preset")?;
-        validate_render_variant(&preset.render)?;
+        let mut render = preset.render;
+        let canvas_normalized =
+            normalize_render_variant_canvas(&mut render, source_dimensions.0, source_dimensions.1);
+        normalize_crosshatch_render(&mut render);
+        validate_render_variant(&render)?;
         return Ok(ParsedTreatment {
-            render: preset.render,
+            render,
             native_settings: Some(preset.settings.sanitized()),
+            canvas_normalized,
         });
     }
+    let raw: PresetV1 =
+        serde_json::from_slice(bytes).context("Could not read this treatment preset")?;
+    let mut original = if let Some(render) = raw.native_render.clone() {
+        render
+    } else {
+        let settings = raw.settings.as_ref().cloned().unwrap_or_default();
+        let width = settings.output_width.unwrap_or(WEB_WIDTH);
+        let height = settings.output_height.unwrap_or(WEB_HEIGHT);
+        if settings.mark_mode.as_deref() == Some("curve") {
+            let value = WebCurveSettings {
+                output_width: width,
+                output_height: height,
+                ..Default::default()
+            };
+            RenderVariant::WebCurveV1 {
+                settings: Box::new(value),
+            }
+        } else {
+            let value = WebShapeSettings {
+                output_width: width,
+                output_height: height,
+                ..Default::default()
+            };
+            RenderVariant::WebShapeV1 {
+                settings: Box::new(value),
+            }
+        }
+    };
+    let canvas_normalized =
+        normalize_render_variant_canvas(&mut original, source_dimensions.0, source_dimensions.1);
     Ok(ParsedTreatment {
         render: parse_tntr(bytes, source_dimensions)?,
         native_settings: None,
+        canvas_normalized,
     })
 }
 
@@ -48,7 +87,9 @@ pub fn parse_tntr(bytes: &[u8], source_dimensions: (u32, u32)) -> Result<RenderV
     if header.version == 2 {
         let preset: NativePresetV2 =
             serde_json::from_slice(bytes).context("Could not read this native treatment preset")?;
-        let candidate = preset.render;
+        let mut candidate = preset.render;
+        normalize_render_variant_canvas(&mut candidate, source_dimensions.0, source_dimensions.1);
+        normalize_crosshatch_render(&mut candidate);
         validate_render_variant(&candidate)?;
         return Ok(candidate);
     }
@@ -63,7 +104,9 @@ pub fn parse_tntr(bytes: &[u8], source_dimensions: (u32, u32)) -> Result<RenderV
         "Unsupported treatment preset version {}",
         preset.version
     );
-    if let Some(render) = preset.native_render.clone() {
+    if let Some(mut render) = preset.native_render.clone() {
+        normalize_render_variant_canvas(&mut render, source_dimensions.0, source_dimensions.1);
+        normalize_crosshatch_render(&mut render);
         validate_render_variant(&render)?;
         return Ok(render);
     }
@@ -78,19 +121,29 @@ pub fn parse_tntr(bytes: &[u8], source_dimensions: (u32, u32)) -> Result<RenderV
         "independent" => false,
         value => bail!("This preset uses unknown geometry '{value}'. Nothing was changed."),
     };
-    let shared_shape = if shared {
-        parse_shape(settings.shared_preset.as_deref().unwrap_or("circle"))?
-    } else {
-        WebShape::Circle
-    };
-    if shared
+    let has_shared_custom = shared
         && settings
             .shared_path
             .as_deref()
-            .is_some_and(|path| !path.trim().is_empty())
-    {
-        bail!("Custom shape paths are not available in the desktop app yet. Nothing was changed.");
-    }
+            .is_some_and(|path| !path.trim().is_empty());
+    let (shared_shape, polygon_sides) = if has_shared_custom {
+        (WebShape::UserDefined, 4)
+    } else if shared {
+        parse_shape(settings.shared_preset.as_deref().unwrap_or("circle"))?
+    } else {
+        (WebShape::Circle, 4)
+    };
+    let shared_custom_path = if shared {
+        settings
+            .shared_path
+            .as_deref()
+            .filter(|path| !path.trim().is_empty())
+            .map(parse_closed_shape_path)
+            .transpose()?
+    } else {
+        None
+    };
+    debug_assert_eq!(shared_custom_path.is_some(), has_shared_custom);
 
     let output_width = settings.output_width.unwrap_or(WEB_WIDTH);
     let mut output_height = settings.output_height.unwrap_or(WEB_HEIGHT);
@@ -148,7 +201,10 @@ pub fn parse_tntr(bytes: &[u8], source_dimensions: (u32, u32)) -> Result<RenderV
         single_channel: parse_ink(settings.single_channel.as_deref().unwrap_or("k"))?,
         use_shared_mark: shared,
         shared_shape,
+        polygon_sides,
         channels,
+        custom_shape_path: shared_custom_path,
+        ..WebShapeSettings::default()
     };
     ensure!(
         result.min_mark <= result.max_mark,
@@ -181,9 +237,11 @@ pub fn parse_tntr(bytes: &[u8], source_dimensions: (u32, u32)) -> Result<RenderV
         offset_x_delta: finite(deltas.offset_x_delta.unwrap_or(0.0), "phase delta")?,
         offset_y_delta: finite(deltas.offset_y_delta.unwrap_or(0.0), "phase delta")?,
     });
-    let candidate = RenderVariant::WebShapeV1 {
+    let mut candidate = RenderVariant::WebShapeV1 {
         settings: Box::new(result),
     };
+    normalize_render_variant_canvas(&mut candidate, source_dimensions.0, source_dimensions.1);
+    normalize_crosshatch_render(&mut candidate);
     let mut cloned = Document::new(crate::model::SourceArtwork {
         name: "validation".into(),
         media_type: "application/octet-stream".into(),
@@ -259,6 +317,8 @@ fn identity_deltas() -> serde_json::Value {
 fn shape_name(shape: WebShape) -> &'static str {
     match shape {
         WebShape::Circle => "circle",
+        WebShape::RegularPolygon => "rectangle",
+        WebShape::UserDefined => "custom",
         WebShape::Rectangle => "rectangle",
         WebShape::Triangle => "triangle",
         WebShape::Pentagon => "pentagon",
@@ -286,6 +346,7 @@ fn ink_name(ink: Ink) -> &'static str {
 }
 
 fn shape_preset_value(name: &str, settings: &WebShapeSettings) -> serde_json::Value {
+    let custom_path = shape_path_data(&settings.resolved_custom_shape_path());
     let mut channels = serde_json::Map::new();
     for ink in Ink::ALL {
         let channel = settings.channels.get(ink);
@@ -305,7 +366,8 @@ fn shape_preset_value(name: &str, settings: &WebShapeSettings) -> serde_json::Va
                 "resolutionScale": channel.resolution_scale,
                 "offsetX": channel.offset_x, "offsetY": channel.offset_y,
                 "opacity": channel.opacity, "preset": shape_name(channel.shape),
-                "customPath": "", "connectEndpoints": false,
+                "polygonSides": channel.polygon_sides,
+                "customPath": if channel.shape == WebShape::UserDefined { channel.custom_shape_path.as_ref().map(shape_path_data).unwrap_or_else(|| custom_path.clone()) } else { String::new() }, "connectEndpoints": false,
                 "smoothSeamTangents": false
             }),
         );
@@ -324,11 +386,33 @@ fn shape_preset_value(name: &str, settings: &WebShapeSettings) -> serde_json::Va
             "showBackground": false,
             "geometryMode": if settings.use_shared_mark { "shared" } else { "independent" },
             "useSharedMark": settings.use_shared_mark,
-            "sharedPreset": shape_name(settings.shared_shape), "sharedPath": "",
+            "sharedPreset": shape_name(settings.shared_shape),
+            "sharedPath": if settings.shared_shape == WebShape::UserDefined { custom_path.as_str() } else { "" },
             "preserveAspect": false
         },
         "cmykDeltas": identity_deltas(), "channels": channels
     })
+}
+
+fn shape_path_data(path: &crate::model::ClosedShapePath) -> String {
+    use std::fmt::Write as _;
+    let mut data = format!("M {} {}", path.anchors[0].point.x, path.anchors[0].point.y);
+    for index in 0..path.anchors.len() {
+        let anchor = path.anchors[index];
+        let next = path.anchors[(index + 1) % path.anchors.len()];
+        let _ = write!(
+            data,
+            " C {} {} {} {} {} {}",
+            anchor.outgoing.x,
+            anchor.outgoing.y,
+            next.incoming.x,
+            next.incoming.y,
+            next.point.x,
+            next.point.y
+        );
+    }
+    data.push_str(" Z");
+    data
 }
 
 fn curve_path_data(path: &CurvePath) -> String {
@@ -480,12 +564,14 @@ fn parse_curve_preset(
         )?,
         value_mode: parse_value_mode(raw_settings.value_mode.as_deref().unwrap_or("cmyk"))?,
         single_channel: parse_ink(raw_settings.single_channel.as_deref().unwrap_or("k"))?,
+        crosshatch_color: "#111111".into(),
         layout,
         use_shared_curve,
         shared_path,
         shared_close_ends,
         shared_smooth_join,
         show_background: raw_settings.show_background.unwrap_or(true),
+        base_channel: WebCurveChannel::default(),
         channels,
     };
     ensure!(
@@ -645,9 +731,10 @@ fn parse_curve_preset(
             channel.alternate_tile_transform = parse_alternate_transform(value)?;
         }
     }
-    let candidate = RenderVariant::WebCurveV1 {
+    let mut candidate = RenderVariant::WebCurveV1 {
         settings: Box::new(result),
     };
+    normalize_render_variant_canvas(&mut candidate, source_dimensions.0, source_dimensions.1);
     let mut cloned = Document::new(crate::model::SourceArtwork {
         name: "validation".into(),
         media_type: "application/octet-stream".into(),
@@ -889,21 +976,31 @@ fn parse_channel(
         "Preset has an invalid {} color",
         ink.label()
     );
+    let independent_custom_path = if !shared && enabled {
+        raw.custom_path
+            .as_deref()
+            .filter(|path| !path.trim().is_empty())
+            .map(parse_closed_shape_path)
+            .transpose()?
+    } else {
+        None
+    };
     let shape = if shared || !enabled {
         shared_shape
+    } else if independent_custom_path.is_some() {
+        WebShape::UserDefined
     } else {
-        if raw
-            .custom_path
-            .as_deref()
-            .is_some_and(|path| !path.trim().is_empty())
-        {
-            bail!(
-                "The {} ink uses a custom shape path that is not available yet. Nothing was changed.",
-                ink.label()
-            );
-        }
-        parse_shape(raw.preset.as_deref().unwrap_or("circle"))?
+        parse_independent_shape(raw.preset.as_deref().unwrap_or("circle"))?
     };
+    let polygon_sides = raw
+        .polygon_sides
+        .unwrap_or(match shape {
+            WebShape::Triangle => 3,
+            WebShape::Pentagon => 5,
+            WebShape::Hexagon => 6,
+            _ => 4,
+        })
+        .clamp(3, 6);
     Ok(WebShapeChannel {
         enabled,
         color,
@@ -922,6 +1019,8 @@ fn parse_channel(
             "grid pivot",
         )?,
         scale: bounded(raw.scale.unwrap_or(1.0), 0.0, 5.0, "coverage")?,
+        width_scale: 1.0,
+        height_scale: 1.0,
         threshold: unit_or_percent(raw.threshold.unwrap_or(0.04), "threshold")?,
         max_size: bounded(raw.max_size.unwrap_or(100.0), 0.0, 1000.0, "maximum size")?,
         resolution_scale: bounded(raw.resolution_scale.unwrap_or(1.0), 0.1, 100.0, "detail")?,
@@ -929,7 +1028,138 @@ fn parse_channel(
         offset_y: bounded(raw.offset_y.unwrap_or(0.0), -4000.0, 4000.0, "phase")?,
         opacity: unit_or_percent(raw.opacity.unwrap_or(0.92), "opacity")?,
         shape,
+        polygon_sides,
+        custom_shape_path: independent_custom_path,
     })
+}
+
+fn parse_closed_shape_path(source: &str) -> Result<ClosedShapePath> {
+    use svgtypes::{PathParser, PathSegment, SimplePathSegment, SimplifyingPathParser};
+    for segment in PathParser::from(source) {
+        ensure!(
+            matches!(
+                segment.context("Preset custom shape path is invalid")?,
+                PathSegment::MoveTo { .. }
+                    | PathSegment::LineTo { .. }
+                    | PathSegment::CurveTo { .. }
+                    | PathSegment::Quadratic { .. }
+                    | PathSegment::ClosePath { .. }
+            ),
+            "Preset custom shape uses an unsupported SVG command"
+        );
+    }
+    let mut start = None;
+    let mut current = ShapePoint { x: 0.0, y: 0.0 };
+    let mut segments: Vec<(ShapePoint, ShapePoint, ShapePoint)> = Vec::new();
+    let mut closed = false;
+    for segment in SimplifyingPathParser::from(source) {
+        match segment.context("Preset custom shape path is invalid")? {
+            SimplePathSegment::MoveTo { x, y } => {
+                ensure!(
+                    start.is_none(),
+                    "Preset custom shape must contain one closed path"
+                );
+                current = ShapePoint { x, y };
+                start = Some(current);
+            }
+            SimplePathSegment::LineTo { x, y } => {
+                ensure!(
+                    start.is_some() && !closed,
+                    "Preset custom shape must begin with a move"
+                );
+                let end = ShapePoint { x, y };
+                segments.push((
+                    shape_lerp(current, end, 1.0 / 3.0),
+                    shape_lerp(current, end, 2.0 / 3.0),
+                    end,
+                ));
+                current = end;
+            }
+            SimplePathSegment::CurveTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x,
+                y,
+            } => {
+                ensure!(
+                    start.is_some() && !closed,
+                    "Preset custom shape must begin with a move"
+                );
+                let end = ShapePoint { x, y };
+                segments.push((
+                    ShapePoint { x: x1, y: y1 },
+                    ShapePoint { x: x2, y: y2 },
+                    end,
+                ));
+                current = end;
+            }
+            SimplePathSegment::Quadratic { x1, y1, x, y } => {
+                ensure!(
+                    start.is_some() && !closed,
+                    "Preset custom shape must begin with a move"
+                );
+                let control = ShapePoint { x: x1, y: y1 };
+                let end = ShapePoint { x, y };
+                segments.push((
+                    shape_lerp(current, control, 2.0 / 3.0),
+                    shape_lerp(end, control, 2.0 / 3.0),
+                    end,
+                ));
+                current = end;
+            }
+            SimplePathSegment::ClosePath => {
+                let first = start.context("Preset custom shape path is empty")?;
+                ensure!(!closed, "Preset custom shape must contain one closed path");
+                if current != first {
+                    segments.push((
+                        shape_lerp(current, first, 1.0 / 3.0),
+                        shape_lerp(current, first, 2.0 / 3.0),
+                        first,
+                    ));
+                }
+                closed = true;
+            }
+        }
+    }
+    ensure!(closed, "Preset custom shape must be closed");
+    ensure!(
+        (3..=64).contains(&segments.len()),
+        "Preset custom shape has an unsupported number of segments"
+    );
+    let first = start.expect("closed path has a start");
+    ensure!(
+        segments.last().is_some_and(|segment| segment.2 == first),
+        "Preset custom shape must end at its start"
+    );
+    let mut points = Vec::with_capacity(segments.len());
+    points.push(first);
+    points.extend(
+        segments
+            .iter()
+            .take(segments.len() - 1)
+            .map(|segment| segment.2),
+    );
+    let anchors = points
+        .into_iter()
+        .enumerate()
+        .map(|(index, point)| ShapeAnchor {
+            point,
+            incoming: segments[(index + segments.len() - 1) % segments.len()].1,
+            outgoing: segments[index].0,
+        })
+        .collect();
+    let path = ClosedShapePath { anchors };
+    crate::model::validate_shape_path(&path)?;
+    Ok(path)
+}
+
+fn shape_lerp(a: ShapePoint, b: ShapePoint, amount: f64) -> ShapePoint {
+    ShapePoint {
+        x: a.x + (b.x - a.x) * amount,
+        y: a.y + (b.y - a.y) * amount,
+    }
 }
 
 fn default_channel(ink: Ink) -> WebShapeChannel {
@@ -948,7 +1178,18 @@ fn default_channel(ink: Ink) -> WebShapeChannel {
     }
 }
 
-fn parse_shape(value: &str) -> Result<WebShape> {
+fn parse_shape(value: &str) -> Result<(WebShape, u8)> {
+    match value {
+        "circle" => Ok((WebShape::Circle, 4)),
+        "rectangle" => Ok((WebShape::RegularPolygon, 4)),
+        "triangle" => Ok((WebShape::RegularPolygon, 3)),
+        "pentagon" => Ok((WebShape::RegularPolygon, 5)),
+        "hexagon" => Ok((WebShape::RegularPolygon, 6)),
+        value => bail!("This preset uses unknown shape '{value}'. Nothing was changed."),
+    }
+}
+
+fn parse_independent_shape(value: &str) -> Result<WebShape> {
     match value {
         "circle" => Ok(WebShape::Circle),
         "rectangle" => Ok(WebShape::Rectangle),
@@ -1113,6 +1354,7 @@ struct RawChannel {
     offset_y: Option<f64>,
     opacity: Option<f64>,
     preset: Option<String>,
+    polygon_sides: Option<u8>,
     custom_path: Option<String>,
     output_quality: Option<f64>,
     curve_scale: Option<f64>,
@@ -1175,6 +1417,67 @@ struct NativePresetV2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::{Channel, MarkGeometry, ResolvedWebShape, generate_web_shape_marks};
+    use image::{Rgba, RgbaImage};
+
+    #[test]
+    fn imported_builtin_polygon_remains_editable_in_current_model() {
+        let preset = br##"{
+          "format":"toniator-preset","version":1,
+          "settings":{"markMode":"shape","geometryMode":"shared","sharedPreset":"hexagon","preserveAspect":false},
+          "channels":{}
+        }"##;
+        let RenderVariant::WebShapeV1 { mut settings } = parse_tntr(preset, (20, 20)).unwrap()
+        else {
+            panic!("shape preset expected")
+        };
+        assert_eq!(settings.shared_shape, WebShape::RegularPolygon);
+        assert_eq!(settings.polygon_sides, 6);
+        settings.polygon_sides = 3;
+        let source = RgbaImage::from_pixel(2, 2, Rgba([0, 0, 0, 255]));
+        let marks = generate_web_shape_marks(&source, &settings);
+        assert!(marks.marks.iter().all(|mark| matches!(
+            &mark.geometry,
+            MarkGeometry::WebShape(ResolvedWebShape::Polygon(points)) if points.len() == 3
+        )));
+    }
+
+    #[test]
+    fn independent_import_preserves_distinct_fixed_channel_shapes() {
+        let preset = br##"{
+          "format":"toniator-preset","version":1,
+          "settings":{"markMode":"shape","geometryMode":"independent","valueMode":"luminance","preserveAspect":false,"outputWidth":100,"outputHeight":100,"longEdgeCells":8},
+          "channels":{
+            "c":{"enabled":true,"preset":"triangle"},
+            "m":{"enabled":true,"preset":"pentagon"},
+            "y":{"enabled":true,"preset":"hexagon"},
+            "k":{"enabled":false,"preset":"circle"}
+          }
+        }"##;
+        let RenderVariant::WebShapeV1 { settings } = parse_tntr(preset, (100, 100)).unwrap() else {
+            panic!("shape preset expected")
+        };
+        assert!(!settings.use_shared_mark);
+        assert_eq!(settings.channels.c.shape, WebShape::Triangle);
+        assert_eq!(settings.channels.m.shape, WebShape::Pentagon);
+        assert_eq!(settings.channels.y.shape, WebShape::Hexagon);
+        let source = RgbaImage::from_pixel(2, 2, Rgba([0, 0, 0, 255]));
+        let marks = generate_web_shape_marks(&source, &settings);
+        let sides = |channel| {
+            marks.marks.iter().find_map(|mark| {
+                if mark.channel != channel {
+                    return None;
+                }
+                match &mark.geometry {
+                    MarkGeometry::WebShape(ResolvedWebShape::Polygon(points)) => Some(points.len()),
+                    _ => None,
+                }
+            })
+        };
+        assert_eq!(sides(Channel::Cyan), Some(3));
+        assert_eq!(sides(Channel::Magenta), Some(5));
+        assert_eq!(sides(Channel::Yellow), Some(6));
+    }
     #[test]
     fn all_bundled_shape_curve_and_motif_presets_import() {
         for name in [
@@ -1187,7 +1490,7 @@ mod tests {
             let result = parse_tntr(&bytes, (960, 680));
             assert!(result.is_ok(), "{name}: {result:?}");
             if let Ok(RenderVariant::WebShapeV1 { settings }) = result {
-                assert_eq!((settings.output_width, settings.output_height), (900, 620));
+                assert_eq!((settings.output_width, settings.output_height), (900, 638));
                 assert_eq!(settings.long_edge_cells, 92.0);
                 assert_eq!(
                     (settings.grid_scale, settings.min_mark, settings.max_mark),
@@ -1247,19 +1550,86 @@ mod tests {
         assert_eq!(settings.channels.m.opacity, 1.0);
     }
     #[test]
-    fn active_custom_rejects_but_disabled_independent_geometry_is_normalized() {
+    fn malformed_active_custom_rejects_but_disabled_independent_geometry_is_ignored() {
         let active = br##"{"format":"toniator-preset","version":1,"settings":{"markMode":"shape","geometryMode":"independent"},"channels":{"c":{"enabled":true,"customPath":"M0 0"}}}"##;
-        assert!(
-            parse_tntr(active, (1, 1))
-                .unwrap_err()
-                .to_string()
-                .ends_with("Nothing was changed.")
-        );
+        assert!(parse_tntr(active, (1, 1)).is_err());
         let disabled = br##"{"format":"toniator-preset","version":1,"settings":{"markMode":"shape","geometryMode":"independent"},"channels":{"c":{"enabled":false,"preset":"unknown","customPath":"M0 0"}}}"##;
         let RenderVariant::WebShapeV1 { settings } = parse_tntr(disabled, (1, 1)).unwrap() else {
             panic!()
         };
         assert_eq!(settings.channels.c.shape, WebShape::Circle);
+    }
+
+    #[test]
+    fn legacy_custom_shape_paths_import_roundtrip_render_and_export_without_native_render() {
+        use crate::model::SourceArtwork;
+        use crate::png_export::{PngExportOptions, png_bytes};
+        use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
+        use std::io::Cursor;
+
+        let shared = br##"{"format":"toniator-preset","version":1,"settings":{"markMode":"shape","geometryMode":"shared","sharedPreset":"custom","sharedPath":"m -.45 -.45 l .9 0 q .15 .45 0 .9 c -.3 .1 -.6 .1 -.9 0 z","preserveAspect":false,"outputWidth":64,"outputHeight":48},"channels":{"c":{"enabled":true},"m":{"enabled":false},"y":{"enabled":false},"k":{"enabled":false}}}"##;
+        let RenderVariant::WebShapeV1 { settings } = parse_tntr(shared, (4, 3)).unwrap() else {
+            panic!()
+        };
+        assert_eq!(settings.shared_shape, WebShape::UserDefined);
+        assert_eq!(settings.resolved_custom_shape_path().anchors.len(), 4);
+
+        let independent = br##"{"format":"toniator-preset","version":1,"settings":{"markMode":"shape","geometryMode":"independent","preserveAspect":false,"outputWidth":64,"outputHeight":48},"channels":{"c":{"enabled":true,"preset":"custom","customPath":"M-.45-.45 L.45-.45 L.45.45 L-.45.45 Z"},"m":{"enabled":true,"preset":"custom","customPath":"M0-.48 Q.48-.48 .48 0 Q.48.48 0 .48 Q-.48.48-.48 0 Q-.48-.48 0-.48 Z"},"y":{"enabled":false,"preset":"unknown","customPath":"M0 0"},"k":{"enabled":false}}}"##;
+        let render = parse_tntr(independent, (4, 3)).unwrap();
+        let RenderVariant::WebShapeV1 { settings } = &render else {
+            panic!()
+        };
+        assert_eq!(settings.channels.c.shape, WebShape::UserDefined);
+        assert_eq!(settings.channels.m.shape, WebShape::UserDefined);
+        assert_ne!(
+            settings.channels.c.custom_shape_path,
+            settings.channels.m.custom_shape_path
+        );
+        assert!(settings.channels.y.custom_shape_path.is_none());
+
+        let saved = treatment_preset_bytes("Legacy custom", &render).unwrap();
+        assert_eq!(parse_tntr(&saved, (4, 3)).unwrap(), render);
+
+        let source = RgbaImage::from_pixel(4, 3, Rgba([0, 0, 0, 255]));
+        let mut encoded = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(source)
+            .write_to(&mut encoded, ImageFormat::Png)
+            .unwrap();
+        let mut document = Document::new(SourceArtwork {
+            name: "legacy.png".into(),
+            media_type: "image/png".into(),
+            bytes: std::sync::Arc::from(encoded.into_inner()),
+        });
+        document.render = render;
+        document.validate().unwrap();
+        let png = png_bytes(
+            &document,
+            PngExportOptions::document_size(&document).unwrap(),
+        )
+        .unwrap();
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+        let directory = tempfile::tempdir().unwrap();
+        let svg = directory.path().join("legacy.svg");
+        crate::svg_export::export_svg(&svg, &document).unwrap();
+        let svg = std::fs::read_to_string(svg).unwrap();
+        assert!(svg.contains(" C ") || svg.contains("C"));
+    }
+
+    #[test]
+    fn legacy_custom_shape_requires_one_supported_closed_path() {
+        for path in [
+            "M 0 0 L 1 0 L 0 1",
+            "M 0 0 L 1 0 L 0 1 Z M 2 2 L 3 2 L 2 3 Z",
+            "M 0 0 A 1 1 0 0 0 1 1 Z",
+        ] {
+            let json = format!(
+                r#"{{"format":"toniator-preset","version":1,"settings":{{"markMode":"shape","geometryMode":"shared","sharedPath":"{path}"}}}}"#
+            );
+            assert!(
+                parse_tntr(json.as_bytes(), (1, 1)).is_err(),
+                "accepted {path}"
+            );
+        }
     }
     #[test]
     fn malformed_version_color_enum_and_range_reject() {
@@ -1324,7 +1694,9 @@ mod tests {
             assert!(text.contains("\"name\": \"My Treatment\""));
             assert!(!text.contains("source"));
             assert!(!text.contains("document_id"));
-            assert_eq!(parse_tntr(&bytes, (333, 222)).unwrap(), render);
+            let mut expected = render.clone();
+            normalize_render_variant_canvas(&mut expected, 333, 222);
+            assert_eq!(parse_tntr(&bytes, (333, 222)).unwrap(), expected);
         }
     }
 
@@ -1340,6 +1712,35 @@ mod tests {
         assert_eq!(value["cmykDeltas"]["scaleMultiplier"], 1);
         assert_eq!(value["cmykDeltas"]["stackSpacingDelta"], 0);
         assert!(value.get("nativeRender").is_some());
+
+        let mut shape = WebShapeSettings {
+            shared_shape: WebShape::UserDefined,
+            ..Default::default()
+        };
+        let mut custom = shape.resolved_custom_shape_path();
+        custom.anchors[0].outgoing.y -= 0.2;
+        shape.custom_shape_path = Some(custom.clone());
+        let bytes = treatment_preset_bytes(
+            "Custom",
+            &RenderVariant::WebShapeV1 {
+                settings: Box::new(shape.clone()),
+            },
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            value["settings"]["sharedPath"]
+                .as_str()
+                .unwrap()
+                .contains(" C ")
+        );
+        let parsed = parse_treatment(&bytes, (900, 620)).unwrap();
+        assert_eq!(
+            parsed.render,
+            RenderVariant::WebShapeV1 {
+                settings: Box::new(shape)
+            }
+        );
     }
 
     #[test]
@@ -1356,6 +1757,7 @@ mod tests {
             contrast: 142.0,
             angle: -17.0,
         };
+        document.render = RenderVariant::NativeBasicV1;
         let bytes = document_treatment_preset_bytes("Lines", &document).unwrap();
         let parsed = parse_treatment(&bytes, (400, 300)).unwrap();
         assert_eq!(parsed.render, RenderVariant::NativeBasicV1);
@@ -1364,5 +1766,20 @@ mod tests {
         assert!(!text.contains("art.png"));
         assert!(!text.contains("document_id"));
         assert!(!text.contains("bytes"));
+    }
+
+    #[test]
+    fn genuine_crosshatch_preset_roundtrips_curves_angles_and_color() {
+        let mut settings = WebCurveSettings {
+            crosshatch_color: "#234567".into(),
+            ..Default::default()
+        };
+        settings.configure_crosshatch();
+        let render = RenderVariant::WebCurveV1 {
+            settings: Box::new(settings),
+        };
+        let bytes = treatment_preset_bytes("Crosshatch", &render).unwrap();
+        let parsed = parse_treatment(&bytes, (900, 620)).unwrap();
+        assert_eq!(parsed.render, render);
     }
 }

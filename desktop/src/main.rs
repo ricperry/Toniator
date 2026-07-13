@@ -16,8 +16,21 @@ pub struct CliOptions {
     save_document: Option<std::path::PathBuf>,
     save_treatment: Option<std::path::PathBuf>,
     preset: Option<std::path::PathBuf>,
+    artwork: Option<std::path::PathBuf>,
+    document: Option<std::path::PathBuf>,
     compare_source: bool,
     arrange_motif: bool,
+    edit_shape: bool,
+    curved_shape: bool,
+    source_mapping: Option<u32>,
+    independent_shapes: bool,
+    artifact_zoom: Option<f64>,
+    artifact_inspector_width: Option<i32>,
+    artifact_window_size: Option<(i32, i32)>,
+    artifact_resize_window: Option<(i32, i32)>,
+    allocation_report: Option<std::path::PathBuf>,
+    indicator_state: Option<String>,
+    indicator_report: Option<std::path::PathBuf>,
 }
 
 impl CliOptions {
@@ -28,8 +41,21 @@ impl CliOptions {
             || self.save_document.is_some()
             || self.save_treatment.is_some()
             || self.preset.is_some()
+            || self.artwork.is_some()
+            || self.document.is_some()
             || self.compare_source
             || self.arrange_motif
+            || self.edit_shape
+            || self.curved_shape
+            || self.source_mapping.is_some()
+            || self.independent_shapes
+            || self.artifact_zoom.is_some()
+            || self.artifact_inspector_width.is_some()
+            || self.artifact_window_size.is_some()
+            || self.artifact_resize_window.is_some()
+            || self.allocation_report.is_some()
+            || self.indicator_state.is_some()
+            || self.indicator_report.is_some()
     }
 
     pub fn loads_example(&self) -> bool {
@@ -42,6 +68,17 @@ impl CliOptions {
             || self.preset.is_some()
             || self.compare_source
             || self.arrange_motif
+            || self.edit_shape
+            || self.curved_shape
+            || self.source_mapping.is_some()
+            || self.independent_shapes
+            || self.artifact_zoom.is_some()
+            || self.artifact_inspector_width.is_some()
+            || self.artifact_window_size.is_some()
+            || self.artifact_resize_window.is_some()
+            || self.allocation_report.is_some()
+            || self.indicator_state.is_some()
+            || self.indicator_report.is_some()
     }
 
     fn application_flags(&self) -> gtk::gio::ApplicationFlags {
@@ -79,11 +116,60 @@ impl CliOptions {
                     options.save_treatment = arguments.next().map(std::path::PathBuf::from)
                 }
                 Some("--preset") => options.preset = arguments.next().map(std::path::PathBuf::from),
+                Some("--artwork") => {
+                    options.artwork = arguments.next().map(std::path::PathBuf::from)
+                }
+                Some("--document") => {
+                    options.document = arguments.next().map(std::path::PathBuf::from)
+                }
                 Some("--compare-source") => options.compare_source = true,
                 Some("--arrange-motif") => options.arrange_motif = true,
+                Some("--edit-shape") => options.edit_shape = true,
+                Some("--curved-shape") => options.curved_shape = true,
+                Some("--source-mapping") => {
+                    options.source_mapping = arguments
+                        .next()
+                        .and_then(|value| value.to_str().and_then(|value| value.parse().ok()))
+                }
+                Some("--independent-shapes") => options.independent_shapes = true,
+                Some("--zoom") => {
+                    options.artifact_zoom = arguments
+                        .next()
+                        .and_then(|value| value.to_str().and_then(|value| value.parse().ok()))
+                }
+                Some("--inspector-width") => {
+                    options.artifact_inspector_width = arguments
+                        .next()
+                        .and_then(|value| value.to_str().and_then(|value| value.parse().ok()))
+                }
+                Some("--window-size") => {
+                    options.artifact_window_size = arguments.next().and_then(|value| {
+                        let value = value.to_str()?;
+                        let (width, height) = value.split_once('x')?;
+                        Some((width.parse().ok()?, height.parse().ok()?))
+                    })
+                }
+                Some("--resize-window") => {
+                    options.artifact_resize_window = arguments.next().and_then(|value| {
+                        let value = value.to_str()?;
+                        let (width, height) = value.split_once('x')?;
+                        Some((width.parse().ok()?, height.parse().ok()?))
+                    })
+                }
+                Some("--allocation-report") => {
+                    options.allocation_report = arguments.next().map(std::path::PathBuf::from)
+                }
+                Some("--indicator-state") => {
+                    options.indicator_state = arguments
+                        .next()
+                        .and_then(|value| value.to_str().map(str::to_owned))
+                }
+                Some("--indicator-report") => {
+                    options.indicator_report = arguments.next().map(std::path::PathBuf::from)
+                }
                 Some("--help") | Some("-h") => {
                     println!(
-                        "Toniator native vertical slice\n\n  --demo                 Open built-in artwork\n  --demo-adjusted        Open an adjusted Lines example\n  --demo-curves          Open the useful default Curves treatment\n  --preset PATH          Apply a legacy treatment preset\n  --compare-source       Show source artwork for screenshot evidence\n  --arrange-motif        Show motif arrangement handles for evidence\n  --screenshot PATH      Save the actual application window as PNG\n  --export-svg PATH      Export the demo as editable SVG\n  --export-png PATH      Export the demo as a PNG image\n  --save-document PATH   Save the demo working document\n  --save-treatment PATH  Save the active treatment without artwork"
+                        "Toniator native vertical slice\n\n  --demo                 Open built-in artwork\n  --demo-adjusted        Open an adjusted Lines example\n  --demo-curves          Open the useful default Curves treatment\n  --preset PATH          Apply a legacy treatment preset\n  --artwork PATH         Import artwork through the production path\n  --compare-source       Show source artwork for screenshot evidence\n  --arrange-motif        Show motif arrangement handles for evidence\n  --edit-shape           Open the curved User-Defined Mark editor for evidence\n  --curved-shape         Apply the curved User-Defined Mark fixture\n  --source-mapping N     Select Source Mapping option 0-4 for evidence\n  --independent-shapes   Apply four distinct per-ink shapes for evidence\n  --zoom SCALE           Set deterministic canvas zoom for evidence\n  --inspector-width PX   Set deterministic inspector width for evidence\n  --window-size WxH      Set deterministic initial window size for evidence\n  --resize-window WxH    Enlarge the artifact window after its first preview\n  --allocation-report P  Write measured inner canvas allocation\n  --screenshot PATH      Save the actual application window as PNG\n  --export-svg PATH      Export the demo as editable SVG\n  --export-png PATH      Export the demo as a PNG image\n  --save-document PATH   Save the demo working document\n  --save-treatment PATH  Save the active treatment without artwork"
                     );
                     std::process::exit(0);
                 }
@@ -91,6 +177,15 @@ impl CliOptions {
             }
         }
         options
+    }
+
+    pub fn indicator_phase(&self) -> Option<f64> {
+        match self.indicator_state.as_deref() {
+            Some("source") => Some(0.0),
+            Some("active") => Some(0.5),
+            Some("rendered") => Some(1.0),
+            _ => None,
+        }
     }
 }
 
@@ -101,21 +196,40 @@ fn main() -> gtk::glib::ExitCode {
         .flags(options.application_flags())
         .build();
     let controller: Rc<RefCell<Option<Rc<ui::AppUi>>>> = Rc::new(RefCell::new(None));
+    let activation_controller = Rc::clone(&controller);
     application.connect_activate(move |application| {
-        if let Some(ui) = controller.borrow().as_ref() {
+        if let Some(ui) = activation_controller.borrow().as_ref() {
             ui.present();
             return;
         }
         let ui = ui::AppUi::new(application, options.clone());
         ui.present();
-        controller.borrow_mut().replace(ui);
+        activation_controller.borrow_mut().replace(ui);
     });
-    application.run_with_args(&["toniator"])
+    let exit_code = application.run_with_args(&["toniator"]);
+    artifact_exit_code(
+        exit_code,
+        controller
+            .borrow()
+            .as_ref()
+            .is_some_and(|ui| ui.cli_artifact_failed()),
+    )
+}
+
+fn artifact_exit_code(
+    application_exit_code: gtk::glib::ExitCode,
+    artifact_failed: bool,
+) -> gtk::glib::ExitCode {
+    if application_exit_code == gtk::glib::ExitCode::SUCCESS && artifact_failed {
+        gtk::glib::ExitCode::FAILURE
+    } else {
+        application_exit_code
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::CliOptions;
+    use super::{CliOptions, artifact_exit_code};
     use std::path::PathBuf;
 
     #[test]
@@ -173,5 +287,21 @@ mod tests {
         };
         assert!(compare.loads_example());
         assert!(compare.artifact_mode());
+    }
+
+    #[test]
+    fn requested_artifact_failure_makes_an_otherwise_successful_run_fail() {
+        assert_eq!(
+            artifact_exit_code(gtk::glib::ExitCode::SUCCESS, true),
+            gtk::glib::ExitCode::FAILURE
+        );
+        assert_eq!(
+            artifact_exit_code(gtk::glib::ExitCode::SUCCESS, false),
+            gtk::glib::ExitCode::SUCCESS
+        );
+        assert_eq!(
+            artifact_exit_code(gtk::glib::ExitCode::FAILURE, false),
+            gtk::glib::ExitCode::FAILURE
+        );
     }
 }

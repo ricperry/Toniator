@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running unittests src/main.rs (target/debug/deps/toniator-ce8cd6bf9f69b3f3)
+
+running 1 test
+realized GTK route check: picking each realized GtkScale/SpinButton center targets that numeric child; controller-chain continuous dy=1.25 reaches a bubble-phase scroller controller and advances its adjustment while values remain 42/17; GTK 4.22 GDK exposes gdk_display_put_event but no public GdkScrollEvent constructor, so this is event-pick/controller-chain injection rather than compositor input synthesis; native keyboard/drag controllers remain
+paned stability: 25 repeated settings/status/preview-install mutations kept inspector=400px; deliberate drag persisted desired=510px; temporary 760px window clamp preserved desired and 1200px restore returned inspector=510px
+test ui::tests::realized_numeric_controls_leave_continuous_scroll_to_parent ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.47s

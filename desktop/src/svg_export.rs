@@ -1,11 +1,17 @@
-use crate::model::{Document, RenderVariant, Treatment, WebShape};
+use crate::model::{Document, RenderVariant, Treatment};
 use crate::persistence::atomic_write;
-use crate::render::{Channel, Mark, MarkGeometry, generate_document_marks, source_dimensions};
+use crate::render::{
+    Channel, Mark, MarkGeometry, ResolvedWebShape, generate_document_marks, source_dimensions,
+};
 use anyhow::Result;
 use std::fmt::Write as _;
 use std::path::Path;
 
 pub fn export_svg(path: &Path, document: &Document) -> Result<()> {
+    let mut canonical = document.clone();
+    let source_size = source_dimensions(&canonical.source)?;
+    canonical.normalize_canvas_aspect(source_size.0, source_size.1);
+    let document = &canonical;
     document.validate()?;
     if let RenderVariant::WebCurveV1 { settings } = &document.render {
         return export_curve_svg(path, document, settings);
@@ -64,7 +70,7 @@ pub fn export_svg(path: &Path, document: &Document) -> Result<()> {
             .filter(|mark| mark.channel == channel)
             .enumerate()
         {
-            write_mark(&mut svg, scale_mark(*mark, scale_x, scale_y), index)?;
+            write_mark(&mut svg, scale_mark(mark.clone(), scale_x, scale_y), index)?;
         }
         writeln!(svg, "  </g>")?;
     }
@@ -107,11 +113,20 @@ fn export_curve_svg(
     for layer in &geometry.layers {
         let channel = layer.layer.channel;
         let (r, g, b) = layer.layer.color;
-        let label = match channel {
-            Channel::Cyan => "Cyan",
-            Channel::Magenta => "Magenta",
-            Channel::Yellow => "Yellow",
-            Channel::Black => "Black",
+        let label = if settings.value_mode == crate::model::ValueMode::CrosshatchLuminance {
+            match channel {
+                Channel::Black => "Layer 1 (K)",
+                Channel::Cyan => "Layer 2 (C)",
+                Channel::Magenta => "Layer 3 (M)",
+                Channel::Yellow => "Layer 4 (Y)",
+            }
+        } else {
+            match channel {
+                Channel::Cyan => "Cyan",
+                Channel::Magenta => "Magenta",
+                Channel::Yellow => "Yellow",
+                Channel::Black => "Black",
+            }
         };
         writeln!(
             svg,
@@ -148,7 +163,7 @@ fn scale_mark(mut mark: Mark, scale_x: f32, scale_y: f32) -> Mark {
 
 fn write_mark(svg: &mut String, mark: Mark, index: usize) -> std::fmt::Result {
     let prefix = mark.channel.id();
-    if let MarkGeometry::WebShape(shape) = mark.geometry {
+    if let MarkGeometry::WebShape(shape) = mark.geometry.clone() {
         return writeln!(
             svg,
             "    <path id=\"{}-mark-{}\" d=\"{}\"/>",
@@ -196,19 +211,19 @@ fn write_mark(svg: &mut String, mark: Mark, index: usize) -> std::fmt::Result {
     }
 }
 
-fn web_shape_path_data(mark: Mark, shape: WebShape) -> String {
+fn web_shape_path_data(mark: Mark, shape: ResolvedWebShape) -> String {
     let transform = |x: f32, y: f32| {
         let radians = mark.angle.to_radians();
         let (sin, cos) = radians.sin_cos();
         let x = x * mark.extent;
-        let y = y * mark.extent;
+        let y = y * mark.thickness;
         (mark.x + x * cos - y * sin, mark.y + x * sin + y * cos)
     };
     let point = |(x, y)| {
         let (x, y) = transform(x, y);
         format!("{} {}", number(x), number(y))
     };
-    if shape == WebShape::Circle {
+    if matches!(shape, ResolvedWebShape::Circle) {
         let p = [
             (0.0, -0.5),
             (0.276, -0.5),
@@ -241,30 +256,26 @@ fn web_shape_path_data(mark: Mark, shape: WebShape) -> String {
             point(p[12]),
         );
     }
-    let points: &[(f32, f32)] = match shape {
-        WebShape::Circle => unreachable!(),
-        WebShape::Rectangle => &[(-0.45, -0.45), (0.45, -0.45), (0.45, 0.45), (-0.45, 0.45)],
-        WebShape::Triangle => &[(0.0, -0.52), (0.5, 0.4), (-0.5, 0.4)],
-        WebShape::Pentagon => &[
-            (0.0, -0.5),
-            (0.4755, -0.1545),
-            (0.2939, 0.4045),
-            (-0.2939, 0.4045),
-            (-0.4755, -0.1545),
-        ],
-        WebShape::Hexagon => &[
-            (0.433, -0.25),
-            (0.433, 0.25),
-            (0.0, 0.5),
-            (-0.433, 0.25),
-            (-0.433, -0.25),
-            (0.0, -0.5),
-        ],
+    if let ResolvedWebShape::Polygon(points) = shape {
+        let mut data = format!("M {}", point(points[0]));
+        for &vertex in &points[1..] {
+            data.push_str(" L ");
+            data.push_str(&point(vertex));
+        }
+        data.push_str(" Z");
+        return data;
+    }
+    let ResolvedWebShape::Cubic { start, segments } = shape else {
+        unreachable!()
     };
-    let mut data = format!("M {}", point(points[0]));
-    for &vertex in &points[1..] {
-        data.push_str(" L ");
-        data.push_str(&point(vertex));
+    let mut data = format!("M {}", point(start));
+    for segment in segments.iter() {
+        data.push_str(" C ");
+        data.push_str(&point((segment.0, segment.1)));
+        data.push(' ');
+        data.push_str(&point((segment.2, segment.3)));
+        data.push(' ');
+        data.push_str(&point((segment.4, segment.5)));
     }
     data.push_str(" Z");
     data
@@ -321,7 +332,7 @@ mod tests {
         for channel in ["cyan", "magenta", "yellow", "black"] {
             assert!(svg.contains(&format!("id=\"toniator-{channel}\"")));
         }
-        assert!(svg.contains("<circle"));
+        assert!(svg.contains("<path"));
         assert!(svg.contains("mix-blend-mode:multiply"));
         assert!(!svg.contains("<image"));
         let options = usvg::Options::default();
@@ -335,11 +346,12 @@ mod tests {
         DynamicImage::ImageRgb8(image)
             .write_to(&mut bytes, ImageFormat::Png)
             .unwrap();
-        let document = Document::new(SourceArtwork {
+        let mut document = Document::new(SourceArtwork {
             name: "wide.png".into(),
             media_type: "image/png".into(),
             bytes: std::sync::Arc::from(bytes.into_inner()),
         });
+        document.render = RenderVariant::NativeBasicV1;
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("wide.svg");
         export_svg(&path, &document).unwrap();
@@ -349,7 +361,9 @@ mod tests {
 
     #[test]
     fn web_export_uses_the_preview_mark_set_and_resolved_layers() {
-        use crate::model::{Ink, RenderVariant, ValueMode, WebShape, WebShapeSettings};
+        use crate::model::{
+            ClosedShapePath, Ink, RenderVariant, ShapePoint, ValueMode, WebShape, WebShapeSettings,
+        };
         use crate::render::generate_document_marks;
 
         let mut document = Document::new(SourceArtwork {
@@ -366,9 +380,13 @@ mod tests {
             max_mark: 90.0,
             value_mode: ValueMode::SingleChannel,
             single_channel: Ink::Black,
-            shared_shape: WebShape::Triangle,
+            shared_shape: WebShape::UserDefined,
             ..Default::default()
         };
+        let mut custom = ClosedShapePath::from_polygon(&settings.custom_nodes);
+        custom.anchors[0].outgoing = ShapePoint { x: 0.1, y: -0.7 };
+        custom.anchors[1].incoming = ShapePoint { x: 0.2, y: -0.1 };
+        settings.custom_shape_path = Some(custom);
         for ink in Ink::ALL {
             settings.channels.get_mut(ink).enabled = ink == Ink::Black;
         }
@@ -392,10 +410,29 @@ mod tests {
         assert!(!svg.contains("<image"));
         assert_eq!(svg.matches("<path id=\"").count(), resolved.marks.len());
         assert!(
-            svg.contains(" L "),
-            "triangle geometry must remain editable paths"
+            svg.contains(" C "),
+            "custom cubic geometry must remain editable paths"
         );
-        usvg::Tree::from_data(svg.as_bytes(), &usvg::Options::default()).unwrap();
+        let tree = usvg::Tree::from_data(svg.as_bytes(), &usvg::Options::default()).unwrap();
+        let mut rasterized = tiny_skia::Pixmap::new(120, 80).unwrap();
+        resvg::render(
+            &tree,
+            tiny_skia::Transform::identity(),
+            &mut rasterized.as_mut(),
+        );
+        let canonical =
+            crate::render::render_document_output(&document, 120, 80, true, None).unwrap();
+        let maximum_channel_drift = rasterized
+            .data()
+            .iter()
+            .zip(canonical.as_raw())
+            .map(|(svg, preview)| svg.abs_diff(*preview))
+            .max()
+            .unwrap_or(0);
+        assert!(
+            maximum_channel_drift <= 8,
+            "SVG/preview raster drift {maximum_channel_drift}"
+        );
     }
 
     #[test]
@@ -442,6 +479,38 @@ mod tests {
         assert!(svg.contains("fill=\"#123456\" opacity=\"0.37\""));
         assert_eq!(svg.matches("-curve-").count(), expected);
         assert!(!svg.contains("<image"));
+        usvg::Tree::from_data(svg.as_bytes(), &usvg::Options::default()).unwrap();
+    }
+
+    #[test]
+    fn crosshatch_svg_is_four_named_monochrome_curve_layers_without_marks() {
+        use crate::model::{RenderVariant, WebCurveSettings};
+
+        let mut document = Document::new(SourceArtwork {
+            name: "crosshatch.png".into(),
+            media_type: "image/png".into(),
+            bytes: std::sync::Arc::from(source_png()),
+        });
+        let mut settings = WebCurveSettings {
+            output_width: 160,
+            output_height: 120,
+            crosshatch_color: "#234567".into(),
+            ..Default::default()
+        };
+        settings.configure_crosshatch();
+        document.render = RenderVariant::WebCurveV1 {
+            settings: Box::new(settings),
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("crosshatch.svg");
+        export_svg(&path, &document).unwrap();
+        let svg = std::fs::read_to_string(path).unwrap();
+        for label in ["Layer 1 (K)", "Layer 2 (C)", "Layer 3 (M)", "Layer 4 (Y)"] {
+            assert!(svg.contains(&format!("inkscape:label=\"{label}\"")));
+        }
+        assert_eq!(svg.matches("fill=\"#234567\"").count(), 4);
+        assert!(svg.contains("-curve-"));
+        assert!(!svg.contains("-mark-"));
         usvg::Tree::from_data(svg.as_bytes(), &usvg::Options::default()).unwrap();
     }
 }

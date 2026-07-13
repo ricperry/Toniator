@@ -1,0 +1,42 @@
+Focused P1 verification — 2026-07-12
+
+Wheel routing
+- GTK 4.22.4 and gtk-rs gdk4 0.10.3 expose gdk_display_put_event / DisplayExt::put_event.
+- Neither the installed public GDK headers nor gtk-rs expose a GdkScrollEvent constructor.
+- GTK's installed test API exposes init/type/accessibility/wait-for-draw helpers, not pointer event injection.
+- ydotool, wtype, and xdotool are installed. ydotool cannot run in this session because
+  /run/user/1000/.ydotool_socket does not exist (ydotoold is not running); compositor-level
+  synthesis therefore cannot be a deterministic automated Wayland gate here.
+- cargo test realized_numeric_controls_leave_continuous_scroll_to_parent -- --nocapture
+  PASS: each realized GtkScale/SpinButton allocation center is picked as that child or a
+  descendant; continuous dy=1.25 reaches a bubble-phase scroller controller, advances the
+  vertical adjustment twice, and leaves Scale=42 / SpinButton=17. Native keyboard actions
+  still change both controls and GtkScale's native GestureDrag remains installed.
+
+Realized zoom controls
+- The same test invokes the production zoom-command binding and widget synchronization helpers
+  with realized Fit / minus / Scale / Entry / plus controls and a real GtkScrolledWindow.
+- PASS: wide and tall Fit, allocation resize while Fit remains active, slider and percentage
+  entry synchronization, Fit-to-manual transitions, +/-25, 5/800 clamping, and below-5 Fit.
+
+Legacy customPath without nativeRender
+- cargo test legacy_custom_shape -- --nocapture
+  PASS: relative/absolute M/L/C/Q/Z parsing, straight/quadratic-to-cubic conversion, shared and
+  distinct enabled independent channel paths, disabled malformed geometry ignored, malformed /
+  open / multiple / unsupported paths rejected, treatment roundtrip, render, SVG and PNG export.
+
+800% setting refresh
+- cargo test settings_refresh_at_800_percent_requests_and_installs_latest_4096_raster -- --nocapture
+  PASS: explicit zoom=800%; generation 1 requested/installed 4096x2048; grid fill changed to 73
+  without zoom input; generation 2 requested max_dimension=4096, superseded generation 1, and
+  installed 4096x2048 as the latest generation.
+
+Full gates
+- cargo fmt --check: PASS
+- cargo clippy --all-targets --all-features -- -D warnings: PASS
+- cargo test: PASS (63 library + 16 binary)
+- cargo build: PASS
+- cargo build --release: PASS
+- npm test: PASS (generator sweep, Vite build, preview screenshots)
+- release GTK launch at explicit 800%: PASS; allocation report recorded preview_width=4096,
+  preview_height=2901, zoom=800.000%.

@@ -1,0 +1,15 @@
+New guard branch matrix
+
+clean                     -> start New
+Cancel                    -> retain current document; do not start New
+Save As cancelled         -> retain current document; do not start New
+save write failure        -> retain current document; do not start New
+save recovery cleanup fail-> retain current document dirty; do not start New
+Discard cleanup failure   -> retain current document; do not start New
+successful Save           -> mark clean, clear matching recovery, start New
+successful Discard        -> clear matching recovery, start New
+
+For every blocked branch the deterministic controller test asserts unchanged
+document identity, path, dirty state, source/render caches, and recovery state.
+Production save_to_path returns false before changing path/clean baseline when
+recovery cleanup fails, so the guard continuation cannot run.

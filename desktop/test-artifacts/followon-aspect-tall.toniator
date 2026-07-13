@@ -1,0 +1,155 @@
+{
+  "format": "toniator-document",
+  "version": 3,
+  "document_id": "18c1b2026cc69036-107d11-1",
+  "source": {
+    "name": "followon-tall-source.svg",
+    "media_type": "image/svg+xml",
+    "bytes": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0ODAiIGhlaWdodD0iOTYwIiB2aWV3Qm94PSIwIDAgNDgwIDk2MCI+CiAgPGRlZnM+PGxpbmVhckdyYWRpZW50IGlkPSJnIiB4Mj0iMCIgeTI9IjEiPjxzdG9wIHN0b3AtY29sb3I9IiMwMGFlZWYiLz48c3RvcCBvZmZzZXQ9IjEiIHN0b3AtY29sb3I9IiNlYzAwOGMiLz48L2xpbmVhckdyYWRpZW50PjwvZGVmcz4KICA8cmVjdCB3aWR0aD0iNDgwIiBoZWlnaHQ9Ijk2MCIgZmlsbD0idXJsKCNnKSIvPgogIDxjaXJjbGUgY3g9IjI0MCIgY3k9IjMwMCIgcj0iMTcwIiBmaWxsPSIjZmZkNDAwIi8+CiAgPHBhdGggZD0iTTgwIDc2MCBDMTYwIDU2MCAzMjAgOTAwIDQwMCA2ODAiIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzExMSIgc3Ryb2tlLXdpZHRoPSI1MiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+Cjwvc3ZnPgo="
+  },
+  "settings": {
+    "treatment": "dots",
+    "detail": 52.0,
+    "coverage": 92.0,
+    "contrast": 108.0,
+    "angle": 0.0
+  },
+  "render": {
+    "variant": "web-shape-v1",
+    "settings": {
+      "output_width": 480,
+      "output_height": 960,
+      "long_edge_cells": 92.0,
+      "grid_scale": 92.0,
+      "min_mark": 0.0,
+      "max_mark": 85.0,
+      "value_mode": "cmyk",
+      "single_channel": "black",
+      "crosshatch_color": "#111111",
+      "use_shared_mark": true,
+      "shared_shape": "circle",
+      "polygon_sides": 4,
+      "custom_nodes": [
+        {
+          "x": -0.45,
+          "y": -0.45
+        },
+        {
+          "x": 0.45,
+          "y": -0.45
+        },
+        {
+          "x": 0.45,
+          "y": 0.45
+        },
+        {
+          "x": -0.45,
+          "y": 0.45
+        }
+      ],
+      "custom_shape_path": null,
+      "base_channel": {
+        "enabled": true,
+        "color": "#111111",
+        "rotation": 0.0,
+        "grid_rotation": 0.0,
+        "grid_pivot_x": 0.0,
+        "grid_pivot_y": 0.0,
+        "scale": 1.0,
+        "width_scale": 1.0,
+        "height_scale": 1.0,
+        "threshold": 0.0,
+        "max_size": 100.0,
+        "resolution_scale": 1.0,
+        "offset_x": 0.0,
+        "offset_y": 0.0,
+        "opacity": 1.0,
+        "shape": "circle",
+        "polygon_sides": 4,
+        "custom_shape_path": null
+      },
+      "channels": {
+        "c": {
+          "enabled": true,
+          "color": "#00aeef",
+          "rotation": 0.0,
+          "grid_rotation": 15.0,
+          "grid_pivot_x": 0.0,
+          "grid_pivot_y": 0.0,
+          "scale": 1.0,
+          "width_scale": 1.0,
+          "height_scale": 1.0,
+          "threshold": 0.0,
+          "max_size": 100.0,
+          "resolution_scale": 1.0,
+          "offset_x": 0.0,
+          "offset_y": 0.0,
+          "opacity": 1.0,
+          "shape": "circle",
+          "polygon_sides": 4,
+          "custom_shape_path": null
+        },
+        "m": {
+          "enabled": true,
+          "color": "#ec008c",
+          "rotation": 0.0,
+          "grid_rotation": 75.0,
+          "grid_pivot_x": 0.0,
+          "grid_pivot_y": 0.0,
+          "scale": 1.0,
+          "width_scale": 1.0,
+          "height_scale": 1.0,
+          "threshold": 0.0,
+          "max_size": 100.0,
+          "resolution_scale": 1.0,
+          "offset_x": 0.0,
+          "offset_y": 0.0,
+          "opacity": 1.0,
+          "shape": "circle",
+          "polygon_sides": 4,
+          "custom_shape_path": null
+        },
+        "y": {
+          "enabled": true,
+          "color": "#ffd400",
+          "rotation": 0.0,
+          "grid_rotation": 0.0,
+          "grid_pivot_x": 0.0,
+          "grid_pivot_y": 0.0,
+          "scale": 1.0,
+          "width_scale": 1.0,
+          "height_scale": 1.0,
+          "threshold": 0.0,
+          "max_size": 100.0,
+          "resolution_scale": 1.0,
+          "offset_x": 0.0,
+          "offset_y": 0.0,
+          "opacity": 1.0,
+          "shape": "circle",
+          "polygon_sides": 4,
+          "custom_shape_path": null
+        },
+        "k": {
+          "enabled": true,
+          "color": "#111111",
+          "rotation": 0.0,
+          "grid_rotation": 45.0,
+          "grid_pivot_x": 0.0,
+          "grid_pivot_y": 0.0,
+          "scale": 1.0,
+          "width_scale": 1.0,
+          "height_scale": 1.0,
+          "threshold": 0.0,
+          "max_size": 100.0,
+          "resolution_scale": 1.0,
+          "offset_x": 0.0,
+          "offset_y": 0.0,
+          "opacity": 1.0,
+          "shape": "circle",
+          "polygon_sides": 4,
+          "custom_shape_path": null
+        }
+      }
+    }
+  }
+}

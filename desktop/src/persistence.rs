@@ -9,8 +9,13 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn document_json(document: &Document) -> Result<Vec<u8>> {
-    document.validate()?;
-    let mut bytes = serde_json::to_vec_pretty(document).context("could not serialize document")?;
+    let mut canonical = document.clone();
+    if let Ok((width, height)) = crate::render::source_dimensions(&canonical.source) {
+        canonical.normalize_canvas_aspect(width, height);
+    }
+    canonical.validate()?;
+    let mut bytes =
+        serde_json::to_vec_pretty(&canonical).context("could not serialize document")?;
     bytes.push(b'\n');
     Ok(bytes)
 }
@@ -21,6 +26,21 @@ pub fn save_document_atomic(path: &Path, document: &Document) -> Result<()> {
 }
 
 pub fn load_document(path: &Path) -> Result<Document> {
+    Ok(load_document_with_migration(path)?.document)
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DocumentMigration {
+    pub canvas_aspect: bool,
+    pub crosshatch_treatment: bool,
+}
+
+pub struct LoadedDocument {
+    pub document: Document,
+    pub migration: DocumentMigration,
+}
+
+pub fn load_document_with_migration(path: &Path) -> Result<LoadedDocument> {
     let bytes = fs::read(path).with_context(|| format!("could not read {}", path.display()))?;
     let header: DocumentHeader = serde_json::from_slice(&bytes)
         .with_context(|| format!("could not parse {}", path.display()))?;
@@ -58,9 +78,22 @@ pub fn load_document(path: &Path) -> Result<Document> {
             .with_context(|| format!("could not parse {}", path.display()))?,
         version => anyhow::bail!("unsupported Toniator document version {version}"),
     };
+    let canvas_aspect =
+        if let Ok((width, height)) = crate::render::source_dimensions(&document.source) {
+            document.normalize_canvas_aspect(width, height)
+        } else {
+            false
+        };
+    let crosshatch_treatment = document.normalize_crosshatch_treatment();
     document.validate()?;
     document.settings = document.settings.sanitized();
-    Ok(document)
+    Ok(LoadedDocument {
+        document,
+        migration: DocumentMigration {
+            canvas_aspect,
+            crosshatch_treatment,
+        },
+    })
 }
 
 #[derive(serde::Deserialize)]
@@ -206,8 +239,10 @@ mod tests {
     }
 
     #[test]
-    fn v3_web_channel_state_roundtrips_without_loss() {
-        use crate::model::{RenderVariant, ValueMode, WebShape, WebShapeSettings};
+    fn legacy_shape_crosshatch_migrates_to_curve_without_losing_output_state() {
+        use crate::model::{
+            ClosedShapePath, RenderVariant, ShapePoint, ValueMode, WebShape, WebShapeSettings,
+        };
 
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("web-shape.toniator");
@@ -228,6 +263,10 @@ mod tests {
             ..Default::default()
         };
         settings.channels.c.enabled = false;
+        let mut custom = ClosedShapePath::from_polygon(&settings.custom_nodes);
+        custom.anchors[0].outgoing = ShapePoint { x: 0.1, y: -0.7 };
+        custom.anchors[1].incoming = ShapePoint { x: 0.2, y: -0.1 };
+        settings.custom_shape_path = Some(custom);
         settings.channels.m.color = "#123456".into();
         settings.channels.m.grid_rotation = 73.5;
         settings.channels.m.grid_pivot_x = -155.49;
@@ -239,7 +278,16 @@ mod tests {
             settings: Box::new(settings),
         };
         save_document_atomic(&path, &document).unwrap();
-        assert_eq!(load_document(&path).unwrap(), document);
+        let loaded = load_document_with_migration(&path).unwrap();
+        assert!(loaded.migration.crosshatch_treatment);
+        let RenderVariant::WebCurveV1 { settings } = loaded.document.render else {
+            panic!("legacy dot crosshatch must become curve geometry")
+        };
+        assert_eq!(settings.value_mode, ValueMode::CrosshatchLuminance);
+        assert_eq!(settings.channels.m.color, "#123456");
+        assert_eq!(settings.channels.m.offset_y, -19.49);
+        assert_eq!(settings.channels.m.resolution_scale, 2.0);
+        assert_eq!(settings.channels.m.opacity, 0.37);
     }
 
     #[test]
@@ -343,5 +391,92 @@ mod tests {
         assert!(!editor.is_dirty());
         assert!(clear_recovery_if_matches(&path, &editor.document().document_id).unwrap());
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn migrated_aspect_is_dirty_until_canonical_save_and_covers_all_caches() {
+        use crate::model::{DocumentEditor, WebCurveSettings, WebShapeSettings};
+        use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
+        use std::io::Cursor;
+
+        let image = RgbImage::from_pixel(16, 9, Rgb([80, 120, 160]));
+        let mut png = Cursor::new(Vec::new());
+        DynamicImage::ImageRgb8(image)
+            .write_to(&mut png, ImageFormat::Png)
+            .unwrap();
+        let mut document = Document::new(SourceArtwork {
+            name: "wide.png".into(),
+            media_type: "image/png".into(),
+            bytes: std::sync::Arc::from(png.into_inner()),
+        });
+        let RenderVariant::WebShapeV1 { settings } = &mut document.render else {
+            panic!()
+        };
+        settings.output_width = 1000;
+        settings.output_height = 1000;
+        document.saved_web_shape = Some(Box::new(WebShapeSettings {
+            output_width: 800,
+            output_height: 800,
+            ..Default::default()
+        }));
+        document.saved_web_curve = Some(Box::new(WebCurveSettings {
+            output_width: 700,
+            output_height: 700,
+            ..Default::default()
+        }));
+        let directory = tempfile::tempdir().unwrap();
+        let legacy_path = directory.path().join("legacy.toniator");
+        std::fs::write(&legacy_path, serde_json::to_vec(&document).unwrap()).unwrap();
+
+        let loaded = load_document_with_migration(&legacy_path).unwrap();
+        assert!(loaded.migration.canvas_aspect);
+        let mut editor = DocumentEditor::new_with_migration(loaded.document, true);
+        assert!(editor.is_dirty());
+        let RenderVariant::WebShapeV1 { settings } = &editor.document().render else {
+            panic!()
+        };
+        assert_eq!((settings.output_width, settings.output_height), (1000, 563));
+        assert_eq!(
+            (
+                editor
+                    .document()
+                    .saved_web_shape
+                    .as_ref()
+                    .unwrap()
+                    .output_width,
+                editor
+                    .document()
+                    .saved_web_shape
+                    .as_ref()
+                    .unwrap()
+                    .output_height,
+            ),
+            (800, 450)
+        );
+        assert_eq!(
+            (
+                editor
+                    .document()
+                    .saved_web_curve
+                    .as_ref()
+                    .unwrap()
+                    .output_width,
+                editor
+                    .document()
+                    .saved_web_curve
+                    .as_ref()
+                    .unwrap()
+                    .output_height,
+            ),
+            (700, 394)
+        );
+
+        let canonical_path = directory.path().join("canonical.toniator");
+        save_document_atomic(&canonical_path, editor.document()).unwrap();
+        editor.mark_clean();
+        assert!(!editor.is_dirty());
+        let reopened = load_document_with_migration(&canonical_path).unwrap();
+        assert_eq!(reopened.migration, DocumentMigration::default());
+        assert_eq!(reopened.document, *editor.document());
     }
 }

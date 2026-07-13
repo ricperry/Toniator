@@ -105,7 +105,7 @@ impl Channel {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Mark {
     pub channel: Channel,
     pub x: f32,
@@ -117,10 +117,22 @@ pub struct Mark {
     pub geometry: MarkGeometry,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MarkGeometry {
     Native,
-    WebShape(WebShape),
+    WebShape(ResolvedWebShape),
+}
+
+pub type CubicShapeSegment = (f32, f32, f32, f32, f32, f32);
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResolvedWebShape {
+    Circle,
+    Polygon(Arc<[(f32, f32)]>),
+    Cubic {
+        start: (f32, f32),
+        segments: Arc<[CubicShapeSegment]>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -396,10 +408,13 @@ pub fn calculate_web_grid(width: u32, height: u32, long_edge_cells: f64) -> WebG
 }
 
 pub fn generate_document_marks(document: &Document) -> Result<MarkSet> {
-    document.validate()?;
-    let source = decode_source(&document.source, 2400)?;
-    Ok(match &document.render {
-        RenderVariant::NativeBasicV1 => generate_marks(&source, document.settings),
+    let mut canonical = document.clone();
+    let dimensions = source_dimensions(&canonical.source)?;
+    canonical.normalize_canvas_aspect(dimensions.0, dimensions.1);
+    canonical.validate()?;
+    let source = decode_source(&canonical.source, 2400)?;
+    Ok(match &canonical.render {
+        RenderVariant::NativeBasicV1 => generate_marks(&source, canonical.settings),
         RenderVariant::WebShapeV1 { settings } => generate_web_shape_marks(&source, settings),
         RenderVariant::WebCurveV1 { .. } => {
             bail!("full-width curve rendering is not available yet")
@@ -434,6 +449,7 @@ pub fn generate_web_shape_marks(source: &RgbaImage, settings: &WebShapeSettings)
         } else {
             channel.shape
         };
+        let shape = resolve_web_shape(shape, settings, channel);
 
         for row in ranges.2..=ranges.3 {
             for col in ranges.0..=ranges.1 {
@@ -461,11 +477,11 @@ pub fn generate_web_shape_marks(source: &RgbaImage, settings: &WebShapeSettings)
                     channel: ink.into(),
                     x: placement.x as f32,
                     y: placement.y as f32,
-                    extent: (size * settings.grid_scale / 100.0) as f32,
-                    thickness: 0.0,
+                    extent: (size * settings.grid_scale / 100.0 * channel.width_scale) as f32,
+                    thickness: (size * settings.grid_scale / 100.0 * channel.height_scale) as f32,
                     angle: channel.rotation as f32,
                     treatment: Treatment::Dots,
-                    geometry: MarkGeometry::WebShape(shape),
+                    geometry: MarkGeometry::WebShape(shape.clone()),
                 });
             }
         }
@@ -476,7 +492,7 @@ pub fn generate_web_shape_marks(source: &RgbaImage, settings: &WebShapeSettings)
         .map(|ink| {
             let channel = settings.channels.get(ink);
             let color = if settings.value_mode == ValueMode::CrosshatchLuminance {
-                (17, 17, 17)
+                parse_hex_color(&settings.crosshatch_color).unwrap_or((17, 17, 17))
             } else {
                 parse_hex_color(&channel.color).unwrap_or_else(|| Channel::from(ink).color())
             };
@@ -715,7 +731,39 @@ fn max_web_shape_extent(
 ) -> f64 {
     let min = (settings.min_mark / 100.0).max(0.0);
     let max = (settings.max_mark / 100.0).max(min) * channel.max_size / 100.0;
-    grid.cell_width.min(grid.cell_height) * max * channel.scale * settings.grid_scale / 100.0 / 2.0
+    let shape = if settings.use_shared_mark {
+        settings.shared_shape
+    } else {
+        channel.shape
+    };
+    let resolved = resolve_web_shape(shape, settings, channel);
+    let radius = match resolved {
+        ResolvedWebShape::Circle => 0.5 * channel.width_scale.max(channel.height_scale),
+        ResolvedWebShape::Polygon(points) => points
+            .iter()
+            .map(|(x, y)| {
+                let x = *x as f64 * channel.width_scale;
+                let y = *y as f64 * channel.height_scale;
+                x.hypot(y)
+            })
+            .fold(0.0, f64::max),
+        ResolvedWebShape::Cubic { start, segments } => std::iter::once(start)
+            .chain(segments.iter().flat_map(|segment| {
+                [
+                    (segment.0, segment.1),
+                    (segment.2, segment.3),
+                    (segment.4, segment.5),
+                ]
+            }))
+            .map(|(x, y)| {
+                let x = x as f64 * channel.width_scale;
+                let y = y as f64 * channel.height_scale;
+                x.hypot(y)
+            })
+            .fold(0.0, f64::max),
+    };
+    grid.cell_width.min(grid.cell_height) * max * channel.scale * settings.grid_scale / 100.0
+        * radius
 }
 
 fn rotate_web_point(
@@ -770,18 +818,21 @@ pub fn render_document_preview(
     max_dimension: u32,
     generation: u64,
 ) -> Result<RenderResult> {
-    if let RenderVariant::WebCurveV1 { settings } = &document.render {
-        document.validate()?;
-        let source = decode_source(&document.source, 2400)?;
+    let mut canonical = document.clone();
+    let dimensions = source_dimensions(&canonical.source)?;
+    canonical.normalize_canvas_aspect(dimensions.0, dimensions.1);
+    if let RenderVariant::WebCurveV1 { settings } = &canonical.render {
+        canonical.validate()?;
+        let source = decode_source(&canonical.source, 2400)?;
         let geometry = crate::curve_render::generate_curve_geometry(&source, settings)?;
         return crate::curve_render::render_curve_geometry(&geometry, max_dimension, generation);
     }
-    let marks = generate_document_marks(document)?;
+    let marks = generate_document_marks(&canonical)?;
     render_mark_set(&marks, max_dimension, generation)
 }
 
 fn render_mark_set(marks: &MarkSet, max_dimension: u32, generation: u64) -> Result<RenderResult> {
-    let scale = (max_dimension as f32 / marks.width.max(marks.height) as f32).min(1.0);
+    let scale = max_dimension as f32 / marks.width.max(marks.height) as f32;
     let width = (marks.width as f32 * scale).round().max(1.0) as u32;
     let height = (marks.height as f32 * scale).round().max(1.0) as u32;
     let image = render_mark_set_output(marks, width, height, true, None)?;
@@ -795,7 +846,10 @@ pub fn render_document_output(
     white_background: bool,
     channel: Option<Ink>,
 ) -> Result<RgbaImage> {
-    document.validate()?;
+    let mut canonical = document.clone();
+    let dimensions = source_dimensions(&canonical.source)?;
+    canonical.normalize_canvas_aspect(dimensions.0, dimensions.1);
+    canonical.validate()?;
     anyhow::ensure!(
         width > 0 && height > 0,
         "output dimensions must be positive"
@@ -805,8 +859,8 @@ pub fn render_document_output(
         pixels <= 64_000_000,
         "PNG output exceeds the safe 64 megapixel limit"
     );
-    if let RenderVariant::WebCurveV1 { settings } = &document.render {
-        let source = decode_source(&document.source, 2400)?;
+    if let RenderVariant::WebCurveV1 { settings } = &canonical.render {
+        let source = decode_source(&canonical.source, 2400)?;
         let geometry = crate::curve_render::generate_curve_geometry(&source, settings)?;
         return crate::curve_render::render_curve_geometry_output(
             &geometry,
@@ -816,7 +870,7 @@ pub fn render_document_output(
             channel,
         );
     }
-    let marks = generate_document_marks(document)?;
+    let marks = generate_document_marks(&canonical)?;
     render_mark_set_output(&marks, width, height, white_background, channel)
 }
 
@@ -844,7 +898,7 @@ fn render_mark_set_output(
             .iter()
             .filter(|mark| mark.channel == layer.channel)
         {
-            if let Some(path) = mark_path(*mark) {
+            if let Some(path) = mark_path(mark) {
                 pixmap.fill_path(
                     &path,
                     &paint,
@@ -874,9 +928,16 @@ fn layer_paint(layer: &InkLayer) -> Paint<'static> {
     paint
 }
 
-fn mark_path(mark: Mark) -> Option<tiny_skia::Path> {
-    if let MarkGeometry::WebShape(shape) = mark.geometry {
-        return web_shape_path(mark.x, mark.y, mark.extent, mark.angle, shape);
+fn mark_path(mark: &Mark) -> Option<tiny_skia::Path> {
+    if let MarkGeometry::WebShape(shape) = &mark.geometry {
+        return web_shape_path(
+            mark.x,
+            mark.y,
+            mark.extent,
+            mark.thickness,
+            mark.angle,
+            shape,
+        );
     }
     match mark.treatment {
         Treatment::Dots => {
@@ -897,18 +958,19 @@ fn web_shape_path(
     cx: f32,
     cy: f32,
     scale: f32,
+    scale_y: f32,
     degrees: f32,
-    shape: WebShape,
+    shape: &ResolvedWebShape,
 ) -> Option<tiny_skia::Path> {
     let mut path = PathBuilder::new();
     let transform = |x: f32, y: f32| {
         let radians = degrees.to_radians();
         let (sin, cos) = radians.sin_cos();
         let x = x * scale;
-        let y = y * scale;
+        let y = y * scale_y;
         (cx + x * cos - y * sin, cy + x * sin + y * cos)
     };
-    if shape == WebShape::Circle {
+    if matches!(shape, ResolvedWebShape::Circle) {
         let points = [
             (0.0, -0.5),
             (0.276, -0.5),
@@ -932,36 +994,88 @@ fn web_shape_path(
             let end = transform(curve[2].0, curve[2].1);
             path.cubic_to(c1.0, c1.1, c2.0, c2.1, end.0, end.1);
         }
-    } else {
-        let points: &[(f32, f32)] = match shape {
-            WebShape::Circle => unreachable!(),
-            WebShape::Rectangle => &[(-0.45, -0.45), (0.45, -0.45), (0.45, 0.45), (-0.45, 0.45)],
-            WebShape::Triangle => &[(0.0, -0.52), (0.5, 0.4), (-0.5, 0.4)],
-            WebShape::Pentagon => &[
-                (0.0, -0.5),
-                (0.4755, -0.1545),
-                (0.2939, 0.4045),
-                (-0.2939, 0.4045),
-                (-0.4755, -0.1545),
-            ],
-            WebShape::Hexagon => &[
-                (0.433, -0.25),
-                (0.433, 0.25),
-                (0.0, 0.5),
-                (-0.433, 0.25),
-                (-0.433, -0.25),
-                (0.0, -0.5),
-            ],
-        };
+    } else if let ResolvedWebShape::Polygon(points) = shape {
         let first = transform(points[0].0, points[0].1);
         path.move_to(first.0, first.1);
         for &(x, y) in &points[1..] {
             let point = transform(x, y);
             path.line_to(point.0, point.1);
         }
+    } else if let ResolvedWebShape::Cubic { start, segments } = shape {
+        let first = transform(start.0, start.1);
+        path.move_to(first.0, first.1);
+        for segment in segments.iter() {
+            let c1 = transform(segment.0, segment.1);
+            let c2 = transform(segment.2, segment.3);
+            let end = transform(segment.4, segment.5);
+            path.cubic_to(c1.0, c1.1, c2.0, c2.1, end.0, end.1);
+        }
     }
     path.close();
     path.finish()
+}
+
+fn resolve_web_shape(
+    shape: WebShape,
+    settings: &WebShapeSettings,
+    channel: &WebShapeChannel,
+) -> ResolvedWebShape {
+    if shape == WebShape::Circle {
+        return ResolvedWebShape::Circle;
+    }
+    let points: Vec<(f32, f32)> = match shape {
+        WebShape::Circle => unreachable!(),
+        WebShape::RegularPolygon => regular_polygon_points(if settings.use_shared_mark {
+            settings.polygon_sides
+        } else {
+            channel.polygon_sides
+        }),
+        WebShape::UserDefined => {
+            let path = settings.resolved_channel_shape_path(channel);
+            let start = path.anchors[0].point;
+            let segments = path
+                .anchors
+                .iter()
+                .enumerate()
+                .map(|(index, anchor)| {
+                    let next = path.anchors[(index + 1) % path.anchors.len()];
+                    (
+                        anchor.outgoing.x as f32,
+                        anchor.outgoing.y as f32,
+                        next.incoming.x as f32,
+                        next.incoming.y as f32,
+                        next.point.x as f32,
+                        next.point.y as f32,
+                    )
+                })
+                .collect::<Vec<_>>();
+            return ResolvedWebShape::Cubic {
+                start: (start.x as f32, start.y as f32),
+                segments: segments.into(),
+            };
+        }
+        WebShape::Rectangle => vec![(-0.45, -0.45), (0.45, -0.45), (0.45, 0.45), (-0.45, 0.45)],
+        WebShape::Triangle => vec![(0.0, -0.52), (0.5, 0.4), (-0.5, 0.4)],
+        WebShape::Pentagon => regular_polygon_points(5),
+        WebShape::Hexagon => regular_polygon_points(6),
+    };
+    ResolvedWebShape::Polygon(points.into())
+}
+
+fn regular_polygon_points(sides: u8) -> Vec<(f32, f32)> {
+    let sides = sides.clamp(3, 6);
+    let start = -std::f32::consts::FRAC_PI_2
+        + if sides.is_multiple_of(2) {
+            std::f32::consts::PI / sides as f32
+        } else {
+            0.0
+        };
+    (0..sides)
+        .map(|index| {
+            let angle = start + std::f32::consts::TAU * index as f32 / sides as f32;
+            (angle.cos() * 0.5, angle.sin() * 0.5)
+        })
+        .collect()
 }
 
 fn rotated_rect_path(
@@ -1235,12 +1349,11 @@ mod tests {
         ] {
             settings.shared_shape = shape;
             let marks = generate_web_shape_marks(&source, &settings);
-            assert!(
-                marks
-                    .marks
-                    .iter()
-                    .all(|mark| mark.geometry == MarkGeometry::WebShape(shape))
-            );
+            assert!(marks.marks.iter().all(|mark| matches!(
+                mark.geometry,
+                MarkGeometry::WebShape(ResolvedWebShape::Circle)
+                    | MarkGeometry::WebShape(ResolvedWebShape::Polygon(_))
+            )));
         }
 
         settings.use_shared_mark = false;
@@ -1249,7 +1362,129 @@ mod tests {
             generate_web_shape_marks(&source, &settings)
                 .marks
                 .iter()
-                .all(|mark| mark.geometry == MarkGeometry::WebShape(WebShape::Hexagon))
+                .all(|mark| matches!(
+                    mark.geometry,
+                    MarkGeometry::WebShape(ResolvedWebShape::Polygon(_))
+                ))
+        );
+    }
+
+    #[test]
+    fn independent_channels_render_circle_triangle_hexagon_and_cubic_together() {
+        let source = RgbaImage::from_pixel(32, 24, image::Rgba([0, 0, 0, 255]));
+        let mut settings = WebShapeSettings {
+            output_width: 320,
+            output_height: 240,
+            long_edge_cells: 8.0,
+            value_mode: ValueMode::Luminance,
+            use_shared_mark: false,
+            ..Default::default()
+        };
+        settings.channels.c.shape = WebShape::Circle;
+        settings.channels.m.shape = WebShape::RegularPolygon;
+        settings.channels.m.polygon_sides = 3;
+        settings.channels.y.shape = WebShape::RegularPolygon;
+        settings.channels.y.polygon_sides = 6;
+        settings.channels.k.shape = WebShape::UserDefined;
+        settings.channels.k.custom_shape_path = Some(crate::model::ClosedShapePath::from_polygon(
+            &crate::model::default_shape_nodes(),
+        ));
+        let marks = generate_web_shape_marks(&source, &settings);
+        let geometry = |channel| {
+            marks
+                .marks
+                .iter()
+                .find(|mark| mark.channel == channel)
+                .unwrap()
+                .geometry
+                .clone()
+        };
+        assert!(matches!(
+            geometry(Channel::Cyan),
+            MarkGeometry::WebShape(ResolvedWebShape::Circle)
+        ));
+        assert!(
+            matches!(geometry(Channel::Magenta), MarkGeometry::WebShape(ResolvedWebShape::Polygon(points)) if points.len() == 3)
+        );
+        assert!(
+            matches!(geometry(Channel::Yellow), MarkGeometry::WebShape(ResolvedWebShape::Polygon(points)) if points.len() == 6)
+        );
+        assert!(matches!(
+            geometry(Channel::Black),
+            MarkGeometry::WebShape(ResolvedWebShape::Cubic { .. })
+        ));
+    }
+
+    #[test]
+    fn user_polygon_is_resolved_once_and_anisotropic_rotation_renders() {
+        let source = RgbaImage::from_pixel(2, 2, Rgba([0, 0, 0, 255]));
+        let mut settings = web_settings();
+        settings.shared_shape = WebShape::UserDefined;
+        settings.custom_nodes = vec![
+            crate::model::ShapePoint { x: -0.5, y: -0.4 },
+            crate::model::ShapePoint { x: 0.5, y: -0.4 },
+            crate::model::ShapePoint { x: 0.0, y: 0.5 },
+        ];
+        settings.channels.k.width_scale = 2.0;
+        settings.channels.k.height_scale = 0.5;
+        settings.channels.k.rotation = 37.0;
+        let marks = generate_web_shape_marks(&source, &settings);
+        let cubics: Vec<_> = marks
+            .marks
+            .iter()
+            .filter_map(|mark| match &mark.geometry {
+                MarkGeometry::WebShape(ResolvedWebShape::Cubic { segments, .. }) => Some(segments),
+                _ => None,
+            })
+            .collect();
+        assert!(!cubics.is_empty());
+        assert!(cubics.windows(2).all(|pair| Arc::ptr_eq(pair[0], pair[1])));
+        assert!(marks.marks.iter().all(|mark| mark.extent > mark.thickness));
+        assert!(marks.marks.iter().all(|mark| mark_path(mark).is_some()));
+    }
+
+    #[test]
+    fn transformed_custom_radius_retains_marks_entering_artboard_edge() {
+        let mut settings = web_settings();
+        settings.output_width = 100;
+        settings.output_height = 100;
+        settings.long_edge_cells = 4.0;
+        settings.max_mark = 100.0;
+        settings.grid_scale = 100.0;
+        settings.shared_shape = WebShape::UserDefined;
+        settings.custom_nodes = vec![
+            crate::model::ShapePoint { x: -1.2, y: -0.2 },
+            crate::model::ShapePoint { x: 1.2, y: -0.2 },
+            crate::model::ShapePoint { x: 0.0, y: 0.4 },
+        ];
+        let channel = &mut settings.channels.k;
+        channel.grid_rotation = 31.0;
+        channel.rotation = 47.0;
+        channel.width_scale = 2.0;
+        channel.height_scale = 0.5;
+        let grid = calculate_web_grid(100, 100, 4.0);
+        let margin = max_web_shape_extent(&settings, &settings.channels.k, grid);
+        assert!(
+            margin > 50.0,
+            "custom radius must exceed the old 25px bound"
+        );
+        let ranges = web_grid_ranges(&settings, &settings.channels.k, grid);
+        let entering = (ranges.2..=ranges.3).any(|row| {
+            (ranges.0..=ranges.1).any(|col| {
+                let placement =
+                    web_shape_placement(col, row, &settings, &settings.channels.k, grid);
+                placement.visible
+                    && (placement.x < 0.0
+                        || placement.x > 100.0
+                        || placement.y < 0.0
+                        || placement.y > 100.0)
+                    && (-margin..=100.0 + margin).contains(&placement.x)
+                    && (-margin..=100.0 + margin).contains(&placement.y)
+            })
+        });
+        assert!(
+            entering,
+            "an off-artboard center whose mark enters must be retained"
         );
     }
 

@@ -1,0 +1,24 @@
+{
+  "format": "toniator-document",
+  "version": 3,
+  "document_id": "migration-evidence",
+  "source": {
+    "name": "wide-source.svg",
+    "media_type": "image/svg+xml",
+    "bytes": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNjAiIGhlaWdodD0iOTAiPjxyZWN0IHdpZHRoPSIxNjAiIGhlaWdodD0iOTAiIGZpbGw9IiNmZmYiLz48Y2lyY2xlIGN4PSI4MCIgY3k9IjQ1IiByPSIzNSIgZmlsbD0iIzExMSIvPjwvc3ZnPg=="
+  },
+  "settings": {
+    "treatment": "dots",
+    "detail": 52.0,
+    "coverage": 92.0,
+    "contrast": 108.0,
+    "angle": 0.0
+  },
+  "render": {
+    "variant": "web-shape-v1",
+    "settings": {
+      "output_width": 900,
+      "output_height": 900
+    }
+  }
+}

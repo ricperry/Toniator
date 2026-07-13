@@ -1,0 +1,13 @@
+Migration dirty-state report
+
+Input: followon2-migrated-dirty-input.toniator
+Source: 160x90 SVG
+Stored legacy canvas: 900x900
+Installed normalized canvas: 900x506
+Opened title: followon2-migrated-dirty-input with dirty bullet
+Toast: Canvas proportions were updated to match the source artwork; save to keep this change.
+Saved: followon2-migrated-saved.toniator
+Reopen: clean title, no migration toast, 900x506 canvas
+
+Unit coverage also verifies active shape settings, saved shape settings, and
+saved curve settings all normalize and remain save-relevant until marked clean.
