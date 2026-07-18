@@ -1,6 +1,7 @@
+use crate::cancel::CancellationToken;
 use crate::model::{
-    DOCUMENT_FORMAT, DOCUMENT_VERSION, Document, RenderVariant, Settings, SourceArtwork,
-    new_document_id,
+    DOCUMENT_FORMAT, DOCUMENT_VERSION, Document, DocumentAppearance, ExportBackground, OutputMode,
+    PreviewSurface, RenderVariant, RgbaColor, Settings, SourceArtwork, new_document_id,
 };
 use anyhow::{Context, Result};
 use std::fs::{self, File, OpenOptions};
@@ -25,6 +26,15 @@ pub fn save_document_atomic(path: &Path, document: &Document) -> Result<()> {
     atomic_write(path, &bytes)
 }
 
+pub fn save_document_atomic_cancellable(
+    path: &Path,
+    document: &Document,
+    token: &CancellationToken,
+) -> Result<()> {
+    let bytes = document_json(document)?;
+    atomic_write_cancellable(path, &bytes, token)
+}
+
 pub fn load_document(path: &Path) -> Result<Document> {
     Ok(load_document_with_migration(path)?.document)
 }
@@ -33,6 +43,8 @@ pub fn load_document(path: &Path) -> Result<Document> {
 pub struct DocumentMigration {
     pub canvas_aspect: bool,
     pub crosshatch_treatment: bool,
+    pub appearance: bool,
+    pub output_mode: bool,
 }
 
 pub struct LoadedDocument {
@@ -55,9 +67,13 @@ pub fn load_document_with_migration(path: &Path) -> Result<LoadedDocument> {
                 document_id: legacy.document_id,
                 source: legacy.source,
                 settings: legacy.settings.sanitized(),
+                appearance: legacy_appearance(),
+                output_mode: OutputMode::CmykInks,
                 render: RenderVariant::NativeBasicV1,
                 saved_web_shape: None,
                 saved_web_curve: None,
+                inactive_cmyk: None,
+                inactive_rgb: None,
             }
         }
         2 => {
@@ -69,10 +85,41 @@ pub fn load_document_with_migration(path: &Path) -> Result<LoadedDocument> {
                 document_id: legacy.document_id,
                 source: legacy.source,
                 settings: legacy.settings.sanitized(),
+                appearance: legacy_appearance(),
+                output_mode: OutputMode::CmykInks,
                 render: legacy.render,
                 saved_web_shape: None,
                 saved_web_curve: None,
+                inactive_cmyk: None,
+                inactive_rgb: None,
             }
+        }
+        3 => {
+            let legacy: DocumentV3 = serde_json::from_slice(&bytes)
+                .with_context(|| format!("could not parse {}", path.display()))?;
+            Document {
+                format: legacy.format,
+                version: DOCUMENT_VERSION,
+                document_id: legacy.document_id,
+                source: legacy.source,
+                settings: legacy.settings,
+                appearance: legacy_appearance(),
+                output_mode: OutputMode::CmykInks,
+                render: legacy.render,
+                saved_web_shape: legacy.saved_web_shape,
+                saved_web_curve: legacy.saved_web_curve,
+                inactive_cmyk: None,
+                inactive_rgb: None,
+            }
+        }
+        4 => {
+            let mut legacy: Document = serde_json::from_slice(&bytes)
+                .with_context(|| format!("could not parse {}", path.display()))?;
+            legacy.version = DOCUMENT_VERSION;
+            legacy.output_mode = OutputMode::CmykInks;
+            legacy.inactive_cmyk = None;
+            legacy.inactive_rgb = None;
+            legacy
         }
         DOCUMENT_VERSION => serde_json::from_slice(&bytes)
             .with_context(|| format!("could not parse {}", path.display()))?,
@@ -92,6 +139,8 @@ pub fn load_document_with_migration(path: &Path) -> Result<LoadedDocument> {
         migration: DocumentMigration {
             canvas_aspect,
             crosshatch_treatment,
+            appearance: header.version < 4,
+            output_mode: header.version < 5,
         },
     })
 }
@@ -120,11 +169,49 @@ struct DocumentV2 {
     render: RenderVariant,
 }
 
+#[derive(serde::Deserialize)]
+struct DocumentV3 {
+    format: String,
+    #[allow(dead_code)]
+    version: u32,
+    #[serde(default = "legacy_document_id")]
+    document_id: String,
+    source: SourceArtwork,
+    settings: Settings,
+    #[serde(default)]
+    render: RenderVariant,
+    #[serde(default)]
+    saved_web_shape: Option<Box<crate::model::WebShapeSettings>>,
+    #[serde(default)]
+    saved_web_curve: Option<Box<crate::model::WebCurveSettings>>,
+}
+
+fn legacy_appearance() -> DocumentAppearance {
+    // v1–v3 always composited preview and exports on white paper. Keep that
+    // visible and editable rather than hiding it in compatibility code.
+    DocumentAppearance {
+        preview_surface: PreviewSurface::Color {
+            color: RgbaColor::WHITE,
+        },
+        export_background: ExportBackground::Color {
+            color: RgbaColor::WHITE,
+        },
+    }
+}
+
 fn legacy_document_id() -> String {
     new_document_id()
 }
 
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    atomic_write_cancellable(path, bytes, &CancellationToken::new())
+}
+
+pub fn atomic_write_cancellable(
+    path: &Path,
+    bytes: &[u8],
+    token: &CancellationToken,
+) -> Result<()> {
     let parent = path
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -146,10 +233,15 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
             .write(true)
             .open(&temporary)
             .with_context(|| format!("could not create {}", temporary.display()))?;
-        file.write_all(bytes)
-            .with_context(|| format!("could not write {}", temporary.display()))?;
+        for chunk in bytes.chunks(64 * 1024) {
+            token.checkpoint()?;
+            file.write_all(chunk)
+                .with_context(|| format!("could not write {}", temporary.display()))?;
+        }
+        token.checkpoint()?;
         file.flush()?;
         file.sync_all()?;
+        token.begin_commit()?;
         fs::rename(&temporary, path)
             .with_context(|| format!("could not replace {}", path.display()))?;
         File::open(parent)?.sync_all()?;
@@ -186,7 +278,20 @@ pub fn clear_recovery_if_matches(path: &Path, document_id: &str) -> Result<bool>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CancellationToken;
     use crate::model::{Document, SourceArtwork};
+
+    #[test]
+    fn cancelled_atomic_write_preserves_existing_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("destination.bin");
+        std::fs::write(&path, b"keep").unwrap();
+        let token = CancellationToken::new();
+        assert!(token.cancel());
+        assert!(atomic_write_cancellable(&path, &[7; 200_000], &token).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"keep");
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
 
     #[test]
     fn v1_document_migrates_to_native_basic_without_changing_marks() {
@@ -210,6 +315,7 @@ mod tests {
         let loaded = load_document(&path).unwrap();
         assert_eq!(loaded.version, DOCUMENT_VERSION);
         assert_eq!(loaded.render, RenderVariant::NativeBasicV1);
+        assert_eq!(loaded.appearance, legacy_appearance());
         let decoded = decode_source(&loaded.source, 2400).unwrap();
         assert_eq!(
             generate_document_marks(&loaded).unwrap(),
@@ -310,6 +416,7 @@ mod tests {
         let loaded = load_document(&path).unwrap();
         assert_eq!(loaded.version, DOCUMENT_VERSION);
         assert_eq!(loaded.render, document.render);
+        assert_eq!(loaded.appearance, legacy_appearance());
         assert!(loaded.saved_web_shape.is_none());
         assert!(loaded.saved_web_curve.is_none());
     }
@@ -339,6 +446,41 @@ mod tests {
         document.saved_web_shape = Some(Box::new(crate::model::WebShapeSettings::default()));
         save_document_atomic(&path, &document).unwrap();
         assert_eq!(load_document(&path).unwrap(), document);
+    }
+
+    #[test]
+    fn v3_migrates_to_visible_white_appearance_and_v4_roundtrips_rgba() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("v3.toniator");
+        let document = Document::new(SourceArtwork {
+            name: "source.png".into(),
+            media_type: "image/png".into(),
+            bytes: std::sync::Arc::from([9, 8, 7]),
+        });
+        let mut legacy = serde_json::to_value(&document).unwrap();
+        legacy["version"] = serde_json::json!(3);
+        legacy.as_object_mut().unwrap().remove("appearance");
+        std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let migrated = load_document_with_migration(&path).unwrap();
+        assert!(migrated.migration.appearance);
+        assert_eq!(migrated.document.appearance, legacy_appearance());
+
+        let mut current = migrated.document;
+        current.appearance = DocumentAppearance {
+            preview_surface: PreviewSurface::Checkerboard,
+            export_background: ExportBackground::Color {
+                color: RgbaColor {
+                    red: 3,
+                    green: 4,
+                    blue: 5,
+                    alpha: 99,
+                },
+            },
+        };
+        save_document_atomic(&path, &current).unwrap();
+        let reopened = load_document_with_migration(&path).unwrap();
+        assert_eq!(reopened.document, current);
+        assert_eq!(reopened.migration, DocumentMigration::default());
     }
 
     #[test]

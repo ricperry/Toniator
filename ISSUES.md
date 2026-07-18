@@ -35,7 +35,7 @@ This file converts the current Toniator wish list and known problems into discre
 
 ## TON-001 — Fix incomplete coverage in repeated-motif curve layouts
 
-- **Status:** Open
+- **Status:** Done
 - **Priority:** P0
 - **Area:** Curves / repeated motif layout
 - **Type:** Rendering defect
@@ -70,11 +70,19 @@ Repeated-motif layouts must cover the complete intended artwork area at all supp
 
 Investigate whether the current layout computes rows only from the nominal canvas bounds rather than from an expanded coverage region. The fix should derive the required path extent from the rendered motif footprint rather than adding an arbitrary fixed number of rows.
 
+### Completion evidence
+
+- Replaced nominal-axis heuristic counts with transformed lattice coverage derived from the actual motif advance, row advance, rotation, pivot, offsets, stagger, bleed, and maximum rendered width.
+- Custom Grid column and row counts now act as requested minimums; symmetric off-canvas guard copies are generated when the artboard requires more coverage.
+- Collapsed or sub-1 px legacy lattice advances remain bounded instead of generating thousands of coincident paths; the supported 1 px minimum still receives full coverage guards.
+- Added deterministic regressions for wide and tall artboards, rotation, heavy curve weight, maximum rows with minimum spacing, nonzero transforms, all four artboard edges, transparent source edges, degenerate spacing, and canonical preview/SVG geometry.
+- Verified with 110 automated tests, the bundled repeated-motif stress preset exported to both SVG and PNG, formatting/diff checks, and an independent regression review with no remaining actionable finding. One unrelated GTK widget test still requires a graphical session and cannot initialize in the headless test shell.
+
 ---
 
 ## TON-002 — Replace implementation-oriented terminology with creator-friendly language
 
-- **Status:** Open
+- **Status:** Done
 - **Priority:** P1
 - **Area:** Entire application
 - **Type:** UX / content design
@@ -123,11 +131,18 @@ Include a terminology-change table in the implementation notes or pull request d
 |---|---|---|
 | Example | Example | What misunderstanding it prevents |
 
+### Completion evidence
+
+- Replaced implementation-shaped labels with creator-facing terminology across the shipping GTK UI, dynamic status text, CLI help, preset/export wording, and accessibility labels while preserving serialized keys.
+- Added the required terminology-change table and specialized-term reference to `README.md`.
+- Verified mode-specific wording for inks versus directional Crosshatch layers, including current screen angles and consistent Shapes/Curves terminology.
+- Reviewed against refreshed main and Crosshatch screenshots by the `creative_tester`; no remaining actionable terminology issue was found.
+
 ---
 
 ## TON-003 — Add contextual popup help for controls
 
-- **Status:** Open
+- **Status:** Done
 - **Priority:** P1
 - **Area:** Entire application
 - **Type:** UX / discoverability
@@ -159,11 +174,18 @@ Users should be able to understand a control without consulting source code or e
 
 This does not require a full manual embedded inside the application.
 
+### Completion evidence
+
+- Added a declarative help catalog with focusable GNOME help buttons, GTK-owned popovers, substantive tooltips, and accessible descriptions for non-obvious controls.
+- Help copy covers effect, increase/decrease behavior, related controls or mode conditions, and preview/export scope; dynamic popovers update fully between ink and Crosshatch-layer modes.
+- Added completeness, realized-widget, keyboard activation, hidden-control, accessibility, and capture-lifecycle regressions.
+- Verified a zero-warning build, 113 automated tests, successful bounded main/Crosshatch screenshot capture, non-hanging terminal artifact failures, and independent creative/test review passes.
+
 ---
 
 ## TON-004 — Rework the UI toward the GNOME/libadwaita HIG
 
-- **Status:** Open
+- **Status:** Done
 - **Priority:** P1
 - **Area:** Application shell and interaction design
 - **Type:** UI/UX overhaul
@@ -215,11 +237,20 @@ Review and improve:
 
 Perform this incrementally. Avoid a single unreviewable rewrite that changes architecture, terminology, layout, and rendering behavior simultaneously.
 
+### Completion evidence
+
+- Reworked the native GTK/libadwaita shell without changing renderer or document semantics: contextual header actions, `AdwWindowTitle` save/operation state, fixed editing-context summary, workflow-grouped inspector, persistent preview/export feedback, and accurate disabled/action explanations.
+- Retained the resizable left controls pane on wide windows and moved the same inspector into a Controls-triggered overlay below the narrow breakpoint; focus, visibility, saved width, and canvas allocation remain synchronized.
+- Added creator-facing context for Shapes, Curves, inks, and directional Crosshatch layers, plus standard new-project, controls, zoom, undo/redo, save, open, and export shortcuts.
+- Added real cooperative cancellation for preview and export work. Controlled sampling, generation, curve, raster, SVG, PNG, and atomic-write paths checkpoint cancellation; cancel/commit state is race-safe, cancelled exports cannot replace an existing destination, and close remains inhibited until export cleanup acknowledges.
+- Added realized layout/focus/allocation regressions, cancellation/state-machine tests, refreshed start/Shapes/Crosshatch/narrow artifacts, and independent creative/test review passes.
+- Verified formatting, warnings-as-errors linting, diff checks, and 119 automated tests. Image resize and PNG encoding remain indivisible third-party calls, with cancellation checked immediately before and after them.
+
 ---
 
 ## TON-005 — Move the primary side panel to the left
 
-- **Status:** Open
+- **Status:** Done
 - **Priority:** P1
 - **Area:** Application layout
 - **Type:** UI change
@@ -239,11 +270,18 @@ The primary controls are currently positioned on the right side of the window. T
 - No control ordering or grouping is accidentally changed merely as a side effect of moving the panel.
 - The layout remains usable on narrow windows.
 
+### Completion evidence
+
+- Moved the primary controls into the left/start pane while preserving the existing control order, vertical scrolling, resizable divider, saved width, canvas centering, and keyboard shortcuts.
+- Added an explicit, keyboard-focusable `Controls` toggle in the left side of the header; its pressed state, tooltip, and accessible description track panel visibility, and the panel restores its saved width when reopened.
+- Added realized GTK regression coverage for pane ownership, drag persistence, constrained narrow widths, collapse/restore, toggle activation, and state synchronization.
+- Verified normal, narrow, collapsed, Crosshatch, light, and dark layouts; the final labeled-toggle revision passed independent creative review. A fresh post-revision screenshot remains a compositor-session verification gap, not an observed defect.
+
 ---
 
 ## TON-006 — Use SVG source-mapping hint icons instead of PNG versions
 
-- **Status:** Open
+- **Status:** Done
 - **Priority:** P2
 - **Area:** Source mapping hints
 - **Type:** Visual-quality defect
@@ -262,13 +300,20 @@ The application uses PNG versions of source-mapping hint icons even though SVG a
 - Packaging and installed builds include the required SVG assets.
 - Missing-asset errors fail visibly and do not silently substitute unrelated imagery.
 
+### Completion evidence
+
+- Confirmed all six source-mapping hints are compile-time embedded SVG assets with no PNG load or fallback path; installed builds require no runtime asset lookup.
+- Made SVG rasterization follow the widget scale factor and refresh when that factor changes, with consistent square framing, padding, alignment, and a neutral tile that remains legible in light and dark appearances.
+- Added parsing, table-identity, accessibility, aspect, and 1x/2x texture-dimension regressions for every mapping pair.
+- Verified a zero-warning build, 113 automated tests, representative Shapes/Crosshatch and light/dark artifacts, and independent creative and regression review passes. A live 2x-compositor capture remains a verification gap rather than a confirmed defect.
+
 ---
 
 # Core capabilities
 
 ## TON-007 — Add configurable document background and transparency controls
 
-- **Status:** Open
+- **Status:** Done
 - **Priority:** P1
 - **Area:** Document / preview / export
 - **Type:** New capability
@@ -302,11 +347,19 @@ Allow the user to preview transparent artwork against a chosen background color 
 
 The selected background can represent the garment color so that white underbase and knockout behavior can be evaluated before export.
 
+### Completion evidence
+
+- Added saved, alpha-capable Preview Surface and Export Background settings with checkerboard support, undo/redo, dirty-state tracking, and v1-v3 migration that preserves legacy white output.
+- Kept Preview Surface strictly canvas-only and composition-only; mark and curve generation remain unchanged. SVG emits an optional named bottom background layer, while PNG uses the saved background by default with explicit transparent and white one-export overrides.
+- Added visible contextual help that explains preview-only transparency, saved export defaults, PNG overrides, and alpha preservation. The controls remain reachable in the narrow adaptive inspector.
+- Verified transparent and semi-transparent PNG/SVG artifacts, successful editor screenshots, strict failing artifact arguments, and exact full-document preview/export equivalence for both Shapes and Curves.
+- Passed formatting, zero-warning Clippy, 128 automated tests, diff validation, and independent creative and regression reviews.
+
 ---
 
 ## TON-008 — Add RGB mode for display-oriented halftone artwork
 
-- **Status:** Open
+- **Status:** In progress
 - **Priority:** P1
 - **Area:** Color modes / rendering / export
 - **Type:** New capability

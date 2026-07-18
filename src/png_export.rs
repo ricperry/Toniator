@@ -1,6 +1,9 @@
+use crate::CancellationToken;
 use crate::model::{Document, Ink, RenderVariant};
-use crate::persistence::atomic_write;
-use crate::render::{render_document_output, source_dimensions};
+use crate::persistence::{atomic_write, atomic_write_cancellable};
+#[cfg(test)]
+use crate::render::render_document_output;
+use crate::render::{render_document_output_cancellable, source_dimensions};
 use anyhow::{Context, Result};
 use image::{DynamicImage, ImageFormat};
 use std::io::Cursor;
@@ -10,8 +13,17 @@ use std::path::Path;
 pub struct PngExportOptions {
     pub width: u32,
     pub height: u32,
-    pub white_background: bool,
+    /// `Document` is the normal path: PNG follows the saved Export
+    /// Background. Overrides are explicit and never mutate the document.
+    pub background: PngBackground,
     pub channel: Option<Ink>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PngBackground {
+    Document,
+    Transparent,
+    White,
 }
 
 impl PngExportOptions {
@@ -20,7 +32,7 @@ impl PngExportOptions {
         Ok(Self {
             width,
             height,
-            white_background: true,
+            background: PngBackground::Document,
             channel: None,
         })
     }
@@ -39,6 +51,15 @@ pub fn document_artboard(document: &Document) -> Result<(u32, u32)> {
 }
 
 pub fn png_bytes(document: &Document, options: PngExportOptions) -> Result<Vec<u8>> {
+    png_bytes_cancellable(document, options, &CancellationToken::new())
+}
+
+pub fn png_bytes_cancellable(
+    document: &Document,
+    options: PngExportOptions,
+    token: &CancellationToken,
+) -> Result<Vec<u8>> {
+    token.checkpoint()?;
     let (document_width, document_height) = document_artboard(document)?;
     let expected = crate::model::aspect_locked_dimensions(
         document_width,
@@ -49,23 +70,53 @@ pub fn png_bytes(document: &Document, options: PngExportOptions) -> Result<Vec<u
         (options.width, options.height) == expected,
         "PNG dimensions must preserve the source artwork aspect ratio"
     );
-    let image = render_document_output(
-        document,
-        options.width,
-        options.height,
-        options.white_background,
-        options.channel,
-    )?;
+    let image = match options.background {
+        PngBackground::Document => crate::render::render_document_export_cancellable(
+            document,
+            options.width,
+            options.height,
+            options.channel,
+            token,
+        )?,
+        PngBackground::Transparent => render_document_output_cancellable(
+            document,
+            options.width,
+            options.height,
+            false,
+            options.channel,
+            token,
+        )?,
+        PngBackground::White => render_document_output_cancellable(
+            document,
+            options.width,
+            options.height,
+            true,
+            options.channel,
+            token,
+        )?,
+    };
+    token.checkpoint()?;
     let mut encoded = Cursor::new(Vec::new());
     DynamicImage::ImageRgba8(image)
         .write_to(&mut encoded, ImageFormat::Png)
         .context("could not encode PNG output")?;
+    token.checkpoint()?;
     Ok(encoded.into_inner())
 }
 
 pub fn export_png(path: &Path, document: &Document, options: PngExportOptions) -> Result<()> {
     let bytes = png_bytes(document, options)?;
     atomic_write(path, &bytes)
+}
+
+pub fn export_png_cancellable(
+    path: &Path,
+    document: &Document,
+    options: PngExportOptions,
+    token: &CancellationToken,
+) -> Result<()> {
+    let bytes = png_bytes_cancellable(document, options, token)?;
+    atomic_write_cancellable(path, &bytes, token)
 }
 
 #[cfg(test)]
@@ -146,7 +197,7 @@ mod tests {
             PngExportOptions {
                 width: 240,
                 height: 180,
-                white_background: false,
+                background: PngBackground::Transparent,
                 channel: None,
             },
         )
@@ -169,7 +220,7 @@ mod tests {
             PngExportOptions {
                 width: 120,
                 height: 90,
-                white_background: true,
+                background: PngBackground::White,
                 channel: Some(Ink::Black),
             },
         )
@@ -181,7 +232,10 @@ mod tests {
     #[test]
     fn nonstraight_cubic_png_decodes_to_canonical_preview_pixels() {
         let document = cubic_shape_document();
-        let options = PngExportOptions::document_size(&document).unwrap();
+        let options = PngExportOptions {
+            background: PngBackground::White,
+            ..PngExportOptions::document_size(&document).unwrap()
+        };
         let decoded = image::load_from_memory(&png_bytes(&document, options).unwrap())
             .unwrap()
             .to_rgba8();
@@ -201,7 +255,7 @@ mod tests {
             PngExportOptions {
                 width: 32_000,
                 height: 24_000,
-                white_background: true,
+                background: PngBackground::White,
                 channel: None,
             },
         )
@@ -217,7 +271,7 @@ mod tests {
             PngExportOptions {
                 width: 120,
                 height: 80,
-                white_background: true,
+                background: PngBackground::White,
                 channel: None,
             },
         )
@@ -241,12 +295,52 @@ mod tests {
                 PngExportOptions {
                     width: 32_000,
                     height: 32_000,
-                    white_background: true,
+                    background: PngBackground::White,
                     channel: None,
                 },
             )
             .is_err()
         );
         assert_eq!(std::fs::read(path).unwrap(), b"keep me");
+    }
+
+    #[test]
+    fn document_background_controls_default_png_without_mutating_document() {
+        let mut document = curve_document();
+        document.appearance.export_background = crate::model::ExportBackground::None;
+        let options = PngExportOptions::document_size(&document).unwrap();
+        let transparent = image::load_from_memory(&png_bytes(&document, options).unwrap())
+            .unwrap()
+            .to_rgba8();
+        assert!(transparent.pixels().any(|pixel| pixel[3] < 255));
+
+        document.appearance.export_background = crate::model::ExportBackground::Color {
+            color: crate::model::RgbaColor::opaque(12, 34, 56),
+        };
+        let flattened = image::load_from_memory(&png_bytes(&document, options).unwrap())
+            .unwrap()
+            .to_rgba8();
+        assert!(flattened.pixels().all(|pixel| pixel[3] == 255));
+        assert!(flattened.pixels().any(|pixel| pixel.0 == [12, 34, 56, 255]));
+        let appearance = document.appearance;
+        let override_png = png_bytes(
+            &document,
+            PngExportOptions {
+                background: PngBackground::Transparent,
+                ..options
+            },
+        )
+        .unwrap();
+        assert!(
+            image::load_from_memory(&override_png)
+                .unwrap()
+                .to_rgba8()
+                .pixels()
+                .any(|pixel| pixel[3] < 255)
+        );
+        assert_eq!(
+            document.appearance, appearance,
+            "export overrides do not mutate the document"
+        );
     }
 }

@@ -15,16 +15,22 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 use toniator::model::{ClosedShapePath, SettingKey, ShapeAnchor, ShapePoint, SourceArtwork};
 use toniator::persistence::{clear_recovery_if_matches, recovery_path};
+#[cfg(test)]
+use toniator::render_document_preview;
 use toniator::{
-    AlternateTileTransform, CurveLayout, CurvePath, CurvePoint, Document, DocumentEditor, Ink,
-    MotifCoverage, RenderGate, RenderVariant, Settings, Treatment, ValueMode, WebCurveChannel,
-    WebCurveSettings, WebShape, WebShapeSettings, export_svg, render_document_preview,
-    save_document_atomic,
+    AlternateTileTransform, CancellationToken, CurveLayout, CurvePath, CurvePoint, Document,
+    DocumentAppearance, DocumentEditor, ExportBackground, Ink, MotifCoverage, OperationCancelled,
+    OutputMode, PreviewSurface, RenderGate, RenderVariant, RgbaColor, Settings, Treatment,
+    ValueMode, WebCurveChannel, WebCurveSettings, WebShape, WebShapeSettings, export_svg,
+    export_svg_cancellable, render_document_preview_cancellable, save_document_atomic,
 };
 
 const EXAMPLE_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="960" height="680" viewBox="0 0 960 680">
 <defs><linearGradient id="warm" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffcf33"/><stop offset="0.48" stop-color="#ec008c"/><stop offset="1" stop-color="#0047ff"/></linearGradient><radialGradient id="cool" cx="42%" cy="40%" r="70%"><stop offset="0" stop-color="#fff"/><stop offset="0.45" stop-color="#00aeef"/><stop offset="1" stop-color="#08111f"/></radialGradient></defs>
 <rect width="100%" height="100%" fill="url(#warm)"/><circle cx="330" cy="310" r="235" fill="url(#cool)" opacity="0.92"/><rect x="565" y="115" width="260" height="365" rx="44" fill="#101114" opacity="0.78"/><path d="M90 555 C225 420 350 665 510 535 S745 440 870 585" fill="none" stroke="#fff" stroke-width="58" stroke-linecap="round" opacity="0.82"/><text x="620" y="345" font-family="sans-serif" font-size="122" font-weight="800" fill="#fff">T</text></svg>"##;
+
+const PREVIEW_SURFACE_LABEL: &str = "Preview Surface — Canvas only · not exported";
+const EXPORT_BACKGROUND_LABEL: &str = "Export Background — Used for SVG and by default for PNG";
 
 const BUNDLED_PRESETS: [(&str, &[u8]); 3] = [
     (
@@ -296,6 +302,8 @@ const INSPECTOR_DEFAULT_WIDTH: i32 = 400;
 const INSPECTOR_MIN_WIDTH: i32 = 340;
 const INSPECTOR_MAX_WIDTH: i32 = 640;
 const CANVAS_MIN_WIDTH: i32 = 360;
+const NARROW_CONTROLS_BREAKPOINT: i32 = 820;
+const EXPORT_CLOSE_INHIBIT_MESSAGE: &str = "Please wait for the export to finish before closing.";
 
 mod center_stage {
     use super::*;
@@ -461,6 +469,38 @@ fn document_artboard_size(document: &Document) -> (u32, u32) {
     }
 }
 
+fn rgba_color(color: gdk::RGBA) -> RgbaColor {
+    let byte = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    RgbaColor {
+        red: byte(color.red()),
+        green: byte(color.green()),
+        blue: byte(color.blue()),
+        alpha: byte(color.alpha()),
+    }
+}
+
+fn gdk_rgba(color: RgbaColor) -> gdk::RGBA {
+    gdk::RGBA::new(
+        color.red as f32 / 255.0,
+        color.green as f32 / 255.0,
+        color.blue as f32 / 255.0,
+        color.alpha as f32 / 255.0,
+    )
+}
+
+fn parse_artifact_rgba(value: &str) -> Option<RgbaColor> {
+    let value = value.strip_prefix('#')?;
+    if value.len() != 8 {
+        return None;
+    }
+    Some(RgbaColor {
+        red: u8::from_str_radix(&value[0..2], 16).ok()?,
+        green: u8::from_str_radix(&value[2..4], 16).ok()?,
+        blue: u8::from_str_radix(&value[4..6], 16).ok()?,
+        alpha: u8::from_str_radix(&value[6..8], 16).ok()?,
+    })
+}
+
 struct AppState {
     editor: Option<DocumentEditor>,
     path: Option<PathBuf>,
@@ -490,7 +530,12 @@ struct PreviewCache {
 
 fn preview_cache_matches(cache: &PreviewCache, document: &Document, view: PreviewView) -> bool {
     match view {
-        PreviewView::Source => cache.document.document_id == document.document_id,
+        // Source pixels do not depend on treatment, while appearance changes
+        // their displayed backdrop and must invalidate the cache.
+        PreviewView::Source => {
+            cache.document.document_id == document.document_id
+                && cache.document.appearance == document.appearance
+        }
         PreviewView::Rendered => cache.document == *document,
     }
 }
@@ -754,6 +799,7 @@ struct PreviewActivity {
 enum PreviewTerminal {
     Installed,
     Failed,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -813,6 +859,14 @@ impl PreviewActivity {
             self.terminal = Some((generation, PreviewTerminal::Failed));
         }
     }
+    fn cancelled(&mut self, generation: u64) {
+        if self
+            .requested
+            .is_some_and(|(requested, _)| requested == generation)
+        {
+            self.terminal = Some((generation, PreviewTerminal::Cancelled));
+        }
+    }
     fn active(&self) -> bool {
         self.requested.is_some_and(|(generation, _)| {
             !matches!(self.terminal, Some((terminal, _)) if terminal == generation)
@@ -837,9 +891,9 @@ impl PreviewActivity {
         {
             "Source preview"
         } else if self.render_busy() {
-            "Updating rendered preview"
+            "Updating halftone preview"
         } else {
-            "Rendered preview"
+            "Halftone preview"
         }
     }
 }
@@ -1016,6 +1070,11 @@ impl PreviewIndicator {
         self.sync();
     }
 
+    fn cancelled(&self, generation: u64) {
+        self.activity.borrow_mut().cancelled(generation);
+        self.sync();
+    }
+
     fn selected(&self, view: PreviewView) {
         let mut activity = self.activity.borrow_mut();
         activity.requested = None;
@@ -1064,8 +1123,8 @@ impl PreviewIndicator {
     fn effective_label(&self) -> &'static str {
         match self.artifact_phase.get() {
             Some(0.0) => "Source preview",
-            Some(0.5) => "Updating rendered preview",
-            Some(1.0) => "Rendered preview",
+            Some(0.5) => "Updating halftone preview",
+            Some(1.0) => "Halftone preview",
             _ => self.activity.borrow().accessible_label(),
         }
     }
@@ -1187,11 +1246,23 @@ fn close_policy(export_running: bool, close_approved: bool, dirty: bool) -> Clos
     }
 }
 
+fn crosshatch_context(treatment: &str, target: u32, angle: f64) -> String {
+    match target {
+        0 => format!("{treatment} · Crosshatch · All layers"),
+        1 => format!("{treatment} · Crosshatch · Layer 1 (Black) · {angle:.0}°"),
+        2 => format!("{treatment} · Crosshatch · Layer 2 (Cyan) · {angle:.0}°"),
+        3 => format!("{treatment} · Crosshatch · Layer 3 (Magenta) · {angle:.0}°"),
+        4 => format!("{treatment} · Crosshatch · Layer 4 (Yellow) · {angle:.0}°"),
+        _ => format!("{treatment} · Crosshatch · All layers"),
+    }
+}
+
 struct RenderRequest {
     generation: u64,
     document: Document,
     compare_source: bool,
     max_dimension: u32,
+    token: CancellationToken,
 }
 
 fn build_render_request(
@@ -1205,6 +1276,7 @@ fn build_render_request(
         document: document.clone(),
         compare_source,
         max_dimension: preview_target_for_zoom(document_artboard_size(document), zoom_mode),
+        token: CancellationToken::new(),
     }
 }
 
@@ -1228,7 +1300,13 @@ struct AutosaveRequest {
 struct ExportOutcome {
     path: PathBuf,
     kind: &'static str,
-    result: anyhow::Result<()>,
+    result: ExportResult,
+}
+
+enum ExportResult {
+    Completed,
+    Cancelled,
+    Failed(anyhow::Error),
 }
 
 struct LatestSlot<T> {
@@ -1271,9 +1349,14 @@ impl<T> LatestSlot<T> {
 
 struct InspectorPaneController {
     paned: gtk::Paned,
+    inspector: gtk::Widget,
+    controls: gtk::ToggleButton,
+    overlay: gtk::Popover,
     desired_width: Cell<i32>,
     pending_width: Cell<Option<i32>>,
     user_dragging: Cell<bool>,
+    collapsed: Cell<bool>,
+    narrow: Cell<bool>,
     state_path: Option<PathBuf>,
 }
 
@@ -1287,17 +1370,38 @@ struct ArtifactAllocation {
 }
 
 impl InspectorPaneController {
-    fn new(paned: &gtk::Paned, desired_width: i32, state_path: Option<PathBuf>) -> Rc<Self> {
+    fn new(
+        paned: &gtk::Paned,
+        inspector: &impl IsA<gtk::Widget>,
+        controls: &gtk::ToggleButton,
+        desired_width: i32,
+        state_path: Option<PathBuf>,
+    ) -> Rc<Self> {
+        let overlay = gtk::Popover::new();
+        overlay.set_has_arrow(false);
+        overlay.set_position(gtk::PositionType::Left);
+        overlay.set_parent(paned);
         Rc::new(Self {
             paned: paned.clone(),
+            inspector: inspector.clone().upcast(),
+            controls: controls.clone(),
+            overlay,
             desired_width: Cell::new(desired_width.clamp(INSPECTOR_MIN_WIDTH, INSPECTOR_MAX_WIDTH)),
             pending_width: Cell::new(None),
             user_dragging: Cell::new(false),
+            collapsed: Cell::new(false),
+            narrow: Cell::new(false),
             state_path,
         })
     }
 
     fn maintain(&self) {
+        if self.narrow.get() {
+            return;
+        }
+        if self.collapsed.get() {
+            return;
+        }
         let total = self.paned.width();
         let actual = self.current_width();
         if total <= 0 || actual <= 0 || self.user_dragging.get() {
@@ -1309,7 +1413,7 @@ impl InspectorPaneController {
             return;
         }
         self.pending_width.set(Some(target));
-        let corrected = (total - target).clamp(0, total);
+        let corrected = target.clamp(0, total);
         if corrected != self.paned.position() {
             self.paned.set_position(corrected);
         }
@@ -1339,7 +1443,58 @@ impl InspectorPaneController {
     }
 
     fn current_width(&self) -> i32 {
-        (self.paned.width() - self.paned.position()).max(0)
+        self.paned.position().max(0)
+    }
+
+    fn set_collapsed(&self, collapsed: bool) {
+        if self.collapsed.replace(collapsed) == collapsed {
+            return;
+        }
+        self.user_dragging.set(false);
+        self.pending_width.set(None);
+        if self.narrow.get() {
+            if collapsed {
+                self.overlay.popdown();
+                self.controls.grab_focus();
+            } else {
+                self.overlay.popup();
+            }
+            return;
+        }
+        self.inspector.set_visible(!collapsed);
+        if collapsed {
+            self.paned.set_position(0);
+        } else {
+            let target = constrained_inspector_width(self.desired_width.get(), self.paned.width());
+            self.paned.set_position(target);
+            self.maintain();
+        }
+    }
+
+    fn update_layout(&self) {
+        let narrow = self.paned.width() > 0 && self.paned.width() < NARROW_CONTROLS_BREAKPOINT;
+        if self.narrow.replace(narrow) == narrow {
+            return;
+        }
+        if narrow {
+            self.paned.set_start_child(Option::<&gtk::Widget>::None);
+            self.paned.set_position(0);
+            self.overlay.set_child(Some(&self.inspector));
+            self.inspector.set_visible(true);
+            self.collapsed.set(true);
+            self.controls.set_active(false);
+        } else {
+            self.overlay.popdown();
+            self.overlay.set_child(Option::<&gtk::Widget>::None);
+            self.paned.set_start_child(Some(&self.inspector));
+            let collapsed = self.collapsed.get();
+            self.inspector.set_visible(!collapsed);
+            if !collapsed {
+                let target =
+                    constrained_inspector_width(self.desired_width.get(), self.paned.width());
+                self.paned.set_position(target);
+            }
+        }
     }
 }
 
@@ -1348,7 +1503,9 @@ pub struct AppUi {
     open: gtk::Button,
     stack: gtk::Stack,
     toast_overlay: adw::ToastOverlay,
-    title: gtk::Label,
+    title: adw::WindowTitle,
+    new_project_button: gtk::Button,
+    controls_toggle: gtk::ToggleButton,
     picture: gtk::Picture,
     canvas: gtk::ScrolledWindow,
     canvas_content: gtk::Overlay,
@@ -1356,6 +1513,10 @@ pub struct AppUi {
     source_label: gtk::Label,
     preview_indicator: PreviewIndicator,
     autosave_status: gtk::Label,
+    workspace_status: gtk::Label,
+    cancel_preview: gtk::Button,
+    cancel_export: gtk::Button,
+    editing_context: gtk::Label,
     detail: gtk::Scale,
     coverage: gtk::Scale,
     contrast: gtk::Scale,
@@ -1368,6 +1529,12 @@ pub struct AppUi {
     treatment_modes: gtk::Stack,
     preset_import: gtk::Button,
     preset_save: gtk::Button,
+    document_section: gtk::Expander,
+    output_mode: gtk::DropDown,
+    preview_surface: gtk::DropDown,
+    preview_color: gtk::ColorDialogButton,
+    export_background: gtk::DropDown,
+    export_color: gtk::ColorDialogButton,
     web_value_mode: gtk::DropDown,
     web_output_ink: gtk::DropDown,
     web_output_ink_row: gtk::Widget,
@@ -1382,7 +1549,9 @@ pub struct AppUi {
     web_edit_shape: gtk::Button,
     web_target: gtk::DropDown,
     web_target_label: gtk::Label,
+    web_target_help: Option<HelpHandle>,
     web_visible_label: gtk::Label,
+    web_visible_help: HelpHandle,
     web_visible: [gtk::CheckButton; 4],
     web_color: gtk::Entry,
     web_color_row: gtk::Widget,
@@ -1416,9 +1585,12 @@ pub struct AppUi {
     curve_editor: gtk::DrawingArea,
     curve_reset: gtk::Button,
     curve_shared: gtk::CheckButton,
+    curve_shared_help: Option<HelpHandle>,
     curve_target: gtk::DropDown,
     curve_target_label: gtk::Label,
+    curve_target_help: Option<HelpHandle>,
     curve_visible_label: gtk::Label,
+    curve_visible_help: HelpHandle,
     curve_visible: [gtk::CheckButton; 4],
     curve_color: gtk::Entry,
     curve_color_row: gtk::Widget,
@@ -1478,6 +1650,8 @@ pub struct AppUi {
     recovery_io_lock: Arc<Mutex<()>>,
     export_results: Arc<LatestSlot<ExportOutcome>>,
     export_running: Cell<bool>,
+    preview_token: RefCell<Option<CancellationToken>>,
+    export_token: RefCell<Option<CancellationToken>>,
     recovery_enabled: bool,
     close_approved: Cell<bool>,
     screenshot_path: Option<PathBuf>,
@@ -1488,6 +1662,7 @@ pub struct AppUi {
     cli_artifacts_written: Cell<bool>,
     cli_artifact_failed: Cell<bool>,
     capture_prepared: Cell<bool>,
+    capture_attempts: Cell<u8>,
     preview_generation: Cell<u64>,
     zoom_settle_generation: Cell<u64>,
     fit_allocation: RefCell<FitAllocationState>,
@@ -1500,8 +1675,7 @@ pub struct AppUi {
     artifact_resize_started: Cell<bool>,
     artifact_resize_before: Cell<Option<ArtifactAllocation>>,
     artifact_shape_editor: bool,
-    capture_root: gtk::Widget,
-    capture_paintable: gtk::WidgetPaintable,
+    artifact_controls_shown: bool,
     capture_override: RefCell<Option<gtk::Window>>,
     deferred_candidate_artifact: bool,
 }
@@ -1629,10 +1803,7 @@ impl AppUi {
         let toast_overlay = adw::ToastOverlay::new();
         toast_overlay.set_child(Some(&stack));
 
-        let title = gtk::Label::builder()
-            .label("Toniator")
-            .css_classes(["window-title"])
-            .build();
+        let title = adw::WindowTitle::new("Toniator", "Start a project");
         let header = adw::HeaderBar::new();
         header.set_title_widget(Some(&title));
         let new = action_button("New", "Start a new project");
@@ -1640,12 +1811,20 @@ impl AppUi {
         let save = action_button("Save", "Save Toniator document");
         let undo = icon_button("edit-undo-symbolic", "Undo");
         let redo = icon_button("edit-redo-symbolic", "Redo");
+        let controls_toggle = gtk::ToggleButton::with_label("Controls");
+        controls_toggle.set_active(true);
+        controls_toggle.set_tooltip_text(Some("Hide Controls"));
+        controls_toggle.update_property(&[
+            gtk::accessible::Property::Label("Controls"),
+            gtk::accessible::Property::Description("Hide Controls"),
+        ]);
         let export = action_button("Export…", "Export editable SVG or PNG image");
         header.pack_start(&new);
         header.pack_start(&open);
         header.pack_start(&save);
         header.pack_start(&undo);
         header.pack_start(&redo);
+        header.pack_start(&controls_toggle);
         header.pack_end(&export);
 
         let toolbar = adw::ToolbarView::new();
@@ -1729,9 +1908,38 @@ impl AppUi {
         let zoom_entry = editor_view.zoom_entry.clone();
         let inspector_pane = InspectorPaneController::new(
             &editor_view.paned,
+            &editor_view.inspector_shell,
+            &controls_toggle,
             initial_inspector_width,
             inspector_state_path,
         );
+        let sidebar_controller = inspector_pane.clone();
+        controls_toggle.connect_toggled(move |button| {
+            let collapsed = !button.is_active();
+            sidebar_controller.set_collapsed(collapsed);
+            let label = if collapsed {
+                "Show Controls"
+            } else {
+                "Hide Controls"
+            };
+            button.set_tooltip_text(Some(label));
+            button.update_property(&[gtk::accessible::Property::Description(label)]);
+        });
+        if options.artifact_controls_hidden {
+            controls_toggle.set_active(false);
+        }
+        let layout_controller = inspector_pane.clone();
+        editor_view
+            .paned
+            .connect_notify_local(Some("width"), move |_, _| {
+                layout_controller.update_layout();
+            });
+        let closed_controller = inspector_pane.clone();
+        inspector_pane.overlay.connect_closed(move |_| {
+            if closed_controller.narrow.get() {
+                closed_controller.controls.set_active(false);
+            }
+        });
 
         let ui = Rc::new(Self {
             window,
@@ -1739,6 +1947,8 @@ impl AppUi {
             stack,
             toast_overlay,
             title,
+            new_project_button: new.clone(),
+            controls_toggle: controls_toggle.clone(),
             picture,
             canvas: editor_view.canvas.clone(),
             canvas_content: editor_view.canvas_content.clone(),
@@ -1746,6 +1956,10 @@ impl AppUi {
             source_label,
             preview_indicator,
             autosave_status,
+            workspace_status: editor_view.workspace_status.clone(),
+            cancel_preview: editor_view.cancel_preview.clone(),
+            cancel_export: editor_view.cancel_export.clone(),
+            editing_context: editor_view.editing_context.clone(),
             detail,
             coverage,
             contrast,
@@ -1758,6 +1972,12 @@ impl AppUi {
             treatment_modes: editor_view.treatment_modes.clone(),
             preset_import: editor_view.preset_import.clone(),
             preset_save: editor_view.preset_save.clone(),
+            document_section: editor_view.document_section.clone(),
+            output_mode: editor_view.output_mode.clone(),
+            preview_surface: editor_view.preview_surface.clone(),
+            preview_color: editor_view.preview_color.clone(),
+            export_background: editor_view.export_background.clone(),
+            export_color: editor_view.export_color.clone(),
             web_value_mode: editor_view.web_value_mode.clone(),
             web_output_ink: editor_view.web_output_ink.clone(),
             web_output_ink_row: editor_view.web_output_ink_row.clone(),
@@ -1772,7 +1992,9 @@ impl AppUi {
             web_edit_shape: editor_view.web_edit_shape.clone(),
             web_target: editor_view.web_target.clone(),
             web_target_label: editor_view.web_target_label.clone(),
+            web_target_help: editor_view.web_target_help.clone(),
             web_visible_label: editor_view.web_visible_label.clone(),
+            web_visible_help: editor_view.web_visible_help.clone(),
             web_visible: editor_view.web_visible.clone(),
             web_color: editor_view.web_color.clone(),
             web_color_row: editor_view.web_color_row.clone(),
@@ -1806,9 +2028,12 @@ impl AppUi {
             curve_editor: editor_view.curve_editor.clone(),
             curve_reset: editor_view.curve_reset.clone(),
             curve_shared: editor_view.curve_shared.clone(),
+            curve_shared_help: editor_view.curve_shared_help.clone(),
             curve_target: editor_view.curve_target.clone(),
             curve_target_label: editor_view.curve_target_label.clone(),
+            curve_target_help: editor_view.curve_target_help.clone(),
             curve_visible_label: editor_view.curve_visible_label.clone(),
+            curve_visible_help: editor_view.curve_visible_help.clone(),
             curve_visible: editor_view.curve_visible.clone(),
             curve_color: editor_view.curve_color.clone(),
             curve_color_row: editor_view.curve_color_row.clone(),
@@ -1877,6 +2102,8 @@ impl AppUi {
             recovery_io_lock,
             export_results,
             export_running: Cell::new(false),
+            preview_token: RefCell::new(None),
+            export_token: RefCell::new(None),
             recovery_enabled,
             close_approved: Cell::new(false),
             screenshot_path: options.screenshot,
@@ -1887,6 +2114,7 @@ impl AppUi {
             cli_artifacts_written: Cell::new(false),
             cli_artifact_failed: Cell::new(false),
             capture_prepared: Cell::new(false),
+            capture_attempts: Cell::new(0),
             preview_generation: Cell::new(0),
             zoom_settle_generation: Cell::new(0),
             fit_allocation: RefCell::new(FitAllocationState::default()),
@@ -1899,8 +2127,7 @@ impl AppUi {
             artifact_resize_started: Cell::new(false),
             artifact_resize_before: Cell::new(None),
             artifact_shape_editor: options.edit_shape,
-            capture_root: toolbar.clone().upcast(),
-            capture_paintable: gtk::WidgetPaintable::new(Some(&toolbar)),
+            artifact_controls_shown: options.artifact_controls_shown,
             capture_override: RefCell::new(None),
             deferred_candidate_artifact: options.artwork.is_some() || options.document.is_some(),
         });
@@ -1923,10 +2150,16 @@ impl AppUi {
             if let Some(mapping) = options.source_mapping {
                 let curves_active = ui.curves.is_active();
                 if source_mapping_from_index(mapping).is_none() {
-                    eprintln!("Source Mapping artifact index {mapping} is outside 0 through 3");
+                    eprintln!("Artwork Mapping artifact index {mapping} is outside 0 through 4");
                 } else if curves_active {
+                    if mapping == 4 {
+                        ui.output_mode.set_selected(1);
+                    }
                     ui.curve_value_mode.set_selected(mapping);
                 } else {
+                    if mapping == 4 {
+                        ui.output_mode.set_selected(1);
+                    }
                     ui.web_value_mode.set_selected(mapping);
                 }
                 if mapping == 1 {
@@ -1949,6 +2182,11 @@ impl AppUi {
             } else if options.curved_shape {
                 ui.install_curved_shape_fixture();
             }
+            ui.apply_artifact_appearance(
+                options.preview_surface.as_deref(),
+                options.export_background.as_deref(),
+                options.expand_document,
+            );
         } else if let Some(path) = options.artwork.as_ref() {
             ui.import_artwork(path);
         } else if let Some(path) = options.document.as_ref() {
@@ -1959,6 +2197,18 @@ impl AppUi {
 
     pub fn present(self: &Rc<Self>) {
         self.window.present();
+        if self.artifact_controls_shown {
+            glib::timeout_add_local_once(
+                Duration::from_millis(120),
+                glib::clone!(
+                    #[weak(rename_to = ui)]
+                    self,
+                    move || {
+                        ui.controls_toggle.set_active(true);
+                    }
+                ),
+            );
+        }
         if self.screenshot_path.is_some()
             && self.state.borrow().editor.is_none()
             && !self.deferred_candidate_artifact
@@ -1984,6 +2234,17 @@ impl AppUi {
         self.show_error(&message);
     }
 
+    fn finish_cli_artifact_failure(&self, message: String) {
+        if self.cli_artifacts_written.replace(true) {
+            return;
+        }
+        self.report_cli_artifact_error(message);
+        if !self.recovery_enabled {
+            self.close_approved.set(true);
+            self.window.close();
+        }
+    }
+
     fn connect_actions(
         self: &Rc<Self>,
         new: gtk::Button,
@@ -1997,6 +2258,8 @@ impl AppUi {
         connect_clicked(&self.undo, self, |ui| ui.undo());
         connect_clicked(&self.redo, self, |ui| ui.redo());
         connect_clicked(&self.export, self, |ui| ui.export_document());
+        connect_clicked(&self.cancel_preview, self, |ui| ui.cancel_preview());
+        connect_clicked(&self.cancel_export, self, |ui| ui.cancel_export());
         connect_clicked(&start.open_artwork, self, |ui| ui.open_artwork_dialog());
         connect_clicked(&start.open_document, self, |ui| ui.open_document_dialog());
         connect_clicked(&start.try_example, self, |ui| ui.request_example());
@@ -2107,6 +2370,81 @@ impl AppUi {
             move |button| ui.open_preset_dialog(button.upcast_ref())
         ));
         connect_clicked(&self.preset_save, self, |ui| ui.save_treatment_dialog());
+        self.preview_surface.connect_selected_notify(glib::clone!(
+            #[weak(rename_to = ui)]
+            self,
+            move |control| if !ui.state.borrow().syncing_controls {
+                ui.update_appearance(|appearance| {
+                    appearance.preview_surface = if control.selected() == 0 {
+                        PreviewSurface::Checkerboard
+                    } else {
+                        PreviewSurface::Color {
+                            color: rgba_color(ui.preview_color.rgba()),
+                        }
+                    };
+                });
+            }
+        ));
+        self.export_background.connect_selected_notify(glib::clone!(
+            #[weak(rename_to = ui)]
+            self,
+            move |control| if !ui.state.borrow().syncing_controls {
+                ui.update_appearance(|appearance| {
+                    appearance.export_background = if control.selected() == 0 {
+                        ExportBackground::None
+                    } else {
+                        ExportBackground::Color {
+                            color: rgba_color(ui.export_color.rgba()),
+                        }
+                    };
+                });
+            }
+        ));
+        self.preview_color.connect_rgba_notify(glib::clone!(
+            #[weak(rename_to = ui)]
+            self,
+            move |button| if !ui.state.borrow().syncing_controls {
+                let color = rgba_color(button.rgba());
+                ui.update_appearance(|appearance| {
+                    appearance.preview_surface = PreviewSurface::Color { color }
+                });
+            }
+        ));
+        self.export_color.connect_rgba_notify(glib::clone!(
+            #[weak(rename_to = ui)]
+            self,
+            move |button| if !ui.state.borrow().syncing_controls {
+                let color = rgba_color(button.rgba());
+                ui.update_appearance(|appearance| {
+                    appearance.export_background = ExportBackground::Color { color }
+                });
+            }
+        ));
+        self.output_mode.connect_selected_notify(glib::clone!(
+            #[weak(rename_to = ui)]
+            self,
+            move |control| {
+                if ui.state.borrow().syncing_controls {
+                    return;
+                }
+                let mode = if control.selected() == 1 {
+                    OutputMode::RgbScreen
+                } else {
+                    OutputMode::CmykInks
+                };
+                let document = {
+                    let mut state = ui.state.borrow_mut();
+                    let Some(editor) = state.editor.as_mut() else {
+                        return;
+                    };
+                    if !editor.set_output_mode(mode) {
+                        return;
+                    }
+                    editor.document().clone()
+                };
+                ui.after_treatment_edit(document);
+            }
+        ));
         self.web_target.connect_selected_notify(glib::clone!(
             #[weak(rename_to = ui)]
             self,
@@ -2124,6 +2462,17 @@ impl AppUi {
                 let Some(mode) = source_mapping_from_index(combo.selected()) else {
                     return;
                 };
+                if mode == ValueMode::Rgb
+                    && ui.state.borrow().editor.as_ref().is_some_and(|editor| {
+                        editor.document().output_mode != OutputMode::RgbScreen
+                    })
+                {
+                    ui.show_error(
+                        "RGB Color mapping is available after choosing Output: RGB Screen.",
+                    );
+                    ui.sync_controls();
+                    return;
+                }
                 if mode == ValueMode::CrosshatchLuminance {
                     ui.activate_crosshatch_from_shape();
                 } else {
@@ -2335,6 +2684,17 @@ impl AppUi {
                 let Some(mode) = source_mapping_from_index(combo.selected()) else {
                     return;
                 };
+                if mode == ValueMode::Rgb
+                    && ui.state.borrow().editor.as_ref().is_some_and(|editor| {
+                        editor.document().output_mode != OutputMode::RgbScreen
+                    })
+                {
+                    ui.show_error(
+                        "RGB Color mapping is available after choosing Output: RGB Screen.",
+                    );
+                    ui.sync_controls();
+                    return;
+                }
                 ui.change_curve_treatment(move |settings, _| {
                     if mode == ValueMode::CrosshatchLuminance {
                         settings.configure_crosshatch();
@@ -2767,7 +3127,7 @@ impl AppUi {
                     ui.has_dirty_document(),
                 ) {
                     ClosePolicy::InhibitExport => {
-                        ui.show_message("Please wait for the SVG export to finish before closing.");
+                        ui.show_message(EXPORT_CLOSE_INHIBIT_MESSAGE);
                         return glib::Propagation::Stop;
                     }
                     ClosePolicy::Proceed => return glib::Propagation::Proceed,
@@ -2809,6 +3169,11 @@ impl AppUi {
         };
         for (name, accelerators, callback) in [
             (
+                "new",
+                &["<primary>n"][..],
+                Self::new_project as fn(&Rc<Self>),
+            ),
+            (
                 "open",
                 &["<primary>o"][..],
                 Self::open_artwork_dialog as fn(&Rc<Self>),
@@ -2827,6 +3192,42 @@ impl AppUi {
             self.window.add_action(&action);
             application.set_accels_for_action(&format!("win.{name}"), accelerators);
         }
+        for (name, accelerators, callback) in [
+            (
+                "zoom-in",
+                &["<primary>plus", "<primary>equal"][..],
+                ZoomIntent::Increase,
+            ),
+            ("zoom-out", &["<primary>minus"][..], ZoomIntent::Decrease),
+        ] {
+            let action = gio::SimpleAction::new(name, None);
+            action.connect_activate(glib::clone!(
+                #[weak(rename_to = ui)]
+                self,
+                move |_, _| ui.set_explicit_zoom(callback)
+            ));
+            self.window.add_action(&action);
+            application.set_accels_for_action(&format!("win.{name}"), accelerators);
+        }
+        let fit = gio::SimpleAction::new("zoom-fit", None);
+        fit.connect_activate(glib::clone!(
+            #[weak(rename_to = ui)]
+            self,
+            move |_, _| ui.set_fit()
+        ));
+        self.window.add_action(&fit);
+        application.set_accels_for_action("win.zoom-fit", &["<primary>0"]);
+        let controls = gio::SimpleAction::new("toggle-controls", None);
+        controls.connect_activate(glib::clone!(
+            #[weak(rename_to = ui)]
+            self,
+            move |_, _| {
+                ui.controls_toggle
+                    .set_active(!ui.controls_toggle.is_active());
+            }
+        ));
+        self.window.add_action(&controls);
+        application.set_accels_for_action("win.toggle-controls", &["F9"]);
     }
 
     fn connect_scale(
@@ -3476,7 +3877,8 @@ impl AppUi {
         self.picture.set_paintable(Option::<&gdk::Paintable>::None);
         self.source_label.set_text("");
         self.stack.set_visible_child_name("start");
-        self.title.set_text("Toniator");
+        self.title.set_title("Toniator");
+        self.title.set_subtitle("Start a project");
         self.update_actions();
     }
 
@@ -4024,6 +4426,20 @@ impl AppUi {
     }
 
     fn selected_web_inks(&self) -> Vec<Ink> {
+        let rgb = self
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .is_some_and(|editor| editor.document().output_mode == OutputMode::RgbScreen);
+        if rgb {
+            return match self.web_target.selected() {
+                1 => vec![Ink::Red],
+                2 => vec![Ink::Green],
+                3 => vec![Ink::Blue],
+                _ => Ink::RGB.to_vec(),
+            };
+        }
         let crosshatch = self.state.borrow().editor.as_ref().is_some_and(|editor| {
             matches!(&editor.document().render, RenderVariant::WebShapeV1 { settings }
                 if settings.value_mode == ValueMode::CrosshatchLuminance)
@@ -4437,6 +4853,20 @@ impl AppUi {
     }
 
     fn selected_curve_inks(&self) -> Vec<Ink> {
+        let rgb = self
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .is_some_and(|editor| editor.document().output_mode == OutputMode::RgbScreen);
+        if rgb {
+            return match self.curve_target.selected() {
+                1 => vec![Ink::Red],
+                2 => vec![Ink::Green],
+                3 => vec![Ink::Blue],
+                _ => Ink::RGB.to_vec(),
+            };
+        }
         let crosshatch = self.state.borrow().editor.as_ref().is_some_and(|editor| {
             matches!(&editor.document().render, RenderVariant::WebCurveV1 { settings }
                 if settings.value_mode == ValueMode::CrosshatchLuminance)
@@ -4553,6 +4983,67 @@ impl AppUi {
         self.sync_controls();
         self.request_rendered_preview();
         self.update_actions();
+    }
+
+    fn update_appearance(&self, change: impl FnOnce(&mut DocumentAppearance)) {
+        let changed = {
+            let mut state = self.state.borrow_mut();
+            let Some(editor) = state.editor.as_mut() else {
+                return;
+            };
+            let mut appearance = editor.document().appearance;
+            change(&mut appearance);
+            editor.set_appearance(appearance)
+        };
+        if changed {
+            self.after_treatment_edit(
+                self.state
+                    .borrow()
+                    .editor
+                    .as_ref()
+                    .unwrap()
+                    .document()
+                    .clone(),
+            );
+        }
+    }
+
+    fn apply_artifact_appearance(
+        &self,
+        preview_surface: Option<&str>,
+        export_background: Option<&str>,
+        expand_document: bool,
+    ) {
+        if expand_document {
+            self.document_section.set_expanded(true);
+        }
+        let mut state = self.state.borrow_mut();
+        let Some(editor) = state.editor.as_mut() else {
+            return;
+        };
+        let mut appearance = editor.document().appearance;
+        if let Some(value) = preview_surface {
+            appearance.preview_surface = if value == "checkerboard" {
+                PreviewSurface::Checkerboard
+            } else if let Some(color) = parse_artifact_rgba(value) {
+                PreviewSurface::Color { color }
+            } else {
+                return;
+            };
+        }
+        if let Some(value) = export_background {
+            appearance.export_background = if value == "none" {
+                ExportBackground::None
+            } else if let Some(color) = parse_artifact_rgba(value) {
+                ExportBackground::Color { color }
+            } else {
+                return;
+            };
+        }
+        editor.set_appearance(appearance);
+        drop(state);
+        self.sync_controls();
+        self.request_preview();
     }
 
     fn change_web_treatment(
@@ -4738,11 +5229,13 @@ impl AppUi {
     }
 
     fn sync_controls(&self) {
-        let Some((settings, render, source_text)) =
+        let Some((settings, render, appearance, output_mode, source_text)) =
             self.state.borrow().editor.as_ref().map(|editor| {
                 (
                     editor.document().settings,
                     editor.document().render.clone(),
+                    editor.document().appearance,
+                    editor.document().output_mode,
                     editor_source_text(editor.document()),
                 )
             })
@@ -4750,6 +5243,58 @@ impl AppUi {
             return;
         };
         self.state.borrow_mut().syncing_controls = true;
+        self.output_mode
+            .set_selected(if output_mode == OutputMode::RgbScreen {
+                1
+            } else {
+                0
+            });
+        if output_mode == OutputMode::RgbScreen {
+            for target in [&self.web_target, &self.curve_target] {
+                let selected = target.selected().min(3);
+                target.set_model(Some(&gtk::StringList::new(&[
+                    "All Channels",
+                    "Red",
+                    "Green",
+                    "Blue",
+                ])));
+                target.set_selected(selected);
+            }
+            self.web_target_label.set_text("Adjust Channel");
+            self.curve_target_label.set_text("Adjust Channel");
+            self.web_visible_label.set_text("Visible RGB Channels");
+            self.curve_visible_label.set_text("Visible RGB Channels");
+        } else {
+            for target in [&self.web_target, &self.curve_target] {
+                let selected = target.selected().min(4);
+                target.set_model(Some(&gtk::StringList::new(&[
+                    "All Inks", "Cyan", "Magenta", "Yellow", "Black",
+                ])));
+                target.set_selected(selected);
+            }
+        }
+        match appearance.preview_surface {
+            PreviewSurface::Checkerboard => self.preview_surface.set_selected(0),
+            PreviewSurface::Color { color } => {
+                self.preview_surface.set_selected(1);
+                self.preview_color.set_rgba(&gdk_rgba(color));
+            }
+        }
+        self.preview_color.set_sensitive(matches!(
+            appearance.preview_surface,
+            PreviewSurface::Color { .. }
+        ));
+        match appearance.export_background {
+            ExportBackground::None => self.export_background.set_selected(0),
+            ExportBackground::Color { color } => {
+                self.export_background.set_selected(1);
+                self.export_color.set_rgba(&gdk_rgba(color));
+            }
+        }
+        self.export_color.set_sensitive(matches!(
+            appearance.export_background,
+            ExportBackground::Color { .. }
+        ));
         self.detail.set_value(settings.detail as f64);
         self.coverage.set_value(settings.coverage as f64);
         self.contrast.set_value(settings.contrast as f64);
@@ -4778,6 +5323,7 @@ impl AppUi {
                 self.treatment_modes.set_visible_child_name("web");
                 self.web_value_mode.set_selected(match settings.value_mode {
                     ValueMode::Cmyk => 0,
+                    ValueMode::Rgb => 4,
                     ValueMode::SingleChannel => 1,
                     ValueMode::Luminance => 2,
                     ValueMode::CrosshatchLuminance => 3,
@@ -4787,9 +5333,14 @@ impl AppUi {
                 sync_layer_terminology(
                     &self.web_target,
                     &self.web_target_label,
+                    self.web_target_help.as_ref(),
                     &self.web_visible_label,
                     settings.value_mode == ValueMode::CrosshatchLuminance,
                 );
+                if output_mode == OutputMode::RgbScreen {
+                    self.web_target_label.set_text("Adjust Channel");
+                    self.web_visible_label.set_text("Visible RGB Channels");
+                }
                 self.web_crosshatch_color_row
                     .set_visible(settings.value_mode == ValueMode::CrosshatchLuminance);
                 self.web_color_row
@@ -4802,9 +5353,42 @@ impl AppUi {
                         Ink::Magenta => 1,
                         Ink::Yellow => 2,
                         Ink::Black => 3,
+                        Ink::Red => 0,
+                        Ink::Green => 1,
+                        Ink::Blue => 2,
                     });
                 self.web_shared.set_active(settings.use_shared_mark);
+                self.web_shared
+                    .set_label(Some(if output_mode == OutputMode::RgbScreen {
+                        "Share Mark Shape Across Channels"
+                    } else {
+                        "Share Mark Shape Across Inks"
+                    }));
                 let crosshatch = settings.value_mode == ValueMode::CrosshatchLuminance;
+                let visible_spec = help_for(if crosshatch {
+                    "Visible Crosshatch Layers"
+                } else {
+                    "Visible Inks"
+                })
+                .unwrap();
+                self.web_visible_help.set_spec(visible_spec);
+                for button in &self.web_visible {
+                    button.set_tooltip_text(Some(visible_spec.summary));
+                    button.update_property(&[gtk::accessible::Property::Description(
+                        visible_spec.summary,
+                    )]);
+                }
+                if crosshatch {
+                    set_crosshatch_target_directions(
+                        &self.web_target,
+                        [
+                            settings.channels.k.grid_rotation,
+                            settings.channels.c.grid_rotation,
+                            settings.channels.m.grid_rotation,
+                            settings.channels.y.grid_rotation,
+                        ],
+                    );
+                }
                 let all_target = self.web_target.selected() == 0;
                 let first_geometry = settings.channels.get(Ink::Cyan);
                 let geometry_mixed = !settings.use_shared_mark
@@ -4876,6 +5460,17 @@ impl AppUi {
                         "Editing this ink's shape."
                     });
                 for (index, button) in self.web_visible.iter().enumerate() {
+                    if output_mode == OutputMode::RgbScreen && index == 3 {
+                        button.set_visible(false);
+                        continue;
+                    }
+                    button.set_visible(true);
+                    if output_mode == OutputMode::RgbScreen {
+                        let ink = Ink::RGB[index];
+                        button.set_label(Some(["Red", "Green", "Blue"][index]));
+                        button.set_active(settings.channels.get(ink).enabled);
+                        continue;
+                    }
                     let ink = ink_for_visible_slot(index, crosshatch);
                     button.set_label(Some(if crosshatch {
                         ["1 K", "2 C", "3 M", "4 Y"][index]
@@ -5004,6 +5599,7 @@ impl AppUi {
                 self.curve_value_mode
                     .set_selected(match settings.value_mode {
                         ValueMode::Cmyk => 0,
+                        ValueMode::Rgb => 4,
                         ValueMode::SingleChannel => 1,
                         ValueMode::Luminance => 2,
                         ValueMode::CrosshatchLuminance => 3,
@@ -5013,9 +5609,14 @@ impl AppUi {
                 sync_layer_terminology(
                     &self.curve_target,
                     &self.curve_target_label,
+                    self.curve_target_help.as_ref(),
                     &self.curve_visible_label,
                     settings.value_mode == ValueMode::CrosshatchLuminance,
                 );
+                if output_mode == OutputMode::RgbScreen {
+                    self.curve_target_label.set_text("Adjust Channel");
+                    self.curve_visible_label.set_text("Visible RGB Channels");
+                }
                 self.curve_crosshatch_color_row
                     .set_visible(settings.value_mode == ValueMode::CrosshatchLuminance);
                 self.curve_color_row
@@ -5028,6 +5629,9 @@ impl AppUi {
                         Ink::Magenta => 1,
                         Ink::Yellow => 2,
                         Ink::Black => 3,
+                        Ink::Red => 0,
+                        Ink::Green => 1,
+                        Ink::Blue => 2,
                     });
                 self.curve_layout.set_selected(match settings.layout {
                     CurveLayout::FullWidth => 0,
@@ -5037,17 +5641,64 @@ impl AppUi {
                     .set_visible(settings.layout == CurveLayout::MotifPattern);
                 self.curve_shared.set_active(settings.use_shared_curve);
                 let crosshatch = settings.value_mode == ValueMode::CrosshatchLuminance;
-                self.curve_shared.set_label(Some(if crosshatch {
-                    "Use One Hatch Path for All Layers"
+                let visible_spec = help_for(if crosshatch {
+                    "Visible Crosshatch Layers"
                 } else {
-                    "Use One Curve for All Inks"
+                    "Visible Inks"
+                })
+                .unwrap();
+                self.curve_visible_help.set_spec(visible_spec);
+                for button in &self.curve_visible {
+                    button.set_tooltip_text(Some(visible_spec.summary));
+                    button.update_property(&[gtk::accessible::Property::Description(
+                        visible_spec.summary,
+                    )]);
+                }
+                self.curve_shared.set_label(Some(if crosshatch {
+                    "Share Hatch Path Across Layers"
+                } else if output_mode == OutputMode::RgbScreen {
+                    "Share Line Shape Across Channels"
+                } else {
+                    "Share Line Shape Across Inks"
                 }));
+                if let Some(help) = self.curve_shared_help.as_ref() {
+                    help.set_spec(
+                        help_for(if crosshatch {
+                            "Share Hatch Path Across Layers"
+                        } else {
+                            "Share Line Shape Across Inks"
+                        })
+                        .unwrap(),
+                    );
+                }
+                if crosshatch {
+                    set_crosshatch_target_directions(
+                        &self.curve_target,
+                        [
+                            settings.channels.k.grid_rotation,
+                            settings.channels.c.grid_rotation,
+                            settings.channels.m.grid_rotation,
+                            settings.channels.y.grid_rotation,
+                        ],
+                    );
+                }
                 self.curve_reset.set_label(if crosshatch {
                     "Reset to Straight Hatch"
                 } else {
                     "Reset to Soft Wave"
                 });
                 for (index, button) in self.curve_visible.iter().enumerate() {
+                    if output_mode == OutputMode::RgbScreen && index == 3 {
+                        button.set_visible(false);
+                        continue;
+                    }
+                    button.set_visible(true);
+                    if output_mode == OutputMode::RgbScreen {
+                        let ink = Ink::RGB[index];
+                        button.set_label(Some(["Red", "Green", "Blue"][index]));
+                        button.set_active(settings.channels.get(ink).enabled);
+                        continue;
+                    }
                     let ink = ink_for_visible_slot(index, crosshatch);
                     button.set_label(Some(if crosshatch {
                         ["1 K", "2 C", "3 M", "4 Y"][index]
@@ -5092,6 +5743,9 @@ impl AppUi {
                             Ink::Cyan => "Layer 2 Hatch Path",
                             Ink::Magenta => "Layer 3 Hatch Path",
                             Ink::Yellow => "Layer 4 Hatch Path",
+                            Ink::Red => "Red Screen Path",
+                            Ink::Green => "Green Screen Path",
+                            Ink::Blue => "Blue Screen Path",
                         }
                     } else if settings.use_shared_curve {
                         if settings.layout == CurveLayout::MotifPattern {
@@ -5105,6 +5759,9 @@ impl AppUi {
                             Ink::Magenta => "Magenta Curve",
                             Ink::Yellow => "Yellow Curve",
                             Ink::Black => "Black Curve",
+                            Ink::Red => "Red Screen Curve",
+                            Ink::Green => "Green Screen Curve",
+                            Ink::Blue => "Blue Screen Curve",
                         }
                     } else if inks.iter().skip(1).any(|ink| {
                         settings.channels.get(*ink).path != settings.channels.get(inks[0]).path
@@ -5309,6 +5966,7 @@ impl AppUi {
         self.source_label.set_text(&source_text);
         self.state.borrow_mut().syncing_controls = false;
         self.sync_motif_overlay();
+        self.update_editing_context();
     }
 
     fn select_preview_view(self: &Rc<Self>) {
@@ -5391,10 +6049,18 @@ impl AppUi {
             document,
             compare_source,
             max_dimension,
+            token: CancellationToken::new(),
         });
     }
 
     fn queue_preview_request(&self, request: RenderRequest) {
+        if let Some(token) = self
+            .preview_token
+            .borrow_mut()
+            .replace(request.token.clone())
+        {
+            token.cancel();
+        }
         let generation = request.generation;
         let requested_view = if request.compare_source {
             PreviewView::Source
@@ -5407,6 +6073,24 @@ impl AppUi {
             self.preview_indicator.request(generation, requested_view);
         }
         self.render_requests.replace(request);
+        self.cancel_preview.set_visible(true);
+    }
+
+    fn cancel_preview(&self) {
+        if self
+            .preview_token
+            .borrow()
+            .as_ref()
+            .is_some_and(CancellationToken::cancel)
+        {
+            let generation = self.gate.current();
+            self.render_requests.take();
+            self.preview_indicator.cancelled(generation);
+            self.gate.next();
+            self.preview_token.take();
+            self.cancel_preview.set_visible(false);
+            self.set_workspace_status("Preview cancelled");
+        }
     }
 
     fn schedule_zoom_refinement(self: &Rc<Self>) {
@@ -5485,6 +6169,7 @@ impl AppUi {
                 if !self.gate.accepts(outcome.generation) || desired_view != outcome.view {
                     return;
                 }
+                self.cancel_preview.set_visible(false);
                 self.preview_generation.set(outcome.generation);
                 self.install_preview(image, outcome.generation, outcome.view)
             }
@@ -5492,7 +6177,13 @@ impl AppUi {
                 if !self.gate.accepts(outcome.generation) {
                     return;
                 }
+                if error.downcast_ref::<OperationCancelled>().is_some() {
+                    self.set_workspace_status("Preview cancelled");
+                    self.cancel_preview.set_visible(false);
+                    return;
+                }
                 self.preview_indicator.failed(outcome.generation);
+                self.set_workspace_status("Preview error — adjust the document or try again");
                 self.show_error(&format!("Could not render preview: {error:#}"));
                 if self.screenshot_path.is_some()
                     || self.export_path.is_some()
@@ -5520,6 +6211,10 @@ impl AppUi {
         self.picture.set_paintable(Some(&texture));
         self.state.borrow_mut().preview_size = Some((width, height));
         self.preview_indicator.installed(generation, view);
+        self.set_workspace_status(match view {
+            PreviewView::Source => "Showing source artwork",
+            PreviewView::Rendered => "Preview ready",
+        });
         self.apply_zoom_mode();
         if let Some((width, height)) = self.artifact_resize_window
             && !self.artifact_resize_started.replace(true)
@@ -5684,16 +6379,14 @@ impl AppUi {
             }
         }
         if self.screenshot_path.is_some() && !self.capture_prepared.replace(true) {
-            self.capture_paintable
-                .set_widget(Option::<&gtk::Widget>::None);
-            self.capture_paintable.set_widget(Some(&self.capture_root));
-            self.capture_paintable.invalidate_contents();
-            self.capture_root.queue_draw();
-            if let Some(window) = self.capture_override.borrow().as_ref() {
-                window.queue_draw();
-            }
+            let capture_window = self
+                .capture_override
+                .borrow()
+                .clone()
+                .unwrap_or_else(|| self.window.clone().upcast());
+            capture_window.queue_draw();
             let frames = Rc::new(Cell::new(0u8));
-            self.capture_root.add_tick_callback(glib::clone!(
+            capture_window.add_tick_callback(glib::clone!(
                 #[weak(rename_to = ui)]
                 self,
                 #[strong]
@@ -5711,10 +6404,6 @@ impl AppUi {
                     }
                 }
             ));
-            // A static start screen may not acquire another frame clock tick
-            // after its first presentation. Keep screenshot-only New/start
-            // artifacts finite; editor captures normally complete via the
-            // two-frame path above before this fallback runs.
             glib::timeout_add_local_once(
                 Duration::from_millis(300),
                 glib::clone!(
@@ -5725,9 +6414,40 @@ impl AppUi {
             );
             return;
         }
-        if self.cli_artifacts_written.replace(true) {
+        if self.cli_artifacts_written.get() {
             return;
         }
+        if let Some(path) = self.screenshot_path.as_ref() {
+            match self.capture_window(path) {
+                Ok(true) => {}
+                Ok(false) => {
+                    let attempts = self.capture_attempts.get() + 1;
+                    self.capture_attempts.set(attempts);
+                    if attempts >= 50 {
+                        self.finish_cli_artifact_failure("Could not write window screenshot: GTK did not produce a render node within 5 seconds".into());
+                        return;
+                    }
+                    self.window.queue_draw();
+                    glib::timeout_add_local_once(
+                        Duration::from_millis(100),
+                        glib::clone!(
+                            #[weak(rename_to = ui)]
+                            self,
+                            move || ui.write_cli_artifacts()
+                        ),
+                    );
+                    return;
+                }
+                Err(error) => {
+                    self.finish_cli_artifact_failure(format!(
+                        "Could not write window screenshot {}: {error:#}",
+                        path.display()
+                    ));
+                    return;
+                }
+            }
+        }
+        self.cli_artifacts_written.set(true);
         if let Some(path) = self.allocation_report_path.as_ref() {
             let state = self.state.borrow();
             let mode = match state.zoom_mode {
@@ -5831,14 +6551,6 @@ impl AppUi {
                 ));
             }
         }
-        if let Some(path) = self.screenshot_path.as_ref()
-            && let Err(error) = self.capture_window(path)
-        {
-            self.report_cli_artifact_error(format!(
-                "Could not write window screenshot {}: {error:#}",
-                path.display()
-            ));
-        }
         if let Some(path) = self.export_path.as_ref()
             && let Some(document) = self
                 .state
@@ -5911,37 +6623,31 @@ impl AppUi {
         }
     }
 
-    fn capture_window(&self, path: &Path) -> anyhow::Result<()> {
-        use gtk::gdk::prelude::PaintableExt;
-        let override_window = self.capture_override.borrow().clone();
-        let widget: gtk::Widget = override_window
-            .as_ref()
-            .map(|window| window.clone().upcast())
-            .unwrap_or_else(|| self.capture_root.clone());
-        let width = widget.width().max(1) as u32;
-        let height = widget.height().max(1) as u32;
-        let paintable = override_window.as_ref().map_or_else(
-            || self.capture_paintable.clone(),
-            |window| gtk::WidgetPaintable::new(Some(window)),
-        );
+    fn capture_window(&self, path: &Path) -> anyhow::Result<bool> {
+        let window: gtk::Window = self
+            .capture_override
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| self.window.clone().upcast());
+        let width = window.width().max(1) as u32;
+        let height = window.height().max(1) as u32;
+        let paintable = gtk::WidgetPaintable::new(Some(&window));
         paintable.invalidate_contents();
         let snapshot = gtk::Snapshot::new();
         paintable.snapshot(&snapshot, width as f64, height as f64);
-        let content_node = snapshot
-            .to_node()
-            .ok_or_else(|| anyhow::anyhow!("GTK produced no render node"))?;
+        let Some(content_node) = snapshot.to_node() else {
+            return Ok(false);
+        };
         let node = opaque_capture_node(&content_node, width, height, capture_window_background());
-        let surface = override_window
-            .as_ref()
-            .and_then(gtk::prelude::NativeExt::surface)
-            .or_else(|| self.window.surface())
+        let surface = window
+            .surface()
             .ok_or_else(|| anyhow::anyhow!("window has no surface"))?;
         let renderer = gtk::gsk::Renderer::for_surface(&surface)
             .ok_or_else(|| anyhow::anyhow!("could not create GTK renderer"))?;
         let viewport = gtk::graphene::Rect::new(0.0, 0.0, width as f32, height as f32);
         let texture = renderer.render_texture(&node, Some(&viewport));
         texture.save_to_png(path)?;
-        Ok(())
+        Ok(true)
     }
 
     fn save_document(self: &Rc<Self>) {
@@ -6213,6 +6919,8 @@ impl AppUi {
             return;
         }
         self.export.set_sensitive(false);
+        self.set_workspace_status("Choose an export format");
+        self.update_actions();
         let dialog = adw::AlertDialog::builder()
             .heading("Export")
             .body("Choose editable vector artwork or a flattened image for sharing and printing.")
@@ -6362,7 +7070,7 @@ impl AppUi {
                 .build(),
         );
         let size = gtk::DropDown::from_strings(&["Document Size", "2×", "Custom"]);
-        content.append(&combo_row("Size", &size));
+        content.append(&combo_row("PNG Size", &size));
         let dimensions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         let width = gtk::SpinButton::with_range(1.0, 16_000.0, 1.0);
         let height = gtk::SpinButton::with_range(1.0, 16_000.0, 1.0);
@@ -6383,8 +7091,12 @@ impl AppUi {
                 .build(),
         );
         content.append(&dimensions);
-        let background = gtk::DropDown::from_strings(&["White Paper", "Transparent"]);
-        content.append(&combo_row("Background", &background));
+        let background = gtk::DropDown::from_strings(&[
+            "Document Export Background",
+            "Transparent Override",
+            "White Override",
+        ]);
+        content.append(&combo_row("PNG Background", &background));
         let summary = gtk::Label::builder()
             .xalign(0.0)
             .css_classes(["dim-label", "caption"])
@@ -6414,10 +7126,10 @@ impl AppUi {
                 "PNG · {} × {} px · {}",
                 width.value_as_int(),
                 height.value_as_int(),
-                if background.selected() == 0 {
-                    "White Paper"
-                } else {
-                    "Transparent"
+                match background.selected() {
+                    0 => "Document Export Background",
+                    1 => "Transparent Override",
+                    _ => "White Override",
                 }
             ))
         ));
@@ -6514,7 +7226,11 @@ impl AppUi {
                 let options = toniator::PngExportOptions {
                     width: width.value_as_int().max(1) as u32,
                     height: height.value_as_int().max(1) as u32,
-                    white_background: background.selected() == 0,
+                    background: match background.selected() {
+                        0 => toniator::PngBackground::Document,
+                        1 => toniator::PngBackground::Transparent,
+                        _ => toniator::PngBackground::White,
+                    },
                     channel: None,
                 };
                 proceeding.set(true);
@@ -6564,10 +7280,20 @@ impl AppUi {
 
     fn start_export(&self, path: PathBuf, document: Document) {
         self.export.set_sensitive(false);
+        self.set_workspace_status("Exporting editable SVG…");
+        self.cancel_export.set_visible(true);
         self.show_message(&format!("Exporting {}…", path.display()));
         let results = Arc::clone(&self.export_results);
+        let token = CancellationToken::new();
+        self.export_token.replace(Some(token.clone()));
         std::thread::spawn(move || {
-            let result = export_svg(&path, &document);
+            let result = match export_svg_cancellable(&path, &document, &token) {
+                Ok(()) => ExportResult::Completed,
+                Err(error) if error.downcast_ref::<OperationCancelled>().is_some() => {
+                    ExportResult::Cancelled
+                }
+                Err(error) => ExportResult::Failed(error),
+            };
             results.replace(ExportOutcome {
                 path,
                 kind: "editable SVG",
@@ -6583,10 +7309,20 @@ impl AppUi {
         options: toniator::PngExportOptions,
     ) {
         self.export.set_sensitive(false);
+        self.set_workspace_status("Exporting PNG image…");
+        self.cancel_export.set_visible(true);
         self.show_message(&format!("Exporting PNG {}…", path.display()));
         let results = Arc::clone(&self.export_results);
+        let token = CancellationToken::new();
+        self.export_token.replace(Some(token.clone()));
         std::thread::spawn(move || {
-            let result = toniator::export_png(&path, &document, options);
+            let result = match toniator::export_png_cancellable(&path, &document, options, &token) {
+                Ok(()) => ExportResult::Completed,
+                Err(error) if error.downcast_ref::<OperationCancelled>().is_some() => {
+                    ExportResult::Cancelled
+                }
+                Err(error) => ExportResult::Failed(error),
+            };
             results.replace(ExportOutcome {
                 path,
                 kind: "PNG",
@@ -6600,17 +7336,41 @@ impl AppUi {
             return;
         };
         self.export_running.set(false);
+        self.export_token.take();
+        self.cancel_export.set_visible(false);
         self.update_actions();
         match outcome.result {
-            Ok(()) => self.show_message(&format!(
-                "Exported {}: {}",
-                outcome.kind,
-                outcome.path.display()
-            )),
-            Err(error) => self.show_error(&format!(
-                "Could not export {}: {error:#}",
-                outcome.path.display()
-            )),
+            ExportResult::Completed => {
+                self.set_workspace_status(&format!("Exported {}", outcome.kind));
+                self.show_message(&format!(
+                    "Exported {}: {}",
+                    outcome.kind,
+                    outcome.path.display()
+                ));
+            }
+            ExportResult::Cancelled => {
+                self.set_workspace_status("Export cancelled");
+            }
+            ExportResult::Failed(error) => {
+                self.set_workspace_status(
+                    "Export could not finish cleanly — check the destination file",
+                );
+                self.show_error(&format!(
+                    "Could not export {}: {error:#}",
+                    outcome.path.display()
+                ));
+            }
+        }
+    }
+
+    fn cancel_export(&self) {
+        if self
+            .export_token
+            .borrow()
+            .as_ref()
+            .is_some_and(CancellationToken::cancel)
+        {
+            self.set_workspace_status("Cancelling export…");
         }
     }
 
@@ -6626,6 +7386,12 @@ impl AppUi {
             .set_sensitive(state.editor.as_ref().is_some_and(DocumentEditor::can_undo));
         self.redo
             .set_sensitive(state.editor.as_ref().is_some_and(DocumentEditor::can_redo));
+        self.new_project_button.set_visible(has_document);
+        self.save.set_visible(has_document);
+        self.undo.set_visible(has_document);
+        self.redo.set_visible(has_document);
+        self.controls_toggle.set_visible(has_document);
+        self.export.set_visible(has_document);
         let (name, dirty) = state
             .editor
             .as_ref()
@@ -6639,18 +7405,97 @@ impl AppUi {
                 (name, editor.is_dirty() || state.path.is_none())
             })
             .unwrap_or_else(|| ("Toniator".into(), false));
-        let display_title = if dirty {
-            format!("{name} •")
+        let status = if self.export_running.get() {
+            "Exporting"
+        } else if dirty {
+            "Unsaved"
+        } else if has_document {
+            "Saved"
         } else {
-            name.clone()
+            "Start a project"
         };
         let window_title = if dirty {
             format!("{name} — Unsaved — Toniator")
         } else {
             format!("{name} — Toniator")
         };
-        self.title.set_text(&display_title);
+        self.title.set_title(&name);
+        self.title.set_subtitle(status);
         self.window.set_title(Some(&window_title));
+    }
+
+    fn set_workspace_status(&self, status: &str) {
+        self.workspace_status.set_text(status);
+    }
+
+    fn update_editing_context(&self) {
+        let state = self.state.borrow();
+        let Some(editor) = state.editor.as_ref() else {
+            self.editing_context.set_text("No artwork open");
+            return;
+        };
+        let context = match &editor.document().render {
+            RenderVariant::WebShapeV1 { settings } => {
+                if settings.value_mode == ValueMode::CrosshatchLuminance {
+                    crosshatch_context("Shapes", self.web_target.selected(), self.web_angle.value())
+                } else {
+                    let layer = if editor.document().output_mode == OutputMode::RgbScreen {
+                        match self.web_target.selected() {
+                            1 => "Red channel",
+                            2 => "Green channel",
+                            3 => "Blue channel",
+                            _ => "All channels",
+                        }
+                    } else {
+                        match self.web_target.selected() {
+                            1 => "Cyan",
+                            2 => "Magenta",
+                            3 => "Yellow",
+                            4 => "Black",
+                            _ => "All inks",
+                        }
+                    };
+                    format!("Shapes · {layer}")
+                }
+            }
+            RenderVariant::WebCurveV1 { settings } => {
+                if settings.value_mode == ValueMode::CrosshatchLuminance {
+                    crosshatch_context(
+                        "Curves",
+                        self.curve_target.selected(),
+                        self.curve_angle.value(),
+                    )
+                } else {
+                    let layer = if editor.document().output_mode == OutputMode::RgbScreen {
+                        match self.curve_target.selected() {
+                            1 => "Red channel",
+                            2 => "Green channel",
+                            3 => "Blue channel",
+                            _ => "All channels",
+                        }
+                    } else {
+                        match self.curve_target.selected() {
+                            1 => "Cyan",
+                            2 => "Magenta",
+                            3 => "Yellow",
+                            4 => "Black",
+                            _ => "All inks",
+                        }
+                    };
+                    format!("Curves · {layer}")
+                }
+            }
+            RenderVariant::NativeBasicV1 => "Shapes · Basic treatment".into(),
+        };
+        let operation = if self.motif_drag.get().is_some() {
+            " · Adjusting motif on canvas"
+        } else if self.curve_selected_handle.get() >= 0 {
+            " · Curve point selected"
+        } else {
+            ""
+        };
+        self.editing_context
+            .set_text(&format!("{context}{operation}"));
     }
 
     fn set_fit(self: &Rc<Self>) {
@@ -6822,10 +7667,28 @@ fn render_worker(
     loop {
         let request = requests.wait_take();
         let result = if request.compare_source {
-            toniator::render::decode_source(&request.document.source, request.max_dimension)
+            request
+                .token
+                .checkpoint()
+                .map_err(anyhow::Error::from)
+                .and_then(|_| {
+                    toniator::render::decode_source(&request.document.source, request.max_dimension)
+                })
+                .and_then(|image| {
+                    request.token.checkpoint().map_err(anyhow::Error::from)?;
+                    Ok(toniator::composite_preview(
+                        image,
+                        request.document.appearance,
+                    ))
+                })
         } else {
-            render_document_preview(&request.document, request.max_dimension, request.generation)
-                .map(|rendered| rendered.image)
+            render_document_preview_cancellable(
+                &request.document,
+                request.max_dimension,
+                request.generation,
+                &request.token,
+            )
+            .map(|rendered| rendered.image)
         };
         results.replace(RenderOutcome {
             generation: request.generation,
@@ -6954,6 +7817,11 @@ fn build_start_view(has_recovery: bool) -> StartWidgets {
 struct EditorWidgets {
     container: gtk::Widget,
     paned: gtk::Paned,
+    inspector_shell: gtk::Widget,
+    workspace_status: gtk::Label,
+    cancel_preview: gtk::Button,
+    cancel_export: gtk::Button,
+    editing_context: gtk::Label,
     canvas: gtk::ScrolledWindow,
     canvas_content: gtk::Overlay,
     fit: gtk::ToggleButton,
@@ -6964,6 +7832,12 @@ struct EditorWidgets {
     treatment_modes: gtk::Stack,
     preset_import: gtk::Button,
     preset_save: gtk::Button,
+    document_section: gtk::Expander,
+    output_mode: gtk::DropDown,
+    preview_surface: gtk::DropDown,
+    preview_color: gtk::ColorDialogButton,
+    export_background: gtk::DropDown,
+    export_color: gtk::ColorDialogButton,
     web_value_mode: gtk::DropDown,
     web_output_ink: gtk::DropDown,
     web_output_ink_row: gtk::Widget,
@@ -6978,7 +7852,9 @@ struct EditorWidgets {
     web_edit_shape: gtk::Button,
     web_target: gtk::DropDown,
     web_target_label: gtk::Label,
+    web_target_help: Option<HelpHandle>,
     web_visible_label: gtk::Label,
+    web_visible_help: HelpHandle,
     web_visible: [gtk::CheckButton; 4],
     web_color: gtk::Entry,
     web_color_row: gtk::Widget,
@@ -7012,9 +7888,12 @@ struct EditorWidgets {
     curve_editor: gtk::DrawingArea,
     curve_reset: gtk::Button,
     curve_shared: gtk::CheckButton,
+    curve_shared_help: Option<HelpHandle>,
     curve_target: gtk::DropDown,
     curve_target_label: gtk::Label,
+    curve_target_help: Option<HelpHandle>,
     curve_visible_label: gtk::Label,
+    curve_visible_help: HelpHandle,
     curve_visible: [gtk::CheckButton; 4],
     curve_color: gtk::Entry,
     curve_color_row: gtk::Widget,
@@ -7053,6 +7932,87 @@ struct EditorWidgets {
     motif_overlay: gtk::DrawingArea,
 }
 
+struct AppearanceControlWidgets {
+    container: gtk::Box,
+    preview_surface: gtk::DropDown,
+    preview_color: gtk::ColorDialogButton,
+    #[cfg(test)]
+    preview_help: gtk::MenuButton,
+    export_background: gtk::DropDown,
+    export_color: gtk::ColorDialogButton,
+    #[cfg(test)]
+    export_help: gtk::MenuButton,
+}
+
+fn build_appearance_controls() -> AppearanceControlWidgets {
+    let container = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let preview_surface = gtk::DropDown::from_strings(&["Checkerboard", "Color over checkerboard"]);
+    preview_surface.set_tooltip_text(Some(help_for("Preview Surface").unwrap().summary));
+    preview_surface.update_property(&[gtk::accessible::Property::Label("Preview Surface")]);
+    let preview_color = gtk::ColorDialogButton::new(Some(
+        gtk::ColorDialog::builder()
+            .title("Preview Surface Color")
+            .with_alpha(true)
+            .build(),
+    ));
+    preview_color.update_property(&[gtk::accessible::Property::Label("Preview Surface Color")]);
+    let preview_section = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    let preview_heading = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    preview_heading.append(
+        &gtk::Label::builder()
+            .label(PREVIEW_SURFACE_LABEL)
+            .xalign(0.0)
+            .wrap(true)
+            .hexpand(true)
+            .build(),
+    );
+    let preview_help = help_button(help_for("Preview Surface").unwrap());
+    preview_help.set_tooltip_text(Some("Help: Preview Surface"));
+    preview_heading.append(&preview_help);
+    preview_section.append(&preview_heading);
+    preview_section.append(&preview_surface);
+    preview_section.append(&preview_color);
+    container.append(&preview_section);
+    let export_background = gtk::DropDown::from_strings(&["None", "Color"]);
+    export_background.set_tooltip_text(Some(help_for("Export Background").unwrap().summary));
+    export_background.update_property(&[gtk::accessible::Property::Label("Export Background")]);
+    let export_color = gtk::ColorDialogButton::new(Some(
+        gtk::ColorDialog::builder()
+            .title("Export Background Color")
+            .with_alpha(true)
+            .build(),
+    ));
+    export_color.update_property(&[gtk::accessible::Property::Label("Export Background Color")]);
+    let export_section = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    let export_heading = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    export_heading.append(
+        &gtk::Label::builder()
+            .label(EXPORT_BACKGROUND_LABEL)
+            .xalign(0.0)
+            .wrap(true)
+            .hexpand(true)
+            .build(),
+    );
+    let export_help = help_button(help_for("Export Background").unwrap());
+    export_help.set_tooltip_text(Some("Help: Export Background"));
+    export_heading.append(&export_help);
+    export_section.append(&export_heading);
+    export_section.append(&export_background);
+    export_section.append(&export_color);
+    container.append(&export_section);
+    AppearanceControlWidgets {
+        container,
+        preview_surface,
+        preview_color,
+        #[cfg(test)]
+        preview_help,
+        export_background,
+        export_color,
+        #[cfg(test)]
+        export_help,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_editor_view(
     picture: &gtk::Picture,
@@ -7074,8 +8034,10 @@ fn build_editor_view(
 ) -> EditorWidgets {
     let layout = gtk::Paned::new(gtk::Orientation::Horizontal);
     layout.set_wide_handle(true);
-    layout.set_resize_start_child(true);
-    layout.set_resize_end_child(false);
+    // The inspector is the start child. Keep its requested width stable while
+    // the canvas absorbs window growth and shrinkage.
+    layout.set_resize_start_child(false);
+    layout.set_resize_end_child(true);
     layout.set_shrink_start_child(true);
     layout.set_shrink_end_child(true);
     let canvas_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -7123,6 +8085,7 @@ fn build_editor_view(
     fit.set_tooltip_text(Some(
         "Fit complete artwork; fitted percentage may be below 5% for very large artwork",
     ));
+    compact_control_help(&fit, "Fit Artwork");
     zoom.update_property(&[gtk::accessible::Property::Label("Canvas zoom")]);
     let zoom_entry = gtk::Entry::builder()
         .text("100")
@@ -7134,7 +8097,9 @@ fn build_editor_view(
     ));
     zoom_entry.set_width_chars(7);
     zoom_entry.update_property(&[gtk::accessible::Property::Label("Zoom percentage")]);
-    let rendered_view = gtk::ToggleButton::with_label("Rendered");
+    compact_control_help(&zoom, "Canvas Zoom");
+    compact_control_help(&zoom_entry, "Canvas Zoom");
+    let rendered_view = gtk::ToggleButton::with_label("Halftone");
     rendered_view.set_group(Some(compare));
     rendered_view.set_active(true);
     let view_switch = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -7154,6 +8119,22 @@ fn build_editor_view(
     controls.append(&spacer);
     controls.append(preview_indicator);
     canvas_box.append(&canvas);
+    let workspace_status = gtk::Label::builder()
+        .label("Preview will appear here")
+        .xalign(0.0)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .css_classes(["caption", "dim-label", "workspace-status"])
+        .build();
+    let status_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    workspace_status.set_hexpand(true);
+    let cancel_preview = gtk::Button::with_label("Cancel Preview");
+    cancel_preview.set_visible(false);
+    let cancel_export = gtk::Button::with_label("Cancel Export");
+    cancel_export.set_visible(false);
+    status_row.append(&workspace_status);
+    status_row.append(&cancel_preview);
+    status_row.append(&cancel_export);
+    canvas_box.append(&status_row);
     canvas_box.append(&controls);
 
     let inspector = gtk::Box::new(gtk::Orientation::Vertical, 14);
@@ -7168,7 +8149,7 @@ fn build_editor_view(
         .css_classes(["title-2"])
         .build();
     let treatment_caption = gtk::Label::builder()
-        .label("Pattern")
+        .label("Pattern Type")
         .xalign(0.0)
         .css_classes(["heading"])
         .build();
@@ -7204,10 +8185,19 @@ fn build_editor_view(
     preset_save.set_tooltip_text(Some("Save this halftone setup without the artwork"));
     preset_actions.append(&preset_import);
     preset_actions.append(&preset_save);
+    if let Some(spec) = help_for("Load Preset") {
+        preset_import.set_tooltip_text(Some(spec.summary));
+        preset_import.update_property(&[gtk::accessible::Property::Description(spec.summary)]);
+    }
+    if let Some(spec) = help_for("Save Preset") {
+        preset_save.set_tooltip_text(Some(spec.summary));
+        preset_save.update_property(&[gtk::accessible::Property::Description(spec.summary)]);
+    }
     inspector.append(&preset_actions);
 
     let native_panel = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    native_panel.append(&control_row("Detail", "Coarse — Fine", detail));
+    native_panel.add_css_class("workflow-group");
+    native_panel.append(&control_row("Sampling Detail", "Coarse — Fine", detail));
     native_panel.append(&control_row(
         "Coverage",
         "How much ink fills the page",
@@ -7219,7 +8209,7 @@ fn build_editor_view(
         contrast,
     ));
     native_panel.append(&control_row(
-        "Angle",
+        "Screen Angle",
         "Rotate square and line screens",
         angle,
     ));
@@ -7235,16 +8225,17 @@ fn build_editor_view(
     native_panel.append(&channel_copy);
 
     let web_panel = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    web_panel.add_css_class("workflow-group");
     let web_value_mode = source_mapping_dropdown();
-    web_panel.append(&combo_row("Source Mapping", &web_value_mode));
+    web_panel.append(&combo_row("Artwork Mapping", &web_value_mode));
     web_panel.append(&source_mapping_hint(&web_value_mode));
     let web_output_ink = gtk::DropDown::from_strings(&["Cyan", "Magenta", "Yellow", "Black"]);
     let web_output_ink_row = combo_row("Output Ink", &web_output_ink);
     web_output_ink_row.set_visible(false);
     web_panel.append(&web_output_ink_row);
-    let web_shared = gtk::CheckButton::with_label("Use One Shape for All Inks");
+    let web_shared = gtk::CheckButton::with_label("Share Mark Shape Across Inks");
     web_shared.set_active(true);
-    web_panel.append(&web_shared);
+    web_panel.append(&check_row(&web_shared, "Share Mark Shape Across Inks"));
     let web_shape = gtk::DropDown::from_strings(&["Circle", "Regular Polygon", "User Defined"]);
     let web_shape_row = combo_row("Mark", &web_shape);
     web_panel.append(&web_shape_row);
@@ -7272,10 +8263,26 @@ fn build_editor_view(
         .xalign(0.0)
         .css_classes(["heading"])
         .build();
-    web_panel.append(&web_polygon_sides_label);
+    let polygon_heading = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    polygon_heading.set_visible(web_polygon_sides.is_visible());
+    web_polygon_sides.connect_visible_notify(glib::clone!(
+        #[weak]
+        polygon_heading,
+        move |spin| polygon_heading.set_visible(spin.is_visible())
+    ));
+    polygon_heading.append(&web_polygon_sides_label);
+    let polygon_spec = help_for("Polygon Sides (3–6)").unwrap();
+    polygon_heading.append(&help_button(polygon_spec));
+    web_polygon_sides.set_tooltip_text(Some(polygon_spec.summary));
+    web_polygon_sides
+        .update_property(&[gtk::accessible::Property::Description(polygon_spec.summary)]);
+    web_polygon_sides.update_relation(&[gtk::accessible::Relation::LabelledBy(&[
+        web_polygon_sides_label.upcast_ref(),
+    ])]);
+    web_panel.append(&polygon_heading);
     web_panel.append(&web_polygon_sides);
     let web_edit_shape = gtk::Button::with_label("Edit User-Defined Mark…");
-    web_panel.append(&web_edit_shape);
+    web_panel.append(&button_with_help(&web_edit_shape, "Edit User-Defined Mark"));
     let web_geometry_note = gtk::Label::builder()
         .xalign(0.0)
         .wrap(true)
@@ -7284,7 +8291,8 @@ fn build_editor_view(
     web_panel.append(&web_geometry_note);
     let web_target =
         gtk::DropDown::from_strings(&["All Inks", "Cyan", "Magenta", "Yellow", "Black"]);
-    let (web_target_row, web_target_label) = labeled_combo_row("Edit Ink", &web_target);
+    let (web_target_row, web_target_label, web_target_help) =
+        labeled_combo_row_with_help("Adjust Ink", &web_target);
     web_panel.append(&web_target_row);
     let visible_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     let web_visible = [
@@ -7297,6 +8305,8 @@ fn build_editor_view(
         button.set_tooltip_text(Some("Toggle this ink in the output"));
         visible_row.append(button);
     }
+    let web_visible_help = help_handle(help_for("Visible Inks").unwrap());
+    visible_row.append(&web_visible_help.button);
     let web_visible_label = gtk::Label::builder()
         .label("Visible Inks")
         .xalign(0.0)
@@ -7333,19 +8343,19 @@ fn build_editor_view(
         control_status_row("Coverage", "Mark size", &web_coverage);
     web_panel.append(&web_coverage_row);
     let (web_angle_row, web_angle_status) =
-        control_status_row("Grid Angle", "Rotate sampling grid", &web_angle);
+        control_status_row("Screen Angle", "Rotate sampling grid", &web_angle);
     web_panel.append(&web_angle_row);
     let (web_mark_angle_row, web_mark_angle_status) = control_status_row(
-        "Mark Angle",
+        "Mark Rotation",
         "Rotate marks within the grid",
         &web_mark_angle,
     );
     web_panel.append(&web_mark_angle_row);
     let (web_width_scale_row, web_width_scale_status) =
-        control_status_row("Width Scale", "Horizontal mark scale", &web_width_scale);
+        control_status_row("Mark Width", "Horizontal mark scale", &web_width_scale);
     web_panel.append(&web_width_scale_row);
     let (web_height_scale_row, web_height_scale_status) =
-        control_status_row("Height Scale", "Vertical mark scale", &web_height_scale);
+        control_status_row("Mark Height", "Vertical mark scale", &web_height_scale);
     web_panel.append(&web_height_scale_row);
     let advanced = gtk::Expander::builder()
         .label("Advanced")
@@ -7356,36 +8366,37 @@ fn build_editor_view(
     let web_opacity = control_scale(0.0, 1.0, 0.01);
     let web_detail = control_scale(0.1, 8.0, 0.1);
     let (web_threshold_row, web_threshold_status) =
-        control_status_row("Remove Faint Marks", "Hide light marks", &web_threshold);
+        control_status_row("Light-Tone Cutoff", "Hide light marks", &web_threshold);
     advanced_box.append(&web_threshold_row);
     let (web_opacity_row, web_opacity_status) =
         control_status_row("Ink Opacity", "Transparent — Solid", &web_opacity);
     advanced_box.append(&web_opacity_row);
     let (web_detail_row, web_detail_status) =
-        control_status_row("Detail", "Sample density", &web_detail);
+        control_status_row("Sampling Detail", "Sample density", &web_detail);
     advanced_box.append(&web_detail_row);
     advanced.set_child(Some(&advanced_box));
     web_panel.append(&advanced);
 
     let curve_panel = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    curve_panel.add_css_class("workflow-group");
     let curve_value_mode = source_mapping_dropdown();
-    curve_panel.append(&combo_row("Source Mapping", &curve_value_mode));
+    curve_panel.append(&combo_row("Artwork Mapping", &curve_value_mode));
     curve_panel.append(&source_mapping_hint(&curve_value_mode));
     let curve_output_ink = gtk::DropDown::from_strings(&["Cyan", "Magenta", "Yellow", "Black"]);
     let curve_output_ink_row = combo_row("Output Ink", &curve_output_ink);
     curve_output_ink_row.set_visible(false);
     curve_panel.append(&curve_output_ink_row);
-    let curve_layout = gtk::DropDown::from_strings(&["Across Page", "Repeated Motif"]);
+    let curve_layout = gtk::DropDown::from_strings(&["Across Artwork", "Repeated Motif"]);
     curve_panel.append(&combo_row("Layout", &curve_layout));
     let curve_weight = control_scale(1.0, 200.0, 1.0);
     curve_panel.append(&control_row(
-        "Weight (All Inks)",
+        "Line Weight",
         "Global curve thickness",
         &curve_weight,
     ));
     let curve_spacing = control_scale(8.0, 220.0, 1.0);
     curve_panel.append(&control_row(
-        "Spacing (All Inks)",
+        "Line Spacing",
         "Global distance between curves",
         &curve_spacing,
     ));
@@ -7396,7 +8407,7 @@ fn build_editor_view(
         "Custom",
         "Mixed — Select One Ink",
     ]);
-    curve_panel.append(&combo_row("Curve Shape", &curve_profile));
+    curve_panel.append(&combo_row("Line Shape", &curve_profile));
     let curve_editor_label = gtk::Label::builder()
         .label("All Inks Curve")
         .xalign(0.0)
@@ -7412,6 +8423,10 @@ fn build_editor_view(
         .css_classes(["curve-editor"])
         .build();
     curve_panel.append(&curve_editor);
+    if let Some(spec) = help_for("Curve Editor") {
+        curve_editor.set_tooltip_text(Some(spec.summary));
+        curve_editor.update_property(&[gtk::accessible::Property::Description(spec.summary)]);
+    }
     curve_panel.append(
         &gtk::Label::builder()
             .label("Drag white points to shape the curve; blue points adjust bends. Double-click the line to add a point; Delete removes the selected point.")
@@ -7423,25 +8438,37 @@ fn build_editor_view(
     let curve_actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     let curve_reset = gtk::Button::with_label("Reset to Soft Wave");
     curve_reset.add_css_class("flat");
-    let curve_shared = gtk::CheckButton::with_label("Use One Curve for All Inks");
+    let curve_shared = gtk::CheckButton::with_label("Share Line Shape Across Inks");
     curve_shared.set_active(true);
     curve_actions.append(&curve_reset);
+    if let Some(spec) = help_for("Reset Line") {
+        curve_reset.set_tooltip_text(Some(spec.summary));
+        curve_reset.update_property(&[gtk::accessible::Property::Description(spec.summary)]);
+    }
     curve_panel.append(&curve_actions);
-    curve_panel.append(&curve_shared);
+    let curve_shared_help = help_for("Share Line Shape Across Inks").map(help_handle);
+    let curve_shared_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    curve_shared_row.append(&curve_shared);
+    if let Some(handle) = &curve_shared_help {
+        curve_shared_row.append(&handle.button);
+    }
+    curve_panel.append(&curve_shared_row);
     let curve_target =
         gtk::DropDown::from_strings(&["All Inks", "Cyan", "Magenta", "Yellow", "Black"]);
-    let (curve_target_row, curve_target_label) = labeled_combo_row("Edit Ink", &curve_target);
+    let (curve_target_row, curve_target_label, curve_target_help) =
+        labeled_combo_row_with_help("Adjust Ink", &curve_target);
     curve_panel.append(&curve_target_row);
     let motif_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
     motif_box.append(
         &gtk::Label::builder()
-            .label("Pattern")
+            .label("Repeated Motif")
             .xalign(0.0)
             .css_classes(["heading"])
             .build(),
     );
-    let motif_coverage = gtk::DropDown::from_strings(&["Fill Canvas Automatically", "Custom Grid"]);
-    motif_box.append(&combo_row("Canvas Coverage", &motif_coverage));
+    let motif_coverage =
+        gtk::DropDown::from_strings(&["Cover Artwork Automatically", "Set Rows and Columns"]);
+    motif_box.append(&combo_row("Artwork Coverage", &motif_coverage));
     let motif_size = control_scale(4.0, 200.0, 1.0);
     motif_box.append(&control_status_row("Motif Size", "Repeated curve width", &motif_size).0);
     let motif_columns = control_scale(1.0, 40.0, 1.0);
@@ -7454,14 +8481,21 @@ fn build_editor_view(
     motif_box
         .append(&control_status_row("Row Spacing", "Distance between rows", &motif_row_spacing).0);
     let motif_stagger = control_scale(-200.0, 200.0, 1.0);
-    motif_box.append(&control_status_row("Stagger Rows", "Alternate row shift", &motif_stagger).0);
+    motif_box.append(
+        &control_status_row(
+            "Alternate Row Offset",
+            "Alternate row shift",
+            &motif_stagger,
+        )
+        .0,
+    );
     let motif_alternate = gtk::DropDown::from_strings(&["None", "Mirror", "Half Turn"]);
     motif_box.append(&combo_row("Alternate Copies", &motif_alternate));
-    let motif_arrange = gtk::CheckButton::with_label("Arrange on Canvas");
+    let motif_arrange = gtk::CheckButton::with_label("Adjust Layout on Artwork");
     motif_arrange.set_tooltip_text(Some(
         "Drag the center, rotation, and spacing handles on the artwork",
     ));
-    motif_box.append(&motif_arrange);
+    motif_box.append(&check_row(&motif_arrange, "Adjust Layout on Artwork"));
     let motif_mixed = gtk::Label::builder()
         .xalign(0.0)
         .wrap(true)
@@ -7490,6 +8524,8 @@ fn build_editor_view(
         button.set_tooltip_text(Some("Toggle this ink in the output"));
         curve_visible_row.append(button);
     }
+    let curve_visible_help = help_handle(help_for("Visible Inks").unwrap());
+    curve_visible_row.append(&curve_visible_help.button);
     let curve_visible_label = gtk::Label::builder()
         .label("Visible Inks")
         .xalign(0.0)
@@ -7520,11 +8556,11 @@ fn build_editor_view(
     curve_panel.append(&curve_crosshatch_color_row);
     let curve_coverage = control_scale(0.0, 5.0, 0.05);
     let (curve_coverage_row, curve_coverage_status) =
-        control_status_row("Coverage", "Curve scale", &curve_coverage);
+        control_status_row("Line Coverage", "Curve scale", &curve_coverage);
     curve_panel.append(&curve_coverage_row);
     let curve_angle = control_scale(-360.0, 360.0, 1.0);
     let (curve_angle_row, curve_angle_status) =
-        control_status_row("Angle", "Rotate ink screen", &curve_angle);
+        control_status_row("Screen Angle", "Rotate ink screen", &curve_angle);
     curve_panel.append(&curve_angle_row);
     let curve_position_x = control_scale(-1000.0, 1000.0, 1.0);
     let (curve_position_x_row, curve_position_x_status) =
@@ -7545,16 +8581,16 @@ fn build_editor_view(
     let curve_advanced_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
     let curve_threshold = control_scale(0.0, 1.0, 0.01);
     let (curve_threshold_row, curve_threshold_status) =
-        control_status_row("Remove Faint Curves", "Hide light marks", &curve_threshold);
+        control_status_row("Light-Tone Cutoff", "Hide light lines", &curve_threshold);
     curve_advanced_box.append(&curve_threshold_row);
     let curve_detail = control_scale(0.1, 8.0, 0.1);
     let (curve_detail_row, curve_detail_status) =
-        control_status_row("Detail", "Sample density", &curve_detail);
+        control_status_row("Sampling Detail", "Sample density", &curve_detail);
     curve_advanced_box.append(&curve_detail_row);
     let curve_close_ends = gtk::CheckButton::with_label("Close Ends");
     let curve_smooth_join = gtk::CheckButton::with_label("Smooth Join");
-    curve_advanced_box.append(&curve_close_ends);
-    curve_advanced_box.append(&curve_smooth_join);
+    curve_advanced_box.append(&check_row(&curve_close_ends, "Close Ends"));
+    curve_advanced_box.append(&check_row(&curve_smooth_join, "Smooth Join"));
     curve_advanced.set_child(Some(&curve_advanced_box));
     curve_panel.append(&curve_advanced);
     let treatment_modes = gtk::Stack::new();
@@ -7572,22 +8608,51 @@ fn build_editor_view(
     document_box.set_margin_top(10);
     document_box.append(source_label);
     document_box.append(autosave_status);
+    let output_mode = gtk::DropDown::from_strings(&["CMYK Inks", "RGB Screen"]);
+    output_mode.set_tooltip_text(Some("Choose subtractive CMYK inks for print or additive RGB screens for transparent, light-based output."));
+    document_box.append(&combo_row("Output", &output_mode));
+    let appearance_controls = build_appearance_controls();
+    let preview_surface = appearance_controls.preview_surface.clone();
+    let preview_color = appearance_controls.preview_color.clone();
+    let export_background = appearance_controls.export_background.clone();
+    let export_color = appearance_controls.export_color.clone();
+    document_box.append(&appearance_controls.container);
     document.set_child(Some(&document_box));
     inspector.append(&document);
 
     let inspector_scroll = gtk::ScrolledWindow::builder()
+        .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Never)
         .vscrollbar_policy(gtk::PolicyType::Automatic)
         .child(&inspector)
         .build();
     inspector_scroll.add_css_class("inspector-pane");
-    inspector_scroll.set_size_request(0, -1);
-    layout.set_start_child(Some(&canvas_box));
-    layout.set_end_child(Some(&inspector_scroll));
-    layout.set_position((initial_layout_width - inspector_width).max(CANVAS_MIN_WIDTH));
+    inspector_scroll.set_size_request(INSPECTOR_MIN_WIDTH, -1);
+    let editing_context = gtk::Label::builder()
+        .label("Shapes · All inks")
+        .xalign(0.0)
+        .wrap(true)
+        .css_classes(["caption", "editing-context"])
+        .build();
+    let inspector_shell = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    inspector_shell.set_vexpand(true);
+    inspector_shell.add_css_class("inspector-shell");
+    inspector_shell.append(&editing_context);
+    inspector_shell.append(&inspector_scroll);
+    layout.set_start_child(Some(&inspector_shell));
+    layout.set_end_child(Some(&canvas_box));
+    layout.set_position(constrained_inspector_width(
+        inspector_width,
+        initial_layout_width,
+    ));
     EditorWidgets {
         container: layout.clone().upcast(),
         paned: layout,
+        inspector_shell: inspector_shell.upcast(),
+        workspace_status,
+        cancel_preview,
+        cancel_export,
+        editing_context,
         canvas,
         canvas_content: canvas_overlay,
         fit,
@@ -7598,6 +8663,12 @@ fn build_editor_view(
         treatment_modes,
         preset_import,
         preset_save,
+        document_section: document,
+        output_mode,
+        preview_surface,
+        preview_color,
+        export_background,
+        export_color,
         web_value_mode,
         web_output_ink,
         web_output_ink_row,
@@ -7612,7 +8683,9 @@ fn build_editor_view(
         web_edit_shape,
         web_target,
         web_target_label,
+        web_target_help,
         web_visible_label,
+        web_visible_help,
         web_visible,
         web_color,
         web_color_row,
@@ -7646,9 +8719,12 @@ fn build_editor_view(
         curve_editor,
         curve_reset,
         curve_shared,
+        curve_shared_help,
         curve_target,
         curve_target_label,
+        curve_target_help,
         curve_visible_label,
+        curve_visible_help,
         curve_visible,
         curve_color,
         curve_color_row,
@@ -7688,22 +8764,481 @@ fn build_editor_view(
     }
 }
 
-fn combo_row(title: &str, combo: &gtk::DropDown) -> gtk::Widget {
-    labeled_combo_row(title, combo).0
+#[derive(Clone, Copy)]
+struct HelpSpec {
+    control: &'static str,
+    heading: &'static str,
+    summary: &'static str,
+    body: &'static str,
 }
 
-fn labeled_combo_row(title: &str, combo: &gtk::DropDown) -> (gtk::Widget, gtk::Label) {
-    combo.set_hexpand(true);
-    combo.set_size_request(0, -1);
-    let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
+// Keep help copy declarative: it is used by the popover, tooltip, and tests so
+// the concise and expanded explanations cannot silently drift apart.
+const HELP_SPECS: &[HelpSpec] = &[
+    HelpSpec {
+        control: "Artwork Mapping",
+        heading: "Artwork Mapping",
+        summary: "Choose which artwork information drives the halftone.",
+        body: "Choose whether color or brightness drives the halftone. The illustration below shows the result; this changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Output Ink",
+        heading: "Output Ink",
+        summary: "Choose the ink used for a one-ink result.",
+        body: "Choose the ink for Brightness → One Ink. This changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Mark",
+        heading: "Mark",
+        summary: "Choose the shape repeated across the screen.",
+        body: "Choose the mark drawn at each sampled position. Polygon and user-defined options reveal related controls; this changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Adjust Ink",
+        heading: "Adjust Ink",
+        summary: "Choose which ink receives the next adjustments.",
+        body: "Choose All Inks for shared adjustments or one ink for a separation. In Crosshatch this becomes Adjust Layer; changes affect both preview and export.",
+    },
+    HelpSpec {
+        control: "Adjust Layer",
+        heading: "Adjust Layer",
+        summary: "Choose which crosshatch layer receives the next adjustments.",
+        body: "Choose All Layers for shared adjustments or one layer for a directional hatch. Changes affect both preview and export.",
+    },
+    HelpSpec {
+        control: "Screen Angle",
+        heading: "Screen Angle",
+        summary: "Rotate the sampling screen behind the marks.",
+        body: "Increase or decrease to rotate the screen. Mark Rotation changes the mark itself instead; this changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Mark Rotation",
+        heading: "Mark Rotation",
+        summary: "Rotate marks without rotating their sampling screen.",
+        body: "Increase or decrease to rotate each mark. Screen Angle rotates the grid instead; this changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Mark Width",
+        heading: "Mark Width",
+        summary: "Change mark width independently from height.",
+        body: "Increase for wider marks or decrease for narrower marks. This changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Mark Height",
+        heading: "Mark Height",
+        summary: "Change mark height independently from width.",
+        body: "Increase for taller marks or decrease for shorter marks. This changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Light-Tone Cutoff",
+        heading: "Light-Tone Cutoff",
+        summary: "Hide faint marks or line sections in lighter artwork.",
+        body: "Increase to remove more faint marks or line sections, or decrease to keep them. This changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Sampling Detail",
+        heading: "Sampling Detail",
+        summary: "Control how densely Toniator samples artwork.",
+        body: "Increase for finer sampling or decrease for a coarser pattern. This changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Line Weight",
+        heading: "Line Weight",
+        summary: "Change the thickness of every curve line.",
+        body: "Increase for heavier lines or decrease for lighter lines. This changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Line Spacing",
+        heading: "Line Spacing",
+        summary: "Change the distance between curve lines.",
+        body: "Increase for more space or decrease for a denser pattern. This changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Line Shape",
+        heading: "Line Shape",
+        summary: "Choose the curve profile used by the pattern.",
+        body: "Choose a preset profile or Custom to edit points below. This changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Artwork Coverage",
+        heading: "Artwork Coverage",
+        summary: "Choose automatic coverage or a fixed motif grid.",
+        body: "Cover Artwork Automatically fills the artwork; Set Rows and Columns reveals manual layout controls. This changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Ink Opacity",
+        heading: "Ink Opacity",
+        summary: "Change how solid each ink appears.",
+        body: "Increase for more opaque ink or decrease for more transparency. This changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Ink Color",
+        heading: "Ink Color",
+        summary: "Set the displayed color for the selected ink.",
+        body: "Enter a hex color such as #00AEEF. The color is applied when valid and changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Crosshatch Color",
+        heading: "Crosshatch Color",
+        summary: "Set the shared monochrome crosshatch color.",
+        body: "Enter a hex color such as #111111. This applies to every crosshatch layer in preview and export.",
+    },
+    HelpSpec {
+        control: "Layout",
+        heading: "Layout",
+        summary: "Choose continuous lines or a repeated motif.",
+        body: "Across Artwork draws continuous lines; Repeated Motif reveals motif controls. This changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Motif Size",
+        heading: "Motif Size",
+        summary: "Change the width of each repeated motif.",
+        body: "Increase for larger motifs or decrease for smaller motifs. This changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Rows",
+        heading: "Rows",
+        summary: "Set how many motif rows are drawn.",
+        body: "Increase for more rows or decrease for fewer rows. Available with Set Rows and Columns; changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Columns",
+        heading: "Columns",
+        summary: "Set how many motif copies span the artwork.",
+        body: "Increase for more copies or decrease for fewer copies. Available with Set Rows and Columns; changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Row Spacing",
+        heading: "Row Spacing",
+        summary: "Change the distance between motif rows.",
+        body: "Increase for more space or decrease for a denser layout. This changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Alternate Row Offset",
+        heading: "Alternate Row Offset",
+        summary: "Offset every other motif row.",
+        body: "Increase or decrease to shift alternating rows. This changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Alternate Copies",
+        heading: "Alternate Copies",
+        summary: "Mirror or rotate alternating motif copies.",
+        body: "Choose an alternating transform for repeated motifs. This changes both preview and export.",
+    },
+    HelpSpec {
+        control: "PNG Background",
+        heading: "PNG Background",
+        summary: "Use the saved Export Background or make a PNG-only override.",
+        body: "Document Export Background uses the saved document setting, including its alpha. Transparent Override preserves artwork alpha; White Override flattens only this PNG export. Overrides never change the document or SVG.",
+    },
+    HelpSpec {
+        control: "Preview Surface",
+        heading: "Preview Surface",
+        summary: "Choose the canvas-only backdrop for transparent artwork.",
+        body: "Checkerboard exposes transparency. A color is composited over checkerboard for the preview canvas only and is never exported or sampled.",
+    },
+    HelpSpec {
+        control: "Export Background",
+        heading: "Export Background",
+        summary: "Choose an optional saved background for SVG and default PNG export.",
+        body: "None preserves transparent output. A color, including alpha, is emitted as the SVG export background layer and used by default for PNG. It is compositing-only and does not change sampling or marks.",
+    },
+    HelpSpec {
+        control: "PNG Size",
+        heading: "PNG Size",
+        summary: "Choose document, double, or custom PNG dimensions.",
+        body: "Custom enables width and height, which stay linked to the artwork ratio. This affects PNG export only.",
+    },
+    HelpSpec {
+        control: "Share Mark Shape Across Inks",
+        heading: "Share Mark Shape Across Inks",
+        summary: "Use one mark shape for every ink.",
+        body: "Turn this on to edit one shared mark, or off to give inks independent marks. This changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Share Line Shape Across Inks",
+        heading: "Share Line Shape Across Inks",
+        summary: "Use one line shape for every ink.",
+        body: "Turn this on to edit one shared line, or off to give inks independent lines. In Crosshatch it shares the hatch path across layers; this changes preview and export.",
+    },
+    HelpSpec {
+        control: "Adjust Layout on Artwork",
+        heading: "Adjust Layout on Artwork",
+        summary: "Move and rotate the repeated motif directly on the artwork.",
+        body: "Turn this on, then drag the handles on the artwork to move, rotate, or separate rows. This changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Close Ends",
+        heading: "Close Ends",
+        summary: "Join the start and end of a curve.",
+        body: "Turn this on to close the curve into a loop. It is most useful for repeated motifs and changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Smooth Join",
+        heading: "Smooth Join",
+        summary: "Smooth the join where a closed curve meets itself.",
+        body: "Turn this on after Close Ends to smooth the seam. It changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Coverage",
+        heading: "Coverage",
+        summary: "Change mark size and the inked area of the artwork.",
+        body: "Increase for larger marks and more inked area; decrease for smaller marks. Combine with spacing or Sampling Detail to control density. This changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Line Coverage",
+        heading: "Line Coverage",
+        summary: "Control how strongly artwork tone changes line width and inked area.",
+        body: "Increase for stronger tonal width changes and more inked line area; decrease for gentler changes. Line Weight sets base thickness. This changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Contrast",
+        heading: "Contrast",
+        summary: "Increase separation between lighter and darker artwork areas.",
+        body: "Increase for stronger tonal separation or decrease for a gentler result. This changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Apply Mark to All",
+        heading: "Apply Mark to All",
+        summary: "Replace mixed selected marks with one choice.",
+        body: "Choose a mark to apply it across the selected inks. This changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Polygon Sides (3–6)",
+        heading: "Polygon Sides",
+        summary: "Set the number of sides in a polygon mark.",
+        body: "Increase for more sides or decrease for fewer. Available only for Regular Polygon marks; this changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Edit User-Defined Mark",
+        heading: "Edit User-Defined Mark",
+        summary: "Edit the custom mark's anchors and curves.",
+        body: "Open the mark editor to move points and handles. Available only for User Defined marks; this changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Curve Editor",
+        heading: "Curve Editor",
+        summary: "Shape the line directly with anchors and handles.",
+        body: "Drag points to shape the line, double-click to add a point, and Delete to remove one. This changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Reset Line",
+        heading: "Reset Line",
+        summary: "Restore the current line to a preset shape.",
+        body: "Reset returns the selected line or hatch path to its default profile. This changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Visible Inks",
+        heading: "Visible Inks",
+        summary: "Include or exclude inks from the halftone.",
+        body: "Turn an ink on to include it or off to hide it. This changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Visible Crosshatch Layers",
+        heading: "Visible Crosshatch Layers",
+        summary: "Include or exclude monochrome hatch directions.",
+        body: "Turn a hatch layer on to include it or off to hide it. Screen Angle changes that layer's direction; this changes preview and export.",
+    },
+    HelpSpec {
+        control: "Position X",
+        heading: "Position X",
+        summary: "Move the selected line horizontally.",
+        body: "Increase to move right or decrease to move left. This changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Position Y",
+        heading: "Position Y",
+        summary: "Move the selected line vertically.",
+        body: "Increase to move down or decrease to move up. This changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Load Preset",
+        heading: "Load Preset",
+        summary: "Apply a saved halftone setup to the current artwork.",
+        body: "Loading a preset changes treatment controls but keeps the current artwork. It changes preview and later export.",
+    },
+    HelpSpec {
+        control: "Save Preset",
+        heading: "Save Preset",
+        summary: "Save this halftone setup without the artwork.",
+        body: "Save reusable settings for later artwork. This affects preset storage only; it does not export or change the current preview.",
+    },
+    HelpSpec {
+        control: "Canvas Zoom",
+        heading: "Canvas Zoom",
+        summary: "Magnify the artwork view without changing output.",
+        body: "Increase to zoom in or decrease to zoom out. This affects the canvas preview only, never export.",
+    },
+    HelpSpec {
+        control: "Fit Artwork",
+        heading: "Fit Artwork",
+        summary: "Fit the complete artwork into the canvas view.",
+        body: "Turn this on to fit the full artwork. This affects the canvas preview only, never export.",
+    },
+    HelpSpec {
+        control: "Share Hatch Path Across Layers",
+        heading: "Share Hatch Path Across Layers",
+        summary: "Use one hatch path for every monochrome layer.",
+        body: "Turn this on to edit one shared hatch path, or off to give layers independent paths. This changes both preview and export.",
+    },
+];
+
+fn help_for(control: &str) -> Option<&'static HelpSpec> {
+    HELP_SPECS.iter().find(|spec| spec.control == control)
+}
+
+#[derive(Clone)]
+struct HelpHandle {
+    button: gtk::MenuButton,
+    popover: gtk::Popover,
+    heading: gtk::Label,
+    body: gtk::Label,
+}
+
+impl HelpHandle {
+    fn set_spec(&self, spec: &HelpSpec) {
+        self.button.set_tooltip_text(Some(spec.summary));
+        self.button
+            .update_property(&[gtk::accessible::Property::Label(&format!(
+                "Help for {}",
+                spec.control
+            ))]);
+        self.heading.set_text(spec.heading);
+        self.body.set_text(spec.body);
+        self.popover.queue_resize();
+        self.popover.queue_draw();
+    }
+}
+
+fn help_handle(spec: &HelpSpec) -> HelpHandle {
+    let button = gtk::MenuButton::builder()
+        .icon_name("help-about-symbolic")
+        .focusable(true)
+        .build();
+    button.add_css_class("flat");
+    let heading = gtk::Label::builder()
+        .xalign(0.0)
+        .css_classes(["heading"])
+        .build();
+    let body = gtk::Label::builder()
+        .wrap(true)
+        .xalign(0.0)
+        .width_chars(34)
+        .build();
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    content.set_margin_top(10);
+    content.set_margin_bottom(10);
+    content.set_margin_start(12);
+    content.set_margin_end(12);
+    content.append(&heading);
+    content.append(&body);
+    let popover = gtk::Popover::builder()
+        .has_arrow(true)
+        .child(&content)
+        .build();
+    button.set_popover(Some(&popover));
+    let handle = HelpHandle {
+        button,
+        popover,
+        heading,
+        body,
+    };
+    handle.set_spec(spec);
+    handle
+}
+
+fn help_button(spec: &HelpSpec) -> gtk::MenuButton {
+    help_handle(spec).button
+}
+
+fn row_heading(title: &str) -> (gtk::Box, gtk::Label, Option<gtk::MenuButton>) {
+    let labels = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let label = gtk::Label::builder()
         .label(title)
         .xalign(0.0)
         .css_classes(["heading"])
         .build();
-    row.append(&label);
+    labels.append(&label);
+    let help = help_for(title).map(help_button);
+    if let Some(button) = &help {
+        labels.append(button);
+    }
+    (labels, label, help)
+}
+
+fn check_row(button: &gtk::CheckButton, control: &str) -> gtk::Widget {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    row.append(button);
+    if let Some(spec) = help_for(control) {
+        button.set_tooltip_text(Some(spec.summary));
+        let help = help_button(spec);
+        button.update_property(&[gtk::accessible::Property::Description(spec.summary)]);
+        row.append(&help);
+    }
+    row.upcast()
+}
+
+fn button_with_help(button: &gtk::Button, control: &str) -> gtk::Widget {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    row.set_visible(button.is_visible());
+    button.connect_visible_notify(glib::clone!(
+        #[weak]
+        row,
+        move |button| row.set_visible(button.is_visible())
+    ));
+    row.append(button);
+    if let Some(spec) = help_for(control) {
+        button.set_tooltip_text(Some(spec.summary));
+        button.update_property(&[gtk::accessible::Property::Description(spec.summary)]);
+        row.append(&help_button(spec));
+    }
+    row.upcast()
+}
+
+fn compact_control_help(widget: &(impl IsA<gtk::Widget> + IsA<gtk::Accessible>), control: &str) {
+    if let Some(spec) = help_for(control) {
+        widget.set_tooltip_text(Some(spec.summary));
+        widget.update_property(&[gtk::accessible::Property::Description(spec.summary)]);
+    }
+}
+
+fn combo_row(title: &str, combo: &gtk::DropDown) -> gtk::Widget {
+    labeled_combo_row(title, combo).0
+}
+
+fn labeled_combo_row(title: &str, combo: &gtk::DropDown) -> (gtk::Widget, gtk::Label) {
+    let (row, label, _) = labeled_combo_row_with_help(title, combo);
+    (row, label)
+}
+
+fn labeled_combo_row_with_help(
+    title: &str,
+    combo: &gtk::DropDown,
+) -> (gtk::Widget, gtk::Label, Option<HelpHandle>) {
+    combo.set_hexpand(true);
+    combo.set_size_request(0, -1);
+    let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    let labels = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let label = gtk::Label::builder()
+        .label(title)
+        .xalign(0.0)
+        .css_classes(["heading"])
+        .build();
+    labels.append(&label);
+    let help = help_for(title).map(help_handle);
+    if let Some(handle) = &help {
+        labels.append(&handle.button);
+    }
+    row.append(&labels);
     row.append(combo);
-    (row.upcast(), label)
+    combo.update_relation(&[gtk::accessible::Relation::LabelledBy(&[label.upcast_ref()])]);
+    if help.is_some() {
+        combo.update_property(&[gtk::accessible::Property::Description(
+            help_for(title).unwrap().summary,
+        )]);
+        combo.set_tooltip_text(help_for(title).map(|spec| spec.summary));
+    }
+    (row.upcast(), label, help)
 }
 
 #[derive(Clone, Copy)]
@@ -7717,7 +9252,7 @@ struct SourceMappingOption {
     result_description: &'static str,
 }
 
-const SOURCE_MAPPING_OPTIONS: [SourceMappingOption; 4] = [
+const SOURCE_MAPPING_OPTIONS: [SourceMappingOption; 5] = [
     SourceMappingOption {
         name: "Color → CMYK Inks",
         description: "Separate source color into cyan, magenta, yellow, and black inks.",
@@ -7728,31 +9263,40 @@ const SOURCE_MAPPING_OPTIONS: [SourceMappingOption; 4] = [
         result_description: "Result separated into cyan, magenta, yellow, and black inks",
     },
     SourceMappingOption {
-        name: "Value → One Ink",
-        description: "Map source tonal value to one selected ink.",
+        name: "Brightness → One Ink",
+        description: "Map artwork brightness to one selected ink.",
         mode: ValueMode::SingleChannel,
         source_svg: VALUE_SOURCE_SVG,
         result_svg: VALUE_TO_ONE_INK_SVG,
-        source_description: "Source artwork represented by tonal value",
-        result_description: "Tonal value mapped to one selected ink",
+        source_description: "Source artwork represented by brightness",
+        result_description: "Artwork brightness mapped to one selected ink",
     },
     SourceMappingOption {
-        name: "Value → All Inks",
-        description: "Apply the same source tonal value to every enabled ink.",
+        name: "Brightness → All Inks",
+        description: "Apply the same artwork brightness to every enabled ink.",
         mode: ValueMode::Luminance,
         source_svg: VALUE_SOURCE_SVG,
         result_svg: VALUE_TO_CMYK_SVG,
-        source_description: "Source artwork represented by tonal value",
-        result_description: "Tonal value mapped to all enabled inks",
+        source_description: "Source artwork represented by brightness",
+        result_description: "Artwork brightness mapped to all enabled inks",
     },
     SourceMappingOption {
-        name: "Value → Crosshatch",
-        description: "Build tonal value with monochrome K +45°, C -45°, M horizontal, and Y vertical hatch layers.",
+        name: "Brightness → Crosshatch",
+        description: "Build brightness with monochrome K +45°, C -45°, M horizontal, and Y vertical hatch layers.",
         mode: ValueMode::CrosshatchLuminance,
         source_svg: VALUE_SOURCE_SVG,
         result_svg: VALUE_TO_CROSSHATCH_SVG,
-        source_description: "Source artwork represented by tonal value",
-        result_description: "Tonal value mapped to four directional crosshatch layers",
+        source_description: "Source artwork represented by brightness",
+        result_description: "Artwork brightness mapped to four directional crosshatch layers",
+    },
+    SourceMappingOption {
+        name: "RGB Color → Screen",
+        description: "Map source red, green, and blue directly to additive screen channels. Use this for luminous RGB output, not print separations.",
+        mode: ValueMode::Rgb,
+        source_svg: COLOR_SOURCE_SVG,
+        result_svg: COLOR_TO_CMYK_SVG,
+        source_description: "Color source artwork",
+        result_description: "Red, green, and blue screens blend additively",
     },
 ];
 
@@ -7772,28 +9316,56 @@ fn ink_for_visible_slot(index: usize, crosshatch: bool) -> Ink {
     }
 }
 
+fn layer_terminology(crosshatch: bool) -> (&'static str, &'static str) {
+    if crosshatch {
+        ("Adjust Layer", "Visible Crosshatch Layers")
+    } else {
+        ("Adjust Ink", "Visible Inks")
+    }
+}
+
+fn set_crosshatch_target_directions(dropdown: &gtk::DropDown, angles: [f64; 4]) {
+    let selected = dropdown.selected();
+    let values = [
+        "All Layers".to_owned(),
+        format!("Layer 1 · {:.0}° (K)", angles[0]),
+        format!("Layer 2 · {:.0}° (C)", angles[1]),
+        format!("Layer 3 · {:.0}° (M)", angles[2]),
+        format!("Layer 4 · {:.0}° (Y)", angles[3]),
+    ];
+    let refs = values.iter().map(String::as_str).collect::<Vec<_>>();
+    dropdown.set_model(Some(&gtk::StringList::new(&refs)));
+    dropdown.set_selected(selected);
+}
+
 fn source_mapping_dropdown() -> gtk::DropDown {
     let names = SOURCE_MAPPING_OPTIONS.map(|option| option.name);
-    gtk::DropDown::from_strings(&names)
+    let dropdown = gtk::DropDown::from_strings(&names);
+    dropdown.set_hexpand(true);
+    dropdown.set_size_request(0, -1);
+    dropdown
 }
 
 fn sync_layer_terminology(
     dropdown: &gtk::DropDown,
     target_label: &gtk::Label,
+    target_help: Option<&HelpHandle>,
     visible_label: &gtk::Label,
     crosshatch: bool,
 ) {
-    let wanted = if crosshatch { "Edit Layer" } else { "Edit Ink" };
+    let (wanted, visible) = layer_terminology(crosshatch);
     if target_label.text() == wanted {
         return;
     }
     let selected = dropdown.selected();
     target_label.set_text(wanted);
-    visible_label.set_text(if crosshatch {
-        "Crosshatch Layers"
-    } else {
-        "Visible Inks"
-    });
+    if let Some(spec) = help_for(wanted) {
+        dropdown.update_property(&[gtk::accessible::Property::Description(spec.summary)]);
+        if let Some(help) = target_help {
+            help.set_spec(spec);
+        }
+    }
+    visible_label.set_text(visible);
     let values = if crosshatch {
         [
             "All Layers",
@@ -7809,18 +9381,23 @@ fn sync_layer_terminology(
     dropdown.set_selected(selected);
 }
 
-fn render_embedded_svg_texture(bytes: &'static [u8]) -> Result<gdk::MemoryTexture, String> {
+fn render_embedded_svg_texture(
+    bytes: &'static [u8],
+    logical_size: i32,
+    scale_factor: i32,
+) -> Result<gdk::MemoryTexture, String> {
     let tree = usvg::Tree::from_data(bytes, &usvg::Options::default())
-        .map_err(|error| format!("could not parse embedded Source Mapping SVG: {error}"))?;
+        .map_err(|error| format!("could not parse embedded Artwork Mapping SVG: {error}"))?;
     let size = tree.size();
     if size.width() <= 0.0 || size.height() <= 0.0 {
-        return Err("embedded Source Mapping SVG has no usable size".into());
+        return Err("embedded Artwork Mapping SVG has no usable size".into());
     }
-    let scale = SOURCE_MAPPING_ARTWORK_SIZE as f32 / size.width().max(size.height());
+    let pixel_size = logical_size.max(1) * scale_factor.max(1);
+    let scale = pixel_size as f32 / size.width().max(size.height());
     let width = (size.width() * scale).round().max(1.0) as u32;
     let height = (size.height() * scale).round().max(1.0) as u32;
     let mut pixmap = tiny_skia::Pixmap::new(width, height)
-        .ok_or_else(|| "could not allocate embedded Source Mapping texture".to_owned())?;
+        .ok_or_else(|| "could not allocate embedded Artwork Mapping texture".to_owned())?;
     resvg::render(
         &tree,
         tiny_skia::Transform::from_scale(scale, scale),
@@ -7838,8 +9415,8 @@ fn render_embedded_svg_texture(bytes: &'static [u8]) -> Result<gdk::MemoryTextur
 }
 
 fn source_mapping_picture(bytes: &'static [u8], description: &'static str) -> gtk::Picture {
-    let texture = render_embedded_svg_texture(bytes)
-        .expect("embedded Source Mapping SVGs are validated application assets");
+    let texture = render_embedded_svg_texture(bytes, SOURCE_MAPPING_ARTWORK_SIZE, 1)
+        .expect("embedded Artwork Mapping SVGs are validated application assets");
     let picture = gtk::Picture::builder()
         .paintable(&texture)
         .content_fit(gtk::ContentFit::Contain)
@@ -7848,8 +9425,15 @@ fn source_mapping_picture(bytes: &'static [u8], description: &'static str) -> gt
         .width_request(SOURCE_MAPPING_ARTWORK_SIZE)
         .height_request(SOURCE_MAPPING_ARTWORK_SIZE)
         .accessible_role(gtk::AccessibleRole::Img)
+        .css_classes(["mapping-artwork"])
         .build();
     picture.update_property(&[gtk::accessible::Property::Label(description)]);
+    picture.connect_scale_factor_notify(move |picture| {
+        let texture =
+            render_embedded_svg_texture(bytes, SOURCE_MAPPING_ARTWORK_SIZE, picture.scale_factor())
+                .expect("embedded Artwork Mapping SVGs are validated application assets");
+        picture.set_paintable(Some(&texture));
+    });
     picture
 }
 
@@ -7906,12 +9490,7 @@ fn entry_status_row(title: &str, status: &str, entry: &gtk::Entry) -> (gtk::Widg
     entry.set_hexpand(true);
     entry.set_size_request(0, -1);
     let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    let labels = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let title = gtk::Label::builder()
-        .label(title)
-        .xalign(0.0)
-        .css_classes(["heading"])
-        .build();
+    let (labels, title, help) = row_heading(title);
     let status = gtk::Label::builder()
         .label(status)
         .xalign(1.0)
@@ -7919,21 +9498,22 @@ fn entry_status_row(title: &str, status: &str, entry: &gtk::Entry) -> (gtk::Widg
         .ellipsize(gtk::pango::EllipsizeMode::End)
         .css_classes(["dim-label", "caption"])
         .build();
-    labels.append(&title);
     labels.append(&status);
     row.append(&labels);
     row.append(entry);
+    entry.update_relation(&[gtk::accessible::Relation::LabelledBy(&[title.upcast_ref()])]);
+    if help.is_some() {
+        entry.update_property(&[gtk::accessible::Property::Description(
+            help_for(&title.text()).unwrap().summary,
+        )]);
+        entry.set_tooltip_text(help_for(&title.text()).map(|spec| spec.summary));
+    }
     (row.upcast(), status)
 }
 
 fn control_status_row(title: &str, status: &str, scale: &gtk::Scale) -> (gtk::Widget, gtk::Label) {
     let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    let labels = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let title = gtk::Label::builder()
-        .label(title)
-        .xalign(0.0)
-        .css_classes(["heading"])
-        .build();
+    let (labels, title, help) = row_heading(title);
     let status = gtk::Label::builder()
         .label(status)
         .xalign(1.0)
@@ -7941,11 +9521,16 @@ fn control_status_row(title: &str, status: &str, scale: &gtk::Scale) -> (gtk::Wi
         .ellipsize(gtk::pango::EllipsizeMode::End)
         .css_classes(["dim-label", "caption"])
         .build();
-    labels.append(&title);
     labels.append(&status);
     row.append(&labels);
     row.append(&precision_scale_control(scale));
     scale.update_relation(&[gtk::accessible::Relation::LabelledBy(&[title.upcast_ref()])]);
+    if help.is_some() {
+        scale.update_property(&[gtk::accessible::Property::Description(
+            help_for(&title.text()).unwrap().summary,
+        )]);
+        scale.set_tooltip_text(help_for(&title.text()).map(|spec| spec.summary));
+    }
     (row.upcast(), status)
 }
 
@@ -8237,12 +9822,7 @@ fn curve_lerp(a: CurvePoint, b: CurvePoint, amount: f64) -> CurvePoint {
 
 fn control_row(title: &str, subtitle: &str, scale: &gtk::Scale) -> gtk::Widget {
     let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    let labels = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let title = gtk::Label::builder()
-        .label(title)
-        .xalign(0.0)
-        .css_classes(["heading"])
-        .build();
+    let (labels, title, help) = row_heading(title);
     let subtitle = gtk::Label::builder()
         .label(subtitle)
         .xalign(1.0)
@@ -8250,11 +9830,16 @@ fn control_row(title: &str, subtitle: &str, scale: &gtk::Scale) -> gtk::Widget {
         .ellipsize(gtk::pango::EllipsizeMode::End)
         .css_classes(["dim-label", "caption"])
         .build();
-    labels.append(&title);
     labels.append(&subtitle);
     row.append(&labels);
     row.append(&precision_scale_control(scale));
     scale.update_relation(&[gtk::accessible::Relation::LabelledBy(&[title.upcast_ref()])]);
+    if help.is_some() {
+        scale.update_property(&[gtk::accessible::Property::Description(
+            help_for(&title.text()).unwrap().summary,
+        )]);
+        scale.set_tooltip_text(help_for(&title.text()).map(|spec| spec.summary));
+    }
     row.upcast()
 }
 
@@ -8380,6 +9965,25 @@ fn install_styles() {
         .canvas { background: #23252a; }
         .artboard { background: transparent; }
         .inspector-pane, .inspector { background: @window_bg_color; }
+        .inspector-shell { background: @window_bg_color; }
+        .editing-context {
+            padding: 10px 14px;
+            font-weight: 600;
+            border-bottom: 1px solid alpha(@borders, 0.5);
+            background: alpha(@accent_bg_color, 0.08);
+        }
+        .workspace-status { padding: 0 12px 6px; }
+        .workflow-group {
+            padding: 12px;
+            border-radius: 12px;
+            background: alpha(@card_bg_color, 0.72);
+            border: 1px solid alpha(@borders, 0.55);
+        }
+        .mapping-artwork {
+            background: #f6f7f8;
+            border-radius: 6px;
+            padding: 4px;
+        }
         .preview-indicator { color: @accent_color; }
         paned > separator.wide { min-width: 10px; }
         scale value { min-width: 42px; }
@@ -8405,6 +10009,59 @@ mod tests {
         assert_eq!(close_policy(true, true, false), ClosePolicy::InhibitExport);
         assert_eq!(close_policy(false, false, false), ClosePolicy::Proceed);
         assert_eq!(close_policy(false, false, true), ClosePolicy::CheckDirty);
+    }
+
+    #[test]
+    fn explicit_preview_cancel_clears_queued_work_without_waiting_for_old_worker() {
+        let active = CancellationToken::new();
+        let queued = CancellationToken::new();
+        let pending = LatestSlot::default();
+        pending.replace(42_u64);
+        assert!(active.cancel(), "replacement cancels the running request");
+        assert!(
+            queued.cancel(),
+            "explicit cancel cancels the queued request"
+        );
+        assert_eq!(
+            pending.take(),
+            Some(42),
+            "queued work is removed immediately"
+        );
+        assert!(active.is_cancelled());
+        assert!(queued.is_cancelled());
+        // The active worker can acknowledge later; UI state must not depend on it.
+        assert!(pending.take().is_none());
+    }
+
+    #[test]
+    fn export_close_inhibition_is_format_neutral() {
+        for format in ["editable SVG", "PNG image"] {
+            assert!(matches!(
+                close_policy(true, false, false),
+                ClosePolicy::InhibitExport
+            ));
+            assert!(!EXPORT_CLOSE_INHIBIT_MESSAGE.contains(format));
+        }
+        assert_eq!(
+            EXPORT_CLOSE_INHIBIT_MESSAGE,
+            "Please wait for the export to finish before closing."
+        );
+    }
+
+    #[test]
+    fn crosshatch_context_uses_layer_terminology_and_only_selected_layer_angles() {
+        assert_eq!(
+            crosshatch_context("Shapes", 0, 0.0),
+            "Shapes · Crosshatch · All layers"
+        );
+        assert_eq!(
+            crosshatch_context("Curves", 1, 45.0),
+            "Curves · Crosshatch · Layer 1 (Black) · 45°"
+        );
+        assert_eq!(
+            crosshatch_context("Shapes", 4, 90.0),
+            "Shapes · Crosshatch · Layer 4 (Yellow) · 90°"
+        );
     }
 
     #[test]
@@ -8740,19 +10397,47 @@ mod tests {
         inspector.set_size_request(0, -1);
         let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
         paned.set_wide_handle(true);
-        paned.set_resize_start_child(true);
-        paned.set_resize_end_child(false);
-        paned.set_start_child(Some(&canvas));
-        paned.set_end_child(Some(&inspector));
-        paned.set_position(800);
+        paned.set_resize_start_child(false);
+        paned.set_resize_end_child(true);
+        paned.set_start_child(Some(&inspector));
+        paned.set_end_child(Some(&canvas));
+        paned.set_position(400);
+        let controls_toggle = gtk::ToggleButton::with_label("Controls");
+        controls_toggle.set_active(true);
+        controls_toggle.set_tooltip_text(Some("Hide Controls"));
+        controls_toggle.update_property(&[
+            gtk::accessible::Property::Label("Controls"),
+            gtk::accessible::Property::Description("Hide Controls"),
+        ]);
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        root.append(&controls_toggle);
+        root.append(&paned);
         let window = gtk::Window::builder()
             .default_width(1200)
             .default_height(600)
-            .child(&paned)
+            .child(&root)
             .build();
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("ui-state.json");
-        let controller = InspectorPaneController::new(&paned, 400, Some(path.clone()));
+        let controller = InspectorPaneController::new(
+            &paned,
+            &inspector,
+            &controls_toggle,
+            400,
+            Some(path.clone()),
+        );
+        let toggle_controller = controller.clone();
+        controls_toggle.connect_toggled(move |button| {
+            let collapsed = !button.is_active();
+            toggle_controller.set_collapsed(collapsed);
+            let action = if collapsed {
+                "Show Controls"
+            } else {
+                "Hide Controls"
+            };
+            button.set_tooltip_text(Some(action));
+            button.update_property(&[gtk::accessible::Property::Description(action)]);
+        });
         window.present();
         for _ in 0..20 {
             glib::MainContext::default().iteration(false);
@@ -8767,6 +10452,25 @@ mod tests {
         );
         assert_eq!(inspector.hscrollbar_policy(), gtk::PolicyType::Never);
         assert!(dropdown.width() <= inspector.width());
+        assert!(paned.start_child().is_some_and(|child| child == inspector));
+        assert!(paned.end_child().is_some_and(|child| child == canvas));
+        assert!(controls_toggle.is_focusable());
+        controls_toggle.emit_clicked();
+        while glib::MainContext::default().iteration(false) {}
+        assert!(!controls_toggle.is_active());
+        assert!(!inspector.is_visible());
+        assert_eq!(
+            controls_toggle.tooltip_text().as_deref(),
+            Some("Show Controls")
+        );
+        controls_toggle.emit_clicked();
+        while glib::MainContext::default().iteration(false) {}
+        assert!(controls_toggle.is_active());
+        assert!(inspector.is_visible());
+        assert_eq!(
+            controls_toggle.tooltip_text().as_deref(),
+            Some("Hide Controls")
+        );
 
         let status = gtk::Label::new(Some(&"status changed ".repeat(20)));
         status.set_wrap(true);
@@ -8790,7 +10494,7 @@ mod tests {
         }
 
         controller.begin_user_drag(paned.position() as f64);
-        paned.set_position(paned.position() - 110);
+        paned.set_position(paned.position() + 110);
         for _ in 0..10 {
             std::thread::sleep(Duration::from_millis(5));
             glib::MainContext::default().iteration(false);
@@ -8804,6 +10508,20 @@ mod tests {
             paned.position()
         );
         assert_eq!(load_inspector_width(&path), deliberate);
+
+        controller.set_collapsed(true);
+        for _ in 0..3 {
+            glib::MainContext::default().iteration(false);
+        }
+        assert!(!inspector.is_visible());
+        assert_eq!(paned.position(), 0);
+        controller.set_collapsed(false);
+        for _ in 0..3 {
+            controller.maintain();
+            glib::MainContext::default().iteration(false);
+        }
+        assert!(inspector.is_visible());
+        assert!((controller.current_width() - deliberate).abs() <= 1);
 
         for _ in 0..3 {
             paned.allocate(760, 600, -1, None);
@@ -8822,9 +10540,72 @@ mod tests {
             controller.maintain();
         }
         assert!((controller.current_width() - deliberate).abs() <= 1);
+
+        // Narrow windows move the one inspector shell into an overlay instead
+        // of squeezing the canvas. The header toggle remains the single
+        // discoverable control and returns focus after closing it.
+        paned.allocate(760, 600, -1, None);
+        controller.update_layout();
+        while glib::MainContext::default().iteration(false) {}
+        assert!(controller.narrow.get());
+        assert!(paned.start_child().is_none());
+        assert!(controller.overlay.child().is_some());
+        assert!(!controls_toggle.is_active());
+        controls_toggle.emit_clicked();
+        while glib::MainContext::default().iteration(false) {}
+        assert!(controls_toggle.is_active());
+        assert!(controller.overlay.is_visible());
+        controls_toggle.emit_clicked();
+        while glib::MainContext::default().iteration(false) {}
+        assert!(!controls_toggle.is_active());
+        controls_toggle.grab_focus();
+        assert!(controls_toggle.is_focusable());
+        paned.allocate(1200, 600, -1, None);
+        controller.update_layout();
+        while glib::MainContext::default().iteration(false) {}
+        assert!(!controller.narrow.get());
+        assert!(paned.start_child().is_some());
         eprintln!(
             "paned stability: 25 repeated settings/status/preview-install mutations kept inspector={initial}px; deliberate drag persisted desired={deliberate}px; temporary 760px window clamp preserved desired and 1200px restore returned inspector={deliberate}px"
         );
+        let help_spec = help_for("Artwork Mapping").unwrap();
+        let help_handle = help_handle(help_spec);
+        let help_window = gtk::Window::builder().child(&help_handle.button).build();
+        help_window.present();
+        while glib::MainContext::default().iteration(false) {}
+        assert!(help_handle.button.is_focusable());
+        assert_eq!(
+            help_handle.button.tooltip_text().as_deref(),
+            Some(help_spec.summary)
+        );
+        assert!(help_handle.button.popover().is_some());
+        help_handle.button.popup();
+        assert!(help_handle.popover.is_visible());
+        help_handle.set_spec(help_for("Adjust Layer").unwrap());
+        assert_eq!(help_handle.heading.text(), "Adjust Layer");
+        assert!(help_handle.body.text().contains("directional hatch"));
+        let visible_help = super::help_handle(help_for("Visible Inks").unwrap());
+        visible_help.set_spec(help_for("Visible Crosshatch Layers").unwrap());
+        assert_eq!(visible_help.heading.text(), "Visible Crosshatch Layers");
+        assert!(
+            visible_help
+                .button
+                .tooltip_text()
+                .unwrap()
+                .contains("hatch")
+        );
+        visible_help.set_spec(help_for("Visible Inks").unwrap());
+        assert_eq!(visible_help.heading.text(), "Visible Inks");
+        help_handle.popover.popdown();
+        help_window.close();
+        let conditional_action = gtk::Button::with_label("Conditional Action");
+        let conditional_row = button_with_help(&conditional_action, "Edit User-Defined Mark");
+        let conditional_window = gtk::Window::builder().child(&conditional_row).build();
+        conditional_window.present();
+        while glib::MainContext::default().iteration(false) {}
+        conditional_action.set_visible(false);
+        assert!(!conditional_row.is_visible());
+        conditional_window.close();
         window.close();
     }
 
@@ -9010,10 +10791,33 @@ mod tests {
         assert_eq!(activity.terminal, Some((4, PreviewTerminal::Installed)));
         activity.request(5, PreviewView::Rendered);
         assert!(activity.render_busy());
-        assert_eq!(activity.accessible_label(), "Updating rendered preview");
+        assert_eq!(activity.accessible_label(), "Updating halftone preview");
         activity.failed(5);
         assert_eq!(activity.resting_phase(), 0.0);
         assert_eq!(activity.accessible_label(), "Source preview");
+    }
+
+    #[test]
+    fn preview_activity_cancellation_settles_only_the_matching_request() {
+        let mut activity = PreviewActivity::default();
+        activity.installed = Some((1, PreviewView::Source));
+        activity.request(2, PreviewView::Rendered);
+        assert!(activity.render_busy());
+        activity.cancelled(2);
+        assert!(!activity.render_busy());
+        assert!(!activity.active());
+        assert_eq!(activity.installed, Some((1, PreviewView::Source)));
+        assert_eq!(activity.resting_phase(), 0.0);
+        assert_eq!(activity.accessible_label(), "Source preview");
+
+        activity.request(3, PreviewView::Rendered);
+        activity.cancelled(2);
+        assert!(
+            activity.render_busy(),
+            "stale cancellation must not settle request 3"
+        );
+        activity.cancelled(3);
+        assert!(!activity.render_busy());
     }
 
     #[test]
@@ -9243,6 +11047,44 @@ mod tests {
         assert!(empty.anchors.is_empty());
     }
 
+    fn verify_realized_inspector_shell_keeps_controls_visible() {
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        let known_control = gtk::DropDown::from_strings(&["Circle", "Regular Polygon"]);
+        content.append(&combo_row("Mark", &known_control));
+        for index in 0..20 {
+            content.append(&gtk::Label::new(Some(&format!("Control group {index}"))));
+        }
+        let scroll = gtk::ScrolledWindow::builder()
+            .vexpand(true)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .child(&content)
+            .build();
+        let context = gtk::Label::new(Some("Shapes · All inks"));
+        let shell = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        shell.set_vexpand(true);
+        shell.append(&context);
+        shell.append(&scroll);
+        let window = gtk::Window::builder()
+            .default_width(400)
+            .default_height(600)
+            .child(&shell)
+            .build();
+        window.present();
+        for _ in 0..20 {
+            glib::MainContext::default().iteration(false);
+        }
+        assert!(context.height() > 0);
+        assert!(scroll.height() > 400, "scroll height={}", scroll.height());
+        assert!(known_control.is_visible());
+        assert!(
+            known_control.height() > 0,
+            "known control was not allocated"
+        );
+        assert!(known_control.compute_bounds(&window).is_some());
+        window.close();
+    }
+
     fn verify_realized_shape_double_clicks() {
         let path = Rc::new(RefCell::new(curved_shape_fixture()));
         let nodes = Rc::new(RefCell::new(
@@ -9301,7 +11143,7 @@ mod tests {
         assert_eq!(indicator.area.accessible_role(), gtk::AccessibleRole::Img);
         assert_eq!(
             indicator.area.tooltip_text().as_deref(),
-            Some("Rendered preview")
+            Some("Halftone preview")
         );
         indicator.request(1, PreviewView::Rendered);
         let epoch = indicator
@@ -9311,7 +11153,7 @@ mod tests {
         assert!(indicator.tick.borrow().is_some());
         assert_eq!(
             indicator.area.tooltip_text().as_deref(),
-            Some("Updating rendered preview")
+            Some("Updating halftone preview")
         );
         indicator.request(2, PreviewView::Rendered);
         assert_eq!(indicator.epoch.get(), Some(epoch));
@@ -9323,7 +11165,7 @@ mod tests {
         assert_eq!(indicator.phase(), 1.0);
         assert_eq!(
             indicator.area.tooltip_text().as_deref(),
-            Some("Rendered preview")
+            Some("Halftone preview")
         );
         indicator.request(3, PreviewView::Source);
         assert!(!indicator.effective_busy());
@@ -9408,6 +11250,87 @@ mod tests {
     #[test]
     fn realized_numeric_controls_leave_continuous_scroll_to_parent() {
         gtk::init().unwrap();
+        let appearance = build_appearance_controls();
+        assert!(appearance.preview_color.dialog().unwrap().is_with_alpha());
+        assert!(appearance.export_color.dialog().unwrap().is_with_alpha());
+        assert!(appearance.preview_help.popover().is_some());
+        assert!(appearance.export_help.popover().is_some());
+        assert_eq!(
+            appearance.preview_help.tooltip_text().as_deref(),
+            Some("Help: Preview Surface")
+        );
+        assert_eq!(
+            appearance.export_help.tooltip_text().as_deref(),
+            Some("Help: Export Background")
+        );
+        assert_eq!(
+            appearance.preview_surface.accessible_role(),
+            gtk::AccessibleRole::ComboBox
+        );
+        assert_eq!(
+            appearance.export_background.accessible_role(),
+            gtk::AccessibleRole::ComboBox
+        );
+        appearance.preview_surface.set_selected(0);
+        appearance
+            .preview_color
+            .set_visible(appearance.preview_surface.selected() == 1);
+        assert!(!appearance.preview_color.is_visible());
+        appearance.preview_surface.set_selected(1);
+        appearance
+            .preview_color
+            .set_visible(appearance.preview_surface.selected() == 1);
+        assert!(appearance.preview_color.is_visible());
+        let appearance_scroll = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .child(&appearance.container)
+            .build();
+        let appearance_window = gtk::Window::builder()
+            .default_width(190)
+            .default_height(120)
+            .child(&appearance_scroll)
+            .build();
+        appearance_window.present();
+        while glib::MainContext::default().iteration(false) {}
+        assert_eq!(
+            appearance_scroll.hscrollbar_policy(),
+            gtk::PolicyType::Never
+        );
+        assert!(appearance.container.bounds().expect("appearance bounds").3 > 0);
+        assert!(
+            appearance
+                .preview_surface
+                .bounds()
+                .expect("preview bounds")
+                .3
+                > 0
+        );
+        assert!(
+            appearance
+                .export_background
+                .bounds()
+                .expect("export bounds")
+                .3
+                > 0
+        );
+        assert!(
+            appearance
+                .preview_help
+                .bounds()
+                .expect("preview help bounds")
+                .3
+                > 0
+        );
+        assert!(
+            appearance
+                .export_help
+                .bounds()
+                .expect("export help bounds")
+                .3
+                > 0
+        );
+        appearance_window.close();
         use gtk::gdk::prelude::PaintableExt;
 
         let mapping_picture = source_mapping_picture(
@@ -9580,6 +11503,7 @@ mod tests {
         window.close();
         verify_realized_zoom_controls_drive_one_canonical_mode_and_actual_allocation();
         verify_realized_paned_owns_inspector_width();
+        verify_realized_inspector_shell_keeps_controls_visible();
         verify_realized_shape_double_clicks();
         verify_realized_preview_indicator();
 
@@ -9675,6 +11599,37 @@ mod tests {
     }
 
     #[test]
+    fn appearance_controls_have_clear_export_scope_and_accessible_names() {
+        assert_eq!(
+            PREVIEW_SURFACE_LABEL,
+            "Preview Surface — Canvas only · not exported"
+        );
+        assert_eq!(
+            EXPORT_BACKGROUND_LABEL,
+            "Export Background — Used for SVG and by default for PNG"
+        );
+        // The construction path applies these exact accessible labels to both
+        // dropdowns and their alpha-capable ColorDialogButtons.
+        assert!(PREVIEW_SURFACE_LABEL.contains("not exported"));
+        assert!(EXPORT_BACKGROUND_LABEL.contains("by default for PNG"));
+    }
+
+    #[test]
+    fn artifact_appearance_values_are_strict_rgba_or_named_controls() {
+        assert_eq!(
+            parse_artifact_rgba("#12345680"),
+            Some(RgbaColor {
+                red: 18,
+                green: 52,
+                blue: 86,
+                alpha: 128
+            })
+        );
+        assert!(parse_artifact_rgba("#123456").is_none());
+        assert!(parse_artifact_rgba("12345680").is_none());
+    }
+
+    #[test]
     fn source_mapping_names_hints_and_enum_indices_are_one_table_order() {
         let expected = [
             ValueMode::Cmyk,
@@ -9693,14 +11648,15 @@ mod tests {
                     .is_empty()
             );
         }
-        assert_eq!(source_mapping_from_index(4), None);
+        assert_eq!(source_mapping_from_index(4), Some(ValueMode::Rgb));
         assert_eq!(
             SOURCE_MAPPING_OPTIONS.map(|option| option.name),
             [
                 "Color → CMYK Inks",
-                "Value → One Ink",
-                "Value → All Inks",
-                "Value → Crosshatch",
+                "Brightness → One Ink",
+                "Brightness → All Inks",
+                "Brightness → Crosshatch",
+                "RGB Color → Screen",
             ]
         );
         let user_facing = SOURCE_MAPPING_OPTIONS
@@ -9708,9 +11664,65 @@ mod tests {
             .flat_map(|option| [option.name, option.description])
             .collect::<Vec<_>>()
             .join(" ");
-        assert!(!user_facing.contains("Darkness"));
-        assert!(!user_facing.contains("Lightness"));
+        assert!(!user_facing.contains("Value →"));
+        assert!(user_facing.contains("brightness"));
         assert!(SOURCE_MAPPING_OPTIONS[3].description.contains("K +45°"));
+    }
+
+    #[test]
+    fn help_catalog_entries_are_actionable_and_scoped() {
+        let required = [
+            "Artwork Mapping",
+            "Coverage",
+            "Contrast",
+            "Mark",
+            "Apply Mark to All",
+            "Polygon Sides (3–6)",
+            "Edit User-Defined Mark",
+            "Adjust Ink",
+            "Adjust Layer",
+            "Visible Inks",
+            "Visible Crosshatch Layers",
+            "Screen Angle",
+            "Mark Rotation",
+            "Sampling Detail",
+            "Line Weight",
+            "Line Spacing",
+            "Line Shape",
+            "Curve Editor",
+            "Reset Line",
+            "Position X",
+            "Position Y",
+            "Artwork Coverage",
+            "PNG Background",
+            "Preview Surface",
+            "Export Background",
+            "PNG Size",
+            "Load Preset",
+            "Save Preset",
+            "Canvas Zoom",
+            "Fit Artwork",
+        ];
+        for control in required {
+            let spec = help_for(control).expect("required control has contextual help");
+            assert!(!spec.heading.trim().is_empty());
+            assert!(!spec.summary.trim().is_empty());
+            assert!(!spec.body.trim().is_empty());
+            assert!(
+                spec.body.contains("preview") || spec.body.contains("export"),
+                "{control}"
+            );
+            assert!(spec.body.len() > spec.summary.len());
+        }
+    }
+
+    #[test]
+    fn layer_terminology_uses_creator_facing_ink_and_layer_names() {
+        assert_eq!(layer_terminology(false), ("Adjust Ink", "Visible Inks"));
+        assert_eq!(
+            layer_terminology(true),
+            ("Adjust Layer", "Visible Crosshatch Layers")
+        );
     }
 
     #[test]
@@ -9781,7 +11793,7 @@ mod tests {
             SOURCE_MAPPING_OPTIONS[0].result_svg,
             COLOR_TO_CMYK_SVG
         ));
-        for option in &SOURCE_MAPPING_OPTIONS[1..] {
+        for option in &SOURCE_MAPPING_OPTIONS[1..4] {
             assert!(std::ptr::eq(option.source_svg, VALUE_SOURCE_SVG));
         }
         for (option, expected) in SOURCE_MAPPING_OPTIONS.iter().zip([
@@ -9789,18 +11801,30 @@ mod tests {
             VALUE_TO_ONE_INK_SVG,
             VALUE_TO_CMYK_SVG,
             VALUE_TO_CROSSHATCH_SVG,
+            COLOR_TO_CMYK_SVG,
         ]) {
             assert!(!option.source_description.is_empty());
             assert!(!option.result_description.is_empty());
             assert!(std::ptr::eq(option.result_svg, expected));
             for bytes in [option.source_svg, option.result_svg] {
+                assert!(
+                    bytes.windows(4).any(|window| window == b"<svg"),
+                    "Artwork Mapping entries must remain embedded SVG bytes"
+                );
                 let tree = usvg::Tree::from_data(bytes, &usvg::Options::default()).unwrap();
                 assert!(tree.size().width() > 0.0 && tree.size().height() > 0.0);
-                let texture = render_embedded_svg_texture(bytes).unwrap();
+                let texture =
+                    render_embedded_svg_texture(bytes, SOURCE_MAPPING_ARTWORK_SIZE, 1).unwrap();
                 assert!(texture.width() > 0 && texture.height() > 0);
                 assert_eq!(
                     texture.width().max(texture.height()),
                     SOURCE_MAPPING_ARTWORK_SIZE
+                );
+                let hidpi =
+                    render_embedded_svg_texture(bytes, SOURCE_MAPPING_ARTWORK_SIZE, 2).unwrap();
+                assert_eq!(
+                    hidpi.width().max(hidpi.height()),
+                    SOURCE_MAPPING_ARTWORK_SIZE * 2
                 );
             }
         }

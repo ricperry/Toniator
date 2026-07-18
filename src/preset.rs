@@ -329,6 +329,7 @@ fn shape_name(shape: WebShape) -> &'static str {
 fn value_mode_name(mode: ValueMode) -> &'static str {
     match mode {
         ValueMode::Cmyk => "cmyk",
+        ValueMode::Rgb => "rgb",
         ValueMode::Luminance => "luminance",
         ValueMode::CrosshatchLuminance => "crosshatch-luminance",
         ValueMode::SingleChannel => "single-channel",
@@ -341,6 +342,9 @@ fn ink_name(ink: Ink) -> &'static str {
         Ink::Magenta => "m",
         Ink::Yellow => "y",
         Ink::Black => "k",
+        Ink::Red => "r",
+        Ink::Green => "g",
+        Ink::Blue => "b",
     }
 }
 
@@ -866,6 +870,9 @@ fn default_curve_channel(ink: Ink) -> WebCurveChannel {
         Ink::Magenta => "#ec008c",
         Ink::Yellow => "#ffd400",
         Ink::Black => "#111111",
+        Ink::Red => "#ff0000",
+        Ink::Green => "#00ff00",
+        Ink::Blue => "#0000ff",
     };
     WebCurveChannel {
         color: color.into(),
@@ -1167,6 +1174,9 @@ fn default_channel(ink: Ink) -> WebShapeChannel {
         Ink::Magenta => "#ec008c",
         Ink::Yellow => "#ffd400",
         Ink::Black => "#111111",
+        Ink::Red => "#ff0000",
+        Ink::Green => "#00ff00",
+        Ink::Blue => "#0000ff",
     };
     WebShapeChannel {
         color: color.into(),
@@ -1385,6 +1395,7 @@ impl RawChannels {
             Ink::Magenta => self.m.as_ref(),
             Ink::Yellow => self.y.as_ref(),
             Ink::Black => self.k.as_ref(),
+            Ink::Red | Ink::Green | Ink::Blue => None,
         }
     }
 }

@@ -33,9 +33,9 @@ export use Rust-native libraries. The original web demo remains in
 [`archive/webapp`](archive/webapp/README.md) as a historical and behavioral
 reference; it is no longer the shipping application.
 
-## Source mappings
+## Artwork mappings
 
-Source Mapping determines which information Toniator reads from the artwork and
+Artwork Mapping determines which information Toniator reads from the artwork and
 how that information drives the ink screens. These SVG examples are the same
 visual explanations embedded in the application.
 
@@ -58,21 +58,21 @@ visual explanations embedded in the application.
       <td>Separates source color into cyan, magenta, yellow, and black screens.</td>
     </tr>
     <tr>
-      <td><strong>Value → One Ink</strong></td>
+      <td><strong>Brightness → One Ink</strong></td>
       <td><img src="icons/ValueSource.svg" width="150" alt="Value source example"></td>
       <td>→</td>
       <td><img src="icons/ValueToOneInk.svg" width="150" alt="Source value rendered with one halftone ink"></td>
       <td>Uses source value to control one selectable ink for a monochrome result.</td>
     </tr>
     <tr>
-      <td><strong>Value → All Inks</strong></td>
+      <td><strong>Brightness → All Inks</strong></td>
       <td><img src="icons/ValueSource.svg" width="150" alt="Value source example"></td>
       <td>→</td>
       <td><img src="icons/ValueToCMYK.svg" width="150" alt="Source value applied to all enabled CMYK inks"></td>
       <td>Applies the same value structure to every enabled ink.</td>
     </tr>
     <tr>
-      <td><strong>Value → Crosshatch</strong></td>
+      <td><strong>Brightness → Crosshatch</strong></td>
       <td><img src="icons/ValueSource.svg" width="150" alt="Value source example"></td>
       <td>→</td>
       <td><img src="icons/ValueToCrosshatch.svg" width="150" alt="Source value rendered as a crosshatched halftone"></td>
@@ -84,6 +84,48 @@ visual explanations embedded in the application.
 The CMYK-like conversion is a creative numerical mapping, not a color-managed
 separation. Always validate output in the color-managed tool used for final
 production.
+
+## Transparency and backgrounds
+
+The **Document** section keeps canvas evaluation separate from delivered
+artwork:
+
+- **Preview Surface** is a checkerboard or alpha-capable color shown only on the
+  canvas. It is never sampled or exported.
+- **Export Background** is an optional saved, alpha-capable background layer.
+  SVG includes it as an editable bottom layer, and PNG uses it by default.
+- PNG export can override the saved setting with transparent or white output for
+  that export only; the override does not change the document or SVG output.
+
+New documents preserve transparent export by default. Documents saved by older
+versions retain their historical white preview and export appearance when
+opened.
+
+## Interface terminology and help
+
+Toniator keeps familiar creative and print terms such as **Halftone**, **CMYK**,
+**Ink**, **Crosshatch**, **Preset**, **SVG**, and **PNG**. Non-obvious inspector
+controls have a small help button. Select it with the mouse, Space, or Enter for
+a concise explanation of the result, related controls, and whether it changes
+the preview, export, or both.
+
+| Existing wording | Current wording | Reason |
+| --- | --- | --- |
+| Pattern | Pattern Type | Clarifies that Shapes and Curves select a pattern family. |
+| Source Mapping | Artwork Mapping | Names the creative input being interpreted. |
+| Value → … | Brightness → … | States the visible artwork property in plain language. |
+| Rendered | Halftone | Names the result shown on the canvas. |
+| Edit Ink | Adjust Ink | Makes the next action explicit. |
+| Grid Angle / Mark Angle | Screen Angle / Mark Rotation | Separates the sampling screen from the mark itself. |
+| Width/Height Scale | Mark Width / Mark Height | States what each scale changes. |
+| Detail | Sampling Detail | Explains that the control changes artwork sampling. |
+| Remove Faint Marks | Light-Tone Cutoff | Explains the threshold in visual terms. |
+| Weight / Spacing | Line Weight / Line Spacing | Identifies the curve controls. |
+| Curve Shape | Line Shape | Uses the result users see in a curve pattern. |
+| Canvas Coverage | Artwork Coverage | Refers to the artwork being filled. |
+| Fill Canvas Automatically / Custom Grid | Cover Artwork Automatically / Set Rows and Columns | Explains the automatic and manual choices directly. |
+| Stagger Rows | Alternate Row Offset | Names the resulting arrangement. |
+| Arrange on Canvas | Adjust Layout on Artwork | Describes the direct-manipulation mode. |
 
 ## What Toniator can do
 
@@ -99,7 +141,7 @@ production.
   cancellable editing sessions.
 - Adjust coverage, screen and mark angle, width/height scale, threshold,
   opacity, detail, curve weight/spacing, position, and motif arrangement.
-- Switch instantly between cached Source and Rendered views; use Fit or an
+- Switch instantly between cached Source and Halftone views; use Fit or an
   explicit zoom from 5% through 800%.
 - Save complete working documents, save reusable treatment presets, recover an
   interrupted editing session, and protect unsaved work before destructive
@@ -113,7 +155,7 @@ coverage, but Lines is not offered as a new-work treatment.
 ## Basic workflow
 
 1. Select **New** or **Open**, then load PNG, JPEG, WebP, or SVG artwork.
-2. Choose a Source Mapping based on whether color or value should drive the
+2. Choose an Artwork Mapping based on whether color or brightness should drive the
    treatment.
 3. Choose **Shapes** or **Curves**, then select a built-in mark/profile or edit
    your own.

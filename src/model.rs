@@ -4,7 +4,92 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const DOCUMENT_FORMAT: &str = "toniator-document";
-pub const DOCUMENT_VERSION: u32 = 3;
+pub const DOCUMENT_VERSION: u32 = 5;
+
+/// Determines how source colour is separated into output layers. CMYK is
+/// subtractive ink; RGB is additive light on a transparent screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum OutputMode {
+    #[default]
+    CmykInks,
+    RgbScreen,
+}
+
+impl OutputMode {
+    pub const fn inks(self) -> &'static [Ink] {
+        match self {
+            Self::CmykInks => &Ink::ALL,
+            Self::RgbScreen => &Ink::RGB,
+        }
+    }
+}
+
+/// An sRGB color stored losslessly in a document. Alpha is straight (not
+/// premultiplied), which keeps it suitable for SVG and PNG export alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RgbaColor {
+    pub red: u8,
+    pub green: u8,
+    pub blue: u8,
+    pub alpha: u8,
+}
+
+impl RgbaColor {
+    pub const WHITE: Self = Self::opaque(255, 255, 255);
+
+    pub const fn opaque(red: u8, green: u8, blue: u8) -> Self {
+        Self {
+            red,
+            green,
+            blue,
+            alpha: 255,
+        }
+    }
+
+    pub const fn is_opaque(self) -> bool {
+        self.alpha == 255
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum PreviewSurface {
+    #[default]
+    Checkerboard,
+    Color {
+        color: RgbaColor,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum ExportBackground {
+    #[default]
+    None,
+    Color {
+        color: RgbaColor,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentAppearance {
+    pub preview_surface: PreviewSurface,
+    pub export_background: ExportBackground,
+}
+
+impl Default for DocumentAppearance {
+    fn default() -> Self {
+        Self {
+            // White is a surface rather than a paper object: new artwork
+            // still exports with transparency unless the user opts in.
+            preview_surface: PreviewSurface::Color {
+                color: RgbaColor::WHITE,
+            },
+            export_background: ExportBackground::None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -54,6 +139,8 @@ impl Settings {
 #[serde(rename_all = "kebab-case")]
 pub enum ValueMode {
     Cmyk,
+    /// Direct source RGB component mapping. Only available in RGB Screen.
+    Rgb,
     Luminance,
     CrosshatchLuminance,
     #[default]
@@ -68,10 +155,14 @@ pub enum Ink {
     Yellow,
     #[default]
     Black,
+    Red,
+    Green,
+    Blue,
 }
 
 impl Ink {
     pub const ALL: [Self; 4] = [Self::Cyan, Self::Magenta, Self::Yellow, Self::Black];
+    pub const RGB: [Self; 3] = [Self::Red, Self::Green, Self::Blue];
 
     pub fn id(self) -> &'static str {
         match self {
@@ -79,6 +170,9 @@ impl Ink {
             Self::Magenta => "m",
             Self::Yellow => "y",
             Self::Black => "k",
+            Self::Red => "r",
+            Self::Green => "g",
+            Self::Blue => "b",
         }
     }
 
@@ -88,6 +182,9 @@ impl Ink {
             Self::Magenta => "Magenta",
             Self::Yellow => "Yellow",
             Self::Black => "Black",
+            Self::Red => "Red",
+            Self::Green => "Green",
+            Self::Blue => "Blue",
         }
     }
 }
@@ -227,6 +324,12 @@ pub struct WebShapeChannels {
     pub m: WebShapeChannel,
     pub y: WebShapeChannel,
     pub k: WebShapeChannel,
+    #[serde(default)]
+    pub r: WebShapeChannel,
+    #[serde(default)]
+    pub g: WebShapeChannel,
+    #[serde(default)]
+    pub b: WebShapeChannel,
 }
 
 impl WebShapeChannels {
@@ -236,6 +339,9 @@ impl WebShapeChannels {
             Ink::Magenta => &self.m,
             Ink::Yellow => &self.y,
             Ink::Black => &self.k,
+            Ink::Red => &self.r,
+            Ink::Green => &self.g,
+            Ink::Blue => &self.b,
         }
     }
 
@@ -245,6 +351,9 @@ impl WebShapeChannels {
             Ink::Magenta => &mut self.m,
             Ink::Yellow => &mut self.y,
             Ink::Black => &mut self.k,
+            Ink::Red => &mut self.r,
+            Ink::Green => &mut self.g,
+            Ink::Blue => &mut self.b,
         }
     }
 }
@@ -261,6 +370,9 @@ impl Default for WebShapeChannels {
             m: channel("#ec008c", 75.0),
             y: channel("#ffd400", 0.0),
             k: channel("#111111", 45.0),
+            r: channel("#ff0000", 0.0),
+            g: channel("#00ff00", 0.0),
+            b: channel("#0000ff", 0.0),
         }
     }
 }
@@ -571,6 +683,12 @@ pub struct WebCurveChannels {
     pub m: WebCurveChannel,
     pub y: WebCurveChannel,
     pub k: WebCurveChannel,
+    #[serde(default)]
+    pub r: WebCurveChannel,
+    #[serde(default)]
+    pub g: WebCurveChannel,
+    #[serde(default)]
+    pub b: WebCurveChannel,
 }
 
 impl WebCurveChannels {
@@ -580,6 +698,9 @@ impl WebCurveChannels {
             Ink::Magenta => &self.m,
             Ink::Yellow => &self.y,
             Ink::Black => &self.k,
+            Ink::Red => &self.r,
+            Ink::Green => &self.g,
+            Ink::Blue => &self.b,
         }
     }
 
@@ -589,6 +710,9 @@ impl WebCurveChannels {
             Ink::Magenta => &mut self.m,
             Ink::Yellow => &mut self.y,
             Ink::Black => &mut self.k,
+            Ink::Red => &mut self.r,
+            Ink::Green => &mut self.g,
+            Ink::Blue => &mut self.b,
         }
     }
 }
@@ -605,6 +729,9 @@ impl Default for WebCurveChannels {
             m: channel("#ec008c", 75.0),
             y: channel("#ffd400", 0.0),
             k: channel("#111111", 45.0),
+            r: channel("#ff0000", 0.0),
+            g: channel("#00ff00", 0.0),
+            b: channel("#0000ff", 0.0),
         }
     }
 }
@@ -757,6 +884,19 @@ pub struct SourceArtwork {
     pub bytes: Arc<[u8]>,
 }
 
+/// The complete editable treatment for the output mode that is not currently
+/// visible. Keeping this in the document makes switching output modes lossless
+/// and makes undo/redo a single ordinary document edit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OutputTreatmentCache {
+    pub settings: Settings,
+    pub render: RenderVariant,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_web_shape: Option<Box<WebShapeSettings>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_web_curve: Option<Box<WebCurveSettings>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Document {
     pub format: String,
@@ -766,11 +906,19 @@ pub struct Document {
     pub source: SourceArtwork,
     pub settings: Settings,
     #[serde(default)]
+    pub appearance: DocumentAppearance,
+    #[serde(default)]
+    pub output_mode: OutputMode,
+    #[serde(default)]
     pub render: RenderVariant,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saved_web_shape: Option<Box<WebShapeSettings>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saved_web_curve: Option<Box<WebCurveSettings>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inactive_cmyk: Option<Box<OutputTreatmentCache>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inactive_rgb: Option<Box<OutputTreatmentCache>>,
 }
 
 impl Document {
@@ -781,12 +929,90 @@ impl Document {
             document_id: new_document_id(),
             source,
             settings: Settings::default(),
+            appearance: DocumentAppearance::default(),
+            output_mode: OutputMode::CmykInks,
             render: RenderVariant::WebShapeV1 {
                 settings: Box::new(WebShapeSettings::default()),
             },
             saved_web_shape: None,
             saved_web_curve: None,
+            inactive_cmyk: None,
+            inactive_rgb: None,
         }
+    }
+
+    fn active_treatment(&self) -> OutputTreatmentCache {
+        OutputTreatmentCache {
+            settings: self.settings,
+            render: self.render.clone(),
+            saved_web_shape: self.saved_web_shape.clone(),
+            saved_web_curve: self.saved_web_curve.clone(),
+        }
+    }
+
+    fn apply_treatment(&mut self, treatment: OutputTreatmentCache) {
+        self.settings = treatment.settings;
+        self.render = treatment.render;
+        self.saved_web_shape = treatment.saved_web_shape;
+        self.saved_web_curve = treatment.saved_web_curve;
+    }
+
+    fn new_rgb_treatment(&self) -> OutputTreatmentCache {
+        let mut render = self.render.clone();
+        match &mut render {
+            RenderVariant::WebShapeV1 { settings } => {
+                settings.value_mode = ValueMode::Rgb;
+                settings.single_channel = Ink::Red;
+                for ink in Ink::RGB {
+                    settings.channels.get_mut(ink).enabled = true;
+                }
+            }
+            RenderVariant::WebCurveV1 { settings } => {
+                settings.value_mode = ValueMode::Rgb;
+                settings.single_channel = Ink::Red;
+                for ink in Ink::RGB {
+                    settings.channels.get_mut(ink).enabled = true;
+                }
+            }
+            RenderVariant::NativeBasicV1 => {}
+        }
+        OutputTreatmentCache {
+            settings: self.settings,
+            render,
+            saved_web_shape: None,
+            saved_web_curve: None,
+        }
+    }
+
+    pub fn switch_output_mode(&mut self, target: OutputMode) -> bool {
+        if target == self.output_mode {
+            return false;
+        }
+        let active = self.active_treatment();
+        let replacement = match target {
+            OutputMode::CmykInks => self
+                .inactive_cmyk
+                .take()
+                .unwrap_or_else(|| Box::new(active.clone())),
+            OutputMode::RgbScreen => self
+                .inactive_rgb
+                .take()
+                .unwrap_or_else(|| Box::new(self.new_rgb_treatment())),
+        };
+        match self.output_mode {
+            OutputMode::CmykInks => self.inactive_cmyk = Some(Box::new(active)),
+            OutputMode::RgbScreen => self.inactive_rgb = Some(Box::new(active)),
+        }
+        self.apply_treatment(*replacement);
+        self.output_mode = target;
+        // A screen has no paper by default. Only replace the untouched
+        // document default; a creator-selected appearance is never clobbered.
+        if target == OutputMode::RgbScreen && self.appearance == DocumentAppearance::default() {
+            self.appearance.preview_surface = PreviewSurface::Color {
+                color: RgbaColor::opaque(0, 0, 0),
+            };
+        }
+        true
     }
 
     pub fn new_with_artboard(source: SourceArtwork, width: u32, height: u32) -> Self {
@@ -911,7 +1137,7 @@ impl Document {
                     && (0.0..=1.0).contains(&base.opacity),
                 "web shape base value is outside the supported range"
             );
-            for ink in Ink::ALL {
+            for &ink in self.output_mode.inks() {
                 let channel = settings.channels.get(ink);
                 anyhow::ensure!(
                     [
@@ -1026,7 +1252,7 @@ impl Document {
                     && (-10_000.0..=10_000.0).contains(&base.stack_spacing),
                 "web curve base value is outside the supported range"
             );
-            for ink in Ink::ALL {
+            for &ink in self.output_mode.inks() {
                 let channel = settings.channels.get(ink);
                 anyhow::ensure!(
                     [
@@ -1278,6 +1504,7 @@ mod base64_bytes {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingKey {
+    Appearance,
     Treatment,
     Detail,
     Coverage,
@@ -1327,9 +1554,13 @@ struct ActiveEdit {
 #[derive(Debug, Clone, PartialEq)]
 struct TreatmentState {
     settings: Settings,
+    appearance: DocumentAppearance,
+    output_mode: OutputMode,
     render: RenderVariant,
     saved_web_shape: Option<Box<WebShapeSettings>>,
     saved_web_curve: Option<Box<WebCurveSettings>>,
+    inactive_cmyk: Option<Box<OutputTreatmentCache>>,
+    inactive_rgb: Option<Box<OutputTreatmentCache>>,
 }
 
 /// Document-level undo with short edits on the same control coalesced into one drag.
@@ -1412,7 +1643,61 @@ impl DocumentEditor {
         true
     }
 
-    pub fn set_render_variant(&mut self, render: RenderVariant) -> bool {
+    /// Appearance is a document edit, independent from treatment presets and
+    /// source interpretation. It deliberately shares the ordinary undo model.
+    pub fn set_appearance(&mut self, appearance: DocumentAppearance) -> bool {
+        if self.document.appearance == appearance {
+            return false;
+        }
+        let before = TreatmentState::from_document(&self.document);
+        self.document.appearance = appearance;
+        if self.active.is_none() {
+            self.undo.push(Edit {
+                before,
+                after: TreatmentState::from_document(&self.document),
+            });
+        }
+        self.redo.clear();
+        true
+    }
+
+    pub fn set_output_mode(&mut self, mode: OutputMode) -> bool {
+        if self.document.output_mode == mode {
+            return false;
+        }
+        let before = TreatmentState::from_document(&self.document);
+        self.document.switch_output_mode(mode);
+        if self.active.is_none() {
+            self.undo.push(Edit {
+                before,
+                after: TreatmentState::from_document(&self.document),
+            });
+        }
+        self.redo.clear();
+        true
+    }
+
+    pub fn set_render_variant(&mut self, mut render: RenderVariant) -> bool {
+        // Treatment presets describe geometry, not output intent. An RGB
+        // document therefore keeps its direct RGB mapping when a CMYK-era
+        // preset is applied.
+        if self.document.output_mode == OutputMode::RgbScreen {
+            match &mut render {
+                RenderVariant::WebShapeV1 { settings } => {
+                    settings.value_mode = ValueMode::Rgb;
+                    for ink in Ink::RGB {
+                        settings.channels.get_mut(ink).enabled = true;
+                    }
+                }
+                RenderVariant::WebCurveV1 { settings } => {
+                    settings.value_mode = ValueMode::Rgb;
+                    for ink in Ink::RGB {
+                        settings.channels.get_mut(ink).enabled = true;
+                    }
+                }
+                RenderVariant::NativeBasicV1 => {}
+            }
+        }
         if self.document.render == render {
             return false;
         }
@@ -1514,17 +1799,25 @@ impl TreatmentState {
     fn from_document(document: &Document) -> Self {
         Self {
             settings: document.settings,
+            appearance: document.appearance,
+            output_mode: document.output_mode,
             render: document.render.clone(),
             saved_web_shape: document.saved_web_shape.clone(),
             saved_web_curve: document.saved_web_curve.clone(),
+            inactive_cmyk: document.inactive_cmyk.clone(),
+            inactive_rgb: document.inactive_rgb.clone(),
         }
     }
 
     fn apply(&self, document: &mut Document) {
         document.settings = self.settings;
+        document.appearance = self.appearance;
+        document.output_mode = self.output_mode;
         document.render = self.render.clone();
         document.saved_web_shape = self.saved_web_shape.clone();
         document.saved_web_curve = self.saved_web_curve.clone();
+        document.inactive_cmyk = self.inactive_cmyk.clone();
+        document.inactive_rgb = self.inactive_rgb.clone();
     }
 }
 
@@ -1561,6 +1854,73 @@ mod tests {
         assert!(!editor.is_dirty());
         assert!(editor.redo());
         assert_eq!(editor.document().settings.coverage, 120.0);
+    }
+
+    #[test]
+    fn appearance_defaults_and_undo_redo_are_document_edits() {
+        let mut editor = editor();
+        assert_eq!(editor.document().appearance, DocumentAppearance::default());
+        assert!(!editor.is_dirty());
+        let appearance = DocumentAppearance {
+            preview_surface: PreviewSurface::Checkerboard,
+            export_background: ExportBackground::Color {
+                color: RgbaColor {
+                    red: 18,
+                    green: 52,
+                    blue: 86,
+                    alpha: 127,
+                },
+            },
+        };
+        assert!(editor.set_appearance(appearance));
+        assert!(editor.is_dirty());
+        assert!(editor.can_undo());
+        assert!(editor.undo());
+        assert_eq!(editor.document().appearance, DocumentAppearance::default());
+        assert!(!editor.is_dirty());
+        assert!(editor.redo());
+        assert_eq!(editor.document().appearance, appearance);
+    }
+
+    #[test]
+    fn rgb_mode_is_lossless_cached_and_one_undoable_edit() {
+        let mut editor = editor();
+        let original = editor.document().clone();
+        assert!(editor.set_output_mode(OutputMode::RgbScreen));
+        assert_eq!(editor.document().output_mode, OutputMode::RgbScreen);
+        let RenderVariant::WebShapeV1 { settings } = &editor.document().render else {
+            panic!("fixture is shapes")
+        };
+        assert_eq!(settings.value_mode, ValueMode::Rgb);
+        assert!(
+            Ink::RGB
+                .into_iter()
+                .all(|ink| settings.channels.get(ink).enabled)
+        );
+        assert!(editor.undo());
+        assert_eq!(editor.document(), &original);
+        assert!(editor.redo());
+        assert!(editor.set_output_mode(OutputMode::CmykInks));
+        assert_eq!(editor.document().render, original.render);
+    }
+
+    #[test]
+    fn treatment_application_keeps_rgb_output_intent_and_appearance() {
+        let mut editor = editor();
+        editor.set_output_mode(OutputMode::RgbScreen);
+        let appearance = editor.document().appearance;
+        assert!(editor.set_treatment(
+            RenderVariant::WebShapeV1 {
+                settings: Box::default()
+            },
+            None,
+        ));
+        assert_eq!(editor.document().appearance, appearance);
+        assert_eq!(editor.document().output_mode, OutputMode::RgbScreen);
+        let RenderVariant::WebShapeV1 { settings } = &editor.document().render else {
+            panic!("shapes")
+        };
+        assert_eq!(settings.value_mode, ValueMode::Rgb);
     }
 
     #[test]
@@ -1834,6 +2194,14 @@ mod tests {
     fn native_preset_settings_and_renderer_apply_as_one_undo_edit() {
         let mut editor = editor();
         let original = editor.document().clone();
+        let appearance = DocumentAppearance {
+            preview_surface: PreviewSurface::Checkerboard,
+            export_background: ExportBackground::Color {
+                color: RgbaColor::opaque(12, 34, 56),
+            },
+        };
+        assert!(editor.set_appearance(appearance));
+        editor.mark_clean();
         let settings = Settings {
             treatment: Treatment::Lines,
             detail: 81.0,
@@ -1843,9 +2211,18 @@ mod tests {
         };
         assert!(editor.set_treatment(RenderVariant::NativeBasicV1, Some(settings)));
         assert_eq!(editor.document().settings, settings);
+        assert_eq!(
+            editor.document().appearance,
+            appearance,
+            "treatment/preset application must not alter appearance"
+        );
         assert!(editor.undo());
-        assert_eq!(editor.document(), &original);
-        assert!(!editor.can_undo());
+        assert_eq!(editor.document().appearance, appearance);
+        assert_eq!(editor.document().settings, original.settings);
+        assert!(
+            editor.can_undo(),
+            "the earlier appearance edit remains independently undoable"
+        );
     }
 
     #[test]

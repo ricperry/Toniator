@@ -1,6 +1,8 @@
+use crate::CancellationToken;
 use crate::model::{
-    Document, Ink, RenderVariant, Settings, SourceArtwork, Treatment, ValueMode, WebShape,
-    WebShapeChannel, WebShapeSettings, parse_hex_color,
+    Document, DocumentAppearance, ExportBackground, Ink, PreviewSurface, RenderVariant, RgbaColor,
+    Settings, SourceArtwork, Treatment, ValueMode, WebShape, WebShapeChannel, WebShapeSettings,
+    parse_hex_color,
 };
 use anyhow::{Context, Result, bail};
 use image::{DynamicImage, ImageBuffer, Rgba, RgbaImage, imageops::FilterType};
@@ -45,6 +47,9 @@ pub enum Channel {
     Magenta,
     Yellow,
     Black,
+    Red,
+    Green,
+    Blue,
 }
 
 impl From<Ink> for Channel {
@@ -54,6 +59,9 @@ impl From<Ink> for Channel {
             Ink::Magenta => Self::Magenta,
             Ink::Yellow => Self::Yellow,
             Ink::Black => Self::Black,
+            Ink::Red => Self::Red,
+            Ink::Green => Self::Green,
+            Ink::Blue => Self::Blue,
         }
     }
 }
@@ -65,6 +73,9 @@ impl From<Channel> for Ink {
             Channel::Magenta => Self::Magenta,
             Channel::Yellow => Self::Yellow,
             Channel::Black => Self::Black,
+            Channel::Red => Self::Red,
+            Channel::Green => Self::Green,
+            Channel::Blue => Self::Blue,
         }
     }
 }
@@ -83,6 +94,9 @@ impl Channel {
             Channel::Magenta => "magenta",
             Channel::Yellow => "yellow",
             Channel::Black => "black",
+            Channel::Red => "red",
+            Channel::Green => "green",
+            Channel::Blue => "blue",
         }
     }
 
@@ -92,6 +106,9 @@ impl Channel {
             Channel::Magenta => (236, 0, 140),
             Channel::Yellow => (255, 242, 0),
             Channel::Black => (20, 20, 24),
+            Channel::Red => (255, 0, 0),
+            Channel::Green => (0, 255, 0),
+            Channel::Blue => (0, 0, 255),
         }
     }
 
@@ -101,6 +118,7 @@ impl Channel {
             Channel::Magenta => 75.0,
             Channel::Yellow => 0.0,
             Channel::Black => 45.0,
+            Channel::Red | Channel::Green | Channel::Blue => 0.0,
         }
     }
 }
@@ -314,6 +332,15 @@ fn first_installed_family(database: &usvg::fontdb::Database, monospaced: bool) -
 }
 
 pub fn generate_marks(source: &RgbaImage, settings: Settings) -> MarkSet {
+    generate_marks_cancellable(source, settings, &CancellationToken::new())
+        .expect("fresh cancellation token cannot cancel")
+}
+
+pub fn generate_marks_cancellable(
+    source: &RgbaImage,
+    settings: Settings,
+    token: &CancellationToken,
+) -> Result<MarkSet> {
     let settings = settings.sanitized();
     let longest = source.width().max(source.height()) as f32;
     let desired_cells = 22.0 + settings.detail * 0.92;
@@ -325,6 +352,7 @@ pub fn generate_marks(source: &RgbaImage, settings: Settings) -> MarkSet {
     let contrast = settings.contrast / 100.0;
 
     for row in 0..rows {
+        token.checkpoint()?;
         for column in 0..columns {
             let x = ((column as f32 + 0.5) * spacing).min(source.width() as f32 - 0.5);
             let y = ((row as f32 + 0.5) * spacing).min(source.height() as f32 - 0.5);
@@ -361,7 +389,7 @@ pub fn generate_marks(source: &RgbaImage, settings: Settings) -> MarkSet {
         }
     }
 
-    MarkSet {
+    Ok(MarkSet {
         width: source.width(),
         height: source.height(),
         marks,
@@ -374,7 +402,59 @@ pub fn generate_marks(source: &RgbaImage, settings: Settings) -> MarkSet {
                 opacity: 205.0 / 255.0,
             })
             .collect(),
+    })
+}
+
+fn generate_rgb_marks_cancellable(
+    source: &RgbaImage,
+    settings: Settings,
+    token: &CancellationToken,
+) -> Result<MarkSet> {
+    let settings = settings.sanitized();
+    let longest = source.width().max(source.height()) as f32;
+    let spacing = (longest / (22.0 + settings.detail * 0.92)).max(3.0);
+    let columns = (source.width() as f32 / spacing).ceil() as u32;
+    let rows = (source.height() as f32 / spacing).ceil() as u32;
+    let mut marks = Vec::with_capacity((columns * rows * 3) as usize);
+    for row in 0..rows {
+        token.checkpoint()?;
+        for column in 0..columns {
+            let x = ((column as f32 + 0.5) * spacing).min(source.width() as f32 - 0.5);
+            let y = ((row as f32 + 0.5) * spacing).min(source.height() as f32 - 0.5);
+            let pixel = source.get_pixel(x as u32, y as u32).0;
+            for (ink, value) in Ink::RGB.into_iter().zip([pixel[0], pixel[1], pixel[2]]) {
+                let value = value as f32 / 255.0 * (pixel[3] as f32 / 255.0);
+                if value <= 0.006 {
+                    continue;
+                }
+                let extent = spacing * 0.47 * (settings.coverage / 100.0) * value.sqrt();
+                marks.push(Mark {
+                    channel: ink.into(),
+                    x,
+                    y,
+                    extent,
+                    thickness: 0.0,
+                    angle: settings.angle,
+                    treatment: settings.treatment,
+                    geometry: MarkGeometry::Native,
+                });
+            }
+        }
     }
+    Ok(MarkSet {
+        width: source.width(),
+        height: source.height(),
+        marks,
+        layers: Ink::RGB
+            .into_iter()
+            .map(|ink| InkLayer {
+                channel: ink.into(),
+                enabled: true,
+                color: Channel::from(ink).color(),
+                opacity: 1.0,
+            })
+            .collect(),
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -408,14 +488,31 @@ pub fn calculate_web_grid(width: u32, height: u32, long_edge_cells: f64) -> WebG
 }
 
 pub fn generate_document_marks(document: &Document) -> Result<MarkSet> {
+    generate_document_marks_cancellable(document, &CancellationToken::new())
+}
+
+pub fn generate_document_marks_cancellable(
+    document: &Document,
+    token: &CancellationToken,
+) -> Result<MarkSet> {
+    token.checkpoint()?;
     let mut canonical = document.clone();
     let dimensions = source_dimensions(&canonical.source)?;
     canonical.normalize_canvas_aspect(dimensions.0, dimensions.1);
     canonical.validate()?;
     let source = decode_source(&canonical.source, 2400)?;
+    token.checkpoint()?;
     Ok(match &canonical.render {
-        RenderVariant::NativeBasicV1 => generate_marks(&source, canonical.settings),
-        RenderVariant::WebShapeV1 { settings } => generate_web_shape_marks(&source, settings),
+        RenderVariant::NativeBasicV1 => {
+            if canonical.output_mode == crate::model::OutputMode::RgbScreen {
+                generate_rgb_marks_cancellable(&source, canonical.settings, token)?
+            } else {
+                generate_marks_cancellable(&source, canonical.settings, token)?
+            }
+        }
+        RenderVariant::WebShapeV1 { settings } => {
+            generate_web_shape_marks_cancellable(&source, settings, token)?
+        }
         RenderVariant::WebCurveV1 { .. } => {
             bail!("full-width curve rendering is not available yet")
         }
@@ -423,13 +520,29 @@ pub fn generate_document_marks(document: &Document) -> Result<MarkSet> {
 }
 
 pub fn generate_web_shape_marks(source: &RgbaImage, settings: &WebShapeSettings) -> MarkSet {
-    let enabled: Vec<Ink> = Ink::ALL
-        .into_iter()
+    generate_web_shape_marks_cancellable(source, settings, &CancellationToken::new())
+        .expect("fresh cancellation token cannot cancel")
+}
+
+pub fn generate_web_shape_marks_cancellable(
+    source: &RgbaImage,
+    settings: &WebShapeSettings,
+    token: &CancellationToken,
+) -> Result<MarkSet> {
+    let output_inks = if settings.value_mode == ValueMode::Rgb {
+        &Ink::RGB[..]
+    } else {
+        &Ink::ALL[..]
+    };
+    let enabled: Vec<Ink> = output_inks
+        .iter()
+        .copied()
         .filter(|ink| settings.channels.get(*ink).enabled)
         .collect();
     let mut marks = Vec::new();
 
-    for ink in Ink::ALL {
+    for &ink in output_inks {
+        token.checkpoint()?;
         let channel = settings.channels.get(ink);
         if !channel.enabled {
             continue;
@@ -442,7 +555,7 @@ pub fn generate_web_shape_marks(source: &RgbaImage, settings: &WebShapeSettings)
             settings.output_height,
             long_edge_cells,
         );
-        let samples = sample_web_image(source, grid.cols, grid.rows);
+        let samples = sample_web_image_cancellable(source, grid.cols, grid.rows, token)?;
         let ranges = web_grid_ranges(settings, channel, grid);
         let shape = if settings.use_shared_mark {
             settings.shared_shape
@@ -452,6 +565,7 @@ pub fn generate_web_shape_marks(source: &RgbaImage, settings: &WebShapeSettings)
         let shape = resolve_web_shape(shape, settings, channel);
 
         for row in ranges.2..=ranges.3 {
+            token.checkpoint()?;
             for col in ranges.0..=ranges.1 {
                 let placement = web_shape_placement(col, row, settings, channel, grid);
                 if !placement.visible {
@@ -487,8 +601,9 @@ pub fn generate_web_shape_marks(source: &RgbaImage, settings: &WebShapeSettings)
         }
     }
 
-    let layers = Ink::ALL
-        .into_iter()
+    let layers = output_inks
+        .iter()
+        .copied()
         .map(|ink| {
             let channel = settings.channels.get(ink);
             let color = if settings.value_mode == ValueMode::CrosshatchLuminance {
@@ -505,43 +620,69 @@ pub fn generate_web_shape_marks(source: &RgbaImage, settings: &WebShapeSettings)
         })
         .collect();
 
-    MarkSet {
+    Ok(MarkSet {
         width: settings.output_width,
         height: settings.output_height,
         marks,
         layers,
-    }
+    })
 }
 
+#[allow(dead_code)]
 pub(crate) fn sample_web_image(source: &RgbaImage, cols: u32, rows: u32) -> Vec<[u8; 4]> {
+    sample_web_image_cancellable(source, cols, rows, &CancellationToken::new())
+        .expect("fresh cancellation token cannot cancel")
+}
+
+pub(crate) fn sample_web_image_cancellable(
+    source: &RgbaImage,
+    cols: u32,
+    rows: u32,
+    token: &CancellationToken,
+) -> Result<Vec<[u8; 4]>> {
     // Canvas drawImage uses interpolated area reduction. Triangle filtering is
     // deterministic; explicitly filtering premultiplied colors matches Canvas
     // compositing at translucent edges before getImageData unpremultiplies.
-    let premultiplied = image::Rgba32FImage::from_fn(source.width(), source.height(), |x, y| {
-        let pixel = source.get_pixel(x, y).0;
-        let alpha = pixel[3] as f32 / 255.0;
-        image::Rgba([
-            pixel[0] as f32 / 255.0 * alpha,
-            pixel[1] as f32 / 255.0 * alpha,
-            pixel[2] as f32 / 255.0 * alpha,
-            alpha,
-        ])
-    });
-    image::imageops::resize(&premultiplied, cols, rows, FilterType::Triangle)
-        .pixels()
-        .map(|pixel| {
+    let mut premultiplied = image::Rgba32FImage::new(source.width(), source.height());
+    for y in 0..source.height() {
+        token.checkpoint()?;
+        for x in 0..source.width() {
+            let pixel = source.get_pixel(x, y).0;
+            let alpha = pixel[3] as f32 / 255.0;
+            premultiplied.put_pixel(
+                x,
+                y,
+                image::Rgba([
+                    pixel[0] as f32 / 255.0 * alpha,
+                    pixel[1] as f32 / 255.0 * alpha,
+                    pixel[2] as f32 / 255.0 * alpha,
+                    alpha,
+                ]),
+            );
+        }
+    }
+    token.checkpoint()?;
+    let resized = image::imageops::resize(&premultiplied, cols, rows, FilterType::Triangle);
+    token.checkpoint()?;
+    let mut result = Vec::with_capacity((cols * rows) as usize);
+    for y in 0..rows {
+        token.checkpoint()?;
+        for x in 0..cols {
+            let pixel = resized.get_pixel(x, y);
             let alpha = pixel[3].clamp(0.0, 1.0);
             if alpha <= f32::EPSILON {
-                return [0, 0, 0, 0];
+                result.push([0, 0, 0, 0]);
+                continue;
             }
-            [
+            result.push([
                 (pixel[0] / alpha * 255.0).round().clamp(0.0, 255.0) as u8,
                 (pixel[1] / alpha * 255.0).round().clamp(0.0, 255.0) as u8,
                 (pixel[2] / alpha * 255.0).round().clamp(0.0, 255.0) as u8,
                 (alpha * 255.0).round() as u8,
-            ]
-        })
-        .collect()
+            ]);
+        }
+    }
+    Ok(result)
 }
 
 pub fn map_web_pixel(
@@ -569,10 +710,19 @@ pub fn map_web_pixel(
             k.clamp(0.0, 1.0),
         ];
     }
+    if mode == ValueMode::Rgb {
+        let alpha = pixel[3] as f64 / 255.0;
+        return [
+            pixel[0] as f64 / 255.0 * alpha,
+            pixel[1] as f64 / 255.0 * alpha,
+            pixel[2] as f64 / 255.0 * alpha,
+            0.0,
+        ];
+    }
     let darkness = 1.0
         - (0.2126 * pixel[0] as f64 + 0.7152 * pixel[1] as f64 + 0.0722 * pixel[2] as f64) / 255.0;
     match mode {
-        ValueMode::Cmyk => unreachable!(),
+        ValueMode::Cmyk | ValueMode::Rgb => unreachable!(),
         ValueMode::Luminance => [darkness; 4],
         ValueMode::SingleChannel => {
             let mut values = [0.0; 4];
@@ -617,6 +767,9 @@ fn ink_index(ink: Ink) -> usize {
         Ink::Magenta => 1,
         Ink::Yellow => 2,
         Ink::Black => 3,
+        Ink::Red => 0,
+        Ink::Green => 1,
+        Ink::Blue => 2,
     }
 }
 
@@ -817,24 +970,112 @@ pub fn render_document_preview(
     max_dimension: u32,
     generation: u64,
 ) -> Result<RenderResult> {
+    render_document_preview_cancellable(
+        document,
+        max_dimension,
+        generation,
+        &CancellationToken::new(),
+    )
+}
+
+pub fn render_document_preview_cancellable(
+    document: &Document,
+    max_dimension: u32,
+    generation: u64,
+    token: &CancellationToken,
+) -> Result<RenderResult> {
+    token.checkpoint()?;
     let mut canonical = document.clone();
     let dimensions = source_dimensions(&canonical.source)?;
     canonical.normalize_canvas_aspect(dimensions.0, dimensions.1);
+    // The common white canvas path retains the long-established native
+    // rasterization behavior (notably multiply blending at antialiased
+    // edges). Non-white/translucent surfaces are composed after transparent
+    // artwork so they remain presentation-only.
+    let legacy_white_preview = matches!(canonical.appearance.preview_surface, PreviewSurface::Color { color } if color == RgbaColor::WHITE)
+        && matches!(
+            canonical.appearance.export_background,
+            ExportBackground::None
+                | ExportBackground::Color {
+                    color: RgbaColor::WHITE
+                }
+        );
     if let RenderVariant::WebCurveV1 { settings } = &canonical.render {
         canonical.validate()?;
         let source = decode_source(&canonical.source, 2400)?;
-        let geometry = crate::curve_render::generate_curve_geometry(&source, settings)?;
-        return crate::curve_render::render_curve_geometry(&geometry, max_dimension, generation);
+        token.checkpoint()?;
+        let geometry =
+            crate::curve_render::generate_curve_geometry_cancellable(&source, settings, token)?;
+        token.checkpoint()?;
+        let rendered = if legacy_white_preview {
+            let scale = max_dimension as f32 / geometry.width.max(geometry.height) as f32;
+            let width = (geometry.width as f32 * scale).round().max(1.0) as u32;
+            let height = (geometry.height as f32 * scale).round().max(1.0) as u32;
+            RenderResult {
+                generation,
+                image: crate::curve_render::render_curve_geometry_output_cancellable(
+                    &geometry, width, height, true, None, token,
+                )?,
+            }
+        } else {
+            let scale = max_dimension as f32 / geometry.width.max(geometry.height) as f32;
+            let width = (geometry.width as f32 * scale).round().max(1.0) as u32;
+            let height = (geometry.height as f32 * scale).round().max(1.0) as u32;
+            RenderResult {
+                generation,
+                image: crate::curve_render::render_curve_geometry_output_cancellable(
+                    &geometry, width, height, false, None, token,
+                )?,
+            }
+        };
+        if legacy_white_preview {
+            return Ok(rendered);
+        }
+        return Ok(RenderResult {
+            generation: rendered.generation,
+            image: composite_preview(rendered.image, canonical.appearance),
+        });
     }
-    let marks = generate_document_marks(&canonical)?;
-    render_mark_set(&marks, max_dimension, generation)
+    let marks = generate_document_marks_cancellable(&canonical, token)?;
+    token.checkpoint()?;
+    if legacy_white_preview {
+        return render_mark_set_cancellable(&marks, max_dimension, generation, token);
+    }
+    let rendered =
+        render_mark_set_transparent_cancellable(&marks, max_dimension, generation, token)?;
+    Ok(RenderResult {
+        generation: rendered.generation,
+        image: composite_preview(rendered.image, canonical.appearance),
+    })
 }
 
 fn render_mark_set(marks: &MarkSet, max_dimension: u32, generation: u64) -> Result<RenderResult> {
+    render_mark_set_cancellable(marks, max_dimension, generation, &CancellationToken::new())
+}
+
+fn render_mark_set_cancellable(
+    marks: &MarkSet,
+    max_dimension: u32,
+    generation: u64,
+    token: &CancellationToken,
+) -> Result<RenderResult> {
     let scale = max_dimension as f32 / marks.width.max(marks.height) as f32;
     let width = (marks.width as f32 * scale).round().max(1.0) as u32;
     let height = (marks.height as f32 * scale).round().max(1.0) as u32;
-    let image = render_mark_set_output(marks, width, height, true, None)?;
+    let image = render_mark_set_output_cancellable(marks, width, height, true, None, token)?;
+    Ok(RenderResult { generation, image })
+}
+
+fn render_mark_set_transparent_cancellable(
+    marks: &MarkSet,
+    max_dimension: u32,
+    generation: u64,
+    token: &CancellationToken,
+) -> Result<RenderResult> {
+    let scale = max_dimension as f32 / marks.width.max(marks.height) as f32;
+    let width = (marks.width as f32 * scale).round().max(1.0) as u32;
+    let height = (marks.height as f32 * scale).round().max(1.0) as u32;
+    let image = render_mark_set_output_cancellable(marks, width, height, false, None, token)?;
     Ok(RenderResult { generation, image })
 }
 
@@ -845,6 +1086,25 @@ pub fn render_document_output(
     white_background: bool,
     channel: Option<Ink>,
 ) -> Result<RgbaImage> {
+    render_document_output_cancellable(
+        document,
+        width,
+        height,
+        white_background,
+        channel,
+        &CancellationToken::new(),
+    )
+}
+
+pub fn render_document_output_cancellable(
+    document: &Document,
+    width: u32,
+    height: u32,
+    white_background: bool,
+    channel: Option<Ink>,
+    token: &CancellationToken,
+) -> Result<RgbaImage> {
+    token.checkpoint()?;
     let mut canonical = document.clone();
     let dimensions = source_dimensions(&canonical.source)?;
     canonical.normalize_canvas_aspect(dimensions.0, dimensions.1);
@@ -860,25 +1120,152 @@ pub fn render_document_output(
     );
     if let RenderVariant::WebCurveV1 { settings } = &canonical.render {
         let source = decode_source(&canonical.source, 2400)?;
-        let geometry = crate::curve_render::generate_curve_geometry(&source, settings)?;
-        return crate::curve_render::render_curve_geometry_output(
+        token.checkpoint()?;
+        let geometry =
+            crate::curve_render::generate_curve_geometry_cancellable(&source, settings, token)?;
+        return crate::curve_render::render_curve_geometry_output_cancellable(
             &geometry,
             width,
             height,
             white_background,
             channel,
+            token,
         );
     }
-    let marks = generate_document_marks(&canonical)?;
-    render_mark_set_output(&marks, width, height, white_background, channel)
+    let marks = generate_document_marks_cancellable(&canonical, token)?;
+    render_mark_set_output_cancellable(&marks, width, height, white_background, channel, token)
 }
 
-fn render_mark_set_output(
+/// Renders artwork using the document's export-background setting. This is
+/// intentionally separate from preview composition: no checkerboard or
+/// preview-only surface can enter exported pixels.
+pub fn render_document_export_cancellable(
+    document: &Document,
+    width: u32,
+    height: u32,
+    channel: Option<Ink>,
+    token: &CancellationToken,
+) -> Result<RgbaImage> {
+    let artwork =
+        render_document_output_cancellable(document, width, height, false, channel, token)?;
+    Ok(composite_export_background(
+        artwork,
+        document.appearance.export_background,
+    ))
+}
+
+pub fn composite_preview(mut artwork: RgbaImage, appearance: DocumentAppearance) -> RgbaImage {
+    for (x, y, pixel) in artwork.enumerate_pixels_mut() {
+        let mut backdrop = checkerboard_pixel(x, y);
+        if let PreviewSurface::Color { color } = appearance.preview_surface {
+            backdrop = over(color, backdrop);
+        }
+        if let ExportBackground::Color { color } = appearance.export_background {
+            backdrop = over(color, backdrop);
+        }
+        *pixel = image::Rgba(
+            over(
+                RgbaColor {
+                    red: pixel[0],
+                    green: pixel[1],
+                    blue: pixel[2],
+                    alpha: pixel[3],
+                },
+                backdrop,
+            )
+            .into(),
+        );
+    }
+    artwork
+}
+
+pub fn composite_export_background(
+    mut artwork: RgbaImage,
+    background: ExportBackground,
+) -> RgbaImage {
+    let ExportBackground::Color { color } = background else {
+        return artwork;
+    };
+    for pixel in artwork.pixels_mut() {
+        *pixel = image::Rgba(
+            over(
+                RgbaColor {
+                    red: pixel[0],
+                    green: pixel[1],
+                    blue: pixel[2],
+                    alpha: pixel[3],
+                },
+                color,
+            )
+            .into(),
+        );
+    }
+    artwork
+}
+
+fn checkerboard_pixel(x: u32, y: u32) -> RgbaColor {
+    let light = ((x / 12) + (y / 12)).is_multiple_of(2);
+    if light {
+        RgbaColor::opaque(232, 232, 232)
+    } else {
+        RgbaColor::opaque(196, 196, 196)
+    }
+}
+
+fn over(foreground: RgbaColor, background: RgbaColor) -> RgbaColor {
+    let fa = foreground.alpha as u32;
+    let ba = background.alpha as u32;
+    let out_a = fa + (ba * (255 - fa) + 127) / 255;
+    if out_a == 0 {
+        return RgbaColor {
+            red: 0,
+            green: 0,
+            blue: 0,
+            alpha: 0,
+        };
+    }
+    let blend = |fg: u8, bg: u8| {
+        let numerator = u32::from(fg) * fa * 255 + u32::from(bg) * ba * (255 - fa);
+        ((numerator + out_a * 127) / (out_a * 255)) as u8
+    };
+    RgbaColor {
+        red: blend(foreground.red, background.red),
+        green: blend(foreground.green, background.green),
+        blue: blend(foreground.blue, background.blue),
+        alpha: out_a as u8,
+    }
+}
+
+impl From<RgbaColor> for [u8; 4] {
+    fn from(value: RgbaColor) -> Self {
+        [value.red, value.green, value.blue, value.alpha]
+    }
+}
+
+pub fn render_mark_set_output(
     marks: &MarkSet,
     width: u32,
     height: u32,
     white_background: bool,
     channel: Option<Ink>,
+) -> Result<RgbaImage> {
+    render_mark_set_output_cancellable(
+        marks,
+        width,
+        height,
+        white_background,
+        channel,
+        &CancellationToken::new(),
+    )
+}
+
+pub fn render_mark_set_output_cancellable(
+    marks: &MarkSet,
+    width: u32,
+    height: u32,
+    white_background: bool,
+    channel: Option<Ink>,
+    token: &CancellationToken,
 ) -> Result<RgbaImage> {
     let mut pixmap = Pixmap::new(width, height).context("output is too large")?;
     if white_background {
@@ -888,15 +1275,20 @@ fn render_mark_set_output(
     let scale_y = height as f32 / marks.height as f32;
 
     for layer in marks.layers.iter().filter(|layer| layer.enabled) {
+        token.checkpoint()?;
         if channel.is_some_and(|ink| layer.channel != Channel::from(ink)) {
             continue;
         }
         let paint = layer_paint(layer);
-        for mark in marks
+        for (index, mark) in marks
             .marks
             .iter()
             .filter(|mark| mark.channel == layer.channel)
+            .enumerate()
         {
+            if index % 256 == 0 {
+                token.checkpoint()?;
+            }
             if let Some(path) = mark_path(mark) {
                 pixmap.fill_path(
                     &path,
@@ -922,7 +1314,10 @@ fn layer_paint(layer: &InkLayer) -> Paint<'static> {
         b,
         (layer.opacity.clamp(0.0, 1.0) * 255.0).round() as u8,
     );
-    paint.blend_mode = BlendMode::Multiply;
+    paint.blend_mode = match layer.channel {
+        Channel::Red | Channel::Green | Channel::Blue => BlendMode::Screen,
+        _ => BlendMode::Multiply,
+    };
     paint.anti_alias = true;
     paint
 }
@@ -1134,6 +1529,14 @@ pub fn source_preview(source: &SourceArtwork, max_dimension: u32) -> Result<Dyna
 mod tests {
     use super::*;
 
+    fn test_png() -> Vec<u8> {
+        let mut bytes = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(RgbaImage::from_pixel(2, 2, Rgba([80, 90, 100, 255])))
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        bytes.into_inner()
+    }
+
     fn web_settings() -> WebShapeSettings {
         let mut settings = WebShapeSettings {
             output_width: 100,
@@ -1202,6 +1605,26 @@ mod tests {
         assert_eq!(red.k, 0.0);
         let gray = rgb_to_cmyk(128, 128, 128);
         assert!((gray.k - (127.0 / 255.0)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn rgb_screen_mapping_is_direct_and_alpha_weighted() {
+        assert_eq!(
+            map_web_pixel([255, 0, 0, 255], ValueMode::Rgb, Ink::Red, &Ink::RGB),
+            [1.0, 0.0, 0.0, 0.0]
+        );
+        assert_eq!(
+            map_web_pixel([255, 255, 255, 255], ValueMode::Rgb, Ink::Red, &Ink::RGB),
+            [1.0, 1.0, 1.0, 0.0]
+        );
+        assert_eq!(
+            map_web_pixel([255, 0, 0, 128], ValueMode::Rgb, Ink::Red, &Ink::RGB),
+            [128.0 / 255.0, 0.0, 0.0, 0.0]
+        );
+        assert_eq!(
+            map_web_pixel([0, 0, 0, 255], ValueMode::Rgb, Ink::Red, &Ink::RGB),
+            [0.0; 4]
+        );
     }
 
     #[test]
@@ -1490,6 +1913,134 @@ mod tests {
         let second = gate.next();
         assert!(!gate.accepts(first));
         assert!(gate.accepts(second));
+    }
+
+    #[test]
+    fn appearance_compositing_is_exact_and_mark_generation_is_invariant() {
+        let artwork = RgbaImage::from_pixel(1, 1, Rgba([200, 100, 0, 128]));
+        let preview = composite_preview(
+            artwork.clone(),
+            DocumentAppearance {
+                preview_surface: PreviewSurface::Color {
+                    color: RgbaColor {
+                        red: 20,
+                        green: 40,
+                        blue: 60,
+                        alpha: 128,
+                    },
+                },
+                export_background: ExportBackground::Color {
+                    color: RgbaColor::opaque(10, 20, 30),
+                },
+            },
+        );
+        assert_eq!(preview.get_pixel(0, 0).0, [105, 60, 15, 255]);
+        let checker = composite_preview(
+            RgbaImage::from_pixel(1, 1, Rgba([0, 0, 0, 0])),
+            DocumentAppearance {
+                preview_surface: PreviewSurface::Checkerboard,
+                export_background: ExportBackground::None,
+            },
+        );
+        assert_eq!(checker.get_pixel(0, 0).0, [232, 232, 232, 255]);
+        let export = composite_export_background(artwork, ExportBackground::None);
+        assert_eq!(
+            export.get_pixel(0, 0).0[3],
+            128,
+            "checkerboard never enters exports"
+        );
+
+        let mut document = crate::model::Document::new(SourceArtwork {
+            name: "fixture.png".into(),
+            media_type: "image/png".into(),
+            bytes: Arc::from(test_png()),
+        });
+        let marks = generate_document_marks(&document).unwrap();
+        document.appearance.preview_surface = PreviewSurface::Checkerboard;
+        document.appearance.export_background = ExportBackground::Color {
+            color: RgbaColor::opaque(4, 5, 6),
+        };
+        assert_eq!(generate_document_marks(&document).unwrap(), marks);
+
+        let mut curve = document.clone();
+        curve.render = RenderVariant::WebCurveV1 {
+            settings: Box::new(crate::model::WebCurveSettings {
+                output_width: 80,
+                output_height: 60,
+                ..Default::default()
+            }),
+        };
+        let source = decode_source(&curve.source, 2400).unwrap();
+        let before = crate::curve_render::generate_curve_geometry(
+            &source,
+            match &curve.render {
+                RenderVariant::WebCurveV1 { settings } => settings,
+                _ => unreachable!(),
+            },
+        )
+        .unwrap();
+        curve.appearance.preview_surface = PreviewSurface::Color {
+            color: RgbaColor {
+                red: 90,
+                green: 80,
+                blue: 70,
+                alpha: 60,
+            },
+        };
+        let after = crate::curve_render::generate_curve_geometry(
+            &source,
+            match &curve.render {
+                RenderVariant::WebCurveV1 { settings } => settings,
+                _ => unreachable!(),
+            },
+        )
+        .unwrap();
+        assert_eq!(before, after, "appearance cannot affect curve geometry");
+    }
+
+    #[test]
+    fn opaque_export_background_makes_full_document_preview_match_export_for_shapes_and_curves() {
+        let source = SourceArtwork {
+            name: "equivalence.png".into(),
+            media_type: "image/png".into(),
+            bytes: Arc::from(test_png()),
+        };
+        let mut shape = crate::model::Document::new(source.clone());
+        shape.appearance = DocumentAppearance {
+            preview_surface: PreviewSurface::Color {
+                color: RgbaColor::opaque(240, 240, 240),
+            },
+            export_background: ExportBackground::Color {
+                color: RgbaColor::opaque(12, 34, 56),
+            },
+        };
+        let preview = render_document_preview(&shape, 2, 1).unwrap().image;
+        let export =
+            render_document_export_cancellable(&shape, 2, 2, None, &CancellationToken::new())
+                .unwrap();
+        assert_eq!(preview, export);
+        shape.appearance.preview_surface = PreviewSurface::Checkerboard;
+        assert_eq!(
+            render_document_export_cancellable(&shape, 2, 2, None, &CancellationToken::new())
+                .unwrap(),
+            export,
+            "preview-only surface cannot leak into export"
+        );
+
+        let mut curve = crate::model::Document::new(source);
+        curve.render = RenderVariant::WebCurveV1 {
+            settings: Box::new(crate::model::WebCurveSettings {
+                output_width: 80,
+                output_height: 80,
+                ..Default::default()
+            }),
+        };
+        curve.appearance = shape.appearance;
+        let preview = render_document_preview(&curve, 80, 2).unwrap().image;
+        let export =
+            render_document_export_cancellable(&curve, 80, 80, None, &CancellationToken::new())
+                .unwrap();
+        assert_eq!(preview, export);
     }
 
     #[test]

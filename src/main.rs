@@ -28,15 +28,36 @@ pub struct CliOptions {
     artifact_inspector_width: Option<i32>,
     artifact_window_size: Option<(i32, i32)>,
     artifact_resize_window: Option<(i32, i32)>,
+    artifact_controls_hidden: bool,
+    artifact_controls_shown: bool,
     allocation_report: Option<std::path::PathBuf>,
     indicator_state: Option<String>,
     indicator_report: Option<std::path::PathBuf>,
+    preview_surface: Option<String>,
+    export_background: Option<String>,
+    expand_document: bool,
 }
 
 fn validated_source_mapping_index(value: Option<u32>) -> Result<u32, &'static str> {
     value
-        .filter(|index| *index <= 3)
-        .ok_or("--source-mapping must be an index from 0 through 3")
+        .filter(|index| *index <= 4)
+        .ok_or("--source-mapping must be an index from 0 through 4")
+}
+
+fn validated_appearance_artifact(
+    value: Option<&str>,
+    flag: &'static str,
+    named: &str,
+) -> Result<String, String> {
+    let value = value.ok_or_else(|| format!("{flag} requires {named} or #RRGGBBAA"))?;
+    if value == named {
+        return Ok(value.to_owned());
+    }
+    value
+        .strip_prefix('#')
+        .filter(|hex| hex.len() == 8 && u32::from_str_radix(hex, 16).is_ok())
+        .map(|_| value.to_owned())
+        .ok_or_else(|| format!("{flag} must be {named} or #RRGGBBAA"))
 }
 
 impl CliOptions {
@@ -59,9 +80,14 @@ impl CliOptions {
             || self.artifact_inspector_width.is_some()
             || self.artifact_window_size.is_some()
             || self.artifact_resize_window.is_some()
+            || self.artifact_controls_hidden
+            || self.artifact_controls_shown
             || self.allocation_report.is_some()
             || self.indicator_state.is_some()
             || self.indicator_report.is_some()
+            || self.preview_surface.is_some()
+            || self.export_background.is_some()
+            || self.expand_document
     }
 
     pub fn loads_example(&self) -> bool {
@@ -82,9 +108,14 @@ impl CliOptions {
             || self.artifact_inspector_width.is_some()
             || self.artifact_window_size.is_some()
             || self.artifact_resize_window.is_some()
+            || self.artifact_controls_hidden
+            || self.artifact_controls_shown
             || self.allocation_report.is_some()
             || self.indicator_state.is_some()
             || self.indicator_report.is_some()
+            || self.preview_surface.is_some()
+            || self.export_background.is_some()
+            || self.expand_document
     }
 
     fn application_flags(&self) -> gtk::gio::ApplicationFlags {
@@ -169,6 +200,8 @@ impl CliOptions {
                         Some((width.parse().ok()?, height.parse().ok()?))
                     })
                 }
+                Some("--hide-controls") => options.artifact_controls_hidden = true,
+                Some("--show-controls") => options.artifact_controls_shown = true,
                 Some("--allocation-report") => {
                     options.allocation_report = arguments.next().map(std::path::PathBuf::from)
                 }
@@ -180,9 +213,42 @@ impl CliOptions {
                 Some("--indicator-report") => {
                     options.indicator_report = arguments.next().map(std::path::PathBuf::from)
                 }
+                Some("--preview-surface") => {
+                    let value = arguments
+                        .next()
+                        .and_then(|value| value.to_str().map(str::to_owned));
+                    options.preview_surface = match validated_appearance_artifact(
+                        value.as_deref(),
+                        "--preview-surface",
+                        "checkerboard",
+                    ) {
+                        Ok(value) => Some(value),
+                        Err(error) => {
+                            eprintln!("{error}");
+                            std::process::exit(2);
+                        }
+                    };
+                }
+                Some("--export-background") => {
+                    let value = arguments
+                        .next()
+                        .and_then(|value| value.to_str().map(str::to_owned));
+                    options.export_background = match validated_appearance_artifact(
+                        value.as_deref(),
+                        "--export-background",
+                        "none",
+                    ) {
+                        Ok(value) => Some(value),
+                        Err(error) => {
+                            eprintln!("{error}");
+                            std::process::exit(2);
+                        }
+                    };
+                }
+                Some("--expand-document") => options.expand_document = true,
                 Some("--help") | Some("-h") => {
                     println!(
-                        "Toniator native GTK application\n\n  --demo                 Open built-in artwork\n  --demo-adjusted        Open an adjusted Lines example\n  --demo-curves          Open the useful default Curves treatment\n  --preset PATH          Apply a legacy treatment preset\n  --artwork PATH         Import artwork through the production path\n  --compare-source       Show source artwork for screenshot evidence\n  --arrange-motif        Show motif arrangement handles for evidence\n  --edit-shape           Open the curved User-Defined Mark editor for evidence\n  --curved-shape         Apply the curved User-Defined Mark fixture\n  --source-mapping N     Select Source Mapping option 0-3 for evidence\n  --independent-shapes   Apply four distinct per-ink shapes for evidence\n  --zoom SCALE           Set deterministic canvas zoom for evidence\n  --inspector-width PX   Set deterministic inspector width for evidence\n  --window-size WxH      Set deterministic initial window size for evidence\n  --resize-window WxH    Enlarge the artifact window after its first preview\n  --allocation-report P  Write measured inner canvas allocation\n  --screenshot PATH      Save the actual application window as PNG\n  --export-svg PATH      Export the demo as editable SVG\n  --export-png PATH      Export the demo as a PNG image\n  --save-document PATH   Save the demo working document\n  --save-treatment PATH  Save the active treatment without artwork"
+                        "Toniator native GTK application\n\n  --demo                 Open built-in artwork\n  --preview-surface V    Artifact preview: checkerboard or #RRGGBBAA\n  --export-background V  Artifact export: none or #RRGGBBAA\n  --expand-document      Expand Document controls for screenshots\n  --screenshot PATH      Save the actual application window as PNG\n  --export-svg PATH      Export the demo as editable SVG\n  --export-png PATH      Export the demo as a PNG image"
                     );
                     std::process::exit(0);
                 }
@@ -242,7 +308,10 @@ fn artifact_exit_code(
 
 #[cfg(test)]
 mod tests {
-    use super::{CliOptions, artifact_exit_code, validated_source_mapping_index};
+    use super::{
+        CliOptions, artifact_exit_code, validated_appearance_artifact,
+        validated_source_mapping_index,
+    };
     use std::path::PathBuf;
 
     #[test]
@@ -319,11 +388,34 @@ mod tests {
     }
 
     #[test]
-    fn source_mapping_cli_accepts_only_the_four_table_indices() {
-        for index in 0..=3 {
+    fn source_mapping_cli_accepts_all_five_table_indices() {
+        for index in 0..=4 {
             assert_eq!(validated_source_mapping_index(Some(index)), Ok(index));
         }
-        assert!(validated_source_mapping_index(Some(4)).is_err());
+        assert!(validated_source_mapping_index(Some(5)).is_err());
         assert!(validated_source_mapping_index(None).is_err());
+    }
+
+    #[test]
+    fn appearance_artifact_flags_are_strict_before_the_application_starts() {
+        assert_eq!(
+            validated_appearance_artifact(
+                Some("checkerboard"),
+                "--preview-surface",
+                "checkerboard"
+            )
+            .unwrap(),
+            "checkerboard"
+        );
+        assert_eq!(
+            validated_appearance_artifact(Some("#12345680"), "--export-background", "none")
+                .unwrap(),
+            "#12345680"
+        );
+        for value in [None, Some("#123456"), Some("#nothex!!"), Some("white")] {
+            assert!(
+                validated_appearance_artifact(value, "--preview-surface", "checkerboard").is_err()
+            );
+        }
     }
 }

@@ -1,10 +1,9 @@
+use crate::CancellationToken;
 use crate::model::{
     AlternateTileTransform, CurveLayout, CurvePath, CurvePoint, Ink, MotifCoverage, ValueMode,
     WebCurveChannel, WebCurveSettings, parse_hex_color,
 };
-use crate::render::{
-    Channel, InkLayer, calculate_web_grid, map_web_pixel, map_web_threshold, sample_web_image,
-};
+use crate::render::{Channel, InkLayer, calculate_web_grid, map_web_pixel, map_web_threshold};
 use anyhow::{Context, Result};
 use image::RgbaImage;
 use tiny_skia::{BlendMode, Color, FillRule, Paint, PathBuilder, Pixmap, Transform};
@@ -49,18 +48,31 @@ pub fn generate_curve_geometry(
     source: &RgbaImage,
     settings: &WebCurveSettings,
 ) -> Result<CurveGeometry> {
-    let ink_order = if settings.value_mode == crate::model::ValueMode::CrosshatchLuminance {
-        [Ink::Black, Ink::Cyan, Ink::Magenta, Ink::Yellow]
+    generate_curve_geometry_cancellable(source, settings, &CancellationToken::new())
+}
+
+pub fn generate_curve_geometry_cancellable(
+    source: &RgbaImage,
+    settings: &WebCurveSettings,
+    token: &CancellationToken,
+) -> Result<CurveGeometry> {
+    let ink_order: Vec<Ink> = if settings.value_mode == crate::model::ValueMode::CrosshatchLuminance
+    {
+        [Ink::Black, Ink::Cyan, Ink::Magenta, Ink::Yellow].to_vec()
+    } else if settings.value_mode == crate::model::ValueMode::Rgb {
+        Ink::RGB.to_vec()
     } else {
-        Ink::ALL
+        Ink::ALL.to_vec()
     };
     let enabled: Vec<Ink> = ink_order
-        .into_iter()
+        .iter()
+        .copied()
         .filter(|ink| settings.channels.get(*ink).enabled)
         .collect();
     let mut layers = Vec::new();
 
     for ink in ink_order {
+        token.checkpoint()?;
         let channel = settings.channels.get(ink);
         if !channel.enabled {
             continue;
@@ -73,7 +85,8 @@ pub fn generate_curve_geometry(
             settings.output_height,
             long_edge_cells,
         );
-        let samples = sample_web_image(source, grid.cols, grid.rows);
+        let samples =
+            crate::render::sample_web_image_cancellable(source, grid.cols, grid.rows, token)?;
         let path = if settings.use_shared_curve {
             &settings.shared_path
         } else {
@@ -98,16 +111,19 @@ pub fn generate_curve_geometry(
                     .max(2);
                 let local = sample_curve_path(path, node_count, close_ends, smooth_join);
                 let baseline = build_full_curve_baseline(&local, settings, channel);
-                repeat_and_transform(&baseline, settings, channel, &grid)
+                repeat_and_transform_cancellable(&baseline, settings, channel, &grid, token)?
             }
             CurveLayout::MotifPattern => {
                 let node_count = (24.0 * channel.output_quality.max(0.1)).ceil() as usize;
                 let local = sample_motif_path(path, node_count.max(4));
-                build_motif_rows(&local, settings, channel, &grid)
+                build_motif_rows_cancellable(&local, settings, channel, &grid, token)?
             }
         };
         let mut outlines = Vec::new();
-        for points in repeated {
+        for (repeat_index, points) in repeated.into_iter().enumerate() {
+            if repeat_index % 256 == 0 {
+                token.checkpoint()?;
+            }
             let mut repeat_commands = Vec::new();
             let nodes: Vec<VariablePoint> = points
                 .into_iter()
@@ -175,10 +191,25 @@ pub fn render_curve_geometry(
     max_dimension: u32,
     generation: u64,
 ) -> Result<crate::render::RenderResult> {
+    render_curve_geometry_cancellable(
+        geometry,
+        max_dimension,
+        generation,
+        &CancellationToken::new(),
+    )
+}
+
+pub fn render_curve_geometry_cancellable(
+    geometry: &CurveGeometry,
+    max_dimension: u32,
+    generation: u64,
+    token: &CancellationToken,
+) -> Result<crate::render::RenderResult> {
     let scale = max_dimension as f32 / geometry.width.max(geometry.height) as f32;
     let width = (geometry.width as f32 * scale).round().max(1.0) as u32;
     let height = (geometry.height as f32 * scale).round().max(1.0) as u32;
-    let image = render_curve_geometry_output(geometry, width, height, true, None)?;
+    let image =
+        render_curve_geometry_output_cancellable(geometry, width, height, true, None, token)?;
     Ok(crate::render::RenderResult { generation, image })
 }
 
@@ -189,6 +220,24 @@ pub fn render_curve_geometry_output(
     white_background: bool,
     channel: Option<Ink>,
 ) -> Result<RgbaImage> {
+    render_curve_geometry_output_cancellable(
+        geometry,
+        width,
+        height,
+        white_background,
+        channel,
+        &CancellationToken::new(),
+    )
+}
+
+pub fn render_curve_geometry_output_cancellable(
+    geometry: &CurveGeometry,
+    width: u32,
+    height: u32,
+    white_background: bool,
+    channel: Option<Ink>,
+    token: &CancellationToken,
+) -> Result<RgbaImage> {
     let mut pixmap = Pixmap::new(width, height).context("curve output is too large")?;
     if white_background {
         pixmap.fill(Color::WHITE);
@@ -196,6 +245,7 @@ pub fn render_curve_geometry_output(
     let scale_x = width as f32 / geometry.width as f32;
     let scale_y = height as f32 / geometry.height as f32;
     for layer in &geometry.layers {
+        token.checkpoint()?;
         if channel.is_some_and(|ink| layer.layer.channel != Channel::from(ink)) {
             continue;
         }
@@ -207,9 +257,15 @@ pub fn render_curve_geometry_output(
             b,
             (layer.layer.opacity.clamp(0.0, 1.0) * 255.0).round() as u8,
         );
-        paint.blend_mode = BlendMode::Multiply;
+        paint.blend_mode = match layer.layer.channel {
+            Channel::Red | Channel::Green | Channel::Blue => BlendMode::Screen,
+            _ => BlendMode::Multiply,
+        };
         paint.anti_alias = true;
-        for outline in &layer.outlines {
+        for (index, outline) in layer.outlines.iter().enumerate() {
+            if index % 256 == 0 {
+                token.checkpoint()?;
+            }
             if let Some(path) = outline.to_tiny_skia_path() {
                 pixmap.fill_path(
                     &path,
@@ -423,18 +479,31 @@ fn build_full_curve_baseline(
         .collect()
 }
 
+#[allow(dead_code)]
 fn repeat_and_transform(
     baseline: &[CurvePoint],
     settings: &WebCurveSettings,
     channel: &WebCurveChannel,
     grid: &crate::render::WebGrid,
 ) -> Vec<Vec<CurvePoint>> {
+    repeat_and_transform_cancellable(baseline, settings, channel, grid, &CancellationToken::new())
+        .expect("fresh cancellation token cannot cancel")
+}
+
+fn repeat_and_transform_cancellable(
+    baseline: &[CurvePoint],
+    settings: &WebCurveSettings,
+    channel: &WebCurveChannel,
+    grid: &crate::render::WebGrid,
+    token: &CancellationToken,
+) -> Result<Vec<Vec<CurvePoint>>> {
     let spacing = grid.cell_width.min(grid.cell_height).max(1.0);
     let radius = ((settings.output_width as f64).hypot(settings.output_height as f64) / spacing)
         .ceil() as i32
         + 2;
     let mut result = Vec::new();
     for index in -radius..=radius {
+        token.checkpoint()?;
         let shifted: Vec<CurvePoint> = baseline
             .iter()
             .map(|point| CurvePoint {
@@ -455,15 +524,27 @@ fn repeat_and_transform(
             result.push(transformed);
         }
     }
-    result
+    Ok(result)
 }
 
+#[allow(dead_code)]
 fn build_motif_rows(
     local: &[CurvePoint],
     settings: &WebCurveSettings,
     channel: &WebCurveChannel,
     grid: &crate::render::WebGrid,
 ) -> Vec<Vec<CurvePoint>> {
+    build_motif_rows_cancellable(local, settings, channel, grid, &CancellationToken::new())
+        .expect("fresh cancellation token cannot cancel")
+}
+
+fn build_motif_rows_cancellable(
+    local: &[CurvePoint],
+    settings: &WebCurveSettings,
+    channel: &WebCurveChannel,
+    grid: &crate::render::WebGrid,
+    token: &CancellationToken,
+) -> Result<Vec<Vec<CurvePoint>>> {
     let motif = normalize_motif(local, channel.curve_scale);
     let start = motif.first().copied().unwrap_or_default();
     let end = motif.last().copied().unwrap_or(start);
@@ -500,6 +581,7 @@ fn build_motif_rows(
     };
     let mut rows = Vec::with_capacity(stack_count as usize);
     for stack_index in 0..stack_count {
+        token.checkpoint()?;
         let stack_position = stack_index as f64 - stack_origin;
         let stagger = if stack_index % 2 == 1 {
             channel.alternate_stack_offset
@@ -522,6 +604,9 @@ fn build_motif_rows(
         };
         let mut chained = Vec::new();
         for tile_index in 0..tile_count {
+            if tile_index % 256 == 0 {
+                token.checkpoint()?;
+            }
             let alternate = (tile_index + stack_index) % 2 == 1;
             let mut tile = transform_motif_tile(
                 &motif,
@@ -565,7 +650,7 @@ fn build_motif_rows(
             rows.push(resample_polyline(&chained, count));
         }
     }
-    rows
+    Ok(rows)
 }
 
 fn normalize_motif(points: &[CurvePoint], curve_scale: f64) -> Vec<CurvePoint> {
@@ -605,35 +690,125 @@ fn motif_counts(
     channel: &WebCurveChannel,
     grid: &crate::render::WebGrid,
 ) -> (u32, u32) {
-    if channel.motif_coverage == MotifCoverage::Manual {
-        return (channel.tile_count, channel.stack_count);
-    }
-    // The web auto-cover calculation projects a nominal horizontal tile.
-    // The actual endpoint advance controls spacing, but not this direction.
-    let rotated_tile = rotate_vector(CurvePoint { x: 1.0, y: 0.0 }, channel.grid_rotation);
-    let rotated_stack = rotate_vector(stack_direction, channel.grid_rotation);
+    // Count from the actual placement axes, rather than a nominal horizontal tile.
+    // The lattice remains centered, so any additional copies are symmetric guards that
+    // may live outside the artboard while still covering its corners.
+    let tile_direction = normalize(row_advance);
+    let center = CurvePoint {
+        x: settings.output_width as f64 / 2.0 + channel.offset_x,
+        y: settings.output_height as f64 / 2.0 + channel.offset_y,
+    };
+    let base = CurvePoint {
+        x: center.x
+            + tile_direction.x * channel.tile_offset
+            + stack_direction.x * channel.stack_offset,
+        y: center.y
+            + tile_direction.y * channel.tile_offset
+            + stack_direction.y * channel.stack_offset,
+    };
     let cell_size = grid.cell_width.min(grid.cell_height).max(1.0);
     let bleed = channel.motif_bleed.max(0.0) * cell_size;
-    let radius = motif
+    let start = motif.first().copied().unwrap_or_default();
+    let motif_radius = motif
         .iter()
-        .map(|point| point.x.hypot(point.y))
+        .map(|point| distance(*point, start))
         .fold(1.0, f64::max);
-    let margin = bleed
-        + radius * 2.0
-        + (settings.output_width as f64).hypot(settings.output_height as f64) * 0.08;
-    let pad = channel.motif_bleed.max(0.0).ceil().max(4.0);
-    let projection = |direction: CurvePoint| {
-        settings.output_width as f64 * direction.x.abs()
-            + settings.output_height as f64 * direction.y.abs()
+    let footprint_radius = motif_radius + max_curve_width(settings, grid, channel) / 2.0 + bleed;
+    let stagger = channel.alternate_stack_offset.abs();
+    let (tile_count, stack_count) = coverage_counts(
+        rotate_vector(row_advance, channel.grid_rotation),
+        rotate_vector(
+            CurvePoint {
+                x: stack_direction.x * channel.stack_spacing,
+                y: stack_direction.y * channel.stack_spacing,
+            },
+            channel.grid_rotation,
+        ),
+        motif_grid_transform(base, settings, channel),
+        footprint_radius + stagger,
+        settings,
+    );
+    let requested_tile_count = if channel.motif_coverage == MotifCoverage::Manual {
+        channel.tile_count
+    } else {
+        1
     };
-    let tile_spacing = row_advance.x.hypot(row_advance.y).max(1.0);
-    let stack_spacing = channel.stack_spacing.abs().max(1.0);
-    let tile_count = ((projection(rotated_tile) + margin * 2.0) / tile_spacing).ceil() + pad;
-    let stack_count = ((projection(rotated_stack) + margin * 2.0) / stack_spacing).ceil() + pad;
+    let requested_stack_count = if channel.motif_coverage == MotifCoverage::Manual {
+        channel.stack_count
+    } else {
+        1
+    };
     (
-        tile_count.round().clamp(1.0, 10_000.0) as u32,
-        stack_count.round().clamp(1.0, 10_000.0) as u32,
+        requested_tile_count.max(tile_count),
+        requested_stack_count.max(stack_count),
     )
+}
+
+fn coverage_counts(
+    tile_advance: CurvePoint,
+    stack_advance: CurvePoint,
+    center: CurvePoint,
+    footprint_radius: f64,
+    settings: &WebCurveSettings,
+) -> (u32, u32) {
+    // Curve controls expose 1 px as the smallest useful row spacing. Persisted
+    // legacy values below that cannot form a practical coverage lattice, so keep
+    // them bounded instead of expanding near-coincident rows.
+    const MIN_PRACTICAL_ADVANCE: f64 = 1.0;
+    let tile_spacing = tile_advance.x.hypot(tile_advance.y);
+    let stack_spacing = stack_advance.x.hypot(stack_advance.y);
+    let determinant = tile_advance.x * stack_advance.y - tile_advance.y * stack_advance.x;
+    if tile_spacing < MIN_PRACTICAL_ADVANCE
+        || stack_spacing < MIN_PRACTICAL_ADVANCE
+        || determinant.abs() <= tile_spacing * stack_spacing * 1e-6
+    {
+        // A collapsed lattice cannot cover a two-dimensional artboard. Do not
+        // manufacture coincident guard copies; Manual retains its requested
+        // minimums and Auto stays at one copy on each axis.
+        return (1, 1);
+    }
+    let (tile_extent, stack_extent) = [
+        CurvePoint { x: 0.0, y: 0.0 },
+        CurvePoint {
+            x: settings.output_width as f64,
+            y: 0.0,
+        },
+        CurvePoint {
+            x: 0.0,
+            y: settings.output_height as f64,
+        },
+        CurvePoint {
+            x: settings.output_width as f64,
+            y: settings.output_height as f64,
+        },
+    ]
+    .into_iter()
+    .map(|corner| {
+        let dx = corner.x - center.x;
+        let dy = corner.y - center.y;
+        (
+            ((dx * stack_advance.y - dy * stack_advance.x) / determinant).abs(),
+            ((tile_advance.x * dy - tile_advance.y * dx) / determinant).abs(),
+        )
+    })
+    .fold((0.0_f64, 0.0_f64), |extent, corner| {
+        (extent.0.max(corner.0), extent.1.max(corner.1))
+    });
+    let tile_margin = footprint_radius * stack_spacing / determinant.abs();
+    let stack_margin = footprint_radius * tile_spacing / determinant.abs();
+    (
+        symmetric_count(tile_extent, tile_margin),
+        symmetric_count(stack_extent, stack_margin),
+    )
+}
+
+fn symmetric_count(extent: f64, footprint: f64) -> u32 {
+    // A motif's bounds are not a filled disk: a thin rotated curve can leave a
+    // corner uncovered even when its radius reaches it. Treat the footprint as
+    // extra guard distance so the outer copies extend beyond every corner.
+    ((extent + footprint).max(0.0) * 2.0 + 1.0)
+        .ceil()
+        .clamp(1.0, 10_000.0) as u32
 }
 
 fn transform_motif_tile(
@@ -813,6 +988,9 @@ fn raw_value(
         Ink::Magenta => 1,
         Ink::Yellow => 2,
         Ink::Black => 3,
+        Ink::Red => 0,
+        Ink::Green => 1,
+        Ink::Blue => 2,
     }]
 }
 
@@ -1383,7 +1561,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_motif_repeats_three_columns_two_rows_and_ignores_legacy_tile_spacing() {
+    fn manual_motif_counts_are_coverage_minimums_and_ignore_legacy_tile_spacing() {
         let source = RgbaImage::from_pixel(8, 5, image::Rgba([0, 0, 0, 255]));
         let mut settings = WebCurveSettings {
             output_width: 120,
@@ -1424,7 +1602,7 @@ mod tests {
         assert_ne!(plain, geometry);
         assert_ne!(flipped, geometry);
         assert_eq!(geometry.layers.len(), 1);
-        assert_eq!(geometry.layers[0].outlines.len(), 2);
+        assert!(geometry.layers[0].outlines.len() >= 2);
         assert!(
             geometry.layers[0]
                 .outlines
@@ -1438,59 +1616,364 @@ mod tests {
     }
 
     #[test]
-    fn bundled_auto_coverage_counts_match_authoritative_web_projection() {
-        let settings = WebCurveSettings {
-            output_width: 900,
-            output_height: 638,
-            long_edge_cells: 90.0,
-            layout: CurveLayout::MotifPattern,
+    fn motif_coverage_counts_use_the_transformed_lattice_and_footprint() {
+        let motif = vec![
+            CurvePoint { x: -16.0, y: 0.0 },
+            CurvePoint { x: 16.0, y: 0.0 },
+        ];
+        let row_advance = CurvePoint { x: 32.0, y: 0.0 };
+        let stack_direction = CurvePoint { x: 0.0, y: 1.0 };
+        let channel = WebCurveChannel {
+            motif_coverage: MotifCoverage::Auto,
+            stack_spacing: 16.0,
             ..Default::default()
         };
-        let path = CurvePath {
-            start: CurvePoint { x: -0.5, y: -0.083 },
-            segments: vec![crate::model::CubicCurveSegment {
-                control_1: CurvePoint {
-                    x: -0.185,
-                    y: -0.212,
-                },
-                control_2: CurvePoint { x: 0.193, y: 0.212 },
-                end: CurvePoint { x: 0.5, y: 0.074 },
-            }],
+
+        let wide = WebCurveSettings {
+            output_width: 1_200,
+            output_height: 120,
+            ..Default::default()
         };
-        let sampled = sample_motif_path(&path, 24);
-        let grid = calculate_web_grid(900, 638, 90.0);
-        for (angle, expected) in [
-            (30.0, (47, 218)),
-            (60.0, (44, 234)),
-            (0.0, (41, 158)),
-            (90.0, (33, 201)),
-        ] {
-            let channel = WebCurveChannel {
-                grid_rotation: angle,
-                curve_scale: 32.0,
-                motif_coverage: MotifCoverage::Auto,
-                motif_bleed: 2.0,
-                stack_spacing: 6.0,
-                ..Default::default()
-            };
-            let motif = normalize_motif(&sampled, channel.curve_scale);
-            let row_advance = CurvePoint {
-                x: motif.last().unwrap().x - motif[0].x,
-                y: motif.last().unwrap().y - motif[0].y,
-            };
-            let stack_direction = CurvePoint { x: 0.0, y: 1.0 };
-            assert_eq!(
-                motif_counts(
-                    &motif,
-                    row_advance,
-                    stack_direction,
-                    &settings,
-                    &channel,
-                    &grid,
-                ),
-                expected
+        let wide_counts = motif_counts(
+            &motif,
+            row_advance,
+            stack_direction,
+            &wide,
+            &channel,
+            &calculate_web_grid(wide.output_width, wide.output_height, wide.long_edge_cells),
+        );
+        assert!(wide_counts.0 > wide_counts.1);
+
+        let tall = WebCurveSettings {
+            output_width: 120,
+            output_height: 1_200,
+            ..Default::default()
+        };
+        let tall_counts = motif_counts(
+            &motif,
+            row_advance,
+            stack_direction,
+            &tall,
+            &channel,
+            &calculate_web_grid(tall.output_width, tall.output_height, tall.long_edge_cells),
+        );
+        assert!(tall_counts.1 > tall_counts.0);
+
+        let rotated = WebCurveChannel {
+            grid_rotation: 90.0,
+            ..channel.clone()
+        };
+        let rotated_counts = motif_counts(
+            &motif,
+            row_advance,
+            stack_direction,
+            &wide,
+            &rotated,
+            &calculate_web_grid(wide.output_width, wide.output_height, wide.long_edge_cells),
+        );
+        assert!(rotated_counts.1 > rotated_counts.0);
+
+        let heavy = WebCurveSettings {
+            max_mark: 1_000.0,
+            ..wide.clone()
+        };
+        let heavy_channel = WebCurveChannel {
+            max_size: 1_000.0,
+            scale: 10.0,
+            ..channel.clone()
+        };
+        let heavy_grid = calculate_web_grid(
+            heavy.output_width,
+            heavy.output_height,
+            heavy.long_edge_cells,
+        );
+        let heavy_counts = motif_counts(
+            &motif,
+            row_advance,
+            stack_direction,
+            &heavy,
+            &heavy_channel,
+            &heavy_grid,
+        );
+        assert!(heavy_counts.0 >= wide_counts.0);
+        assert!(heavy_counts.1 >= wide_counts.1);
+    }
+
+    #[test]
+    fn manual_motif_counts_are_minimums_with_symmetric_coverage_guards() {
+        let motif = vec![
+            CurvePoint { x: -1.0, y: 0.0 },
+            CurvePoint { x: 1.0, y: 0.0 },
+        ];
+        let settings = WebCurveSettings {
+            output_width: 160,
+            output_height: 240,
+            ..Default::default()
+        };
+        let grid = calculate_web_grid(160, 240, settings.long_edge_cells);
+        let minimum_rows = WebCurveChannel {
+            motif_coverage: MotifCoverage::Manual,
+            tile_count: 3,
+            stack_count: 80,
+            stack_spacing: 1.0,
+            ..Default::default()
+        };
+        let guarded = motif_counts(
+            &motif,
+            CurvePoint { x: 2.0, y: 0.0 },
+            CurvePoint { x: 0.0, y: 1.0 },
+            &settings,
+            &minimum_rows,
+            &grid,
+        );
+        assert!(guarded.0 > minimum_rows.tile_count);
+        assert!(guarded.1 > minimum_rows.stack_count);
+
+        let auto_one_pixel_rows = WebCurveChannel {
+            motif_coverage: MotifCoverage::Auto,
+            tile_count: 1,
+            stack_count: 1,
+            ..minimum_rows.clone()
+        };
+        assert!(
+            motif_counts(
+                &motif,
+                CurvePoint { x: 2.0, y: 0.0 },
+                CurvePoint { x: 0.0, y: 1.0 },
+                &settings,
+                &auto_one_pixel_rows,
+                &grid,
+            )
+            .1 > 1,
+            "the supported 1 px spacing must still receive coverage guards"
+        );
+
+        let requested_more = WebCurveChannel {
+            tile_count: 500,
+            stack_count: 400,
+            ..minimum_rows.clone()
+        };
+        assert_eq!(
+            motif_counts(
+                &motif,
+                CurvePoint { x: 2.0, y: 0.0 },
+                CurvePoint { x: 0.0, y: 1.0 },
+                &settings,
+                &requested_more,
+                &grid,
+            ),
+            (500, 400)
+        );
+
+        let coincident_rows = WebCurveChannel {
+            stack_count: 2,
+            stack_spacing: 0.0,
+            ..minimum_rows
+        };
+        assert_eq!(
+            motif_counts(
+                &motif,
+                CurvePoint { x: 2.0, y: 0.0 },
+                CurvePoint { x: 0.0, y: 1.0 },
+                &settings,
+                &coincident_rows,
+                &grid,
+            )
+            .1,
+            2
+        );
+        assert_eq!(
+            build_motif_rows(&motif, &settings, &coincident_rows, &grid,).len(),
+            2,
+            "zero row spacing must not expand into coincident guard rows"
+        );
+        let auto_coincident_rows = WebCurveChannel {
+            motif_coverage: MotifCoverage::Auto,
+            ..coincident_rows.clone()
+        };
+        assert_eq!(
+            motif_counts(
+                &motif,
+                CurvePoint { x: 2.0, y: 0.0 },
+                CurvePoint { x: 0.0, y: 1.0 },
+                &settings,
+                &auto_coincident_rows,
+                &grid,
+            ),
+            (1, 1),
+            "Auto must not expand a collapsed lattice into coincident work"
+        );
+        let tiny_positive_rows = WebCurveChannel {
+            stack_spacing: 0.000_01,
+            ..coincident_rows
+        };
+        assert_eq!(
+            motif_counts(
+                &motif,
+                CurvePoint { x: 2.0, y: 0.0 },
+                CurvePoint { x: 0.0, y: 1.0 },
+                &settings,
+                &tiny_positive_rows,
+                &grid,
+            )
+            .1,
+            2,
+            "tiny persisted spacing must retain the Manual minimum without guard expansion"
+        );
+    }
+
+    #[test]
+    fn transformed_motif_geometry_reaches_every_artboard_edge_from_the_canonical_path() {
+        let source = RgbaImage::from_pixel(16, 8, image::Rgba([0, 0, 0, 255]));
+        let mut settings = WebCurveSettings {
+            output_width: 320,
+            output_height: 120,
+            long_edge_cells: 16.0,
+            min_mark: 100.0,
+            max_mark: 100.0,
+            value_mode: ValueMode::SingleChannel,
+            single_channel: Ink::Black,
+            layout: CurveLayout::MotifPattern,
+            shared_path: CurvePath::straight(),
+            ..Default::default()
+        };
+        for ink in Ink::ALL {
+            settings.channels.get_mut(ink).enabled = ink == Ink::Black;
+        }
+        let channel = &mut settings.channels.k;
+        channel.grid_rotation = 31.0;
+        channel.grid_pivot_x = 37.0;
+        channel.grid_pivot_y = -19.0;
+        channel.offset_x = 13.0;
+        channel.offset_y = -7.0;
+        channel.curve_scale = 24.0;
+        channel.stack_spacing = 10.0;
+        channel.alternate_stack_offset = 5.0;
+        channel.threshold = 0.0;
+        channel.opacity = 1.0;
+
+        let geometry = generate_curve_geometry(&source, &settings).unwrap();
+        let points: Vec<CurvePoint> = geometry.layers[0]
+            .outlines
+            .iter()
+            .flat_map(|outline| {
+                outline.commands.iter().flat_map(|command| match *command {
+                    CurveCommand::Move(point) => vec![point],
+                    CurveCommand::Cubic {
+                        control_1,
+                        control_2,
+                        end,
+                    } => vec![control_1, control_2, end],
+                    CurveCommand::Close => Vec::new(),
+                })
+            })
+            .collect();
+        let bounds = point_bounds(&points);
+        assert!(bounds.0 <= 0.0, "left edge is uncovered: {bounds:?}");
+        assert!(bounds.1 <= 0.0, "top edge is uncovered: {bounds:?}");
+        assert!(
+            bounds.0 + bounds.2 >= settings.output_width as f64,
+            "right edge is uncovered: {bounds:?}"
+        );
+        assert!(
+            bounds.1 + bounds.3 >= settings.output_height as f64,
+            "bottom edge is uncovered: {bounds:?}"
+        );
+
+        let preview = render_curve_geometry(&geometry, 160, 7).unwrap();
+        let svg_paths: Vec<String> = geometry.layers[0]
+            .outlines
+            .iter()
+            .map(CurveOutline::to_svg_path_data)
+            .collect();
+        assert!(
+            svg_paths
+                .iter()
+                .all(|path| path.starts_with("M ") && path.ends_with(" Z"))
+        );
+        assert_eq!(
+            preview.image,
+            render_curve_geometry_output(
+                &geometry,
+                preview.image.width(),
+                preview.image.height(),
+                true,
+                None,
+            )
+            .unwrap(),
+            "preview and SVG both derive from the same canonical curve geometry"
+        );
+    }
+
+    #[test]
+    fn transparent_source_edges_do_not_shrink_motif_lattice_coverage() {
+        let mut settings = WebCurveSettings {
+            output_width: 160,
+            output_height: 120,
+            long_edge_cells: 16.0,
+            min_mark: 100.0,
+            max_mark: 100.0,
+            value_mode: ValueMode::SingleChannel,
+            single_channel: Ink::Black,
+            layout: CurveLayout::MotifPattern,
+            shared_path: CurvePath::straight(),
+            ..Default::default()
+        };
+        for ink in Ink::ALL {
+            settings.channels.get_mut(ink).enabled = ink == Ink::Black;
+        }
+        let channel = &mut settings.channels.k;
+        channel.curve_scale = 20.0;
+        channel.stack_spacing = 10.0;
+        channel.threshold = 0.0;
+        channel.opacity = 1.0;
+
+        let grid = calculate_web_grid(
+            settings.output_width,
+            settings.output_height,
+            settings.long_edge_cells,
+        );
+        let lattice_rows = build_motif_rows(
+            &sample_motif_path(&settings.shared_path, 24),
+            &settings,
+            &settings.channels.k,
+            &grid,
+        );
+        let lattice_points: Vec<CurvePoint> = lattice_rows.into_iter().flatten().collect();
+        let lattice_bounds = point_bounds(&lattice_points);
+        assert!(lattice_bounds.0 <= 0.0);
+        assert!(lattice_bounds.1 <= 0.0);
+        assert!(lattice_bounds.0 + lattice_bounds.2 >= settings.output_width as f64);
+        assert!(lattice_bounds.1 + lattice_bounds.3 >= settings.output_height as f64);
+
+        let opaque = RgbaImage::from_pixel(16, 12, image::Rgba([0, 0, 0, 255]));
+        let mut transparent_edges = opaque.clone();
+        for x in 0..transparent_edges.width() {
+            transparent_edges.put_pixel(x, 0, image::Rgba([0, 0, 0, 0]));
+            transparent_edges.put_pixel(
+                x,
+                transparent_edges.height() - 1,
+                image::Rgba([0, 0, 0, 0]),
             );
         }
+        for y in 0..transparent_edges.height() {
+            transparent_edges.put_pixel(0, y, image::Rgba([0, 0, 0, 0]));
+            transparent_edges.put_pixel(
+                transparent_edges.width() - 1,
+                y,
+                image::Rgba([0, 0, 0, 0]),
+            );
+        }
+
+        let opaque_geometry = generate_curve_geometry(&opaque, &settings).unwrap();
+        let transparent_geometry = generate_curve_geometry(&transparent_edges, &settings).unwrap();
+        let opaque_paths = &opaque_geometry.layers[0].outlines;
+        let transparent_paths = &transparent_geometry.layers[0].outlines;
+        assert!(!opaque_paths.is_empty());
+        assert!(
+            transparent_paths.len() < opaque_paths.len(),
+            "transparent samples may omit visible edge marks without changing the lattice"
+        );
     }
 
     #[test]
