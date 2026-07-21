@@ -10799,8 +10799,10 @@ mod tests {
 
     #[test]
     fn preview_activity_cancellation_settles_only_the_matching_request() {
-        let mut activity = PreviewActivity::default();
-        activity.installed = Some((1, PreviewView::Source));
+        let mut activity = PreviewActivity {
+            installed: Some((1, PreviewView::Source)),
+            ..PreviewActivity::default()
+        };
         activity.request(2, PreviewView::Rendered);
         assert!(activity.render_busy());
         activity.cancelled(2);
