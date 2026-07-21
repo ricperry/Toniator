@@ -50,6 +50,7 @@ const START_HERO: &[u8] = include_bytes!("../assets/splash-hero.png");
 const PREVIEW_INDICATOR_SVG: &[u8] = include_bytes!("../assets/preview-indicator.svg");
 const COLOR_SOURCE_SVG: &[u8] = include_bytes!("../icons/ColorSource.svg");
 const COLOR_TO_CMYK_SVG: &[u8] = include_bytes!("../icons/ColorToCMYK.svg");
+const COLOR_TO_RGB_SVG: &[u8] = include_bytes!("../icons/ColorToRGB.svg");
 const VALUE_SOURCE_SVG: &[u8] = include_bytes!("../icons/ValueSource.svg");
 const VALUE_TO_ONE_INK_SVG: &[u8] = include_bytes!("../icons/ValueToOneInk.svg");
 const VALUE_TO_CMYK_SVG: &[u8] = include_bytes!("../icons/ValueToCMYK.svg");
@@ -1539,6 +1540,7 @@ pub struct AppUi {
     web_output_ink: gtk::DropDown,
     web_output_ink_row: gtk::Widget,
     web_shared: gtk::CheckButton,
+    web_shared_help: Option<HelpHandle>,
     web_shape: gtk::DropDown,
     web_shape_row: gtk::Widget,
     web_mixed_shape_label: gtk::Label,
@@ -1982,6 +1984,7 @@ impl AppUi {
             web_output_ink: editor_view.web_output_ink.clone(),
             web_output_ink_row: editor_view.web_output_ink_row.clone(),
             web_shared: editor_view.web_shared.clone(),
+            web_shared_help: editor_view.web_shared_help.clone(),
             web_shape: editor_view.web_shape.clone(),
             web_shape_row: editor_view.web_shape_row.clone(),
             web_mixed_shape_label: editor_view.web_mixed_shape_label.clone(),
@@ -2462,17 +2465,6 @@ impl AppUi {
                 let Some(mode) = source_mapping_from_index(combo.selected()) else {
                     return;
                 };
-                if mode == ValueMode::Rgb
-                    && ui.state.borrow().editor.as_ref().is_some_and(|editor| {
-                        editor.document().output_mode != OutputMode::RgbScreen
-                    })
-                {
-                    ui.show_error(
-                        "RGB Color mapping is available after choosing Output: RGB Screen.",
-                    );
-                    ui.sync_controls();
-                    return;
-                }
                 if mode == ValueMode::CrosshatchLuminance {
                     ui.activate_crosshatch_from_shape();
                 } else {
@@ -2487,12 +2479,12 @@ impl AppUi {
                 if ui.state.borrow().syncing_controls {
                     return;
                 }
-                let ink = match combo.selected() {
-                    0 => Ink::Cyan,
-                    1 => Ink::Magenta,
-                    2 => Ink::Yellow,
-                    3 => Ink::Black,
-                    _ => return,
+                let rgb =
+                    ui.state.borrow().editor.as_ref().is_some_and(|editor| {
+                        editor.document().output_mode == OutputMode::RgbScreen
+                    });
+                let Some(ink) = output_ink_for_slot(combo.selected(), rgb) else {
+                    return;
                 };
                 ui.change_web_treatment(move |settings, _| settings.single_channel = ink);
             }
@@ -2505,9 +2497,16 @@ impl AppUi {
                     return;
                 }
                 if !button.is_active() {
+                    let rgb = ui.state.borrow().editor.as_ref().is_some_and(|editor| {
+                        editor.document().output_mode == OutputMode::RgbScreen
+                    });
+                    let crosshatch = ui.state.borrow().editor.as_ref().is_some_and(|editor| {
+                        matches!(&editor.document().render, RenderVariant::WebShapeV1 { settings }
+                            if settings.value_mode == ValueMode::CrosshatchLuminance)
+                    });
                     ui.change_web_treatment(|settings, _| {
                         let path = settings.resolved_custom_shape_path();
-                        for ink in Ink::ALL {
+                        for ink in output_channel_order(rgb, crosshatch).iter().copied() {
                             let channel = settings.channels.get_mut(ink);
                             channel.shape = settings.shared_shape;
                             channel.polygon_sides = settings.polygon_sides;
@@ -2535,13 +2534,21 @@ impl AppUi {
                 };
                 let target = ui.web_target.selected();
                 let target_ink = ui.selected_web_inks().first().copied();
+                let rgb =
+                    ui.state.borrow().editor.as_ref().is_some_and(|editor| {
+                        editor.document().output_mode == OutputMode::RgbScreen
+                    });
+                let crosshatch = ui.state.borrow().editor.as_ref().is_some_and(|editor| {
+                    matches!(&editor.document().render, RenderVariant::WebShapeV1 { settings }
+                        if settings.value_mode == ValueMode::CrosshatchLuminance)
+                });
                 ui.change_web_treatment(move |settings, _| {
                     if settings.use_shared_mark {
                         settings.shared_shape = shape;
                     } else if target == 0 {
                         let path = settings.resolved_custom_shape_path();
                         let polygon_sides = settings.polygon_sides;
-                        for ink in Ink::ALL {
+                        for ink in output_channel_order(rgb, crosshatch).iter().copied() {
                             let channel = settings.channels.get_mut(ink);
                             channel.shape = shape;
                             channel.polygon_sides = polygon_sides;
@@ -2569,11 +2576,18 @@ impl AppUi {
                         3 => WebShape::UserDefined,
                         _ => return,
                     };
+                    let rgb = ui.state.borrow().editor.as_ref().is_some_and(|editor| {
+                        editor.document().output_mode == OutputMode::RgbScreen
+                    });
+                    let crosshatch = ui.state.borrow().editor.as_ref().is_some_and(|editor| {
+                        matches!(&editor.document().render, RenderVariant::WebShapeV1 { settings }
+                            if settings.value_mode == ValueMode::CrosshatchLuminance)
+                    });
                     ui.change_web_treatment(move |settings, _| {
                         settings.use_shared_mark = false;
                         let path = settings.resolved_custom_shape_path();
                         let polygon_sides = settings.polygon_sides;
-                        for ink in Ink::ALL {
+                        for ink in output_channel_order(rgb, crosshatch).iter().copied() {
                             let channel = settings.channels.get_mut(ink);
                             channel.shape = shape;
                             channel.polygon_sides = polygon_sides;
@@ -2591,10 +2605,18 @@ impl AppUi {
                 let sides = spin.value_as_int().clamp(3, 6) as u8;
                 let target = ui.web_target.selected();
                 let target_ink = ui.selected_web_inks().first().copied();
+                let rgb =
+                    ui.state.borrow().editor.as_ref().is_some_and(|editor| {
+                        editor.document().output_mode == OutputMode::RgbScreen
+                    });
+                let crosshatch = ui.state.borrow().editor.as_ref().is_some_and(|editor| {
+                    matches!(&editor.document().render, RenderVariant::WebShapeV1 { settings }
+                        if settings.value_mode == ValueMode::CrosshatchLuminance)
+                });
                 ui.change_web_treatment(move |settings, _| {
                     if settings.use_shared_mark || target == 0 {
                         settings.polygon_sides = sides;
-                        for ink in Ink::ALL {
+                        for ink in output_channel_order(rgb, crosshatch).iter().copied() {
                             settings.channels.get_mut(ink).polygon_sides = sides;
                         }
                     } else if let Some(ink) = target_ink {
@@ -2616,7 +2638,10 @@ impl AppUi {
                         matches!(&editor.document().render, RenderVariant::WebShapeV1 { settings }
                             if settings.value_mode == ValueMode::CrosshatchLuminance)
                     });
-                    let ink = ink_for_visible_slot(index, crosshatch);
+                    let rgb = ui.state.borrow().editor.as_ref().is_some_and(|editor| {
+                        editor.document().output_mode == OutputMode::RgbScreen
+                    });
+                    let ink = visible_ink_for_slot(index, rgb, crosshatch);
                     let visible = button.is_active();
                     ui.change_web_treatment(move |settings, _| {
                         settings.channels.get_mut(ink).enabled = visible
@@ -2684,17 +2709,6 @@ impl AppUi {
                 let Some(mode) = source_mapping_from_index(combo.selected()) else {
                     return;
                 };
-                if mode == ValueMode::Rgb
-                    && ui.state.borrow().editor.as_ref().is_some_and(|editor| {
-                        editor.document().output_mode != OutputMode::RgbScreen
-                    })
-                {
-                    ui.show_error(
-                        "RGB Color mapping is available after choosing Output: RGB Screen.",
-                    );
-                    ui.sync_controls();
-                    return;
-                }
                 ui.change_curve_treatment(move |settings, _| {
                     if mode == ValueMode::CrosshatchLuminance {
                         settings.configure_crosshatch();
@@ -2711,12 +2725,12 @@ impl AppUi {
                 if ui.state.borrow().syncing_controls {
                     return;
                 }
-                let ink = match combo.selected() {
-                    0 => Ink::Cyan,
-                    1 => Ink::Magenta,
-                    2 => Ink::Yellow,
-                    3 => Ink::Black,
-                    _ => return,
+                let rgb =
+                    ui.state.borrow().editor.as_ref().is_some_and(|editor| {
+                        editor.document().output_mode == OutputMode::RgbScreen
+                    });
+                let Some(ink) = output_ink_for_slot(combo.selected(), rgb) else {
+                    return;
                 };
                 ui.change_curve_treatment(move |settings, _| settings.single_channel = ink);
             }
@@ -2778,6 +2792,14 @@ impl AppUi {
                     return;
                 }
                 let shared = button.is_active();
+                let rgb =
+                    ui.state.borrow().editor.as_ref().is_some_and(|editor| {
+                        editor.document().output_mode == OutputMode::RgbScreen
+                    });
+                let crosshatch = ui.state.borrow().editor.as_ref().is_some_and(|editor| {
+                    matches!(&editor.document().render, RenderVariant::WebCurveV1 { settings }
+                        if settings.value_mode == ValueMode::CrosshatchLuminance)
+                });
                 ui.change_curve_treatment(move |settings, inks| {
                     if shared && !settings.use_shared_curve {
                         let ink = inks.first().copied().unwrap_or(Ink::Black);
@@ -2785,7 +2807,7 @@ impl AppUi {
                         settings.shared_close_ends = settings.channels.get(ink).close_ends;
                         settings.shared_smooth_join = settings.channels.get(ink).smooth_join;
                     } else if !shared && settings.use_shared_curve {
-                        for ink in Ink::ALL {
+                        for ink in output_channel_order(rgb, crosshatch).iter().copied() {
                             let channel = settings.channels.get_mut(ink);
                             channel.path = settings.shared_path.clone();
                             channel.close_ends = settings.shared_close_ends;
@@ -2808,7 +2830,10 @@ impl AppUi {
                         matches!(&editor.document().render, RenderVariant::WebCurveV1 { settings }
                             if settings.value_mode == ValueMode::CrosshatchLuminance)
                     });
-                    let ink = ink_for_visible_slot(index, crosshatch);
+                    let rgb = ui.state.borrow().editor.as_ref().is_some_and(|editor| {
+                        editor.document().output_mode == OutputMode::RgbScreen
+                    });
+                    let ink = visible_ink_for_slot(index, rgb, crosshatch);
                     let visible = button.is_active();
                     ui.change_curve_treatment(move |settings, _| {
                         settings.channels.get_mut(ink).enabled = visible
@@ -4426,12 +4451,13 @@ impl AppUi {
     }
 
     fn selected_web_inks(&self) -> Vec<Ink> {
-        let rgb = self
-            .state
-            .borrow()
-            .editor
-            .as_ref()
-            .is_some_and(|editor| editor.document().output_mode == OutputMode::RgbScreen);
+        let crosshatch = self.state.borrow().editor.as_ref().is_some_and(|editor| {
+            matches!(&editor.document().render, RenderVariant::WebShapeV1 { settings }
+                if settings.value_mode == ValueMode::CrosshatchLuminance)
+        });
+        let rgb = self.state.borrow().editor.as_ref().is_some_and(|editor| {
+            editor.document().output_mode == OutputMode::RgbScreen && !crosshatch
+        });
         if rgb {
             return match self.web_target.selected() {
                 1 => vec![Ink::Red],
@@ -4440,10 +4466,6 @@ impl AppUi {
                 _ => Ink::RGB.to_vec(),
             };
         }
-        let crosshatch = self.state.borrow().editor.as_ref().is_some_and(|editor| {
-            matches!(&editor.document().render, RenderVariant::WebShapeV1 { settings }
-                if settings.value_mode == ValueMode::CrosshatchLuminance)
-        });
         match self.web_target.selected() {
             1 => vec![if crosshatch { Ink::Black } else { Ink::Cyan }],
             2 => vec![if crosshatch { Ink::Cyan } else { Ink::Magenta }],
@@ -4853,12 +4875,13 @@ impl AppUi {
     }
 
     fn selected_curve_inks(&self) -> Vec<Ink> {
-        let rgb = self
-            .state
-            .borrow()
-            .editor
-            .as_ref()
-            .is_some_and(|editor| editor.document().output_mode == OutputMode::RgbScreen);
+        let crosshatch = self.state.borrow().editor.as_ref().is_some_and(|editor| {
+            matches!(&editor.document().render, RenderVariant::WebCurveV1 { settings }
+                if settings.value_mode == ValueMode::CrosshatchLuminance)
+        });
+        let rgb = self.state.borrow().editor.as_ref().is_some_and(|editor| {
+            editor.document().output_mode == OutputMode::RgbScreen && !crosshatch
+        });
         if rgb {
             return match self.curve_target.selected() {
                 1 => vec![Ink::Red],
@@ -4867,10 +4890,6 @@ impl AppUi {
                 _ => Ink::RGB.to_vec(),
             };
         }
-        let crosshatch = self.state.borrow().editor.as_ref().is_some_and(|editor| {
-            matches!(&editor.document().render, RenderVariant::WebCurveV1 { settings }
-                if settings.value_mode == ValueMode::CrosshatchLuminance)
-        });
         match self.curve_target.selected() {
             1 => vec![if crosshatch { Ink::Black } else { Ink::Cyan }],
             2 => vec![if crosshatch { Ink::Cyan } else { Ink::Magenta }],
@@ -5077,7 +5096,7 @@ impl AppUi {
 
     fn enable_shared_shape(self: &Rc<Self>) {
         let selected_ink = self.selected_web_inks().first().copied();
-        let (target, equal) = {
+        let (target, equal, rgb) = {
             let state = self.state.borrow();
             let Some(editor) = state.editor.as_ref() else {
                 return;
@@ -5085,18 +5104,25 @@ impl AppUi {
             let RenderVariant::WebShapeV1 { settings } = &editor.document().render else {
                 return;
             };
-            let first = settings.channels.get(Ink::Cyan);
-            let equal = Ink::ALL.into_iter().skip(1).all(|ink| {
+            let crosshatch = matches!(
+                &editor.document().render,
+                RenderVariant::WebShapeV1 { settings }
+                    if settings.value_mode == ValueMode::CrosshatchLuminance
+            );
+            let rgb = editor.document().output_mode == OutputMode::RgbScreen && !crosshatch;
+            let channel_order = output_channel_order(rgb, crosshatch);
+            let first = settings.channels.get(channel_order[0]);
+            let equal = channel_order.iter().skip(1).copied().all(|ink| {
                 let channel = settings.channels.get(ink);
                 channel.shape == first.shape
                     && channel.polygon_sides == first.polygon_sides
                     && settings.resolved_channel_shape_path(channel)
                         == settings.resolved_channel_shape_path(first)
             });
-            (self.web_target.selected(), equal)
+            (self.web_target.selected(), equal, rgb)
         };
         if equal {
-            self.share_shape_from(Ink::Cyan);
+            self.share_shape_from(if rgb { Ink::Red } else { Ink::Cyan });
             return;
         }
         self.state.borrow_mut().syncing_controls = true;
@@ -5108,16 +5134,29 @@ impl AppUi {
             } else {
                 "Share this ink's shape?"
             })
-            .body("This replaces the other inks' shape geometry as one undoable change.")
+            .body(if rgb {
+                "This replaces the other channels' shape geometry as one undoable change."
+            } else {
+                "This replaces the other inks' shape geometry as one undoable change."
+            })
             .build();
         if target == 0 {
-            dialog.add_responses(&[
-                ("cancel", "Cancel"),
-                ("c", "C"),
-                ("m", "M"),
-                ("y", "Y"),
-                ("k", "K"),
-            ]);
+            if rgb {
+                dialog.add_responses(&[
+                    ("cancel", "Cancel"),
+                    ("r", "Red"),
+                    ("g", "Green"),
+                    ("b", "Blue"),
+                ]);
+            } else {
+                dialog.add_responses(&[
+                    ("cancel", "Cancel"),
+                    ("c", "C"),
+                    ("m", "M"),
+                    ("y", "Y"),
+                    ("k", "K"),
+                ]);
+            }
         } else {
             dialog.add_responses(&[("cancel", "Cancel"), ("share", "Share")]);
             dialog.set_response_appearance("share", adw::ResponseAppearance::Suggested);
@@ -5132,6 +5171,9 @@ impl AppUi {
                 move |response| {
                     let ink = if target == 0 {
                         match response.as_str() {
+                            "r" if rgb => Some(Ink::Red),
+                            "g" if rgb => Some(Ink::Green),
+                            "b" if rgb => Some(Ink::Blue),
                             "c" => Some(Ink::Cyan),
                             "m" => Some(Ink::Magenta),
                             "y" => Some(Ink::Yellow),
@@ -5249,9 +5291,11 @@ impl AppUi {
             } else {
                 0
             });
+        sync_source_mapping_names(&self.web_value_mode, output_mode);
+        sync_source_mapping_names(&self.curve_value_mode, output_mode);
         if output_mode == OutputMode::RgbScreen {
             for target in [&self.web_target, &self.curve_target] {
-                let selected = target.selected().min(3);
+                let selected = selection_for_item_count(target, 4);
                 target.set_model(Some(&gtk::StringList::new(&[
                     "All Channels",
                     "Red",
@@ -5264,13 +5308,25 @@ impl AppUi {
             self.curve_target_label.set_text("Adjust Channel");
             self.web_visible_label.set_text("Visible RGB Channels");
             self.curve_visible_label.set_text("Visible RGB Channels");
+            for output in [&self.web_output_ink, &self.curve_output_ink] {
+                let selected = selection_for_item_count(output, 3);
+                output.set_model(Some(&gtk::StringList::new(&["Red", "Green", "Blue"])));
+                output.set_selected(selected);
+            }
         } else {
             for target in [&self.web_target, &self.curve_target] {
-                let selected = target.selected().min(4);
+                let selected = selection_for_item_count(target, 5);
                 target.set_model(Some(&gtk::StringList::new(&[
                     "All Inks", "Cyan", "Magenta", "Yellow", "Black",
                 ])));
                 target.set_selected(selected);
+            }
+            for output in [&self.web_output_ink, &self.curve_output_ink] {
+                let selected = selection_for_item_count(output, 4);
+                output.set_model(Some(&gtk::StringList::new(&[
+                    "Cyan", "Magenta", "Yellow", "Black",
+                ])));
+                output.set_selected(selected);
             }
         }
         match appearance.preview_surface {
@@ -5335,9 +5391,12 @@ impl AppUi {
                     &self.web_target_label,
                     self.web_target_help.as_ref(),
                     &self.web_visible_label,
+                    output_mode == OutputMode::RgbScreen,
                     settings.value_mode == ValueMode::CrosshatchLuminance,
                 );
-                if output_mode == OutputMode::RgbScreen {
+                if output_mode == OutputMode::RgbScreen
+                    && settings.value_mode != ValueMode::CrosshatchLuminance
+                {
                     self.web_target_label.set_text("Adjust Channel");
                     self.web_visible_label.set_text("Visible RGB Channels");
                 }
@@ -5358,19 +5417,39 @@ impl AppUi {
                         Ink::Blue => 2,
                     });
                 self.web_shared.set_active(settings.use_shared_mark);
-                self.web_shared
-                    .set_label(Some(if output_mode == OutputMode::RgbScreen {
+                self.web_shared.set_label(Some(
+                    if output_mode == OutputMode::RgbScreen
+                        && settings.value_mode != ValueMode::CrosshatchLuminance
+                    {
                         "Share Mark Shape Across Channels"
                     } else {
                         "Share Mark Shape Across Inks"
-                    }));
+                    },
+                ));
+                if let Some(help) = self.web_shared_help.as_ref() {
+                    help.set_spec(
+                        help_for(
+                            if output_mode == OutputMode::RgbScreen
+                                && settings.value_mode != ValueMode::CrosshatchLuminance
+                            {
+                                "Share Mark Shape Across Channels"
+                            } else {
+                                "Share Mark Shape Across Inks"
+                            },
+                        )
+                        .unwrap(),
+                    );
+                }
                 let crosshatch = settings.value_mode == ValueMode::CrosshatchLuminance;
-                let visible_spec = help_for(if crosshatch {
-                    "Visible Crosshatch Layers"
-                } else {
-                    "Visible Inks"
-                })
-                .unwrap();
+                let visible_spec =
+                    help_for(if output_mode == OutputMode::RgbScreen && !crosshatch {
+                        "Visible RGB Channels"
+                    } else if crosshatch {
+                        "Visible Crosshatch Layers"
+                    } else {
+                        "Visible Inks"
+                    })
+                    .unwrap();
                 self.web_visible_help.set_spec(visible_spec);
                 for button in &self.web_visible {
                     button.set_tooltip_text(Some(visible_spec.summary));
@@ -5390,9 +5469,11 @@ impl AppUi {
                     );
                 }
                 let all_target = self.web_target.selected() == 0;
-                let first_geometry = settings.channels.get(Ink::Cyan);
+                let channel_order =
+                    output_channel_order(output_mode == OutputMode::RgbScreen, crosshatch);
+                let first_geometry = settings.channels.get(channel_order[0]);
                 let geometry_mixed = !settings.use_shared_mark
-                    && Ink::ALL.into_iter().skip(1).any(|ink| {
+                    && channel_order.iter().skip(1).copied().any(|ink| {
                         let channel = settings.channels.get(ink);
                         channel.shape != first_geometry.shape
                             || channel.polygon_sides != first_geometry.polygon_sides
@@ -5403,7 +5484,13 @@ impl AppUi {
                     .web_target
                     .selected()
                     .checked_sub(1)
-                    .map(|index| ink_for_visible_slot(index as usize, crosshatch))
+                    .map(|index| {
+                        visible_ink_for_slot(
+                            index as usize,
+                            output_mode == OutputMode::RgbScreen,
+                            crosshatch,
+                        )
+                    })
                     .map(|ink| settings.channels.get(ink));
                 let displayed_shape = if settings.use_shared_mark {
                     settings.shared_shape
@@ -5453,25 +5540,41 @@ impl AppUi {
                 self.web_mixed_shape_apply.set_selected(0);
                 self.web_geometry_note
                     .set_text(if settings.use_shared_mark {
-                        "One shape shared by all inks."
+                        if output_mode == OutputMode::RgbScreen && !crosshatch {
+                            "One shape shared by all channels."
+                        } else {
+                            "One shape shared by all inks."
+                        }
                     } else if all_target && geometry_mixed {
-                        "Shapes differ. Choose a mark to apply it to all inks, or edit one ink."
+                        if output_mode == OutputMode::RgbScreen && !crosshatch {
+                            "Shapes differ. Choose a mark to apply it to all channels, or edit one channel."
+                        } else {
+                            "Shapes differ. Choose a mark to apply it to all inks, or edit one ink."
+                        }
                     } else {
-                        "Editing this ink's shape."
+                        if output_mode == OutputMode::RgbScreen && !crosshatch {
+                            "Editing this channel's shape."
+                        } else {
+                            "Editing this ink's shape."
+                        }
                     });
                 for (index, button) in self.web_visible.iter().enumerate() {
-                    if output_mode == OutputMode::RgbScreen && index == 3 {
+                    if output_mode == OutputMode::RgbScreen && !crosshatch && index == 3 {
                         button.set_visible(false);
                         continue;
                     }
                     button.set_visible(true);
-                    if output_mode == OutputMode::RgbScreen {
+                    if output_mode == OutputMode::RgbScreen && !crosshatch {
                         let ink = Ink::RGB[index];
                         button.set_label(Some(["Red", "Green", "Blue"][index]));
                         button.set_active(settings.channels.get(ink).enabled);
                         continue;
                     }
-                    let ink = ink_for_visible_slot(index, crosshatch);
+                    let ink = visible_ink_for_slot(
+                        index,
+                        output_mode == OutputMode::RgbScreen,
+                        crosshatch,
+                    );
                     button.set_label(Some(if crosshatch {
                         ["1 K", "2 C", "3 M", "4 Y"][index]
                     } else {
@@ -5611,9 +5714,12 @@ impl AppUi {
                     &self.curve_target_label,
                     self.curve_target_help.as_ref(),
                     &self.curve_visible_label,
+                    output_mode == OutputMode::RgbScreen,
                     settings.value_mode == ValueMode::CrosshatchLuminance,
                 );
-                if output_mode == OutputMode::RgbScreen {
+                if output_mode == OutputMode::RgbScreen
+                    && settings.value_mode != ValueMode::CrosshatchLuminance
+                {
                     self.curve_target_label.set_text("Adjust Channel");
                     self.curve_visible_label.set_text("Visible RGB Channels");
                 }
@@ -5641,12 +5747,15 @@ impl AppUi {
                     .set_visible(settings.layout == CurveLayout::MotifPattern);
                 self.curve_shared.set_active(settings.use_shared_curve);
                 let crosshatch = settings.value_mode == ValueMode::CrosshatchLuminance;
-                let visible_spec = help_for(if crosshatch {
-                    "Visible Crosshatch Layers"
-                } else {
-                    "Visible Inks"
-                })
-                .unwrap();
+                let visible_spec =
+                    help_for(if output_mode == OutputMode::RgbScreen && !crosshatch {
+                        "Visible RGB Channels"
+                    } else if crosshatch {
+                        "Visible Crosshatch Layers"
+                    } else {
+                        "Visible Inks"
+                    })
+                    .unwrap();
                 self.curve_visible_help.set_spec(visible_spec);
                 for button in &self.curve_visible {
                     button.set_tooltip_text(Some(visible_spec.summary));
@@ -5665,6 +5774,8 @@ impl AppUi {
                     help.set_spec(
                         help_for(if crosshatch {
                             "Share Hatch Path Across Layers"
+                        } else if output_mode == OutputMode::RgbScreen {
+                            "Share Line Shape Across Channels"
                         } else {
                             "Share Line Shape Across Inks"
                         })
@@ -5688,18 +5799,22 @@ impl AppUi {
                     "Reset to Soft Wave"
                 });
                 for (index, button) in self.curve_visible.iter().enumerate() {
-                    if output_mode == OutputMode::RgbScreen && index == 3 {
+                    if output_mode == OutputMode::RgbScreen && !crosshatch && index == 3 {
                         button.set_visible(false);
                         continue;
                     }
                     button.set_visible(true);
-                    if output_mode == OutputMode::RgbScreen {
+                    if output_mode == OutputMode::RgbScreen && !crosshatch {
                         let ink = Ink::RGB[index];
                         button.set_label(Some(["Red", "Green", "Blue"][index]));
                         button.set_active(settings.channels.get(ink).enabled);
                         continue;
                     }
-                    let ink = ink_for_visible_slot(index, crosshatch);
+                    let ink = visible_ink_for_slot(
+                        index,
+                        output_mode == OutputMode::RgbScreen,
+                        crosshatch,
+                    );
                     button.set_label(Some(if crosshatch {
                         ["1 K", "2 C", "3 M", "4 Y"][index]
                     } else {
@@ -7455,7 +7570,11 @@ impl AppUi {
                             _ => "All inks",
                         }
                     };
-                    format!("Shapes · {layer}")
+                    if editor.document().output_mode == OutputMode::RgbScreen {
+                        format!("Shapes · RGB Screen · {layer}")
+                    } else {
+                        format!("Shapes · {layer}")
+                    }
                 }
             }
             RenderVariant::WebCurveV1 { settings } => {
@@ -7482,7 +7601,11 @@ impl AppUi {
                             _ => "All inks",
                         }
                     };
-                    format!("Curves · {layer}")
+                    if editor.document().output_mode == OutputMode::RgbScreen {
+                        format!("Curves · RGB Screen · {layer}")
+                    } else {
+                        format!("Curves · {layer}")
+                    }
                 }
             }
             RenderVariant::NativeBasicV1 => "Shapes · Basic treatment".into(),
@@ -7842,6 +7965,7 @@ struct EditorWidgets {
     web_output_ink: gtk::DropDown,
     web_output_ink_row: gtk::Widget,
     web_shared: gtk::CheckButton,
+    web_shared_help: Option<HelpHandle>,
     web_shape: gtk::DropDown,
     web_shape_row: gtk::Widget,
     web_mixed_shape_label: gtk::Label,
@@ -8230,12 +8354,18 @@ fn build_editor_view(
     web_panel.append(&combo_row("Artwork Mapping", &web_value_mode));
     web_panel.append(&source_mapping_hint(&web_value_mode));
     let web_output_ink = gtk::DropDown::from_strings(&["Cyan", "Magenta", "Yellow", "Black"]);
-    let web_output_ink_row = combo_row("Output Ink", &web_output_ink);
+    let web_output_ink_row = combo_row("Output Channel", &web_output_ink);
     web_output_ink_row.set_visible(false);
     web_panel.append(&web_output_ink_row);
     let web_shared = gtk::CheckButton::with_label("Share Mark Shape Across Inks");
     web_shared.set_active(true);
-    web_panel.append(&check_row(&web_shared, "Share Mark Shape Across Inks"));
+    let web_shared_help = help_for("Share Mark Shape Across Inks").map(help_handle);
+    let web_shared_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    web_shared_row.append(&web_shared);
+    if let Some(help) = &web_shared_help {
+        web_shared_row.append(&help.button);
+    }
+    web_panel.append(&web_shared_row);
     let web_shape = gtk::DropDown::from_strings(&["Circle", "Regular Polygon", "User Defined"]);
     let web_shape_row = combo_row("Mark", &web_shape);
     web_panel.append(&web_shape_row);
@@ -8383,7 +8513,7 @@ fn build_editor_view(
     curve_panel.append(&combo_row("Artwork Mapping", &curve_value_mode));
     curve_panel.append(&source_mapping_hint(&curve_value_mode));
     let curve_output_ink = gtk::DropDown::from_strings(&["Cyan", "Magenta", "Yellow", "Black"]);
-    let curve_output_ink_row = combo_row("Output Ink", &curve_output_ink);
+    let curve_output_ink_row = combo_row("Output Channel", &curve_output_ink);
     curve_output_ink_row.set_visible(false);
     curve_panel.append(&curve_output_ink_row);
     let curve_layout = gtk::DropDown::from_strings(&["Across Artwork", "Repeated Motif"]);
@@ -8673,6 +8803,7 @@ fn build_editor_view(
         web_output_ink,
         web_output_ink_row,
         web_shared,
+        web_shared_help,
         web_shape,
         web_shape_row,
         web_mixed_shape_label,
@@ -8782,10 +8913,10 @@ const HELP_SPECS: &[HelpSpec] = &[
         body: "Choose whether color or brightness drives the halftone. The illustration below shows the result; this changes both preview and export.",
     },
     HelpSpec {
-        control: "Output Ink",
-        heading: "Output Ink",
-        summary: "Choose the ink used for a one-ink result.",
-        body: "Choose the ink for Brightness → One Ink. This changes both preview and export.",
+        control: "Output Channel",
+        heading: "Output Channel",
+        summary: "Choose the channel used for a one-channel result.",
+        body: "Choose the ink or RGB channel for Brightness → One Ink. This changes both preview and export.",
     },
     HelpSpec {
         control: "Mark",
@@ -8804,6 +8935,12 @@ const HELP_SPECS: &[HelpSpec] = &[
         heading: "Adjust Layer",
         summary: "Choose which crosshatch layer receives the next adjustments.",
         body: "Choose All Layers for shared adjustments or one layer for a directional hatch. Changes affect both preview and export.",
+    },
+    HelpSpec {
+        control: "Adjust Channel",
+        heading: "Adjust Channel",
+        summary: "Choose which RGB channel receives the next adjustments.",
+        body: "Choose All Channels for shared adjustments or Red, Green, or Blue for one additive channel. Changes affect both preview and export.",
     },
     HelpSpec {
         control: "Screen Angle",
@@ -8956,10 +9093,22 @@ const HELP_SPECS: &[HelpSpec] = &[
         body: "Turn this on to edit one shared mark, or off to give inks independent marks. This changes both preview and export.",
     },
     HelpSpec {
+        control: "Share Mark Shape Across Channels",
+        heading: "Share Mark Shape Across Channels",
+        summary: "Use one mark shape for every RGB channel.",
+        body: "Turn this on to edit one shared mark shape, or off to give red, green, and blue independent shapes. This changes both preview and export.",
+    },
+    HelpSpec {
         control: "Share Line Shape Across Inks",
         heading: "Share Line Shape Across Inks",
         summary: "Use one line shape for every ink.",
         body: "Turn this on to edit one shared line, or off to give inks independent lines. In Crosshatch it shares the hatch path across layers; this changes preview and export.",
+    },
+    HelpSpec {
+        control: "Share Line Shape Across Channels",
+        heading: "Share Line Shape Across Channels",
+        summary: "Use one line shape for every RGB channel.",
+        body: "Turn this on to edit one shared line shape, or off to give red, green, and blue independent shapes. This changes both preview and export.",
     },
     HelpSpec {
         control: "Adjust Layout on Artwork",
@@ -9038,6 +9187,12 @@ const HELP_SPECS: &[HelpSpec] = &[
         heading: "Visible Crosshatch Layers",
         summary: "Include or exclude monochrome hatch directions.",
         body: "Turn a hatch layer on to include it or off to hide it. Screen Angle changes that layer's direction; this changes preview and export.",
+    },
+    HelpSpec {
+        control: "Visible RGB Channels",
+        heading: "Visible RGB Channels",
+        summary: "Include or exclude red, green, and blue channels.",
+        body: "Turn a channel on to include it or off to hide it from the additive screen. This changes both preview and export.",
     },
     HelpSpec {
         control: "Position X",
@@ -9264,21 +9419,21 @@ const SOURCE_MAPPING_OPTIONS: [SourceMappingOption; 5] = [
     },
     SourceMappingOption {
         name: "Brightness → One Ink",
-        description: "Map artwork brightness to one selected ink.",
+        description: "Map artwork brightness to one selected output channel.",
         mode: ValueMode::SingleChannel,
         source_svg: VALUE_SOURCE_SVG,
         result_svg: VALUE_TO_ONE_INK_SVG,
         source_description: "Source artwork represented by brightness",
-        result_description: "Artwork brightness mapped to one selected ink",
+        result_description: "Artwork brightness mapped to one selected output channel",
     },
     SourceMappingOption {
         name: "Brightness → All Inks",
-        description: "Apply the same artwork brightness to every enabled ink.",
+        description: "Apply the same artwork brightness to every enabled output channel.",
         mode: ValueMode::Luminance,
         source_svg: VALUE_SOURCE_SVG,
         result_svg: VALUE_TO_CMYK_SVG,
         source_description: "Source artwork represented by brightness",
-        result_description: "Artwork brightness mapped to all enabled inks",
+        result_description: "Artwork brightness mapped to all enabled output channels",
     },
     SourceMappingOption {
         name: "Brightness → Crosshatch",
@@ -9294,7 +9449,7 @@ const SOURCE_MAPPING_OPTIONS: [SourceMappingOption; 5] = [
         description: "Map source red, green, and blue directly to additive screen channels. Use this for luminous RGB output, not print separations.",
         mode: ValueMode::Rgb,
         source_svg: COLOR_SOURCE_SVG,
-        result_svg: COLOR_TO_CMYK_SVG,
+        result_svg: COLOR_TO_RGB_SVG,
         source_description: "Color source artwork",
         result_description: "Red, green, and blue screens blend additively",
     },
@@ -9308,7 +9463,35 @@ fn source_mapping_from_index(index: u32) -> Option<ValueMode> {
         .map(|option| option.mode)
 }
 
-fn ink_for_visible_slot(index: usize, crosshatch: bool) -> Ink {
+fn source_mapping_names(output_mode: OutputMode) -> [&'static str; 5] {
+    let mut names = SOURCE_MAPPING_OPTIONS.map(|option| option.name);
+    if output_mode == OutputMode::RgbScreen {
+        names[1] = "Brightness → One Channel";
+        names[2] = "Brightness → All Channels";
+    }
+    names
+}
+
+fn sync_source_mapping_names(dropdown: &gtk::DropDown, output_mode: OutputMode) {
+    let names = source_mapping_names(output_mode);
+    let selected = dropdown.selected();
+    let refs = names.to_vec();
+    dropdown.set_model(Some(&gtk::StringList::new(&refs)));
+    dropdown.set_selected(selected.min((names.len() - 1) as u32));
+}
+
+fn output_channel_order(rgb: bool, crosshatch: bool) -> &'static [Ink] {
+    if rgb && !crosshatch {
+        &Ink::RGB
+    } else {
+        &Ink::ALL
+    }
+}
+
+fn visible_ink_for_slot(index: usize, rgb: bool, crosshatch: bool) -> Ink {
+    if rgb && !crosshatch {
+        return Ink::RGB[index];
+    }
     if crosshatch {
         [Ink::Black, Ink::Cyan, Ink::Magenta, Ink::Yellow][index]
     } else {
@@ -9316,8 +9499,29 @@ fn ink_for_visible_slot(index: usize, crosshatch: bool) -> Ink {
     }
 }
 
-fn layer_terminology(crosshatch: bool) -> (&'static str, &'static str) {
-    if crosshatch {
+fn output_ink_for_slot(index: u32, rgb: bool) -> Option<Ink> {
+    if rgb {
+        Ink::RGB.get(index as usize).copied()
+    } else {
+        Ink::ALL.get(index as usize).copied()
+    }
+}
+
+fn selection_for_item_count(dropdown: &gtk::DropDown, expected_items: u32) -> u32 {
+    let compatible = dropdown
+        .model()
+        .is_some_and(|model| model.n_items() == expected_items);
+    if compatible {
+        dropdown.selected().min(expected_items.saturating_sub(1))
+    } else {
+        0
+    }
+}
+
+fn layer_terminology(rgb: bool, crosshatch: bool) -> (&'static str, &'static str) {
+    if rgb && !crosshatch {
+        ("Adjust Channel", "Visible RGB Channels")
+    } else if crosshatch {
         ("Adjust Layer", "Visible Crosshatch Layers")
     } else {
         ("Adjust Ink", "Visible Inks")
@@ -9339,7 +9543,7 @@ fn set_crosshatch_target_directions(dropdown: &gtk::DropDown, angles: [f64; 4]) 
 }
 
 fn source_mapping_dropdown() -> gtk::DropDown {
-    let names = SOURCE_MAPPING_OPTIONS.map(|option| option.name);
+    let names = source_mapping_names(OutputMode::CmykInks);
     let dropdown = gtk::DropDown::from_strings(&names);
     dropdown.set_hexpand(true);
     dropdown.set_size_request(0, -1);
@@ -9351,12 +9555,10 @@ fn sync_layer_terminology(
     target_label: &gtk::Label,
     target_help: Option<&HelpHandle>,
     visible_label: &gtk::Label,
+    rgb: bool,
     crosshatch: bool,
 ) {
-    let (wanted, visible) = layer_terminology(crosshatch);
-    if target_label.text() == wanted {
-        return;
-    }
+    let (wanted, visible) = layer_terminology(rgb, crosshatch);
     let selected = dropdown.selected();
     target_label.set_text(wanted);
     if let Some(spec) = help_for(wanted) {
@@ -9366,8 +9568,10 @@ fn sync_layer_terminology(
         }
     }
     visible_label.set_text(visible);
-    let values = if crosshatch {
-        [
+    let values: &[&str] = if rgb && !crosshatch {
+        &["All Channels", "Red", "Green", "Blue"]
+    } else if crosshatch {
+        &[
             "All Layers",
             "Layer 1 (K)",
             "Layer 2 (C)",
@@ -9375,10 +9579,10 @@ fn sync_layer_terminology(
             "Layer 4 (Y)",
         ]
     } else {
-        ["All Inks", "Cyan", "Magenta", "Yellow", "Black"]
+        &["All Inks", "Cyan", "Magenta", "Yellow", "Black"]
     };
-    dropdown.set_model(Some(&gtk::StringList::new(&values)));
-    dropdown.set_selected(selected);
+    dropdown.set_model(Some(&gtk::StringList::new(values)));
+    dropdown.set_selected(selected.min(values.len().saturating_sub(1) as u32));
 }
 
 fn render_embedded_svg_texture(
@@ -11661,6 +11865,20 @@ mod tests {
                 "RGB Color → Screen",
             ]
         );
+        assert_eq!(
+            source_mapping_names(OutputMode::RgbScreen),
+            [
+                "Color → CMYK Inks",
+                "Brightness → One Channel",
+                "Brightness → All Channels",
+                "Brightness → Crosshatch",
+                "RGB Color → Screen",
+            ]
+        );
+        assert_eq!(
+            source_mapping_names(OutputMode::CmykInks),
+            SOURCE_MAPPING_OPTIONS.map(|option| option.name)
+        );
         let user_facing = SOURCE_MAPPING_OPTIONS
             .iter()
             .flat_map(|option| [option.name, option.description])
@@ -11683,8 +11901,10 @@ mod tests {
             "Edit User-Defined Mark",
             "Adjust Ink",
             "Adjust Layer",
+            "Adjust Channel",
             "Visible Inks",
             "Visible Crosshatch Layers",
+            "Visible RGB Channels",
             "Screen Angle",
             "Mark Rotation",
             "Sampling Detail",
@@ -11720,11 +11940,22 @@ mod tests {
 
     #[test]
     fn layer_terminology_uses_creator_facing_ink_and_layer_names() {
-        assert_eq!(layer_terminology(false), ("Adjust Ink", "Visible Inks"));
         assert_eq!(
-            layer_terminology(true),
+            layer_terminology(false, false),
+            ("Adjust Ink", "Visible Inks")
+        );
+        assert_eq!(
+            layer_terminology(false, true),
             ("Adjust Layer", "Visible Crosshatch Layers")
         );
+        assert_eq!(
+            layer_terminology(true, false),
+            ("Adjust Channel", "Visible RGB Channels")
+        );
+        assert_eq!(visible_ink_for_slot(0, true, false), Ink::Red);
+        assert_eq!(visible_ink_for_slot(2, true, false), Ink::Blue);
+        assert_eq!(output_ink_for_slot(1, true), Some(Ink::Green));
+        assert_eq!(output_ink_for_slot(3, true), None);
     }
 
     #[test]
@@ -11803,7 +12034,7 @@ mod tests {
             VALUE_TO_ONE_INK_SVG,
             VALUE_TO_CMYK_SVG,
             VALUE_TO_CROSSHATCH_SVG,
-            COLOR_TO_CMYK_SVG,
+            COLOR_TO_RGB_SVG,
         ]) {
             assert!(!option.source_description.is_empty());
             assert!(!option.result_description.is_empty());
@@ -11830,6 +12061,12 @@ mod tests {
                 );
             }
         }
+        assert_ne!(COLOR_TO_RGB_SVG, COLOR_TO_CMYK_SVG);
+        assert!(
+            std::str::from_utf8(COLOR_TO_RGB_SVG)
+                .unwrap()
+                .contains("RGB additive screen channels")
+        );
     }
 
     #[test]

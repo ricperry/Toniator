@@ -449,6 +449,40 @@ mod tests {
     }
 
     #[test]
+    fn v4_stays_cmyk_while_v5_rgb_mapping_roundtrips_with_output_mode() {
+        let directory = tempfile::tempdir().unwrap();
+        let legacy_path = directory.path().join("v4.toniator");
+        let mut legacy = Document::new(SourceArtwork {
+            name: "source.png".into(),
+            media_type: "image/png".into(),
+            bytes: std::sync::Arc::from([9, 8, 7]),
+        });
+        legacy.version = 4;
+        legacy.output_mode = OutputMode::RgbScreen;
+        std::fs::write(&legacy_path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+        let migrated = load_document(&legacy_path).unwrap();
+        assert_eq!(migrated.version, DOCUMENT_VERSION);
+        assert_eq!(migrated.output_mode, OutputMode::CmykInks);
+
+        let rgb_path = directory.path().join("v5-rgb.toniator");
+        let mut rgb = Document::new(SourceArtwork {
+            name: "source.png".into(),
+            media_type: "image/png".into(),
+            bytes: std::sync::Arc::from([9, 8, 7]),
+        });
+        rgb.output_mode = OutputMode::RgbScreen;
+        let settings = crate::model::WebShapeSettings {
+            value_mode: crate::model::ValueMode::Rgb,
+            ..Default::default()
+        };
+        rgb.render = RenderVariant::WebShapeV1 {
+            settings: Box::new(settings),
+        };
+        save_document_atomic(&rgb_path, &rgb).unwrap();
+        assert_eq!(load_document(&rgb_path).unwrap(), rgb);
+    }
+
+    #[test]
     fn v3_migrates_to_visible_white_appearance_and_v4_roundtrips_rgba() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("v3.toniator");

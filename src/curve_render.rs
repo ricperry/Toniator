@@ -1,7 +1,7 @@
 use crate::CancellationToken;
 use crate::model::{
-    AlternateTileTransform, CurveLayout, CurvePath, CurvePoint, Ink, MotifCoverage, ValueMode,
-    WebCurveChannel, WebCurveSettings, parse_hex_color,
+    AlternateTileTransform, CurveLayout, CurvePath, CurvePoint, Ink, MotifCoverage, OutputMode,
+    ValueMode, WebCurveChannel, WebCurveSettings, parse_hex_color,
 };
 use crate::render::{Channel, InkLayer, calculate_web_grid, map_web_pixel, map_web_threshold};
 use anyhow::{Context, Result};
@@ -56,10 +56,18 @@ pub fn generate_curve_geometry_cancellable(
     settings: &WebCurveSettings,
     token: &CancellationToken,
 ) -> Result<CurveGeometry> {
-    let ink_order: Vec<Ink> = if settings.value_mode == crate::model::ValueMode::CrosshatchLuminance
-    {
+    generate_curve_geometry_for_output_mode(source, settings, OutputMode::CmykInks, token)
+}
+
+pub(crate) fn generate_curve_geometry_for_output_mode(
+    source: &RgbaImage,
+    settings: &WebCurveSettings,
+    output_mode: OutputMode,
+    token: &CancellationToken,
+) -> Result<CurveGeometry> {
+    let ink_order: Vec<Ink> = if settings.value_mode == ValueMode::CrosshatchLuminance {
         [Ink::Black, Ink::Cyan, Ink::Magenta, Ink::Yellow].to_vec()
-    } else if settings.value_mode == crate::model::ValueMode::Rgb {
+    } else if output_mode == OutputMode::RgbScreen || settings.value_mode == ValueMode::Rgb {
         Ink::RGB.to_vec()
     } else {
         Ink::ALL.to_vec()
@@ -1998,6 +2006,38 @@ mod tests {
                 .iter()
                 .all(|layer| layer.layer.color == (0x23, 0x45, 0x67))
         );
+    }
+
+    #[test]
+    fn rgb_output_uses_rgb_layers_for_neutral_curve_mapping() {
+        let source = image::RgbaImage::from_pixel(16, 12, image::Rgba([180, 120, 60, 255]));
+        let mut settings = WebCurveSettings {
+            output_width: 160,
+            output_height: 120,
+            long_edge_cells: 16.0,
+            value_mode: ValueMode::Luminance,
+            ..Default::default()
+        };
+        for ink in Ink::ALL {
+            settings.channels.get_mut(ink).enabled = false;
+        }
+        for ink in Ink::RGB {
+            settings.channels.get_mut(ink).enabled = true;
+        }
+        let geometry = generate_curve_geometry_for_output_mode(
+            &source,
+            &settings,
+            OutputMode::RgbScreen,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(geometry.layers.len(), 3);
+        assert!(geometry.layers.iter().all(|layer| {
+            matches!(
+                layer.layer.channel,
+                Channel::Red | Channel::Green | Channel::Blue
+            )
+        }));
     }
 
     #[test]

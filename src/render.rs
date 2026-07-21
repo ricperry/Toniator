@@ -1,8 +1,8 @@
 use crate::CancellationToken;
 use crate::model::{
-    Document, DocumentAppearance, ExportBackground, Ink, PreviewSurface, RenderVariant, RgbaColor,
-    Settings, SourceArtwork, Treatment, ValueMode, WebShape, WebShapeChannel, WebShapeSettings,
-    parse_hex_color,
+    Document, DocumentAppearance, ExportBackground, Ink, OutputMode, PreviewSurface, RenderVariant,
+    RgbaColor, Settings, SourceArtwork, Treatment, ValueMode, WebShape, WebShapeChannel,
+    WebShapeSettings, parse_hex_color,
 };
 use anyhow::{Context, Result, bail};
 use image::{DynamicImage, ImageBuffer, Rgba, RgbaImage, imageops::FilterType};
@@ -510,9 +510,12 @@ pub fn generate_document_marks_cancellable(
                 generate_marks_cancellable(&source, canonical.settings, token)?
             }
         }
-        RenderVariant::WebShapeV1 { settings } => {
-            generate_web_shape_marks_cancellable(&source, settings, token)?
-        }
+        RenderVariant::WebShapeV1 { settings } => generate_web_shape_marks_for_output_mode(
+            &source,
+            settings,
+            canonical.output_mode,
+            token,
+        )?,
         RenderVariant::WebCurveV1 { .. } => {
             bail!("full-width curve rendering is not available yet")
         }
@@ -529,7 +532,18 @@ pub fn generate_web_shape_marks_cancellable(
     settings: &WebShapeSettings,
     token: &CancellationToken,
 ) -> Result<MarkSet> {
-    let output_inks = if settings.value_mode == ValueMode::Rgb {
+    generate_web_shape_marks_for_output_mode(source, settings, OutputMode::CmykInks, token)
+}
+
+fn generate_web_shape_marks_for_output_mode(
+    source: &RgbaImage,
+    settings: &WebShapeSettings,
+    output_mode: OutputMode,
+    token: &CancellationToken,
+) -> Result<MarkSet> {
+    let output_inks = if settings.value_mode == ValueMode::CrosshatchLuminance {
+        &Ink::ALL[..]
+    } else if output_mode == OutputMode::RgbScreen || settings.value_mode == ValueMode::Rgb {
         &Ink::RGB[..]
     } else {
         &Ink::ALL[..]
@@ -1004,8 +1018,12 @@ pub fn render_document_preview_cancellable(
         canonical.validate()?;
         let source = decode_source(&canonical.source, 2400)?;
         token.checkpoint()?;
-        let geometry =
-            crate::curve_render::generate_curve_geometry_cancellable(&source, settings, token)?;
+        let geometry = crate::curve_render::generate_curve_geometry_for_output_mode(
+            &source,
+            settings,
+            canonical.output_mode,
+            token,
+        )?;
         token.checkpoint()?;
         let rendered = if legacy_white_preview {
             let scale = max_dimension as f32 / geometry.width.max(geometry.height) as f32;
@@ -1121,8 +1139,12 @@ pub fn render_document_output_cancellable(
     if let RenderVariant::WebCurveV1 { settings } = &canonical.render {
         let source = decode_source(&canonical.source, 2400)?;
         token.checkpoint()?;
-        let geometry =
-            crate::curve_render::generate_curve_geometry_cancellable(&source, settings, token)?;
+        let geometry = crate::curve_render::generate_curve_geometry_for_output_mode(
+            &source,
+            settings,
+            canonical.output_mode,
+            token,
+        )?;
         return crate::curve_render::render_curve_geometry_output_cancellable(
             &geometry,
             width,
@@ -1624,6 +1646,46 @@ mod tests {
         assert_eq!(
             map_web_pixel([0, 0, 0, 255], ValueMode::Rgb, Ink::Red, &Ink::RGB),
             [0.0; 4]
+        );
+    }
+
+    #[test]
+    fn rgb_output_uses_rgb_layers_for_neutral_shape_mapping() {
+        let source = image::RgbaImage::from_pixel(4, 4, image::Rgba([180, 120, 60, 255]));
+        let settings = WebShapeSettings {
+            output_width: 4,
+            output_height: 4,
+            long_edge_cells: 2.0,
+            value_mode: ValueMode::Luminance,
+            ..Default::default()
+        };
+        let marks = generate_web_shape_marks_for_output_mode(
+            &source,
+            &settings,
+            OutputMode::RgbScreen,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert!(marks.layers.iter().all(|layer| {
+            matches!(layer.channel, Channel::Red | Channel::Green | Channel::Blue)
+        }));
+        assert!(
+            marks
+                .layers
+                .iter()
+                .any(|layer| layer.channel == Channel::Red)
+        );
+        assert!(
+            marks
+                .layers
+                .iter()
+                .any(|layer| layer.channel == Channel::Green)
+        );
+        assert!(
+            marks
+                .layers
+                .iter()
+                .any(|layer| layer.channel == Channel::Blue)
         );
     }
 

@@ -147,6 +147,28 @@ pub enum ValueMode {
     SingleChannel,
 }
 
+/// Whether a source mapping explicitly chooses an output colour model.
+/// Brightness-derived mappings remain neutral so a creator's output choice is
+/// never silently replaced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueModeOutputMode {
+    ExplicitCmyk,
+    ExplicitRgb,
+    Neutral,
+}
+
+impl ValueMode {
+    pub const fn output_mode_classification(self) -> ValueModeOutputMode {
+        match self {
+            Self::Cmyk => ValueModeOutputMode::ExplicitCmyk,
+            Self::Rgb => ValueModeOutputMode::ExplicitRgb,
+            Self::Luminance | Self::CrosshatchLuminance | Self::SingleChannel => {
+                ValueModeOutputMode::Neutral
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Ink {
@@ -1677,31 +1699,36 @@ impl DocumentEditor {
         true
     }
 
-    pub fn set_render_variant(&mut self, mut render: RenderVariant) -> bool {
-        // Treatment presets describe geometry, not output intent. An RGB
-        // document therefore keeps its direct RGB mapping when a CMYK-era
-        // preset is applied.
-        if self.document.output_mode == OutputMode::RgbScreen {
-            match &mut render {
-                RenderVariant::WebShapeV1 { settings } => {
-                    settings.value_mode = ValueMode::Rgb;
-                    for ink in Ink::RGB {
-                        settings.channels.get_mut(ink).enabled = true;
-                    }
-                }
-                RenderVariant::WebCurveV1 { settings } => {
-                    settings.value_mode = ValueMode::Rgb;
-                    for ink in Ink::RGB {
-                        settings.channels.get_mut(ink).enabled = true;
-                    }
-                }
-                RenderVariant::NativeBasicV1 => {}
+    pub fn set_render_variant(&mut self, render: RenderVariant) -> bool {
+        let before = TreatmentState::from_document(&self.document);
+        let target_mode = match &render {
+            RenderVariant::WebShapeV1 { settings } => settings.value_mode,
+            RenderVariant::WebCurveV1 { settings } => settings.value_mode,
+            RenderVariant::NativeBasicV1 => {
+                return self.set_render_variant_from_before(render, before);
             }
+        };
+        match target_mode.output_mode_classification() {
+            ValueModeOutputMode::ExplicitCmyk => {
+                self.document.switch_output_mode(OutputMode::CmykInks);
+            }
+            ValueModeOutputMode::ExplicitRgb => {
+                self.document.switch_output_mode(OutputMode::RgbScreen);
+            }
+            ValueModeOutputMode::Neutral => {}
         }
-        if self.document.render == render {
+        self.set_render_variant_from_before(render, before)
+    }
+
+    fn set_render_variant_from_before(
+        &mut self,
+        render: RenderVariant,
+        before: TreatmentState,
+    ) -> bool {
+        if self.document.render == render && TreatmentState::from_document(&self.document) == before
+        {
             return false;
         }
-        let before = TreatmentState::from_document(&self.document);
         if render_kind(&self.document.render) != render_kind(&render) {
             match &self.document.render {
                 RenderVariant::WebShapeV1 { settings } => {
@@ -1905,7 +1932,62 @@ mod tests {
     }
 
     #[test]
-    fn treatment_application_keeps_rgb_output_intent_and_appearance() {
+    fn mapping_classification_switches_only_explicit_output_modes_in_one_undo() {
+        assert_eq!(
+            ValueMode::Cmyk.output_mode_classification(),
+            ValueModeOutputMode::ExplicitCmyk
+        );
+        assert_eq!(
+            ValueMode::Rgb.output_mode_classification(),
+            ValueModeOutputMode::ExplicitRgb
+        );
+        for mode in [
+            ValueMode::SingleChannel,
+            ValueMode::Luminance,
+            ValueMode::CrosshatchLuminance,
+        ] {
+            assert_eq!(
+                mode.output_mode_classification(),
+                ValueModeOutputMode::Neutral
+            );
+        }
+
+        let mut editor = editor();
+        let original = editor.document().clone();
+        let rgb = WebShapeSettings {
+            value_mode: ValueMode::Rgb,
+            ..Default::default()
+        };
+        assert!(editor.set_render_variant(RenderVariant::WebShapeV1 {
+            settings: Box::new(rgb),
+        }));
+        assert_eq!(editor.document().output_mode, OutputMode::RgbScreen);
+        assert!(editor.undo());
+        assert_eq!(editor.document(), &original);
+
+        assert!(editor.redo());
+        let neutral = WebShapeSettings {
+            value_mode: ValueMode::Luminance,
+            ..Default::default()
+        };
+        assert!(editor.set_render_variant(RenderVariant::WebShapeV1 {
+            settings: Box::new(neutral),
+        }));
+        assert_eq!(editor.document().output_mode, OutputMode::RgbScreen);
+
+        let cmyk = WebShapeSettings {
+            value_mode: ValueMode::Cmyk,
+            ..Default::default()
+        };
+        assert!(editor.set_render_variant(RenderVariant::WebShapeV1 {
+            settings: Box::new(cmyk),
+        }));
+        assert_eq!(editor.document().output_mode, OutputMode::CmykInks);
+        assert!(!editor.set_output_mode(OutputMode::CmykInks));
+    }
+
+    #[test]
+    fn treatment_application_uses_explicit_mapping_output_mode_and_appearance() {
         let mut editor = editor();
         editor.set_output_mode(OutputMode::RgbScreen);
         let appearance = editor.document().appearance;
@@ -1916,11 +1998,11 @@ mod tests {
             None,
         ));
         assert_eq!(editor.document().appearance, appearance);
-        assert_eq!(editor.document().output_mode, OutputMode::RgbScreen);
+        assert_eq!(editor.document().output_mode, OutputMode::CmykInks);
         let RenderVariant::WebShapeV1 { settings } = &editor.document().render else {
             panic!("shapes")
         };
-        assert_eq!(settings.value_mode, ValueMode::Rgb);
+        assert_eq!(settings.value_mode, ValueMode::Cmyk);
     }
 
     #[test]
