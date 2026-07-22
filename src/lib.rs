@@ -11,8 +11,8 @@ pub use model::{
     AlternateTileTransform, CubicCurveSegment, CurveLayout, CurvePath, CurvePoint, Document,
     DocumentAppearance, DocumentEditor, ExportBackground, Ink, MotifCoverage, OutputMode,
     PreviewSurface, RenderVariant, RgbaColor, Settings, SourceArtwork, Treatment, ValueMode,
-    WebCurveChannel, WebCurveChannels, WebCurveSettings, WebShape, WebShapeChannel,
-    WebShapeChannels, WebShapeDeltas, WebShapeSettings,
+    ValueModeOutputMode, WebCurveChannel, WebCurveChannels, WebCurveSettings, WebShape,
+    WebShapeChannel, WebShapeChannels, WebShapeDeltas, WebShapeSettings,
 };
 pub use persistence::{
     atomic_write_cancellable, load_document, save_document_atomic, save_document_atomic_cancellable,

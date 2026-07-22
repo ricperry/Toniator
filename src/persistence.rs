@@ -465,21 +465,42 @@ mod tests {
         assert_eq!(migrated.output_mode, OutputMode::CmykInks);
 
         let rgb_path = directory.path().join("v5-rgb.toniator");
-        let mut rgb = Document::new(SourceArtwork {
+        let source = SourceArtwork {
             name: "source.png".into(),
             media_type: "image/png".into(),
             bytes: std::sync::Arc::from([9, 8, 7]),
-        });
-        rgb.output_mode = OutputMode::RgbScreen;
-        let settings = crate::model::WebShapeSettings {
-            value_mode: crate::model::ValueMode::Rgb,
-            ..Default::default()
         };
-        rgb.render = RenderVariant::WebShapeV1 {
+        let mut editor = crate::model::DocumentEditor::new(Document::new(source));
+        assert!(editor.set_output_mode(OutputMode::RgbScreen));
+        let RenderVariant::WebShapeV1 { settings } = &editor.document().render else {
+            panic!("fixture is shapes")
+        };
+        let mut settings = (**settings).clone();
+        settings.value_mode = crate::model::ValueMode::Rgb;
+        settings.use_shared_mark = false;
+        settings.channels.r.enabled = true;
+        settings.channels.g.enabled = false;
+        settings.channels.b.enabled = true;
+        settings.channels.r.opacity = 0.41;
+        settings.channels.b.grid_rotation = 37.0;
+        settings.channels.b.shape = crate::model::WebShape::RegularPolygon;
+        settings.channels.b.polygon_sides = 6;
+        assert!(editor.set_render_variant(RenderVariant::WebShapeV1 {
             settings: Box::new(settings),
-        };
+        }));
+        assert!(editor.set_output_mode(OutputMode::CmykInks));
+        assert!(editor.set_output_mode(OutputMode::RgbScreen));
+        let rgb = editor.document().clone();
+        assert!(rgb.inactive_cmyk.is_some());
         save_document_atomic(&rgb_path, &rgb).unwrap();
         assert_eq!(load_document(&rgb_path).unwrap(), rgb);
+
+        assert!(editor.set_output_mode(OutputMode::CmykInks));
+        let cmyk_path = directory.path().join("v5-cmyk-with-rgb-cache.toniator");
+        let cmyk = editor.document().clone();
+        assert!(cmyk.inactive_rgb.is_some());
+        save_document_atomic(&cmyk_path, &cmyk).unwrap();
+        assert_eq!(load_document(&cmyk_path).unwrap(), cmyk);
     }
 
     #[test]

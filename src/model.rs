@@ -1932,6 +1932,42 @@ mod tests {
     }
 
     #[test]
+    fn customized_rgb_shapes_survive_cmyk_roundtrip_without_cross_mode_leakage() {
+        let mut editor = editor();
+        assert!(editor.set_output_mode(OutputMode::RgbScreen));
+        let RenderVariant::WebShapeV1 { settings } = &editor.document().render else {
+            panic!("fixture is shapes")
+        };
+        let mut rgb = (**settings).clone();
+        rgb.value_mode = ValueMode::Rgb;
+        rgb.use_shared_mark = false;
+        rgb.channels.r.enabled = true;
+        rgb.channels.g.enabled = false;
+        rgb.channels.b.enabled = true;
+        rgb.channels.r.opacity = 0.41;
+        rgb.channels.b.grid_rotation = 37.0;
+        rgb.channels.b.shape = WebShape::RegularPolygon;
+        rgb.channels.b.polygon_sides = 6;
+        assert!(editor.set_render_variant(RenderVariant::WebShapeV1 {
+            settings: Box::new(rgb.clone()),
+        }));
+        let rgb_before_switch = editor.document().render.clone();
+
+        assert!(editor.set_output_mode(OutputMode::CmykInks));
+        let cmyk_before_switch_back = editor.document().render.clone();
+        assert!(editor.set_output_mode(OutputMode::RgbScreen));
+        assert_eq!(editor.document().render, rgb_before_switch);
+        assert_ne!(editor.document().render, cmyk_before_switch_back);
+        let RenderVariant::WebShapeV1 { settings } = &editor.document().render else {
+            panic!("RGB mode must restore Shapes")
+        };
+        assert_eq!(settings.channels.r.opacity, 0.41);
+        assert!(!settings.channels.g.enabled);
+        assert_eq!(settings.channels.b.grid_rotation, 37.0);
+        assert_eq!(settings.channels.b.polygon_sides, 6);
+    }
+
+    #[test]
     fn mapping_classification_switches_only_explicit_output_modes_in_one_undo() {
         assert_eq!(
             ValueMode::Cmyk.output_mode_classification(),

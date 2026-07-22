@@ -6,6 +6,7 @@ use crate::model::{
 };
 use anyhow::{Context, Result, bail};
 use image::{DynamicImage, ImageBuffer, Rgba, RgbaImage, imageops::FilterType};
+use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -554,6 +555,7 @@ fn generate_web_shape_marks_for_output_mode(
         .filter(|ink| settings.channels.get(*ink).enabled)
         .collect();
     let mut marks = Vec::new();
+    let mut sample_cache = HashMap::new();
 
     for &ink in output_inks {
         token.checkpoint()?;
@@ -569,7 +571,7 @@ fn generate_web_shape_marks_for_output_mode(
             settings.output_height,
             long_edge_cells,
         );
-        let samples = sample_web_image_cancellable(source, grid.cols, grid.rows, token)?;
+        let samples = cached_web_samples(&mut sample_cache, source, grid.cols, grid.rows, token)?;
         let ranges = web_grid_ranges(settings, channel, grid);
         let shape = if settings.use_shared_mark {
             settings.shared_shape
@@ -587,12 +589,23 @@ fn generate_web_shape_marks_for_output_mode(
                 }
                 let sample =
                     samples[(placement.sample_row * grid.cols + placement.sample_col) as usize];
-                let raw = map_web_pixel(
+                let mut raw = map_web_pixel(
                     sample,
                     settings.value_mode,
                     settings.single_channel,
                     &enabled,
                 )[ink_index(ink)];
+                // RGB Screen is additive light on a transparent surface. Unlike
+                // CMYK, brightness-driven shapes retain sampled source coverage
+                // at antialiased edges. Direct RGB mapping already does this.
+                if output_mode == OutputMode::RgbScreen
+                    && matches!(
+                        settings.value_mode,
+                        ValueMode::Luminance | ValueMode::SingleChannel
+                    )
+                {
+                    raw *= sample[3] as f64 / 255.0;
+                }
                 let value = map_web_threshold(raw, channel.threshold);
                 if value <= 0.0 {
                     continue;
@@ -640,6 +653,23 @@ fn generate_web_shape_marks_for_output_mode(
         marks,
         layers,
     })
+}
+
+fn cached_web_samples<'a>(
+    cache: &'a mut HashMap<(u32, u32), Vec<[u8; 4]>>,
+    source: &RgbaImage,
+    cols: u32,
+    rows: u32,
+    token: &CancellationToken,
+) -> Result<&'a [[u8; 4]]> {
+    token.checkpoint()?;
+    if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry((cols, rows)) {
+        entry.insert(sample_web_image_cancellable(source, cols, rows, token)?);
+    }
+    Ok(cache
+        .get(&(cols, rows))
+        .expect("sample cache entry was inserted")
+        .as_slice())
 }
 
 #[allow(dead_code)]
@@ -1687,6 +1717,307 @@ mod tests {
                 .iter()
                 .any(|layer| layer.channel == Channel::Blue)
         );
+    }
+
+    #[test]
+    fn rgb_brightness_shapes_preserve_alpha_coverage_and_channel_output() {
+        let source = RgbaImage::from_pixel(2, 2, Rgba([0, 0, 0, 128]));
+        let mut settings = WebShapeSettings {
+            output_width: 40,
+            output_height: 40,
+            long_edge_cells: 2.0,
+            min_mark: 0.0,
+            max_mark: 100.0,
+            value_mode: ValueMode::Luminance,
+            ..Default::default()
+        };
+        for ink in Ink::ALL {
+            settings.channels.get_mut(ink).enabled = Ink::RGB.contains(&ink);
+        }
+        let half_alpha = generate_web_shape_marks_for_output_mode(
+            &source,
+            &settings,
+            OutputMode::RgbScreen,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        let half_render = render_mark_set_output(&half_alpha, 40, 40, false, None).unwrap();
+        assert!(half_render.pixels().any(|pixel| pixel[3] > 0));
+        assert!(
+            half_render
+                .pixels()
+                .all(|pixel| pixel[0] == pixel[1] && pixel[1] == pixel[2])
+        );
+
+        let opaque = RgbaImage::from_pixel(2, 2, Rgba([0, 0, 0, 255]));
+        let opaque_marks = generate_web_shape_marks_for_output_mode(
+            &opaque,
+            &settings,
+            OutputMode::RgbScreen,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        let opaque_alpha = render_mark_set_output(&opaque_marks, 40, 40, false, None)
+            .unwrap()
+            .pixels()
+            .map(|pixel| pixel[3] as u32)
+            .sum::<u32>();
+        let half_alpha_coverage = half_render
+            .pixels()
+            .map(|pixel| pixel[3] as u32)
+            .sum::<u32>();
+        assert!(
+            half_alpha_coverage < opaque_alpha,
+            "half-alpha brightness must render less coverage than opaque brightness"
+        );
+
+        let mut one_channel = settings.clone();
+        one_channel.value_mode = ValueMode::SingleChannel;
+        one_channel.single_channel = Ink::Red;
+        let one_channel_coverage = |source: &RgbaImage| {
+            let marks = generate_web_shape_marks_for_output_mode(
+                source,
+                &one_channel,
+                OutputMode::RgbScreen,
+                &CancellationToken::new(),
+            )
+            .unwrap();
+            render_mark_set_output(&marks, 40, 40, false, None)
+                .unwrap()
+                .pixels()
+                .map(|pixel| pixel[3] as u32)
+                .sum::<u32>()
+        };
+        assert!(
+            one_channel_coverage(&source) < one_channel_coverage(&opaque),
+            "half-alpha one-channel brightness must render less coverage than opaque brightness"
+        );
+
+        let transparent = RgbaImage::from_pixel(2, 2, Rgba([0, 0, 0, 0]));
+        let transparent_marks = generate_web_shape_marks_for_output_mode(
+            &transparent,
+            &settings,
+            OutputMode::RgbScreen,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert!(transparent_marks.marks.is_empty());
+        assert!(
+            render_mark_set_output(&transparent_marks, 40, 40, false, None)
+                .unwrap()
+                .pixels()
+                .all(|pixel| pixel[3] == 0)
+        );
+
+        let red_only = render_mark_set_output(&half_alpha, 40, 40, false, Some(Ink::Red)).unwrap();
+        assert!(
+            red_only
+                .pixels()
+                .all(|pixel| pixel[1] == 0 && pixel[2] == 0)
+        );
+    }
+
+    #[test]
+    fn rgb_shapes_keep_channel_independence_through_raster_png_and_svg() {
+        let source_image = RgbaImage::from_pixel(4, 4, Rgba([255, 128, 64, 255]));
+        let mut settings = WebShapeSettings {
+            output_width: 64,
+            output_height: 64,
+            long_edge_cells: 4.0,
+            grid_scale: 100.0,
+            min_mark: 0.0,
+            max_mark: 100.0,
+            value_mode: ValueMode::Rgb,
+            use_shared_mark: false,
+            ..Default::default()
+        };
+        for ink in Ink::ALL {
+            settings.channels.get_mut(ink).enabled = Ink::RGB.contains(&ink);
+            settings.channels.get_mut(ink).grid_rotation = 0.0;
+        }
+        settings.channels.r.shape = WebShape::Circle;
+        settings.channels.g.shape = WebShape::RegularPolygon;
+        settings.channels.g.polygon_sides = 3;
+        settings.channels.b.shape = WebShape::RegularPolygon;
+        settings.channels.b.polygon_sides = 6;
+        settings.channels.r.opacity = 1.0;
+        settings.channels.g.opacity = 0.6;
+        settings.channels.b.opacity = 0.3;
+
+        let marks = generate_web_shape_marks_for_output_mode(
+            &source_image,
+            &settings,
+            OutputMode::RgbScreen,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        let max_extent = |channel| {
+            marks
+                .marks
+                .iter()
+                .filter(|mark| mark.channel == Channel::from(channel))
+                .map(|mark| mark.extent)
+                .fold(0.0, f32::max)
+        };
+        assert!(max_extent(Ink::Red) > max_extent(Ink::Green));
+        assert!(max_extent(Ink::Green) > max_extent(Ink::Blue));
+        assert!(matches!(
+            marks
+                .marks
+                .iter()
+                .find(|mark| mark.channel == Channel::Green)
+                .unwrap()
+                .geometry,
+            MarkGeometry::WebShape(ResolvedWebShape::Polygon(ref points)) if points.len() == 3
+        ));
+        assert!(matches!(
+            marks
+                .marks
+                .iter()
+                .find(|mark| mark.channel == Channel::Blue)
+                .unwrap()
+                .geometry,
+            MarkGeometry::WebShape(ResolvedWebShape::Polygon(ref points)) if points.len() == 6
+        ));
+
+        let red_only = render_mark_set_output(&marks, 64, 64, false, Some(Ink::Red)).unwrap();
+        assert!(
+            red_only
+                .pixels()
+                .all(|pixel| pixel[1] == 0 && pixel[2] == 0)
+        );
+        let blue_only = render_mark_set_output(&marks, 64, 64, false, Some(Ink::Blue)).unwrap();
+        assert!(
+            blue_only
+                .pixels()
+                .all(|pixel| pixel[0] == 0 && pixel[1] == 0)
+        );
+        let combined = render_mark_set_output(&marks, 64, 64, false, None).unwrap();
+        assert!(combined.pixels().any(|pixel| pixel[0] > 0 && pixel[1] > 0));
+        assert!(combined.pixels().any(|pixel| pixel[2] > 0));
+        let green_only = render_mark_set_output(&marks, 64, 64, false, Some(Ink::Green)).unwrap();
+        let red_alpha = red_only.pixels().map(|pixel| pixel[3]).max().unwrap_or(0);
+        let green_alpha = green_only.pixels().map(|pixel| pixel[3]).max().unwrap_or(0);
+        assert!(
+            green_alpha < red_alpha,
+            "per-channel opacity must affect output alpha"
+        );
+
+        let mut shared = settings.clone();
+        shared.use_shared_mark = true;
+        shared.shared_shape = WebShape::RegularPolygon;
+        shared.polygon_sides = 5;
+        let shared_marks = generate_web_shape_marks_for_output_mode(
+            &source_image,
+            &shared,
+            OutputMode::RgbScreen,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert!(shared_marks.marks.iter().all(|mark| matches!(
+            mark.geometry,
+            MarkGeometry::WebShape(ResolvedWebShape::Polygon(ref points)) if points.len() == 5
+        )));
+
+        let mut png_bytes = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(source_image)
+            .write_to(&mut png_bytes, image::ImageFormat::Png)
+            .unwrap();
+        let mut document = Document::new(SourceArtwork {
+            name: "rgb-shapes.png".into(),
+            media_type: "image/png".into(),
+            bytes: Arc::from(png_bytes.into_inner()),
+        });
+        document.output_mode = OutputMode::RgbScreen;
+        document.render = RenderVariant::WebShapeV1 {
+            settings: Box::new(settings),
+        };
+        document.appearance.preview_surface = PreviewSurface::Color {
+            color: RgbaColor::opaque(12, 18, 28),
+        };
+        document.appearance.export_background = ExportBackground::Color {
+            color: RgbaColor::opaque(4, 8, 16),
+        };
+        let preview = render_document_preview(&document, 64, 1).unwrap().image;
+        let png = crate::png_export::png_bytes(
+            &document,
+            crate::png_export::PngExportOptions {
+                width: 64,
+                height: 64,
+                background: crate::png_export::PngBackground::Document,
+                channel: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            image::load_from_memory(&png).unwrap().to_rgba8(),
+            preview,
+            "RGB Shapes preview and document-background PNG must share the rendered result"
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let svg_path = directory.path().join("rgb-shapes.svg");
+        crate::export_svg(&svg_path, &document).unwrap();
+        let svg = std::fs::read_to_string(svg_path).unwrap();
+        for (id, label) in [("red", "Red"), ("green", "Green"), ("blue", "Blue")] {
+            assert!(svg.contains(&format!("id=\"toniator-{id}\"")));
+            assert!(svg.contains(&format!("inkscape:label=\"{label}\"")));
+        }
+        assert!(svg.contains("mix-blend-mode:screen"));
+        assert!(!svg.contains("toniator-cyan"));
+        assert!(!svg.contains("toniator-black"));
+        usvg::Tree::from_data(svg.as_bytes(), &usvg::Options::default()).unwrap();
+    }
+
+    #[test]
+    fn cancelled_rgb_shapes_preview_is_discarded_before_stale_install() {
+        let mut document = Document::new(SourceArtwork {
+            name: "dense-rgb.png".into(),
+            media_type: "image/png".into(),
+            bytes: Arc::from(test_png()),
+        });
+        document.output_mode = OutputMode::RgbScreen;
+        document.render = RenderVariant::WebShapeV1 {
+            settings: Box::new(WebShapeSettings {
+                output_width: 900,
+                output_height: 900,
+                long_edge_cells: 900.0,
+                value_mode: ValueMode::Rgb,
+                ..Default::default()
+            }),
+        };
+        let token = CancellationToken::new();
+        assert!(token.cancel());
+        assert!(render_document_preview_cancellable(&document, 900, 11, &token).is_err());
+
+        let gate = RenderGate::default();
+        let stale_generation = gate.next();
+        let current_generation = gate.next();
+        assert!(!gate.accepts(stale_generation));
+        assert!(gate.accepts(current_generation));
+    }
+
+    #[test]
+    fn rgb_shape_sampling_reuses_matching_grids_and_checks_cancellation_on_hits() {
+        let source = RgbaImage::from_pixel(4, 4, Rgba([24, 96, 192, 255]));
+        let token = CancellationToken::new();
+        let mut cache = HashMap::new();
+
+        let first = cached_web_samples(&mut cache, &source, 3, 2, &token).unwrap();
+        assert_eq!(first.len(), 6);
+        assert_eq!(cache.len(), 1);
+        let second = cached_web_samples(&mut cache, &source, 3, 2, &token).unwrap();
+        assert_eq!(second.len(), 6);
+        assert_eq!(cache.len(), 1, "matching RGB channel grids share samples");
+        cached_web_samples(&mut cache, &source, 4, 2, &token).unwrap();
+        assert_eq!(
+            cache.len(),
+            2,
+            "different resolution scales keep distinct grids"
+        );
+
+        assert!(token.cancel());
+        assert!(cached_web_samples(&mut cache, &source, 3, 2, &token).is_err());
     }
 
     #[test]

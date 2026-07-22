@@ -112,8 +112,12 @@ fn export_curve_svg(
     token.checkpoint()?;
     let source = crate::render::decode_source(&document.source, 2400)?;
     token.checkpoint()?;
-    let geometry =
-        crate::curve_render::generate_curve_geometry_cancellable(&source, settings, token)?;
+    let geometry = crate::curve_render::generate_curve_geometry_for_output_mode(
+        &source,
+        settings,
+        document.output_mode,
+        token,
+    )?;
     let mut svg = String::new();
     writeln!(
         svg,
