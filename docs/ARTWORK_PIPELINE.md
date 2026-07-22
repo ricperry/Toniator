@@ -8,6 +8,14 @@
 
 **Audience:** Toniator maintainers, Codex agents, reviewers, and future contributors
 
+> **Stage 1A implementation note (2026-07-21):** the independent vocabulary
+> and migration-bounded adapters now live in `src/artwork_pipeline.rs`. They
+> are not yet authoritative `Document` state, serialized state, GTK state, or
+> renderer input. Stage 1A deliberately supersedes this document's earlier
+> unshipped `encoded_rec709_luma_darkness_v1` compatibility spelling with the
+> canonical ID `source.legacy_brightness.encoded_rec709_inverted_v1`. The
+> semantic formula remains the audited inverted encoded Rec.709 luma.
+
 ---
 
 ## 1. Purpose
@@ -511,11 +519,69 @@ behavior that must survive migration without being renamed to a different
 formula or concept:
 
 ```text
-source.legacy_brightness.encoded_rec709_luma_darkness_v1
+source.legacy_brightness.encoded_rec709_inverted_v1
 separation.cmyk.encoded_rgb_max_black_v1
 separation.rgb.direct_encoded_components_v1
 compat.crosshatch.progressive_kcmy_v1
 ```
+
+### 7.8 Stage 1A canonical identifier decision
+
+The prior Stage 0 spelling is retained only in the historical note at the top
+of this document. It was never shipped as a persisted identifier.
+`ArtworkSource::LegacyBrightness` and
+`LegacyBrightnessKind::EncodedRec709InvertedV1` use exactly:
+
+```text
+source.legacy_brightness.encoded_rec709_inverted_v1
+```
+
+The Stage 1A parser intentionally rejects the older spelling rather than
+silently accepting two identities for one compatibility behavior. The module
+also implements the other public semantic IDs listed in this architecture:
+sources, source-alpha policies, output models, output channels, assignment
+kind IDs, automatic-separation payload IDs, and the Crosshatch compatibility
+payload ID. Labels are separate `label()` methods; no API depends on enum
+order, legacy short ink IDs, or GTK positions.
+
+### 7.9 Stage 1A domain and migration contract
+
+`ArtworkPipelineSettings` independently contains `ArtworkSource`,
+`SourceAlphaPolicy`, `OutputModel`, `ChannelAssignment`, and an optional stable
+`OutputChannelId`. `validate()` is strict: automatic assignments require Full
+Color and the strategy for the selected model; scalar Active/All assignments
+require a scalar source; an Active assignment requires a compatible channel;
+and Crosshatch is the exclusive
+`LegacyCompatibilityAssignment::CrosshatchProgressiveKcmyV1` combination with
+legacy Brightness and `LegacyCurrentV1`. A retained active channel is always
+membership-checked. Validation does not repair input.
+
+`normalize_legacy_active_channel()` is the explicit migration repair API and
+`transition_output_model()` is the explicit user-transition API. Neither is
+called by the live application in Stage 1A. CMYK channel order is C/M/Y/K and
+RGB is R/G/B. Legacy scalar slots map only C/R, M/G, Y/B, and K; RGB slot 3 and
+all other slots, including GTK invalid positions, are errors.
+
+`LegacyPipelineSnapshot` and `LegacyPipelineConversion` are visibly
+migration-bounded records. A snapshot retains the coupled legacy mapping,
+serialized and current output, scalar destination and slot, Shapes/Curves (or
+unsupported Native Basic) treatment, Crosshatch presence, and active/saved/
+inactive origin. `pipeline_from_legacy()` maps only the five confirmed legacy
+states, errors on unavailable/ambiguous/mismatched inputs, and keeps Crosshatch
+outside RGB channel membership even when its stored output is RGB.
+
+`project_legacy_value_mode()` projects valid settings back only to the five
+representable legacy modes. Future source choices, modern alpha policies, and
+other combinations return `LegacyProjectionError::UnsupportedReverseProjection`;
+it never invents renderer behavior. Structured errors also cover unknown IDs,
+strategy/model incompatibility, invalid or missing channels, invalid source /
+assignment combinations, invalid slots, malformed snapshots, and unsupported
+Crosshatch combinations.
+
+Stage 1B remains responsible for making these settings authoritative and
+migrating document/preset caches. No source sampling, alpha behavior, output
+formula, Crosshatch formula, schema, persistence, UI, preview, PNG, or SVG
+behavior changes in Stage 1A.
 
 ---
 
@@ -639,7 +705,7 @@ is 0. This is not HSV Value, HSL Lightness, linear-light luminance, arithmetic
 mean, maximum RGB, or perceptual lightness.
 
 **Compatibility requirement:** Preserve it as
-`source.legacy_brightness.encoded_rec709_luma_darkness_v1`. Do not automatically
+`source.legacy_brightness.encoded_rec709_inverted_v1`. Do not automatically
 rename it to Value or Perceptual Lightness. Its partial-alpha behavior is
 path-dependent and is documented in `ARTWORK_PIPELINE_AUDIT.md`.
 
@@ -1755,7 +1821,7 @@ Integrate only when TON-009 is complete.
 9. CMYK and RGB retain separate mode-specific state.
 10. Standard workflow remains simpler than Advanced Pattern Mixing.
 11. Legacy Brightness is encoded Rec.709-weighted luma darkness, identified as
-    `source.legacy_brightness.encoded_rec709_luma_darkness_v1`.
+    `source.legacy_brightness.encoded_rec709_inverted_v1`.
 12. The initial compatibility CMYK separation is
     `separation.cmyk.encoded_rgb_max_black_v1`.
 13. Direct encoded RGB automatic mapping is

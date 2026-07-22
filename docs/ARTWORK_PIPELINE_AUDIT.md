@@ -8,6 +8,14 @@
 
 **Architecture baseline:** `docs/ARTWORK_PIPELINE.md` (untracked at the audited starting state)
 
+> **Historical note — Stage 1A decision (2026-07-21):** this Stage 0 audit
+> recorded `source.legacy_brightness.encoded_rec709_luma_darkness_v1` while
+> naming the discovered formula. Stage 1A intentionally chose the canonical,
+> unshipped compatibility identity
+> `source.legacy_brightness.encoded_rec709_inverted_v1` instead. The old text
+> below remains evidence of the audit; the new parser does not accept both
+> spellings. No live source formula or legacy document behavior changed.
+
 ## 1. Status and evidence rules
 
 This document records current behavior, not behavior inferred from labels such as
@@ -864,3 +872,71 @@ compile in Stage 1. Formula centralization and output changes belong to Stage 2.
 The exact current Brightness formula, current CMYK formula, legacy alpha table,
 stable legacy Brightness ID, minimum Crosshatch compatibility state, and need for
 minimal Stage 1 document persistence are no longer provisional.
+
+## Appendix A. Stage 1A implementation contract (2026-07-21)
+
+Stage 1A adds `src/artwork_pipeline.rs` without changing `Document`, schema v5,
+persistence, presets, GTK, renderers, source formulas, alpha behavior, or
+exports. This appendix supplements, rather than rewrites, the Stage 0 evidence
+above. The earlier `encoded_rec709_luma_darkness_v1` spelling remains historical
+audit text only; the sole Stage 1A compatibility ID is
+`source.legacy_brightness.encoded_rec709_inverted_v1`.
+
+Implemented public types are `ArtworkSource`, `LegacyBrightnessKind`,
+`SourceAlphaPolicy`, `OutputModel`, `OutputChannelId`,
+`AutomaticSeparationStrategy`, `LegacyCompatibilityAssignment`,
+`ChannelAssignment`, and `ArtworkPipelineSettings`. Migration-only types are
+`LegacyPipelineSnapshot`, `LegacyPipelineConversion`, `LegacySnapshotOrigin`,
+`LegacyTreatmentKind`, and `LegacyScalarTarget`; none is normal document state.
+
+| Category | Stage 1A stable IDs |
+|---|---|
+| Sources | `source.full_color`, `source.red`, `source.green`, `source.blue`, `source.value`, `source.perceptual_lightness`, `source.alpha`, `source.legacy_brightness.encoded_rec709_inverted_v1` |
+| Alpha | `source_alpha.legacy_current_v1`, `source_alpha.preserve`, `source_alpha.ignore` |
+| Output | `output.cmyk_print`, `output.rgb_screen` |
+| Channels | `channel.cmyk.cyan`, `.magenta`, `.yellow`, `.black`; `channel.rgb.red`, `.green`, `.blue` |
+| Assignment | `assignment.automatic` with a required separation payload, `assignment.active_channel`, `assignment.all_channels`, `compat.crosshatch.progressive_kcmy_v1` |
+| Separation | `separation.cmyk.encoded_rgb_max_black_v1`, `separation.rgb.direct_encoded_components_v1` |
+
+`validate()` is strict and never normalizes: automatic requires Full Color and
+the matching output strategy; Active/All require a scalar source; Active needs
+a present member channel; retained channels are always output-membership checked;
+Crosshatch exclusively requires legacy Brightness plus `LegacyCurrentV1` and
+keeps its K/C/M/Y compatibility layers outside RGB membership. CMYK ordering is
+C/M/Y/K, RGB ordering is R/G/B, and legacy slots map only C/R, M/G, Y/B, K;
+RGB slot 3 and all invalid positions are errors.
+
+For migration conversion, the explicit owning output plus scalar slot determines
+the semantic channel. A legacy cross-model `Ink` alias with the same slot is
+translated deliberately (Cyan/slot 0 under RGB becomes Red; Red/slot 0 under
+CMYK becomes Cyan); only disagreeing slots are ambiguous.
+
+`normalize_legacy_active_channel()` is a migration-only repair that preserves a
+compatible retained editor channel. `transition_output_model()` is separate and
+returns a validated result: Full Color Automatic receives the matching strategy;
+scalar source, alpha policy, and Active/All assignment remain independent while
+a compatible restored/same-slot/default channel is selected; Crosshatch remains
+compatibility-only with no active channel.
+
+`pipeline_from_legacy()` accepts a bounded snapshot with the coupled mapping,
+serialized owning output, current output, scalar target (One/All), destination
+and slot, treatment, Crosshatch flag, and origin. Active/Saved snapshots require
+serialized and current output equality. Inactive CMYK caches own serialized
+CMYK while the current output is RGB; inactive RGB caches own serialized RGB
+while current is CMYK. Neutral One/All and Crosshatch always preserve that
+serialized owning output. Explicit Color/RGB mappings must agree with their
+forced CMYK/RGB outputs. Native Basic, missing/mismatched scalar targets,
+contradictory origin/output, invalid slots, and ambiguous snapshots return
+structured errors.
+
+`project_legacy_value_mode()` reverses only Full Color CMYK/RGB automatic and
+legacy Brightness One/All/Crosshatch combinations. It validates first, then
+returns `UnsupportedReverseProjection` for new sources or modern alpha policy
+instead of inventing legacy renderer semantics. Related structured errors are
+`UnknownStableIdError`, `PipelineStateError`, `LegacySlotError`,
+`LegacyPipelineConversionError`, and `LegacyProjectionError`.
+
+Stage 1B is still deferred: it will make the domain state authoritative and
+migrate active, saved, and inactive containers. No live application behavior
+changed in Stage 1A, including the known RGB Crosshatch raster/PNG versus SVG
+blend mismatch.
