@@ -1,4 +1,9 @@
 use crate::CancellationToken;
+use crate::artwork_pipeline::{
+    ArtworkPipelineSettings, ArtworkSource, AutomaticSeparationStrategy, ChannelAssignment,
+    LegacyBrightnessKind, LegacyCompatibilityAssignment, OutputChannelId, OutputModel,
+    PreparedSource, SourceAlphaPolicy, resolve_channel_fields_cancellable,
+};
 use crate::model::{
     Document, DocumentAppearance, ExportBackground, Ink, OutputMode, PreviewSurface, RenderVariant,
     RgbaColor, Settings, SourceArtwork, Treatment, ValueMode, WebShape, WebShapeChannel,
@@ -6,6 +11,7 @@ use crate::model::{
 };
 use anyhow::{Context, Result, bail};
 use image::{DynamicImage, ImageBuffer, Rgba, RgbaImage, imageops::FilterType};
+use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -496,11 +502,14 @@ pub fn generate_document_marks_cancellable(
     token: &CancellationToken,
 ) -> Result<MarkSet> {
     token.checkpoint()?;
+    // The renderer receives only a derived legacy snapshot.  It never uses
+    // mutable document compatibility fields as semantic authority.
     let mut canonical = document.clone();
     let dimensions = source_dimensions(&canonical.source)?;
     canonical.normalize_canvas_aspect(dimensions.0, dimensions.1);
     canonical.validate()?;
     let source = decode_source(&canonical.source, 2400)?;
+    let prepared = PreparedSource::from_rgba_image(&source, 0);
     token.checkpoint()?;
     Ok(match &canonical.render {
         RenderVariant::NativeBasicV1 => {
@@ -510,10 +519,10 @@ pub fn generate_document_marks_cancellable(
                 generate_marks_cancellable(&source, canonical.settings, token)?
             }
         }
-        RenderVariant::WebShapeV1 { settings } => generate_web_shape_marks_for_output_mode(
-            &source,
+        RenderVariant::WebShapeV1 { settings } => generate_web_shape_marks_for_pipeline(
+            &prepared,
             settings,
-            canonical.output_mode,
+            &canonical.artwork_pipeline,
             token,
         )?,
         RenderVariant::WebCurveV1 { .. } => {
@@ -527,36 +536,47 @@ pub fn generate_web_shape_marks(source: &RgbaImage, settings: &WebShapeSettings)
         .expect("fresh cancellation token cannot cancel")
 }
 
+/// Compatibility adapter for public callers that only have legacy renderer
+/// settings. Document rendering uses `generate_document_marks` instead.
 pub fn generate_web_shape_marks_cancellable(
     source: &RgbaImage,
     settings: &WebShapeSettings,
     token: &CancellationToken,
 ) -> Result<MarkSet> {
-    generate_web_shape_marks_for_output_mode(source, settings, OutputMode::CmykInks, token)
+    let prepared = PreparedSource::from_rgba_image(source, 0);
+    let pipeline = legacy_pipeline_from_facade(
+        settings.value_mode,
+        OutputMode::CmykInks,
+        settings.single_channel,
+    );
+    generate_web_shape_marks_for_pipeline(&prepared, settings, &pipeline, token)
 }
 
-fn generate_web_shape_marks_for_output_mode(
-    source: &RgbaImage,
+fn generate_web_shape_marks_for_pipeline(
+    prepared: &PreparedSource,
     settings: &WebShapeSettings,
-    output_mode: OutputMode,
+    pipeline: &ArtworkPipelineSettings,
     token: &CancellationToken,
 ) -> Result<MarkSet> {
-    let output_inks = if settings.value_mode == ValueMode::CrosshatchLuminance {
-        &Ink::ALL[..]
-    } else if output_mode == OutputMode::RgbScreen || settings.value_mode == ValueMode::Rgb {
-        &Ink::RGB[..]
+    let output_channels = if matches!(
+        pipeline.assignment,
+        ChannelAssignment::LegacyCompatibility(_)
+    ) {
+        OutputChannelId::CMYK.to_vec()
     } else {
-        &Ink::ALL[..]
+        pipeline.output_model.channels().to_vec()
     };
-    let enabled: Vec<Ink> = output_inks
+    let enabled: Vec<OutputChannelId> = output_channels
         .iter()
         .copied()
-        .filter(|ink| settings.channels.get(*ink).enabled)
+        .filter(|channel| settings.channels.get(channel.to_legacy_ink()).enabled)
         .collect();
     let mut marks = Vec::new();
+    let mut sample_cache = HashMap::new();
 
-    for &ink in output_inks {
+    for channel_id in output_channels {
         token.checkpoint()?;
+        let ink = channel_id.to_legacy_ink();
         let channel = settings.channels.get(ink);
         if !channel.enabled {
             continue;
@@ -569,7 +589,18 @@ fn generate_web_shape_marks_for_output_mode(
             settings.output_height,
             long_edge_cells,
         );
-        let samples = sample_web_image_cancellable(source, grid.cols, grid.rows, token)?;
+        let fields = cached_resolved_fields(
+            &mut sample_cache,
+            prepared,
+            pipeline,
+            grid.cols,
+            grid.rows,
+            &enabled,
+            token,
+        )?;
+        let Some(field) = fields.field(channel_id) else {
+            continue;
+        };
         let ranges = web_grid_ranges(settings, channel, grid);
         let shape = if settings.use_shared_mark {
             settings.shared_shape
@@ -585,14 +616,9 @@ fn generate_web_shape_marks_for_output_mode(
                 if !placement.visible {
                     continue;
                 }
-                let sample =
-                    samples[(placement.sample_row * grid.cols + placement.sample_col) as usize];
-                let raw = map_web_pixel(
-                    sample,
-                    settings.value_mode,
-                    settings.single_channel,
-                    &enabled,
-                )[ink_index(ink)];
+                let sample_index =
+                    (placement.sample_row * grid.cols + placement.sample_col) as usize;
+                let raw = field.value_at(sample_index);
                 let value = map_web_threshold(raw, channel.threshold);
                 if value <= 0.0 {
                     continue;
@@ -615,24 +641,35 @@ fn generate_web_shape_marks_for_output_mode(
         }
     }
 
-    let layers = output_inks
-        .iter()
-        .copied()
-        .map(|ink| {
-            let channel = settings.channels.get(ink);
-            let color = if settings.value_mode == ValueMode::CrosshatchLuminance {
-                parse_hex_color(&settings.crosshatch_color).unwrap_or((17, 17, 17))
-            } else {
-                parse_hex_color(&channel.color).unwrap_or_else(|| Channel::from(ink).color())
-            };
-            InkLayer {
-                channel: ink.into(),
-                enabled: channel.enabled,
-                color,
-                opacity: channel.opacity as f32,
-            }
-        })
-        .collect();
+    let layers = if matches!(
+        pipeline.assignment,
+        ChannelAssignment::LegacyCompatibility(_)
+    ) {
+        OutputChannelId::CMYK.to_vec()
+    } else {
+        pipeline.output_model.channels().to_vec()
+    }
+    .iter()
+    .copied()
+    .map(|channel_id| {
+        let ink = channel_id.to_legacy_ink();
+        let channel = settings.channels.get(ink);
+        let color = if matches!(
+            pipeline.assignment,
+            ChannelAssignment::LegacyCompatibility(_)
+        ) {
+            parse_hex_color(&settings.crosshatch_color).unwrap_or((17, 17, 17))
+        } else {
+            parse_hex_color(&channel.color).unwrap_or_else(|| Channel::from(ink).color())
+        };
+        InkLayer {
+            channel: ink.into(),
+            enabled: channel.enabled,
+            color,
+            opacity: channel.opacity as f32,
+        }
+    })
+    .collect();
 
     Ok(MarkSet {
         width: settings.output_width,
@@ -640,6 +677,137 @@ fn generate_web_shape_marks_for_output_mode(
         marks,
         layers,
     })
+}
+
+/// Compatibility adapter for legacy entrypoints; documents carry the
+/// authoritative pipeline and never derive it from these renderer fields.
+pub(crate) fn legacy_pipeline_from_facade(
+    mode: ValueMode,
+    output_mode: OutputMode,
+    single_channel: Ink,
+) -> ArtworkPipelineSettings {
+    let output_model = OutputModel::from_legacy(output_mode);
+    match mode {
+        ValueMode::Cmyk => ArtworkPipelineSettings {
+            source: ArtworkSource::FullColor,
+            alpha_policy: SourceAlphaPolicy::LegacyCurrentV1,
+            output_model: OutputModel::CmykPrint,
+            assignment: ChannelAssignment::automatic(
+                AutomaticSeparationStrategy::CmykEncodedRgbMaxBlackV1,
+            ),
+            active_channel: Some(OutputChannelId::CmykCyan),
+        },
+        ValueMode::Rgb => ArtworkPipelineSettings {
+            source: ArtworkSource::FullColor,
+            alpha_policy: SourceAlphaPolicy::LegacyCurrentV1,
+            output_model: OutputModel::RgbScreen,
+            assignment: ChannelAssignment::automatic(
+                AutomaticSeparationStrategy::RgbDirectEncodedComponentsV1,
+            ),
+            active_channel: Some(OutputChannelId::RgbRed),
+        },
+        ValueMode::Luminance => ArtworkPipelineSettings {
+            source: ArtworkSource::LegacyBrightness(LegacyBrightnessKind::EncodedRec709InvertedV1),
+            alpha_policy: SourceAlphaPolicy::LegacyCurrentV1,
+            output_model,
+            assignment: ChannelAssignment::AllChannels,
+            active_channel: None,
+        },
+        ValueMode::SingleChannel => ArtworkPipelineSettings {
+            source: ArtworkSource::LegacyBrightness(LegacyBrightnessKind::EncodedRec709InvertedV1),
+            alpha_policy: SourceAlphaPolicy::LegacyCurrentV1,
+            output_model,
+            assignment: ChannelAssignment::ActiveChannel,
+            active_channel: Some(OutputChannelId::from_legacy_ink(single_channel)),
+        },
+        ValueMode::CrosshatchLuminance => ArtworkPipelineSettings {
+            source: ArtworkSource::LegacyBrightness(LegacyBrightnessKind::EncodedRec709InvertedV1),
+            alpha_policy: SourceAlphaPolicy::LegacyCurrentV1,
+            output_model,
+            assignment: ChannelAssignment::LegacyCompatibility(
+                LegacyCompatibilityAssignment::CrosshatchProgressiveKcmyV1,
+            ),
+            active_channel: None,
+        },
+    }
+}
+
+// Kept for internal compatibility tests and old renderer entrypoints. Document
+// rendering bypasses this façade and supplies its semantic pipeline directly.
+#[cfg(test)]
+fn generate_web_shape_marks_for_output_mode(
+    source: &RgbaImage,
+    settings: &WebShapeSettings,
+    output_mode: OutputMode,
+    token: &CancellationToken,
+) -> Result<MarkSet> {
+    let prepared = PreparedSource::from_rgba_image(source, 0);
+    let pipeline =
+        legacy_pipeline_from_facade(settings.value_mode, output_mode, settings.single_channel);
+    generate_web_shape_marks_for_pipeline(&prepared, settings, &pipeline, token)
+}
+
+pub(crate) fn cached_resolved_fields<'a>(
+    cache: &'a mut HashMap<String, crate::artwork_pipeline::ResolvedChannelFields>,
+    prepared: &PreparedSource,
+    pipeline: &ArtworkPipelineSettings,
+    cols: u32,
+    rows: u32,
+    enabled: &[OutputChannelId],
+    token: &CancellationToken,
+) -> Result<&'a crate::artwork_pipeline::ResolvedChannelFields> {
+    token.checkpoint()?;
+    let key = resolved_field_cache_key(prepared, pipeline, cols, rows, enabled);
+    if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(key.clone()) {
+        entry.insert(resolve_channel_fields_cancellable(
+            prepared,
+            pipeline,
+            cols,
+            rows,
+            prepared.generation,
+            enabled,
+            token,
+        )?);
+    }
+    Ok(cache
+        .get(&key)
+        .expect("resolved field cache entry was inserted"))
+}
+
+fn resolved_field_cache_key(
+    prepared: &PreparedSource,
+    pipeline: &ArtworkPipelineSettings,
+    cols: u32,
+    rows: u32,
+    enabled: &[OutputChannelId],
+) -> String {
+    let active = pipeline
+        .active_channel
+        .map(OutputChannelId::stable_id)
+        .unwrap_or("none");
+    let payload = pipeline.assignment.payload_id().unwrap_or("none");
+    let enabled = enabled
+        .iter()
+        .map(|channel| channel.stable_id())
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "generation={};bounds={}x{}@{},{};grid={}x{};source={};alpha={};output={};assignment={};payload={};active={};enabled={}",
+        prepared.generation,
+        prepared.bounds.width,
+        prepared.bounds.height,
+        prepared.bounds.x,
+        prepared.bounds.y,
+        cols,
+        rows,
+        pipeline.source.stable_id(),
+        pipeline.alpha_policy.stable_id(),
+        pipeline.output_model.stable_id(),
+        pipeline.assignment.stable_id(),
+        payload,
+        active,
+        enabled,
+    )
 }
 
 #[allow(dead_code)]
@@ -1006,22 +1174,16 @@ pub fn render_document_preview_cancellable(
     // rasterization behavior (notably multiply blending at antialiased
     // edges). Non-white/translucent surfaces are composed after transparent
     // artwork so they remain presentation-only.
-    let legacy_white_preview = matches!(canonical.appearance.preview_surface, PreviewSurface::Color { color } if color == RgbaColor::WHITE)
-        && matches!(
-            canonical.appearance.export_background,
-            ExportBackground::None
-                | ExportBackground::Color {
-                    color: RgbaColor::WHITE
-                }
-        );
+    let legacy_white_preview = matches!(canonical.appearance.preview_surface, PreviewSurface::Color { color } if color == RgbaColor::WHITE);
     if let RenderVariant::WebCurveV1 { settings } = &canonical.render {
         canonical.validate()?;
         let source = decode_source(&canonical.source, 2400)?;
+        let prepared = PreparedSource::from_rgba_image(&source, generation);
         token.checkpoint()?;
-        let geometry = crate::curve_render::generate_curve_geometry_for_output_mode(
-            &source,
+        let geometry = crate::curve_render::generate_curve_geometry_for_pipeline(
+            &prepared,
             settings,
-            canonical.output_mode,
+            &canonical.artwork_pipeline,
             token,
         )?;
         token.checkpoint()?;
@@ -1138,11 +1300,12 @@ pub fn render_document_output_cancellable(
     );
     if let RenderVariant::WebCurveV1 { settings } = &canonical.render {
         let source = decode_source(&canonical.source, 2400)?;
+        let prepared = PreparedSource::from_rgba_image(&source, 0);
         token.checkpoint()?;
-        let geometry = crate::curve_render::generate_curve_geometry_for_output_mode(
-            &source,
+        let geometry = crate::curve_render::generate_curve_geometry_for_pipeline(
+            &prepared,
             settings,
-            canonical.output_mode,
+            &canonical.artwork_pipeline,
             token,
         )?;
         return crate::curve_render::render_curve_geometry_output_cancellable(
@@ -1180,9 +1343,6 @@ pub fn composite_preview(mut artwork: RgbaImage, appearance: DocumentAppearance)
     for (x, y, pixel) in artwork.enumerate_pixels_mut() {
         let mut backdrop = checkerboard_pixel(x, y);
         if let PreviewSurface::Color { color } = appearance.preview_surface {
-            backdrop = over(color, backdrop);
-        }
-        if let ExportBackground::Color { color } = appearance.export_background {
             backdrop = over(color, backdrop);
         }
         *pixel = image::Rgba(
@@ -1690,6 +1850,458 @@ mod tests {
     }
 
     #[test]
+    fn rgb_brightness_shapes_preserve_alpha_coverage_and_channel_output() {
+        let source = RgbaImage::from_pixel(2, 2, Rgba([0, 0, 0, 128]));
+        let mut settings = WebShapeSettings {
+            output_width: 40,
+            output_height: 40,
+            long_edge_cells: 2.0,
+            min_mark: 0.0,
+            max_mark: 100.0,
+            value_mode: ValueMode::Luminance,
+            ..Default::default()
+        };
+        for ink in Ink::ALL {
+            settings.channels.get_mut(ink).enabled = Ink::RGB.contains(&ink);
+        }
+        let half_alpha = generate_web_shape_marks_for_output_mode(
+            &source,
+            &settings,
+            OutputMode::RgbScreen,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        let half_render = render_mark_set_output(&half_alpha, 40, 40, false, None).unwrap();
+        assert!(half_render.pixels().any(|pixel| pixel[3] > 0));
+        assert!(
+            half_render
+                .pixels()
+                .all(|pixel| pixel[0] == pixel[1] && pixel[1] == pixel[2])
+        );
+
+        let opaque = RgbaImage::from_pixel(2, 2, Rgba([0, 0, 0, 255]));
+        let opaque_marks = generate_web_shape_marks_for_output_mode(
+            &opaque,
+            &settings,
+            OutputMode::RgbScreen,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        let opaque_alpha = render_mark_set_output(&opaque_marks, 40, 40, false, None)
+            .unwrap()
+            .pixels()
+            .map(|pixel| pixel[3] as u32)
+            .sum::<u32>();
+        let half_alpha_coverage = half_render
+            .pixels()
+            .map(|pixel| pixel[3] as u32)
+            .sum::<u32>();
+        assert!(
+            half_alpha_coverage < opaque_alpha,
+            "half-alpha brightness must render less coverage than opaque brightness"
+        );
+
+        let mut one_channel = settings.clone();
+        one_channel.value_mode = ValueMode::SingleChannel;
+        one_channel.single_channel = Ink::Red;
+        let one_channel_coverage = |source: &RgbaImage| {
+            let marks = generate_web_shape_marks_for_output_mode(
+                source,
+                &one_channel,
+                OutputMode::RgbScreen,
+                &CancellationToken::new(),
+            )
+            .unwrap();
+            render_mark_set_output(&marks, 40, 40, false, None)
+                .unwrap()
+                .pixels()
+                .map(|pixel| pixel[3] as u32)
+                .sum::<u32>()
+        };
+        assert!(
+            one_channel_coverage(&source) < one_channel_coverage(&opaque),
+            "half-alpha one-channel brightness must render less coverage than opaque brightness"
+        );
+
+        let transparent = RgbaImage::from_pixel(2, 2, Rgba([0, 0, 0, 0]));
+        let transparent_marks = generate_web_shape_marks_for_output_mode(
+            &transparent,
+            &settings,
+            OutputMode::RgbScreen,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert!(transparent_marks.marks.is_empty());
+        assert!(
+            render_mark_set_output(&transparent_marks, 40, 40, false, None)
+                .unwrap()
+                .pixels()
+                .all(|pixel| pixel[3] == 0)
+        );
+
+        let red_only = render_mark_set_output(&half_alpha, 40, 40, false, Some(Ink::Red)).unwrap();
+        assert!(
+            red_only
+                .pixels()
+                .all(|pixel| pixel[1] == 0 && pixel[2] == 0)
+        );
+    }
+
+    #[test]
+    fn rgb_shapes_keep_channel_independence_through_raster_png_and_svg() {
+        let source_image = RgbaImage::from_pixel(4, 4, Rgba([255, 128, 64, 255]));
+        let mut settings = WebShapeSettings {
+            output_width: 64,
+            output_height: 64,
+            long_edge_cells: 4.0,
+            grid_scale: 100.0,
+            min_mark: 0.0,
+            max_mark: 100.0,
+            value_mode: ValueMode::Rgb,
+            use_shared_mark: false,
+            ..Default::default()
+        };
+        for ink in Ink::ALL {
+            settings.channels.get_mut(ink).enabled = Ink::RGB.contains(&ink);
+            settings.channels.get_mut(ink).grid_rotation = 0.0;
+        }
+        settings.channels.r.shape = WebShape::Circle;
+        settings.channels.g.shape = WebShape::RegularPolygon;
+        settings.channels.g.polygon_sides = 3;
+        settings.channels.b.shape = WebShape::RegularPolygon;
+        settings.channels.b.polygon_sides = 6;
+        settings.channels.r.opacity = 1.0;
+        settings.channels.g.opacity = 0.6;
+        settings.channels.b.opacity = 0.3;
+
+        let marks = generate_web_shape_marks_for_output_mode(
+            &source_image,
+            &settings,
+            OutputMode::RgbScreen,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        let max_extent = |channel| {
+            marks
+                .marks
+                .iter()
+                .filter(|mark| mark.channel == Channel::from(channel))
+                .map(|mark| mark.extent)
+                .fold(0.0, f32::max)
+        };
+        assert!(max_extent(Ink::Red) > max_extent(Ink::Green));
+        assert!(max_extent(Ink::Green) > max_extent(Ink::Blue));
+        assert!(matches!(
+            marks
+                .marks
+                .iter()
+                .find(|mark| mark.channel == Channel::Green)
+                .unwrap()
+                .geometry,
+            MarkGeometry::WebShape(ResolvedWebShape::Polygon(ref points)) if points.len() == 3
+        ));
+        assert!(matches!(
+            marks
+                .marks
+                .iter()
+                .find(|mark| mark.channel == Channel::Blue)
+                .unwrap()
+                .geometry,
+            MarkGeometry::WebShape(ResolvedWebShape::Polygon(ref points)) if points.len() == 6
+        ));
+
+        let red_only = render_mark_set_output(&marks, 64, 64, false, Some(Ink::Red)).unwrap();
+        assert!(
+            red_only
+                .pixels()
+                .all(|pixel| pixel[1] == 0 && pixel[2] == 0)
+        );
+        let blue_only = render_mark_set_output(&marks, 64, 64, false, Some(Ink::Blue)).unwrap();
+        assert!(
+            blue_only
+                .pixels()
+                .all(|pixel| pixel[0] == 0 && pixel[1] == 0)
+        );
+        let combined = render_mark_set_output(&marks, 64, 64, false, None).unwrap();
+        assert!(combined.pixels().any(|pixel| pixel[0] > 0 && pixel[1] > 0));
+        assert!(combined.pixels().any(|pixel| pixel[2] > 0));
+        let green_only = render_mark_set_output(&marks, 64, 64, false, Some(Ink::Green)).unwrap();
+        let red_alpha = red_only.pixels().map(|pixel| pixel[3]).max().unwrap_or(0);
+        let green_alpha = green_only.pixels().map(|pixel| pixel[3]).max().unwrap_or(0);
+        assert!(
+            green_alpha < red_alpha,
+            "per-channel opacity must affect output alpha"
+        );
+
+        let mut shared = settings.clone();
+        shared.use_shared_mark = true;
+        shared.shared_shape = WebShape::RegularPolygon;
+        shared.polygon_sides = 5;
+        let shared_marks = generate_web_shape_marks_for_output_mode(
+            &source_image,
+            &shared,
+            OutputMode::RgbScreen,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert!(shared_marks.marks.iter().all(|mark| matches!(
+            mark.geometry,
+            MarkGeometry::WebShape(ResolvedWebShape::Polygon(ref points)) if points.len() == 5
+        )));
+
+        let mut png_bytes = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(source_image)
+            .write_to(&mut png_bytes, image::ImageFormat::Png)
+            .unwrap();
+        let mut document = Document::new(SourceArtwork {
+            name: "rgb-shapes.png".into(),
+            media_type: "image/png".into(),
+            bytes: Arc::from(png_bytes.into_inner()),
+        });
+        document.output_mode = OutputMode::RgbScreen;
+        document.artwork_pipeline = crate::artwork_pipeline::ArtworkPipelineSettings {
+            source: crate::artwork_pipeline::ArtworkSource::FullColor,
+            alpha_policy: crate::artwork_pipeline::SourceAlphaPolicy::LegacyCurrentV1,
+            output_model: crate::artwork_pipeline::OutputModel::RgbScreen,
+            assignment: crate::artwork_pipeline::ChannelAssignment::automatic(
+                crate::artwork_pipeline::AutomaticSeparationStrategy::RgbDirectEncodedComponentsV1,
+            ),
+            active_channel: None,
+        };
+        document.render = RenderVariant::WebShapeV1 {
+            settings: Box::new(settings),
+        };
+        document.appearance.preview_surface = PreviewSurface::Color {
+            color: RgbaColor::opaque(12, 18, 28),
+        };
+        document.appearance.export_background = ExportBackground::Color {
+            color: RgbaColor::opaque(4, 8, 16),
+        };
+        let preview = render_document_preview(&document, 64, 1).unwrap().image;
+        let png = crate::png_export::png_bytes(
+            &document,
+            crate::png_export::PngExportOptions {
+                width: 64,
+                height: 64,
+                background: crate::png_export::PngBackground::Document,
+                channel: None,
+            },
+        )
+        .unwrap();
+        let artwork = render_document_output(&document, 64, 64, false, None).unwrap();
+        assert_eq!(
+            preview,
+            composite_preview(artwork.clone(), document.appearance),
+            "RGB Shapes preview must compose only its preview surface"
+        );
+        assert_eq!(
+            image::load_from_memory(&png).unwrap().to_rgba8(),
+            composite_export_background(artwork, document.appearance.export_background),
+            "RGB Shapes PNG must compose only its export background"
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let svg_path = directory.path().join("rgb-shapes.svg");
+        crate::export_svg(&svg_path, &document).unwrap();
+        let svg = std::fs::read_to_string(svg_path).unwrap();
+        for (id, label) in [("red", "Red"), ("green", "Green"), ("blue", "Blue")] {
+            assert!(svg.contains(&format!("id=\"toniator-{id}\"")));
+            assert!(svg.contains(&format!("inkscape:label=\"{label}\"")));
+        }
+        assert!(svg.contains("mix-blend-mode:screen"));
+        assert!(!svg.contains("toniator-cyan"));
+        assert!(!svg.contains("toniator-black"));
+        usvg::Tree::from_data(svg.as_bytes(), &usvg::Options::default()).unwrap();
+    }
+
+    #[test]
+    fn cancelled_rgb_shapes_preview_is_discarded_before_stale_install() {
+        let mut document = Document::new(SourceArtwork {
+            name: "dense-rgb.png".into(),
+            media_type: "image/png".into(),
+            bytes: Arc::from(test_png()),
+        });
+        document.output_mode = OutputMode::RgbScreen;
+        document.render = RenderVariant::WebShapeV1 {
+            settings: Box::new(WebShapeSettings {
+                output_width: 900,
+                output_height: 900,
+                long_edge_cells: 900.0,
+                value_mode: ValueMode::Rgb,
+                ..Default::default()
+            }),
+        };
+        let token = CancellationToken::new();
+        assert!(token.cancel());
+        assert!(render_document_preview_cancellable(&document, 900, 11, &token).is_err());
+
+        let gate = RenderGate::default();
+        let stale_generation = gate.next();
+        let current_generation = gate.next();
+        assert!(!gate.accepts(stale_generation));
+        assert!(gate.accepts(current_generation));
+    }
+
+    #[test]
+    fn resolved_channel_fields_reuse_matching_grids_and_check_cancellation_on_hits() {
+        let source = RgbaImage::from_pixel(4, 4, Rgba([24, 96, 192, 255]));
+        let prepared = PreparedSource::from_rgba_image(&source, 44);
+        let pipeline = legacy_pipeline_from_facade(ValueMode::Rgb, OutputMode::RgbScreen, Ink::Red);
+        let token = CancellationToken::new();
+        let mut cache = HashMap::new();
+
+        let first = cached_resolved_fields(
+            &mut cache,
+            &prepared,
+            &pipeline,
+            3,
+            2,
+            &OutputChannelId::RGB,
+            &token,
+        )
+        .unwrap();
+        assert_eq!(
+            first.field(OutputChannelId::RgbRed).unwrap().values().len(),
+            6
+        );
+        assert_eq!(cache.len(), 1);
+        let second = cached_resolved_fields(
+            &mut cache,
+            &prepared,
+            &pipeline,
+            3,
+            2,
+            &OutputChannelId::RGB,
+            &token,
+        )
+        .unwrap();
+        assert_eq!(second.generation, 44);
+        assert_eq!(
+            cache.len(),
+            1,
+            "matching enabled channels share resolved fields"
+        );
+        cached_resolved_fields(
+            &mut cache,
+            &prepared,
+            &pipeline,
+            4,
+            2,
+            &OutputChannelId::RGB,
+            &token,
+        )
+        .unwrap();
+        assert_eq!(
+            cache.len(),
+            2,
+            "different resolution scales keep distinct grids"
+        );
+
+        let mut changed_pipeline = pipeline.clone();
+        changed_pipeline.source = crate::artwork_pipeline::ArtworkSource::Red;
+        changed_pipeline.alpha_policy = crate::artwork_pipeline::SourceAlphaPolicy::Ignore;
+        changed_pipeline.output_model = crate::artwork_pipeline::OutputModel::CmykPrint;
+        changed_pipeline.assignment = crate::artwork_pipeline::ChannelAssignment::ActiveChannel;
+        changed_pipeline.active_channel = Some(OutputChannelId::CmykBlack);
+        let changed = cached_resolved_fields(
+            &mut cache,
+            &prepared,
+            &changed_pipeline,
+            3,
+            2,
+            &[OutputChannelId::CmykBlack],
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            changed
+                .field(OutputChannelId::CmykBlack)
+                .unwrap()
+                .values()
+                .len(),
+            6
+        );
+        assert_eq!(
+            cache.len(),
+            3,
+            "semantic pipeline changes cannot hit an old field cache"
+        );
+
+        assert!(token.cancel());
+        assert!(
+            cached_resolved_fields(
+                &mut cache,
+                &prepared,
+                &pipeline,
+                3,
+                2,
+                &OutputChannelId::RGB,
+                &token
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn shapes_and_curves_consume_the_document_resolved_pipeline_not_value_mode() {
+        let mut encoded = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(RgbaImage::from_pixel(2, 2, Rgba([255, 0, 0, 0])))
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        let mut document = Document::new(SourceArtwork {
+            name: "transparent-red.png".into(),
+            media_type: "image/png".into(),
+            bytes: Arc::from(encoded.into_inner()),
+        });
+        let settings = web_settings(); // Deliberately contradictory legacy CMYK facade.
+        document.render = RenderVariant::WebShapeV1 {
+            settings: Box::new(settings),
+        };
+        document.artwork_pipeline = ArtworkPipelineSettings {
+            source: ArtworkSource::Red,
+            alpha_policy: SourceAlphaPolicy::Ignore,
+            output_model: OutputModel::CmykPrint,
+            assignment: ChannelAssignment::ActiveChannel,
+            active_channel: Some(OutputChannelId::CmykBlack),
+        };
+        let shape_marks = generate_document_marks(&document).unwrap();
+        assert!(
+            shape_marks
+                .marks
+                .iter()
+                .any(|mark| mark.channel == Channel::Black)
+        );
+        assert!(
+            render_document_output(&document, 100, 100, false, None)
+                .unwrap()
+                .pixels()
+                .any(|pixel| pixel[3] > 0)
+        );
+
+        let mut curve = crate::model::WebCurveSettings {
+            output_width: 100,
+            output_height: 100,
+            long_edge_cells: 3.0,
+            min_mark: 100.0,
+            max_mark: 100.0,
+            value_mode: ValueMode::Cmyk,
+            ..Default::default()
+        };
+        for ink in Ink::ALL {
+            curve.channels.get_mut(ink).enabled = ink == Ink::Black;
+        }
+        document.render = RenderVariant::WebCurveV1 {
+            settings: Box::new(curve),
+        };
+        assert!(
+            render_document_output(&document, 100, 100, false, None)
+                .unwrap()
+                .pixels()
+                .any(|pixel| pixel[3] > 0)
+        );
+    }
+
+    #[test]
     fn all_web_value_modes_match_reference_vectors_and_alpha_semantics() {
         let enabled = Ink::ALL;
         let gray = [192, 192, 192, 255];
@@ -1980,23 +2592,28 @@ mod tests {
     #[test]
     fn appearance_compositing_is_exact_and_mark_generation_is_invariant() {
         let artwork = RgbaImage::from_pixel(1, 1, Rgba([200, 100, 0, 128]));
-        let preview = composite_preview(
-            artwork.clone(),
-            DocumentAppearance {
-                preview_surface: PreviewSurface::Color {
-                    color: RgbaColor {
-                        red: 20,
-                        green: 40,
-                        blue: 60,
-                        alpha: 128,
-                    },
-                },
-                export_background: ExportBackground::Color {
-                    color: RgbaColor::opaque(10, 20, 30),
+        let appearance = DocumentAppearance {
+            preview_surface: PreviewSurface::Color {
+                color: RgbaColor {
+                    red: 20,
+                    green: 40,
+                    blue: 60,
+                    alpha: 128,
                 },
             },
+            export_background: ExportBackground::Color {
+                color: RgbaColor::opaque(10, 20, 30),
+            },
+        };
+        let preview = composite_preview(artwork.clone(), appearance);
+        let without_export_background = composite_preview(
+            artwork.clone(),
+            DocumentAppearance {
+                export_background: ExportBackground::None,
+                ..appearance
+            },
         );
-        assert_eq!(preview.get_pixel(0, 0).0, [105, 60, 15, 255]);
+        assert_eq!(preview, without_export_background);
         let checker = composite_preview(
             RgbaImage::from_pixel(1, 1, Rgba([0, 0, 0, 0])),
             DocumentAppearance {
@@ -2061,7 +2678,7 @@ mod tests {
     }
 
     #[test]
-    fn opaque_export_background_makes_full_document_preview_match_export_for_shapes_and_curves() {
+    fn preview_and_export_apply_only_their_own_presentation_state_for_shapes_and_curves() {
         let source = SourceArtwork {
             name: "equivalence.png".into(),
             media_type: "image/png".into(),
@@ -2076,11 +2693,29 @@ mod tests {
                 color: RgbaColor::opaque(12, 34, 56),
             },
         };
+        let artwork = render_document_output(&shape, 2, 2, false, None).unwrap();
         let preview = render_document_preview(&shape, 2, 1).unwrap().image;
+        assert_eq!(
+            preview,
+            composite_preview(artwork.clone(), shape.appearance)
+        );
         let export =
             render_document_export_cancellable(&shape, 2, 2, None, &CancellationToken::new())
                 .unwrap();
-        assert_eq!(preview, export);
+        assert_eq!(
+            export,
+            composite_export_background(artwork, shape.appearance.export_background)
+        );
+        let preview_before_export_change = preview.clone();
+        shape.appearance.export_background = ExportBackground::None;
+        assert_eq!(
+            render_document_preview(&shape, 2, 1).unwrap().image,
+            preview_before_export_change,
+            "export background cannot enter the preview"
+        );
+        shape.appearance.export_background = ExportBackground::Color {
+            color: RgbaColor::opaque(12, 34, 56),
+        };
         shape.appearance.preview_surface = PreviewSurface::Checkerboard;
         assert_eq!(
             render_document_export_cancellable(&shape, 2, 2, None, &CancellationToken::new())
@@ -2098,11 +2733,25 @@ mod tests {
             }),
         };
         curve.appearance = shape.appearance;
+        curve.appearance.preview_surface = PreviewSurface::Color {
+            color: RgbaColor::opaque(240, 240, 240),
+        };
+        curve.appearance.export_background = ExportBackground::Color {
+            color: RgbaColor::opaque(12, 34, 56),
+        };
+        let artwork = render_document_output(&curve, 80, 80, false, None).unwrap();
         let preview = render_document_preview(&curve, 80, 2).unwrap().image;
+        assert_eq!(
+            preview,
+            composite_preview(artwork.clone(), curve.appearance)
+        );
         let export =
             render_document_export_cancellable(&curve, 80, 80, None, &CancellationToken::new())
                 .unwrap();
-        assert_eq!(preview, export);
+        assert_eq!(
+            export,
+            composite_export_background(artwork, curve.appearance.export_background)
+        );
     }
 
     #[test]
@@ -2114,6 +2763,33 @@ mod tests {
             opacity: 1.0,
         };
         assert_eq!(layer_paint(&layer).blend_mode, BlendMode::Multiply);
+    }
+
+    #[test]
+    fn renderer_projection_ignores_contradictory_facades_without_mutating_input() {
+        let mut document = Document::new(SourceArtwork {
+            name: "projection.png".into(),
+            media_type: "image/png".into(),
+            bytes: std::sync::Arc::from(test_png()),
+        });
+        let RenderVariant::WebShapeV1 { settings } = &mut document.render else {
+            panic!("new document is Shapes")
+        };
+        settings.output_width = 64;
+        settings.output_height = 64;
+        settings.long_edge_cells = 4.0;
+        settings.value_mode = ValueMode::Rgb;
+        settings.single_channel = Ink::Red;
+        document.output_mode = OutputMode::RgbScreen;
+        let before = document.clone();
+
+        let from_contradiction = render_document_preview(&document, 64, 1).unwrap().image;
+        assert_eq!(document, before, "render projection must be read-only");
+
+        let mut canonical = document.clone();
+        canonical.sync_legacy_projection().unwrap();
+        let from_canonical = render_document_preview(&canonical, 64, 2).unwrap().image;
+        assert_eq!(from_contradiction, from_canonical);
     }
 
     #[test]

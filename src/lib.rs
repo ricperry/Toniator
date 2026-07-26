@@ -1,3 +1,4 @@
+pub mod artwork_pipeline;
 pub mod curve_render;
 pub mod model;
 pub mod persistence;
@@ -6,6 +7,12 @@ pub mod preset;
 pub mod render;
 pub mod svg_export;
 
+pub use artwork_pipeline::{
+    ArtworkPipelineSettings, ArtworkSource, AutomaticSeparationStrategy, ChannelAssignment,
+    LegacyBrightnessKind, LegacyCompatibilityAssignment, LegacyProjectionError,
+    LegacyValueModeProjection, OutputChannelId, OutputModel, PipelineStateError, SourceAlphaPolicy,
+    UnknownStableIdError, project_legacy_value_mode,
+};
 pub use cancel::{CancellationToken, OperationCancelled};
 pub use model::{
     AlternateTileTransform, CubicCurveSegment, CurveLayout, CurvePath, CurvePoint, Document,

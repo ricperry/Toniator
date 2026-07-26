@@ -13,6 +13,10 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
+use toniator::artwork_pipeline::{
+    ArtworkPipelineSettings, ArtworkSource, AutomaticSeparationStrategy, ChannelAssignment,
+    LegacyCompatibilityAssignment, OutputChannelId, OutputModel, SourceAlphaPolicy,
+};
 use toniator::model::{ClosedShapePath, SettingKey, ShapeAnchor, ShapePoint, SourceArtwork};
 use toniator::persistence::{clear_recovery_if_matches, recovery_path};
 #[cfg(test)]
@@ -32,7 +36,7 @@ const EXAMPLE_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="960
 const PREVIEW_SURFACE_LABEL: &str = "Preview Surface — Canvas only · not exported";
 const EXPORT_BACKGROUND_LABEL: &str = "Export Background — Used for SVG and by default for PNG";
 
-const BUNDLED_PRESETS: [(&str, &[u8]); 3] = [
+const BUNDLED_PRESETS: [(&str, &[u8]); 4] = [
     (
         "Comic Book",
         include_bytes!("../assets/presets/ComicBook.tntr"),
@@ -45,19 +49,17 @@ const BUNDLED_PRESETS: [(&str, &[u8]); 3] = [
         "Chunky Fingerprints",
         include_bytes!("../assets/presets/Chunky Fingerprints.tntr"),
     ),
+    (
+        "Tiled Stacked Motif Stress Test",
+        include_bytes!("../assets/presets/Tiled Stacked Motif Stress Test.tntr"),
+    ),
 ];
 const START_HERO: &[u8] = include_bytes!("../assets/splash-hero.png");
 const PREVIEW_INDICATOR_SVG: &[u8] = include_bytes!("../assets/preview-indicator.svg");
-const COLOR_SOURCE_SVG: &[u8] = include_bytes!("../icons/ColorSource.svg");
-const COLOR_TO_CMYK_SVG: &[u8] = include_bytes!("../icons/ColorToCMYK.svg");
-const COLOR_TO_RGB_SVG: &[u8] = include_bytes!("../icons/ColorToRGB.svg");
-const VALUE_SOURCE_SVG: &[u8] = include_bytes!("../icons/ValueSource.svg");
-const VALUE_TO_ONE_INK_SVG: &[u8] = include_bytes!("../icons/ValueToOneInk.svg");
-const VALUE_TO_CMYK_SVG: &[u8] = include_bytes!("../icons/ValueToCMYK.svg");
-const VALUE_TO_CROSSHATCH_SVG: &[u8] = include_bytes!("../icons/ValueToCrosshatch.svg");
 const PREVIEW_INDICATOR_WIDTH: i32 = 40;
 const PREVIEW_INDICATOR_HEIGHT: i32 = 28;
 const PREVIEW_INDICATOR_RASTER_SCALE: i32 = 4;
+const CROSSHATCH_INK_ORDER: [Ink; 4] = [Ink::Black, Ink::Cyan, Ink::Magenta, Ink::Yellow];
 
 #[derive(Clone)]
 enum PresetSource {
@@ -1532,13 +1534,21 @@ pub struct AppUi {
     preset_save: gtk::Button,
     document_section: gtk::Expander,
     output_mode: gtk::DropDown,
+    artwork_source: gtk::DropDown,
+    artwork_source_note: gtk::Label,
+    source_alpha: gtk::DropDown,
+    source_alpha_row: gtk::Widget,
+    source_alpha_note: gtk::Label,
+    channel_assignment: gtk::DropDown,
+    channel_assignment_note: gtk::Label,
+    active_channel: gtk::DropDown,
+    active_channel_row: gtk::Widget,
+    crosshatch_action: gtk::Button,
+    crosshatch_note: gtk::Label,
     preview_surface: gtk::DropDown,
     preview_color: gtk::ColorDialogButton,
     export_background: gtk::DropDown,
     export_color: gtk::ColorDialogButton,
-    web_value_mode: gtk::DropDown,
-    web_output_ink: gtk::DropDown,
-    web_output_ink_row: gtk::Widget,
     web_shared: gtk::CheckButton,
     web_shared_help: Option<HelpHandle>,
     web_shape: gtk::DropDown,
@@ -1557,6 +1567,8 @@ pub struct AppUi {
     web_visible: [gtk::CheckButton; 4],
     web_color: gtk::Entry,
     web_color_row: gtk::Widget,
+    web_color_heading: gtk::Label,
+    web_color_help: HelpHandle,
     web_crosshatch_color: gtk::Entry,
     web_crosshatch_color_row: gtk::Widget,
     web_color_status: gtk::Label,
@@ -1573,14 +1585,13 @@ pub struct AppUi {
     web_threshold: gtk::Scale,
     web_threshold_status: gtk::Label,
     web_opacity: gtk::Scale,
+    web_opacity_heading: gtk::Label,
+    web_opacity_help: HelpHandle,
     web_opacity_status: gtk::Label,
     web_detail: gtk::Scale,
     web_detail_status: gtk::Label,
     web_mixed: gtk::Label,
     web_geometry_note: gtk::Label,
-    curve_value_mode: gtk::DropDown,
-    curve_output_ink: gtk::DropDown,
-    curve_output_ink_row: gtk::Widget,
     curve_layout: gtk::DropDown,
     curve_profile: gtk::DropDown,
     curve_editor_label: gtk::Label,
@@ -1976,13 +1987,21 @@ impl AppUi {
             preset_save: editor_view.preset_save.clone(),
             document_section: editor_view.document_section.clone(),
             output_mode: editor_view.output_mode.clone(),
+            artwork_source: editor_view.artwork_source.clone(),
+            artwork_source_note: editor_view.artwork_source_note.clone(),
+            source_alpha: editor_view.source_alpha.clone(),
+            source_alpha_row: editor_view.source_alpha_row.clone(),
+            source_alpha_note: editor_view.source_alpha_note.clone(),
+            channel_assignment: editor_view.channel_assignment.clone(),
+            channel_assignment_note: editor_view.channel_assignment_note.clone(),
+            active_channel: editor_view.active_channel.clone(),
+            active_channel_row: editor_view.active_channel_row.clone(),
+            crosshatch_action: editor_view.crosshatch_action.clone(),
+            crosshatch_note: editor_view.crosshatch_note.clone(),
             preview_surface: editor_view.preview_surface.clone(),
             preview_color: editor_view.preview_color.clone(),
             export_background: editor_view.export_background.clone(),
             export_color: editor_view.export_color.clone(),
-            web_value_mode: editor_view.web_value_mode.clone(),
-            web_output_ink: editor_view.web_output_ink.clone(),
-            web_output_ink_row: editor_view.web_output_ink_row.clone(),
             web_shared: editor_view.web_shared.clone(),
             web_shared_help: editor_view.web_shared_help.clone(),
             web_shape: editor_view.web_shape.clone(),
@@ -2001,6 +2020,8 @@ impl AppUi {
             web_visible: editor_view.web_visible.clone(),
             web_color: editor_view.web_color.clone(),
             web_color_row: editor_view.web_color_row.clone(),
+            web_color_heading: editor_view.web_color_heading.clone(),
+            web_color_help: editor_view.web_color_help.clone(),
             web_crosshatch_color: editor_view.web_crosshatch_color.clone(),
             web_crosshatch_color_row: editor_view.web_crosshatch_color_row.clone(),
             web_color_status: editor_view.web_color_status.clone(),
@@ -2017,14 +2038,13 @@ impl AppUi {
             web_threshold: editor_view.web_threshold.clone(),
             web_threshold_status: editor_view.web_threshold_status.clone(),
             web_opacity: editor_view.web_opacity.clone(),
+            web_opacity_heading: editor_view.web_opacity_heading.clone(),
+            web_opacity_help: editor_view.web_opacity_help.clone(),
             web_opacity_status: editor_view.web_opacity_status.clone(),
             web_detail: editor_view.web_detail.clone(),
             web_detail_status: editor_view.web_detail_status.clone(),
             web_mixed: editor_view.web_mixed.clone(),
             web_geometry_note: editor_view.web_geometry_note.clone(),
-            curve_value_mode: editor_view.curve_value_mode.clone(),
-            curve_output_ink: editor_view.curve_output_ink.clone(),
-            curve_output_ink_row: editor_view.curve_output_ink_row.clone(),
             curve_layout: editor_view.curve_layout.clone(),
             curve_profile: editor_view.curve_profile.clone(),
             curve_editor_label: editor_view.curve_editor_label.clone(),
@@ -2151,26 +2171,22 @@ impl AppUi {
                 ui.compare.set_active(true);
             }
             if let Some(mapping) = options.source_mapping {
-                let curves_active = ui.curves.is_active();
-                if source_mapping_from_index(mapping).is_none() {
-                    eprintln!("Artwork Mapping artifact index {mapping} is outside 0 through 4");
-                } else if curves_active {
-                    if mapping == 4 {
-                        ui.output_mode.set_selected(1);
+                if let Some(mapping) = source_mapping_from_index(mapping) {
+                    // CLI artifacts retain their historic mapping vocabulary;
+                    // the normal GTK inspector never routes through this adapter.
+                    let document = {
+                        let mut state = ui.state.borrow_mut();
+                        state.editor.as_mut().and_then(|editor| {
+                            editor
+                                .apply_legacy_mapping_action(mapping)
+                                .then(|| editor.document().clone())
+                        })
+                    };
+                    if let Some(document) = document {
+                        ui.after_treatment_edit(document);
                     }
-                    ui.curve_value_mode.set_selected(mapping);
                 } else {
-                    if mapping == 4 {
-                        ui.output_mode.set_selected(1);
-                    }
-                    ui.web_value_mode.set_selected(mapping);
-                }
-                if mapping == 1 {
-                    if curves_active {
-                        ui.curve_output_ink.set_selected(0);
-                    } else {
-                        ui.web_output_ink.set_selected(0);
-                    }
+                    eprintln!("Artwork Mapping artifact index {mapping} is outside 0 through 4");
                 }
             }
             if options.independent_shapes {
@@ -2445,50 +2461,152 @@ impl AppUi {
                     }
                     editor.document().clone()
                 };
-                ui.after_treatment_edit(document);
+                ui.after_output_mode_edit(document);
             }
         ));
         self.web_target.connect_selected_notify(glib::clone!(
             #[weak(rename_to = ui)]
             self,
             move |_| if !ui.state.borrow().syncing_controls {
-                ui.sync_controls();
+                ui.sync_controls_when_idle();
             }
         ));
-        self.web_value_mode.connect_selected_notify(glib::clone!(
+        self.artwork_source.connect_selected_notify(glib::clone!(
             #[weak(rename_to = ui)]
             self,
-            move |combo| {
+            move |control| {
                 if ui.state.borrow().syncing_controls {
                     return;
                 }
-                let Some(mode) = source_mapping_from_index(combo.selected()) else {
+                let Some(source) = artwork_source_from_index(control.selected()) else {
                     return;
                 };
-                if mode == ValueMode::CrosshatchLuminance {
-                    ui.activate_crosshatch_from_shape();
+                let document = {
+                    let mut state = ui.state.borrow_mut();
+                    let Some(editor) = state.editor.as_mut() else {
+                        return;
+                    };
+                    let pipeline = pipeline_for_source(&editor.document().artwork_pipeline, source);
+                    if !editor.set_artwork_pipeline(pipeline) {
+                        return;
+                    }
+                    editor.document().clone()
+                };
+                ui.after_treatment_edit(document);
+            }
+        ));
+        self.source_alpha.connect_selected_notify(glib::clone!(
+            #[weak(rename_to = ui)]
+            self,
+            move |control| {
+                if ui.state.borrow().syncing_controls {
+                    return;
+                }
+                let Some(alpha_policy) = source_alpha_from_index(control.selected()) else {
+                    return;
+                };
+                let document = {
+                    let mut state = ui.state.borrow_mut();
+                    let Some(editor) = state.editor.as_mut() else {
+                        return;
+                    };
+                    let mut pipeline = editor.document().artwork_pipeline.clone();
+                    pipeline.alpha_policy = alpha_policy;
+                    if !editor.set_artwork_pipeline(pipeline) {
+                        return;
+                    }
+                    editor.document().clone()
+                };
+                ui.after_treatment_edit(document);
+            }
+        ));
+        self.channel_assignment
+            .connect_selected_notify(glib::clone!(
+                #[weak(rename_to = ui)]
+                self,
+                move |control| {
+                    if ui.state.borrow().syncing_controls {
+                        return;
+                    }
+                    let document = {
+                        let mut state = ui.state.borrow_mut();
+                        let Some(editor) = state.editor.as_mut() else {
+                            return;
+                        };
+                        let current = editor.document().artwork_pipeline.clone();
+                        let Some(assignment) =
+                            channel_assignment_from_index(control.selected(), current.source)
+                        else {
+                            return;
+                        };
+                        let pipeline = pipeline_for_assignment(&current, assignment);
+                        if !editor.set_artwork_pipeline(pipeline) {
+                            return;
+                        }
+                        editor.document().clone()
+                    };
+                    ui.after_treatment_edit(document);
+                }
+            ));
+        self.active_channel.connect_selected_notify(glib::clone!(
+            #[weak(rename_to = ui)]
+            self,
+            move |control| {
+                if ui.state.borrow().syncing_controls {
+                    return;
+                }
+                let output = ui
+                    .state
+                    .borrow()
+                    .editor
+                    .as_ref()
+                    .map(|editor| editor.document().artwork_pipeline.output_model);
+                let Some(channel) = output.and_then(|output| {
+                    OutputChannelId::from_legacy_slot(control.selected(), output).ok()
+                }) else {
+                    return;
+                };
+                let document = {
+                    let mut state = ui.state.borrow_mut();
+                    let Some(editor) = state.editor.as_mut() else {
+                        return;
+                    };
+                    let mut pipeline = editor.document().artwork_pipeline.clone();
+                    if !matches!(pipeline.assignment, ChannelAssignment::ActiveChannel) {
+                        return;
+                    }
+                    pipeline.active_channel = Some(channel);
+                    if !editor.set_artwork_pipeline(pipeline) {
+                        return;
+                    }
+                    editor.document().clone()
+                };
+                ui.after_treatment_edit(document);
+            }
+        ));
+        connect_clicked(&self.crosshatch_action, self, |ui| {
+            let document = {
+                let mut state = ui.state.borrow_mut();
+                let Some(editor) = state.editor.as_mut() else {
+                    return;
+                };
+                let changed = if matches!(
+                    editor.document().artwork_pipeline.assignment,
+                    ChannelAssignment::LegacyCompatibility(
+                        LegacyCompatibilityAssignment::CrosshatchProgressiveKcmyV1
+                    )
+                ) {
+                    editor.exit_crosshatch_treatment()
                 } else {
-                    ui.change_web_treatment(move |settings, _| settings.value_mode = mode);
-                }
-            }
-        ));
-        self.web_output_ink.connect_selected_notify(glib::clone!(
-            #[weak(rename_to = ui)]
-            self,
-            move |combo| {
-                if ui.state.borrow().syncing_controls {
-                    return;
-                }
-                let rgb =
-                    ui.state.borrow().editor.as_ref().is_some_and(|editor| {
-                        editor.document().output_mode == OutputMode::RgbScreen
-                    });
-                let Some(ink) = output_ink_for_slot(combo.selected(), rgb) else {
-                    return;
+                    editor.apply_legacy_mapping_action(ValueMode::CrosshatchLuminance)
                 };
-                ui.change_web_treatment(move |settings, _| settings.single_channel = ink);
-            }
-        ));
+                if !changed {
+                    return;
+                }
+                editor.document().clone()
+            };
+            ui.after_treatment_edit(document);
+        });
         self.web_shared.connect_toggled(glib::clone!(
             #[weak(rename_to = ui)]
             self,
@@ -2533,7 +2651,9 @@ impl AppUi {
                     _ => return,
                 };
                 let target = ui.web_target.selected();
-                let target_ink = ui.selected_web_inks().first().copied();
+                let target_ink = ui
+                    .selected_web_inks()
+                    .and_then(|inks| inks.first().copied());
                 let rgb =
                     ui.state.borrow().editor.as_ref().is_some_and(|editor| {
                         editor.document().output_mode == OutputMode::RgbScreen
@@ -2604,7 +2724,9 @@ impl AppUi {
             move |spin| if !ui.state.borrow().syncing_controls {
                 let sides = spin.value_as_int().clamp(3, 6) as u8;
                 let target = ui.web_target.selected();
-                let target_ink = ui.selected_web_inks().first().copied();
+                let target_ink = ui
+                    .selected_web_inks()
+                    .and_then(|inks| inks.first().copied());
                 let rgb =
                     ui.state.borrow().editor.as_ref().is_some_and(|editor| {
                         editor.document().output_mode == OutputMode::RgbScreen
@@ -2641,7 +2763,9 @@ impl AppUi {
                     let rgb = ui.state.borrow().editor.as_ref().is_some_and(|editor| {
                         editor.document().output_mode == OutputMode::RgbScreen
                     });
-                    let ink = visible_ink_for_slot(index, rgb, crosshatch);
+                    let Some(ink) = visible_ink_for_slot(index, rgb, crosshatch) else {
+                        return;
+                    };
                     let visible = button.is_active();
                     ui.change_web_treatment(move |settings, _| {
                         settings.channels.get_mut(ink).enabled = visible
@@ -2692,49 +2816,13 @@ impl AppUi {
             move |_| {
                 let color = ui.web_color.text();
                 if !color.is_empty() && toniator::model::parse_hex_color(&color).is_none() {
-                    ui.show_error("Use a six-digit hex ink color such as #111111");
+                    ui.show_error(web_color_validation_message(ui.web_uses_channel_copy()));
                     ui.sync_controls();
                 }
                 ui.end_setting_edit();
             }
         ));
         self.web_color.add_controller(color_focus);
-        self.curve_value_mode.connect_selected_notify(glib::clone!(
-            #[weak(rename_to = ui)]
-            self,
-            move |combo| {
-                if ui.state.borrow().syncing_controls {
-                    return;
-                }
-                let Some(mode) = source_mapping_from_index(combo.selected()) else {
-                    return;
-                };
-                ui.change_curve_treatment(move |settings, _| {
-                    if mode == ValueMode::CrosshatchLuminance {
-                        settings.configure_crosshatch();
-                    } else {
-                        settings.value_mode = mode;
-                    }
-                });
-            }
-        ));
-        self.curve_output_ink.connect_selected_notify(glib::clone!(
-            #[weak(rename_to = ui)]
-            self,
-            move |combo| {
-                if ui.state.borrow().syncing_controls {
-                    return;
-                }
-                let rgb =
-                    ui.state.borrow().editor.as_ref().is_some_and(|editor| {
-                        editor.document().output_mode == OutputMode::RgbScreen
-                    });
-                let Some(ink) = output_ink_for_slot(combo.selected(), rgb) else {
-                    return;
-                };
-                ui.change_curve_treatment(move |settings, _| settings.single_channel = ink);
-            }
-        ));
         self.curve_layout.connect_selected_notify(glib::clone!(
             #[weak(rename_to = ui)]
             self,
@@ -2754,7 +2842,7 @@ impl AppUi {
             #[weak(rename_to = ui)]
             self,
             move |_| if !ui.state.borrow().syncing_controls {
-                ui.sync_controls();
+                ui.sync_controls_when_idle();
             }
         ));
         self.curve_profile.connect_selected_notify(glib::clone!(
@@ -2833,7 +2921,9 @@ impl AppUi {
                     let rgb = ui.state.borrow().editor.as_ref().is_some_and(|editor| {
                         editor.document().output_mode == OutputMode::RgbScreen
                     });
-                    let ink = visible_ink_for_slot(index, rgb, crosshatch);
+                    let Some(ink) = visible_ink_for_slot(index, rgb, crosshatch) else {
+                        return;
+                    };
                     let visible = button.is_active();
                     ui.change_curve_treatment(move |settings, _| {
                         settings.channels.get_mut(ink).enabled = visible
@@ -3694,7 +3784,7 @@ impl AppUi {
         let RenderVariant::WebCurveV1 { settings } = &editor.document().render else {
             return None;
         };
-        let ink = self.selected_curve_inks().first().copied()?;
+        let ink = self.selected_curve_inks()?.first().copied()?;
         let channel = settings.channels.get(ink);
         Some((
             channel.offset_x,
@@ -3736,7 +3826,7 @@ impl AppUi {
         if settings.layout != CurveLayout::MotifPattern {
             return None;
         }
-        let ink = self.selected_curve_inks().first().copied()?;
+        let ink = self.selected_curve_inks()?.first().copied()?;
         let channel = settings.channels.get(ink);
         let scale = (width / settings.output_width as f64)
             .min(height / settings.output_height as f64)
@@ -3778,7 +3868,7 @@ impl AppUi {
         let RenderVariant::WebCurveV1 { settings } = &editor.document().render else {
             return None;
         };
-        let inks = self.selected_curve_inks();
+        let inks = self.selected_curve_inks()?;
         if !settings.use_shared_curve
             && inks
                 .iter()
@@ -3802,7 +3892,9 @@ impl AppUi {
         let RenderVariant::WebCurveV1 { settings } = &editor.document().render else {
             return (0.2, 0.55, 1.0);
         };
-        let inks = self.selected_curve_inks();
+        let Some(inks) = self.selected_curve_inks() else {
+            return (0.2, 0.55, 1.0);
+        };
         if inks.len() != 1 {
             return (0.2, 0.55, 1.0);
         }
@@ -4072,6 +4164,51 @@ impl AppUi {
     }
 
     fn save_treatment_dialog(self: &Rc<Self>) {
+        let popover = gtk::Popover::new();
+        let list = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        list.set_margin_top(8);
+        list.set_margin_bottom(8);
+        list.set_margin_start(8);
+        list.set_margin_end(8);
+        list.append(
+            &gtk::Label::builder()
+                .label("Save preset scope")
+                .xalign(0.0)
+                .css_classes(["heading"])
+                .build(),
+        );
+        for (scope, detail) in [
+            (
+                toniator::preset::PresetScope::Treatment,
+                "Treatment — geometry and shared settings",
+            ),
+            (
+                toniator::preset::PresetScope::Pipeline,
+                "Pipeline — source, alpha, output, assignment",
+            ),
+            (
+                toniator::preset::PresetScope::Channel,
+                "Current Channel — appearance and channel settings",
+            ),
+            (
+                toniator::preset::PresetScope::CompleteWorkflow,
+                "Complete Workflow — pipeline, treatment, and channels",
+            ),
+        ] {
+            let button = gtk::Button::with_label(detail);
+            button.add_css_class("flat");
+            list.append(&button);
+            connect_clicked(&button, self, move |ui| {
+                ui.save_treatment_dialog_with_scope(scope)
+            });
+        }
+        popover.set_child(Some(&list));
+        popover.set_parent(&self.preset_save);
+        popover.connect_closed(|popover| popover.unparent());
+        popover.popup();
+    }
+
+    fn save_treatment_dialog_with_scope(self: &Rc<Self>, scope: toniator::preset::PresetScope) {
         let document = {
             let state = self.state.borrow();
             let Some(editor) = state.editor.as_ref() else {
@@ -4113,7 +4250,7 @@ impl AppUi {
                     let path = normalized_preset_path(&path);
                     let name = preset_name_from_path(&path);
                     let bytes =
-                        match toniator::preset::document_treatment_preset_bytes(&name, &document) {
+                        match toniator::preset::document_preset_bytes(&name, &document, scope) {
                             Ok(bytes) => bytes,
                             Err(error) => {
                                 ui.show_error(&format!("Could not save preset: {error:#}"));
@@ -4181,20 +4318,15 @@ impl AppUi {
             self.show_message("Reading halftone preset…");
         }
         std::thread::spawn(move || {
-            let parsed = (|| -> anyhow::Result<toniator::preset::ParsedTreatment> {
+            let parsed = (|| -> anyhow::Result<(toniator::preset::ParsedTreatment, Document)> {
                 let bytes = match source {
                     PresetSource::Path(path) => std::fs::read(path)?,
                     PresetSource::Bundled(bytes) => bytes.to_vec(),
                 };
                 let dimensions = toniator::render::source_dimensions(&document.source)?;
                 let treatment = toniator::preset::parse_treatment(&bytes, dimensions)?;
-                let mut candidate = document.clone();
-                candidate.render = treatment.render.clone();
-                if let Some(settings) = treatment.native_settings {
-                    candidate.settings = settings;
-                }
-                candidate.validate()?;
-                Ok(treatment)
+                let candidate = treatment.candidate_for(&document)?;
+                Ok((treatment, candidate))
             })();
             worker_result.replace(parsed);
         });
@@ -4214,7 +4346,7 @@ impl AppUi {
                     }
                     ui.preset_pending.set(false);
                     match result {
-                        Ok(treatment) => {
+                        Ok((treatment, candidate)) => {
                             let canvas_normalized = treatment.canvas_normalized;
                             let changed = {
                                 let mut state = ui.state.borrow_mut();
@@ -4224,7 +4356,7 @@ impl AppUi {
                                 if editor.document().document_id != document_id {
                                     return glib::ControlFlow::Break;
                                 }
-                                editor.set_treatment(treatment.render, treatment.native_settings)
+                                editor.replace_with_preset_candidate(candidate)
                             };
                             if changed {
                                 if ui.state.borrow().compare_source && !ui.compare_source_artifact {
@@ -4284,12 +4416,13 @@ impl AppUi {
         }
         std::thread::spawn(move || {
             let candidate =
-                (|| -> anyhow::Result<(Document, toniator::persistence::DocumentMigration)> {
-                    let (document, migration) = if is_document {
-                        let loaded =
-                            toniator::persistence::load_document_with_migration(&path_for_worker)?;
+                (|| -> anyhow::Result<(Document, toniator::persistence::LoadAdjustments)> {
+                    let (document, adjustments) = if is_document {
+                        let loaded = toniator::persistence::load_document_with_adjustments(
+                            &path_for_worker,
+                        )?;
                         toniator::render::decode_source(&loaded.document.source, 128)?;
-                        (loaded.document, loaded.migration)
+                        (loaded.document, loaded.adjustments)
                     } else {
                         let bytes = std::fs::read(&path_for_worker)?;
                         let source = SourceArtwork {
@@ -4305,10 +4438,10 @@ impl AppUi {
                         let (width, height) = toniator::render::source_dimensions(&source)?;
                         (
                             Document::new_with_artboard(source, width, height),
-                            toniator::persistence::DocumentMigration::default(),
+                            toniator::persistence::LoadAdjustments::default(),
                         )
                     };
-                    Ok((document, migration))
+                    Ok((document, adjustments))
                 })();
             worker_result.replace(candidate);
         });
@@ -4327,22 +4460,22 @@ impl AppUi {
                         return glib::ControlFlow::Break;
                     }
                     match candidate {
-                        Ok((document, migration)) => {
+                        Ok((document, adjustments)) => {
                             let install_path = if is_document && !recovered {
                                 Some(path.clone())
                             } else {
                                 None
                             };
                             ui.gate_dirty_transition(move |ui| {
-                                ui.install_document_migrated(
+                                ui.install_loaded_document(
                                     document.clone(),
                                     install_path.clone(),
-                                    migration != toniator::persistence::DocumentMigration::default(),
+                                    adjustments != toniator::persistence::LoadAdjustments::default(),
                                 );
-                                if migration.canvas_aspect {
+                                if adjustments.canvas_aspect {
                                     ui.show_message("Canvas proportions were updated to match the source artwork; save to keep this change.");
-                                } else if migration.crosshatch_treatment {
-                                    ui.show_message("Legacy crosshatch was updated to genuine curve layers; save to keep this change.");
+                                } else if adjustments.crosshatch_geometry {
+                                    ui.show_message("Crosshatch treatment was normalized to curve layers; save to keep this change.");
                                 }
                                 if recovered {
                                     ui.show_message(
@@ -4396,14 +4529,14 @@ impl AppUi {
     }
 
     fn install_document(self: &Rc<Self>, document: Document, path: Option<PathBuf>) {
-        self.install_document_migrated(document, path, false);
+        self.install_loaded_document(document, path, false);
     }
 
-    fn install_document_migrated(
+    fn install_loaded_document(
         self: &Rc<Self>,
         mut document: Document,
         path: Option<PathBuf>,
-        migrated_dirty: bool,
+        adjusted_on_load_dirty: bool,
     ) {
         if let Ok((width, height)) = toniator::render::source_dimensions(&document.source) {
             document.normalize_canvas_aspect(width, height);
@@ -4412,7 +4545,10 @@ impl AppUi {
         let recovery_document = should_autosave.then(|| document.clone());
         {
             let mut state = self.state.borrow_mut();
-            state.editor = Some(DocumentEditor::new_with_migration(document, migrated_dirty));
+            state.editor = Some(DocumentEditor::new_with_load_adjustment(
+                document,
+                adjusted_on_load_dirty,
+            ));
             state.path = path;
             state.compare_source = false;
             state.preview_size = None;
@@ -4450,7 +4586,7 @@ impl AppUi {
         self.update_actions();
     }
 
-    fn selected_web_inks(&self) -> Vec<Ink> {
+    fn selected_web_inks(&self) -> Option<Vec<Ink>> {
         let crosshatch = self.state.borrow().editor.as_ref().is_some_and(|editor| {
             matches!(&editor.document().render, RenderVariant::WebShapeV1 { settings }
                 if settings.value_mode == ValueMode::CrosshatchLuminance)
@@ -4458,30 +4594,14 @@ impl AppUi {
         let rgb = self.state.borrow().editor.as_ref().is_some_and(|editor| {
             editor.document().output_mode == OutputMode::RgbScreen && !crosshatch
         });
-        if rgb {
-            return match self.web_target.selected() {
-                1 => vec![Ink::Red],
-                2 => vec![Ink::Green],
-                3 => vec![Ink::Blue],
-                _ => Ink::RGB.to_vec(),
-            };
-        }
-        match self.web_target.selected() {
-            1 => vec![if crosshatch { Ink::Black } else { Ink::Cyan }],
-            2 => vec![if crosshatch { Ink::Cyan } else { Ink::Magenta }],
-            3 => vec![if crosshatch {
-                Ink::Magenta
-            } else {
-                Ink::Yellow
-            }],
-            4 => vec![if crosshatch { Ink::Yellow } else { Ink::Black }],
-            _ => Ink::ALL.to_vec(),
-        }
+        web_inks_for_target(self.web_target.selected(), rgb, crosshatch)
     }
 
     fn open_shape_editor(self: &Rc<Self>) {
         let target = self.web_target.selected();
-        let target_ink = self.selected_web_inks().first().copied();
+        let target_ink = self
+            .selected_web_inks()
+            .and_then(|inks| inks.first().copied());
         let Some(shape_path) =
             self.state.borrow().editor.as_ref().and_then(|editor| {
                 match &editor.document().render {
@@ -4874,7 +4994,7 @@ impl AppUi {
         });
     }
 
-    fn selected_curve_inks(&self) -> Vec<Ink> {
+    fn selected_curve_inks(&self) -> Option<Vec<Ink>> {
         let crosshatch = self.state.borrow().editor.as_ref().is_some_and(|editor| {
             matches!(&editor.document().render, RenderVariant::WebCurveV1 { settings }
                 if settings.value_mode == ValueMode::CrosshatchLuminance)
@@ -4882,25 +5002,7 @@ impl AppUi {
         let rgb = self.state.borrow().editor.as_ref().is_some_and(|editor| {
             editor.document().output_mode == OutputMode::RgbScreen && !crosshatch
         });
-        if rgb {
-            return match self.curve_target.selected() {
-                1 => vec![Ink::Red],
-                2 => vec![Ink::Green],
-                3 => vec![Ink::Blue],
-                _ => Ink::RGB.to_vec(),
-            };
-        }
-        match self.curve_target.selected() {
-            1 => vec![if crosshatch { Ink::Black } else { Ink::Cyan }],
-            2 => vec![if crosshatch { Ink::Cyan } else { Ink::Magenta }],
-            3 => vec![if crosshatch {
-                Ink::Magenta
-            } else {
-                Ink::Yellow
-            }],
-            4 => vec![if crosshatch { Ink::Yellow } else { Ink::Black }],
-            _ => Ink::ALL.to_vec(),
-        }
+        web_inks_for_target(self.curve_target.selected(), rgb, crosshatch)
     }
 
     fn activate_curve_treatment(self: &Rc<Self>) {
@@ -4909,26 +5011,22 @@ impl AppUi {
             let Some(editor) = state.editor.as_mut() else {
                 return;
             };
-            let settings = editor
-                .document()
-                .saved_web_curve
-                .clone()
-                .unwrap_or_else(|| Box::new(WebCurveSettings::default()));
-            if !editor.set_render_variant(RenderVariant::WebCurveV1 { settings }) {
-                return;
-            }
-            editor.document().clone()
-        };
-        self.after_treatment_edit(document);
-    }
-
-    fn activate_crosshatch_from_shape(self: &Rc<Self>) {
-        let document = {
-            let mut state = self.state.borrow_mut();
-            let Some(editor) = state.editor.as_mut() else {
-                return;
-            };
-            if !editor.convert_shape_to_crosshatch() {
+            if matches!(
+                editor.document().artwork_pipeline.assignment,
+                ChannelAssignment::LegacyCompatibility(
+                    LegacyCompatibilityAssignment::CrosshatchProgressiveKcmyV1
+                )
+            ) {
+                if !editor.exit_crosshatch_treatment() {
+                    return;
+                }
+            } else if editor.document().saved_web_curve.is_some() {
+                if !editor.restore_saved_curve() {
+                    return;
+                }
+            } else if !editor.set_render_variant(RenderVariant::WebCurveV1 {
+                settings: Box::new(WebCurveSettings::default()),
+            }) {
                 return;
             }
             editor.document().clone()
@@ -4942,12 +5040,13 @@ impl AppUi {
             let Some(editor) = state.editor.as_mut() else {
                 return;
             };
-            let settings = editor
-                .document()
-                .saved_web_shape
-                .clone()
-                .unwrap_or_else(|| Box::new(WebShapeSettings::default()));
-            if !editor.set_render_variant(RenderVariant::WebShapeV1 { settings }) {
+            if editor.document().saved_web_shape.is_some() {
+                if !editor.restore_saved_shape() {
+                    return;
+                }
+            } else if !editor.set_render_variant(RenderVariant::WebShapeV1 {
+                settings: Box::new(WebShapeSettings::default()),
+            }) {
                 return;
             }
             editor.document().clone()
@@ -4975,12 +5074,15 @@ impl AppUi {
         self: &Rc<Self>,
         update: impl FnOnce(&mut WebCurveSettings, Vec<Ink>),
     ) {
-        let inks = self.selected_curve_inks();
-        let document = {
+        let Some(inks) = self.selected_curve_inks() else {
+            return;
+        };
+        let (document, output_changed) = {
             let mut state = self.state.borrow_mut();
             let Some(editor) = state.editor.as_mut() else {
                 return;
             };
+            let output_mode = editor.document().output_mode;
             let RenderVariant::WebCurveV1 { settings } = &editor.document().render else {
                 return;
             };
@@ -4991,9 +5093,16 @@ impl AppUi {
             }) {
                 return;
             }
-            editor.document().clone()
+            (
+                editor.document().clone(),
+                editor.document().output_mode != output_mode,
+            )
         };
-        self.after_treatment_edit(document);
+        if output_changed {
+            self.after_output_mode_edit(document);
+        } else {
+            self.after_treatment_edit(document);
+        }
     }
 
     fn after_treatment_edit(&self, document: Document) {
@@ -5002,6 +5111,26 @@ impl AppUi {
         self.sync_controls();
         self.request_rendered_preview();
         self.update_actions();
+    }
+
+    fn after_output_mode_edit(self: &Rc<Self>, document: Document) {
+        self.state.borrow_mut().rendered_cache = None;
+        self.queue_autosave(document);
+        self.request_rendered_preview();
+        self.update_actions();
+        // Output changes alter the source-mapping labels and target/output
+        // item lists.  Do that work after the active DropDown's
+        // selected-notify stack has returned, rather than splicing a live
+        // GtkListView model from its activation callback.
+        self.sync_controls_when_idle();
+    }
+
+    fn sync_controls_when_idle(self: &Rc<Self>) {
+        glib::idle_add_local_once(glib::clone!(
+            #[weak(rename_to = ui)]
+            self,
+            move || ui.sync_controls()
+        ));
     }
 
     fn update_appearance(&self, change: impl FnOnce(&mut DocumentAppearance)) {
@@ -5015,15 +5144,15 @@ impl AppUi {
             editor.set_appearance(appearance)
         };
         if changed {
-            self.after_treatment_edit(
-                self.state
-                    .borrow()
-                    .editor
-                    .as_ref()
-                    .unwrap()
-                    .document()
-                    .clone(),
-            );
+            // Keep the RefCell borrow scoped to this clone.  Calling
+            // after_treatment_edit while it is live re-enters state through
+            // borrow_mut (to clear the rendered cache) from the DropDown
+            // selected-notify trampoline.
+            let document = {
+                let state = self.state.borrow();
+                state.editor.as_ref().unwrap().document().clone()
+            };
+            self.after_treatment_edit(document);
         }
     }
 
@@ -5069,12 +5198,15 @@ impl AppUi {
         self: &Rc<Self>,
         update: impl FnOnce(&mut toniator::WebShapeSettings, Vec<Ink>),
     ) {
-        let inks = self.selected_web_inks();
-        let document = {
+        let Some(inks) = self.selected_web_inks() else {
+            return;
+        };
+        let (document, output_changed) = {
             let mut state = self.state.borrow_mut();
             let Some(editor) = state.editor.as_mut() else {
                 return;
             };
+            let output_mode = editor.document().output_mode;
             let RenderVariant::WebShapeV1 { settings } = &editor.document().render else {
                 return;
             };
@@ -5085,17 +5217,22 @@ impl AppUi {
             }) {
                 return;
             }
-            editor.document().clone()
+            (
+                editor.document().clone(),
+                editor.document().output_mode != output_mode,
+            )
         };
-        self.state.borrow_mut().rendered_cache = None;
-        self.queue_autosave(document);
-        self.sync_controls();
-        self.request_rendered_preview();
-        self.update_actions();
+        if output_changed {
+            self.after_output_mode_edit(document);
+        } else {
+            self.after_treatment_edit(document);
+        }
     }
 
     fn enable_shared_shape(self: &Rc<Self>) {
-        let selected_ink = self.selected_web_inks().first().copied();
+        let selected_ink = self
+            .selected_web_inks()
+            .and_then(|inks| inks.first().copied());
         let (target, equal, rgb) = {
             let state = self.state.borrow();
             let Some(editor) = state.editor.as_ref() else {
@@ -5271,19 +5408,27 @@ impl AppUi {
     }
 
     fn sync_controls(&self) {
-        let Some((settings, render, appearance, output_mode, source_text)) =
+        let Some((settings, render, appearance, pipeline, source_text)) =
             self.state.borrow().editor.as_ref().map(|editor| {
                 (
                     editor.document().settings,
                     editor.document().render.clone(),
                     editor.document().appearance,
-                    editor.document().output_mode,
+                    editor.document().artwork_pipeline.clone(),
                     editor_source_text(editor.document()),
                 )
             })
         else {
             return;
         };
+        let output_model = pipeline.output_model;
+        let output_mode = output_model.to_legacy();
+        let crosshatch = matches!(
+            pipeline.assignment,
+            ChannelAssignment::LegacyCompatibility(
+                LegacyCompatibilityAssignment::CrosshatchProgressiveKcmyV1
+            )
+        );
         self.state.borrow_mut().syncing_controls = true;
         self.output_mode
             .set_selected(if output_mode == OutputMode::RgbScreen {
@@ -5291,42 +5436,84 @@ impl AppUi {
             } else {
                 0
             });
-        sync_source_mapping_names(&self.web_value_mode, output_mode);
-        sync_source_mapping_names(&self.curve_value_mode, output_mode);
+        sync_dropdown_strings(
+            &self.artwork_source,
+            &artwork_source_labels(matches!(
+                pipeline.source,
+                ArtworkSource::LegacyBrightness(_)
+            )),
+        );
+        self.artwork_source
+            .set_selected(artwork_source_index(pipeline.source));
+        self.artwork_source_note
+            .set_text(artwork_source_guidance(pipeline.source));
+        sync_dropdown_strings(
+            &self.source_alpha,
+            &source_alpha_labels(pipeline.alpha_policy == SourceAlphaPolicy::LegacyCurrentV1),
+        );
+        self.source_alpha
+            .set_selected(source_alpha_index(pipeline.alpha_policy));
+        let alpha_is_source = pipeline.source == ArtworkSource::Alpha;
+        self.source_alpha_row
+            .set_visible(!crosshatch && !alpha_is_source);
+        self.source_alpha_note.set_visible(alpha_is_source);
+        self.source_alpha
+            .set_sensitive(!crosshatch && !alpha_is_source);
+        sync_dropdown_strings(
+            &self.channel_assignment,
+            &channel_assignment_labels(pipeline.source == ArtworkSource::FullColor, output_model),
+        );
+        self.channel_assignment
+            .set_selected(channel_assignment_index(
+                pipeline.assignment,
+                pipeline.source,
+            ));
+        let full_color = pipeline.source == ArtworkSource::FullColor;
+        self.channel_assignment
+            .set_sensitive(!crosshatch && !full_color);
+        self.channel_assignment_note.set_visible(full_color);
+        self.channel_assignment_note.set_text(match output_model {
+            OutputModel::CmykPrint => {
+                "Automatic CMYK Separation derives cyan, magenta, yellow, and black inks."
+            }
+            OutputModel::RgbScreen => {
+                "Direct RGB Channels map encoded red, green, and blue components."
+            }
+        });
+        sync_dropdown_strings(&self.active_channel, &output_channel_labels(output_model));
+        self.active_channel.set_selected(
+            pipeline
+                .active_channel
+                .map(OutputChannelId::legacy_slot)
+                .unwrap_or(0),
+        );
+        self.active_channel_row.set_visible(matches!(
+            pipeline.assignment,
+            ChannelAssignment::ActiveChannel
+        ));
+        self.active_channel.set_sensitive(!crosshatch);
+        self.artwork_source.set_sensitive(!crosshatch);
+        self.crosshatch_action.set_label(if crosshatch {
+            "Exit Legacy Crosshatch"
+        } else {
+            "Use Legacy Crosshatch"
+        });
+        self.crosshatch_note.set_text(if crosshatch {
+            "Legacy Crosshatch is active in Curves. Exit restores ordinary Curves."
+        } else {
+            "Legacy Crosshatch temporarily switches to Curves. Exit restores ordinary Curves."
+        });
         if output_mode == OutputMode::RgbScreen {
             for target in [&self.web_target, &self.curve_target] {
-                let selected = selection_for_item_count(target, 4);
-                target.set_model(Some(&gtk::StringList::new(&[
-                    "All Channels",
-                    "Red",
-                    "Green",
-                    "Blue",
-                ])));
-                target.set_selected(selected);
+                sync_dropdown_strings(target, &["All Channels", "Red", "Green", "Blue"]);
             }
             self.web_target_label.set_text("Adjust Channel");
             self.curve_target_label.set_text("Adjust Channel");
             self.web_visible_label.set_text("Visible RGB Channels");
             self.curve_visible_label.set_text("Visible RGB Channels");
-            for output in [&self.web_output_ink, &self.curve_output_ink] {
-                let selected = selection_for_item_count(output, 3);
-                output.set_model(Some(&gtk::StringList::new(&["Red", "Green", "Blue"])));
-                output.set_selected(selected);
-            }
         } else {
             for target in [&self.web_target, &self.curve_target] {
-                let selected = selection_for_item_count(target, 5);
-                target.set_model(Some(&gtk::StringList::new(&[
-                    "All Inks", "Cyan", "Magenta", "Yellow", "Black",
-                ])));
-                target.set_selected(selected);
-            }
-            for output in [&self.web_output_ink, &self.curve_output_ink] {
-                let selected = selection_for_item_count(output, 4);
-                output.set_model(Some(&gtk::StringList::new(&[
-                    "Cyan", "Magenta", "Yellow", "Black",
-                ])));
-                output.set_selected(selected);
+                sync_dropdown_strings(target, &["All Inks", "Cyan", "Magenta", "Yellow", "Black"]);
             }
         }
         match appearance.preview_surface {
@@ -5377,50 +5564,25 @@ impl AppUi {
                 self.legacy.set_visible(false);
                 self.dots.set_active(true);
                 self.treatment_modes.set_visible_child_name("web");
-                self.web_value_mode.set_selected(match settings.value_mode {
-                    ValueMode::Cmyk => 0,
-                    ValueMode::Rgb => 4,
-                    ValueMode::SingleChannel => 1,
-                    ValueMode::Luminance => 2,
-                    ValueMode::CrosshatchLuminance => 3,
-                });
-                self.web_output_ink_row
-                    .set_visible(settings.value_mode == ValueMode::SingleChannel);
                 sync_layer_terminology(
                     &self.web_target,
                     &self.web_target_label,
                     self.web_target_help.as_ref(),
                     &self.web_visible_label,
                     output_mode == OutputMode::RgbScreen,
-                    settings.value_mode == ValueMode::CrosshatchLuminance,
+                    crosshatch,
                 );
-                if output_mode == OutputMode::RgbScreen
-                    && settings.value_mode != ValueMode::CrosshatchLuminance
-                {
+                if output_mode == OutputMode::RgbScreen && !crosshatch {
                     self.web_target_label.set_text("Adjust Channel");
                     self.web_visible_label.set_text("Visible RGB Channels");
                 }
-                self.web_crosshatch_color_row
-                    .set_visible(settings.value_mode == ValueMode::CrosshatchLuminance);
-                self.web_color_row
-                    .set_visible(settings.value_mode != ValueMode::CrosshatchLuminance);
+                self.web_crosshatch_color_row.set_visible(crosshatch);
+                self.web_color_row.set_visible(!crosshatch);
                 self.web_crosshatch_color
                     .set_text(&settings.crosshatch_color);
-                self.web_output_ink
-                    .set_selected(match settings.single_channel {
-                        Ink::Cyan => 0,
-                        Ink::Magenta => 1,
-                        Ink::Yellow => 2,
-                        Ink::Black => 3,
-                        Ink::Red => 0,
-                        Ink::Green => 1,
-                        Ink::Blue => 2,
-                    });
                 self.web_shared.set_active(settings.use_shared_mark);
                 self.web_shared.set_label(Some(
-                    if output_mode == OutputMode::RgbScreen
-                        && settings.value_mode != ValueMode::CrosshatchLuminance
-                    {
+                    if output_mode == OutputMode::RgbScreen && !crosshatch {
                         "Share Mark Shape Across Channels"
                     } else {
                         "Share Mark Shape Across Inks"
@@ -5428,19 +5590,17 @@ impl AppUi {
                 ));
                 if let Some(help) = self.web_shared_help.as_ref() {
                     help.set_spec(
-                        help_for(
-                            if output_mode == OutputMode::RgbScreen
-                                && settings.value_mode != ValueMode::CrosshatchLuminance
-                            {
-                                "Share Mark Shape Across Channels"
-                            } else {
-                                "Share Mark Shape Across Inks"
-                            },
-                        )
+                        help_for(if output_mode == OutputMode::RgbScreen && !crosshatch {
+                            "Share Mark Shape Across Channels"
+                        } else {
+                            "Share Mark Shape Across Inks"
+                        })
                         .unwrap(),
                     );
                 }
-                let crosshatch = settings.value_mode == ValueMode::CrosshatchLuminance;
+                let channel_copy = output_mode == OutputMode::RgbScreen && !crosshatch;
+                let mixed_target = web_mixed_target(channel_copy);
+                self.sync_web_color_terminology(channel_copy);
                 let visible_spec =
                     help_for(if output_mode == OutputMode::RgbScreen && !crosshatch {
                         "Visible RGB Channels"
@@ -5468,7 +5628,18 @@ impl AppUi {
                         ],
                     );
                 }
-                let all_target = self.web_target.selected() == 0;
+                let selected_target = self.web_target.selected();
+                let Some(inks) = web_inks_for_target(
+                    selected_target,
+                    output_mode == OutputMode::RgbScreen,
+                    crosshatch,
+                ) else {
+                    // GTK briefly reports INVALID_LIST_POSITION while its model is
+                    // being replaced. Leave the current shape controls untouched.
+                    self.state.borrow_mut().syncing_controls = false;
+                    return;
+                };
+                let all_target = selected_target == 0;
                 let channel_order =
                     output_channel_order(output_mode == OutputMode::RgbScreen, crosshatch);
                 let first_geometry = settings.channels.get(channel_order[0]);
@@ -5480,11 +5651,9 @@ impl AppUi {
                             || settings.resolved_channel_shape_path(channel)
                                 != settings.resolved_channel_shape_path(first_geometry)
                     });
-                let selected_channel = self
-                    .web_target
-                    .selected()
+                let selected_channel = selected_target
                     .checked_sub(1)
-                    .map(|index| {
+                    .and_then(|index| {
                         visible_ink_for_slot(
                             index as usize,
                             output_mode == OutputMode::RgbScreen,
@@ -5553,9 +5722,17 @@ impl AppUi {
                         }
                     } else {
                         if output_mode == OutputMode::RgbScreen && !crosshatch {
-                            "Editing this channel's shape."
+                            if all_target {
+                                "Editing all channels' shapes."
+                            } else {
+                                "Editing this channel's shape."
+                            }
                         } else {
-                            "Editing this ink's shape."
+                            if all_target {
+                                "Editing all inks' shapes."
+                            } else {
+                                "Editing this ink's shape."
+                            }
                         }
                     });
                 for (index, button) in self.web_visible.iter().enumerate() {
@@ -5565,16 +5742,20 @@ impl AppUi {
                     }
                     button.set_visible(true);
                     if output_mode == OutputMode::RgbScreen && !crosshatch {
-                        let ink = Ink::RGB[index];
+                        let Some(ink) = Ink::RGB.get(index).copied() else {
+                            continue;
+                        };
                         button.set_label(Some(["Red", "Green", "Blue"][index]));
                         button.set_active(settings.channels.get(ink).enabled);
                         continue;
                     }
-                    let ink = visible_ink_for_slot(
+                    let Some(ink) = visible_ink_for_slot(
                         index,
                         output_mode == OutputMode::RgbScreen,
                         crosshatch,
-                    );
+                    ) else {
+                        continue;
+                    };
                     button.set_label(Some(if crosshatch {
                         ["1 K", "2 C", "3 M", "4 Y"][index]
                     } else {
@@ -5582,8 +5763,7 @@ impl AppUi {
                     }));
                     button.set_active(settings.channels.get(ink).enabled);
                 }
-                let inks = self.selected_web_inks();
-                let all_inks = self.web_target.selected() == 0;
+                let all_inks = selected_target == 0;
                 let first = if all_inks {
                     &settings.base_channel
                 } else {
@@ -5610,7 +5790,11 @@ impl AppUi {
                 };
                 self.web_mixed
                     .set_text(if mixed_fields.into_iter().any(|mixed| mixed) {
-                        "Changing a Mixed control applies one value to every selected ink."
+                        if channel_copy {
+                            "Changing a Mixed control applies one value to every selected channel."
+                        } else {
+                            "Changing a Mixed control applies one value to every selected ink."
+                        }
                     } else {
                         ""
                     });
@@ -5625,14 +5809,22 @@ impl AppUi {
                     &first.color
                 });
                 self.web_color.set_placeholder_text(Some(if all_inks {
-                    "Select one ink"
+                    if channel_copy {
+                        "Select one channel"
+                    } else {
+                        "Select one ink"
+                    }
                 } else if colors_mixed {
                     "Mixed"
                 } else {
                     "#RRGGBB"
                 }));
                 self.web_color_status.set_text(if all_inks {
-                    "Select one ink"
+                    if channel_copy {
+                        "Select one channel"
+                    } else {
+                        "Select one ink"
+                    }
                 } else if colors_mixed {
                     "Mixed"
                 } else {
@@ -5644,6 +5836,7 @@ impl AppUi {
                     first.scale,
                     mixed_fields[0],
                     "Mark size",
+                    mixed_target,
                 );
                 sync_web_scale(
                     &self.web_angle,
@@ -5651,6 +5844,7 @@ impl AppUi {
                     first.grid_rotation,
                     mixed_fields[1],
                     "Rotate ink screen",
+                    mixed_target,
                 );
                 sync_web_scale(
                     &self.web_mark_angle,
@@ -5658,6 +5852,7 @@ impl AppUi {
                     first.rotation,
                     mixed_fields[2],
                     "Rotate marks",
+                    mixed_target,
                 );
                 sync_web_scale(
                     &self.web_width_scale,
@@ -5665,6 +5860,7 @@ impl AppUi {
                     first.width_scale,
                     mixed_fields[3],
                     "Horizontal mark scale",
+                    mixed_target,
                 );
                 sync_web_scale(
                     &self.web_height_scale,
@@ -5672,6 +5868,7 @@ impl AppUi {
                     first.height_scale,
                     mixed_fields[4],
                     "Vertical mark scale",
+                    mixed_target,
                 );
                 sync_web_scale(
                     &self.web_threshold,
@@ -5679,6 +5876,7 @@ impl AppUi {
                     first.threshold,
                     mixed_fields[5],
                     "Hide light marks",
+                    mixed_target,
                 );
                 sync_web_scale(
                     &self.web_opacity,
@@ -5686,6 +5884,7 @@ impl AppUi {
                     first.opacity,
                     mixed_fields[6],
                     "Transparent — Solid",
+                    mixed_target,
                 );
                 sync_web_scale(
                     &self.web_detail,
@@ -5693,52 +5892,29 @@ impl AppUi {
                     first.resolution_scale,
                     mixed_fields[7],
                     "Sample density",
+                    mixed_target,
                 );
             }
             RenderVariant::WebCurveV1 { settings } => {
                 self.legacy.set_visible(false);
                 self.curves.set_active(true);
                 self.treatment_modes.set_visible_child_name("curve");
-                self.curve_value_mode
-                    .set_selected(match settings.value_mode {
-                        ValueMode::Cmyk => 0,
-                        ValueMode::Rgb => 4,
-                        ValueMode::SingleChannel => 1,
-                        ValueMode::Luminance => 2,
-                        ValueMode::CrosshatchLuminance => 3,
-                    });
-                self.curve_output_ink_row
-                    .set_visible(settings.value_mode == ValueMode::SingleChannel);
                 sync_layer_terminology(
                     &self.curve_target,
                     &self.curve_target_label,
                     self.curve_target_help.as_ref(),
                     &self.curve_visible_label,
                     output_mode == OutputMode::RgbScreen,
-                    settings.value_mode == ValueMode::CrosshatchLuminance,
+                    crosshatch,
                 );
-                if output_mode == OutputMode::RgbScreen
-                    && settings.value_mode != ValueMode::CrosshatchLuminance
-                {
+                if output_mode == OutputMode::RgbScreen && !crosshatch {
                     self.curve_target_label.set_text("Adjust Channel");
                     self.curve_visible_label.set_text("Visible RGB Channels");
                 }
-                self.curve_crosshatch_color_row
-                    .set_visible(settings.value_mode == ValueMode::CrosshatchLuminance);
-                self.curve_color_row
-                    .set_visible(settings.value_mode != ValueMode::CrosshatchLuminance);
+                self.curve_crosshatch_color_row.set_visible(crosshatch);
+                self.curve_color_row.set_visible(!crosshatch);
                 self.curve_crosshatch_color
                     .set_text(&settings.crosshatch_color);
-                self.curve_output_ink
-                    .set_selected(match settings.single_channel {
-                        Ink::Cyan => 0,
-                        Ink::Magenta => 1,
-                        Ink::Yellow => 2,
-                        Ink::Black => 3,
-                        Ink::Red => 0,
-                        Ink::Green => 1,
-                        Ink::Blue => 2,
-                    });
                 self.curve_layout.set_selected(match settings.layout {
                     CurveLayout::FullWidth => 0,
                     CurveLayout::MotifPattern => 1,
@@ -5746,7 +5922,6 @@ impl AppUi {
                 self.motif_controls
                     .set_visible(settings.layout == CurveLayout::MotifPattern);
                 self.curve_shared.set_active(settings.use_shared_curve);
-                let crosshatch = settings.value_mode == ValueMode::CrosshatchLuminance;
                 let visible_spec =
                     help_for(if output_mode == OutputMode::RgbScreen && !crosshatch {
                         "Visible RGB Channels"
@@ -5805,16 +5980,20 @@ impl AppUi {
                     }
                     button.set_visible(true);
                     if output_mode == OutputMode::RgbScreen && !crosshatch {
-                        let ink = Ink::RGB[index];
+                        let Some(ink) = Ink::RGB.get(index).copied() else {
+                            continue;
+                        };
                         button.set_label(Some(["Red", "Green", "Blue"][index]));
                         button.set_active(settings.channels.get(ink).enabled);
                         continue;
                     }
-                    let ink = visible_ink_for_slot(
+                    let Some(ink) = visible_ink_for_slot(
                         index,
                         output_mode == OutputMode::RgbScreen,
                         crosshatch,
-                    );
+                    ) else {
+                        continue;
+                    };
                     button.set_label(Some(if crosshatch {
                         ["1 K", "2 C", "3 M", "4 Y"][index]
                     } else {
@@ -5822,7 +6001,15 @@ impl AppUi {
                     }));
                     button.set_active(settings.channels.get(ink).enabled);
                 }
-                let inks = self.selected_curve_inks();
+                let Some(inks) = self.selected_curve_inks() else {
+                    // Do not turn GTK's transient invalid selection into the
+                    // all-inks target while controls are being synchronized.
+                    self.source_label.set_text(&source_text);
+                    self.state.borrow_mut().syncing_controls = false;
+                    self.sync_motif_overlay();
+                    self.update_editing_context();
+                    return;
+                };
                 let all_inks = self.curve_target.selected() == 0;
                 let first = if all_inks {
                     &settings.base_channel
@@ -5973,6 +6160,7 @@ impl AppUi {
                     first.scale,
                     mixed_fields[0],
                     "Curve scale",
+                    "inks",
                 );
                 sync_web_scale(
                     &self.curve_angle,
@@ -5980,6 +6168,7 @@ impl AppUi {
                     first.grid_rotation,
                     mixed_fields[1],
                     "Rotate ink screen",
+                    "inks",
                 );
                 sync_web_scale(
                     &self.curve_position_x,
@@ -5987,6 +6176,7 @@ impl AppUi {
                     first.offset_x,
                     mixed_fields[2],
                     "Move across",
+                    "inks",
                 );
                 sync_web_scale(
                     &self.curve_position_y,
@@ -5994,6 +6184,7 @@ impl AppUi {
                     first.offset_y,
                     mixed_fields[3],
                     "Move vertically",
+                    "inks",
                 );
                 sync_web_scale(
                     &self.curve_opacity,
@@ -6001,6 +6192,7 @@ impl AppUi {
                     first.opacity,
                     mixed_fields[4],
                     "Transparent — Solid",
+                    "inks",
                 );
                 sync_web_scale(
                     &self.curve_threshold,
@@ -6008,6 +6200,7 @@ impl AppUi {
                     first.threshold,
                     mixed_fields[5],
                     "Hide light marks",
+                    "inks",
                 );
                 sync_web_scale(
                     &self.curve_detail,
@@ -6015,6 +6208,7 @@ impl AppUi {
                     first.resolution_scale,
                     mixed_fields[6],
                     "Sample density",
+                    "inks",
                 );
                 let active_path = if settings.use_shared_curve {
                     &settings.shared_path
@@ -6082,6 +6276,34 @@ impl AppUi {
         self.state.borrow_mut().syncing_controls = false;
         self.sync_motif_overlay();
         self.update_editing_context();
+    }
+
+    fn web_uses_channel_copy(&self) -> bool {
+        self.state.borrow().editor.as_ref().is_some_and(|editor| {
+            editor.document().output_mode == OutputMode::RgbScreen
+                && matches!(
+                    editor.document().render,
+                    RenderVariant::WebShapeV1 { ref settings }
+                        if settings.value_mode != ValueMode::CrosshatchLuminance
+                )
+        })
+    }
+
+    fn sync_web_color_terminology(&self, channel_copy: bool) {
+        let copy = web_color_copy(channel_copy);
+        self.web_color_heading.set_text(copy.color_heading);
+        self.web_color_help
+            .set_spec(help_for(copy.color_heading).unwrap());
+        self.web_color.set_tooltip_text(Some(copy.color_tooltip));
+        self.web_color
+            .update_property(&[gtk::accessible::Property::Description(copy.color_tooltip)]);
+        self.web_opacity_heading.set_text(copy.opacity_heading);
+        self.web_opacity_help
+            .set_spec(help_for(copy.opacity_heading).unwrap());
+        self.web_opacity
+            .set_tooltip_text(Some(copy.opacity_tooltip));
+        self.web_opacity
+            .update_property(&[gtk::accessible::Property::Description(copy.opacity_tooltip)]);
     }
 
     fn select_preview_view(self: &Rc<Self>) {
@@ -7571,7 +7793,10 @@ impl AppUi {
                         }
                     };
                     if editor.document().output_mode == OutputMode::RgbScreen {
-                        format!("Shapes · RGB Screen · {layer}")
+                        let visibility = rgb_visibility_summary(settings)
+                            .map(|summary| format!(" · {summary}"))
+                            .unwrap_or_default();
+                        format!("Shapes · RGB Screen · {layer}{visibility}")
                     } else {
                         format!("Shapes · {layer}")
                     }
@@ -7957,13 +8182,21 @@ struct EditorWidgets {
     preset_save: gtk::Button,
     document_section: gtk::Expander,
     output_mode: gtk::DropDown,
+    artwork_source: gtk::DropDown,
+    artwork_source_note: gtk::Label,
+    source_alpha: gtk::DropDown,
+    source_alpha_row: gtk::Widget,
+    source_alpha_note: gtk::Label,
+    channel_assignment: gtk::DropDown,
+    channel_assignment_note: gtk::Label,
+    active_channel: gtk::DropDown,
+    active_channel_row: gtk::Widget,
+    crosshatch_action: gtk::Button,
+    crosshatch_note: gtk::Label,
     preview_surface: gtk::DropDown,
     preview_color: gtk::ColorDialogButton,
     export_background: gtk::DropDown,
     export_color: gtk::ColorDialogButton,
-    web_value_mode: gtk::DropDown,
-    web_output_ink: gtk::DropDown,
-    web_output_ink_row: gtk::Widget,
     web_shared: gtk::CheckButton,
     web_shared_help: Option<HelpHandle>,
     web_shape: gtk::DropDown,
@@ -7982,6 +8215,8 @@ struct EditorWidgets {
     web_visible: [gtk::CheckButton; 4],
     web_color: gtk::Entry,
     web_color_row: gtk::Widget,
+    web_color_heading: gtk::Label,
+    web_color_help: HelpHandle,
     web_crosshatch_color: gtk::Entry,
     web_crosshatch_color_row: gtk::Widget,
     web_color_status: gtk::Label,
@@ -7998,14 +8233,13 @@ struct EditorWidgets {
     web_threshold: gtk::Scale,
     web_threshold_status: gtk::Label,
     web_opacity: gtk::Scale,
+    web_opacity_heading: gtk::Label,
+    web_opacity_help: HelpHandle,
     web_opacity_status: gtk::Label,
     web_detail: gtk::Scale,
     web_detail_status: gtk::Label,
     web_mixed: gtk::Label,
     web_geometry_note: gtk::Label,
-    curve_value_mode: gtk::DropDown,
-    curve_output_ink: gtk::DropDown,
-    curve_output_ink_row: gtk::Widget,
     curve_layout: gtk::DropDown,
     curve_profile: gtk::DropDown,
     curve_editor_label: gtk::Label,
@@ -8350,13 +8584,6 @@ fn build_editor_view(
 
     let web_panel = gtk::Box::new(gtk::Orientation::Vertical, 10);
     web_panel.add_css_class("workflow-group");
-    let web_value_mode = source_mapping_dropdown();
-    web_panel.append(&combo_row("Artwork Mapping", &web_value_mode));
-    web_panel.append(&source_mapping_hint(&web_value_mode));
-    let web_output_ink = gtk::DropDown::from_strings(&["Cyan", "Magenta", "Yellow", "Black"]);
-    let web_output_ink_row = combo_row("Output Channel", &web_output_ink);
-    web_output_ink_row.set_visible(false);
-    web_panel.append(&web_output_ink_row);
     let web_shared = gtk::CheckButton::with_label("Share Mark Shape Across Inks");
     web_shared.set_active(true);
     let web_shared_help = help_for("Share Mark Shape Across Inks").map(help_handle);
@@ -8454,7 +8681,9 @@ fn build_editor_view(
         .placeholder_text("#RRGGBB")
         .tooltip_text("Hex ink color; valid colors apply automatically")
         .build();
-    let (web_color_row, web_color_status) = entry_status_row("Ink Color", "Hex color", &web_color);
+    let (web_color_row, web_color_heading, web_color_status, web_color_help) =
+        entry_status_row_with_help("Ink Color", "Hex color", &web_color);
+    let web_color_help = web_color_help.expect("Ink Color has help copy");
     web_panel.append(&web_color_row);
     let web_crosshatch_color = gtk::Entry::builder()
         .placeholder_text("#111111")
@@ -8498,8 +8727,9 @@ fn build_editor_view(
     let (web_threshold_row, web_threshold_status) =
         control_status_row("Light-Tone Cutoff", "Hide light marks", &web_threshold);
     advanced_box.append(&web_threshold_row);
-    let (web_opacity_row, web_opacity_status) =
-        control_status_row("Ink Opacity", "Transparent — Solid", &web_opacity);
+    let (web_opacity_row, web_opacity_heading, web_opacity_status, web_opacity_help) =
+        control_status_row_with_help("Ink Opacity", "Transparent — Solid", &web_opacity);
+    let web_opacity_help = web_opacity_help.expect("Ink Opacity has help copy");
     advanced_box.append(&web_opacity_row);
     let (web_detail_row, web_detail_status) =
         control_status_row("Sampling Detail", "Sample density", &web_detail);
@@ -8509,13 +8739,6 @@ fn build_editor_view(
 
     let curve_panel = gtk::Box::new(gtk::Orientation::Vertical, 10);
     curve_panel.add_css_class("workflow-group");
-    let curve_value_mode = source_mapping_dropdown();
-    curve_panel.append(&combo_row("Artwork Mapping", &curve_value_mode));
-    curve_panel.append(&source_mapping_hint(&curve_value_mode));
-    let curve_output_ink = gtk::DropDown::from_strings(&["Cyan", "Magenta", "Yellow", "Black"]);
-    let curve_output_ink_row = combo_row("Output Channel", &curve_output_ink);
-    curve_output_ink_row.set_visible(false);
-    curve_panel.append(&curve_output_ink_row);
     let curve_layout = gtk::DropDown::from_strings(&["Across Artwork", "Repeated Motif"]);
     curve_panel.append(&combo_row("Layout", &curve_layout));
     let curve_weight = control_scale(1.0, 200.0, 1.0);
@@ -8738,9 +8961,54 @@ fn build_editor_view(
     document_box.set_margin_top(10);
     document_box.append(source_label);
     document_box.append(autosave_status);
-    let output_mode = gtk::DropDown::from_strings(&["CMYK Inks", "RGB Screen"]);
+    let output_mode = gtk::DropDown::from_strings(&["CMYK Print", "RGB Screen"]);
     output_mode.set_tooltip_text(Some("Choose subtractive CMYK inks for print or additive RGB screens for transparent, light-based output."));
-    document_box.append(&combo_row("Output", &output_mode));
+    document_box.append(&combo_row("Output Model", &output_mode));
+    let artwork_source = gtk::DropDown::from_strings(&artwork_source_labels(false));
+    document_box.append(&combo_row("Artwork Source", &artwork_source));
+    let artwork_source_note = gtk::Label::builder()
+        .xalign(0.0)
+        .wrap(true)
+        .css_classes(["dim-label", "caption"])
+        .build();
+    document_box.append(&artwork_source_note);
+    let source_alpha = gtk::DropDown::from_strings(&source_alpha_labels(false));
+    let source_alpha_row = combo_row("Source Alpha", &source_alpha);
+    document_box.append(&source_alpha_row);
+    let source_alpha_note = gtk::Label::builder()
+        .label("Alpha is the source; source alpha is not applied again.")
+        .xalign(0.0)
+        .wrap(true)
+        .css_classes(["dim-label", "caption"])
+        .build();
+    source_alpha_note.set_visible(false);
+    document_box.append(&source_alpha_note);
+    let channel_assignment =
+        gtk::DropDown::from_strings(&channel_assignment_labels(true, OutputModel::CmykPrint));
+    document_box.append(&combo_row("Channel Assignment", &channel_assignment));
+    let channel_assignment_note = gtk::Label::builder()
+        .xalign(0.0)
+        .wrap(true)
+        .css_classes(["dim-label", "caption"])
+        .build();
+    document_box.append(&channel_assignment_note);
+    let active_channel =
+        gtk::DropDown::from_strings(&output_channel_labels(OutputModel::CmykPrint));
+    let active_channel_row = combo_row("Active Channel", &active_channel);
+    active_channel_row.set_visible(false);
+    document_box.append(&active_channel_row);
+    let crosshatch_action = gtk::Button::with_label("Use Legacy Crosshatch");
+    crosshatch_action.set_tooltip_text(Some(
+        "Temporarily use the legacy brightness crosshatch treatment with the current output model.",
+    ));
+    document_box.append(&crosshatch_action);
+    let crosshatch_note = gtk::Label::builder()
+        .label("Legacy Crosshatch temporarily switches to Curves. Exit restores ordinary Curves.")
+        .xalign(0.0)
+        .wrap(true)
+        .css_classes(["dim-label", "caption"])
+        .build();
+    document_box.append(&crosshatch_note);
     let appearance_controls = build_appearance_controls();
     let preview_surface = appearance_controls.preview_surface.clone();
     let preview_color = appearance_controls.preview_color.clone();
@@ -8795,13 +9063,21 @@ fn build_editor_view(
         preset_save,
         document_section: document,
         output_mode,
+        artwork_source,
+        artwork_source_note,
+        source_alpha,
+        source_alpha_row,
+        source_alpha_note,
+        channel_assignment,
+        channel_assignment_note,
+        active_channel,
+        active_channel_row,
+        crosshatch_action,
+        crosshatch_note,
         preview_surface,
         preview_color,
         export_background,
         export_color,
-        web_value_mode,
-        web_output_ink,
-        web_output_ink_row,
         web_shared,
         web_shared_help,
         web_shape,
@@ -8820,6 +9096,8 @@ fn build_editor_view(
         web_visible,
         web_color,
         web_color_row,
+        web_color_heading,
+        web_color_help,
         web_crosshatch_color,
         web_crosshatch_color_row,
         web_color_status,
@@ -8836,14 +9114,13 @@ fn build_editor_view(
         web_threshold,
         web_threshold_status,
         web_opacity,
+        web_opacity_heading,
+        web_opacity_help,
         web_opacity_status,
         web_detail,
         web_detail_status,
         web_mixed,
         web_geometry_note,
-        curve_value_mode,
-        curve_output_ink,
-        curve_output_ink_row,
         curve_layout,
         curve_profile,
         curve_editor_label,
@@ -9009,9 +9286,21 @@ const HELP_SPECS: &[HelpSpec] = &[
         body: "Increase for more opaque ink or decrease for more transparency. This changes both preview and export.",
     },
     HelpSpec {
+        control: "Channel Opacity",
+        heading: "Channel Opacity",
+        summary: "Change how solid each RGB channel appears.",
+        body: "Increase for a more solid RGB channel or decrease for more transparency. This changes both preview and export.",
+    },
+    HelpSpec {
         control: "Ink Color",
         heading: "Ink Color",
         summary: "Set the displayed color for the selected ink.",
+        body: "Enter a hex color such as #00AEEF. The color is applied when valid and changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Channel Color",
+        heading: "Channel Color",
+        summary: "Set the displayed color for the selected RGB channel.",
         body: "Enter a hex color such as #00AEEF. The color is applied when valid and changes both preview and export.",
     },
     HelpSpec {
@@ -9396,126 +9685,257 @@ fn labeled_combo_row_with_help(
     (row.upcast(), label, help)
 }
 
-#[derive(Clone, Copy)]
-struct SourceMappingOption {
-    name: &'static str,
-    description: &'static str,
-    mode: ValueMode,
-    source_svg: &'static [u8],
-    result_svg: &'static [u8],
-    source_description: &'static str,
-    result_description: &'static str,
-}
-
-const SOURCE_MAPPING_OPTIONS: [SourceMappingOption; 5] = [
-    SourceMappingOption {
-        name: "Color → CMYK Inks",
-        description: "Separate source color into cyan, magenta, yellow, and black inks.",
-        mode: ValueMode::Cmyk,
-        source_svg: COLOR_SOURCE_SVG,
-        result_svg: COLOR_TO_CMYK_SVG,
-        source_description: "Color source artwork",
-        result_description: "Result separated into cyan, magenta, yellow, and black inks",
-    },
-    SourceMappingOption {
-        name: "Brightness → One Ink",
-        description: "Map artwork brightness to one selected output channel.",
-        mode: ValueMode::SingleChannel,
-        source_svg: VALUE_SOURCE_SVG,
-        result_svg: VALUE_TO_ONE_INK_SVG,
-        source_description: "Source artwork represented by brightness",
-        result_description: "Artwork brightness mapped to one selected output channel",
-    },
-    SourceMappingOption {
-        name: "Brightness → All Inks",
-        description: "Apply the same artwork brightness to every enabled output channel.",
-        mode: ValueMode::Luminance,
-        source_svg: VALUE_SOURCE_SVG,
-        result_svg: VALUE_TO_CMYK_SVG,
-        source_description: "Source artwork represented by brightness",
-        result_description: "Artwork brightness mapped to all enabled output channels",
-    },
-    SourceMappingOption {
-        name: "Brightness → Crosshatch",
-        description: "Build brightness with monochrome K +45°, C -45°, M horizontal, and Y vertical hatch layers.",
-        mode: ValueMode::CrosshatchLuminance,
-        source_svg: VALUE_SOURCE_SVG,
-        result_svg: VALUE_TO_CROSSHATCH_SVG,
-        source_description: "Source artwork represented by brightness",
-        result_description: "Artwork brightness mapped to four directional crosshatch layers",
-    },
-    SourceMappingOption {
-        name: "RGB Color → Screen",
-        description: "Map source red, green, and blue directly to additive screen channels. Use this for luminous RGB output, not print separations.",
-        mode: ValueMode::Rgb,
-        source_svg: COLOR_SOURCE_SVG,
-        result_svg: COLOR_TO_RGB_SVG,
-        source_description: "Color source artwork",
-        result_description: "Red, green, and blue screens blend additively",
-    },
-];
-
-const SOURCE_MAPPING_ARTWORK_SIZE: i32 = 92;
-
 fn source_mapping_from_index(index: u32) -> Option<ValueMode> {
-    SOURCE_MAPPING_OPTIONS
-        .get(index as usize)
-        .map(|option| option.mode)
-}
-
-fn source_mapping_names(output_mode: OutputMode) -> [&'static str; 5] {
-    let mut names = SOURCE_MAPPING_OPTIONS.map(|option| option.name);
-    if output_mode == OutputMode::RgbScreen {
-        names[1] = "Brightness → One Channel";
-        names[2] = "Brightness → All Channels";
+    match index {
+        0 => Some(ValueMode::Cmyk),
+        1 => Some(ValueMode::SingleChannel),
+        2 => Some(ValueMode::Luminance),
+        3 => Some(ValueMode::CrosshatchLuminance),
+        4 => Some(ValueMode::Rgb),
+        _ => None,
     }
-    names
 }
 
-fn sync_source_mapping_names(dropdown: &gtk::DropDown, output_mode: OutputMode) {
-    let names = source_mapping_names(output_mode);
-    let selected = dropdown.selected();
-    let refs = names.to_vec();
-    dropdown.set_model(Some(&gtk::StringList::new(&refs)));
-    dropdown.set_selected(selected.min((names.len() - 1) as u32));
+fn artwork_source_labels(include_legacy: bool) -> Vec<&'static str> {
+    let mut labels = vec![
+        "Full Color",
+        "Red",
+        "Green",
+        "Blue",
+        "Value",
+        "Perceptual Lightness",
+        "Alpha",
+    ];
+    if include_legacy {
+        labels.push("Legacy Brightness");
+    }
+    labels
+}
+
+fn artwork_source_from_index(index: u32) -> Option<ArtworkSource> {
+    [
+        ArtworkSource::FullColor,
+        ArtworkSource::Red,
+        ArtworkSource::Green,
+        ArtworkSource::Blue,
+        ArtworkSource::Value,
+        ArtworkSource::PerceptualLightness,
+        ArtworkSource::Alpha,
+    ]
+    .get(index as usize)
+    .copied()
+}
+
+fn artwork_source_index(source: ArtworkSource) -> u32 {
+    match source {
+        ArtworkSource::FullColor => 0,
+        ArtworkSource::Red => 1,
+        ArtworkSource::Green => 2,
+        ArtworkSource::Blue => 3,
+        ArtworkSource::Value => 4,
+        ArtworkSource::PerceptualLightness => 5,
+        ArtworkSource::Alpha => 6,
+        ArtworkSource::LegacyBrightness(_) => 7,
+    }
+}
+
+fn artwork_source_guidance(source: ArtworkSource) -> &'static str {
+    match source {
+        ArtworkSource::FullColor => {
+            "Separate the source color automatically for the selected output model."
+        }
+        ArtworkSource::Red => "Use the encoded red component as sampled content.",
+        ArtworkSource::Green => "Use the encoded green component as sampled content.",
+        ArtworkSource::Blue => "Use the encoded blue component as sampled content.",
+        ArtworkSource::Value => {
+            "Use the strongest RGB component (HSV value semantics) as sampled content."
+        }
+        ArtworkSource::PerceptualLightness => {
+            "Use OKLab L for perceptual lightness as sampled content."
+        }
+        ArtworkSource::Alpha => "Use sampled alpha as content.",
+        ArtworkSource::LegacyBrightness(_) => {
+            "Legacy brightness is retained only for compatibility-loaded state."
+        }
+    }
+}
+
+fn source_alpha_labels(include_legacy: bool) -> Vec<&'static str> {
+    let mut labels = vec!["Preserve Source Alpha", "Ignore Source Alpha"];
+    if include_legacy {
+        labels.push("Legacy Source Alpha");
+    }
+    labels
+}
+
+fn source_alpha_from_index(index: u32) -> Option<SourceAlphaPolicy> {
+    match index {
+        0 => Some(SourceAlphaPolicy::Preserve),
+        1 => Some(SourceAlphaPolicy::Ignore),
+        2 => Some(SourceAlphaPolicy::LegacyCurrentV1),
+        _ => None,
+    }
+}
+
+fn source_alpha_index(alpha: SourceAlphaPolicy) -> u32 {
+    match alpha {
+        SourceAlphaPolicy::Preserve => 0,
+        SourceAlphaPolicy::Ignore => 1,
+        SourceAlphaPolicy::LegacyCurrentV1 => 2,
+    }
+}
+
+fn channel_assignment_labels(full_color: bool, output_model: OutputModel) -> Vec<&'static str> {
+    if full_color {
+        vec![match output_model {
+            OutputModel::CmykPrint => "Automatic CMYK Separation",
+            OutputModel::RgbScreen => "Direct RGB Channels",
+        }]
+    } else {
+        vec!["Apply To Active Channel", "Apply To All Channels"]
+    }
+}
+
+fn channel_assignment_from_index(index: u32, source: ArtworkSource) -> Option<ChannelAssignment> {
+    match (source == ArtworkSource::FullColor, index) {
+        (true, 0) => Some(ChannelAssignment::automatic(
+            AutomaticSeparationStrategy::CmykEncodedRgbMaxBlackV1,
+        )),
+        (false, 0) => Some(ChannelAssignment::ActiveChannel),
+        (false, 1) => Some(ChannelAssignment::AllChannels),
+        _ => None,
+    }
+}
+
+fn channel_assignment_index(assignment: ChannelAssignment, source: ArtworkSource) -> u32 {
+    if source == ArtworkSource::FullColor {
+        0
+    } else {
+        match assignment {
+            ChannelAssignment::AllChannels => 1,
+            _ => 0,
+        }
+    }
+}
+
+fn output_channel_labels(output: OutputModel) -> Vec<&'static str> {
+    output
+        .channels()
+        .iter()
+        .map(|channel| channel.label())
+        .collect()
+}
+
+fn pipeline_for_source(
+    current: &ArtworkPipelineSettings,
+    source: ArtworkSource,
+) -> ArtworkPipelineSettings {
+    let mut pipeline = current.clone();
+    pipeline.source = source;
+    if source == ArtworkSource::FullColor {
+        pipeline.assignment = ChannelAssignment::automatic(match pipeline.output_model {
+            OutputModel::CmykPrint => AutomaticSeparationStrategy::CmykEncodedRgbMaxBlackV1,
+            OutputModel::RgbScreen => AutomaticSeparationStrategy::RgbDirectEncodedComponentsV1,
+        });
+        pipeline.active_channel = pipeline
+            .active_channel
+            .filter(|channel| channel.belongs_to(pipeline.output_model));
+    } else if !matches!(
+        pipeline.assignment,
+        ChannelAssignment::ActiveChannel | ChannelAssignment::AllChannels
+    ) {
+        pipeline.assignment = ChannelAssignment::AllChannels;
+        pipeline.active_channel = None;
+    }
+    if matches!(pipeline.assignment, ChannelAssignment::ActiveChannel) {
+        pipeline.active_channel = pipeline
+            .active_channel
+            .filter(|channel| channel.belongs_to(pipeline.output_model))
+            .or_else(|| Some(pipeline.output_model.default_channel()));
+    }
+    pipeline
+}
+
+fn pipeline_for_assignment(
+    current: &ArtworkPipelineSettings,
+    assignment: ChannelAssignment,
+) -> ArtworkPipelineSettings {
+    let mut pipeline = current.clone();
+    pipeline.assignment = match assignment {
+        ChannelAssignment::Automatic { .. } => {
+            ChannelAssignment::automatic(match pipeline.output_model {
+                OutputModel::CmykPrint => AutomaticSeparationStrategy::CmykEncodedRgbMaxBlackV1,
+                OutputModel::RgbScreen => AutomaticSeparationStrategy::RgbDirectEncodedComponentsV1,
+            })
+        }
+        assignment => assignment,
+    };
+    pipeline.active_channel = if matches!(pipeline.assignment, ChannelAssignment::ActiveChannel) {
+        pipeline
+            .active_channel
+            .filter(|channel| channel.belongs_to(pipeline.output_model))
+            .or_else(|| Some(pipeline.output_model.default_channel()))
+    } else {
+        None
+    };
+    pipeline
 }
 
 fn output_channel_order(rgb: bool, crosshatch: bool) -> &'static [Ink] {
     if rgb && !crosshatch {
         &Ink::RGB
+    } else if crosshatch {
+        &CROSSHATCH_INK_ORDER
     } else {
         &Ink::ALL
     }
 }
 
-fn visible_ink_for_slot(index: usize, rgb: bool, crosshatch: bool) -> Ink {
-    if rgb && !crosshatch {
-        return Ink::RGB[index];
-    }
-    if crosshatch {
-        [Ink::Black, Ink::Cyan, Ink::Magenta, Ink::Yellow][index]
-    } else {
-        Ink::ALL[index]
+fn visible_ink_for_slot(index: usize, rgb: bool, crosshatch: bool) -> Option<Ink> {
+    output_channel_order(rgb, crosshatch).get(index).copied()
+}
+
+fn web_inks_for_target(selected: u32, rgb: bool, crosshatch: bool) -> Option<Vec<Ink>> {
+    let channels = output_channel_order(rgb, crosshatch);
+    match selected {
+        0 => Some(channels.to_vec()),
+        slot => channels
+            .get(slot.checked_sub(1)? as usize)
+            .copied()
+            .map(|ink| vec![ink]),
     }
 }
 
-fn output_ink_for_slot(index: u32, rgb: bool) -> Option<Ink> {
-    if rgb {
-        Ink::RGB.get(index as usize).copied()
-    } else {
-        Ink::ALL.get(index as usize).copied()
-    }
+fn dropdown_strings_match(dropdown: &gtk::DropDown, values: &[&str]) -> bool {
+    dropdown.model().is_some_and(|model| {
+        model.n_items() == values.len() as u32
+            && values.iter().enumerate().all(|(index, value)| {
+                model
+                    .item(index as u32)
+                    .and_then(|item| item.downcast::<gtk::StringObject>().ok())
+                    .is_some_and(|item| item.string() == *value)
+            })
+    })
 }
 
-fn selection_for_item_count(dropdown: &gtk::DropDown, expected_items: u32) -> u32 {
-    let compatible = dropdown
+fn sync_dropdown_strings(dropdown: &gtk::DropDown, values: &[&str]) {
+    if dropdown_strings_match(dropdown, values) {
+        return;
+    }
+
+    let selected = dropdown.selected();
+    let new_selected = selected.min(values.len().saturating_sub(1) as u32);
+    if let Some(model) = dropdown
         .model()
-        .is_some_and(|model| model.n_items() == expected_items);
-    if compatible {
-        dropdown.selected().min(expected_items.saturating_sub(1))
+        .and_then(|model| model.downcast::<gtk::StringList>().ok())
+    {
+        // Keep the model object installed while a DropDown activation is being
+        // dispatched.  Replacing it invalidates GTK's live list selection.
+        model.splice(0, model.n_items(), values);
     } else {
-        0
+        dropdown.set_model(Some(&gtk::StringList::new(values)));
     }
+    dropdown.set_selected(new_selected);
 }
 
 fn layer_terminology(rgb: bool, crosshatch: bool) -> (&'static str, &'static str) {
@@ -9528,8 +9948,60 @@ fn layer_terminology(rgb: bool, crosshatch: bool) -> (&'static str, &'static str
     }
 }
 
+struct WebColorCopy {
+    color_heading: &'static str,
+    color_tooltip: &'static str,
+    opacity_heading: &'static str,
+    opacity_tooltip: &'static str,
+}
+
+fn web_color_copy(channel_copy: bool) -> WebColorCopy {
+    if channel_copy {
+        WebColorCopy {
+            color_heading: "Channel Color",
+            color_tooltip: "Set the displayed color for the selected RGB channel.",
+            opacity_heading: "Channel Opacity",
+            opacity_tooltip: "Change how solid each RGB channel appears.",
+        }
+    } else {
+        WebColorCopy {
+            color_heading: "Ink Color",
+            color_tooltip: "Set the displayed color for the selected ink.",
+            opacity_heading: "Ink Opacity",
+            opacity_tooltip: "Change how solid each ink appears.",
+        }
+    }
+}
+
+fn web_color_validation_message(channel_copy: bool) -> &'static str {
+    if channel_copy {
+        "Use a six-digit hex channel color such as #111111"
+    } else {
+        "Use a six-digit hex ink color such as #111111"
+    }
+}
+
+fn web_mixed_target(channel_copy: bool) -> &'static str {
+    if channel_copy { "channels" } else { "inks" }
+}
+
+fn rgb_visibility_summary(settings: &WebShapeSettings) -> Option<String> {
+    let visible = [
+        (Ink::Red, "Red"),
+        (Ink::Green, "Green"),
+        (Ink::Blue, "Blue"),
+    ]
+    .into_iter()
+    .filter_map(|(ink, label)| settings.channels.get(ink).enabled.then_some(label))
+    .collect::<Vec<_>>();
+    match visible.len() {
+        3 => None,
+        0 => Some("Visible: none".into()),
+        _ => Some(format!("Visible: {}", visible.join(" + "))),
+    }
+}
+
 fn set_crosshatch_target_directions(dropdown: &gtk::DropDown, angles: [f64; 4]) {
-    let selected = dropdown.selected();
     let values = [
         "All Layers".to_owned(),
         format!("Layer 1 · {:.0}° (K)", angles[0]),
@@ -9538,16 +10010,7 @@ fn set_crosshatch_target_directions(dropdown: &gtk::DropDown, angles: [f64; 4]) 
         format!("Layer 4 · {:.0}° (Y)", angles[3]),
     ];
     let refs = values.iter().map(String::as_str).collect::<Vec<_>>();
-    dropdown.set_model(Some(&gtk::StringList::new(&refs)));
-    dropdown.set_selected(selected);
-}
-
-fn source_mapping_dropdown() -> gtk::DropDown {
-    let names = source_mapping_names(OutputMode::CmykInks);
-    let dropdown = gtk::DropDown::from_strings(&names);
-    dropdown.set_hexpand(true);
-    dropdown.set_size_request(0, -1);
-    dropdown
+    sync_dropdown_strings(dropdown, &refs);
 }
 
 fn sync_layer_terminology(
@@ -9559,7 +10022,6 @@ fn sync_layer_terminology(
     crosshatch: bool,
 ) {
     let (wanted, visible) = layer_terminology(rgb, crosshatch);
-    let selected = dropdown.selected();
     target_label.set_text(wanted);
     if let Some(spec) = help_for(wanted) {
         dropdown.update_property(&[gtk::accessible::Property::Description(spec.summary)]);
@@ -9581,120 +10043,33 @@ fn sync_layer_terminology(
     } else {
         &["All Inks", "Cyan", "Magenta", "Yellow", "Black"]
     };
-    dropdown.set_model(Some(&gtk::StringList::new(values)));
-    dropdown.set_selected(selected.min(values.len().saturating_sub(1) as u32));
-}
-
-fn render_embedded_svg_texture(
-    bytes: &'static [u8],
-    logical_size: i32,
-    scale_factor: i32,
-) -> Result<gdk::MemoryTexture, String> {
-    let tree = usvg::Tree::from_data(bytes, &usvg::Options::default())
-        .map_err(|error| format!("could not parse embedded Artwork Mapping SVG: {error}"))?;
-    let size = tree.size();
-    if size.width() <= 0.0 || size.height() <= 0.0 {
-        return Err("embedded Artwork Mapping SVG has no usable size".into());
-    }
-    let pixel_size = logical_size.max(1) * scale_factor.max(1);
-    let scale = pixel_size as f32 / size.width().max(size.height());
-    let width = (size.width() * scale).round().max(1.0) as u32;
-    let height = (size.height() * scale).round().max(1.0) as u32;
-    let mut pixmap = tiny_skia::Pixmap::new(width, height)
-        .ok_or_else(|| "could not allocate embedded Artwork Mapping texture".to_owned())?;
-    resvg::render(
-        &tree,
-        tiny_skia::Transform::from_scale(scale, scale),
-        &mut pixmap.as_mut(),
-    );
-    let stride = width as usize * 4;
-    let bytes = glib::Bytes::from_owned(pixmap.take());
-    Ok(gdk::MemoryTexture::new(
-        width as i32,
-        height as i32,
-        gdk::MemoryFormat::R8g8b8a8Premultiplied,
-        &bytes,
-        stride,
-    ))
-}
-
-fn source_mapping_picture(bytes: &'static [u8], description: &'static str) -> gtk::Picture {
-    let texture = render_embedded_svg_texture(bytes, SOURCE_MAPPING_ARTWORK_SIZE, 1)
-        .expect("embedded Artwork Mapping SVGs are validated application assets");
-    let picture = gtk::Picture::builder()
-        .paintable(&texture)
-        .content_fit(gtk::ContentFit::Contain)
-        .can_shrink(false)
-        .hexpand(true)
-        .width_request(SOURCE_MAPPING_ARTWORK_SIZE)
-        .height_request(SOURCE_MAPPING_ARTWORK_SIZE)
-        .accessible_role(gtk::AccessibleRole::Img)
-        .css_classes(["mapping-artwork"])
-        .build();
-    picture.update_property(&[gtk::accessible::Property::Label(description)]);
-    picture.connect_scale_factor_notify(move |picture| {
-        let texture =
-            render_embedded_svg_texture(bytes, SOURCE_MAPPING_ARTWORK_SIZE, picture.scale_factor())
-                .expect("embedded Artwork Mapping SVGs are validated application assets");
-        picture.set_paintable(Some(&texture));
-    });
-    picture
-}
-
-fn source_mapping_hint(dropdown: &gtk::DropDown) -> gtk::Widget {
-    let stack = gtk::Stack::builder()
-        .transition_type(gtk::StackTransitionType::Crossfade)
-        .transition_duration(120)
-        .build();
-    for (index, option) in SOURCE_MAPPING_OPTIONS.into_iter().enumerate() {
-        let group = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        let artwork = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        artwork.set_homogeneous(false);
-        artwork.append(&source_mapping_picture(
-            option.source_svg,
-            option.source_description,
-        ));
-        artwork.append(
-            &gtk::Label::builder()
-                .label("→")
-                .accessible_role(gtk::AccessibleRole::Presentation)
-                .css_classes(["title-2", "dim-label"])
-                .build(),
-        );
-        artwork.append(&source_mapping_picture(
-            option.result_svg,
-            option.result_description,
-        ));
-        group.append(&artwork);
-        group.append(
-            &gtk::Label::builder()
-                .label(option.description)
-                .xalign(0.0)
-                .wrap(true)
-                .hexpand(true)
-                .css_classes(["dim-label", "caption"])
-                .build(),
-        );
-        stack.add_named(&group, Some(&index.to_string()));
-    }
-    stack.set_visible_child_name("0");
-    dropdown.connect_selected_notify(glib::clone!(
-        #[weak]
-        stack,
-        move |dropdown| {
-            if source_mapping_from_index(dropdown.selected()).is_some() {
-                stack.set_visible_child_name(&dropdown.selected().to_string());
-            }
-        }
-    ));
-    stack.upcast()
+    sync_dropdown_strings(dropdown, values);
 }
 
 fn entry_status_row(title: &str, status: &str, entry: &gtk::Entry) -> (gtk::Widget, gtk::Label) {
+    let (row, _, status, _) = entry_status_row_with_help(title, status, entry);
+    (row, status)
+}
+
+fn entry_status_row_with_help(
+    title: &str,
+    status: &str,
+    entry: &gtk::Entry,
+) -> (gtk::Widget, gtk::Label, gtk::Label, Option<HelpHandle>) {
     entry.set_hexpand(true);
     entry.set_size_request(0, -1);
     let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    let (labels, title, help) = row_heading(title);
+    let labels = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let heading = gtk::Label::builder()
+        .label(title)
+        .xalign(0.0)
+        .css_classes(["heading"])
+        .build();
+    labels.append(&heading);
+    let help = help_for(title).map(help_handle);
+    if let Some(handle) = &help {
+        labels.append(&handle.button);
+    }
     let status = gtk::Label::builder()
         .label(status)
         .xalign(1.0)
@@ -9705,19 +10080,38 @@ fn entry_status_row(title: &str, status: &str, entry: &gtk::Entry) -> (gtk::Widg
     labels.append(&status);
     row.append(&labels);
     row.append(entry);
-    entry.update_relation(&[gtk::accessible::Relation::LabelledBy(&[title.upcast_ref()])]);
-    if help.is_some() {
-        entry.update_property(&[gtk::accessible::Property::Description(
-            help_for(&title.text()).unwrap().summary,
-        )]);
-        entry.set_tooltip_text(help_for(&title.text()).map(|spec| spec.summary));
+    entry.update_relation(&[gtk::accessible::Relation::LabelledBy(&[
+        heading.upcast_ref()
+    ])]);
+    if let Some(spec) = help_for(title) {
+        entry.update_property(&[gtk::accessible::Property::Description(spec.summary)]);
+        entry.set_tooltip_text(Some(spec.summary));
     }
-    (row.upcast(), status)
+    (row.upcast(), heading, status, help)
 }
 
 fn control_status_row(title: &str, status: &str, scale: &gtk::Scale) -> (gtk::Widget, gtk::Label) {
+    let (row, _, status, _) = control_status_row_with_help(title, status, scale);
+    (row, status)
+}
+
+fn control_status_row_with_help(
+    title: &str,
+    status: &str,
+    scale: &gtk::Scale,
+) -> (gtk::Widget, gtk::Label, gtk::Label, Option<HelpHandle>) {
     let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    let (labels, title, help) = row_heading(title);
+    let labels = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let heading = gtk::Label::builder()
+        .label(title)
+        .xalign(0.0)
+        .css_classes(["heading"])
+        .build();
+    labels.append(&heading);
+    let help = help_for(title).map(help_handle);
+    if let Some(handle) = &help {
+        labels.append(&handle.button);
+    }
     let status = gtk::Label::builder()
         .label(status)
         .xalign(1.0)
@@ -9728,14 +10122,14 @@ fn control_status_row(title: &str, status: &str, scale: &gtk::Scale) -> (gtk::Wi
     labels.append(&status);
     row.append(&labels);
     row.append(&precision_scale_control(scale));
-    scale.update_relation(&[gtk::accessible::Relation::LabelledBy(&[title.upcast_ref()])]);
-    if help.is_some() {
-        scale.update_property(&[gtk::accessible::Property::Description(
-            help_for(&title.text()).unwrap().summary,
-        )]);
-        scale.set_tooltip_text(help_for(&title.text()).map(|spec| spec.summary));
+    scale.update_relation(&[gtk::accessible::Relation::LabelledBy(&[
+        heading.upcast_ref()
+    ])]);
+    if let Some(spec) = help_for(title) {
+        scale.update_property(&[gtk::accessible::Property::Description(spec.summary)]);
+        scale.set_tooltip_text(Some(spec.summary));
     }
-    (row.upcast(), status)
+    (row.upcast(), heading, status, help)
 }
 
 fn sync_web_scale(
@@ -9744,6 +10138,7 @@ fn sync_web_scale(
     value: f64,
     mixed: bool,
     normal_status: &str,
+    mixed_target: &str,
 ) {
     scale.set_draw_value(false);
     if let Some(entry) = precision_entry(scale) {
@@ -9751,9 +10146,10 @@ fn sync_web_scale(
     }
     if mixed {
         scale.add_css_class("mixed-scale");
-        scale.update_property(&[gtk::accessible::Property::Description(
-            "Mixed values; changing this control applies one value to all selected inks",
-        )]);
+        let description = format!(
+            "Mixed values; changing this control applies one value to all selected {mixed_target}"
+        );
+        scale.update_property(&[gtk::accessible::Property::Description(&description)]);
     } else {
         scale.remove_css_class("mixed-scale");
         scale.update_property(&[gtk::accessible::Property::Description(normal_status)]);
@@ -10269,6 +10665,41 @@ mod tests {
     }
 
     #[test]
+    fn rgb_shapes_use_channel_color_copy_without_changing_ink_or_curve_copy() {
+        let channel = web_color_copy(true);
+        assert_eq!(channel.color_heading, "Channel Color");
+        assert_eq!(channel.opacity_heading, "Channel Opacity");
+        assert!(channel.color_tooltip.contains("RGB channel"));
+        assert_eq!(
+            web_color_validation_message(true),
+            "Use a six-digit hex channel color such as #111111"
+        );
+        let ink = web_color_copy(false);
+        assert_eq!(ink.color_heading, "Ink Color");
+        assert_eq!(ink.opacity_heading, "Ink Opacity");
+        assert_eq!(
+            web_color_validation_message(false),
+            "Use a six-digit hex ink color such as #111111"
+        );
+        assert_eq!(web_mixed_target(true), "channels");
+        assert_eq!(web_mixed_target(false), "inks");
+
+        let mut settings = WebShapeSettings::default();
+        assert_eq!(rgb_visibility_summary(&settings), None);
+        settings.channels.g.enabled = false;
+        assert_eq!(
+            rgb_visibility_summary(&settings).as_deref(),
+            Some("Visible: Red + Blue")
+        );
+        settings.channels.r.enabled = false;
+        settings.channels.b.enabled = false;
+        assert_eq!(
+            rgb_visibility_summary(&settings).as_deref(),
+            Some("Visible: none")
+        );
+    }
+
+    #[test]
     fn candidate_generation_is_latest_request_wins() {
         let gate = RenderGate::default();
         let slow_open = gate.next();
@@ -10307,7 +10738,12 @@ mod tests {
         assert_eq!(preset_name_from_path(Path::new("My Ink.tntr")), "My Ink");
         assert_eq!(
             BUNDLED_PRESETS.map(|item| item.0),
-            ["Comic Book", "Skinny Curve", "Chunky Fingerprints"]
+            [
+                "Comic Book",
+                "Skinny Curve",
+                "Chunky Fingerprints",
+                "Tiled Stacked Motif Stress Test",
+            ]
         );
         assert!(BUNDLED_PRESETS.iter().all(|(_, bytes)| !bytes.is_empty()));
     }
@@ -11456,6 +11892,8 @@ mod tests {
     #[test]
     fn realized_numeric_controls_leave_continuous_scroll_to_parent() {
         gtk::init().unwrap();
+        verify_realized_dropdown_sync_keeps_the_live_model_and_valid_selection();
+        verify_realized_semantic_pipeline_callbacks();
         let appearance = build_appearance_controls();
         assert!(appearance.preview_color.dialog().unwrap().is_with_alpha());
         assert!(appearance.export_color.dialog().unwrap().is_with_alpha());
@@ -11537,20 +11975,6 @@ mod tests {
                 > 0
         );
         appearance_window.close();
-        use gtk::gdk::prelude::PaintableExt;
-
-        let mapping_picture = source_mapping_picture(
-            SOURCE_MAPPING_OPTIONS[0].source_svg,
-            SOURCE_MAPPING_OPTIONS[0].source_description,
-        );
-        assert!(!mapping_picture.can_shrink());
-        assert_eq!(mapping_picture.width_request(), SOURCE_MAPPING_ARTWORK_SIZE);
-        assert_eq!(
-            mapping_picture.height_request(),
-            SOURCE_MAPPING_ARTWORK_SIZE
-        );
-        assert_eq!(mapping_picture.accessible_role(), gtk::AccessibleRole::Img);
-
         let capture_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let capture_paintable = gtk::WidgetPaintable::new(Some(&capture_content));
         let capture_window = gtk::Window::builder()
@@ -11732,17 +12156,32 @@ mod tests {
         shape.channels.m.scale = 1.45;
         shape.shared_shape = WebShape::UserDefined;
         shape.custom_shape_path = Some(curved_shape_fixture());
-        let bytes = toniator::preset::treatment_preset_bytes(
+        let mut document = Document::new(SourceArtwork {
+            name: "base-test".into(),
+            media_type: "application/octet-stream".into(),
+            bytes: Arc::from([1]),
+        });
+        document.render = RenderVariant::WebShapeV1 {
+            settings: Box::new(shape.clone()),
+        };
+        let bytes = toniator::preset::document_preset_bytes(
             "Base Test",
-            &RenderVariant::WebShapeV1 {
-                settings: Box::new(shape.clone()),
-            },
+            &document,
+            toniator::preset::PresetScope::CompleteWorkflow,
         )
         .unwrap();
         let parsed = toniator::preset::parse_treatment(&bytes, (900, 600)).unwrap();
+        let rendered = parsed
+            .candidate_for(&Document::new(SourceArtwork {
+                name: "target".into(),
+                media_type: "application/octet-stream".into(),
+                bytes: Arc::from([1]),
+            }))
+            .unwrap()
+            .render;
         shape.output_height = 600;
         assert_eq!(
-            parsed.render,
+            rendered,
             RenderVariant::WebShapeV1 {
                 settings: Box::new(shape)
             }
@@ -11836,57 +12275,48 @@ mod tests {
     }
 
     #[test]
-    fn source_mapping_names_hints_and_enum_indices_are_one_table_order() {
-        let expected = [
-            ValueMode::Cmyk,
-            ValueMode::SingleChannel,
-            ValueMode::Luminance,
-            ValueMode::CrosshatchLuminance,
-        ];
-        for index in 0..4 {
-            assert_eq!(
-                source_mapping_from_index(index),
-                Some(expected[index as usize])
-            );
-            assert!(
-                !SOURCE_MAPPING_OPTIONS[index as usize]
-                    .description
-                    .is_empty()
-            );
-        }
-        assert_eq!(source_mapping_from_index(4), Some(ValueMode::Rgb));
+    fn semantic_artwork_controls_use_stable_labels_and_legacy_cli_mapping_only() {
         assert_eq!(
-            SOURCE_MAPPING_OPTIONS.map(|option| option.name),
+            artwork_source_labels(false),
             [
-                "Color → CMYK Inks",
-                "Brightness → One Ink",
-                "Brightness → All Inks",
-                "Brightness → Crosshatch",
-                "RGB Color → Screen",
+                "Full Color",
+                "Red",
+                "Green",
+                "Blue",
+                "Value",
+                "Perceptual Lightness",
+                "Alpha"
             ]
         );
         assert_eq!(
-            source_mapping_names(OutputMode::RgbScreen),
-            [
-                "Color → CMYK Inks",
-                "Brightness → One Channel",
-                "Brightness → All Channels",
-                "Brightness → Crosshatch",
-                "RGB Color → Screen",
-            ]
+            source_alpha_labels(false),
+            ["Preserve Source Alpha", "Ignore Source Alpha"]
         );
         assert_eq!(
-            source_mapping_names(OutputMode::CmykInks),
-            SOURCE_MAPPING_OPTIONS.map(|option| option.name)
+            channel_assignment_labels(true, OutputModel::CmykPrint),
+            ["Automatic CMYK Separation"]
         );
-        let user_facing = SOURCE_MAPPING_OPTIONS
-            .iter()
-            .flat_map(|option| [option.name, option.description])
-            .collect::<Vec<_>>()
-            .join(" ");
-        assert!(!user_facing.contains("Value →"));
-        assert!(user_facing.contains("brightness"));
-        assert!(SOURCE_MAPPING_OPTIONS[3].description.contains("K +45°"));
+        assert_eq!(
+            channel_assignment_labels(false, OutputModel::CmykPrint),
+            ["Apply To Active Channel", "Apply To All Channels"]
+        );
+        assert_eq!(
+            artwork_source_guidance(ArtworkSource::Value),
+            "Use the strongest RGB component (HSV value semantics) as sampled content."
+        );
+        assert_eq!(
+            artwork_source_guidance(ArtworkSource::PerceptualLightness),
+            "Use OKLab L for perceptual lightness as sampled content."
+        );
+        assert_eq!(
+            output_channel_labels(OutputModel::RgbScreen),
+            ["Red", "Green", "Blue"]
+        );
+        assert_eq!(
+            source_mapping_from_index(3),
+            Some(ValueMode::CrosshatchLuminance)
+        );
+        assert_eq!(source_mapping_from_index(5), None);
     }
 
     #[test]
@@ -11952,10 +12382,626 @@ mod tests {
             layer_terminology(true, false),
             ("Adjust Channel", "Visible RGB Channels")
         );
-        assert_eq!(visible_ink_for_slot(0, true, false), Ink::Red);
-        assert_eq!(visible_ink_for_slot(2, true, false), Ink::Blue);
-        assert_eq!(output_ink_for_slot(1, true), Some(Ink::Green));
-        assert_eq!(output_ink_for_slot(3, true), None);
+        assert_eq!(visible_ink_for_slot(0, true, false), Some(Ink::Red));
+        assert_eq!(visible_ink_for_slot(2, true, false), Some(Ink::Blue));
+    }
+
+    #[test]
+    fn shape_channel_slots_reject_invalid_dropdown_positions_without_fallback() {
+        assert_eq!(visible_ink_for_slot(3, true, false), None);
+        assert_eq!(visible_ink_for_slot(usize::MAX, true, false), None);
+        assert_eq!(
+            web_inks_for_target(gtk::INVALID_LIST_POSITION, true, false),
+            None
+        );
+        assert_eq!(web_inks_for_target(4, true, false), None);
+        assert_eq!(web_inks_for_target(0, true, false), Some(Ink::RGB.to_vec()));
+        assert_eq!(web_inks_for_target(2, true, false), Some(vec![Ink::Green]));
+
+        assert_eq!(visible_ink_for_slot(0, false, false), Some(Ink::Cyan));
+        assert_eq!(visible_ink_for_slot(3, false, false), Some(Ink::Black));
+        assert_eq!(visible_ink_for_slot(4, false, false), None);
+        assert_eq!(visible_ink_for_slot(usize::MAX, false, false), None);
+        assert_eq!(
+            web_inks_for_target(gtk::INVALID_LIST_POSITION, false, false),
+            None
+        );
+        assert_eq!(web_inks_for_target(5, false, false), None);
+        assert_eq!(web_inks_for_target(4, false, false), Some(vec![Ink::Black]));
+    }
+
+    fn verify_realized_dropdown_sync_keeps_the_live_model_and_valid_selection() {
+        let dropdown =
+            gtk::DropDown::from_strings(&["All Inks", "Cyan", "Magenta", "Yellow", "Black"]);
+        let model = dropdown.model().unwrap();
+        dropdown.set_selected(4);
+
+        // A normal control resync must not replace the model beneath GTK's
+        // selected-notify/list-view activation path.
+        sync_dropdown_strings(
+            &dropdown,
+            &["All Inks", "Cyan", "Magenta", "Yellow", "Black"],
+        );
+        assert_eq!(dropdown.model().unwrap(), model);
+        assert_eq!(dropdown.selected(), 4);
+
+        // CMYK -> RGB changes the effective items in place and clamps K to a
+        // real RGB channel instead of leaving INVALID_LIST_POSITION behind.
+        sync_dropdown_strings(&dropdown, &["All Channels", "Red", "Green", "Blue"]);
+        assert_eq!(dropdown.model().unwrap(), model);
+        assert_eq!(dropdown.selected(), 3);
+        assert_eq!(
+            web_inks_for_target(dropdown.selected(), true, false),
+            Some(vec![Ink::Blue])
+        );
+
+        assert_eq!(
+            web_inks_for_target(gtk::INVALID_LIST_POSITION, true, false),
+            None
+        );
+        eprintln!(
+            "realized GTK DropDown sync retained its StringList across CMYK/RGB changes, clamped K to Blue, and rejected INVALID_LIST_POSITION without an all-channels fallback"
+        );
+    }
+
+    fn drain_ui_callbacks() {
+        for _ in 0..32 {
+            if !glib::MainContext::default().iteration(false) {
+                break;
+            }
+        }
+    }
+
+    fn verify_realized_semantic_pipeline_callbacks() {
+        let application = adw::Application::builder()
+            .application_id("dev.toniator.semantic-pipeline-regression")
+            .build();
+        application.register(None::<&gio::Cancellable>).unwrap();
+        let ui = AppUi::new(
+            &application,
+            CliOptions {
+                demo: true,
+                artifact_window_size: Some((900, 680)),
+                ..CliOptions::default()
+            },
+        );
+        ui.window.present();
+        drain_ui_callbacks();
+        ui.activate_shape_treatment();
+        drain_ui_callbacks();
+
+        let source_model = ui.artwork_source.model().unwrap();
+        let active_model = ui.active_channel.model().unwrap();
+        assert!(!ui.state.borrow().syncing_controls);
+        assert!(!ui.channel_assignment.is_sensitive());
+        assert_eq!(
+            ui.channel_assignment_note.text(),
+            "Automatic CMYK Separation derives cyan, magenta, yellow, and black inks."
+        );
+        for source in 0..7 {
+            ui.artwork_source.set_selected(source);
+            drain_ui_callbacks();
+            assert_eq!(ui.artwork_source.selected(), source);
+            let pipeline = ui
+                .state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .artwork_pipeline
+                .clone();
+            assert_eq!(pipeline.source, artwork_source_from_index(source).unwrap());
+            if source == 0 {
+                assert!(matches!(
+                    pipeline.assignment,
+                    ChannelAssignment::Automatic { .. }
+                ));
+            } else {
+                assert!(matches!(
+                    pipeline.assignment,
+                    ChannelAssignment::AllChannels
+                ));
+            }
+            if source == 6 {
+                assert!(!ui.source_alpha_row.is_visible());
+                assert!(ui.source_alpha_note.is_visible());
+                assert_eq!(
+                    ui.source_alpha_note.text(),
+                    "Alpha is the source; source alpha is not applied again."
+                );
+            }
+        }
+        assert_eq!(ui.artwork_source.model().unwrap(), source_model);
+
+        ui.channel_assignment.set_selected(0);
+        drain_ui_callbacks();
+        ui.active_channel.set_selected(3);
+        drain_ui_callbacks();
+        assert_eq!(
+            ui.state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .artwork_pipeline
+                .active_channel,
+            Some(OutputChannelId::CmykBlack)
+        );
+        ui.active_channel.set_selected(gtk::INVALID_LIST_POSITION);
+        drain_ui_callbacks();
+        assert_eq!(
+            ui.state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .artwork_pipeline
+                .active_channel,
+            Some(OutputChannelId::CmykBlack)
+        );
+
+        for output in [
+            OutputMode::RgbScreen,
+            OutputMode::CmykInks,
+            OutputMode::RgbScreen,
+            OutputMode::CmykInks,
+            OutputMode::RgbScreen,
+        ] {
+            ui.output_mode
+                .set_selected((output == OutputMode::RgbScreen) as u32);
+            drain_ui_callbacks();
+            assert_eq!(
+                ui.state
+                    .borrow()
+                    .editor
+                    .as_ref()
+                    .unwrap()
+                    .document()
+                    .output_mode,
+                output
+            );
+            assert_eq!(ui.active_channel.model().unwrap(), active_model);
+        }
+        assert_eq!(ui.active_channel.model().unwrap().n_items(), 3);
+        ui.artwork_source.set_selected(0);
+        drain_ui_callbacks();
+        assert!(!ui.channel_assignment.is_sensitive());
+        assert_eq!(
+            ui.channel_assignment_note.text(),
+            "Direct RGB Channels map encoded red, green, and blue components."
+        );
+        ui.artwork_source.set_selected(4);
+        drain_ui_callbacks();
+        ui.source_alpha.set_selected(1);
+        drain_ui_callbacks();
+        assert_eq!(
+            ui.state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .artwork_pipeline
+                .alpha_policy,
+            SourceAlphaPolicy::Ignore
+        );
+        ui.channel_assignment.set_selected(0);
+        drain_ui_callbacks();
+        ui.active_channel.set_selected(2);
+        drain_ui_callbacks();
+        assert_eq!(
+            ui.state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .artwork_pipeline
+                .active_channel,
+            Some(OutputChannelId::RgbBlue)
+        );
+        ui.artwork_source.set_selected(6);
+        drain_ui_callbacks();
+        assert!(!ui.source_alpha.is_sensitive());
+
+        ui.crosshatch_action.emit_clicked();
+        drain_ui_callbacks();
+        let pipeline = ui
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .unwrap()
+            .document()
+            .artwork_pipeline
+            .clone();
+        assert!(matches!(
+            pipeline.assignment,
+            ChannelAssignment::LegacyCompatibility(_)
+        ));
+        assert_eq!(pipeline.output_model, OutputModel::RgbScreen);
+        assert!(matches!(
+            ui.state.borrow().editor.as_ref().unwrap().document().render,
+            RenderVariant::WebCurveV1 { .. }
+        ));
+        assert_eq!(
+            ui.crosshatch_note.text(),
+            "Legacy Crosshatch is active in Curves. Exit restores ordinary Curves."
+        );
+        ui.crosshatch_action.emit_clicked();
+        drain_ui_callbacks();
+        let pipeline = ui
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .unwrap()
+            .document()
+            .artwork_pipeline
+            .clone();
+        assert_eq!(pipeline.output_model, OutputModel::RgbScreen);
+        assert_eq!(pipeline.source, ArtworkSource::Value);
+        assert!(matches!(
+            pipeline.assignment,
+            ChannelAssignment::AllChannels
+        ));
+        assert_eq!(
+            ui.crosshatch_note.text(),
+            "Legacy Crosshatch temporarily switches to Curves. Exit restores ordinary Curves."
+        );
+        ui.window.close();
+    }
+
+    // Superseded by the semantic-pipeline selector regression below.  Keep
+    // the historic fixture out of the test build while its compatibility
+    // artifact vocabulary remains available only through the CLI adapter.
+    #[cfg(any())]
+    fn assert_selector_state(ui: &AppUi, output: OutputMode, curve: bool) {
+        let state = ui.state.borrow();
+        assert!(!state.syncing_controls);
+        let editor = state
+            .editor
+            .as_ref()
+            .expect("realized fixture has a document");
+        assert_eq!(editor.document().output_mode, output);
+        let expected_render = if curve {
+            matches!(editor.document().render, RenderVariant::WebCurveV1 { .. })
+        } else {
+            matches!(editor.document().render, RenderVariant::WebShapeV1 { .. })
+        };
+        assert!(
+            expected_render,
+            "expected {} render, got {:?}",
+            if curve { "Curves" } else { "Shapes" },
+            editor.document().render
+        );
+        let crosshatch = matches!(
+            &editor.document().render,
+            RenderVariant::WebCurveV1 { settings }
+                if settings.value_mode == ValueMode::CrosshatchLuminance
+        ) || matches!(
+            &editor.document().render,
+            RenderVariant::WebShapeV1 { settings }
+                if settings.value_mode == ValueMode::CrosshatchLuminance
+        );
+        drop(state);
+        let target_count = if output == OutputMode::RgbScreen && !crosshatch {
+            4
+        } else {
+            5
+        };
+        let output_count = if output == OutputMode::RgbScreen {
+            3
+        } else {
+            4
+        };
+        let (target, output_control, visible) = if curve {
+            (&ui.curve_target, &ui.curve_output_ink, &ui.curve_visible)
+        } else {
+            (&ui.web_target, &ui.web_output_ink, &ui.web_visible)
+        };
+        assert_eq!(target.model().unwrap().n_items(), target_count);
+        assert_eq!(output_control.model().unwrap().n_items(), output_count);
+        assert!(target.selected() < target_count);
+        if output == OutputMode::RgbScreen && !crosshatch {
+            assert!(!visible[3].is_visible());
+        }
+    }
+
+    #[cfg(any())]
+    fn verify_realized_appui_selector_callbacks() {
+        let application = adw::Application::builder()
+            .application_id("dev.toniator.selector-regression")
+            .build();
+        application.register(None::<&gio::Cancellable>).unwrap();
+        let ui = AppUi::new(
+            &application,
+            CliOptions {
+                demo: true,
+                artifact_window_size: Some((900, 680)),
+                ..CliOptions::default()
+            },
+        );
+        ui.window.present();
+        drain_ui_callbacks();
+        ui.activate_shape_treatment();
+        drain_ui_callbacks();
+        assert_selector_state(&ui, OutputMode::CmykInks, false);
+
+        // UI synchronization is a read-only projection of the semantic
+        // pipeline, even if a temporary renderer facade is contradictory.
+        let mut contradictory = ui
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .unwrap()
+            .document()
+            .clone();
+        contradictory
+            .apply_legacy_mapping_action(ValueMode::SingleChannel)
+            .unwrap();
+        contradictory
+            .select_active_output_channel(toniator::artwork_pipeline::OutputChannelId::CmykBlack)
+            .unwrap();
+        contradictory.output_mode = OutputMode::RgbScreen;
+        let RenderVariant::WebShapeV1 { settings } = &mut contradictory.render else {
+            panic!("realized fixture is Shapes")
+        };
+        settings.value_mode = ValueMode::Rgb;
+        settings.single_channel = Ink::Red;
+        ui.state.borrow_mut().editor = Some(DocumentEditor::new(contradictory));
+        ui.sync_controls();
+        assert_eq!(ui.output_mode.selected(), 0);
+        assert_eq!(ui.web_value_mode.selected(), 1);
+        assert_eq!(ui.web_output_ink.selected(), 3);
+        assert_eq!(
+            ui.state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .artwork_pipeline
+                .active_channel,
+            Some(toniator::artwork_pipeline::OutputChannelId::CmykBlack)
+        );
+        let mut canonical = ui
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .unwrap()
+            .document()
+            .clone();
+        canonical.sync_legacy_projection().unwrap();
+        ui.state.borrow_mut().editor = Some(DocumentEditor::new(canonical));
+        ui.sync_controls();
+
+        for selected in [0, 1, 0, 1] {
+            ui.preview_surface.set_selected(selected);
+            ui.export_background.set_selected(selected);
+            drain_ui_callbacks();
+            let appearance = ui
+                .state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .appearance;
+            assert_eq!(
+                matches!(appearance.preview_surface, PreviewSurface::Color { .. }),
+                selected == 1
+            );
+            assert_eq!(
+                matches!(appearance.export_background, ExportBackground::Color { .. }),
+                selected == 1
+            );
+        }
+
+        // Repeat the output transition while the real selected-notify handler
+        // defers its model synchronization to the idle queue.
+        for output in [
+            OutputMode::RgbScreen,
+            OutputMode::CmykInks,
+            OutputMode::RgbScreen,
+            OutputMode::CmykInks,
+            OutputMode::RgbScreen,
+        ] {
+            ui.output_mode
+                .set_selected((output == OutputMode::RgbScreen) as u32);
+            drain_ui_callbacks();
+            assert_selector_state(&ui, output, false);
+        }
+
+        // Shapes: every mapping, output channel, target, and mark choice uses
+        // the production selected-notify callbacks.
+        for mapping in [0, 1, 2, 4] {
+            ui.web_value_mode.set_selected(mapping);
+            drain_ui_callbacks();
+            assert_selector_state(
+                &ui,
+                if mapping == 4 {
+                    OutputMode::RgbScreen
+                } else {
+                    OutputMode::CmykInks
+                },
+                false,
+            );
+        }
+        // The Shapes mapping's Crosshatch entry transitions to the production
+        // curve-based hatch treatment. Exercise every layer target after that
+        // transition, including the deferred target selected-notify sync.
+        ui.web_value_mode.set_selected(3);
+        drain_ui_callbacks();
+        assert_selector_state(&ui, OutputMode::RgbScreen, true);
+        for target in 0..ui.curve_target.model().unwrap().n_items() {
+            ui.curve_target.set_selected(target);
+            drain_ui_callbacks();
+            assert_eq!(
+                ui.selected_curve_inks(),
+                web_inks_for_target(ui.curve_target.selected(), false, true)
+            );
+        }
+        ui.dots.set_active(true);
+        drain_ui_callbacks();
+        ui.web_value_mode.set_selected(4);
+        drain_ui_callbacks();
+        for target in 0..ui.web_target.model().unwrap().n_items() {
+            ui.web_target.set_selected(target);
+            drain_ui_callbacks();
+            assert_eq!(
+                ui.selected_web_inks(),
+                web_inks_for_target(target, true, false)
+            );
+        }
+        ui.web_value_mode.set_selected(1);
+        drain_ui_callbacks();
+        for channel in 0..ui.web_output_ink.model().unwrap().n_items() {
+            ui.web_output_ink.set_selected(channel);
+            drain_ui_callbacks();
+            let state = ui.state.borrow();
+            let editor = state.editor.as_ref().unwrap();
+            let RenderVariant::WebShapeV1 { settings } = &editor.document().render else {
+                panic!("Shapes output selector changed treatment");
+            };
+            assert_eq!(
+                settings.single_channel,
+                output_ink_for_slot(channel, true).unwrap()
+            );
+        }
+        for mark in 0..ui.web_shape.model().unwrap().n_items() {
+            ui.web_shape.set_selected(mark);
+            drain_ui_callbacks();
+            let expected = match mark {
+                0 => WebShape::Circle,
+                1 => WebShape::RegularPolygon,
+                2 => WebShape::UserDefined,
+                _ => continue,
+            };
+            let state = ui.state.borrow();
+            let editor = state.editor.as_ref().unwrap();
+            let RenderVariant::WebShapeV1 { settings } = &editor.document().render else {
+                panic!("Shapes mark selector changed treatment");
+            };
+            if settings.use_shared_mark {
+                assert_eq!(settings.shared_shape, expected);
+            } else {
+                for ink in ui.selected_web_inks().unwrap() {
+                    assert_eq!(settings.channels.get(ink).shape, expected);
+                }
+            }
+        }
+        for button in &ui.web_visible[..3] {
+            button.set_active(!button.is_active());
+            button.set_active(!button.is_active());
+        }
+        drain_ui_callbacks();
+        ui.web_value_mode.set_selected(0);
+        drain_ui_callbacks();
+        ui.web_value_mode.set_selected(4);
+        drain_ui_callbacks();
+        assert_selector_state(&ui, OutputMode::RgbScreen, false);
+
+        // Curves repeats the same lifecycle, including layout/profile selectors
+        // and all valid active channel positions.
+        ui.curves.set_active(true);
+        drain_ui_callbacks();
+        assert_selector_state(&ui, OutputMode::RgbScreen, true);
+        for mapping in 0..5 {
+            ui.curve_value_mode.set_selected(mapping);
+            drain_ui_callbacks();
+            assert_selector_state(
+                &ui,
+                if mapping == 4 {
+                    OutputMode::RgbScreen
+                } else {
+                    OutputMode::CmykInks
+                },
+                true,
+            );
+        }
+        ui.curve_value_mode.set_selected(4);
+        drain_ui_callbacks();
+        for target in 0..ui.curve_target.model().unwrap().n_items() {
+            ui.curve_target.set_selected(target);
+            drain_ui_callbacks();
+            assert_eq!(
+                ui.selected_curve_inks(),
+                web_inks_for_target(target, true, false)
+            );
+        }
+        ui.curve_value_mode.set_selected(1);
+        drain_ui_callbacks();
+        for channel in 0..ui.curve_output_ink.model().unwrap().n_items() {
+            ui.curve_output_ink.set_selected(channel);
+            drain_ui_callbacks();
+            let state = ui.state.borrow();
+            let editor = state.editor.as_ref().unwrap();
+            let RenderVariant::WebCurveV1 { settings } = &editor.document().render else {
+                panic!("Curves output selector changed treatment");
+            };
+            assert_eq!(
+                settings.single_channel,
+                output_ink_for_slot(channel, true).unwrap()
+            );
+        }
+        for layout in 0..2 {
+            ui.curve_layout.set_selected(layout);
+            drain_ui_callbacks();
+            let state = ui.state.borrow();
+            let editor = state.editor.as_ref().unwrap();
+            let RenderVariant::WebCurveV1 { settings } = &editor.document().render else {
+                panic!("Curves layout selector changed treatment");
+            };
+            assert_eq!(
+                settings.layout,
+                if layout == 1 {
+                    CurveLayout::MotifPattern
+                } else {
+                    CurveLayout::FullWidth
+                }
+            );
+        }
+        for profile in 0..3 {
+            ui.curve_profile.set_selected(profile);
+            drain_ui_callbacks();
+            let expected = match profile {
+                0 => CurvePath::straight(),
+                1 => CurvePath::soft_wave(),
+                2 => CurvePath::deep_wave(),
+                _ => unreachable!(),
+            };
+            let state = ui.state.borrow();
+            let editor = state.editor.as_ref().unwrap();
+            let RenderVariant::WebCurveV1 { settings } = &editor.document().render else {
+                panic!("Curves profile selector changed treatment");
+            };
+            assert_eq!(settings.shared_path, expected);
+        }
+        for button in &ui.curve_visible[..3] {
+            button.set_active(!button.is_active());
+            button.set_active(!button.is_active());
+        }
+        drain_ui_callbacks();
+        assert_selector_state(&ui, OutputMode::RgbScreen, true);
+
+        // Return through CMYK and Shapes, which proves repeated treatment and
+        // list synchronization remains stable after both selector families.
+        ui.output_mode.set_selected(0);
+        drain_ui_callbacks();
+        ui.dots.set_active(true);
+        drain_ui_callbacks();
+        assert_selector_state(&ui, OutputMode::CmykInks, false);
+        assert_eq!(ui.web_target.model().unwrap().n_items(), 5);
+        eprintln!(
+            "realized AppUi selector regression exercised repeated output/treatment switches, all mapping, target/output, mark, curve layout/profile, visibility, and appearance DropDown callbacks without a RefCell conflict"
+        );
+        ui.window.close();
     }
 
     #[test]
@@ -11969,10 +13015,6 @@ mod tests {
             (Ink::Yellow, 90.0),
         ] {
             assert_eq!(settings.channels.get(ink).grid_rotation, angle);
-        }
-        let description = SOURCE_MAPPING_OPTIONS[3].description;
-        for expected in ["K +45°", "C -45°", "M horizontal", "Y vertical"] {
-            assert!(description.contains(expected));
         }
     }
 
@@ -11996,6 +13038,9 @@ mod tests {
         document.render = RenderVariant::WebCurveV1 {
             settings: Box::new(settings.clone()),
         };
+        document
+            .apply_legacy_mapping_action(ValueMode::CrosshatchLuminance)
+            .unwrap();
         let mut editor = DocumentEditor::new(document);
         reset_crosshatch_curve_path(&mut settings, &[Ink::Black]);
         assert!(editor.set_render_variant(RenderVariant::WebCurveV1 {
@@ -12016,6 +13061,7 @@ mod tests {
         ));
     }
 
+    #[cfg(any())]
     #[test]
     fn source_mapping_embedded_svg_pairs_parse_render_and_match_the_table() {
         assert!(std::ptr::eq(

@@ -1,11 +1,15 @@
 use crate::CancellationToken;
+use crate::artwork_pipeline::{ArtworkPipelineSettings, OutputChannelId, PreparedSource};
 use crate::model::{
     AlternateTileTransform, CurveLayout, CurvePath, CurvePoint, Ink, MotifCoverage, OutputMode,
-    ValueMode, WebCurveChannel, WebCurveSettings, parse_hex_color,
+    WebCurveChannel, WebCurveSettings, parse_hex_color,
 };
-use crate::render::{Channel, InkLayer, calculate_web_grid, map_web_pixel, map_web_threshold};
+use crate::render::{
+    Channel, InkLayer, calculate_web_grid, legacy_pipeline_from_facade, map_web_threshold,
+};
 use anyhow::{Context, Result};
 use image::RgbaImage;
+use std::collections::HashMap;
 use tiny_skia::{BlendMode, Color, FillRule, Paint, PathBuilder, Pixmap, Transform};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -56,6 +60,8 @@ pub fn generate_curve_geometry_cancellable(
     settings: &WebCurveSettings,
     token: &CancellationToken,
 ) -> Result<CurveGeometry> {
+    // Compatibility adapter for callers that still supply the legacy facade.
+    // Document rendering uses `generate_curve_geometry_for_pipeline` instead.
     generate_curve_geometry_for_output_mode(source, settings, OutputMode::CmykInks, token)
 }
 
@@ -65,22 +71,37 @@ pub(crate) fn generate_curve_geometry_for_output_mode(
     output_mode: OutputMode,
     token: &CancellationToken,
 ) -> Result<CurveGeometry> {
-    let ink_order: Vec<Ink> = if settings.value_mode == ValueMode::CrosshatchLuminance {
-        [Ink::Black, Ink::Cyan, Ink::Magenta, Ink::Yellow].to_vec()
-    } else if output_mode == OutputMode::RgbScreen || settings.value_mode == ValueMode::Rgb {
-        Ink::RGB.to_vec()
+    let prepared = PreparedSource::from_rgba_image(source, 0);
+    let pipeline =
+        legacy_pipeline_from_facade(settings.value_mode, output_mode, settings.single_channel);
+    generate_curve_geometry_for_pipeline(&prepared, settings, &pipeline, token)
+}
+
+pub(crate) fn generate_curve_geometry_for_pipeline(
+    prepared: &PreparedSource,
+    settings: &WebCurveSettings,
+    pipeline: &ArtworkPipelineSettings,
+    token: &CancellationToken,
+) -> Result<CurveGeometry> {
+    let output_channels = if matches!(
+        pipeline.assignment,
+        crate::artwork_pipeline::ChannelAssignment::LegacyCompatibility(_)
+    ) {
+        OutputChannelId::CMYK.to_vec()
     } else {
-        Ink::ALL.to_vec()
+        pipeline.output_model.channels().to_vec()
     };
-    let enabled: Vec<Ink> = ink_order
+    let enabled: Vec<OutputChannelId> = output_channels
         .iter()
         .copied()
-        .filter(|ink| settings.channels.get(*ink).enabled)
+        .filter(|channel| settings.channels.get(channel.to_legacy_ink()).enabled)
         .collect();
     let mut layers = Vec::new();
+    let mut field_cache = HashMap::new();
 
-    for ink in ink_order {
+    for channel_id in output_channels {
         token.checkpoint()?;
+        let ink = channel_id.to_legacy_ink();
         let channel = settings.channels.get(ink);
         if !channel.enabled {
             continue;
@@ -93,8 +114,18 @@ pub(crate) fn generate_curve_geometry_for_output_mode(
             settings.output_height,
             long_edge_cells,
         );
-        let samples =
-            crate::render::sample_web_image_cancellable(source, grid.cols, grid.rows, token)?;
+        let fields = crate::render::cached_resolved_fields(
+            &mut field_cache,
+            prepared,
+            pipeline,
+            grid.cols,
+            grid.rows,
+            &enabled,
+            token,
+        )?;
+        let Some(field) = fields.field(channel_id) else {
+            continue;
+        };
         let path = if settings.use_shared_curve {
             &settings.shared_path
         } else {
@@ -138,9 +169,7 @@ pub(crate) fn generate_curve_geometry_for_output_mode(
                 .map(|point| VariablePoint {
                     x: point.x,
                     y: point.y,
-                    width: curve_width_at_point(
-                        point, ink, &samples, &grid, settings, channel, &enabled,
-                    ),
+                    width: curve_width_at_point(point, field, &grid, settings, channel),
                 })
                 .collect();
             if settings.use_shared_curve && settings.shared_close_ends
@@ -169,7 +198,10 @@ pub(crate) fn generate_curve_geometry_for_output_mode(
                 });
             }
         }
-        let output_color = if settings.value_mode == crate::model::ValueMode::CrosshatchLuminance {
+        let output_color = if matches!(
+            pipeline.assignment,
+            crate::artwork_pipeline::ChannelAssignment::LegacyCompatibility(_)
+        ) {
             &settings.crosshatch_color
         } else {
             &channel.color
@@ -900,12 +932,10 @@ fn curve_grid_transform(
 #[allow(clippy::too_many_arguments)]
 fn curve_width_at_point(
     point: CurvePoint,
-    ink: Ink,
-    samples: &[[u8; 4]],
+    field: &crate::artwork_pipeline::ResolvedChannelField,
     grid: &crate::render::WebGrid,
     settings: &WebCurveSettings,
     channel: &WebCurveChannel,
-    enabled: &[Ink],
 ) -> f64 {
     let x = point.x / grid.cell_width - 0.5;
     let y = point.y / grid.cell_height - 0.5;
@@ -916,46 +946,10 @@ fn curve_width_at_point(
     let mut rows = [0.0; 4];
     for row_offset in -1..=2 {
         let values = [
-            raw_value(
-                x0 - 1,
-                y0 + row_offset,
-                ink,
-                samples,
-                grid,
-                settings.value_mode,
-                settings.single_channel,
-                enabled,
-            ),
-            raw_value(
-                x0,
-                y0 + row_offset,
-                ink,
-                samples,
-                grid,
-                settings.value_mode,
-                settings.single_channel,
-                enabled,
-            ),
-            raw_value(
-                x0 + 1,
-                y0 + row_offset,
-                ink,
-                samples,
-                grid,
-                settings.value_mode,
-                settings.single_channel,
-                enabled,
-            ),
-            raw_value(
-                x0 + 2,
-                y0 + row_offset,
-                ink,
-                samples,
-                grid,
-                settings.value_mode,
-                settings.single_channel,
-                enabled,
-            ),
+            raw_value(x0 - 1, y0 + row_offset, field, grid),
+            raw_value(x0, y0 + row_offset, field, grid),
+            raw_value(x0 + 1, y0 + row_offset, field, grid),
+            raw_value(x0 + 2, y0 + row_offset, field, grid),
         ];
         rows[(row_offset + 1) as usize] = cubic_interpolate(values, tx);
     }
@@ -976,30 +970,12 @@ fn curve_width_at_point(
 fn raw_value(
     col: i32,
     row: i32,
-    ink: Ink,
-    samples: &[[u8; 4]],
+    field: &crate::artwork_pipeline::ResolvedChannelField,
     grid: &crate::render::WebGrid,
-    mode: ValueMode,
-    single: Ink,
-    enabled: &[Ink],
 ) -> f64 {
     let col = col.clamp(0, grid.cols as i32 - 1) as u32;
     let row = row.clamp(0, grid.rows as i32 - 1) as u32;
-    let values = map_web_pixel(
-        samples[(row * grid.cols + col) as usize],
-        mode,
-        single,
-        enabled,
-    );
-    values[match ink {
-        Ink::Cyan => 0,
-        Ink::Magenta => 1,
-        Ink::Yellow => 2,
-        Ink::Black => 3,
-        Ink::Red => 0,
-        Ink::Green => 1,
-        Ink::Blue => 2,
-    }]
+    field.value_at((row * grid.cols + col) as usize)
 }
 
 fn cubic_interpolate(points: [f64; 4], amount: f64) -> f64 {
@@ -1458,6 +1434,7 @@ fn number(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::ValueMode;
 
     #[test]
     fn equal_arc_sampling_preserves_curve_endpoints() {
