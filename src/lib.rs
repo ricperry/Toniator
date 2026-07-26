@@ -9,19 +9,17 @@ pub mod svg_export;
 
 pub use artwork_pipeline::{
     ArtworkPipelineSettings, ArtworkSource, AutomaticSeparationStrategy, ChannelAssignment,
-    LegacyBrightnessKind, LegacyCompatibilityAssignment, LegacyPipelineConversion,
-    LegacyPipelineConversionError, LegacyPipelineSnapshot, LegacyProjectionError,
-    LegacyScalarTarget, LegacySlotError, LegacySnapshotOrigin, LegacyTreatmentKind,
+    LegacyBrightnessKind, LegacyCompatibilityAssignment, LegacyProjectionError,
     LegacyValueModeProjection, OutputChannelId, OutputModel, PipelineStateError, SourceAlphaPolicy,
-    UnknownStableIdError, pipeline_from_legacy, project_legacy_value_mode,
+    UnknownStableIdError, project_legacy_value_mode,
 };
 pub use cancel::{CancellationToken, OperationCancelled};
 pub use model::{
     AlternateTileTransform, CubicCurveSegment, CurveLayout, CurvePath, CurvePoint, Document,
     DocumentAppearance, DocumentEditor, ExportBackground, Ink, MotifCoverage, OutputMode,
     PreviewSurface, RenderVariant, RgbaColor, Settings, SourceArtwork, Treatment, ValueMode,
-    ValueModeOutputMode, WebCurveChannel, WebCurveChannels, WebCurveSettings, WebShape,
-    WebShapeChannel, WebShapeChannels, WebShapeDeltas, WebShapeSettings,
+    WebCurveChannel, WebCurveChannels, WebCurveSettings, WebShape, WebShapeChannel,
+    WebShapeChannels, WebShapeDeltas, WebShapeSettings,
 };
 pub use persistence::{
     atomic_write_cancellable, load_document, save_document_atomic, save_document_atomic_cancellable,

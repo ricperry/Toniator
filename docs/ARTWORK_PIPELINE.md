@@ -8,13 +8,11 @@
 
 **Audience:** Toniator maintainers, Codex agents, reviewers, and future contributors
 
-> **Stage 1A implementation note (2026-07-21):** the independent vocabulary
-> and migration-bounded adapters now live in `src/artwork_pipeline.rs`. They
-> are not yet authoritative `Document` state, serialized state, GTK state, or
-> renderer input. Stage 1A deliberately supersedes this document's earlier
-> unshipped `encoded_rec709_luma_darkness_v1` compatibility spelling with the
-> canonical ID `source.legacy_brightness.encoded_rec709_inverted_v1`. The
-> semantic formula remains the audited inverted encoded Rec.709 luma.
+> **Pre-1.0 format policy (2026-07-22):** Toniator currently accepts only
+> document schema v6 and preset schema v3. Earlier experimental formats are
+> intentionally unsupported and reject without mutation; they are not migrated.
+> `Document.artwork_pipeline` is the semantic authority. The older combined
+> output/mapping/channel fields are a temporary renderer and GTK projection only.
 
 ---
 
@@ -41,6 +39,57 @@ The architecture must support the current CMYK and RGB workflows while providing
 - TON-009 DTF output treatment.
 
 This document is normative for new design work unless a later architecture decision explicitly supersedes part of it.
+
+## Current persistence and authority contract
+
+**Toniator project and preset formats are unstable before version 1.0. Backward
+compatibility is not guaranteed for pre-release files. The first compatibility
+baseline will be established at the 1.0 release.** Historical migration sections
+below are superseded investigation history, not supported load requirements.
+
+### Current project schema: v6
+
+A saved project has `format: "toniator-project"`, `version: 6`, normal document
+state, and a required `artwork_pipeline` object. The pipeline stores stable
+dotted IDs for `source`, `alpha_policy`, `output_model`, `assignment`, optional
+`assignment_payload`, and optional `active_channel`. Unknown IDs, inconsistent
+assignment payloads, or an active channel outside its output model are invalid.
+
+`artwork_pipeline` is authoritative. Active renderer settings, `output_mode`,
+and the GTK combined Artwork Mapping control are compatibility projections. The
+render and export entry points create a projected read-only document; they do
+not infer pipeline state from renderer fields.
+
+Saved Shapes and Curves are each paired with a pipeline snapshot. Inactive CMYK
+and RGB caches retain their complete treatment plus its pipeline snapshot. A
+missing partner is invalid: current files never reconstruct a snapshot from a
+legacy render field.
+
+### Current treatment preset schema: v3
+
+A preset has `format: "toniator-preset"`, `version: 3`, `name`, `render`, and a
+required `artwork_pipeline`; `settings` is optional for native treatments. The
+same stable-ID and pipeline validation applies. The parser normalizes canvas
+dimensions for the receiving artwork, then rebuilds only the temporary render
+facade from the semantic pipeline before renderer validation.
+
+Bundled current presets are:
+
+- `Chunky Fingerprints.tntr`
+- `ComicBook.tntr`
+- `Skinny Curve.tntr`
+- `Tiled Stacked Motif Stress Test.tntr`
+
+### Atomic edits and adapter retirement
+
+Output changes, mapping changes, active-channel changes, treatment swaps, and
+undo/redo are single document edits. They preserve or restore the corresponding
+semantic pipeline with the active/saved/inactive render state. The temporary
+adapter is limited to projecting a valid pipeline into renderer-owned legacy
+fields. It must be removed in stages: first renderer inputs consume resolved
+pipeline fields, then GTK stops exposing the combined mapping facade, then the
+legacy render fields and projection code are deleted. No new persistence or
+parser path may depend on the adapter.
 
 ---
 
@@ -144,11 +193,16 @@ The standard workflow should expose only the controls needed for ordinary use.
 
 Advanced per-channel source and pattern overrides may exist later, but must not make the default workflow difficult to understand.
 
-### 3.8 Migration preserves existing artwork
+### 3.8 Pre-1.0 formats fail explicitly
 
-Legacy documents and presets must retain their established output where practical.
+This codebase is pre-1.0. Compatibility with experimental serialized formats is
+not a product promise. A document below v6 rejects with
+`This project was created with an unsupported pre-release Toniator format.` A
+preset below v3 rejects with
+`This preset was created with an unsupported pre-release Toniator format.`
 
-A cleaner new name must not be substituted for an old behavior until the old behavior’s actual formula and semantics are known.
+No loader derives semantic state from old combined mapping fields. A cleaner new
+name must not silently establish a formula or state transition.
 
 ---
 

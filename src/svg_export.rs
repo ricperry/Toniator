@@ -19,7 +19,7 @@ pub fn export_svg_cancellable(
     token: &CancellationToken,
 ) -> Result<()> {
     token.checkpoint()?;
-    let mut canonical = document.clone();
+    let mut canonical = document.projected_for_render()?;
     let source_size = source_dimensions(&canonical.source)?;
     canonical.normalize_canvas_aspect(source_size.0, source_size.1);
     let document = &canonical;
@@ -573,6 +573,9 @@ mod tests {
         document.render = RenderVariant::WebCurveV1 {
             settings: Box::new(settings),
         };
+        document
+            .apply_legacy_mapping_action(crate::model::ValueMode::CrosshatchLuminance)
+            .unwrap();
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("crosshatch.svg");
         export_svg(&path, &document).unwrap();

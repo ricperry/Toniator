@@ -497,7 +497,9 @@ pub fn generate_document_marks_cancellable(
     token: &CancellationToken,
 ) -> Result<MarkSet> {
     token.checkpoint()?;
-    let mut canonical = document.clone();
+    // The renderer receives only a derived legacy snapshot.  It never uses
+    // mutable document compatibility fields as semantic authority.
+    let mut canonical = document.projected_for_render()?;
     let dimensions = source_dimensions(&canonical.source)?;
     canonical.normalize_canvas_aspect(dimensions.0, dimensions.1);
     canonical.validate()?;
@@ -1029,7 +1031,7 @@ pub fn render_document_preview_cancellable(
     token: &CancellationToken,
 ) -> Result<RenderResult> {
     token.checkpoint()?;
-    let mut canonical = document.clone();
+    let mut canonical = document.projected_for_render()?;
     let dimensions = source_dimensions(&canonical.source)?;
     canonical.normalize_canvas_aspect(dimensions.0, dimensions.1);
     // The common white canvas path retains the long-established native
@@ -1153,7 +1155,7 @@ pub fn render_document_output_cancellable(
     token: &CancellationToken,
 ) -> Result<RgbaImage> {
     token.checkpoint()?;
-    let mut canonical = document.clone();
+    let mut canonical = document.projected_for_render()?;
     let dimensions = source_dimensions(&canonical.source)?;
     canonical.normalize_canvas_aspect(dimensions.0, dimensions.1);
     canonical.validate()?;
@@ -1929,6 +1931,15 @@ mod tests {
             bytes: Arc::from(png_bytes.into_inner()),
         });
         document.output_mode = OutputMode::RgbScreen;
+        document.artwork_pipeline = crate::artwork_pipeline::ArtworkPipelineSettings {
+            source: crate::artwork_pipeline::ArtworkSource::FullColor,
+            alpha_policy: crate::artwork_pipeline::SourceAlphaPolicy::LegacyCurrentV1,
+            output_model: crate::artwork_pipeline::OutputModel::RgbScreen,
+            assignment: crate::artwork_pipeline::ChannelAssignment::automatic(
+                crate::artwork_pipeline::AutomaticSeparationStrategy::RgbDirectEncodedComponentsV1,
+            ),
+            active_channel: None,
+        };
         document.render = RenderVariant::WebShapeV1 {
             settings: Box::new(settings),
         };
@@ -2445,6 +2456,33 @@ mod tests {
             opacity: 1.0,
         };
         assert_eq!(layer_paint(&layer).blend_mode, BlendMode::Multiply);
+    }
+
+    #[test]
+    fn renderer_projection_ignores_contradictory_facades_without_mutating_input() {
+        let mut document = Document::new(SourceArtwork {
+            name: "projection.png".into(),
+            media_type: "image/png".into(),
+            bytes: std::sync::Arc::from(test_png()),
+        });
+        let RenderVariant::WebShapeV1 { settings } = &mut document.render else {
+            panic!("new document is Shapes")
+        };
+        settings.output_width = 64;
+        settings.output_height = 64;
+        settings.long_edge_cells = 4.0;
+        settings.value_mode = ValueMode::Rgb;
+        settings.single_channel = Ink::Red;
+        document.output_mode = OutputMode::RgbScreen;
+        let before = document.clone();
+
+        let from_contradiction = render_document_preview(&document, 64, 1).unwrap().image;
+        assert_eq!(document, before, "render projection must be read-only");
+
+        let mut canonical = document.clone();
+        canonical.sync_legacy_projection().unwrap();
+        let from_canonical = render_document_preview(&canonical, 64, 2).unwrap().image;
+        assert_eq!(from_contradiction, from_canonical);
     }
 
     #[test]

@@ -1,10 +1,11 @@
-//! Stage 1A's migration-bounded artwork-pipeline vocabulary.
+//! Authoritative artwork-source, alpha, output, and assignment vocabulary.
 //!
-//! These types deliberately do not participate in `Document` yet.  They make
-//! the meanings currently coupled in legacy render settings explicit, while
-//! keeping conversion at that legacy boundary until Stage 1B.
+//! `Document::artwork_pipeline` stores this state directly. The combined GTK
+//! mapping control and existing renderers consume temporary projections until
+//! their later TON-012 stages replace those runtime adapters.
 
 use crate::model::{Ink, OutputMode, ValueMode};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::error::Error;
 use std::fmt;
 use std::str::FromStr;
@@ -281,7 +282,7 @@ impl ChannelAssignment {
     pub const fn payload_id(self) -> Option<&'static str> {
         match self {
             Self::Automatic { strategy } => Some(strategy.stable_id()),
-            Self::LegacyCompatibility(kind) => Some(kind.stable_id()),
+            Self::LegacyCompatibility(_) => None,
             _ => None,
         }
     }
@@ -347,13 +348,75 @@ impl Default for ArtworkPipelineSettings {
     fn default() -> Self {
         Self {
             source: ArtworkSource::FullColor,
-            alpha_policy: SourceAlphaPolicy::Preserve,
+            // New documents deliberately begin at the audited legacy alpha
+            // boundary until Stage 2 makes alpha choices visible.
+            alpha_policy: SourceAlphaPolicy::LegacyCurrentV1,
             output_model: OutputModel::CmykPrint,
             assignment: ChannelAssignment::automatic(
                 AutomaticSeparationStrategy::CmykEncodedRgbMaxBlackV1,
             ),
             active_channel: Some(OutputChannelId::CmykCyan),
         }
+    }
+}
+
+/// Stable, dotted-ID document representation.  Keeping this conversion here
+/// prevents serde enum spellings or GTK indexes from becoming a file format.
+#[derive(Serialize, Deserialize)]
+struct PersistedSettings {
+    source: String,
+    alpha_policy: String,
+    output_model: String,
+    assignment: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    assignment_payload: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_channel: Option<String>,
+}
+
+impl Serialize for ArtworkPipelineSettings {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        PersistedSettings {
+            source: self.source.stable_id().into(),
+            alpha_policy: self.alpha_policy.stable_id().into(),
+            output_model: self.output_model.stable_id().into(),
+            assignment: self.assignment.stable_id().into(),
+            assignment_payload: self.assignment.payload_id().map(str::to_owned),
+            active_channel: self
+                .active_channel
+                .map(|channel| channel.stable_id().to_owned()),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ArtworkPipelineSettings {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = PersistedSettings::deserialize(deserializer)?;
+        let settings = Self {
+            source: value.source.parse().map_err(serde::de::Error::custom)?,
+            alpha_policy: value
+                .alpha_policy
+                .parse()
+                .map_err(serde::de::Error::custom)?,
+            output_model: value
+                .output_model
+                .parse()
+                .map_err(serde::de::Error::custom)?,
+            assignment: ChannelAssignment::parse(
+                &value.assignment,
+                value.assignment_payload.as_deref(),
+            )
+            .map_err(serde::de::Error::custom)?,
+            active_channel: value
+                .active_channel
+                .as_deref()
+                .map(str::parse)
+                .transpose()
+                .map_err(serde::de::Error::custom)?,
+        };
+        settings.validate().map_err(serde::de::Error::custom)?;
+        Ok(settings)
     }
 }
 impl ArtworkPipelineSettings {
@@ -418,20 +481,6 @@ impl ArtworkPipelineSettings {
             }
         };
         Ok(())
-    }
-    /// A deliberate migration-only repair for a missing or incompatible retained channel.
-    pub fn normalize_legacy_active_channel(mut self) -> Self {
-        if !matches!(self.assignment, ChannelAssignment::LegacyCompatibility(_))
-            && self
-                .active_channel
-                .map(|c| !c.belongs_to(self.output_model))
-                .unwrap_or(matches!(self.assignment, ChannelAssignment::ActiveChannel))
-        {
-            self.active_channel = Some(self.output_model.default_channel());
-        } else if matches!(self.assignment, ChannelAssignment::LegacyCompatibility(_)) {
-            self.active_channel = None;
-        }
-        self
     }
     /// A user-requested model change; it is intentionally distinct from validation.
     pub fn transition_output_model(
@@ -517,214 +566,6 @@ impl fmt::Display for PipelineStateError {
     }
 }
 impl Error for PipelineStateError {}
-
-/// Migration-only origin: never place this on normal new-document settings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LegacySnapshotOrigin {
-    ActiveRender,
-    SavedShapes,
-    SavedCurves,
-    InactiveCmykCache,
-    InactiveRgbCache,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LegacyTreatmentKind {
-    NativeBasic,
-    Shapes,
-    Curves,
-}
-/// The legacy scalar target independently recorded beside the coupled mapping.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LegacyScalarTarget {
-    One,
-    All,
-}
-/// A bounded record of the coupled state serialized by v1-v5 containers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LegacyPipelineSnapshot {
-    pub current_mapping: Option<ValueMode>,
-    pub serialized_output: OutputMode,
-    pub current_output: OutputMode,
-    pub scalar_destination: Option<Ink>,
-    pub scalar_slot: Option<u32>,
-    pub scalar_target: Option<LegacyScalarTarget>,
-    pub treatment: LegacyTreatmentKind,
-    pub crosshatch_present: bool,
-    pub origin: LegacySnapshotOrigin,
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LegacyPipelineConversion {
-    pub settings: ArtworkPipelineSettings,
-    pub origin: LegacySnapshotOrigin,
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LegacyPipelineConversionError {
-    NativeBasicUnavailable {
-        origin: LegacySnapshotOrigin,
-    },
-    MissingMapping {
-        origin: LegacySnapshotOrigin,
-    },
-    AmbiguousLegacySnapshot {
-        detail: &'static str,
-        origin: LegacySnapshotOrigin,
-    },
-    InvalidSlot(LegacySlotError),
-    InvalidPipeline(PipelineStateError),
-}
-impl fmt::Display for LegacyPipelineConversionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "legacy pipeline conversion failed: {self:?}")
-    }
-}
-impl Error for LegacyPipelineConversionError {}
-
-pub fn pipeline_from_legacy(
-    snapshot: LegacyPipelineSnapshot,
-) -> Result<LegacyPipelineConversion, LegacyPipelineConversionError> {
-    if snapshot.treatment == LegacyTreatmentKind::NativeBasic {
-        return Err(LegacyPipelineConversionError::NativeBasicUnavailable {
-            origin: snapshot.origin,
-        });
-    }
-    let mapping =
-        snapshot
-            .current_mapping
-            .ok_or(LegacyPipelineConversionError::MissingMapping {
-                origin: snapshot.origin,
-            })?;
-    let origin_output_is_consistent = match snapshot.origin {
-        LegacySnapshotOrigin::ActiveRender
-        | LegacySnapshotOrigin::SavedShapes
-        | LegacySnapshotOrigin::SavedCurves => {
-            snapshot.serialized_output == snapshot.current_output
-        }
-        LegacySnapshotOrigin::InactiveCmykCache => {
-            snapshot.serialized_output == OutputMode::CmykInks
-                && snapshot.current_output == OutputMode::RgbScreen
-        }
-        LegacySnapshotOrigin::InactiveRgbCache => {
-            snapshot.serialized_output == OutputMode::RgbScreen
-                && snapshot.current_output == OutputMode::CmykInks
-        }
-    };
-    if !origin_output_is_consistent {
-        return Err(LegacyPipelineConversionError::AmbiguousLegacySnapshot {
-            detail: "serialized/current output contradicts snapshot origin",
-            origin: snapshot.origin,
-        });
-    }
-    let preserved_output = OutputModel::from_legacy(snapshot.serialized_output);
-    let active = || -> Result<OutputChannelId, LegacyPipelineConversionError> {
-        let slot =
-            snapshot
-                .scalar_slot
-                .ok_or(LegacyPipelineConversionError::AmbiguousLegacySnapshot {
-                    detail: "single channel mapping has no scalar slot",
-                    origin: snapshot.origin,
-                })?;
-        let channel = OutputChannelId::from_legacy_slot(slot, preserved_output)
-            .map_err(LegacyPipelineConversionError::InvalidSlot)?;
-        if let Some(destination) = snapshot.scalar_destination {
-            let destination = OutputChannelId::from_legacy_ink(destination);
-            if destination.legacy_slot() != slot {
-                return Err(LegacyPipelineConversionError::AmbiguousLegacySnapshot {
-                    detail: "scalar destination and slot disagree",
-                    origin: snapshot.origin,
-                });
-            }
-        }
-        Ok(channel)
-    };
-    let settings = match mapping {
-        ValueMode::Cmyk
-            if !snapshot.crosshatch_present
-                && snapshot.scalar_target.is_none()
-                && snapshot.serialized_output == OutputMode::CmykInks =>
-        {
-            ArtworkPipelineSettings {
-                source: ArtworkSource::FullColor,
-                alpha_policy: SourceAlphaPolicy::LegacyCurrentV1,
-                output_model: OutputModel::CmykPrint,
-                assignment: ChannelAssignment::automatic(
-                    AutomaticSeparationStrategy::CmykEncodedRgbMaxBlackV1,
-                ),
-                active_channel: None,
-            }
-        }
-        ValueMode::Rgb
-            if !snapshot.crosshatch_present
-                && snapshot.scalar_target.is_none()
-                && snapshot.serialized_output == OutputMode::RgbScreen =>
-        {
-            ArtworkPipelineSettings {
-                source: ArtworkSource::FullColor,
-                alpha_policy: SourceAlphaPolicy::LegacyCurrentV1,
-                output_model: OutputModel::RgbScreen,
-                assignment: ChannelAssignment::automatic(
-                    AutomaticSeparationStrategy::RgbDirectEncodedComponentsV1,
-                ),
-                active_channel: None,
-            }
-        }
-        ValueMode::SingleChannel
-            if !snapshot.crosshatch_present
-                && snapshot.scalar_target == Some(LegacyScalarTarget::One) =>
-        {
-            ArtworkPipelineSettings {
-                source: ArtworkSource::LegacyBrightness(
-                    LegacyBrightnessKind::EncodedRec709InvertedV1,
-                ),
-                alpha_policy: SourceAlphaPolicy::LegacyCurrentV1,
-                output_model: preserved_output,
-                assignment: ChannelAssignment::ActiveChannel,
-                active_channel: Some(active()?),
-            }
-        }
-        ValueMode::Luminance
-            if !snapshot.crosshatch_present
-                && snapshot.scalar_target == Some(LegacyScalarTarget::All) =>
-        {
-            ArtworkPipelineSettings {
-                source: ArtworkSource::LegacyBrightness(
-                    LegacyBrightnessKind::EncodedRec709InvertedV1,
-                ),
-                alpha_policy: SourceAlphaPolicy::LegacyCurrentV1,
-                output_model: preserved_output,
-                assignment: ChannelAssignment::AllChannels,
-                active_channel: None,
-            }
-        }
-        ValueMode::CrosshatchLuminance
-            if snapshot.crosshatch_present && snapshot.scalar_target.is_none() =>
-        {
-            ArtworkPipelineSettings {
-                source: ArtworkSource::LegacyBrightness(
-                    LegacyBrightnessKind::EncodedRec709InvertedV1,
-                ),
-                alpha_policy: SourceAlphaPolicy::LegacyCurrentV1,
-                output_model: preserved_output,
-                assignment: ChannelAssignment::LegacyCompatibility(
-                    LegacyCompatibilityAssignment::CrosshatchProgressiveKcmyV1,
-                ),
-                active_channel: None,
-            }
-        }
-        _ => {
-            return Err(LegacyPipelineConversionError::AmbiguousLegacySnapshot {
-                detail: "mapping, scalar target, output, or crosshatch presence disagree",
-                origin: snapshot.origin,
-            });
-        }
-    };
-    settings
-        .validate()
-        .map_err(LegacyPipelineConversionError::InvalidPipeline)?;
-    Ok(LegacyPipelineConversion {
-        settings,
-        origin: snapshot.origin,
-    })
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LegacyValueModeProjection {
@@ -822,24 +663,6 @@ pub fn project_legacy_value_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn legacy(mapping: ValueMode, output: OutputMode) -> LegacyPipelineSnapshot {
-        LegacyPipelineSnapshot {
-            current_mapping: Some(mapping),
-            serialized_output: output,
-            current_output: output,
-            scalar_destination: None,
-            scalar_slot: None,
-            scalar_target: match mapping {
-                ValueMode::SingleChannel => Some(LegacyScalarTarget::One),
-                ValueMode::Luminance => Some(LegacyScalarTarget::All),
-                _ => None,
-            },
-            treatment: LegacyTreatmentKind::Shapes,
-            crosshatch_present: false,
-            origin: LegacySnapshotOrigin::ActiveRender,
-        }
-    }
 
     #[test]
     fn every_stable_id_is_explicit_and_round_trips() {
@@ -951,10 +774,7 @@ mod tests {
             assignment.stable_id(),
             "compat.crosshatch.progressive_kcmy_v1"
         );
-        assert_eq!(
-            assignment.payload_id(),
-            Some("compat.crosshatch.progressive_kcmy_v1")
-        );
+        assert_eq!(assignment.payload_id(), None);
         assert_eq!(
             ChannelAssignment::parse(assignment.stable_id(), None).unwrap(),
             assignment
@@ -1100,22 +920,15 @@ mod tests {
         );
     }
     #[test]
-    fn normalization_and_transition_preserve_independent_concepts() {
+    fn output_transition_preserves_independent_concepts() {
         let invalid = ArtworkPipelineSettings {
-            source: ArtworkSource::Red,
+            source: ArtworkSource::LegacyBrightness(LegacyBrightnessKind::EncodedRec709InvertedV1),
             alpha_policy: SourceAlphaPolicy::Preserve,
             output_model: OutputModel::RgbScreen,
             assignment: ChannelAssignment::ActiveChannel,
             active_channel: Some(OutputChannelId::CmykCyan),
         };
         assert!(invalid.validate().is_err());
-        assert_eq!(
-            invalid
-                .clone()
-                .normalize_legacy_active_channel()
-                .active_channel,
-            Some(OutputChannelId::RgbRed)
-        );
         assert_eq!(
             invalid
                 .transition_output_model(OutputModel::CmykPrint, None)
@@ -1141,7 +954,7 @@ mod tests {
             .transition_output_model(OutputModel::RgbScreen, None)
             .unwrap();
         assert_eq!(automatic.source, ArtworkSource::FullColor);
-        assert_eq!(automatic.alpha_policy, SourceAlphaPolicy::Preserve);
+        assert_eq!(automatic.alpha_policy, SourceAlphaPolicy::LegacyCurrentV1);
         assert_eq!(
             automatic.assignment.payload_id(),
             Some("separation.rgb.direct_encoded_components_v1")
@@ -1149,196 +962,39 @@ mod tests {
         assert_eq!(automatic.active_channel, Some(OutputChannelId::RgbRed));
     }
     #[test]
-    fn legacy_mapping_matrix_and_origins() {
-        let cmyk = pipeline_from_legacy(legacy(ValueMode::Cmyk, OutputMode::CmykInks)).unwrap();
+    fn reverse_projection_covers_current_valid_compatibility_states() {
+        let automatic = ArtworkPipelineSettings::default();
         assert_eq!(
-            cmyk.settings,
-            ArtworkPipelineSettings {
-                source: ArtworkSource::FullColor,
-                alpha_policy: SourceAlphaPolicy::LegacyCurrentV1,
-                output_model: OutputModel::CmykPrint,
-                assignment: ChannelAssignment::automatic(
-                    AutomaticSeparationStrategy::CmykEncodedRgbMaxBlackV1
-                ),
-                active_channel: None
-            }
+            project_legacy_value_mode(&automatic).unwrap().value_mode,
+            ValueMode::Cmyk
         );
-        let rgb = pipeline_from_legacy(legacy(ValueMode::Rgb, OutputMode::RgbScreen)).unwrap();
+
+        let active = ArtworkPipelineSettings {
+            source: ArtworkSource::LegacyBrightness(LegacyBrightnessKind::EncodedRec709InvertedV1),
+            alpha_policy: SourceAlphaPolicy::LegacyCurrentV1,
+            output_model: OutputModel::RgbScreen,
+            assignment: ChannelAssignment::ActiveChannel,
+            active_channel: Some(OutputChannelId::RgbGreen),
+        };
+        let projection = project_legacy_value_mode(&active).unwrap();
+        assert_eq!(projection.value_mode, ValueMode::SingleChannel);
+        assert_eq!(projection.scalar_destination, Some(Ink::Green));
+
+        let crosshatch = ArtworkPipelineSettings {
+            source: ArtworkSource::LegacyBrightness(LegacyBrightnessKind::EncodedRec709InvertedV1),
+            alpha_policy: SourceAlphaPolicy::LegacyCurrentV1,
+            output_model: OutputModel::CmykPrint,
+            assignment: ChannelAssignment::LegacyCompatibility(
+                LegacyCompatibilityAssignment::CrosshatchProgressiveKcmyV1,
+            ),
+            active_channel: None,
+        };
         assert_eq!(
-            rgb.settings,
-            ArtworkPipelineSettings {
-                source: ArtworkSource::FullColor,
-                alpha_policy: SourceAlphaPolicy::LegacyCurrentV1,
-                output_model: OutputModel::RgbScreen,
-                assignment: ChannelAssignment::automatic(
-                    AutomaticSeparationStrategy::RgbDirectEncodedComponentsV1
-                ),
-                active_channel: None
-            }
-        );
-        assert!(matches!(
-            pipeline_from_legacy(legacy(ValueMode::Cmyk, OutputMode::RgbScreen)),
-            Err(LegacyPipelineConversionError::AmbiguousLegacySnapshot { .. })
-        ));
-        assert!(matches!(
-            pipeline_from_legacy(legacy(ValueMode::Rgb, OutputMode::CmykInks)),
-            Err(LegacyPipelineConversionError::AmbiguousLegacySnapshot { .. })
-        ));
-        for output in [OutputMode::CmykInks, OutputMode::RgbScreen] {
-            let mut one = legacy(ValueMode::SingleChannel, output);
-            one.scalar_slot = Some(0);
-            let expected_channel =
-                OutputChannelId::from_legacy_slot(0, OutputModel::from_legacy(output)).unwrap();
-            assert_eq!(
-                pipeline_from_legacy(one).unwrap().settings,
-                ArtworkPipelineSettings {
-                    source: ArtworkSource::LegacyBrightness(
-                        LegacyBrightnessKind::EncodedRec709InvertedV1
-                    ),
-                    alpha_policy: SourceAlphaPolicy::LegacyCurrentV1,
-                    output_model: OutputModel::from_legacy(output),
-                    assignment: ChannelAssignment::ActiveChannel,
-                    active_channel: Some(expected_channel),
-                }
-            );
-            assert_eq!(
-                pipeline_from_legacy(legacy(ValueMode::Luminance, output))
-                    .unwrap()
-                    .settings,
-                ArtworkPipelineSettings {
-                    source: ArtworkSource::LegacyBrightness(
-                        LegacyBrightnessKind::EncodedRec709InvertedV1
-                    ),
-                    alpha_policy: SourceAlphaPolicy::LegacyCurrentV1,
-                    output_model: OutputModel::from_legacy(output),
-                    assignment: ChannelAssignment::AllChannels,
-                    active_channel: None,
-                }
-            );
-        }
-        for origin in [
-            LegacySnapshotOrigin::ActiveRender,
-            LegacySnapshotOrigin::SavedShapes,
-            LegacySnapshotOrigin::SavedCurves,
-            LegacySnapshotOrigin::InactiveCmykCache,
-            LegacySnapshotOrigin::InactiveRgbCache,
-        ] {
-            let output = match origin {
-                LegacySnapshotOrigin::InactiveCmykCache => OutputMode::CmykInks,
-                _ => OutputMode::RgbScreen,
-            };
-            let current = match origin {
-                LegacySnapshotOrigin::InactiveCmykCache => OutputMode::RgbScreen,
-                LegacySnapshotOrigin::InactiveRgbCache => OutputMode::CmykInks,
-                _ => output,
-            };
-            let mut all = legacy(ValueMode::Luminance, output);
-            all.current_output = current;
-            all.origin = origin;
-            assert_eq!(pipeline_from_legacy(all).unwrap().origin, origin);
-        }
-    }
-    #[test]
-    fn legacy_errors_and_crosshatch_outputs() {
-        let mut bad = legacy(ValueMode::SingleChannel, OutputMode::RgbScreen);
-        bad.scalar_slot = Some(3);
-        assert!(matches!(
-            pipeline_from_legacy(bad),
-            Err(LegacyPipelineConversionError::InvalidSlot(_))
-        ));
-        let mut mismatched_destination = legacy(ValueMode::SingleChannel, OutputMode::RgbScreen);
-        mismatched_destination.scalar_slot = Some(0);
-        mismatched_destination.scalar_destination = Some(Ink::Magenta);
-        assert!(matches!(
-            pipeline_from_legacy(mismatched_destination),
-            Err(LegacyPipelineConversionError::AmbiguousLegacySnapshot { .. })
-        ));
-        let mut cross_model_alias = legacy(ValueMode::SingleChannel, OutputMode::RgbScreen);
-        cross_model_alias.scalar_slot = Some(0);
-        cross_model_alias.scalar_destination = Some(Ink::Cyan);
-        assert_eq!(
-            pipeline_from_legacy(cross_model_alias)
-                .unwrap()
-                .settings
-                .active_channel,
-            Some(OutputChannelId::RgbRed)
-        );
-        let mut reverse_cross_model_alias = legacy(ValueMode::SingleChannel, OutputMode::CmykInks);
-        reverse_cross_model_alias.scalar_slot = Some(0);
-        reverse_cross_model_alias.scalar_destination = Some(Ink::Red);
-        assert_eq!(
-            pipeline_from_legacy(reverse_cross_model_alias)
-                .unwrap()
-                .settings
-                .active_channel,
-            Some(OutputChannelId::CmykCyan)
-        );
-        for output in [OutputMode::CmykInks, OutputMode::RgbScreen] {
-            let mut hatch = legacy(ValueMode::CrosshatchLuminance, output);
-            hatch.crosshatch_present = true;
-            hatch.treatment = LegacyTreatmentKind::Curves;
-            assert_eq!(
-                pipeline_from_legacy(hatch).unwrap().settings,
-                ArtworkPipelineSettings {
-                    source: ArtworkSource::LegacyBrightness(
-                        LegacyBrightnessKind::EncodedRec709InvertedV1
-                    ),
-                    alpha_policy: SourceAlphaPolicy::LegacyCurrentV1,
-                    output_model: OutputModel::from_legacy(output),
-                    assignment: ChannelAssignment::LegacyCompatibility(
-                        LegacyCompatibilityAssignment::CrosshatchProgressiveKcmyV1
-                    ),
-                    active_channel: None,
-                }
-            );
-        }
-        let mut native = legacy(ValueMode::Cmyk, OutputMode::CmykInks);
-        native.treatment = LegacyTreatmentKind::NativeBasic;
-        assert!(matches!(
-            pipeline_from_legacy(native),
-            Err(LegacyPipelineConversionError::NativeBasicUnavailable { .. })
-        ));
-        let mut wrong_inactive = legacy(ValueMode::Luminance, OutputMode::RgbScreen);
-        wrong_inactive.origin = LegacySnapshotOrigin::InactiveCmykCache;
-        wrong_inactive.current_output = OutputMode::CmykInks;
-        assert!(matches!(
-            pipeline_from_legacy(wrong_inactive),
-            Err(LegacyPipelineConversionError::AmbiguousLegacySnapshot { .. })
-        ));
-    }
-    #[test]
-    fn reverse_projection_is_total_only_for_legacy_states() {
-        for (mapping, output) in [
-            (ValueMode::Cmyk, OutputMode::CmykInks),
-            (ValueMode::Rgb, OutputMode::RgbScreen),
-            (ValueMode::Luminance, OutputMode::RgbScreen),
-        ] {
-            let settings = pipeline_from_legacy(legacy(mapping, output))
-                .unwrap()
-                .settings;
-            assert_eq!(
-                project_legacy_value_mode(&settings).unwrap().value_mode,
-                mapping
-            );
-        }
-        let mut one = legacy(ValueMode::SingleChannel, OutputMode::CmykInks);
-        one.scalar_slot = Some(3);
-        let settings = pipeline_from_legacy(one).unwrap().settings;
-        assert_eq!(
-            project_legacy_value_mode(&settings)
-                .unwrap()
-                .scalar_destination,
-            Some(Ink::Black)
-        );
-        let mut hatch = legacy(ValueMode::CrosshatchLuminance, OutputMode::RgbScreen);
-        hatch.crosshatch_present = true;
-        assert_eq!(
-            project_legacy_value_mode(&pipeline_from_legacy(hatch).unwrap().settings)
-                .unwrap()
-                .value_mode,
+            project_legacy_value_mode(&crosshatch).unwrap().value_mode,
             ValueMode::CrosshatchLuminance
         );
-        let future = ArtworkPipelineSettings {
+
+        let unsupported = ArtworkPipelineSettings {
             source: ArtworkSource::Value,
             alpha_policy: SourceAlphaPolicy::Preserve,
             output_model: OutputModel::RgbScreen,
@@ -1346,18 +1002,7 @@ mod tests {
             active_channel: None,
         };
         assert_eq!(
-            project_legacy_value_mode(&future),
-            Err(LegacyProjectionError::UnsupportedReverseProjection)
-        );
-        let modern_alpha = ArtworkPipelineSettings {
-            source: ArtworkSource::LegacyBrightness(LegacyBrightnessKind::EncodedRec709InvertedV1),
-            alpha_policy: SourceAlphaPolicy::Preserve,
-            output_model: OutputModel::CmykPrint,
-            assignment: ChannelAssignment::AllChannels,
-            active_channel: None,
-        };
-        assert_eq!(
-            project_legacy_value_mode(&modern_alpha),
+            project_legacy_value_mode(&unsupported),
             Err(LegacyProjectionError::UnsupportedReverseProjection)
         );
     }

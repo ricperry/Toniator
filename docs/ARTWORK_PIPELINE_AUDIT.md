@@ -18,6 +18,12 @@
 
 ## 1. Status and evidence rules
 
+**Superseded compatibility plans:** Toniator project and preset formats are
+unstable before version 1.0. Backward compatibility is not guaranteed for
+pre-release files. The first compatibility baseline will be established at the
+1.0 release. Migration tables and plans retained below are historical audit
+evidence only; current builds reject pre-v6 projects and pre-v3 presets.
+
 This document records current behavior, not behavior inferred from labels such as
 “Brightness,” “Color,” or “RGB.” Code references use line numbers from commit
 `08459db` before this audit's documentation-only edits.
@@ -30,6 +36,15 @@ The dispositions used below are:
 - **Defer:** decide or implement in a later stage or issue.
 
 No application code or behavior changed during this audit.
+
+> **Stage 1B follow-up (2026-07-22):** The audited coupling is now retained
+> only as a derived facade. Schema v6 stores the independent pipeline with
+> strict dotted IDs; unknown IDs reject on load. Pre-v6 projects and pre-v3
+> presets reject explicitly: they are unsupported pre-release formats, not
+> migration inputs. Active/saved and inactive CMYK/RGB treatment snapshots retain
+> their pipeline state for atomic restoration and undo. Existing renderer
+> formulas and known RGB Crosshatch PNG Multiply/SVG Screen mismatch remain
+> intentionally unchanged.
 
 ## 2. Confirmed current pipeline
 
@@ -66,10 +81,10 @@ Export Background
 shown in preview
 ```
 
-There is no current `ArtworkSource`, `SourceAlphaPolicy`,
-`ChannelAssignment`, `ResolvedChannelField`, or stable semantic pattern ID.
-The proposed pipeline in `docs/ARTWORK_PIPELINE.md` is therefore a target, not a
-description of the present implementation.
+`ArtworkSource`, `SourceAlphaPolicy`, `ChannelAssignment`, stable output and
+channel IDs, and `Document.artwork_pipeline` now exist. `ResolvedChannelField`
+and semantic pattern IDs remain later-stage work. The table below is historical
+Stage 0 evidence; the Stage 1B contract supersedes its authority statements.
 
 ## 3. Model and state inventory
 

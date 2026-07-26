@@ -1,10 +1,14 @@
+use crate::artwork_pipeline::{
+    ArtworkPipelineSettings, ArtworkSource, AutomaticSeparationStrategy, ChannelAssignment,
+    LegacyBrightnessKind, LegacyCompatibilityAssignment, OutputChannelId, OutputModel,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const DOCUMENT_FORMAT: &str = "toniator-document";
-pub const DOCUMENT_VERSION: u32 = 5;
+pub const DOCUMENT_VERSION: u32 = 6;
 
 /// Determines how source colour is separated into output layers. CMYK is
 /// subtractive ink; RGB is additive light on a transparent screen.
@@ -145,28 +149,6 @@ pub enum ValueMode {
     CrosshatchLuminance,
     #[default]
     SingleChannel,
-}
-
-/// Whether a source mapping explicitly chooses an output colour model.
-/// Brightness-derived mappings remain neutral so a creator's output choice is
-/// never silently replaced.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ValueModeOutputMode {
-    ExplicitCmyk,
-    ExplicitRgb,
-    Neutral,
-}
-
-impl ValueMode {
-    pub const fn output_mode_classification(self) -> ValueModeOutputMode {
-        match self {
-            Self::Cmyk => ValueModeOutputMode::ExplicitCmyk,
-            Self::Rgb => ValueModeOutputMode::ExplicitRgb,
-            Self::Luminance | Self::CrosshatchLuminance | Self::SingleChannel => {
-                ValueModeOutputMode::Neutral
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -917,26 +899,94 @@ pub struct OutputTreatmentCache {
     pub saved_web_shape: Option<Box<WebShapeSettings>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saved_web_curve: Option<Box<WebCurveSettings>>,
+    pub artwork_pipeline: ArtworkPipelineSettings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_web_shape_pipeline: Option<ArtworkPipelineSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_web_curve_pipeline: Option<ArtworkPipelineSettings>,
+}
+
+impl OutputTreatmentCache {
+    fn canonicalize_pipeline_facades(&mut self) -> anyhow::Result<()> {
+        apply_pipeline_projection(&mut self.render, &self.artwork_pipeline)?;
+        canonicalize_saved_shape_facade(&mut self.saved_web_shape, &self.saved_web_shape_pipeline)?;
+        canonicalize_saved_curve_facade(&mut self.saved_web_curve, &self.saved_web_curve_pipeline)?;
+        Ok(())
+    }
+
+    fn validate_for(&self, owner: OutputMode) -> anyhow::Result<()> {
+        self.artwork_pipeline.validate()?;
+        if matches!(
+            self.artwork_pipeline.assignment,
+            ChannelAssignment::LegacyCompatibility(
+                LegacyCompatibilityAssignment::CrosshatchProgressiveKcmyV1
+            )
+        ) {
+            anyhow::ensure!(
+                matches!(self.render, RenderVariant::WebCurveV1 { .. }),
+                "cached Crosshatch requires a Curves treatment"
+            );
+        }
+        anyhow::ensure!(
+            self.artwork_pipeline.output_model == OutputModel::from_legacy(owner),
+            "inactive treatment pipeline belongs to the wrong output mode"
+        );
+        anyhow::ensure!(
+            self.saved_web_shape.is_some() == self.saved_web_shape_pipeline.is_some(),
+            "cached Shapes treatment and pipeline snapshot must be paired"
+        );
+        anyhow::ensure!(
+            self.saved_web_curve.is_some() == self.saved_web_curve_pipeline.is_some(),
+            "cached Curves treatment and pipeline snapshot must be paired"
+        );
+        if let Some(pipeline) = &self.saved_web_shape_pipeline {
+            pipeline.validate()?;
+            anyhow::ensure!(
+                !matches!(
+                    pipeline.assignment,
+                    ChannelAssignment::LegacyCompatibility(
+                        LegacyCompatibilityAssignment::CrosshatchProgressiveKcmyV1
+                    )
+                ),
+                "Crosshatch cannot be stored as a Shapes treatment"
+            );
+            anyhow::ensure!(
+                pipeline.output_model == OutputModel::from_legacy(owner),
+                "cached Shapes pipeline belongs to the wrong output mode"
+            );
+        }
+        if let Some(pipeline) = &self.saved_web_curve_pipeline {
+            pipeline.validate()?;
+            anyhow::ensure!(
+                pipeline.output_model == OutputModel::from_legacy(owner),
+                "cached Curves pipeline belongs to the wrong output mode"
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Document {
     pub format: String,
     pub version: u32,
-    #[serde(default = "new_document_id")]
     pub document_id: String,
     pub source: SourceArtwork,
     pub settings: Settings,
-    #[serde(default)]
     pub appearance: DocumentAppearance,
-    #[serde(default)]
+    /// The only live source/output/assignment authority. Legacy render fields
+    /// below are a renderer/UI compatibility projection.
+    pub artwork_pipeline: ArtworkPipelineSettings,
     pub output_mode: OutputMode,
-    #[serde(default)]
     pub render: RenderVariant,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saved_web_shape: Option<Box<WebShapeSettings>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_web_shape_pipeline: Option<ArtworkPipelineSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saved_web_curve: Option<Box<WebCurveSettings>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_web_curve_pipeline: Option<ArtworkPipelineSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inactive_cmyk: Option<Box<OutputTreatmentCache>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -952,12 +1002,15 @@ impl Document {
             source,
             settings: Settings::default(),
             appearance: DocumentAppearance::default(),
+            artwork_pipeline: ArtworkPipelineSettings::default(),
             output_mode: OutputMode::CmykInks,
             render: RenderVariant::WebShapeV1 {
                 settings: Box::new(WebShapeSettings::default()),
             },
             saved_web_shape: None,
+            saved_web_shape_pipeline: None,
             saved_web_curve: None,
+            saved_web_curve_pipeline: None,
             inactive_cmyk: None,
             inactive_rgb: None,
         }
@@ -968,7 +1021,10 @@ impl Document {
             settings: self.settings,
             render: self.render.clone(),
             saved_web_shape: self.saved_web_shape.clone(),
+            saved_web_shape_pipeline: self.saved_web_shape_pipeline.clone(),
             saved_web_curve: self.saved_web_curve.clone(),
+            saved_web_curve_pipeline: self.saved_web_curve_pipeline.clone(),
+            artwork_pipeline: self.artwork_pipeline.clone(),
         }
     }
 
@@ -976,7 +1032,10 @@ impl Document {
         self.settings = treatment.settings;
         self.render = treatment.render;
         self.saved_web_shape = treatment.saved_web_shape;
+        self.saved_web_shape_pipeline = treatment.saved_web_shape_pipeline;
         self.saved_web_curve = treatment.saved_web_curve;
+        self.saved_web_curve_pipeline = treatment.saved_web_curve_pipeline;
+        self.artwork_pipeline = treatment.artwork_pipeline;
     }
 
     fn new_rgb_treatment(&self) -> OutputTreatmentCache {
@@ -1003,11 +1062,23 @@ impl Document {
             render,
             saved_web_shape: None,
             saved_web_curve: None,
+            artwork_pipeline: ArtworkPipelineSettings {
+                source: ArtworkSource::FullColor,
+                alpha_policy: crate::artwork_pipeline::SourceAlphaPolicy::LegacyCurrentV1,
+                output_model: OutputModel::RgbScreen,
+                assignment: ChannelAssignment::automatic(
+                    AutomaticSeparationStrategy::RgbDirectEncodedComponentsV1,
+                ),
+                active_channel: None,
+            },
+            saved_web_shape_pipeline: None,
+            saved_web_curve_pipeline: None,
         }
     }
 
     pub fn switch_output_mode(&mut self, target: OutputMode) -> bool {
-        if target == self.output_mode {
+        let current = self.artwork_pipeline.output_model.to_legacy();
+        if target == current {
             return false;
         }
         let active = self.active_treatment();
@@ -1021,12 +1092,19 @@ impl Document {
                 .take()
                 .unwrap_or_else(|| Box::new(self.new_rgb_treatment())),
         };
-        match self.output_mode {
+        match current {
             OutputMode::CmykInks => self.inactive_cmyk = Some(Box::new(active)),
             OutputMode::RgbScreen => self.inactive_rgb = Some(Box::new(active)),
         }
         self.apply_treatment(*replacement);
-        self.output_mode = target;
+        let target_pipeline = self
+            .artwork_pipeline
+            .clone()
+            .transition_output_model(OutputModel::from_legacy(target), None)
+            .expect("valid pipeline output transition");
+        self.artwork_pipeline = target_pipeline;
+        self.sync_legacy_projection()
+            .expect("projectable legacy compatibility state");
         // A screen has no paper by default. Only replace the untouched
         // document default; a creator-selected appearance is never clobbered.
         if target == OutputMode::RgbScreen && self.appearance == DocumentAppearance::default() {
@@ -1035,6 +1113,143 @@ impl Document {
             };
         }
         true
+    }
+
+    /// Rebuild the legacy facade exclusively from the semantic pipeline.
+    /// Renderers continue to consume this snapshot while Stage 1B preserves
+    /// their established formulas byte-for-byte.
+    pub fn sync_legacy_projection(&mut self) -> anyhow::Result<()> {
+        self.output_mode = self.artwork_pipeline.output_model.to_legacy();
+        apply_pipeline_projection(&mut self.render, &self.artwork_pipeline)?;
+        Ok(())
+    }
+
+    pub fn canonicalize_pipeline_facades(&mut self) -> anyhow::Result<()> {
+        self.sync_legacy_projection()?;
+        canonicalize_saved_shape_facade(&mut self.saved_web_shape, &self.saved_web_shape_pipeline)?;
+        canonicalize_saved_curve_facade(&mut self.saved_web_curve, &self.saved_web_curve_pipeline)?;
+        for cache in [&mut self.inactive_cmyk, &mut self.inactive_rgb]
+            .into_iter()
+            .flatten()
+        {
+            cache.canonicalize_pipeline_facades()?;
+        }
+        Ok(())
+    }
+
+    // This is intentionally the only legacy-field writer.
+    fn apply_projection_to_render(
+        render: &mut RenderVariant,
+        projection: crate::artwork_pipeline::LegacyValueModeProjection,
+    ) {
+        let apply = |settings: &mut ValueMode, channel: &mut Ink| {
+            *settings = projection.value_mode;
+            if let Some(destination) = projection.scalar_destination {
+                *channel = destination;
+            }
+        };
+        match render {
+            RenderVariant::WebShapeV1 { settings } => {
+                apply(&mut settings.value_mode, &mut settings.single_channel)
+            }
+            RenderVariant::WebCurveV1 { settings } => {
+                apply(&mut settings.value_mode, &mut settings.single_channel)
+            }
+            RenderVariant::NativeBasicV1 => {}
+        }
+    }
+
+    pub fn projected_for_render(&self) -> anyhow::Result<Self> {
+        let mut projected = self.clone();
+        projected.sync_legacy_projection()?;
+        Ok(projected)
+    }
+
+    pub fn apply_legacy_mapping_action(&mut self, mapping: ValueMode) -> anyhow::Result<()> {
+        let forced_output = match mapping {
+            ValueMode::Cmyk => Some(OutputModel::CmykPrint),
+            ValueMode::Rgb => Some(OutputModel::RgbScreen),
+            _ => None,
+        };
+        if let Some(output) = forced_output
+            && self.artwork_pipeline.output_model != output
+        {
+            // Forced legacy Color/RGB mappings use the same lossless cache
+            // transition as the Output control before changing assignment.
+            self.switch_output_mode(output.to_legacy());
+        }
+        let output = forced_output.unwrap_or(self.artwork_pipeline.output_model);
+        let retained_channel = self
+            .artwork_pipeline
+            .active_channel
+            .filter(|channel| channel.belongs_to(output))
+            .or_else(|| Some(output.default_channel()));
+        self.artwork_pipeline = match mapping {
+            ValueMode::Cmyk => ArtworkPipelineSettings {
+                source: ArtworkSource::FullColor,
+                alpha_policy: crate::artwork_pipeline::SourceAlphaPolicy::LegacyCurrentV1,
+                output_model: OutputModel::CmykPrint,
+                assignment: ChannelAssignment::automatic(
+                    AutomaticSeparationStrategy::CmykEncodedRgbMaxBlackV1,
+                ),
+                active_channel: retained_channel,
+            },
+            ValueMode::Rgb => ArtworkPipelineSettings {
+                source: ArtworkSource::FullColor,
+                alpha_policy: crate::artwork_pipeline::SourceAlphaPolicy::LegacyCurrentV1,
+                output_model: OutputModel::RgbScreen,
+                assignment: ChannelAssignment::automatic(
+                    AutomaticSeparationStrategy::RgbDirectEncodedComponentsV1,
+                ),
+                active_channel: retained_channel,
+            },
+            ValueMode::Luminance => ArtworkPipelineSettings {
+                source: ArtworkSource::LegacyBrightness(
+                    LegacyBrightnessKind::EncodedRec709InvertedV1,
+                ),
+                alpha_policy: crate::artwork_pipeline::SourceAlphaPolicy::LegacyCurrentV1,
+                output_model: output,
+                assignment: ChannelAssignment::AllChannels,
+                active_channel: None,
+            },
+            ValueMode::SingleChannel => ArtworkPipelineSettings {
+                source: ArtworkSource::LegacyBrightness(
+                    LegacyBrightnessKind::EncodedRec709InvertedV1,
+                ),
+                alpha_policy: crate::artwork_pipeline::SourceAlphaPolicy::LegacyCurrentV1,
+                output_model: output,
+                assignment: ChannelAssignment::ActiveChannel,
+                active_channel: retained_channel,
+            },
+            ValueMode::CrosshatchLuminance => ArtworkPipelineSettings {
+                source: ArtworkSource::LegacyBrightness(
+                    LegacyBrightnessKind::EncodedRec709InvertedV1,
+                ),
+                alpha_policy: crate::artwork_pipeline::SourceAlphaPolicy::LegacyCurrentV1,
+                output_model: output,
+                assignment: ChannelAssignment::LegacyCompatibility(
+                    LegacyCompatibilityAssignment::CrosshatchProgressiveKcmyV1,
+                ),
+                active_channel: None,
+            },
+        };
+        self.sync_legacy_projection()
+    }
+
+    pub fn select_active_output_channel(&mut self, channel: OutputChannelId) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            matches!(
+                self.artwork_pipeline.assignment,
+                ChannelAssignment::ActiveChannel
+            ),
+            "active channel requires one-channel mapping"
+        );
+        anyhow::ensure!(
+            channel.belongs_to(self.artwork_pipeline.output_model),
+            "active channel is outside the current output model"
+        );
+        self.artwork_pipeline.active_channel = Some(channel);
+        self.sync_legacy_projection()
     }
 
     pub fn new_with_artboard(source: SourceArtwork, width: u32, height: u32) -> Self {
@@ -1071,18 +1286,10 @@ impl Document {
         changed
     }
 
-    /// Converts the legacy shape-based "crosshatch" approximation into the
-    /// native curve treatment so desktop documents never render dot layers
-    /// under a crosshatch label.
+    /// Keeps the current Crosshatch compatibility assignment on its configured
+    /// curve treatment so it never renders dot layers under a hatch label.
     pub fn normalize_crosshatch_treatment(&mut self) -> bool {
-        let mut changed = normalize_crosshatch_render(&mut self.render);
-        if let Some(settings) = self.saved_web_shape.as_deref_mut()
-            && settings.value_mode == ValueMode::CrosshatchLuminance
-        {
-            settings.value_mode = ValueMode::Luminance;
-            changed = true;
-        }
-        changed
+        normalize_crosshatch_render(&mut self.render)
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -1092,6 +1299,55 @@ impl Document {
             "unsupported Toniator document version {}",
             self.version
         );
+        self.artwork_pipeline.validate()?;
+        if matches!(
+            self.artwork_pipeline.assignment,
+            ChannelAssignment::LegacyCompatibility(
+                LegacyCompatibilityAssignment::CrosshatchProgressiveKcmyV1
+            )
+        ) {
+            anyhow::ensure!(
+                matches!(self.render, RenderVariant::WebCurveV1 { .. }),
+                "Crosshatch requires a Curves treatment"
+            );
+        }
+        anyhow::ensure!(
+            self.saved_web_shape.is_some() == self.saved_web_shape_pipeline.is_some(),
+            "saved Shapes treatment and pipeline snapshot must be paired"
+        );
+        anyhow::ensure!(
+            self.saved_web_curve.is_some() == self.saved_web_curve_pipeline.is_some(),
+            "saved Curves treatment and pipeline snapshot must be paired"
+        );
+        if let Some(pipeline) = &self.saved_web_shape_pipeline {
+            pipeline.validate()?;
+            anyhow::ensure!(
+                !matches!(
+                    pipeline.assignment,
+                    ChannelAssignment::LegacyCompatibility(
+                        LegacyCompatibilityAssignment::CrosshatchProgressiveKcmyV1
+                    )
+                ),
+                "Crosshatch cannot be stored as a Shapes treatment"
+            );
+            anyhow::ensure!(
+                pipeline.output_model == self.artwork_pipeline.output_model,
+                "saved Shapes pipeline belongs to the wrong output mode"
+            );
+        }
+        if let Some(pipeline) = &self.saved_web_curve_pipeline {
+            pipeline.validate()?;
+            anyhow::ensure!(
+                pipeline.output_model == self.artwork_pipeline.output_model,
+                "saved Curves pipeline belongs to the wrong output mode"
+            );
+        }
+        if let Some(cache) = self.inactive_cmyk.as_deref() {
+            cache.validate_for(OutputMode::CmykInks)?;
+        }
+        if let Some(cache) = self.inactive_rgb.as_deref() {
+            cache.validate_for(OutputMode::RgbScreen)?;
+        }
         anyhow::ensure!(
             !self.source.bytes.is_empty(),
             "document has no source artwork"
@@ -1326,29 +1582,112 @@ impl Document {
                 validate_curve_path(&channel.path)?;
             }
         }
-        for saved in [
-            self.saved_web_shape
-                .as_ref()
-                .map(|settings| RenderVariant::WebShapeV1 {
-                    settings: settings.clone(),
-                }),
-            self.saved_web_curve
-                .as_ref()
-                .map(|settings| RenderVariant::WebCurveV1 {
-                    settings: settings.clone(),
-                }),
+        for (saved, pipeline) in [
+            (
+                self.saved_web_shape
+                    .as_ref()
+                    .map(|settings| RenderVariant::WebShapeV1 {
+                        settings: settings.clone(),
+                    }),
+                self.saved_web_shape_pipeline.as_ref(),
+            ),
+            (
+                self.saved_web_curve
+                    .as_ref()
+                    .map(|settings| RenderVariant::WebCurveV1 {
+                        settings: settings.clone(),
+                    }),
+                self.saved_web_curve_pipeline.as_ref(),
+            ),
         ]
         .into_iter()
-        .flatten()
+        .filter_map(|(render, pipeline)| render.zip(pipeline))
         {
             let mut candidate = self.clone();
             candidate.render = saved;
+            candidate.artwork_pipeline = pipeline.clone();
+            candidate.output_mode = pipeline.output_model.to_legacy();
             candidate.saved_web_shape = None;
+            candidate.saved_web_shape_pipeline = None;
             candidate.saved_web_curve = None;
+            candidate.saved_web_curve_pipeline = None;
+            candidate.inactive_cmyk = None;
+            candidate.inactive_rgb = None;
+            candidate.validate()?;
+        }
+        for (owner, cache) in [
+            (OutputMode::CmykInks, self.inactive_cmyk.as_deref()),
+            (OutputMode::RgbScreen, self.inactive_rgb.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|(owner, cache)| cache.map(|cache| (owner, cache)))
+        {
+            let mut candidate = self.clone();
+            candidate.apply_treatment(cache.clone());
+            candidate.output_mode = owner;
+            candidate.inactive_cmyk = None;
+            candidate.inactive_rgb = None;
             candidate.validate()?;
         }
         Ok(())
     }
+}
+
+fn canonicalize_saved_shape_facade(
+    settings: &mut Option<Box<WebShapeSettings>>,
+    pipeline: &Option<ArtworkPipelineSettings>,
+) -> anyhow::Result<()> {
+    match (settings, pipeline) {
+        (Some(settings), Some(pipeline)) => {
+            let mut render = RenderVariant::WebShapeV1 {
+                settings: settings.clone(),
+            };
+            apply_pipeline_projection(&mut render, pipeline)?;
+            let RenderVariant::WebShapeV1 {
+                settings: projected,
+            } = render
+            else {
+                unreachable!()
+            };
+            *settings = projected;
+            Ok(())
+        }
+        (None, None) => Ok(()),
+        _ => anyhow::bail!("saved Shapes treatment and pipeline snapshot must be paired"),
+    }
+}
+
+fn canonicalize_saved_curve_facade(
+    settings: &mut Option<Box<WebCurveSettings>>,
+    pipeline: &Option<ArtworkPipelineSettings>,
+) -> anyhow::Result<()> {
+    match (settings, pipeline) {
+        (Some(settings), Some(pipeline)) => {
+            let mut render = RenderVariant::WebCurveV1 {
+                settings: settings.clone(),
+            };
+            apply_pipeline_projection(&mut render, pipeline)?;
+            let RenderVariant::WebCurveV1 {
+                settings: projected,
+            } = render
+            else {
+                unreachable!()
+            };
+            *settings = projected;
+            Ok(())
+        }
+        (None, None) => Ok(()),
+        _ => anyhow::bail!("saved Curves treatment and pipeline snapshot must be paired"),
+    }
+}
+
+fn apply_pipeline_projection(
+    render: &mut RenderVariant,
+    pipeline: &ArtworkPipelineSettings,
+) -> anyhow::Result<()> {
+    let projection = crate::artwork_pipeline::project_legacy_value_mode(pipeline)?;
+    Document::apply_projection_to_render(render, projection);
+    Ok(())
 }
 
 pub fn normalize_crosshatch_render(render: &mut RenderVariant) -> bool {
@@ -1578,9 +1917,12 @@ struct TreatmentState {
     settings: Settings,
     appearance: DocumentAppearance,
     output_mode: OutputMode,
+    artwork_pipeline: ArtworkPipelineSettings,
     render: RenderVariant,
     saved_web_shape: Option<Box<WebShapeSettings>>,
+    saved_web_shape_pipeline: Option<ArtworkPipelineSettings>,
     saved_web_curve: Option<Box<WebCurveSettings>>,
+    saved_web_curve_pipeline: Option<ArtworkPipelineSettings>,
     inactive_cmyk: Option<Box<OutputTreatmentCache>>,
     inactive_rgb: Option<Box<OutputTreatmentCache>>,
 }
@@ -1592,15 +1934,15 @@ pub struct DocumentEditor {
     redo: Vec<Edit>,
     clean_state: TreatmentState,
     active: Option<ActiveEdit>,
-    migrated_dirty: bool,
+    adjusted_on_load_dirty: bool,
 }
 
 impl DocumentEditor {
     pub fn new(document: Document) -> Self {
-        Self::new_with_migration(document, false)
+        Self::new_with_load_adjustment(document, false)
     }
 
-    pub fn new_with_migration(document: Document, migrated_dirty: bool) -> Self {
+    pub fn new_with_load_adjustment(document: Document, adjusted_on_load_dirty: bool) -> Self {
         let clean_state = TreatmentState::from_document(&document);
         Self {
             document,
@@ -1608,7 +1950,7 @@ impl DocumentEditor {
             redo: Vec::new(),
             clean_state,
             active: None,
-            migrated_dirty,
+            adjusted_on_load_dirty,
         }
     }
 
@@ -1625,12 +1967,13 @@ impl DocumentEditor {
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.migrated_dirty || TreatmentState::from_document(&self.document) != self.clean_state
+        self.adjusted_on_load_dirty
+            || TreatmentState::from_document(&self.document) != self.clean_state
     }
 
     pub fn mark_clean(&mut self) {
         self.clean_state = TreatmentState::from_document(&self.document);
-        self.migrated_dirty = false;
+        self.adjusted_on_load_dirty = false;
     }
 
     pub fn begin_edit(&mut self, key: SettingKey) {
@@ -1684,7 +2027,7 @@ impl DocumentEditor {
     }
 
     pub fn set_output_mode(&mut self, mode: OutputMode) -> bool {
-        if self.document.output_mode == mode {
+        if self.document.artwork_pipeline.output_model.to_legacy() == mode {
             return false;
         }
         let before = TreatmentState::from_document(&self.document);
@@ -1699,24 +2042,97 @@ impl DocumentEditor {
         true
     }
 
+    pub fn apply_legacy_mapping_action(&mut self, mapping: ValueMode) -> bool {
+        let before = TreatmentState::from_document(&self.document);
+        let requested_kind = render_kind(&self.document.render);
+        if mapping == ValueMode::CrosshatchLuminance {
+            match &self.document.render {
+                RenderVariant::WebShapeV1 { settings } => {
+                    let mut saved = settings.clone();
+                    saved.value_mode = ValueMode::Luminance;
+                    self.document.saved_web_shape = Some(saved);
+                    self.document.saved_web_shape_pipeline = Some(ArtworkPipelineSettings {
+                        source: ArtworkSource::LegacyBrightness(
+                            LegacyBrightnessKind::EncodedRec709InvertedV1,
+                        ),
+                        alpha_policy: crate::artwork_pipeline::SourceAlphaPolicy::LegacyCurrentV1,
+                        output_model: self.document.artwork_pipeline.output_model,
+                        assignment: ChannelAssignment::AllChannels,
+                        active_channel: None,
+                    });
+                    self.document.render = RenderVariant::WebCurveV1 {
+                        settings: Box::new(WebCurveSettings::crosshatch_from_shape(settings)),
+                    };
+                }
+                RenderVariant::WebCurveV1 { settings } => {
+                    let mut configured = (**settings).clone();
+                    configured.configure_crosshatch();
+                    self.document.render = RenderVariant::WebCurveV1 {
+                        settings: Box::new(configured),
+                    };
+                }
+                RenderVariant::NativeBasicV1 => return false,
+            }
+        }
+        if self.document.apply_legacy_mapping_action(mapping).is_err() {
+            before.apply(&mut self.document);
+            return false;
+        }
+        // A forced legacy Color/RGB mapping transitions the mode cache, but
+        // changing a mapping from the Curves inspector must not silently
+        // replace the selected treatment with the cached Shapes treatment.
+        if matches!(mapping, ValueMode::Cmyk | ValueMode::Rgb)
+            && render_kind(&self.document.render) != requested_kind
+        {
+            match &self.document.render {
+                RenderVariant::WebShapeV1 { settings } => {
+                    self.document.saved_web_shape = Some(settings.clone());
+                    self.document.saved_web_shape_pipeline =
+                        Some(self.document.artwork_pipeline.clone());
+                }
+                RenderVariant::WebCurveV1 { settings } => {
+                    self.document.saved_web_curve = Some(settings.clone());
+                    self.document.saved_web_curve_pipeline =
+                        Some(self.document.artwork_pipeline.clone());
+                }
+                RenderVariant::NativeBasicV1 => {}
+            }
+            self.document.render = before.render.clone();
+            let _ = self.document.sync_legacy_projection();
+        }
+        if TreatmentState::from_document(&self.document) == before {
+            return false;
+        }
+        if self.active.is_none() {
+            self.undo.push(Edit {
+                before,
+                after: TreatmentState::from_document(&self.document),
+            });
+        }
+        self.redo.clear();
+        true
+    }
+
+    pub fn select_active_output_channel(&mut self, channel: OutputChannelId) -> bool {
+        let before = TreatmentState::from_document(&self.document);
+        if self.document.select_active_output_channel(channel).is_err() {
+            return false;
+        }
+        if TreatmentState::from_document(&self.document) == before {
+            return false;
+        }
+        if self.active.is_none() {
+            self.undo.push(Edit {
+                before,
+                after: TreatmentState::from_document(&self.document),
+            });
+        }
+        self.redo.clear();
+        true
+    }
+
     pub fn set_render_variant(&mut self, render: RenderVariant) -> bool {
         let before = TreatmentState::from_document(&self.document);
-        let target_mode = match &render {
-            RenderVariant::WebShapeV1 { settings } => settings.value_mode,
-            RenderVariant::WebCurveV1 { settings } => settings.value_mode,
-            RenderVariant::NativeBasicV1 => {
-                return self.set_render_variant_from_before(render, before);
-            }
-        };
-        match target_mode.output_mode_classification() {
-            ValueModeOutputMode::ExplicitCmyk => {
-                self.document.switch_output_mode(OutputMode::CmykInks);
-            }
-            ValueModeOutputMode::ExplicitRgb => {
-                self.document.switch_output_mode(OutputMode::RgbScreen);
-            }
-            ValueModeOutputMode::Neutral => {}
-        }
         self.set_render_variant_from_before(render, before)
     }
 
@@ -1732,15 +2148,22 @@ impl DocumentEditor {
         if render_kind(&self.document.render) != render_kind(&render) {
             match &self.document.render {
                 RenderVariant::WebShapeV1 { settings } => {
-                    self.document.saved_web_shape = Some(settings.clone())
+                    self.document.saved_web_shape = Some(settings.clone());
+                    self.document.saved_web_shape_pipeline =
+                        Some(self.document.artwork_pipeline.clone());
                 }
                 RenderVariant::WebCurveV1 { settings } => {
-                    self.document.saved_web_curve = Some(settings.clone())
+                    self.document.saved_web_curve = Some(settings.clone());
+                    self.document.saved_web_curve_pipeline =
+                        Some(self.document.artwork_pipeline.clone());
                 }
                 RenderVariant::NativeBasicV1 => {}
             }
         }
         self.document.render = render;
+        // Generic treatment edits cannot alter semantic mapping/output. The
+        // compatibility fields supplied by callers are overwritten here.
+        let _ = self.document.sync_legacy_projection();
         if self.active.is_none() {
             let after = TreatmentState::from_document(&self.document);
             self.undo.push(Edit { before, after });
@@ -1762,20 +2185,71 @@ impl DocumentEditor {
         self.end_edit()
     }
 
-    pub fn convert_shape_to_crosshatch(&mut self) -> bool {
-        let RenderVariant::WebShapeV1 { settings } = &self.document.render else {
+    pub fn set_treatment_with_pipeline(
+        &mut self,
+        render: RenderVariant,
+        native_settings: Option<Settings>,
+        pipeline: ArtworkPipelineSettings,
+    ) -> bool {
+        if pipeline.validate().is_err() {
+            return false;
+        }
+        let before = TreatmentState::from_document(&self.document);
+        if self.document.artwork_pipeline.output_model != pipeline.output_model {
+            self.document
+                .switch_output_mode(pipeline.output_model.to_legacy());
+        }
+        if let Some(settings) = native_settings {
+            self.document.settings = settings.sanitized();
+        }
+        if render_kind(&self.document.render) != render_kind(&render) {
+            match &self.document.render {
+                RenderVariant::WebShapeV1 { settings } => {
+                    self.document.saved_web_shape = Some(settings.clone());
+                    self.document.saved_web_shape_pipeline =
+                        Some(self.document.artwork_pipeline.clone());
+                }
+                RenderVariant::WebCurveV1 { settings } => {
+                    self.document.saved_web_curve = Some(settings.clone());
+                    self.document.saved_web_curve_pipeline =
+                        Some(self.document.artwork_pipeline.clone());
+                }
+                RenderVariant::NativeBasicV1 => {}
+            }
+        }
+        self.document.render = render;
+        self.document.artwork_pipeline = pipeline;
+        if self.document.sync_legacy_projection().is_err() {
+            before.apply(&mut self.document);
+            return false;
+        }
+        let after = TreatmentState::from_document(&self.document);
+        if before == after {
+            return false;
+        }
+        self.undo.push(Edit { before, after });
+        self.redo.clear();
+        true
+    }
+
+    pub fn restore_saved_shape(&mut self) -> bool {
+        let (Some(settings), Some(pipeline)) = (
+            self.document.saved_web_shape.clone(),
+            self.document.saved_web_shape_pipeline.clone(),
+        ) else {
             return false;
         };
-        let curve = WebCurveSettings::crosshatch_from_shape(settings);
-        let mut saved_shape = settings.clone();
-        saved_shape.value_mode = ValueMode::Luminance;
-        self.begin_edit(SettingKey::Treatment);
-        self.document.saved_web_shape = Some(saved_shape);
-        self.document.render = RenderVariant::WebCurveV1 {
-            settings: Box::new(curve),
+        self.set_treatment_with_pipeline(RenderVariant::WebShapeV1 { settings }, None, pipeline)
+    }
+
+    pub fn restore_saved_curve(&mut self) -> bool {
+        let (Some(settings), Some(pipeline)) = (
+            self.document.saved_web_curve.clone(),
+            self.document.saved_web_curve_pipeline.clone(),
+        ) else {
+            return false;
         };
-        self.redo.clear();
-        self.end_edit()
+        self.set_treatment_with_pipeline(RenderVariant::WebCurveV1 { settings }, None, pipeline)
     }
 
     pub fn end_edit(&mut self) -> bool {
@@ -1828,9 +2302,12 @@ impl TreatmentState {
             settings: document.settings,
             appearance: document.appearance,
             output_mode: document.output_mode,
+            artwork_pipeline: document.artwork_pipeline.clone(),
             render: document.render.clone(),
             saved_web_shape: document.saved_web_shape.clone(),
+            saved_web_shape_pipeline: document.saved_web_shape_pipeline.clone(),
             saved_web_curve: document.saved_web_curve.clone(),
+            saved_web_curve_pipeline: document.saved_web_curve_pipeline.clone(),
             inactive_cmyk: document.inactive_cmyk.clone(),
             inactive_rgb: document.inactive_rgb.clone(),
         }
@@ -1840,9 +2317,12 @@ impl TreatmentState {
         document.settings = self.settings;
         document.appearance = self.appearance;
         document.output_mode = self.output_mode;
+        document.artwork_pipeline = self.artwork_pipeline.clone();
         document.render = self.render.clone();
         document.saved_web_shape = self.saved_web_shape.clone();
+        document.saved_web_shape_pipeline = self.saved_web_shape_pipeline.clone();
         document.saved_web_curve = self.saved_web_curve.clone();
+        document.saved_web_curve_pipeline = self.saved_web_curve_pipeline.clone();
         document.inactive_cmyk = self.inactive_cmyk.clone();
         document.inactive_rgb = self.inactive_rgb.clone();
     }
@@ -1932,6 +2412,25 @@ mod tests {
     }
 
     #[test]
+    fn output_transition_uses_authoritative_pipeline_when_projection_is_stale() {
+        let mut editor = editor();
+        editor.document.artwork_pipeline = editor
+            .document
+            .artwork_pipeline
+            .clone()
+            .transition_output_model(OutputModel::RgbScreen, None)
+            .expect("valid RGB pipeline transition");
+        assert_eq!(editor.document.output_mode, OutputMode::CmykInks);
+
+        assert!(editor.set_output_mode(OutputMode::CmykInks));
+        assert_eq!(
+            editor.document().artwork_pipeline.output_model,
+            OutputModel::CmykPrint
+        );
+        assert_eq!(editor.document().output_mode, OutputMode::CmykInks);
+    }
+
+    #[test]
     fn customized_rgb_shapes_survive_cmyk_roundtrip_without_cross_mode_leakage() {
         let mut editor = editor();
         assert!(editor.set_output_mode(OutputMode::RgbScreen));
@@ -1968,26 +2467,7 @@ mod tests {
     }
 
     #[test]
-    fn mapping_classification_switches_only_explicit_output_modes_in_one_undo() {
-        assert_eq!(
-            ValueMode::Cmyk.output_mode_classification(),
-            ValueModeOutputMode::ExplicitCmyk
-        );
-        assert_eq!(
-            ValueMode::Rgb.output_mode_classification(),
-            ValueModeOutputMode::ExplicitRgb
-        );
-        for mode in [
-            ValueMode::SingleChannel,
-            ValueMode::Luminance,
-            ValueMode::CrosshatchLuminance,
-        ] {
-            assert_eq!(
-                mode.output_mode_classification(),
-                ValueModeOutputMode::Neutral
-            );
-        }
-
+    fn generic_render_edits_cannot_infer_pipeline_output_mode() {
         let mut editor = editor();
         let original = editor.document().clone();
         let rgb = WebShapeSettings {
@@ -1997,11 +2477,13 @@ mod tests {
         assert!(editor.set_render_variant(RenderVariant::WebShapeV1 {
             settings: Box::new(rgb),
         }));
+        assert_eq!(editor.document().output_mode, OutputMode::CmykInks);
+        assert!(editor.apply_legacy_mapping_action(ValueMode::Rgb));
         assert_eq!(editor.document().output_mode, OutputMode::RgbScreen);
         assert!(editor.undo());
         assert_eq!(editor.document(), &original);
-
         assert!(editor.redo());
+
         let neutral = WebShapeSettings {
             value_mode: ValueMode::Luminance,
             ..Default::default()
@@ -2018,12 +2500,13 @@ mod tests {
         assert!(editor.set_render_variant(RenderVariant::WebShapeV1 {
             settings: Box::new(cmyk),
         }));
+        assert_eq!(editor.document().output_mode, OutputMode::RgbScreen);
+        assert!(editor.apply_legacy_mapping_action(ValueMode::Cmyk));
         assert_eq!(editor.document().output_mode, OutputMode::CmykInks);
-        assert!(!editor.set_output_mode(OutputMode::CmykInks));
     }
 
     #[test]
-    fn treatment_application_uses_explicit_mapping_output_mode_and_appearance() {
+    fn treatment_application_preserves_authoritative_output_and_appearance() {
         let mut editor = editor();
         editor.set_output_mode(OutputMode::RgbScreen);
         let appearance = editor.document().appearance;
@@ -2034,11 +2517,11 @@ mod tests {
             None,
         ));
         assert_eq!(editor.document().appearance, appearance);
-        assert_eq!(editor.document().output_mode, OutputMode::CmykInks);
+        assert_eq!(editor.document().output_mode, OutputMode::RgbScreen);
         let RenderVariant::WebShapeV1 { settings } = &editor.document().render else {
             panic!("shapes")
         };
-        assert_eq!(settings.value_mode, ValueMode::Cmyk);
+        assert_eq!(settings.value_mode, ValueMode::Rgb);
     }
 
     #[test]
@@ -2246,6 +2729,42 @@ mod tests {
     }
 
     #[test]
+    fn saved_treatment_pipeline_snapshots_restore_atomically_across_mode_sequences() {
+        let mut editor = editor();
+        // CMYK Shapes -> RGB Shapes -> CMYK Shapes
+        assert!(editor.apply_legacy_mapping_action(ValueMode::Luminance));
+        assert!(editor.set_output_mode(OutputMode::RgbScreen));
+        assert!(editor.set_render_variant(RenderVariant::WebCurveV1 {
+            settings: Box::new(WebCurveSettings::default())
+        }));
+        let saved_rgb_shape_pipeline = editor.document().saved_web_shape_pipeline.clone().unwrap();
+        assert!(editor.restore_saved_shape());
+        assert_eq!(editor.document().artwork_pipeline, saved_rgb_shape_pipeline);
+
+        // RGB Shapes -> CMYK Curves -> RGB Shapes and CMYK Curves -> RGB Curves -> CMYK Curves.
+        assert!(editor.set_output_mode(OutputMode::CmykInks));
+        assert!(editor.set_render_variant(RenderVariant::WebCurveV1 {
+            settings: Box::new(WebCurveSettings::default())
+        }));
+        let cmyk_curve_pipeline = editor.document().artwork_pipeline.clone();
+        let saved_shape_pipeline = editor.document().saved_web_shape_pipeline.clone().unwrap();
+        assert!(editor.restore_saved_shape());
+        assert_eq!(editor.document().artwork_pipeline, saved_shape_pipeline);
+        assert!(editor.restore_saved_curve());
+        assert_eq!(editor.document().artwork_pipeline, cmyk_curve_pipeline);
+
+        // Crosshatch -> ordinary Curves -> Crosshatch keeps the compatibility state.
+        assert!(editor.apply_legacy_mapping_action(ValueMode::CrosshatchLuminance));
+        let hatch = editor.document().artwork_pipeline.clone();
+        assert!(editor.restore_saved_shape());
+        assert!(editor.restore_saved_curve());
+        assert_eq!(editor.document().artwork_pipeline, hatch);
+        assert!(editor.undo());
+        assert!(editor.redo());
+        assert_eq!(editor.document().artwork_pipeline, hatch);
+    }
+
+    #[test]
     fn curve_drag_changes_coalesce_into_one_undo_step() {
         let original = WebCurveSettings::default();
         let mut document = Document::new(SourceArtwork {
@@ -2344,6 +2863,41 @@ mod tests {
     }
 
     #[test]
+    fn current_pipeline_preset_applies_as_one_undo_edit() {
+        let mut editor = editor();
+        let original = editor.document().clone();
+        let pipeline = ArtworkPipelineSettings {
+            source: ArtworkSource::FullColor,
+            alpha_policy: crate::artwork_pipeline::SourceAlphaPolicy::LegacyCurrentV1,
+            output_model: OutputModel::RgbScreen,
+            assignment: ChannelAssignment::automatic(
+                AutomaticSeparationStrategy::RgbDirectEncodedComponentsV1,
+            ),
+            active_channel: Some(OutputChannelId::RgbGreen),
+        };
+        assert!(editor.set_treatment_with_pipeline(
+            RenderVariant::WebShapeV1 {
+                settings: Box::new(WebShapeSettings::default()),
+            },
+            None,
+            pipeline.clone(),
+        ));
+        assert_eq!(editor.document().artwork_pipeline, pipeline);
+        assert!(
+            editor.document().inactive_cmyk.is_some(),
+            "preset output changes must preserve the outgoing treatment cache"
+        );
+        assert!(editor.undo());
+        assert_eq!(editor.document(), &original);
+        assert!(
+            !editor.can_undo(),
+            "preset application must create one undo step"
+        );
+        assert!(editor.redo());
+        assert_eq!(editor.document().artwork_pipeline, pipeline);
+    }
+
+    #[test]
     fn curve_base_effective_values_roundtrip_and_undo_exactly() {
         let mut curve = WebCurveSettings::default();
         curve.base_channel.scale = 1.25;
@@ -2353,13 +2907,16 @@ mod tests {
         curve.channels.c.curve_scale = 44.0;
         curve.channels.m.curve_scale = 53.0;
 
-        let bytes = crate::preset::treatment_preset_bytes(
-            "Curve Base",
-            &RenderVariant::WebCurveV1 {
-                settings: Box::new(curve.clone()),
-            },
-        )
-        .unwrap();
+        let mut preset_document = Document::new(SourceArtwork {
+            name: "curve-preset".into(),
+            media_type: "application/octet-stream".into(),
+            bytes: Arc::from([1]),
+        });
+        preset_document.render = RenderVariant::WebCurveV1 {
+            settings: Box::new(curve.clone()),
+        };
+        let bytes =
+            crate::preset::document_treatment_preset_bytes("Curve Base", &preset_document).unwrap();
         let parsed = crate::preset::parse_treatment(&bytes, (900, 620)).unwrap();
         assert_eq!(
             parsed.render,
@@ -2463,49 +3020,29 @@ mod tests {
     }
 
     #[test]
-    fn shape_crosshatch_becomes_atomic_editable_curve_treatment() {
+    fn crosshatch_mapping_from_rgb_shapes_installs_curves_in_one_edit() {
         let mut editor = editor();
-        let RenderVariant::WebShapeV1 { settings } = &mut editor.document.render else {
-            panic!()
-        };
-        settings.value_mode = ValueMode::CrosshatchLuminance;
-        settings.crosshatch_color = "#234567".into();
-        settings.channels.c.color = "#abcdef".into();
-
-        assert!(editor.convert_shape_to_crosshatch());
-        let RenderVariant::WebCurveV1 { settings } = &editor.document().render else {
-            panic!("crosshatch must visibly switch to Curves")
-        };
-        assert_eq!(settings.value_mode, ValueMode::CrosshatchLuminance);
-        assert_eq!(settings.layout, CurveLayout::FullWidth);
-        assert_eq!(settings.shared_path, CurvePath::straight());
-        assert_eq!(settings.crosshatch_color, "#234567");
-        assert_eq!(settings.channels.c.color, "#abcdef");
-        assert_eq!(settings.channels.k.grid_rotation, 45.0);
-        assert_eq!(settings.channels.c.grid_rotation, -45.0);
-        assert_eq!(settings.channels.m.grid_rotation, 0.0);
-        assert_eq!(settings.channels.y.grid_rotation, 90.0);
-        assert!(
-            Ink::ALL
-                .into_iter()
-                .all(|ink| settings.channels.get(ink).enabled)
-        );
+        assert!(editor.apply_legacy_mapping_action(ValueMode::Rgb));
+        assert!(editor.apply_legacy_mapping_action(ValueMode::CrosshatchLuminance));
+        assert!(matches!(
+            editor.document().render,
+            RenderVariant::WebCurveV1 { .. }
+        ));
+        assert!(matches!(
+            editor.document().artwork_pipeline.assignment,
+            ChannelAssignment::LegacyCompatibility(_)
+        ));
         assert!(editor.undo());
         assert!(matches!(
             editor.document().render,
             RenderVariant::WebShapeV1 { .. }
         ));
-        assert!(editor.redo());
-        assert!(matches!(
-            editor.document().render,
-            RenderVariant::WebCurveV1 { .. }
-        ));
     }
 
     #[test]
-    fn migrated_dirty_flag_survives_edits_and_clears_only_on_save_baseline() {
+    fn load_adjustment_dirty_flag_survives_edits_and_clears_only_on_save_baseline() {
         let document = editor().document().clone();
-        let mut editor = DocumentEditor::new_with_migration(document, true);
+        let mut editor = DocumentEditor::new_with_load_adjustment(document, true);
         assert!(editor.is_dirty());
         let mut settings = editor.document().settings;
         settings.coverage += 1.0;

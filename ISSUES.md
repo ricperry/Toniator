@@ -366,6 +366,18 @@ The selected background can represent the garment color so that white underbase 
 - **Depends on:** TON-007
 - **Related:** TON-009
 
+### Implementation pause
+
+RGB Shapes and GTK interaction stability were checkpointed at commit
+`08459db`.
+
+Remaining RGB Curves and final RGB parity work are intentionally paused
+until TON-012 separates artwork-source sampling, output model, and channel
+assignment.
+
+Do not extend the legacy combined Artwork Mapping architecture while
+TON-012 is pending.
+
 ### Problem
 
 Toniator is currently oriented toward print-style color separation. Users also need a display-oriented RGB workflow.
@@ -388,6 +400,24 @@ Add an RGB mode designed for artwork viewed on screens rather than separated for
 - Existing CMYK projects continue to open and render unchanged.
 - Mode switching either preserves compatible settings or clearly warns which settings will be reset.
 - Help text explains when to use RGB versus CMYK.
+
+### RGB Shapes and interaction-stability checkpoint
+
+- Completed RGB Shapes mapping, channel isolation, shared and independent
+  mark behavior, source-alpha handling, Screen rendering, persistence, and
+  preview/PNG/SVG routing.
+- Fixed two pre-existing P0 GTK interaction defects:
+  - nested `RefCell` borrowing during Preview Surface edits;
+  - replacement of live dropdown models during GTK selection notification.
+- Dropdown models now retain identity and update through `StringList::splice`;
+  mode-dependent synchronization is deferred until notification handling
+  unwinds, and invalid selections are safely rejected or clamped.
+- Verified with 98 library tests, 44 UI/binary tests, 39 focused realized GTK
+  callback tests, strict Clippy, release build, desktop/AppStream validation,
+  a ten-cycle manual interaction smoke test, normal exit status 0, and no new
+  core dumps or GTK criticals.
+- Remaining TON-008 work includes RGB Curves, final cross-generator parity,
+  and residual RGB terminology corrections.
 
 ### Design question to resolve
 
@@ -3131,9 +3161,9 @@ The smallest stable first architecture is **one TON-010 pattern instance per pri
 * **Priority:** P1
 * **Area:** Artwork mapping / source sampling / color models
 * **Type:** Model and workflow refactor
-* **Depends on:** TON-008 RGB stabilization
-* **Blocks:** TON-010 pattern framework and TON-011 Advanced Pattern Mixing
-* **Related:** TON-009 DTF output treatment
+* **Requires:** Stable RGB Shapes and output-model baseline from commit `08459db`
+* **Blocks:** Remaining TON-008 RGB Curves work, TON-010, and TON-011
+* **Related:** TON-009
 * **Implementation order:** Complete after TON-008 and before TON-010
 
 ## Problem
