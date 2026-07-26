@@ -1,7 +1,7 @@
 # Toniator Artwork Pipeline Architecture
 
-**Status:** Stage 3 complete; Stage 4 preset/persistence cleanup and Stage 5
-preview/export parity and final review remain planned. Confirmed facts are
+**Status:** Stages 3 and 4 are implemented; Stage 5 preview/export parity and
+final review remain planned. Confirmed facts are
 recorded in `ARTWORK_PIPELINE_AUDIT.md`.
 
 **Primary issue:** TON-012 — Separate artwork source sampling, output model, and channel assignment
@@ -11,7 +11,7 @@ recorded in `ARTWORK_PIPELINE_AUDIT.md`.
 **Audience:** Toniator maintainers, Codex agents, reviewers, and future contributors
 
 > **Pre-1.0 format policy (2026-07-22):** Toniator currently accepts only
-> document schema v6 and preset schema v3. Earlier experimental formats are
+> document schema v6 and preset schema v4. Earlier experimental formats are
 > intentionally unsupported and reject without mutation; they are not migrated.
 > `Document.artwork_pipeline` is the semantic authority. The older combined
 > output/mapping/channel fields are a temporary renderer projection; normal GTK
@@ -69,13 +69,41 @@ and RGB caches retain their complete treatment plus its pipeline snapshot. A
 missing partner is invalid: current files never reconstruct a snapshot from a
 legacy render field.
 
-### Current treatment preset schema: v3
+### Current treatment preset schema: v4
 
-A preset has `format: "toniator-preset"`, `version: 3`, `name`, `render`, and a
-required `artwork_pipeline`; `settings` is optional for native treatments. The
-same stable-ID and pipeline validation applies. The parser normalizes canvas
-dimensions for the receiving artwork, then rebuilds only the temporary render
-facade from the semantic pipeline before renderer validation.
+A preset has `format: "toniator-preset"`, `version: 4`, `name`, an explicit
+`scope`, and exactly the sections declared by that scope:
+
+- **Pipeline** has only `pipeline` (Artwork Source, Source Alpha, Output Model,
+  assignment, and optional semantic active channel).
+- **Treatment** has only `treatment` (treatment kind, common settings, native
+  geometry, shared motif/path state). It excludes per-channel maps and the
+  renderer's compatibility `value_mode`/`single_channel` fields. Same-kind
+  treatment import preserves the receiving channel maps; a cross-kind import
+  intentionally creates the target kind's current default channel maps rather
+  than claiming to preserve incompatible channel state.
+- **Current Channel** has only `channel`, keyed by a stable `channel.*` ID and
+  constrained to one current-treatment channel record.
+- **Complete Workflow** has pipeline, treatment, and semantic channel records
+  for the active output model. It intentionally excludes artwork, document
+  identity, transient UI/undo state, and appearance/export presentation.
+
+The parser rejects any other version, unknown scope or stable ID, absent or
+contradictory sections, incompatible output channels, malformed custom
+geometry, unsupported treatment kinds, and renderer compatibility data. It
+constructs a complete candidate before an editor replacement. A failed import
+therefore changes neither the document nor history; a successful import is one
+undo edit, followed by read-only control synchronization and one preview
+request. Output-model pipeline imports use the normal paired CMYK/RGB cache
+transition and never reinterpret a CMYK Black slot as RGB.
+
+When a Pipeline or Complete Workflow preset omits `active_channel`, it retains
+the receiving semantic active channel where that channel belongs to the target
+model. Across output models it uses the existing transition rule: matching
+legacy slots carry across (for example RGB Blue to CMYK Yellow); a CMYK Black
+has no RGB slot and therefore selects the normal RGB default. Crosshatch is a
+transitional Complete Workflow-only representation with Curves and explicit
+CMYK compatibility channel records; it has no Current Channel scope.
 
 Bundled current presets are:
 
@@ -233,7 +261,7 @@ Advanced per-channel source and pattern overrides may exist later, but must not 
 This codebase is pre-1.0. Compatibility with experimental serialized formats is
 not a product promise. A document below v6 rejects with
 `This project was created with an unsupported pre-release Toniator format.` A
-preset below v3 rejects with
+preset below v4 rejects with
 `This preset was created with an unsupported pre-release Toniator format.`
 
 No loader derives semantic state from old combined mapping fields. A cleaner new
@@ -704,7 +732,7 @@ the manual-verification gate. Verified automated GUI/artifact runs exited 0 and
 `coredumpctl list toniator` reported no coredumps; a separate interactive shell
 exit status was not captured.
 
-Stage 4 owns preset cleanup and broader persistence-scope decisions. RGB Curves
+Stage 4 owns the implemented preset cleanup and persistence scope contract. RGB Curves
 completion, broad preview/export parity, and manual creative-workflow
 click-through remain outside the completed Stage 3 boundary.
 
@@ -1271,6 +1299,14 @@ It must not affect:
 - SVG transparency;
 - DTF coverage.
 
+Preview Surface is independent of Export Background. Each Output Model must
+retain its own Preview Surface setting: RGB Screen defaults to a dark/black
+surface, while CMYK Print defaults to a white surface. Output-model transitions
+restore the destination model's last explicit setting, or that model-specific
+default when none exists. A verified Stage 5 defect currently allows RGB's
+black surface to leak into a fresh CMYK return; this remains open and must not
+be corrected as part of the completed Stage 4 preset work.
+
 ### 17.2 Export Background
 
 Export Background is an explicit export option.
@@ -1347,7 +1383,14 @@ Mode-specific state includes:
 - channel colors;
 - channel opacity;
 - mode-specific channel defaults;
+- the mode-specific Preview Surface setting and its default;
 - compatible pattern state where not shared.
+
+Preview Surface is display-only. It must not enter source sampling, resolved
+channel fields, canonical geometry, PNG transparency, or SVG transparency.
+Export Background is a separate export setting and must not be used as the
+Preview Surface state. Stage 5 owns restoration, save/reopen, preset, and
+PNG/SVG regression coverage for this boundary.
 
 ### 18.3 Pattern-instance state
 
@@ -1576,7 +1619,7 @@ Historical Stage 1 migration design (not a supported current load path)
 converted each legacy output-mode cache once to a complete semantic snapshot
 plus pattern/channel state. That design explains the retained mode-cache
 restoration boundary; current pre-release builds reject pre-v6 projects and
-pre-v3 presets rather than migrating them. New documents and ordinary
+pre-v4 presets rather than migrating them. New documents and ordinary
 output-only edits must not create source/output coupling.
 
 ### 22.3 Legacy brightness audit
@@ -1650,7 +1693,7 @@ The following are mandatory.
 - Output Model does not silently replace Artwork Source.
 - Source-only presets do not change Output Model.
 - Output-only presets do not change Artwork Source.
-- The current pre-release loader rejects pre-v6 projects and pre-v3 presets;
+- The current pre-release loader rejects pre-v6 projects and pre-v4 presets;
   historical migration-only coupling is not a supported new-document rule.
 
 ### 24.2 Channels
@@ -1871,7 +1914,7 @@ Preserve legacy behavior through adapters.
 
 **Compatibility requirement:** Stage 1 included the minimum project schema bump
 and semantic persistence needed to make the new state authoritative. Current
-pre-release builds accept only project schema v6 and preset schema v3; the
+pre-release builds accept only project schema v6 and preset schema v4; the
 historical v1-v5 migration design is not a supported load path and state may not
 be reconstructed from a second mutable legacy mapping after reopen.
 
@@ -1907,15 +1950,26 @@ mode-cache behavior remain unchanged.
 
 ### Stage 4 — Preset migration and compatibility cleanup
 
-**Status:** Planned.
+**Status:** Complete on 2026-07-26.
 
-Implement the complete preset migration and scoped preset semantics, stable-ID
-unknown-value handling, remaining compatibility cleanup, and preset round-trip
-verification. This stage must preserve the pre-release format policy: current
-documents use schema v6 and presets use schema v3; earlier experimental formats
-remain unsupported rather than becoming an implicit migration target.
+Current `.tntr` files use schema v4 and explicit scope. The parser has no
+migration path: pre-v4 files remain unsupported pre-release input. Renderer
+`value_mode`/`single_channel` and the legacy projection remain retained internal
+adapters until the later renderer/parity work consumes semantic pipeline fields
+directly. Stage 4 does not complete final RGB Curves or broad preview/PNG/SVG
+parity. The user-confirmed manual smoke gate exited with status `0`; Stage 5
+remains responsible for the verified Output-model Preview Surface restoration
+defect and the final parity boundary below.
 
 ### Stage 5 — Preview and export parity
+
+Stage 5 must correct and verify Output-model Preview Surface restoration. A
+fresh CMYK → RGB → CMYK transition must return to CMYK's white default, and a
+fresh RGB → CMYK → RGB transition must return to RGB's dark/black default.
+Explicitly customized surfaces must remain independent per model across mode
+switching, save/reopen, and preset application. Preview Surface must remain
+display-only so PNG and SVG exports are unchanged; Export Background remains a
+separate export setting.
 
 Verify:
 

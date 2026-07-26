@@ -205,9 +205,13 @@ Keyboard shortcuts:
 | PNG export | Flattened document-size, 2×, or linked custom-size raster output |
 
 Working-document saves are atomic. Toniator currently reads and writes document
-schema v6. Treatment presets use schema v3; unsupported or malformed pre-release
-formats are rejected before the current document is changed. The pre-1.0 format
-policy does not promise migration from earlier experimental formats.
+schema v6. Treatment presets use schema v4: every `.tntr` declares one of
+Pipeline, Treatment, Current Channel, or Complete Workflow scope. The wire
+format uses semantic dotted pipeline and channel IDs; treatment data excludes
+renderer compatibility fields and per-channel maps. Unsupported, malformed, or
+pre-v4 formats are rejected before the current document or undo history changes.
+The pre-1.0 format policy does not promise migration from earlier experimental
+formats.
 
 User presets default to:
 

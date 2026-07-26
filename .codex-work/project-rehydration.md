@@ -56,3 +56,33 @@ replace entries whose relevant files or assumptions changed.
 - Remaining scope: Stage 4 preset cleanup, final RGB Curves completion, broad
   preview/export parity, and manual creative-workflow verification. TON-012
   remains In Progress.
+
+## TON-012 artwork pipeline — Stage 4 preset boundary
+
+- Cache entry: `evidence/ton-012-stage-4-preset-ownership-current-head.md` —
+  valid for HEAD `236cdb1` while preset, model, UI, bundled assets, and the
+  listed dirty-file assumptions remain unchanged.
+- Verified path: `src/preset.rs`, `src/model.rs`, `src/artwork_pipeline.rs`,
+  `src/ui.rs`, `assets/presets/*.tntr`.
+- Verified state: current v3 is one unscoped treatment document; semantic
+  pipeline IDs are authoritative; save/load call paths and undo/cache seams
+  are identified; four runtime bundled presets exist; renderer compatibility
+  fields remain active adapters.
+- Implementation entry: `agents/desktop-implementer/ton-012-stage-4-implementation.md`
+  records the v4 scoped `.tntr` representation, atomic editor application,
+  four converted bundled presets, UI scope chooser, tests, and retained
+  compatibility adapters.
+- Review entry: `evidence/ton-012-stage-4-preset-review-236cdb1.md` records the
+  independent review; its nested unknown-field and treatment/channel isolation
+  findings were corrected and revalidated in the implementation evidence.
+- Stage 4 gate: user-confirmed manual smoke exited status `0`; Stage 4 is
+  complete. Final RGB Curves and broad preview/export parity remain outside
+  this stage.
+- Stage 5 defect: RGB Screen to CMYK Print can retain RGB's black Preview
+  Surface instead of CMYK's white default. Stage 5 must give each output model
+  independent cached/default Preview Surface state and verify switching,
+  save/reopen, preset application, and PNG/SVG export isolation from Preview
+  Surface and Export Background.
+- Creative review entry: `evidence/ton-012-stage-4-creative-preset-review-236cdb1.md`;
+  all four bundled names/output pairs were judged coherent, with no creative
+  correction required.

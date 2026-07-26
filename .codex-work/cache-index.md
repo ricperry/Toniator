@@ -44,3 +44,21 @@ The parent thread records read-only-agent updates here after persisting them.
   `agents/documentation-maintainer/ton-012-stage-3-documentation-reconciliation.md`;
   validated against the corrected working tree on 2026-07-26; durable docs and
   issue-ledger reconciliation.
+- `ton-012-stage-4-preset-ownership-current-head` —
+  `evidence/ton-012-stage-4-preset-ownership-current-head.md`; validated
+  against HEAD `236cdb1` on 2026-07-26; targeted preset ownership, call paths,
+  bundled inventory, retained compatibility adapters, and Stage 4 format
+  assumption.
+- `ton-012-stage-4-preset-review-236cdb1` —
+  `evidence/ton-012-stage-4-preset-review-236cdb1.md`; reviewed against the
+  uncommitted Stage 4 diff on 2026-07-26; independent atomicity, scope,
+  channel-identity, and nested-validation findings.
+- `ton-012-stage-4-implementation` —
+  `agents/desktop-implementer/ton-012-stage-4-implementation.md`; validated
+  against the corrected uncommitted Stage 4 worktree on 2026-07-26; v4 scoped
+  format, atomic application, bundled conversion, UI scope chooser, tests,
+  and retained adapters.
+- `ton-012-stage-4-creative-preset-review-236cdb1` —
+  `evidence/ton-012-stage-4-creative-preset-review-236cdb1.md`; reviewed
+  against the corrected uncommitted Stage 4 worktree on 2026-07-26; bundled
+  naming/output, scope wording, Crosshatch framing, and visual findings.

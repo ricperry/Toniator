@@ -1115,6 +1115,106 @@ impl Document {
         true
     }
 
+    /// Applies a preset-owned pipeline through the normal output transition so
+    /// inactive mode caches remain paired with their semantic pipeline.  This
+    /// is intentionally separate from ordinary pipeline edits: preset input
+    /// may explicitly request a different output model.
+    pub fn apply_preset_pipeline(
+        &mut self,
+        pipeline: ArtworkPipelineSettings,
+    ) -> anyhow::Result<()> {
+        self.apply_preset_pipeline_unchecked(pipeline)?;
+        self.validate()
+    }
+
+    /// Stage a preset pipeline after its semantic validation but before the
+    /// rest of a complete-workflow candidate is installed.  Crosshatch is the
+    /// one transitional representation that needs its Curves treatment added
+    /// before whole-document validation can succeed.
+    pub(crate) fn apply_preset_pipeline_unchecked(
+        &mut self,
+        mut pipeline: ArtworkPipelineSettings,
+    ) -> anyhow::Result<()> {
+        let omitted_active_channel = pipeline.active_channel.is_none()
+            && matches!(pipeline.assignment, ChannelAssignment::ActiveChannel);
+        if omitted_active_channel {
+            // Scoped v4 presets may omit Active Channel to request the
+            // receiving/output-transition destination. Validate every other
+            // invariant against a representative valid destination first.
+            let mut representative = pipeline.clone();
+            representative.active_channel = Some(pipeline.output_model.default_channel());
+            representative.validate()?;
+        } else {
+            pipeline.validate()?;
+        }
+        let prior_active_channel = self.artwork_pipeline.active_channel;
+        if self.artwork_pipeline.output_model != pipeline.output_model {
+            self.switch_output_mode(pipeline.output_model.to_legacy());
+        }
+        // An omitted active channel means "use the transition's last valid
+        // channel", not "clear the current channel". Crosshatch is the one
+        // compatibility assignment whose invariant requires no active
+        // channel at all.
+        if pipeline.active_channel.is_none()
+            && !matches!(
+                pipeline.assignment,
+                ChannelAssignment::LegacyCompatibility(_)
+            )
+        {
+            pipeline.active_channel = prior_active_channel
+                .filter(|channel| channel.belongs_to(pipeline.output_model))
+                .or_else(|| {
+                    prior_active_channel.and_then(|channel| {
+                        OutputChannelId::from_legacy_slot(
+                            channel.legacy_slot(),
+                            pipeline.output_model,
+                        )
+                        .ok()
+                    })
+                })
+                .or_else(|| {
+                    matches!(pipeline.assignment, ChannelAssignment::ActiveChannel)
+                        .then(|| pipeline.output_model.default_channel())
+                });
+        }
+        pipeline.validate()?;
+        self.artwork_pipeline = pipeline;
+        // The complete-workflow caller may still need to replace a Shapes
+        // treatment with Crosshatch Curves.  Do not project that temporary,
+        // intentionally incomplete candidate into the renderer facade yet.
+        self.output_mode = self.artwork_pipeline.output_model.to_legacy();
+        Ok(())
+    }
+
+    /// Replaces the active treatment while preserving the outgoing treatment
+    /// snapshot used when the creator returns to its kind.  Preset parsing
+    /// constructs and validates a complete candidate before this is called.
+    pub fn apply_preset_treatment(
+        &mut self,
+        render: RenderVariant,
+        native_settings: Option<Settings>,
+    ) -> anyhow::Result<()> {
+        if render_kind(&self.render) != render_kind(&render) {
+            match &self.render {
+                RenderVariant::WebShapeV1 { settings } => {
+                    self.saved_web_shape = Some(settings.clone());
+                    self.saved_web_shape_pipeline = Some(self.artwork_pipeline.clone());
+                }
+                RenderVariant::WebCurveV1 { settings } => {
+                    self.saved_web_curve = Some(settings.clone());
+                    self.saved_web_curve_pipeline = Some(self.artwork_pipeline.clone());
+                }
+                RenderVariant::NativeBasicV1 => {}
+            }
+        }
+        if let Some(settings) = native_settings {
+            self.settings = settings.sanitized();
+        }
+        self.render = render;
+        self.sync_legacy_projection()?;
+        self.validate()
+    }
+
     /// Rebuild the legacy facade exclusively from the semantic pipeline.
     /// Renderers continue to consume this snapshot while Stage 1B preserves
     /// their established formulas byte-for-byte.
@@ -2315,6 +2415,24 @@ impl DocumentEditor {
         true
     }
 
+    /// Commit a fully parsed and validated preset candidate as one ordinary
+    /// undo edit.  Callers must build the candidate without touching the live
+    /// editor; a malformed preset therefore cannot mutate document or history.
+    pub fn replace_with_preset_candidate(&mut self, candidate: Document) -> bool {
+        if candidate.validate().is_err() {
+            return false;
+        }
+        let before = TreatmentState::from_document(&self.document);
+        let after = TreatmentState::from_document(&candidate);
+        if before == after {
+            return false;
+        }
+        self.document = candidate;
+        self.undo.push(Edit { before, after });
+        self.redo.clear();
+        true
+    }
+
     pub fn restore_saved_shape(&mut self) -> bool {
         let (Some(settings), Some(pipeline)) = (
             self.document.saved_web_shape.clone(),
@@ -3159,18 +3277,31 @@ mod tests {
         preset_document.render = RenderVariant::WebCurveV1 {
             settings: Box::new(curve.clone()),
         };
-        let bytes =
-            crate::preset::document_treatment_preset_bytes("Curve Base", &preset_document).unwrap();
+        let bytes = crate::preset::document_preset_bytes(
+            "Curve Base",
+            &preset_document,
+            crate::preset::PresetScope::CompleteWorkflow,
+        )
+        .unwrap();
         let parsed = crate::preset::parse_treatment(&bytes, (900, 620)).unwrap();
+        let applied = parsed
+            .candidate_for(&Document::new(SourceArtwork {
+                name: "candidate".into(),
+                media_type: "application/octet-stream".into(),
+                bytes: Arc::from([1]),
+            }))
+            .unwrap();
         assert_eq!(
-            parsed.render,
+            applied.render,
             RenderVariant::WebCurveV1 {
                 settings: Box::new(curve.clone())
             }
         );
 
         let mut editor = editor();
-        assert!(editor.set_render_variant(parsed.render));
+        assert!(
+            editor.replace_with_preset_candidate(parsed.candidate_for(editor.document()).unwrap())
+        );
         let before_shift = editor.document().render.clone();
         let mut shifted = curve.clone();
         let delta = 0.2;

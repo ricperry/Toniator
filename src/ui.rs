@@ -36,7 +36,7 @@ const EXAMPLE_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="960
 const PREVIEW_SURFACE_LABEL: &str = "Preview Surface — Canvas only · not exported";
 const EXPORT_BACKGROUND_LABEL: &str = "Export Background — Used for SVG and by default for PNG";
 
-const BUNDLED_PRESETS: [(&str, &[u8]); 3] = [
+const BUNDLED_PRESETS: [(&str, &[u8]); 4] = [
     (
         "Comic Book",
         include_bytes!("../assets/presets/ComicBook.tntr"),
@@ -48,6 +48,10 @@ const BUNDLED_PRESETS: [(&str, &[u8]); 3] = [
     (
         "Chunky Fingerprints",
         include_bytes!("../assets/presets/Chunky Fingerprints.tntr"),
+    ),
+    (
+        "Tiled Stacked Motif Stress Test",
+        include_bytes!("../assets/presets/Tiled Stacked Motif Stress Test.tntr"),
     ),
 ];
 const START_HERO: &[u8] = include_bytes!("../assets/splash-hero.png");
@@ -4160,6 +4164,51 @@ impl AppUi {
     }
 
     fn save_treatment_dialog(self: &Rc<Self>) {
+        let popover = gtk::Popover::new();
+        let list = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        list.set_margin_top(8);
+        list.set_margin_bottom(8);
+        list.set_margin_start(8);
+        list.set_margin_end(8);
+        list.append(
+            &gtk::Label::builder()
+                .label("Save preset scope")
+                .xalign(0.0)
+                .css_classes(["heading"])
+                .build(),
+        );
+        for (scope, detail) in [
+            (
+                toniator::preset::PresetScope::Treatment,
+                "Treatment — geometry and shared settings",
+            ),
+            (
+                toniator::preset::PresetScope::Pipeline,
+                "Pipeline — source, alpha, output, assignment",
+            ),
+            (
+                toniator::preset::PresetScope::Channel,
+                "Current Channel — appearance and channel settings",
+            ),
+            (
+                toniator::preset::PresetScope::CompleteWorkflow,
+                "Complete Workflow — pipeline, treatment, and channels",
+            ),
+        ] {
+            let button = gtk::Button::with_label(detail);
+            button.add_css_class("flat");
+            list.append(&button);
+            connect_clicked(&button, self, move |ui| {
+                ui.save_treatment_dialog_with_scope(scope)
+            });
+        }
+        popover.set_child(Some(&list));
+        popover.set_parent(&self.preset_save);
+        popover.connect_closed(|popover| popover.unparent());
+        popover.popup();
+    }
+
+    fn save_treatment_dialog_with_scope(self: &Rc<Self>, scope: toniator::preset::PresetScope) {
         let document = {
             let state = self.state.borrow();
             let Some(editor) = state.editor.as_ref() else {
@@ -4201,7 +4250,7 @@ impl AppUi {
                     let path = normalized_preset_path(&path);
                     let name = preset_name_from_path(&path);
                     let bytes =
-                        match toniator::preset::document_treatment_preset_bytes(&name, &document) {
+                        match toniator::preset::document_preset_bytes(&name, &document, scope) {
                             Ok(bytes) => bytes,
                             Err(error) => {
                                 ui.show_error(&format!("Could not save preset: {error:#}"));
@@ -4269,20 +4318,15 @@ impl AppUi {
             self.show_message("Reading halftone preset…");
         }
         std::thread::spawn(move || {
-            let parsed = (|| -> anyhow::Result<toniator::preset::ParsedTreatment> {
+            let parsed = (|| -> anyhow::Result<(toniator::preset::ParsedTreatment, Document)> {
                 let bytes = match source {
                     PresetSource::Path(path) => std::fs::read(path)?,
                     PresetSource::Bundled(bytes) => bytes.to_vec(),
                 };
                 let dimensions = toniator::render::source_dimensions(&document.source)?;
                 let treatment = toniator::preset::parse_treatment(&bytes, dimensions)?;
-                let mut candidate = document.clone();
-                candidate.render = treatment.render.clone();
-                if let Some(settings) = treatment.native_settings {
-                    candidate.settings = settings;
-                }
-                candidate.validate()?;
-                Ok(treatment)
+                let candidate = treatment.candidate_for(&document)?;
+                Ok((treatment, candidate))
             })();
             worker_result.replace(parsed);
         });
@@ -4302,7 +4346,7 @@ impl AppUi {
                     }
                     ui.preset_pending.set(false);
                     match result {
-                        Ok(treatment) => {
+                        Ok((treatment, candidate)) => {
                             let canvas_normalized = treatment.canvas_normalized;
                             let changed = {
                                 let mut state = ui.state.borrow_mut();
@@ -4312,11 +4356,7 @@ impl AppUi {
                                 if editor.document().document_id != document_id {
                                     return glib::ControlFlow::Break;
                                 }
-                                editor.set_treatment_with_pipeline(
-                                    treatment.render,
-                                    treatment.native_settings,
-                                    treatment.artwork_pipeline,
-                                )
+                                editor.replace_with_preset_candidate(candidate)
                             };
                             if changed {
                                 if ui.state.borrow().compare_source && !ui.compare_source_artifact {
@@ -10698,7 +10738,12 @@ mod tests {
         assert_eq!(preset_name_from_path(Path::new("My Ink.tntr")), "My Ink");
         assert_eq!(
             BUNDLED_PRESETS.map(|item| item.0),
-            ["Comic Book", "Skinny Curve", "Chunky Fingerprints"]
+            [
+                "Comic Book",
+                "Skinny Curve",
+                "Chunky Fingerprints",
+                "Tiled Stacked Motif Stress Test",
+            ]
         );
         assert!(BUNDLED_PRESETS.iter().all(|(_, bytes)| !bytes.is_empty()));
     }
@@ -12119,12 +12164,24 @@ mod tests {
         document.render = RenderVariant::WebShapeV1 {
             settings: Box::new(shape.clone()),
         };
-        let bytes =
-            toniator::preset::document_treatment_preset_bytes("Base Test", &document).unwrap();
+        let bytes = toniator::preset::document_preset_bytes(
+            "Base Test",
+            &document,
+            toniator::preset::PresetScope::CompleteWorkflow,
+        )
+        .unwrap();
         let parsed = toniator::preset::parse_treatment(&bytes, (900, 600)).unwrap();
+        let rendered = parsed
+            .candidate_for(&Document::new(SourceArtwork {
+                name: "target".into(),
+                media_type: "application/octet-stream".into(),
+                bytes: Arc::from([1]),
+            }))
+            .unwrap()
+            .render;
         shape.output_height = 600;
         assert_eq!(
-            parsed.render,
+            rendered,
             RenderVariant::WebShapeV1 {
                 settings: Box::new(shape)
             }

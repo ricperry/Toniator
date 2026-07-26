@@ -3223,12 +3223,11 @@ gate. The verified automated GUI/artifact runs exited with status 0, and
 `coredumpctl list toniator` reported no coredumps. A separate shell exit status
 for the interactive smoke command was not captured and is not claimed.
 
-Known remaining limitations: Stage 4 preset cleanup, final RGB Curves
-completion, broad preview/export parity, and manual creative-workflow
-click-through. Current preset/persistence behavior, schema policy, and
-mode-cache conventions remain unchanged by Stage 3. The pre-release policy
-continues to support document schema v6 and preset schema v3; earlier
-experimental formats remain unsupported.
+Known remaining limitations at the Stage 3 checkpoint were Stage 4 preset
+cleanup, final RGB Curves completion, broad preview/export parity, and manual
+creative-workflow click-through. Stage 4 now defines the current preset policy
+as document schema v6 and preset schema v4; earlier experimental formats
+remain unsupported.
 
 TON-012 remains **In progress**.
 
@@ -4058,23 +4057,75 @@ GTK coverage and screenshot are recorded above.
 
 ## Stage 4 — Presets and persistence
 
-**Status:** Planned; this is the remaining TON-012 cleanup boundary.
+**Status:** Complete on 2026-07-26.
 
-Separate:
+Current schema v4 `.tntr` presets declare exactly one explicit scope:
 
-* source presets;
-* output presets;
-* complete workflow presets.
+* **Pipeline** stores only semantic Artwork Source, Source Alpha, Output Model,
+  assignment, and optional semantic active channel IDs.
+* **Treatment** stores treatment kind, shared/native settings, geometry, and
+  shared motif/path state without renderer compatibility fields or per-channel
+  maps.
+* **Current Channel** stores one semantic output-channel record and rejects a
+  treatment-kind or output-model mismatch rather than replacing other state.
+* **Complete Workflow** declares pipeline, treatment, and active-model semantic
+  channel records; it deliberately excludes artwork, identity, appearance,
+  export/presentation, and transient UI/undo state.
 
-Verify:
+Version 4 is the only accepted current preset format. Pre-v4 files are rejected
+as unsupported pre-release input, with no migration. The application builds and
+validates a candidate before replacing editor state in one undo edit, so failed
+imports do not mutate the document or history. Pipeline output transitions use
+the existing paired mode-cache rules; renderer `value_mode`/`single_channel`
+remain retained internal adapters until final renderer/parity work.
 
-* save and reopen;
-* undo and redo;
-* migration;
-* mode-specific state restoration;
-* no silent cross-setting changes.
+Verified focused coverage includes all scopes, deterministic save/reload, save
+non-mutation, one undo/redo, omitted-section preservation, stable CMYK/RGB
+channel IDs, bundled preset loading, malformed/old/unknown rejection, and
+incompatible channel rejection. The remaining TON-012 boundary is final RGB
+Curves plus broad preview/PNG/SVG parity, not a preset migration.
+
+### Stage 4 completion record — 2026-07-26
+
+The user completed the manual smoke gate with Toniator exit status `0`. The
+verified Stage 4 implementation and review evidence includes 110 library tests,
+43 binary tests, 11 focused preset tests, strict Clippy, locked release build,
+formatting and diff checks, desktop/AppStream validation, all four bundled
+preset runtime loads, inspected bundled screenshots, and no Toniator
+coredumps. The v4 scoped preset format, atomic application, semantic channel
+identity, Crosshatch constraints, and save-scope chooser are recorded above.
+
+TON-012 remains **In Progress** because the Stage 5 preview/export and final
+parity work below is still open.
 
 ## Stage 5 — Final review
+
+### Stage 5 remaining work — Output-model Preview Surface restoration
+
+**Verified defect:** switching Output Model from RGB Screen to CMYK Print can
+inherit RGB's black Preview Surface instead of restoring CMYK's expected white
+default. This produces a confusing CMYK preview and currently requires manual
+correction during smoke testing.
+
+Expected behavior:
+
+* RGB Screen defaults to a dark/black Preview Surface.
+* CMYK Print defaults to a white Preview Surface.
+* Each output model retains its own cached Preview Surface setting.
+* Switching models restores the destination model's last explicit setting, or
+  its model-specific default when no explicit setting exists.
+* Preview Surface is display-only and never affects exported artwork.
+* Export Background remains separate and must not be conflated with Preview
+  Surface.
+
+Stage 5 regression coverage must include:
+
+* fresh CMYK → RGB → CMYK;
+* fresh RGB → CMYK → RGB;
+* independently customized CMYK and RGB Preview Surfaces;
+* save/reopen;
+* preset application;
+* PNG and SVG export confirmation that Preview Surface is irrelevant.
 
 Perform:
 

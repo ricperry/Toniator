@@ -6,8 +6,8 @@
 
 **Original scope:** TON-012 Stage 0 audit
 
-**Current status:** Stage 3 is complete in the current worktree. Stage 4 preset
-cleanup and Stage 5 preview/export parity and final review remain planned.
+**Current status:** Stage 3 is complete and Stage 4 is implemented pending
+milestone review. Stage 5 preview/export parity and final review remain planned.
 
 **Architecture baseline:** `docs/ARTWORK_PIPELINE.md` (untracked at the audited starting state)
 
@@ -25,7 +25,7 @@ cleanup and Stage 5 preview/export parity and final review remain planned.
 unstable before version 1.0. Backward compatibility is not guaranteed for
 pre-release files. The first compatibility baseline will be established at the
 1.0 release. Migration tables and plans retained below are historical audit
-evidence only; current builds reject pre-v6 projects and pre-v3 presets.
+evidence only; current builds reject pre-v6 projects and pre-v4 presets.
 
 The tables below preserve Stage 0 evidence and code references from commit
 `08459db`; the follow-up notes and current-status section describe verified
@@ -48,7 +48,7 @@ the follow-up notes above explicitly say so.
 
 > **Stage 1B follow-up (2026-07-22):** The audited coupling is now retained
 > only as a derived facade. Schema v6 stores the independent pipeline with
-> strict dotted IDs; unknown IDs reject on load. Pre-v6 projects and pre-v3
+> strict dotted IDs; unknown IDs reject on load. Pre-v6 projects and pre-v4
 > presets reject explicitly: they are unsupported pre-release formats, not
 > migration inputs. Active/saved and inactive CMYK/RGB treatment snapshots retain
 > their pipeline state for atomic restoration and undo. Existing renderer
@@ -91,6 +91,25 @@ the follow-up notes above explicitly say so.
 > reported no coredumps; a separate interactive shell exit status was not
 > captured. Stage 4 preset cleanup, RGB Curves completion, and broad
 > preview/export parity remain open.
+
+> **Stage 4 follow-up (2026-07-26):** `.tntr` now uses schema v4 with explicit
+> Pipeline, Treatment, Current Channel, or Complete Workflow scope. The parser
+> accepts no migration input: older formats, missing/contradictory sections,
+> unknown semantic IDs, incompatible channels, malformed geometry, and adapter
+> fields reject before a candidate reaches the editor. Candidate construction
+> uses the existing CMYK/RGB cache transition; a successful apply replaces the
+> editor document as one undoable edit, then GTK performs read-only sync and one
+> preview request. Treatment serialization excludes renderer `value_mode` and
+> `single_channel`; both remain internal adapters pending Stage 5 parity work.
+
+> **Stage 4 completion follow-up (2026-07-26):** The user-confirmed manual
+> smoke gate exited with status `0`. Stage 4 is complete; TON-012 remains in
+> progress for Stage 5. A verified remaining defect is that switching from RGB
+> Screen to CMYK Print can retain RGB's black Preview Surface instead of
+> restoring CMYK's white default. Preview Surface must remain display-only and
+> separate from Export Background. Stage 5 owns per-output-model defaults and
+> cached explicit settings, save/reopen and preset coverage, and confirmation
+> that PNG/SVG exports are unaffected.
 
 ## 2. Confirmed current pipeline
 
