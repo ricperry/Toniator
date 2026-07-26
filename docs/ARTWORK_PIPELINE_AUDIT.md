@@ -6,8 +6,9 @@
 
 **Original scope:** TON-012 Stage 0 audit
 
-**Current status:** Stage 3 is complete and Stage 4 is implemented pending
-milestone review. Stage 5 preview/export parity and final review remain planned.
+**Current status:** TON-012 Stages 0 through 5 are complete and accepted on
+2026-07-26. The audit below preserves historical findings while current
+follow-up notes identify the accepted implementation.
 
 **Architecture baseline:** `docs/ARTWORK_PIPELINE.md` (untracked at the audited starting state)
 
@@ -110,6 +111,27 @@ the follow-up notes above explicitly say so.
 > separate from Export Background. Stage 5 owns per-output-model defaults and
 > cached explicit settings, save/reopen and preset coverage, and confirmation
 > that PNG/SVG exports are unaffected.
+
+> **Stage 5 follow-up (2026-07-26):** `OutputTreatmentCache` now stores an
+> optional Preview Surface snapshot for its inactive output model. The active
+> `DocumentAppearance.preview_surface` is restored from that snapshot on
+> CMYK/RGB transitions, or from the model default (CMYK white, RGB black) when
+> no snapshot exists. Export Background remains document-wide and explicit.
+> Preview composition no longer includes Export Background; transparent PNG
+> and SVG artwork are unchanged by Preview Surface.
+>
+> Shapes and Curves document rendering use resolved semantic pipeline fields.
+> Curves SVG Crosshatch labels derive from the authoritative compatibility
+> assignment rather than the legacy facade. RGB Curves emit only Red, Green,
+> and Blue. RGB-output Crosshatch SVG uses Multiply for its K/C/M/Y layers,
+> matching preview and PNG; ordinary RGB Curves retain Screen.
+>
+> Stage 5 automated verification: 117 library tests, 43 binary tests, strict
+> Clippy with all features, locked release build, formatting, diff checks,
+> desktop-file validation, AppStream validation, and no Toniator coredumps.
+> The user accepted the Stage 5 manual gate in the closeout request. Toniator
+> exited normally, no GTK critical was reported, and no new Toniator coredump
+> was found. Source-sampled mark colors are deferred to planned TON-014.
 
 ## 2. Confirmed current pipeline
 
@@ -889,7 +911,7 @@ and migration from versions 1-5. It does not need the full preset redesign.
 
 **Stage 4 — preset migration and compatibility cleanup**
 
-**Status:** Planned.
+**Status:** Complete on 2026-07-26; see the current follow-up above.
 
 - introduce scoped preset semantics using the stable IDs introduced in Stage 1;
 - migrate/rewrite saved treatment presets without relying on `nativeRender` as a
@@ -899,11 +921,19 @@ and migration from versions 1-5. It does not need the full preset redesign.
 - add preset round-trip tests without changing the current pre-release policy
   that v6 projects and v3 presets are the supported formats.
 
+**Stage 5 — preview/export parity**
+
+**Status:** Complete and accepted on 2026-07-26.
+
+- model-specific Preview Surface defaults and cache restoration;
+- Preview Surface versus Export Background separation;
+- semantic Shapes/Curves preview, PNG, and SVG boundaries;
+- authoritative RGB Curves and Crosshatch SVG channel/compositing behavior;
+- focused persistence, transition, stale-facade, and export isolation tests.
+
 **Later stages/issues**
 
-- Preview/export parity hardening follows the resolved-field pipeline. The
-  RGB-mode Crosshatch SVG Screen-to-Multiply correction belongs there and needs
-  explicit behavioral-change approval.
+- Source-sampled mark colors are deferred to TON-014.
 - TON-008 RGB Curves resumes only after the corrected pipeline.
 - TON-010 owns general Crosshatch/pattern registry work.
 - TON-011 owns advanced per-channel source/pattern overrides.

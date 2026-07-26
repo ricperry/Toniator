@@ -276,6 +276,57 @@ mod tests {
     }
 
     #[test]
+    fn appearance_roundtrips_with_output_treatment_preview_snapshots() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("appearance-caches.toniator");
+        let mut editor = DocumentEditor::new(Document::new(source([1])));
+        assert!(editor.set_appearance(crate::model::DocumentAppearance {
+            preview_surface: crate::model::PreviewSurface::Color {
+                color: crate::model::RgbaColor::opaque(243, 236, 219),
+            },
+            export_background: crate::model::ExportBackground::None,
+        }));
+        assert!(editor.set_output_mode(crate::model::OutputMode::RgbScreen));
+        assert!(editor.set_appearance(crate::model::DocumentAppearance {
+            preview_surface: crate::model::PreviewSurface::Color {
+                color: crate::model::RgbaColor::opaque(9, 17, 29),
+            },
+            export_background: crate::model::ExportBackground::Color {
+                color: crate::model::RgbaColor::opaque(70, 80, 90),
+            },
+        }));
+
+        save_document_atomic(&path, editor.document()).unwrap();
+        assert_eq!(load_document(&path).unwrap(), *editor.document());
+        let serialized = std::fs::read_to_string(path).unwrap();
+        assert!(serialized.contains("\"preview_surface\""));
+    }
+
+    #[test]
+    fn old_v6_treatment_caches_without_preview_snapshots_use_model_defaults() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("old-cache.toniator");
+        let mut editor = DocumentEditor::new(Document::new(source([1])));
+        assert!(editor.set_output_mode(crate::model::OutputMode::RgbScreen));
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&document_json(editor.document()).unwrap()).unwrap();
+        value["inactive_cmyk"]
+            .as_object_mut()
+            .unwrap()
+            .remove("preview_surface");
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let mut loaded = DocumentEditor::new(load_document(&path).unwrap());
+        assert!(loaded.set_output_mode(crate::model::OutputMode::CmykInks));
+        assert_eq!(
+            loaded.document().appearance.preview_surface,
+            crate::model::PreviewSurface::Color {
+                color: crate::model::RgbaColor::WHITE,
+            }
+        );
+    }
+
+    #[test]
     fn recovery_is_removed_only_for_the_matching_clean_document() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("recovery.toniator");

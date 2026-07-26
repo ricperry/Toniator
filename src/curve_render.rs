@@ -60,6 +60,8 @@ pub fn generate_curve_geometry_cancellable(
     settings: &WebCurveSettings,
     token: &CancellationToken,
 ) -> Result<CurveGeometry> {
+    // Compatibility adapter for callers that still supply the legacy facade.
+    // Document rendering uses `generate_curve_geometry_for_pipeline` instead.
     generate_curve_geometry_for_output_mode(source, settings, OutputMode::CmykInks, token)
 }
 

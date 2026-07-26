@@ -1,7 +1,7 @@
 # Toniator Artwork Pipeline Architecture
 
-**Status:** Stages 3 and 4 are implemented; Stage 5 preview/export parity and
-final review remain planned. Confirmed facts are
+**Status:** TON-012 Stages 0 through 5 are complete and accepted on
+2026-07-26. Confirmed facts are
 recorded in `ARTWORK_PIPELINE_AUDIT.md`.
 
 **Primary issue:** TON-012 — Separate artwork source sampling, output model, and channel assignment
@@ -732,9 +732,9 @@ the manual-verification gate. Verified automated GUI/artifact runs exited 0 and
 `coredumpctl list toniator` reported no coredumps; a separate interactive shell
 exit status was not captured.
 
-Stage 4 owns the implemented preset cleanup and persistence scope contract. RGB Curves
-completion, broad preview/export parity, and manual creative-workflow
-click-through remain outside the completed Stage 3 boundary.
+Stage 4 owns the implemented preset cleanup and persistence scope contract.
+Stage 5 owns the final semantic preview/export parity boundary; manual
+creative-workflow click-through remains the final acceptance gate.
 
 ---
 
@@ -1955,13 +1955,14 @@ mode-cache behavior remain unchanged.
 Current `.tntr` files use schema v4 and explicit scope. The parser has no
 migration path: pre-v4 files remain unsupported pre-release input. Renderer
 `value_mode`/`single_channel` and the legacy projection remain retained internal
-adapters until the later renderer/parity work consumes semantic pipeline fields
-directly. Stage 4 does not complete final RGB Curves or broad preview/PNG/SVG
-parity. The user-confirmed manual smoke gate exited with status `0`; Stage 5
-remains responsible for the verified Output-model Preview Surface restoration
-defect and the final parity boundary below.
+adapters where legacy callers still require them; document-facing renderer and
+export paths consume semantic pipeline fields. Stage 4 did not complete final
+RGB Curves or broad preview/PNG/SVG parity; Stage 5 completed that boundary.
+The user-confirmed Stage 4 manual smoke gate exited with status `0`.
 
 ### Stage 5 — Preview and export parity
+
+**Status:** Complete and accepted on 2026-07-26.
 
 Stage 5 must correct and verify Output-model Preview Surface restoration. A
 fresh CMYK → RGB → CMYK transition must return to CMYK's white default, and a
@@ -1983,9 +1984,38 @@ Verify:
 - oversized raster and SVG sources with a long edge above 2400 pixels;
 - mode round trips.
 
-Treat correction of RGB-mode Crosshatch SVG from its current Screen blend to
-Multiply as an intentional behavior change requiring explicit approval, not as
-part of Stage 1 migration.
+The active document keeps the current model's Preview Surface in
+`DocumentAppearance`; each inactive output-treatment cache stores its last
+explicit surface, with CMYK opaque white and RGB opaque black as defaults when
+no snapshot exists. Export Background remains document-wide export state and
+is never included in interactive Preview Surface composition. One output-model
+switch remains one undoable editor edit.
+
+Preview, PNG, and SVG now consume the same resolved semantic channel inputs.
+Shapes and Curves use model-specific CMYK or RGB channel identities; RGB
+Curves emit exactly Red, Green, and Blue. Crosshatch remains a temporary
+`compat.crosshatch.progressive_kcmy_v1` treatment boundary: its K/C/M/Y raster,
+PNG, and SVG layers intentionally use Multiply even under RGB Screen, matching
+the established compatibility renderer. Ordinary RGB Curves use Screen.
+
+The remaining legacy facade entrypoints are explicitly retained only for
+callers that still provide legacy renderer settings; document-facing render
+and export paths use the authoritative pipeline entrypoints. No obsolete
+pre-release migration path was restored.
+
+Automated Stage 5 verification passed with 117 library tests, 43 binary tests,
+strict Clippy with all features, locked release build, formatting, diff checks,
+desktop-file validation, AppStream validation, and no Toniator coredumps.
+Artifact review found no blocker or major visual defect. Transparent black
+Crosshatch can be low-contrast in a dark file viewer, and the current saved
+alpha examples use an opaque source so Preserve versus Ignore is not visually
+distinct. The user accepted the manual Stage 5 gate in the closeout request;
+Toniator exited normally, no GTK critical was reported, and no new Toniator
+coredump was found.
+
+Source-sampled mark colors are deliberately deferred to TON-014. They must
+introduce an explicit mark-color source without redefining Alpha or coupling
+color sampling to scalar geometry.
 
 ### Stage 6 — Resume TON-008 RGB Curves
 
@@ -2163,6 +2193,13 @@ The artwork pipeline is ready for TON-010 and TON-011 when:
 - Shapes and Curves consume consistent resolved channel fields;
 - legacy mappings migrate safely;
 - preview, PNG, and SVG agree;
+- Preview Surface is display-only and Export Background is explicit;
+- model-specific Preview Surface defaults and cached settings restore across
+  output-model transitions;
+- RGB Curves use Red, Green, and Blue only;
+- RGB-output Crosshatch preserves its intentional K/C/M/Y Multiply rule in all
+  output paths;
+- source-sampled mark colors remain deferred to TON-014;
 - GTK transitions remain stable;
 - persistence restores semantic state;
 - Crosshatch no longer defines source mapping;

@@ -62,3 +62,30 @@ The parent thread records read-only-agent updates here after persisting them.
   `evidence/ton-012-stage-4-creative-preset-review-236cdb1.md`; reviewed
   against the corrected uncommitted Stage 4 worktree on 2026-07-26; bundled
   naming/output, scope wording, Crosshatch framing, and visual findings.
+- `ton-012-stage-5-rendering-parity-audit-current-head-4161635` —
+  `evidence/ton-012-stage-5-rendering-parity-audit-current-head-4161635.md`;
+  validated against HEAD `4161635` on 2026-07-26; targeted semantic preview,
+  PNG/SVG, transition, appearance, and retained-adapter findings. Invalidate
+  after relevant Stage 5 implementation edits.
+- `ton-012-stage-5-independent-export-parity-review-4161635` —
+  `evidence/ton-012-stage-5-independent-export-parity-review-4161635.md`;
+  reviewed the Stage 5 implementation on 2026-07-26; found one major RGB
+  Crosshatch SVG blend mismatch and minor test gaps. Invalidate after the
+  correction changes rendering or export paths.
+- `ton-012-stage-5-rendering-parity-implementation` —
+  `agents/desktop-implementer/ton-012-stage-5-rendering-parity-implementation.md`;
+  validated against the corrected current worktree on 2026-07-26; per-model
+  Preview Surface cache, preview/export separation, semantic Curves SVG, and
+  focused test evidence.
+- `ton-012-stage-5-rgb-crosshatch-svg-correction` —
+  `agents/desktop-implementer/ton-012-stage-5-rgb-crosshatch-svg-correction.md`;
+  validated against the corrected current worktree on 2026-07-26; RGB-output
+  Crosshatch SVG Multiply parity correction and regression evidence.
+- `ton-012-stage-5-artifact-creative-output-review-4161635` —
+  `evidence/ton-012-stage-5-artifact-creative-output-review-4161635.md`;
+  reviewed the ignored Stage 5 visual/serialized artifacts on 2026-07-26;
+  no blocker or major finding, with minor dark-viewer Crosshatch friction and
+  opaque-source alpha fixture limitations recorded.
+- `ton-012-closeout-4161635` — `evidence/ton-012-closeout-4161635.md`;
+  final accepted TON-012 architecture, verification, retained adapters, and
+  deferred-issue record prepared for the closeout commit.

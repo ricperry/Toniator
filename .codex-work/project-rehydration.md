@@ -86,3 +86,40 @@ replace entries whose relevant files or assumptions changed.
 - Creative review entry: `evidence/ton-012-stage-4-creative-preset-review-236cdb1.md`;
   all four bundled names/output pairs were judged coherent, with no creative
   correction required.
+
+## TON-012 artwork pipeline — Stage 5 implementation boundary
+
+- Cache entries: `evidence/ton-012-stage-5-rendering-parity-audit-current-head-4161635.md`,
+  `agents/desktop-implementer/ton-012-stage-5-rendering-parity-implementation.md`,
+  `evidence/ton-012-stage-5-independent-export-parity-review-4161635.md`, and
+  `agents/desktop-implementer/ton-012-stage-5-rgb-crosshatch-svg-correction.md`,
+  and `evidence/ton-012-stage-5-artifact-creative-output-review-4161635.md`;
+  validated against the current dirty worktree based on HEAD `4161635` on
+  2026-07-26.
+- Verified state: active `DocumentAppearance.preview_surface` is restored from
+  an optional per-output snapshot in `OutputTreatmentCache`, with CMYK white
+  and RGB black defaults. Export Background remains explicit and export-only.
+  Document-facing Shapes/Curves rendering consumes semantic pipeline fields;
+  RGB Curves contain Red/Green/Blue only. Crosshatch remains the temporary
+  progressive K/C/M/Y compatibility treatment and uses Multiply consistently
+  across raster preview/PNG and SVG, including RGB-output documents.
+- Retained adapters: legacy renderer entrypoints that accept facade settings;
+  document render/export paths use pipeline-authoritative functions. No
+  obsolete format compatibility or future TON issue work was added.
+- Verification: 117 library tests, 43 binary tests, strict Clippy with all
+  features, locked release build, formatting, diff check, desktop/AppStream
+  validation, and no coredumps. Artifacts are under ignored
+  `test-artifacts/ton-012-stage5/`. Manual graphical verification remains the
+  user acceptance gate.
+- Final state: the user accepted the manual Stage 5 gate in the closeout
+  request; TON-012 is ready for its closeout commit/PR workflow. The next
+  planned issue is TON-014 Source-Sampled Mark Colors. Do not begin it here.
+
+## TON-012 final closeout
+
+- Evidence: `evidence/ton-012-closeout-4161635.md`.
+- Tracker state: TON-012 Complete; TON-014 Source-Sampled Mark Colors Planned;
+  TON-013 GtkBuilder/Cambalache remains Planned.
+- Closeout state: final verification passed, the user accepted Stage 5, and
+  the feature branch is ready to commit and publish through the authorized PR
+  workflow. Preserve unrelated untracked `AGENTS.md` and `.codex-work/backups/`.

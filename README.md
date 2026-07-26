@@ -106,15 +106,20 @@ The **Document** section keeps canvas evaluation separate from delivered
 artwork:
 
 - **Preview Surface** is a checkerboard or alpha-capable color shown only on the
-  canvas. It is never sampled or exported.
+  canvas. CMYK Print and RGB Screen retain independent last-used surfaces,
+  with white and dark defaults respectively. It is never sampled or exported.
 - **Export Background** is an optional saved, alpha-capable background layer.
   SVG includes it as an editable bottom layer, and PNG uses it by default.
 - PNG export can override the saved setting with transparent or white output for
   that export only; the override does not change the document or SVG output.
 
-New documents preserve transparent export by default. Documents saved by older
-versions retain their historical white preview and export appearance when
-opened.
+Source-sampled mark colors are not part of TON-012 and remain planned for
+TON-014; `Artwork Source: Alpha` remains a scalar source, not a hidden RGB
+color source.
+
+New documents preserve transparent export by default. Toniator is pre-release;
+obsolete development project and preset snapshots are rejected rather than
+migrated.
 
 ## Interface terminology and help
 

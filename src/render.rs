@@ -536,6 +536,8 @@ pub fn generate_web_shape_marks(source: &RgbaImage, settings: &WebShapeSettings)
         .expect("fresh cancellation token cannot cancel")
 }
 
+/// Compatibility adapter for public callers that only have legacy renderer
+/// settings. Document rendering uses `generate_document_marks` instead.
 pub fn generate_web_shape_marks_cancellable(
     source: &RgbaImage,
     settings: &WebShapeSettings,
@@ -677,6 +679,8 @@ fn generate_web_shape_marks_for_pipeline(
     })
 }
 
+/// Compatibility adapter for legacy entrypoints; documents carry the
+/// authoritative pipeline and never derive it from these renderer fields.
 pub(crate) fn legacy_pipeline_from_facade(
     mode: ValueMode,
     output_mode: OutputMode,
@@ -1170,14 +1174,7 @@ pub fn render_document_preview_cancellable(
     // rasterization behavior (notably multiply blending at antialiased
     // edges). Non-white/translucent surfaces are composed after transparent
     // artwork so they remain presentation-only.
-    let legacy_white_preview = matches!(canonical.appearance.preview_surface, PreviewSurface::Color { color } if color == RgbaColor::WHITE)
-        && matches!(
-            canonical.appearance.export_background,
-            ExportBackground::None
-                | ExportBackground::Color {
-                    color: RgbaColor::WHITE
-                }
-        );
+    let legacy_white_preview = matches!(canonical.appearance.preview_surface, PreviewSurface::Color { color } if color == RgbaColor::WHITE);
     if let RenderVariant::WebCurveV1 { settings } = &canonical.render {
         canonical.validate()?;
         let source = decode_source(&canonical.source, 2400)?;
@@ -1346,9 +1343,6 @@ pub fn composite_preview(mut artwork: RgbaImage, appearance: DocumentAppearance)
     for (x, y, pixel) in artwork.enumerate_pixels_mut() {
         let mut backdrop = checkerboard_pixel(x, y);
         if let PreviewSurface::Color { color } = appearance.preview_surface {
-            backdrop = over(color, backdrop);
-        }
-        if let ExportBackground::Color { color } = appearance.export_background {
             backdrop = over(color, backdrop);
         }
         *pixel = image::Rgba(
@@ -2094,10 +2088,16 @@ mod tests {
             },
         )
         .unwrap();
+        let artwork = render_document_output(&document, 64, 64, false, None).unwrap();
+        assert_eq!(
+            preview,
+            composite_preview(artwork.clone(), document.appearance),
+            "RGB Shapes preview must compose only its preview surface"
+        );
         assert_eq!(
             image::load_from_memory(&png).unwrap().to_rgba8(),
-            preview,
-            "RGB Shapes preview and document-background PNG must share the rendered result"
+            composite_export_background(artwork, document.appearance.export_background),
+            "RGB Shapes PNG must compose only its export background"
         );
 
         let directory = tempfile::tempdir().unwrap();
@@ -2592,23 +2592,28 @@ mod tests {
     #[test]
     fn appearance_compositing_is_exact_and_mark_generation_is_invariant() {
         let artwork = RgbaImage::from_pixel(1, 1, Rgba([200, 100, 0, 128]));
-        let preview = composite_preview(
-            artwork.clone(),
-            DocumentAppearance {
-                preview_surface: PreviewSurface::Color {
-                    color: RgbaColor {
-                        red: 20,
-                        green: 40,
-                        blue: 60,
-                        alpha: 128,
-                    },
-                },
-                export_background: ExportBackground::Color {
-                    color: RgbaColor::opaque(10, 20, 30),
+        let appearance = DocumentAppearance {
+            preview_surface: PreviewSurface::Color {
+                color: RgbaColor {
+                    red: 20,
+                    green: 40,
+                    blue: 60,
+                    alpha: 128,
                 },
             },
+            export_background: ExportBackground::Color {
+                color: RgbaColor::opaque(10, 20, 30),
+            },
+        };
+        let preview = composite_preview(artwork.clone(), appearance);
+        let without_export_background = composite_preview(
+            artwork.clone(),
+            DocumentAppearance {
+                export_background: ExportBackground::None,
+                ..appearance
+            },
         );
-        assert_eq!(preview.get_pixel(0, 0).0, [105, 60, 15, 255]);
+        assert_eq!(preview, without_export_background);
         let checker = composite_preview(
             RgbaImage::from_pixel(1, 1, Rgba([0, 0, 0, 0])),
             DocumentAppearance {
@@ -2673,7 +2678,7 @@ mod tests {
     }
 
     #[test]
-    fn opaque_export_background_makes_full_document_preview_match_export_for_shapes_and_curves() {
+    fn preview_and_export_apply_only_their_own_presentation_state_for_shapes_and_curves() {
         let source = SourceArtwork {
             name: "equivalence.png".into(),
             media_type: "image/png".into(),
@@ -2688,11 +2693,29 @@ mod tests {
                 color: RgbaColor::opaque(12, 34, 56),
             },
         };
+        let artwork = render_document_output(&shape, 2, 2, false, None).unwrap();
         let preview = render_document_preview(&shape, 2, 1).unwrap().image;
+        assert_eq!(
+            preview,
+            composite_preview(artwork.clone(), shape.appearance)
+        );
         let export =
             render_document_export_cancellable(&shape, 2, 2, None, &CancellationToken::new())
                 .unwrap();
-        assert_eq!(preview, export);
+        assert_eq!(
+            export,
+            composite_export_background(artwork, shape.appearance.export_background)
+        );
+        let preview_before_export_change = preview.clone();
+        shape.appearance.export_background = ExportBackground::None;
+        assert_eq!(
+            render_document_preview(&shape, 2, 1).unwrap().image,
+            preview_before_export_change,
+            "export background cannot enter the preview"
+        );
+        shape.appearance.export_background = ExportBackground::Color {
+            color: RgbaColor::opaque(12, 34, 56),
+        };
         shape.appearance.preview_surface = PreviewSurface::Checkerboard;
         assert_eq!(
             render_document_export_cancellable(&shape, 2, 2, None, &CancellationToken::new())
@@ -2710,11 +2733,25 @@ mod tests {
             }),
         };
         curve.appearance = shape.appearance;
+        curve.appearance.preview_surface = PreviewSurface::Color {
+            color: RgbaColor::opaque(240, 240, 240),
+        };
+        curve.appearance.export_background = ExportBackground::Color {
+            color: RgbaColor::opaque(12, 34, 56),
+        };
+        let artwork = render_document_output(&curve, 80, 80, false, None).unwrap();
         let preview = render_document_preview(&curve, 80, 2).unwrap().image;
+        assert_eq!(
+            preview,
+            composite_preview(artwork.clone(), curve.appearance)
+        );
         let export =
             render_document_export_cancellable(&curve, 80, 80, None, &CancellationToken::new())
                 .unwrap();
-        assert_eq!(preview, export);
+        assert_eq!(
+            export,
+            composite_export_background(artwork, curve.appearance.export_background)
+        );
     }
 
     #[test]

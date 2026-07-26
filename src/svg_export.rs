@@ -1,4 +1,5 @@
 use crate::CancellationToken;
+use crate::artwork_pipeline::{ChannelAssignment, LegacyCompatibilityAssignment};
 use crate::model::{Document, ExportBackground, RenderVariant, Treatment};
 use crate::persistence::atomic_write_cancellable;
 use crate::render::{
@@ -150,11 +151,17 @@ fn export_curve_svg(
         geometry.width, geometry.height
     )?;
     write_export_background(&mut svg, document.appearance.export_background)?;
+    let crosshatch_compatibility = matches!(
+        document.artwork_pipeline.assignment,
+        ChannelAssignment::LegacyCompatibility(
+            LegacyCompatibilityAssignment::CrosshatchProgressiveKcmyV1
+        )
+    );
     for layer in &geometry.layers {
         token.checkpoint()?;
         let channel = layer.layer.channel;
         let (r, g, b) = layer.layer.color;
-        let label = if settings.value_mode == crate::model::ValueMode::CrosshatchLuminance {
+        let label = if crosshatch_compatibility {
             match channel {
                 Channel::Black => "Layer 1 (K)",
                 Channel::Cyan => "Layer 2 (C)",
@@ -184,8 +191,9 @@ fn export_curve_svg(
             g,
             b,
             number(layer.layer.opacity),
-            if document.artwork_pipeline.output_model
-                == crate::artwork_pipeline::OutputModel::RgbScreen
+            if !crosshatch_compatibility
+                && document.artwork_pipeline.output_model
+                    == crate::artwork_pipeline::OutputModel::RgbScreen
             {
                 "screen"
             } else {
@@ -611,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    fn crosshatch_svg_is_four_named_monochrome_curve_layers_without_marks() {
+    fn crosshatch_svg_labels_follow_the_authoritative_pipeline_when_facade_is_stale() {
         use crate::model::{RenderVariant, WebCurveSettings};
 
         let mut document = Document::new(SourceArtwork {
@@ -632,6 +640,10 @@ mod tests {
         document
             .apply_legacy_mapping_action(crate::model::ValueMode::CrosshatchLuminance)
             .unwrap();
+        let RenderVariant::WebCurveV1 { settings } = &mut document.render else {
+            panic!("Crosshatch uses Curves");
+        };
+        settings.value_mode = crate::model::ValueMode::Cmyk;
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("crosshatch.svg");
         export_svg(&path, &document).unwrap();
@@ -646,18 +658,103 @@ mod tests {
     }
 
     #[test]
+    fn rgb_output_crosshatch_svg_uses_multiply_and_authoritative_labels() {
+        use crate::model::{DocumentEditor, OutputMode, ValueMode};
+
+        let document = Document::new(SourceArtwork {
+            name: "rgb-crosshatch.png".into(),
+            media_type: "image/png".into(),
+            bytes: std::sync::Arc::from(source_png()),
+        });
+        let mut editor = DocumentEditor::new(document);
+        assert!(editor.set_output_mode(OutputMode::RgbScreen));
+        assert!(editor.apply_legacy_mapping_action(ValueMode::CrosshatchLuminance));
+        let mut document = editor.document().clone();
+        let RenderVariant::WebCurveV1 { settings } = &mut document.render else {
+            panic!("Crosshatch uses Curves");
+        };
+        settings.value_mode = ValueMode::Cmyk;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("rgb-crosshatch.svg");
+        export_svg(&path, &document).unwrap();
+        let svg = std::fs::read_to_string(path).unwrap();
+        assert_eq!(svg.matches("mix-blend-mode:multiply").count(), 4);
+        assert!(!svg.contains("mix-blend-mode:screen"));
+        for label in ["Layer 1 (K)", "Layer 2 (C)", "Layer 3 (M)", "Layer 4 (Y)"] {
+            assert!(svg.contains(&format!("inkscape:label=\"{label}\"")));
+        }
+    }
+
+    #[test]
+    fn rgb_curve_svg_uses_only_rgb_layers_when_legacy_facade_is_stale() {
+        use crate::artwork_pipeline::{
+            ArtworkPipelineSettings, AutomaticSeparationStrategy, ChannelAssignment, OutputModel,
+            SourceAlphaPolicy,
+        };
+        use crate::model::{Ink, RenderVariant, ValueMode, WebCurveSettings};
+
+        let mut document = Document::new(SourceArtwork {
+            name: "rgb-curves.png".into(),
+            media_type: "image/png".into(),
+            bytes: std::sync::Arc::from(source_png()),
+        });
+        let mut settings = WebCurveSettings {
+            output_width: 120,
+            output_height: 80,
+            long_edge_cells: 8.0,
+            value_mode: ValueMode::Cmyk,
+            ..Default::default()
+        };
+        for ink in Ink::RGB {
+            settings.channels.get_mut(ink).enabled = true;
+        }
+        document.render = RenderVariant::WebCurveV1 {
+            settings: Box::new(settings),
+        };
+        document.artwork_pipeline = ArtworkPipelineSettings {
+            source: crate::artwork_pipeline::ArtworkSource::FullColor,
+            alpha_policy: SourceAlphaPolicy::LegacyCurrentV1,
+            output_model: OutputModel::RgbScreen,
+            assignment: ChannelAssignment::automatic(
+                AutomaticSeparationStrategy::RgbDirectEncodedComponentsV1,
+            ),
+            active_channel: Some(crate::artwork_pipeline::OutputChannelId::RgbRed),
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("rgb-curves.svg");
+        export_svg(&path, &document).unwrap();
+        let svg = std::fs::read_to_string(path).unwrap();
+        for (id, label) in [("red", "Red"), ("green", "Green"), ("blue", "Blue")] {
+            assert!(svg.contains(&format!("id=\"toniator-{id}\"")));
+            assert!(svg.contains(&format!("inkscape:label=\"{label}\"")));
+        }
+        assert!(!svg.contains("toniator-black"));
+        assert!(!svg.contains("inkscape:label=\"Black\""));
+        assert!(svg.contains("mix-blend-mode:screen"));
+    }
+
+    #[test]
     fn export_background_is_optional_named_bottom_layer_with_alpha() {
         let mut document = Document::new(SourceArtwork {
             name: "background.png".into(),
             media_type: "image/png".into(),
             bytes: std::sync::Arc::from(source_png()),
         });
+        document.appearance.preview_surface = crate::model::PreviewSurface::Color {
+            color: crate::model::RgbaColor::opaque(14, 26, 41),
+        };
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("background.svg");
         export_svg(&path, &document).unwrap();
         let transparent = std::fs::read_to_string(&path).unwrap();
         assert!(!transparent.contains("toniator-background"));
         assert!(!transparent.contains("checkerboard"));
+
+        document.appearance.preview_surface = crate::model::PreviewSurface::Checkerboard;
+        export_svg(&path, &document).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), transparent);
 
         document.appearance.export_background = ExportBackground::Color {
             color: crate::model::RgbaColor {

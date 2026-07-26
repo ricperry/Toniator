@@ -895,6 +895,10 @@ pub struct SourceArtwork {
 pub struct OutputTreatmentCache {
     pub settings: Settings,
     pub render: RenderVariant,
+    /// Presentation snapshot for this output model. Older v6 documents did
+    /// not store it, so absence resolves to the model-specific default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_surface: Option<PreviewSurface>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saved_web_shape: Option<Box<WebShapeSettings>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1020,6 +1024,7 @@ impl Document {
         OutputTreatmentCache {
             settings: self.settings,
             render: self.render.clone(),
+            preview_surface: Some(self.appearance.preview_surface),
             saved_web_shape: self.saved_web_shape.clone(),
             saved_web_shape_pipeline: self.saved_web_shape_pipeline.clone(),
             saved_web_curve: self.saved_web_curve.clone(),
@@ -1036,6 +1041,17 @@ impl Document {
         self.saved_web_curve = treatment.saved_web_curve;
         self.saved_web_curve_pipeline = treatment.saved_web_curve_pipeline;
         self.artwork_pipeline = treatment.artwork_pipeline;
+    }
+
+    fn default_preview_surface(output: OutputMode) -> PreviewSurface {
+        match output {
+            OutputMode::CmykInks => PreviewSurface::Color {
+                color: RgbaColor::WHITE,
+            },
+            OutputMode::RgbScreen => PreviewSurface::Color {
+                color: RgbaColor::opaque(0, 0, 0),
+            },
+        }
     }
 
     fn new_rgb_treatment(&self) -> OutputTreatmentCache {
@@ -1068,6 +1084,7 @@ impl Document {
         OutputTreatmentCache {
             settings: self.settings,
             render,
+            preview_surface: None,
             saved_web_shape: None,
             saved_web_curve: None,
             artwork_pipeline,
@@ -1096,7 +1113,11 @@ impl Document {
             OutputMode::CmykInks => self.inactive_cmyk = Some(Box::new(active)),
             OutputMode::RgbScreen => self.inactive_rgb = Some(Box::new(active)),
         }
+        let preview_surface = replacement
+            .preview_surface
+            .unwrap_or_else(|| Self::default_preview_surface(target));
         self.apply_treatment(*replacement);
+        self.appearance.preview_surface = preview_surface;
         let target_pipeline = self
             .artwork_pipeline
             .clone()
@@ -1105,13 +1126,6 @@ impl Document {
         self.artwork_pipeline = target_pipeline;
         self.sync_legacy_projection()
             .expect("projectable legacy compatibility state");
-        // A screen has no paper by default. Only replace the untouched
-        // document default; a creator-selected appearance is never clobbered.
-        if target == OutputMode::RgbScreen && self.appearance == DocumentAppearance::default() {
-            self.appearance.preview_surface = PreviewSurface::Color {
-                color: RgbaColor::opaque(0, 0, 0),
-            };
-        }
         true
     }
 
@@ -2749,6 +2763,90 @@ mod tests {
         assert!(!editor.is_dirty());
         assert!(editor.redo());
         assert_eq!(editor.document().appearance, appearance);
+    }
+
+    #[test]
+    fn output_modes_have_distinct_default_preview_surfaces() {
+        let mut editor = editor();
+        assert_eq!(
+            editor.document().appearance.preview_surface,
+            PreviewSurface::Color {
+                color: RgbaColor::WHITE,
+            }
+        );
+
+        assert!(editor.set_output_mode(OutputMode::RgbScreen));
+        assert_eq!(
+            editor.document().appearance.preview_surface,
+            PreviewSurface::Color {
+                color: RgbaColor::opaque(0, 0, 0),
+            }
+        );
+    }
+
+    #[test]
+    fn output_mode_caches_retain_independent_preview_surfaces() {
+        let mut editor = editor();
+        let cmyk_surface = PreviewSurface::Color {
+            color: RgbaColor::opaque(242, 238, 227),
+        };
+        let rgb_surface = PreviewSurface::Color {
+            color: RgbaColor::opaque(13, 21, 34),
+        };
+        let export_background = ExportBackground::Color {
+            color: RgbaColor::opaque(71, 83, 97),
+        };
+        editor.document.appearance.preview_surface = cmyk_surface;
+        editor.document.appearance.export_background = export_background;
+
+        assert!(editor.set_output_mode(OutputMode::RgbScreen));
+        assert_eq!(
+            editor.document().appearance.preview_surface,
+            PreviewSurface::Color {
+                color: RgbaColor::opaque(0, 0, 0),
+            }
+        );
+        editor.document.appearance.preview_surface = rgb_surface;
+
+        assert!(editor.set_output_mode(OutputMode::CmykInks));
+        assert_eq!(editor.document().appearance.preview_surface, cmyk_surface);
+        assert_eq!(
+            editor.document().appearance.export_background,
+            export_background
+        );
+
+        assert!(editor.set_output_mode(OutputMode::RgbScreen));
+        assert_eq!(editor.document().appearance.preview_surface, rgb_surface);
+        assert_eq!(
+            editor.document().appearance.export_background,
+            export_background
+        );
+    }
+
+    #[test]
+    fn output_mode_switch_restores_preview_surface_in_one_undo_redo() {
+        let mut editor = editor();
+        editor.document.appearance.preview_surface = PreviewSurface::Color {
+            color: RgbaColor::opaque(231, 225, 211),
+        };
+        let original = editor.document().clone();
+
+        assert!(editor.set_output_mode(OutputMode::RgbScreen));
+        let switched = editor.document().clone();
+        assert_eq!(
+            switched.appearance.preview_surface,
+            PreviewSurface::Color {
+                color: RgbaColor::opaque(0, 0, 0),
+            }
+        );
+        assert!(editor.undo());
+        assert_eq!(editor.document(), &original);
+        assert!(
+            !editor.can_undo(),
+            "the output transition is one undo entry"
+        );
+        assert!(editor.redo());
+        assert_eq!(editor.document(), &switched);
     }
 
     #[test]

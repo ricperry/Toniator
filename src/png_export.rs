@@ -305,10 +305,32 @@ mod tests {
     }
 
     #[test]
-    fn document_background_controls_default_png_without_mutating_document() {
+    fn preview_surface_never_enters_png_and_export_background_controls_document_png() {
         let mut document = curve_document();
         document.appearance.export_background = crate::model::ExportBackground::None;
+        document.appearance.preview_surface = crate::model::PreviewSurface::Color {
+            color: crate::model::RgbaColor::opaque(18, 28, 42),
+        };
         let options = PngExportOptions::document_size(&document).unwrap();
+        let transparent_before = png_bytes(
+            &document,
+            PngExportOptions {
+                background: PngBackground::Transparent,
+                ..options
+            },
+        )
+        .unwrap();
+        document.appearance.preview_surface = crate::model::PreviewSurface::Checkerboard;
+        let transparent_after = png_bytes(
+            &document,
+            PngExportOptions {
+                background: PngBackground::Transparent,
+                ..options
+            },
+        )
+        .unwrap();
+        assert_eq!(transparent_before, transparent_after);
+
         let transparent = image::load_from_memory(&png_bytes(&document, options).unwrap())
             .unwrap()
             .to_rgba8();

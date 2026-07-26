@@ -3157,7 +3157,7 @@ The smallest stable first architecture is **one TON-010 pattern instance per pri
 
 # TON-012 — Separate artwork source sampling, output model, and channel assignment
 
-* **Status:** In progress — Stage 3 complete; Stage 4 remains
+* **Status:** Complete — Stages 0 through 5 accepted on 2026-07-26
 * **Priority:** P1
 * **Area:** Artwork mapping / source sampling / color models
 * **Type:** Model and workflow refactor
@@ -3165,6 +3165,12 @@ The smallest stable first architecture is **one TON-010 pattern instance per pri
 * **Blocks:** Remaining TON-008 RGB Curves work, TON-010, and TON-011
 * **Related:** TON-009
 * **Implementation order:** Complete after TON-008 and before TON-010
+
+### Stage 0 completion record — 2026-07-21
+
+The initial artwork-pipeline audit was completed at `10b0f6f` (`docs: audit
+artwork pipeline`). It established the source/output/assignment coupling,
+compatibility boundaries, migration risks, and staged implementation plan.
 
 ### Stage 1B completion record — 2026-07-25
 
@@ -3176,10 +3182,8 @@ pipeline snapshots. Legacy renderer and GTK fields remain projections rather
 than competing semantic state.
 
 Verification at the Stage 1B checkpoint: `cargo fmt --check` and
-`cargo test --locked` passed with 93 library tests and 44 binary tests. TON-012
-remains in progress: Stage 2's resolved-field implementation is complete in
-the checkpoint below; Stage 3 UI, Stage 4 preset cleanup, and final
-preview/export parity remain later-stage work.
+`cargo test --locked` passed with 93 library tests and 44 binary tests. Later
+stages completed the remaining UI, preset, and preview/export work.
 
 ### Stage 2 completion record — 2026-07-26
 
@@ -3229,7 +3233,7 @@ creative-workflow click-through. Stage 4 now defines the current preset policy
 as document schema v6 and preset schema v4; earlier experimental formats
 remain unsupported.
 
-TON-012 remains **In progress**.
+At this checkpoint TON-012 remained In Progress pending its later stages.
 
 ## Problem
 
@@ -4095,12 +4099,15 @@ preset runtime loads, inspected bundled screenshots, and no Toniator
 coredumps. The v4 scoped preset format, atomic application, semantic channel
 identity, Crosshatch constraints, and save-scope chooser are recorded above.
 
-TON-012 remains **In Progress** because the Stage 5 preview/export and final
-parity work below is still open.
+Stage 5 completed the remaining preview/export and final parity work below.
 
 ## Stage 5 — Final review
 
-### Stage 5 remaining work — Output-model Preview Surface restoration
+**Status:** Complete on 2026-07-26; the user accepted the manual Stage 5 gate
+in the closeout request. Toniator exited normally, no GTK critical was
+reported, and no new Toniator coredump was found.
+
+### Stage 5 completed work — Output-model Preview Surface restoration
 
 **Verified defect:** switching Output Model from RGB Screen to CMYK Print can
 inherit RGB's black Preview Surface instead of restoring CMYK's expected white
@@ -4137,7 +4144,45 @@ Perform:
 * accessibility review;
 * performance review where source sampling changes affect render cost.
 
-Do not begin TON-010 until TON-012’s source and output boundaries are stable.
+### Stage 5 implementation and acceptance record — 2026-07-26
+
+The bounded Stage 5 implementation and manual acceptance are complete. The
+active document stores the current model's Preview
+Surface in `DocumentAppearance`; each inactive CMYK/RGB treatment cache stores
+its last explicit Preview Surface, and missing snapshots use CMYK opaque white
+or RGB opaque black. The full transition, including appearance/cache state,
+remains one undoable output-model edit and survives current v6 save/reopen.
+
+Preview composition now uses only Preview Surface and checkerboard. Export
+Background is explicit and affects PNG Document-background output and SVG only;
+changing Preview Surface does not alter transparent PNG or SVG artwork, and a
+model switch does not change Export Background.
+
+Shapes and Curves document render/export paths consume the resolved semantic
+pipeline. RGB Curves use Red, Green, and Blue only, including with a stale
+legacy facade. Curves SVG Crosshatch labels use the authoritative compatibility
+assignment. RGB-output Crosshatch retains the established K/C/M/Y Multiply
+compositing rule in preview, PNG, and SVG; ordinary RGB Curves use Screen.
+
+Retained legacy adapters are `generate_web_shape_marks*`,
+`legacy_pipeline_from_facade`, and legacy Curves facade entrypoints for callers
+that still provide old renderer settings. Document-facing paths do not derive
+semantic state from those adapters. No obsolete pre-release compatibility was
+restored, and no TON-009, TON-010, TON-011, or GtkBuilder/Cambalache work was
+started.
+
+Automated verification at this record: 117 library tests, 43 binary tests,
+strict Clippy with all features, locked release build, formatting, diff check,
+desktop-file validation, AppStream validation, and no Toniator coredumps. No
+manual or graphical acceptance is claimed beyond the user's closeout
+acceptance.
+Artifact review found no blocker or major visual defect. The remaining review
+limitations are that transparent black Crosshatch can be low-contrast in a
+dark file viewer and the saved alpha examples use an opaque source; manual
+verification should include a soft-alpha source.
+
+TON-012's source and output boundaries are now stable for TON-010 and TON-011
+to begin in their own issues. Do not mark those dependent issues complete.
 
 ---
 
@@ -4340,6 +4385,55 @@ future UI changes.
 * Existing visibility and sensitivity behavior is preserved.
 * Current presets and project save/reopen continue to work.
 * Undo/redo, preview, PNG, and SVG continue to work.
+
+---
+
+# TON-014 — Source-Sampled Mark Colors
+
+* **Status:** Planned
+* **Priority:** P2
+* **Requires:** TON-012
+* **Related:** TON-010 and TON-011
+
+## Objective
+
+Allow generated marks to derive their rendered color from the source artwork
+independently of the scalar field used to determine mark size, width, coverage,
+or presence.
+
+The initial motivating workflow is:
+
+```text
+Artwork Source: Alpha
+Mark Color Source: Sample Artwork RGB
+```
+
+Geometry/intensity sampling and mark-color sampling must remain independent.
+Do not redefine `ArtworkSource::Alpha` to return RGB information or give Alpha
+a hidden color behavior.
+
+The future architecture should introduce an explicit appearance choice such as:
+
+* Fixed Channel Color;
+* Sample Artwork Color.
+
+Requirements to design before implementation:
+
+* Alpha remains a normalized scalar field.
+* Sampled color uses the same prepared source and document transform.
+* Fixed channel color remains the default.
+* Fully transparent regions produce no marks when Preserve Alpha applies.
+* Alpha must not be applied twice.
+* RGB Screen behavior preserves sampled RGB color.
+* CMYK Print behavior is explicitly designed.
+* Preview, PNG, and SVG agree.
+* SVG may require per-mark fill or stroke colors.
+* Presets store the mark-color source explicitly.
+* Point sampling versus area averaging remains a design decision.
+* Interaction with channel colors, opacity, separation, and future patterns
+  remains to be designed.
+
+Keep this issue Planned. Do not inspect or implement it as part of TON-012.
 
 ---
 
