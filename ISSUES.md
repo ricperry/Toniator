@@ -3157,7 +3157,7 @@ The smallest stable first architecture is **one TON-010 pattern instance per pri
 
 # TON-012 — Separate artwork source sampling, output model, and channel assignment
 
-* **Status:** In progress — Stage 2 complete
+* **Status:** In progress — Stage 3 complete; Stage 4 remains
 * **Priority:** P1
 * **Area:** Artwork mapping / source sampling / color models
 * **Type:** Model and workflow refactor
@@ -3175,7 +3175,7 @@ and active, saved, and inactive CMYK/RGB treatment containers retain paired
 pipeline snapshots. Legacy renderer and GTK fields remain projections rather
 than competing semantic state.
 
-Verification at the current checkout: `cargo fmt --check` and
+Verification at the Stage 1B checkpoint: `cargo fmt --check` and
 `cargo test --locked` passed with 93 library tests and 44 binary tests. TON-012
 remains in progress: Stage 2's resolved-field implementation is complete in
 the checkpoint below; Stage 3 UI, Stage 4 preset cleanup, and final
@@ -3192,10 +3192,45 @@ progressive Crosshatch compatibility assignment. Shapes, Curves, preview, PNG,
 and SVG consume the resolved pipeline. SVG output metadata/blending follows the
 authoritative output model even if the legacy facade is stale.
 
-Verification: 99 library tests, 44 binary tests, strict Clippy, release build,
-desktop-file validation, AppStream validation, formatting, and diff checks pass.
+Verification at the Stage 2 checkpoint: 99 library tests, 44 binary tests,
+strict Clippy, release build, desktop-file validation, AppStream validation,
+formatting, and diff checks pass.
 No new Toniator core dumps were found. The user accepted Stage 2 as complete;
-TON-012 stays In progress for later Stage 3–5 work.
+the later Stage 3 UI and Stage 4–5 work remained open at that checkpoint.
+
+### Stage 3 completion record — 2026-07-26
+
+The shared Document section now replaces the combined Artwork Mapping UI with
+independent semantic controls: Artwork Source (Full Color, Red, Green, Blue,
+Value, Perceptual Lightness, Alpha), Source Alpha (Preserve or Ignore; hidden
+with a no-double-alpha note for Alpha source), independent Output Model (CMYK
+Print or RGB Screen), scalar Apply To Active/All, and conditional semantic
+Active Channel destinations. Legacy Brightness remains transitional state only
+for loaded/internal compatibility.
+
+Callbacks update the authoritative pipeline directly and create one ordinary
+undo entry. Output-model transitions retain the existing mode-specific
+treatment caches and valid semantic state. GTK synchronization retains live
+StringList models, defers output synchronization, and rejects invalid
+positions. Legacy Crosshatch is an explicit temporary action; exiting restores
+ordinary Curves state when available without changing Output Model.
+
+Verification: 103 library tests, 43 binary tests, strict Clippy, locked release
+build, desktop/AppStream validation, formatting and diff checks, and an
+automated GTK screenshot inspected for normal rendering. The user accepted
+TON-012 Stage 3 as complete on 2026-07-26, satisfying the manual-verification
+gate. The verified automated GUI/artifact runs exited with status 0, and
+`coredumpctl list toniator` reported no coredumps. A separate shell exit status
+for the interactive smoke command was not captured and is not claimed.
+
+Known remaining limitations: Stage 4 preset cleanup, final RGB Curves
+completion, broad preview/export parity, and manual creative-workflow
+click-through. Current preset/persistence behavior, schema policy, and
+mode-cache conventions remain unchanged by Stage 3. The pre-release policy
+continues to support document schema v6 and preset schema v3; earlier
+experimental formats remain unsupported.
+
+TON-012 remains **In progress**.
 
 ## Problem
 
@@ -4010,23 +4045,20 @@ Implement:
 
 ## Stage 3 — Interface refactor
 
-Replace the combined Artwork Mapping dropdown with:
+**Status:** Complete in the 2026-07-26 Stage 3 checkpoint.
 
-* Artwork Source;
-* Source Alpha where applicable;
-* Output Model;
-* Apply To where applicable.
-
-Implement:
-
-* dynamic visibility;
-* contextual help;
-* wide and narrow layouts;
-* keyboard and accessibility behavior;
-* callback-loop prevention;
-* correct dirty-state behavior.
+The shared Document section replaces the combined Artwork Mapping dropdown with
+Artwork Source, Source Alpha where applicable, independent Output Model, scalar
+Apply To, and conditional semantic Active Channel controls. It includes
+contextual guidance, direct authoritative callbacks, one undo entry per
+semantic edit, GTK-safe live-model synchronization, invalid-position rejection,
+and an explicit temporary Legacy Crosshatch action with ordinary Curves
+restoration. No human manual click-through is claimed; the automated realized
+GTK coverage and screenshot are recorded above.
 
 ## Stage 4 — Presets and persistence
+
+**Status:** Planned; this is the remaining TON-012 cleanup boundary.
 
 Separate:
 
@@ -4100,6 +4132,163 @@ Track separately unless required to preserve current behavior:
 The main correction is:
 
 > **Artwork Source says what Toniator reads. Output Model says what Toniator generates. Channel Assignment says where scalar source values go.**
+
+---
+
+# TON-013 — Move Toniator's GTK/libadwaita UI to GtkBuilder and Cambalache
+
+* **Status:** Planned
+* **Priority:** P1
+* **Requires:** Completed TON-012 Stage 3 UI checkpoint
+* **Blocks:** Future substantial GTK layout work and UI-heavy portions of
+  TON-010 and TON-011
+* **Related:** TON-012
+
+## Objective
+
+Move Toniator's static GTK/libadwaita widget hierarchy from programmatic Rust
+construction into GtkBuilder `.ui` resources that can be opened and edited in
+Cambalache.
+
+The runtime UI source of truth should become one or more `.ui` files, including
+a main Toniator UI resource and reusable component templates. Rust continues to
+own application state, semantic callbacks, dynamic models, rendering,
+validation, undo, synchronization, and custom runtime behavior.
+
+## Architecture boundary
+
+Move into GtkBuilder resources:
+
+* application windows and major containers;
+* libadwaita pages, groups, rows, and navigation structure;
+* static labels, buttons, switches, scales, entries, and dropdown shells;
+* widget properties, layout relationships, style classes, tooltips, and
+  accessibility relationships;
+* translatable strings, stable widget IDs, and reusable static control
+  structures.
+
+Keep in Rust:
+
+* document and pipeline state;
+* callback implementations, undo/redo, rendering, preview, and export;
+* dynamic list contents and semantic `OutputChannelId` mappings;
+* conditional model population, sensitivity, visibility, and deferred
+  synchronization;
+* custom drawing, preview widgets, GTK crash protections, and runtime-only
+  content.
+
+Dynamic content may use stable placeholder containers and model objects declared
+in `.ui` resources and populated by Rust.
+
+## Reusable channel controls
+
+Implement per-channel controls as one reusable GTK composite template rather
+than duplicating separate static hierarchies for Cyan, Magenta, Yellow, Black,
+Red, Green, and Blue. The component must support:
+
+* semantic `OutputChannelId`;
+* localized channel name and channel color;
+* visibility, opacity, and current channel-specific treatment controls;
+* future per-channel pattern assignment, transforms, and source-response
+  controls;
+* stable widget/model identity and CMYK/RGB terminology.
+
+Do not represent “All Channels” as a fake output channel. It remains an
+aggregate editing mode over real semantic channels.
+
+Prefer stable CMYK and RGB component instances or pages over destroying and
+rebuilding live controls during output-model transitions.
+
+## Dynamic models and composite templates
+
+`.ui` resources may define `GtkDropDown` widgets, empty `GtkStringList` models,
+list factories, placeholder containers, and static row templates. Rust owns
+dynamic contents. Channel dropdowns must retain model identity, use
+`GtkStringList::splice()` or an equivalent safe operation, map positions through
+semantic Rust channel arrays, reject `GTK_INVALID_LIST_POSITION`, and never use
+display strings or indexes as authoritative identities.
+
+For richer future rows, use a custom `GObject` item model with `GListStore` and
+a reusable list-item template. Prefer composite templates where appropriate.
+Likely resources include:
+
+```text
+Toniator.ui
+ToniatorChannelControls.ui
+```
+
+Additional focused resources such as `ToniatorPatternControls.ui` or
+`ToniatorExportControls.ui` require a clear ownership boundary. Do not split
+the UI into excessive files.
+
+## Required work
+
+1. Audit and classify current widget construction as static, reusable,
+   dynamic-model-backed, or custom/runtime-only.
+2. Define the target `.ui` resource structure and create valid GTK 4/libadwaita
+   GtkBuilder resources.
+3. Add resources to the application bundle and load the main interface through
+   GtkBuilder or gtk-rs composite templates.
+4. Bind widgets through stable IDs or template children.
+5. Convert repeated channel controls into one reusable composite template.
+6. Remove duplicated programmatic construction only after parity is proven.
+7. Create a Cambalache project if it improves maintainability.
+8. Document the XML/Rust ownership boundary and resource workflow.
+
+Do not begin this implementation speculatively or as part of TON-012 Stage 3.
+
+## GTK stability requirements
+
+Preserve the existing P0 protections:
+
+* never replace live dropdown models during selection notifications;
+* retain stable model identity where required;
+* reject invalid list positions;
+* preserve deferred synchronization and bounded `RefCell` borrows;
+* avoid callback recursion, refresh-induced dirty state, and semantic channel
+  validation regressions;
+* preserve output-model transition safety.
+
+Do not move dynamic model ownership into GtkBuilder when doing so weakens these
+protections.
+
+## UI parity requirements
+
+Preserve the current window structure, inspector organization, control
+visibility and sensitivity, labels, terminology, keyboard behavior, pipeline
+controls, channel selection, Crosshatch handling, preset loading, save/reopen,
+undo/redo, preview, PNG, and SVG behavior. This is an architecture conversion,
+not a visual redesign.
+
+## Cambalache requirements
+
+* Main and reusable `.ui` resources open in Cambalache without structural
+  errors.
+* Unsupported custom/runtime behavior uses stable placeholder containers.
+* Cambalache edits do not require manual reconstruction of generated Rust
+  widget hierarchies.
+* Resource paths and template class names are documented.
+* Checked-in Cambalache projects contain no machine-specific absolute paths.
+
+## Documentation
+
+Add `docs/UI_ARCHITECTURE.md` covering GtkBuilder layout, Cambalache workflow,
+composite templates, stable widget IDs, reusable channel controls, static and
+dynamic ownership, model population, callback ownership, custom widgets,
+resource compilation, localization, accessibility, testing, and rules for
+future UI changes.
+
+## Acceptance criteria
+
+* Toniator builds and launches using GtkBuilder `.ui` resources.
+* Primary static UI is no longer duplicated in Rust.
+* Reusable channel controls use one composite template.
+* CMYK and RGB channel instances preserve semantic identity.
+* Dynamic dropdown models retain stable identity.
+* Current callbacks operate through the new widgets.
+* Existing visibility and sensitivity behavior is preserved.
+* Current presets and project save/reopen continue to work.
+* Undo/redo, preview, PNG, and SVG continue to work.
 
 ---
 

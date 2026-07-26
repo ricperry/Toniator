@@ -1,0 +1,35 @@
+# TON-012 Stage 3 implementation evidence
+
+- Repository absolute path: `/home/ricperry1/projects/Toniator`
+- Git HEAD: `bac55f70e7a77ec638b8033d7801fa07141d4d7e`
+- Relevant working-tree assumptions: before work, only `.gitignore` was modified and `.agents/`, `.codex/`, `AGENTS.md`, and `nextPrompt.txt` were untracked. They were preserved. This work modifies only `src/artwork_pipeline.rs`, `src/model.rs`, and `src/ui.rs`.
+- Producing agent: `desktop-implementer`
+- Task: TON-012 Stage 3 semantic Artwork Source UI; bounded to Document pipeline controls, compatibility projection, temporary Crosshatch treatment, and focused verification.
+- Subsystems inspected: `Document.artwork_pipeline`, legacy projection, `DocumentEditor` undo/history, shared Document inspector, Shapes/Curves synchronization, GTK `DropDown` model synchronization, Crosshatch compatibility treatment, bundled preset loading, and output-mode caches.
+- Exact files changed:
+  - `src/artwork_pipeline.rs`: legacy projection now projects any validated Full Color automatic or scalar active/all semantic pipeline state for the retained renderer facade; Crosshatch remains restricted to its canonical legacy-brightness adapter.
+  - `src/model.rs`: added validated undo-aware `DocumentEditor::set_artwork_pipeline` and `exit_crosshatch_treatment`; added semantic pipeline and Crosshatch undo/redo tests.
+  - `src/ui.rs`: removed normal Artwork Mapping/Output Channel facades and illustrative mapping assets; added shared Document controls for Artwork Source, Source Alpha, Output Model, Channel Assignment, Active Channel, and explicit temporary Crosshatch action; direct semantic callbacks use `OutputChannelId`, reject invalid positions, retain live `StringList` models, and defer output synchronization.
+- Important implementation decisions:
+  - The common Document section is the single semantic authority shared by Shapes and Curves; per-treatment geometry remains unchanged.
+  - Full Color always uses Automatic Color Separation. Scalar sources expose active/all assignment. The Alpha source disables Source Alpha selection to prevent double application. RGB active-channel lists expose only Red, Green, and Blue.
+  - `set_artwork_pipeline` validates before mutation, syncs only the compatibility projection, rolls back on projection failure, and produces one ordinary undo entry.
+  - `apply_legacy_mapping_action` remains only behind CLI compatibility artifacts and explicit Crosshatch activation. Exiting Crosshatch produces ordinary Curves with Value/All Channels while retaining the selected output model.
+  - Existing `sync_dropdown_strings` remains the GTK protection: it splices an installed `StringList` rather than replacing it; output transitions defer synchronization to the idle queue.
+- Existing abstractions reused: `ArtworkPipelineSettings`, `OutputChannelId`, `ChannelAssignment`, `OutputModel`, `DocumentEditor` history, `sync_legacy_projection`, `sync_dropdown_strings`, `sync_controls_when_idle`, and existing Shapes/Curves treatment caches.
+- Verified findings:
+  - UI synchronization reads `Document.artwork_pipeline` directly rather than `project_legacy_value_mode`.
+  - Realized GTK coverage selects every source, Source Alpha, scalar assignment, CMYK K then RGB Blue, invalid active-channel position, repeated CMYK/RGB transitions, and Crosshatch enter/exit without `RefCell` conflict or replacement of the live dropdown models.
+  - Shapes and Curves continue using their existing geometry controls; output-mode cache tests and bundled preset tests passed.
+- Commands run:
+  - `cargo fmt && cargo fmt --check`
+  - `cargo test --locked` (101 library tests, 43 binary tests, 0 doc tests)
+  - `cargo clippy --locked --all-targets -- -D warnings`
+  - `git diff --check`
+  - `cargo run --locked -- --demo --screenshot /tmp/toniator-ton-012-stage3.png`
+  - `cargo run --locked -- --demo --expand-document --screenshot /tmp/toniator-ton-012-stage3-document.png`
+- Artifacts produced: GTK screenshots outside the worktree at `/tmp/toniator-ton-012-stage3.png` and `/tmp/toniator-ton-012-stage3-document.png`; the first was visually inspected and shows a normal rendered Shapes demo. The document expander was not visible in the screenshot capture despite the artifact flag, so the shared-control interaction evidence is the realized GTK test rather than a manual verification claim.
+- Known limitations: this does not perform Stage 4 preset cleanup, final RGB Curves work, broad preview/export parity work, or obsolete-format changes. The old CLI source-mapping index remains intentionally supported as a compatibility adapter. No human manual interaction verification was performed.
+- Follow-up review targets: manual creative-workflow review of the Document expander at multiple inspector sizes; Stage 4 can remove the CLI compatibility mapping only after preset/format cleanup is authorized; documentation likely affected after milestone review is `docs/ARTWORK_PIPELINE.md` and `docs/ARTWORK_PIPELINE_AUDIT.md`.
+- Invalidation conditions: changes to `src/artwork_pipeline.rs`, `src/model.rs`, `src/ui.rs`, pipeline validation/projection, GTK dropdown synchronization, output cache transitions, Crosshatch behavior, Git HEAD, or the stated dirty-worktree assumptions require revalidation.
+- Timestamp: `2026-07-26`

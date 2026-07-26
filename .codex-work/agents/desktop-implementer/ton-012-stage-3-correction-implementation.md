@@ -1,0 +1,33 @@
+# TON-012 Stage 3 correction evidence
+
+- Repository absolute path: `/home/ricperry1/projects/Toniator`
+- Git HEAD: `bac55f70e7a77ec638b8033d7801fa07141d4d7e`
+- Relevant working-tree assumptions: existing Stage 3 changes were already present in `src/artwork_pipeline.rs`, `src/model.rs`, and `src/ui.rs`; untracked `.codex-work/` and `AGENTS.md` were preserved. `.gitignore` was not modified by this correction pass.
+- Producing agent: `desktop-implementer`
+- Task: bounded independent-review correction for TON-012 Stage 3 mode transition, Crosshatch restoration, and semantic-control guidance.
+- Subsystems inspected: `Document::new_rgb_treatment`, `Document::switch_output_mode`, `ArtworkPipelineSettings::transition_output_model`, Crosshatch `DocumentEditor` transitions, saved Curves pipeline snapshots, Document control synchronization, and realized GTK control tests.
+- Exact files changed:
+  - `src/model.rs`: first uncached RGB treatment now transitions the current authoritative pipeline rather than hard-coding Full Color/RGB automatic; Crosshatch captures ordinary Curves before activation and restores the paired saved Curve/pipeline on exit; added focused regression tests.
+  - `src/ui.rs`: added semantic source guidance, Alpha-source replacement note, static Full Color assignment explanation, and Crosshatch restoration note; expanded realized GTK checks for those states.
+- Important implementation decisions:
+  - CMYK Black converts to the valid RGB default channel on the uncached transition; returning to CMYK restores the cached original Black selection and all semantic source/alpha/assignment state.
+  - Existing `saved_web_curve` and `saved_web_curve_pipeline` are reused as the narrow Crosshatch prior-state cache. Crosshatch exit falls back to ordinary default Curves only if no valid same-output saved curve exists.
+  - Source Alpha is hidden for the Alpha source and replaced with “Alpha is the source; source alpha is not applied again.” Full Color makes Channel Assignment insensitive and names its model-specific automatic behavior.
+- Existing abstractions reused: `transition_output_model`, `saved_web_curve`, `saved_web_curve_pipeline`, `TreatmentState`, `sync_controls`, `sync_dropdown_strings`, and realized GTK callback test plumbing.
+- Verified findings:
+  - Value/Preserve and Perceptual Lightness/Ignore with Active CMYK Black survive first RGB transition and CMYK cache restoration without an invalid channel crossing models.
+  - Non-default Curve path, rotation, color, and visibility restore after Crosshatch exit, undo/redo, and a second Crosshatch round trip.
+  - Realized GTK coverage verifies source guidance, hidden Alpha policy row/replacement note, static CMYK/RGB Full Color assignment explanations, and Crosshatch state note.
+- Commands run:
+  - `cargo fmt && cargo fmt --check`
+  - focused model and realized GTK tests
+  - `cargo test --locked` (103 library tests, 43 binary tests, 0 doc tests)
+  - `cargo clippy --locked --all-targets -- -D warnings`
+  - `git diff --check`
+  - `cargo run --locked -- --demo --screenshot /tmp/toniator-ton-012-stage3-correction.png`
+- Artifacts produced: automated GTK screenshot outside the worktree at `/tmp/toniator-ton-012-stage3-correction.png`; it was inspected for normal application rendering. No manual interaction verification is claimed.
+- Known limitations: Stage 4 preset cleanup, final RGB Curves work, and broad preview/export parity remain outside this pass. The Document expander controls were exercised by realized GTK tests; no human click-through was performed.
+- Follow-up review targets: manual creative-workflow review of source guidance and Document expander layout at narrow inspector widths; Stage 4 compatibility/preset decisions.
+- Documentation likely affected: `docs/ARTWORK_PIPELINE.md` and `docs/ARTWORK_PIPELINE_AUDIT.md` after milestone review.
+- Invalidation conditions: changes to output-mode cache handling, pipeline transitions, saved Curve snapshots, Crosshatch handling, semantic control synchronization, Git HEAD, or listed working-tree assumptions require revalidation.
+- Timestamp: `2026-07-26`

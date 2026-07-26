@@ -4,7 +4,10 @@
 
 **Audited commit:** `08459db` on `debug/ton-008-menu-crashes`
 
-**Scope:** TON-012 Stage 0 only
+**Original scope:** TON-012 Stage 0 audit
+
+**Current status:** Stage 3 is complete in the current worktree. Stage 4 preset
+cleanup and Stage 5 preview/export parity and final review remain planned.
 
 **Architecture baseline:** `docs/ARTWORK_PIPELINE.md` (untracked at the audited starting state)
 
@@ -24,9 +27,10 @@ pre-release files. The first compatibility baseline will be established at the
 1.0 release. Migration tables and plans retained below are historical audit
 evidence only; current builds reject pre-v6 projects and pre-v3 presets.
 
-This document records current behavior, not behavior inferred from labels such as
-“Brightness,” “Color,” or “RGB.” Code references use line numbers from commit
-`08459db` before this audit's documentation-only edits.
+The tables below preserve Stage 0 evidence and code references from commit
+`08459db`; the follow-up notes and current-status section describe verified
+behavior in the current worktree. Behavior is not inferred from labels such as
+“Brightness,” “Color,” or “RGB.”
 
 The dispositions used below are:
 
@@ -36,6 +40,11 @@ The dispositions used below are:
 - **Defer:** decide or implement in a later stage or issue.
 
 No application code or behavior changed during this audit.
+
+The numbered tables and appendices below retain historical Stage 0/Stage 1
+evidence, including old line references and investigated migration inputs. They
+do not describe currently accepted pre-release files or current UI state unless
+the follow-up notes above explicitly say so.
 
 > **Stage 1B follow-up (2026-07-22):** The audited coupling is now retained
 > only as a derived facade. Schema v6 stores the independent pipeline with
@@ -54,14 +63,41 @@ No application code or behavior changed during this audit.
 > mode derive from `Document.artwork_pipeline.output_model`; the legacy
 > `Document.output_mode`/`ValueMode` fields remain compatibility projections only.
 > Preserve, Ignore, Alpha, and LegacyCurrentV1 semantics are covered at the
-> resolver boundary. Stage 3 UI exposure, Stage 4 preset cleanup, and broader
-> translucent-SVG end-to-end fixture coverage remains a later hardening task.
+> resolver boundary.
+
+> **Stage 3 follow-up (2026-07-26):** The shared Document section now exposes
+> independent Artwork Source controls for Full Color, Red, Green, Blue, Value,
+> Perceptual Lightness, and Alpha; Source Alpha Preserve/Ignore controls;
+> independent CMYK Print/RGB Screen Output Model controls; scalar Apply To
+> Active/All controls; and conditional semantic Active Channel destinations.
+> Legacy Brightness remains transitional state for loaded/internal compatibility
+> only. Alpha-source state hides Source Alpha with an explicit no-double-alpha
+> note. Full Color shows model-specific automatic separation rather than an
+> editable scalar assignment.
+>
+> The callbacks update the authoritative pipeline directly and create one undo
+> entry. Output transitions retain the existing mode-specific treatment caches
+> and valid semantic state. GTK synchronization retains installed StringList
+> identity, defers output synchronization, and rejects invalid positions.
+> Legacy Crosshatch is an explicit temporary action; exit restores ordinary
+> Curves state when saved state is available, without changing Output Model.
+> Current preset, persistence, and mode-cache behavior is unchanged by Stage 3.
+>
+> Verification: 103 library tests, 43 binary tests, strict Clippy, locked
+> release build, desktop/AppStream validation, formatting and diff checks, and
+> an automated GTK screenshot inspected for normal rendering. The user accepted
+> TON-012 Stage 3 on 2026-07-26, satisfying the manual-verification gate.
+> Verified automated GUI/artifact runs exited 0 and `coredumpctl list toniator`
+> reported no coredumps; a separate interactive shell exit status was not
+> captured. Stage 4 preset cleanup, RGB Curves completion, and broad
+> preview/export parity remain open.
 
 ## 2. Confirmed current pipeline
 
 ```text
 GTK controls
-  Pattern Type + Artwork Mapping + Output + target/visibility/appearance
+  Shared Document source/alpha/output/assignment/channel controls
+  + Pattern Type + target/visibility/appearance
         |
         v
 DocumentEditor
@@ -498,7 +534,7 @@ The implementation at `08459db` already:
   (`src/ui.rs:5022-5042`);
 - validates candidates before replacing the live editor.
 
-Stage 1 and Stage 4 must preserve these rules exactly.
+Stage 3 and Stage 4 must preserve these rules exactly.
 
 ## 10. Shapes and Curves comparison
 
@@ -701,20 +737,20 @@ enum ChannelAssignment {
     AutomaticColorSeparation(SeparationStrategyId),
     ActiveChannel,
     AllChannels,
-    Compatibility(ArtworkCompatibility),
+    LegacyCompatibility(LegacyCompatibilityAssignment),
 }
 ```
 
 Rules:
 
 - `ArtworkPipelineState` is the only mutable source of truth for these concepts.
-- `ValueMode` remains only as a deserialization/input compatibility type during
-  migration; it is not stored independently beside the new state.
+- `ValueMode` remains only as a CLI/legacy-action compatibility type; it is not
+  stored independently beside the new state.
 - `Document.output_mode` is migrated into `output_model` rather than retained as
   a second authoritative field.
 - Shapes/Curves settings no longer authoritatively own source, alpha, assignment,
-  or active destination. Temporary adapters may project the new state into old
-  renderer calls until Stage 2.
+  or active destination. The remaining adapters project validated semantic state
+  into retained renderer fields.
 - Automatic separation serializes its versioned strategy ID. Migrated CMYK and
   RGB mappings select the exact legacy strategy IDs below; the strategy is not
   inferred later from the output model.
@@ -722,21 +758,20 @@ Rules:
   model. It is present only for `ActiveChannel`; every other assignment requires
   `None`.
 - Crosshatch is represented only by
-  `Compatibility(LegacyProgressiveCrosshatchV1)`. That assignment exclusively
+  `LegacyCompatibility(LegacyCompatibilityAssignment)`. That assignment exclusively
   owns progressive K/C/M/Y routing; it is not simultaneously Automatic, Active,
   or All, and it is not source or output state.
-- For migrated v1-v5 documents, each existing mode cache is converted once to a
-  complete, valid semantic snapshot plus its pattern/channel state. Selecting an
-  output mode activates that owning cache snapshot and stores the previous
-  active snapshot, exactly preserving today's mode-switch restoration. This is
-  a versioned migration-only compatibility exception to the general rule that
-  Output Model does not replace Artwork Source. New state does not independently
-  mutate a cache, and no cache competes with the currently active snapshot.
+- Historical v1-v5 migration converted each existing mode cache once to a
+  complete, valid semantic snapshot plus its pattern/channel state. Current
+  pre-release loaders reject those formats; the retained cache boundary still
+  preserves mode-specific state for supported schema v6 documents. New state
+  does not independently mutate a cache, and no cache competes with the
+  currently active snapshot.
 
-### 15.2 Legacy Artwork Mapping facade
+### 15.2 Historical Legacy Artwork Mapping facade
 
-Keep the current five-entry GTK control unchanged through Stage 1. A deliberate
-user selection is translated once:
+The historical Stage 1 plan kept the five-entry GTK control unchanged while the
+semantic model was introduced. A deliberate user selection was translated once:
 
 ```text
 legacy dropdown action
@@ -823,21 +858,27 @@ and migration from versions 1-5. It does not need the full preset redesign.
 - remove slot aliasing and duplicate output inference;
 - establish one canonical resolved object for preview/PNG/SVG generation.
 
-**Stage 3 — preset migration and compatibility cleanup**
+**Stage 3 — separate GTK controls**
+
+**Status:** Complete on 2026-07-26.
+
+- replace the facade with Artwork Source, Source Alpha, Output Model, scalar
+  Apply To, and conditional semantic Active Channel controls;
+- preserve all P0 callback, invalid-position, live-model, and deferred-sync rules;
+- retain progressive disclosure and clear creative terminology;
+- expose Legacy Crosshatch as a temporary action with ordinary Curves restoration.
+
+**Stage 4 — preset migration and compatibility cleanup**
+
+**Status:** Planned.
 
 - introduce scoped preset semantics using the stable IDs introduced in Stage 1;
 - migrate/rewrite saved treatment presets without relying on `nativeRender` as a
   hidden semantic source;
 - define unknown-ID preservation/error behavior;
-- finish cached/saved compatibility cleanup once Stage 2 no longer requires old
-  renderer projections.
-
-**Stage 4 — separate GTK controls**
-
-- replace the facade with Artwork Source, Source Alpha, Output Model, Assignment,
-  and active-channel controls;
-- preserve all P0 callback, invalid-position, live-model, and deferred-sync rules;
-- retain progressive disclosure and clear creative terminology.
+- finish cached/saved compatibility cleanup once the UI transition is settled;
+- add preset round-trip tests without changing the current pre-release policy
+  that v6 projects and v3 presets are the supported formats.
 
 **Later stages/issues**
 
@@ -849,11 +890,11 @@ and migration from versions 1-5. It does not need the full preset redesign.
 - TON-011 owns advanced per-channel source/pattern overrides.
 - TON-009 remains a post-compositing output treatment.
 
-### 15.5 Recommended Stage 1 file scope
+### 15.5 Historical Stage 1 file scope
 
 - `src/model.rs`: authoritative types/state, validation, legacy adapters, cache
   ownership, undo snapshot integration.
-- `src/persistence.rs`: document version bump and v1-v5 migration.
+- `src/persistence.rs`: document version bump and historical migration design.
 - `src/preset.rs`: parse-boundary compatibility intent only; defer full preset
   schema redesign.
 - `src/ui.rs`: keep the existing UI, route mapping/output callbacks through the

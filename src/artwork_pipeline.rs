@@ -989,7 +989,7 @@ pub fn project_legacy_value_mode(
     match (settings.source, settings.alpha_policy, settings.assignment) {
         (
             ArtworkSource::FullColor,
-            SourceAlphaPolicy::LegacyCurrentV1,
+            _,
             ChannelAssignment::Automatic {
                 strategy: AutomaticSeparationStrategy::CmykEncodedRgbMaxBlackV1,
             },
@@ -1001,7 +1001,7 @@ pub fn project_legacy_value_mode(
         }),
         (
             ArtworkSource::FullColor,
-            SourceAlphaPolicy::LegacyCurrentV1,
+            _,
             ChannelAssignment::Automatic {
                 strategy: AutomaticSeparationStrategy::RgbDirectEncodedComponentsV1,
             },
@@ -1011,11 +1011,7 @@ pub fn project_legacy_value_mode(
             scalar_slot: None,
             scalar_destination: None,
         }),
-        (
-            ArtworkSource::LegacyBrightness(LegacyBrightnessKind::EncodedRec709InvertedV1),
-            SourceAlphaPolicy::LegacyCurrentV1,
-            ChannelAssignment::ActiveChannel,
-        ) => {
+        (source, _, ChannelAssignment::ActiveChannel) if source.is_scalar() => {
             let Some(channel) = settings.active_channel else {
                 return Err(LegacyProjectionError::InvalidPipeline(
                     PipelineStateError::MissingActiveChannel,
@@ -1028,16 +1024,14 @@ pub fn project_legacy_value_mode(
                 scalar_destination: Some(channel.to_legacy_ink()),
             })
         }
-        (
-            ArtworkSource::LegacyBrightness(LegacyBrightnessKind::EncodedRec709InvertedV1),
-            SourceAlphaPolicy::LegacyCurrentV1,
-            ChannelAssignment::AllChannels,
-        ) => Ok(LegacyValueModeProjection {
-            value_mode: ValueMode::Luminance,
-            output_mode,
-            scalar_slot: None,
-            scalar_destination: None,
-        }),
+        (source, _, ChannelAssignment::AllChannels) if source.is_scalar() => {
+            Ok(LegacyValueModeProjection {
+                value_mode: ValueMode::Luminance,
+                output_mode,
+                scalar_slot: None,
+                scalar_destination: None,
+            })
+        }
         (
             ArtworkSource::LegacyBrightness(LegacyBrightnessKind::EncodedRec709InvertedV1),
             SourceAlphaPolicy::LegacyCurrentV1,
@@ -1410,7 +1404,7 @@ mod tests {
             ValueMode::CrosshatchLuminance
         );
 
-        let unsupported = ArtworkPipelineSettings {
+        let semantic_scalar = ArtworkPipelineSettings {
             source: ArtworkSource::Value,
             alpha_policy: SourceAlphaPolicy::Preserve,
             output_model: OutputModel::RgbScreen,
@@ -1418,8 +1412,10 @@ mod tests {
             active_channel: None,
         };
         assert_eq!(
-            project_legacy_value_mode(&unsupported),
-            Err(LegacyProjectionError::UnsupportedReverseProjection)
+            project_legacy_value_mode(&semantic_scalar)
+                .unwrap()
+                .value_mode,
+            ValueMode::Luminance
         );
     }
 

@@ -1057,20 +1057,20 @@ impl Document {
             }
             RenderVariant::NativeBasicV1 => {}
         }
+        // The first RGB visit has no cached treatment yet.  Preserve the
+        // semantic source/alpha/assignment state and translate only its
+        // output-model-dependent channel before installing this treatment.
+        let artwork_pipeline = self
+            .artwork_pipeline
+            .clone()
+            .transition_output_model(OutputModel::RgbScreen, None)
+            .expect("valid pipeline output transition");
         OutputTreatmentCache {
             settings: self.settings,
             render,
             saved_web_shape: None,
             saved_web_curve: None,
-            artwork_pipeline: ArtworkPipelineSettings {
-                source: ArtworkSource::FullColor,
-                alpha_policy: crate::artwork_pipeline::SourceAlphaPolicy::LegacyCurrentV1,
-                output_model: OutputModel::RgbScreen,
-                assignment: ChannelAssignment::automatic(
-                    AutomaticSeparationStrategy::RgbDirectEncodedComponentsV1,
-                ),
-                active_channel: None,
-            },
+            artwork_pipeline,
             saved_web_shape_pipeline: None,
             saved_web_curve_pipeline: None,
         }
@@ -2042,6 +2042,84 @@ impl DocumentEditor {
         true
     }
 
+    /// Applies one validated semantic artwork-pipeline edit.  This is the
+    /// Stage 3 UI seam: the pipeline remains authoritative and the legacy
+    /// renderer facade is updated only through `sync_legacy_projection`.
+    pub fn set_artwork_pipeline(&mut self, pipeline: ArtworkPipelineSettings) -> bool {
+        if pipeline.validate().is_err() || self.document.artwork_pipeline == pipeline {
+            return false;
+        }
+        let before = TreatmentState::from_document(&self.document);
+        self.document.artwork_pipeline = pipeline;
+        if self.document.sync_legacy_projection().is_err() {
+            before.apply(&mut self.document);
+            return false;
+        }
+        if self.active.is_none() {
+            self.undo.push(Edit {
+                before,
+                after: TreatmentState::from_document(&self.document),
+            });
+        }
+        self.redo.clear();
+        true
+    }
+
+    /// Leave the temporary compatibility Crosshatch treatment as ordinary
+    /// Curves without changing the selected output model.
+    pub fn exit_crosshatch_treatment(&mut self) -> bool {
+        if !matches!(
+            self.document.artwork_pipeline.assignment,
+            ChannelAssignment::LegacyCompatibility(
+                LegacyCompatibilityAssignment::CrosshatchProgressiveKcmyV1
+            )
+        ) {
+            return false;
+        }
+        let before = TreatmentState::from_document(&self.document);
+        let output_model = self.document.artwork_pipeline.output_model;
+        let (render, pipeline) = match (
+            self.document.saved_web_curve.clone(),
+            self.document.saved_web_curve_pipeline.clone(),
+        ) {
+            (Some(settings), Some(pipeline))
+                if pipeline.output_model == output_model
+                    && !matches!(
+                        pipeline.assignment,
+                        ChannelAssignment::LegacyCompatibility(_)
+                    ) =>
+            {
+                (RenderVariant::WebCurveV1 { settings }, pipeline)
+            }
+            _ => (
+                RenderVariant::WebCurveV1 {
+                    settings: Box::new(WebCurveSettings::default()),
+                },
+                ArtworkPipelineSettings {
+                    source: ArtworkSource::Value,
+                    alpha_policy: crate::artwork_pipeline::SourceAlphaPolicy::Preserve,
+                    output_model,
+                    assignment: ChannelAssignment::AllChannels,
+                    active_channel: None,
+                },
+            ),
+        };
+        self.document.render = render;
+        self.document.artwork_pipeline = pipeline;
+        if self.document.sync_legacy_projection().is_err() {
+            before.apply(&mut self.document);
+            return false;
+        }
+        if self.active.is_none() {
+            self.undo.push(Edit {
+                before,
+                after: TreatmentState::from_document(&self.document),
+            });
+        }
+        self.redo.clear();
+        true
+    }
+
     pub fn apply_legacy_mapping_action(&mut self, mapping: ValueMode) -> bool {
         let before = TreatmentState::from_document(&self.document);
         let requested_kind = render_kind(&self.document.render);
@@ -2065,6 +2143,11 @@ impl DocumentEditor {
                     };
                 }
                 RenderVariant::WebCurveV1 { settings } => {
+                    // Keep the ordinary curve treatment intact so Exit can
+                    // restore its geometry, visibility, and color settings.
+                    self.document.saved_web_curve = Some(settings.clone());
+                    self.document.saved_web_curve_pipeline =
+                        Some(self.document.artwork_pipeline.clone());
                     let mut configured = (**settings).clone();
                     configured.configure_crosshatch();
                     self.document.render = RenderVariant::WebCurveV1 {
@@ -2361,6 +2444,167 @@ mod tests {
         assert!(!editor.is_dirty());
         assert!(editor.redo());
         assert_eq!(editor.document().settings.coverage, 120.0);
+    }
+
+    #[test]
+    fn semantic_pipeline_edits_are_validated_projected_and_one_undo_entry() {
+        let mut editor = editor();
+        let original = editor.document().clone();
+        let pipeline = ArtworkPipelineSettings {
+            source: ArtworkSource::PerceptualLightness,
+            alpha_policy: crate::artwork_pipeline::SourceAlphaPolicy::Ignore,
+            output_model: OutputModel::CmykPrint,
+            assignment: ChannelAssignment::ActiveChannel,
+            active_channel: Some(OutputChannelId::CmykBlack),
+        };
+        assert!(editor.set_artwork_pipeline(pipeline.clone()));
+        assert_eq!(editor.document().artwork_pipeline, pipeline);
+        let RenderVariant::WebShapeV1 { settings } = &editor.document().render else {
+            panic!("fixture is Shapes");
+        };
+        assert_eq!(settings.value_mode, ValueMode::SingleChannel);
+        assert_eq!(settings.single_channel, Ink::Black);
+        assert!(editor.undo());
+        assert_eq!(editor.document(), &original);
+        assert!(editor.redo());
+        assert_eq!(
+            editor.document().artwork_pipeline.active_channel,
+            Some(OutputChannelId::CmykBlack)
+        );
+
+        let mut invalid = editor.document().artwork_pipeline.clone();
+        invalid.active_channel = Some(OutputChannelId::RgbRed);
+        assert!(!editor.set_artwork_pipeline(invalid));
+    }
+
+    #[test]
+    fn crosshatch_exit_restores_ordinary_curves_without_changing_output_model() {
+        let mut editor = editor();
+        assert!(editor.set_output_mode(OutputMode::RgbScreen));
+        assert!(editor.apply_legacy_mapping_action(ValueMode::CrosshatchLuminance));
+        assert_eq!(
+            editor.document().artwork_pipeline.output_model,
+            OutputModel::RgbScreen
+        );
+        assert!(editor.exit_crosshatch_treatment());
+        assert!(matches!(
+            editor.document().render,
+            RenderVariant::WebCurveV1 { .. }
+        ));
+        assert_eq!(
+            editor.document().artwork_pipeline.output_model,
+            OutputModel::RgbScreen
+        );
+        assert_eq!(
+            editor.document().artwork_pipeline.source,
+            ArtworkSource::Value
+        );
+        assert!(matches!(
+            editor.document().artwork_pipeline.assignment,
+            ChannelAssignment::AllChannels
+        ));
+        assert!(editor.undo());
+        assert!(matches!(
+            editor.document().artwork_pipeline.assignment,
+            ChannelAssignment::LegacyCompatibility(_)
+        ));
+        assert!(editor.redo());
+        assert_eq!(
+            editor.document().artwork_pipeline.output_model,
+            OutputModel::RgbScreen
+        );
+    }
+
+    #[test]
+    fn first_uncached_rgb_transition_preserves_scalar_pipeline_and_restores_cmyk_cache() {
+        for (source, alpha_policy) in [
+            (
+                ArtworkSource::Value,
+                crate::artwork_pipeline::SourceAlphaPolicy::Preserve,
+            ),
+            (
+                ArtworkSource::PerceptualLightness,
+                crate::artwork_pipeline::SourceAlphaPolicy::Ignore,
+            ),
+        ] {
+            let mut editor = editor();
+            let cmyk_pipeline = ArtworkPipelineSettings {
+                source,
+                alpha_policy,
+                output_model: OutputModel::CmykPrint,
+                assignment: ChannelAssignment::ActiveChannel,
+                active_channel: Some(OutputChannelId::CmykBlack),
+            };
+            assert!(editor.set_artwork_pipeline(cmyk_pipeline.clone()));
+            assert!(editor.set_output_mode(OutputMode::RgbScreen));
+            assert_eq!(editor.document().artwork_pipeline.source, source);
+            assert_eq!(
+                editor.document().artwork_pipeline.alpha_policy,
+                alpha_policy
+            );
+            assert!(matches!(
+                editor.document().artwork_pipeline.assignment,
+                ChannelAssignment::ActiveChannel
+            ));
+            assert_eq!(
+                editor.document().artwork_pipeline.active_channel,
+                Some(OutputChannelId::RgbRed),
+                "CMYK Black must never survive as an RGB active channel"
+            );
+            assert!(editor.set_output_mode(OutputMode::CmykInks));
+            assert_eq!(editor.document().artwork_pipeline, cmyk_pipeline);
+        }
+    }
+
+    #[test]
+    fn crosshatch_exit_restores_saved_ordinary_curve_geometry_and_pipeline() {
+        fn assert_restored_curve(document: &Document, expected: &WebCurveSettings) {
+            let RenderVariant::WebCurveV1 { settings } = &document.render else {
+                panic!("ordinary curve should be restored");
+            };
+            assert_eq!(settings.shared_path, expected.shared_path);
+            assert_eq!(
+                settings.channels.c.grid_rotation,
+                expected.channels.c.grid_rotation
+            );
+            assert_eq!(settings.channels.c.color, expected.channels.c.color);
+            assert_eq!(settings.channels.y.enabled, expected.channels.y.enabled);
+            assert_eq!(settings.value_mode, ValueMode::Luminance);
+        }
+
+        let mut editor = editor();
+        let mut ordinary_curve = WebCurveSettings {
+            shared_path: CurvePath::deep_wave(),
+            ..Default::default()
+        };
+        ordinary_curve.channels.c.grid_rotation = 27.0;
+        ordinary_curve.channels.c.color = "#123456".into();
+        ordinary_curve.channels.y.enabled = false;
+        let ordinary_pipeline = ArtworkPipelineSettings {
+            source: ArtworkSource::PerceptualLightness,
+            alpha_policy: crate::artwork_pipeline::SourceAlphaPolicy::Ignore,
+            output_model: OutputModel::CmykPrint,
+            assignment: ChannelAssignment::AllChannels,
+            active_channel: None,
+        };
+        assert!(editor.set_artwork_pipeline(ordinary_pipeline.clone()));
+        assert!(editor.set_render_variant(RenderVariant::WebCurveV1 {
+            settings: Box::new(ordinary_curve.clone()),
+        }));
+        assert!(editor.apply_legacy_mapping_action(ValueMode::CrosshatchLuminance));
+        assert!(editor.exit_crosshatch_treatment());
+        assert_eq!(editor.document().artwork_pipeline, ordinary_pipeline);
+        assert_restored_curve(editor.document(), &ordinary_curve);
+        assert!(editor.undo());
+        assert!(matches!(
+            editor.document().artwork_pipeline.assignment,
+            ChannelAssignment::LegacyCompatibility(_)
+        ));
+        assert!(editor.redo());
+        assert_restored_curve(editor.document(), &ordinary_curve);
+        assert!(editor.apply_legacy_mapping_action(ValueMode::CrosshatchLuminance));
+        assert!(editor.exit_crosshatch_treatment());
+        assert_restored_curve(editor.document(), &ordinary_curve);
     }
 
     #[test]

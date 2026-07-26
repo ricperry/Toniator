@@ -33,11 +33,11 @@ export use Rust-native libraries. The original web demo remains in
 [`archive/webapp`](archive/webapp/README.md) as a historical and behavioral
 reference; it is no longer the shipping application.
 
-## Artwork mappings
+## Legacy mapping examples
 
-Artwork Mapping determines which information Toniator reads from the artwork and
-how that information drives the ink screens. These SVG examples are the same
-visual explanations embedded in the application.
+These historical mapping examples document compatibility behavior retained by
+the native application. The current interface uses the independent Document
+controls described below rather than one combined Artwork Mapping choice.
 
 <table>
   <thead>
@@ -81,6 +81,21 @@ visual explanations embedded in the application.
   </tbody>
 </table>
 
+## Artwork source and output model
+
+The **Document** section keeps source interpretation, transparency handling,
+output color model, and scalar destination separate. Artwork Source offers Full
+Color, Red, Green, Blue, Value, Perceptual Lightness, and Alpha. Source Alpha
+offers Preserve Source Alpha or Ignore Source Alpha; Alpha-source artwork shows
+an explanatory note instead of applying source alpha a second time.
+
+Output Model independently selects **CMYK Print** or **RGB Screen**. Full Color
+uses automatic model-specific separation. Scalar sources can apply to the
+active channel or all channels, with Active Channel shown only when relevant.
+Legacy Brightness remains only as transitional compatibility state for loaded
+or internal documents. Legacy Crosshatch is available through an explicit
+temporary action and exiting it restores ordinary Curves.
+
 The CMYK-like conversion is a creative numerical mapping, not a color-managed
 separation. Always validate output in the color-managed tool used for final
 production.
@@ -112,8 +127,8 @@ the preview, export, or both.
 | Existing wording | Current wording | Reason |
 | --- | --- | --- |
 | Pattern | Pattern Type | Clarifies that Shapes and Curves select a pattern family. |
-| Source Mapping | Artwork Mapping | Names the creative input being interpreted. |
-| Value → … | Brightness → … | States the visible artwork property in plain language. |
+| Source Mapping / Artwork Mapping | Artwork Source | Separates source interpretation from output model and destination. |
+| Value → … | Value / Perceptual Lightness | Names the selected source semantics directly. |
 | Rendered | Halftone | Names the result shown on the canvas. |
 | Edit Ink | Adjust Ink | Makes the next action explicit. |
 | Grid Angle / Mark Angle | Screen Angle / Mark Rotation | Separates the sampling screen from the mark itself. |
@@ -136,7 +151,8 @@ the preview, export, or both.
   polygons, or closed user-defined cubic Bézier marks.
 - Create Curves treatments from Straight, Soft Wave, Deep Wave, or Custom
   profiles, either across the page or as repeated motifs.
-- Share geometry across CMYK inks or give each ink its own shape or curve.
+- Share geometry across CMYK inks or RGB channels, or give each destination its
+  own shape or curve.
 - Edit anchors and Bézier handles directly, with gesture-level undo/redo and
   cancellable editing sessions.
 - Adjust coverage, screen and mark angle, width/height scale, threshold,
@@ -146,8 +162,8 @@ the preview, export, or both.
 - Save complete working documents, save reusable treatment presets, recover an
   interrupted editing session, and protect unsaved work before destructive
   actions.
-- Export an editable, full-artboard SVG with multiply-composited Inkscape CMYK
-  layers, or a flattened PNG with a white or transparent background.
+- Export an editable, full-artboard SVG with model-appropriate output layers, or
+  a flattened PNG with a white or transparent background.
 
 Legacy Lines state is retained for compatible imported material and regression
 coverage, but Lines is not offered as a new-work treatment.
@@ -155,16 +171,18 @@ coverage, but Lines is not offered as a new-work treatment.
 ## Basic workflow
 
 1. Select **New** or **Open**, then load PNG, JPEG, WebP, or SVG artwork.
-2. Choose an Artwork Mapping based on whether color or brightness should drive the
-   treatment.
-3. Choose **Shapes** or **Curves**, then select a built-in mark/profile or edit
+2. Choose an **Artwork Source**, then choose **CMYK Print** or **RGB Screen** as
+   the independent Output Model.
+3. For a scalar source, choose **Apply To Active Channel** or **Apply To All
+   Channels**, then select an Active Channel when applicable.
+4. Choose **Shapes** or **Curves**, then select a built-in mark/profile or edit
    your own.
-4. Start with **All Inks** (**All Layers** in crosshatch mode) for broad
-   adjustments. Disable shared geometry or target C, M, Y, or K when an
-   individual separation needs different settings.
-5. Use **Source** to compare against the original and **Fit** to keep the full
+5. Start with **All Inks** or **All Channels** for broad adjustments. Disable
+   shared geometry or target an individual destination when a separation needs
+   different settings.
+6. Use **Source** to compare against the original and **Fit** to keep the full
    artboard visible.
-6. Save the project as `.toniator`, optionally save the treatment as `.tntr`,
+7. Save the project as `.toniator`, optionally save the treatment as `.tntr`,
    and export SVG or PNG when the result is ready.
 
 Keyboard shortcuts:
@@ -183,13 +201,13 @@ Keyboard shortcuts:
 | SVG | Vector source artwork, rasterized internally for sampling |
 | `.toniator` | Versioned JSON working document containing artwork, treatment, and editor state |
 | `.tntr` | Reusable treatment/preset only; it does not contain artwork or document identity |
-| SVG export | Newly generated editable vector halftone with C/M/Y/K layers |
+| SVG export | Newly generated editable vector halftone with model-appropriate output layers |
 | PNG export | Flattened document-size, 2×, or linked custom-size raster output |
 
-Working-document saves are atomic. Toniator currently reads document versions
-1–3 and writes version 3. Preset import accepts native presets and a validated
-subset of useful legacy v1 treatments; unsupported or malformed presets are
-rejected before the current document is changed.
+Working-document saves are atomic. Toniator currently reads and writes document
+schema v6. Treatment presets use schema v3; unsupported or malformed pre-release
+formats are rejected before the current document is changed. The pre-1.0 format
+policy does not promise migration from earlier experimental formats.
 
 User presets default to:
 

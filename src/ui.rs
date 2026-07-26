@@ -13,6 +13,10 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
+use toniator::artwork_pipeline::{
+    ArtworkPipelineSettings, ArtworkSource, AutomaticSeparationStrategy, ChannelAssignment,
+    LegacyCompatibilityAssignment, OutputChannelId, OutputModel, SourceAlphaPolicy,
+};
 use toniator::model::{ClosedShapePath, SettingKey, ShapeAnchor, ShapePoint, SourceArtwork};
 use toniator::persistence::{clear_recovery_if_matches, recovery_path};
 #[cfg(test)]
@@ -48,13 +52,6 @@ const BUNDLED_PRESETS: [(&str, &[u8]); 3] = [
 ];
 const START_HERO: &[u8] = include_bytes!("../assets/splash-hero.png");
 const PREVIEW_INDICATOR_SVG: &[u8] = include_bytes!("../assets/preview-indicator.svg");
-const COLOR_SOURCE_SVG: &[u8] = include_bytes!("../icons/ColorSource.svg");
-const COLOR_TO_CMYK_SVG: &[u8] = include_bytes!("../icons/ColorToCMYK.svg");
-const COLOR_TO_RGB_SVG: &[u8] = include_bytes!("../icons/ColorToRGB.svg");
-const VALUE_SOURCE_SVG: &[u8] = include_bytes!("../icons/ValueSource.svg");
-const VALUE_TO_ONE_INK_SVG: &[u8] = include_bytes!("../icons/ValueToOneInk.svg");
-const VALUE_TO_CMYK_SVG: &[u8] = include_bytes!("../icons/ValueToCMYK.svg");
-const VALUE_TO_CROSSHATCH_SVG: &[u8] = include_bytes!("../icons/ValueToCrosshatch.svg");
 const PREVIEW_INDICATOR_WIDTH: i32 = 40;
 const PREVIEW_INDICATOR_HEIGHT: i32 = 28;
 const PREVIEW_INDICATOR_RASTER_SCALE: i32 = 4;
@@ -1533,13 +1530,21 @@ pub struct AppUi {
     preset_save: gtk::Button,
     document_section: gtk::Expander,
     output_mode: gtk::DropDown,
+    artwork_source: gtk::DropDown,
+    artwork_source_note: gtk::Label,
+    source_alpha: gtk::DropDown,
+    source_alpha_row: gtk::Widget,
+    source_alpha_note: gtk::Label,
+    channel_assignment: gtk::DropDown,
+    channel_assignment_note: gtk::Label,
+    active_channel: gtk::DropDown,
+    active_channel_row: gtk::Widget,
+    crosshatch_action: gtk::Button,
+    crosshatch_note: gtk::Label,
     preview_surface: gtk::DropDown,
     preview_color: gtk::ColorDialogButton,
     export_background: gtk::DropDown,
     export_color: gtk::ColorDialogButton,
-    web_value_mode: gtk::DropDown,
-    web_output_ink: gtk::DropDown,
-    web_output_ink_row: gtk::Widget,
     web_shared: gtk::CheckButton,
     web_shared_help: Option<HelpHandle>,
     web_shape: gtk::DropDown,
@@ -1583,9 +1588,6 @@ pub struct AppUi {
     web_detail_status: gtk::Label,
     web_mixed: gtk::Label,
     web_geometry_note: gtk::Label,
-    curve_value_mode: gtk::DropDown,
-    curve_output_ink: gtk::DropDown,
-    curve_output_ink_row: gtk::Widget,
     curve_layout: gtk::DropDown,
     curve_profile: gtk::DropDown,
     curve_editor_label: gtk::Label,
@@ -1981,13 +1983,21 @@ impl AppUi {
             preset_save: editor_view.preset_save.clone(),
             document_section: editor_view.document_section.clone(),
             output_mode: editor_view.output_mode.clone(),
+            artwork_source: editor_view.artwork_source.clone(),
+            artwork_source_note: editor_view.artwork_source_note.clone(),
+            source_alpha: editor_view.source_alpha.clone(),
+            source_alpha_row: editor_view.source_alpha_row.clone(),
+            source_alpha_note: editor_view.source_alpha_note.clone(),
+            channel_assignment: editor_view.channel_assignment.clone(),
+            channel_assignment_note: editor_view.channel_assignment_note.clone(),
+            active_channel: editor_view.active_channel.clone(),
+            active_channel_row: editor_view.active_channel_row.clone(),
+            crosshatch_action: editor_view.crosshatch_action.clone(),
+            crosshatch_note: editor_view.crosshatch_note.clone(),
             preview_surface: editor_view.preview_surface.clone(),
             preview_color: editor_view.preview_color.clone(),
             export_background: editor_view.export_background.clone(),
             export_color: editor_view.export_color.clone(),
-            web_value_mode: editor_view.web_value_mode.clone(),
-            web_output_ink: editor_view.web_output_ink.clone(),
-            web_output_ink_row: editor_view.web_output_ink_row.clone(),
             web_shared: editor_view.web_shared.clone(),
             web_shared_help: editor_view.web_shared_help.clone(),
             web_shape: editor_view.web_shape.clone(),
@@ -2031,9 +2041,6 @@ impl AppUi {
             web_detail_status: editor_view.web_detail_status.clone(),
             web_mixed: editor_view.web_mixed.clone(),
             web_geometry_note: editor_view.web_geometry_note.clone(),
-            curve_value_mode: editor_view.curve_value_mode.clone(),
-            curve_output_ink: editor_view.curve_output_ink.clone(),
-            curve_output_ink_row: editor_view.curve_output_ink_row.clone(),
             curve_layout: editor_view.curve_layout.clone(),
             curve_profile: editor_view.curve_profile.clone(),
             curve_editor_label: editor_view.curve_editor_label.clone(),
@@ -2160,26 +2167,22 @@ impl AppUi {
                 ui.compare.set_active(true);
             }
             if let Some(mapping) = options.source_mapping {
-                let curves_active = ui.curves.is_active();
-                if source_mapping_from_index(mapping).is_none() {
-                    eprintln!("Artwork Mapping artifact index {mapping} is outside 0 through 4");
-                } else if curves_active {
-                    if mapping == 4 {
-                        ui.output_mode.set_selected(1);
+                if let Some(mapping) = source_mapping_from_index(mapping) {
+                    // CLI artifacts retain their historic mapping vocabulary;
+                    // the normal GTK inspector never routes through this adapter.
+                    let document = {
+                        let mut state = ui.state.borrow_mut();
+                        state.editor.as_mut().and_then(|editor| {
+                            editor
+                                .apply_legacy_mapping_action(mapping)
+                                .then(|| editor.document().clone())
+                        })
+                    };
+                    if let Some(document) = document {
+                        ui.after_treatment_edit(document);
                     }
-                    ui.curve_value_mode.set_selected(mapping);
                 } else {
-                    if mapping == 4 {
-                        ui.output_mode.set_selected(1);
-                    }
-                    ui.web_value_mode.set_selected(mapping);
-                }
-                if mapping == 1 {
-                    if curves_active {
-                        ui.curve_output_ink.set_selected(0);
-                    } else {
-                        ui.web_output_ink.set_selected(0);
-                    }
+                    eprintln!("Artwork Mapping artifact index {mapping} is outside 0 through 4");
                 }
             }
             if options.independent_shapes {
@@ -2464,14 +2467,14 @@ impl AppUi {
                 ui.sync_controls_when_idle();
             }
         ));
-        self.web_value_mode.connect_selected_notify(glib::clone!(
+        self.artwork_source.connect_selected_notify(glib::clone!(
             #[weak(rename_to = ui)]
             self,
-            move |combo| {
+            move |control| {
                 if ui.state.borrow().syncing_controls {
                     return;
                 }
-                let Some(mode) = source_mapping_from_index(combo.selected()) else {
+                let Some(source) = artwork_source_from_index(control.selected()) else {
                     return;
                 };
                 let document = {
@@ -2479,44 +2482,8 @@ impl AppUi {
                     let Some(editor) = state.editor.as_mut() else {
                         return;
                     };
-                    let output_mode = editor.document().output_mode;
-                    if !editor.apply_legacy_mapping_action(mode) {
-                        return;
-                    }
-                    (
-                        editor.document().clone(),
-                        editor.document().output_mode != output_mode,
-                    )
-                };
-                if document.1 {
-                    ui.after_output_mode_edit(document.0);
-                } else {
-                    ui.after_treatment_edit(document.0);
-                }
-            }
-        ));
-        self.web_output_ink.connect_selected_notify(glib::clone!(
-            #[weak(rename_to = ui)]
-            self,
-            move |combo| {
-                if ui.state.borrow().syncing_controls {
-                    return;
-                }
-                let rgb =
-                    ui.state.borrow().editor.as_ref().is_some_and(|editor| {
-                        editor.document().output_mode == OutputMode::RgbScreen
-                    });
-                let Some(ink) = output_ink_for_slot(combo.selected(), rgb) else {
-                    return;
-                };
-                let document = {
-                    let mut state = ui.state.borrow_mut();
-                    let Some(editor) = state.editor.as_mut() else {
-                        return;
-                    };
-                    if !editor.select_active_output_channel(
-                        toniator::artwork_pipeline::OutputChannelId::from_legacy_ink(ink),
-                    ) {
+                    let pipeline = pipeline_for_source(&editor.document().artwork_pipeline, source);
+                    if !editor.set_artwork_pipeline(pipeline) {
                         return;
                     }
                     editor.document().clone()
@@ -2524,6 +2491,118 @@ impl AppUi {
                 ui.after_treatment_edit(document);
             }
         ));
+        self.source_alpha.connect_selected_notify(glib::clone!(
+            #[weak(rename_to = ui)]
+            self,
+            move |control| {
+                if ui.state.borrow().syncing_controls {
+                    return;
+                }
+                let Some(alpha_policy) = source_alpha_from_index(control.selected()) else {
+                    return;
+                };
+                let document = {
+                    let mut state = ui.state.borrow_mut();
+                    let Some(editor) = state.editor.as_mut() else {
+                        return;
+                    };
+                    let mut pipeline = editor.document().artwork_pipeline.clone();
+                    pipeline.alpha_policy = alpha_policy;
+                    if !editor.set_artwork_pipeline(pipeline) {
+                        return;
+                    }
+                    editor.document().clone()
+                };
+                ui.after_treatment_edit(document);
+            }
+        ));
+        self.channel_assignment
+            .connect_selected_notify(glib::clone!(
+                #[weak(rename_to = ui)]
+                self,
+                move |control| {
+                    if ui.state.borrow().syncing_controls {
+                        return;
+                    }
+                    let document = {
+                        let mut state = ui.state.borrow_mut();
+                        let Some(editor) = state.editor.as_mut() else {
+                            return;
+                        };
+                        let current = editor.document().artwork_pipeline.clone();
+                        let Some(assignment) =
+                            channel_assignment_from_index(control.selected(), current.source)
+                        else {
+                            return;
+                        };
+                        let pipeline = pipeline_for_assignment(&current, assignment);
+                        if !editor.set_artwork_pipeline(pipeline) {
+                            return;
+                        }
+                        editor.document().clone()
+                    };
+                    ui.after_treatment_edit(document);
+                }
+            ));
+        self.active_channel.connect_selected_notify(glib::clone!(
+            #[weak(rename_to = ui)]
+            self,
+            move |control| {
+                if ui.state.borrow().syncing_controls {
+                    return;
+                }
+                let output = ui
+                    .state
+                    .borrow()
+                    .editor
+                    .as_ref()
+                    .map(|editor| editor.document().artwork_pipeline.output_model);
+                let Some(channel) = output.and_then(|output| {
+                    OutputChannelId::from_legacy_slot(control.selected(), output).ok()
+                }) else {
+                    return;
+                };
+                let document = {
+                    let mut state = ui.state.borrow_mut();
+                    let Some(editor) = state.editor.as_mut() else {
+                        return;
+                    };
+                    let mut pipeline = editor.document().artwork_pipeline.clone();
+                    if !matches!(pipeline.assignment, ChannelAssignment::ActiveChannel) {
+                        return;
+                    }
+                    pipeline.active_channel = Some(channel);
+                    if !editor.set_artwork_pipeline(pipeline) {
+                        return;
+                    }
+                    editor.document().clone()
+                };
+                ui.after_treatment_edit(document);
+            }
+        ));
+        connect_clicked(&self.crosshatch_action, self, |ui| {
+            let document = {
+                let mut state = ui.state.borrow_mut();
+                let Some(editor) = state.editor.as_mut() else {
+                    return;
+                };
+                let changed = if matches!(
+                    editor.document().artwork_pipeline.assignment,
+                    ChannelAssignment::LegacyCompatibility(
+                        LegacyCompatibilityAssignment::CrosshatchProgressiveKcmyV1
+                    )
+                ) {
+                    editor.exit_crosshatch_treatment()
+                } else {
+                    editor.apply_legacy_mapping_action(ValueMode::CrosshatchLuminance)
+                };
+                if !changed {
+                    return;
+                }
+                editor.document().clone()
+            };
+            ui.after_treatment_edit(document);
+        });
         self.web_shared.connect_toggled(glib::clone!(
             #[weak(rename_to = ui)]
             self,
@@ -2740,66 +2819,6 @@ impl AppUi {
             }
         ));
         self.web_color.add_controller(color_focus);
-        self.curve_value_mode.connect_selected_notify(glib::clone!(
-            #[weak(rename_to = ui)]
-            self,
-            move |combo| {
-                if ui.state.borrow().syncing_controls {
-                    return;
-                }
-                let Some(mode) = source_mapping_from_index(combo.selected()) else {
-                    return;
-                };
-                let document = {
-                    let mut state = ui.state.borrow_mut();
-                    let Some(editor) = state.editor.as_mut() else {
-                        return;
-                    };
-                    let output_mode = editor.document().output_mode;
-                    if !editor.apply_legacy_mapping_action(mode) {
-                        return;
-                    }
-                    (
-                        editor.document().clone(),
-                        editor.document().output_mode != output_mode,
-                    )
-                };
-                if document.1 {
-                    ui.after_output_mode_edit(document.0);
-                } else {
-                    ui.after_treatment_edit(document.0);
-                }
-            }
-        ));
-        self.curve_output_ink.connect_selected_notify(glib::clone!(
-            #[weak(rename_to = ui)]
-            self,
-            move |combo| {
-                if ui.state.borrow().syncing_controls {
-                    return;
-                }
-                let rgb =
-                    ui.state.borrow().editor.as_ref().is_some_and(|editor| {
-                        editor.document().output_mode == OutputMode::RgbScreen
-                    });
-                let Some(ink) = output_ink_for_slot(combo.selected(), rgb) else {
-                    return;
-                };
-                let document = {
-                    let mut state = ui.state.borrow_mut();
-                    let Some(editor) = state.editor.as_mut() else {
-                        return;
-                    };
-                    if !editor.select_active_output_channel(
-                        toniator::artwork_pipeline::OutputChannelId::from_legacy_ink(ink),
-                    ) {
-                        return;
-                    }
-                    editor.document().clone()
-                };
-                ui.after_treatment_edit(document);
-            }
-        ));
         self.curve_layout.connect_selected_notify(glib::clone!(
             #[weak(rename_to = ui)]
             self,
@@ -4952,7 +4971,16 @@ impl AppUi {
             let Some(editor) = state.editor.as_mut() else {
                 return;
             };
-            if editor.document().saved_web_curve.is_some() {
+            if matches!(
+                editor.document().artwork_pipeline.assignment,
+                ChannelAssignment::LegacyCompatibility(
+                    LegacyCompatibilityAssignment::CrosshatchProgressiveKcmyV1
+                )
+            ) {
+                if !editor.exit_crosshatch_treatment() {
+                    return;
+                }
+            } else if editor.document().saved_web_curve.is_some() {
                 if !editor.restore_saved_curve() {
                     return;
                 }
@@ -5353,21 +5381,14 @@ impl AppUi {
         else {
             return;
         };
-        let Ok(projection) = toniator::artwork_pipeline::project_legacy_value_mode(&pipeline)
-        else {
-            return;
-        };
-        let output_mode = projection.output_mode;
-        let mapping = projection.value_mode;
-        let selected_output_ink = projection
-            .scalar_destination
-            .map(|ink| match ink {
-                Ink::Cyan | Ink::Red => 0,
-                Ink::Magenta | Ink::Green => 1,
-                Ink::Yellow | Ink::Blue => 2,
-                Ink::Black => 3,
-            })
-            .unwrap_or(0);
+        let output_model = pipeline.output_model;
+        let output_mode = output_model.to_legacy();
+        let crosshatch = matches!(
+            pipeline.assignment,
+            ChannelAssignment::LegacyCompatibility(
+                LegacyCompatibilityAssignment::CrosshatchProgressiveKcmyV1
+            )
+        );
         self.state.borrow_mut().syncing_controls = true;
         self.output_mode
             .set_selected(if output_mode == OutputMode::RgbScreen {
@@ -5375,8 +5396,73 @@ impl AppUi {
             } else {
                 0
             });
-        sync_source_mapping_names(&self.web_value_mode, output_mode);
-        sync_source_mapping_names(&self.curve_value_mode, output_mode);
+        sync_dropdown_strings(
+            &self.artwork_source,
+            &artwork_source_labels(matches!(
+                pipeline.source,
+                ArtworkSource::LegacyBrightness(_)
+            )),
+        );
+        self.artwork_source
+            .set_selected(artwork_source_index(pipeline.source));
+        self.artwork_source_note
+            .set_text(artwork_source_guidance(pipeline.source));
+        sync_dropdown_strings(
+            &self.source_alpha,
+            &source_alpha_labels(pipeline.alpha_policy == SourceAlphaPolicy::LegacyCurrentV1),
+        );
+        self.source_alpha
+            .set_selected(source_alpha_index(pipeline.alpha_policy));
+        let alpha_is_source = pipeline.source == ArtworkSource::Alpha;
+        self.source_alpha_row
+            .set_visible(!crosshatch && !alpha_is_source);
+        self.source_alpha_note.set_visible(alpha_is_source);
+        self.source_alpha
+            .set_sensitive(!crosshatch && !alpha_is_source);
+        sync_dropdown_strings(
+            &self.channel_assignment,
+            &channel_assignment_labels(pipeline.source == ArtworkSource::FullColor, output_model),
+        );
+        self.channel_assignment
+            .set_selected(channel_assignment_index(
+                pipeline.assignment,
+                pipeline.source,
+            ));
+        let full_color = pipeline.source == ArtworkSource::FullColor;
+        self.channel_assignment
+            .set_sensitive(!crosshatch && !full_color);
+        self.channel_assignment_note.set_visible(full_color);
+        self.channel_assignment_note.set_text(match output_model {
+            OutputModel::CmykPrint => {
+                "Automatic CMYK Separation derives cyan, magenta, yellow, and black inks."
+            }
+            OutputModel::RgbScreen => {
+                "Direct RGB Channels map encoded red, green, and blue components."
+            }
+        });
+        sync_dropdown_strings(&self.active_channel, &output_channel_labels(output_model));
+        self.active_channel.set_selected(
+            pipeline
+                .active_channel
+                .map(OutputChannelId::legacy_slot)
+                .unwrap_or(0),
+        );
+        self.active_channel_row.set_visible(matches!(
+            pipeline.assignment,
+            ChannelAssignment::ActiveChannel
+        ));
+        self.active_channel.set_sensitive(!crosshatch);
+        self.artwork_source.set_sensitive(!crosshatch);
+        self.crosshatch_action.set_label(if crosshatch {
+            "Exit Legacy Crosshatch"
+        } else {
+            "Use Legacy Crosshatch"
+        });
+        self.crosshatch_note.set_text(if crosshatch {
+            "Legacy Crosshatch is active in Curves. Exit restores ordinary Curves."
+        } else {
+            "Legacy Crosshatch temporarily switches to Curves. Exit restores ordinary Curves."
+        });
         if output_mode == OutputMode::RgbScreen {
             for target in [&self.web_target, &self.curve_target] {
                 sync_dropdown_strings(target, &["All Channels", "Red", "Green", "Blue"]);
@@ -5385,15 +5471,9 @@ impl AppUi {
             self.curve_target_label.set_text("Adjust Channel");
             self.web_visible_label.set_text("Visible RGB Channels");
             self.curve_visible_label.set_text("Visible RGB Channels");
-            for output in [&self.web_output_ink, &self.curve_output_ink] {
-                sync_dropdown_strings(output, &["Red", "Green", "Blue"]);
-            }
         } else {
             for target in [&self.web_target, &self.curve_target] {
                 sync_dropdown_strings(target, &["All Inks", "Cyan", "Magenta", "Yellow", "Black"]);
-            }
-            for output in [&self.web_output_ink, &self.curve_output_ink] {
-                sync_dropdown_strings(output, &["Cyan", "Magenta", "Yellow", "Black"]);
             }
         }
         match appearance.preview_surface {
@@ -5444,40 +5524,25 @@ impl AppUi {
                 self.legacy.set_visible(false);
                 self.dots.set_active(true);
                 self.treatment_modes.set_visible_child_name("web");
-                self.web_value_mode.set_selected(match mapping {
-                    ValueMode::Cmyk => 0,
-                    ValueMode::Rgb => 4,
-                    ValueMode::SingleChannel => 1,
-                    ValueMode::Luminance => 2,
-                    ValueMode::CrosshatchLuminance => 3,
-                });
-                self.web_output_ink_row
-                    .set_visible(mapping == ValueMode::SingleChannel);
                 sync_layer_terminology(
                     &self.web_target,
                     &self.web_target_label,
                     self.web_target_help.as_ref(),
                     &self.web_visible_label,
                     output_mode == OutputMode::RgbScreen,
-                    mapping == ValueMode::CrosshatchLuminance,
+                    crosshatch,
                 );
-                if output_mode == OutputMode::RgbScreen && mapping != ValueMode::CrosshatchLuminance
-                {
+                if output_mode == OutputMode::RgbScreen && !crosshatch {
                     self.web_target_label.set_text("Adjust Channel");
                     self.web_visible_label.set_text("Visible RGB Channels");
                 }
-                self.web_crosshatch_color_row
-                    .set_visible(mapping == ValueMode::CrosshatchLuminance);
-                self.web_color_row
-                    .set_visible(mapping != ValueMode::CrosshatchLuminance);
+                self.web_crosshatch_color_row.set_visible(crosshatch);
+                self.web_color_row.set_visible(!crosshatch);
                 self.web_crosshatch_color
                     .set_text(&settings.crosshatch_color);
-                self.web_output_ink.set_selected(selected_output_ink);
                 self.web_shared.set_active(settings.use_shared_mark);
                 self.web_shared.set_label(Some(
-                    if output_mode == OutputMode::RgbScreen
-                        && mapping != ValueMode::CrosshatchLuminance
-                    {
+                    if output_mode == OutputMode::RgbScreen && !crosshatch {
                         "Share Mark Shape Across Channels"
                     } else {
                         "Share Mark Shape Across Inks"
@@ -5485,19 +5550,14 @@ impl AppUi {
                 ));
                 if let Some(help) = self.web_shared_help.as_ref() {
                     help.set_spec(
-                        help_for(
-                            if output_mode == OutputMode::RgbScreen
-                                && mapping != ValueMode::CrosshatchLuminance
-                            {
-                                "Share Mark Shape Across Channels"
-                            } else {
-                                "Share Mark Shape Across Inks"
-                            },
-                        )
+                        help_for(if output_mode == OutputMode::RgbScreen && !crosshatch {
+                            "Share Mark Shape Across Channels"
+                        } else {
+                            "Share Mark Shape Across Inks"
+                        })
                         .unwrap(),
                     );
                 }
-                let crosshatch = mapping == ValueMode::CrosshatchLuminance;
                 let channel_copy = output_mode == OutputMode::RgbScreen && !crosshatch;
                 let mixed_target = web_mixed_target(channel_copy);
                 self.sync_web_color_terminology(channel_copy);
@@ -5799,35 +5859,22 @@ impl AppUi {
                 self.legacy.set_visible(false);
                 self.curves.set_active(true);
                 self.treatment_modes.set_visible_child_name("curve");
-                self.curve_value_mode.set_selected(match mapping {
-                    ValueMode::Cmyk => 0,
-                    ValueMode::Rgb => 4,
-                    ValueMode::SingleChannel => 1,
-                    ValueMode::Luminance => 2,
-                    ValueMode::CrosshatchLuminance => 3,
-                });
-                self.curve_output_ink_row
-                    .set_visible(mapping == ValueMode::SingleChannel);
                 sync_layer_terminology(
                     &self.curve_target,
                     &self.curve_target_label,
                     self.curve_target_help.as_ref(),
                     &self.curve_visible_label,
                     output_mode == OutputMode::RgbScreen,
-                    mapping == ValueMode::CrosshatchLuminance,
+                    crosshatch,
                 );
-                if output_mode == OutputMode::RgbScreen && mapping != ValueMode::CrosshatchLuminance
-                {
+                if output_mode == OutputMode::RgbScreen && !crosshatch {
                     self.curve_target_label.set_text("Adjust Channel");
                     self.curve_visible_label.set_text("Visible RGB Channels");
                 }
-                self.curve_crosshatch_color_row
-                    .set_visible(mapping == ValueMode::CrosshatchLuminance);
-                self.curve_color_row
-                    .set_visible(mapping != ValueMode::CrosshatchLuminance);
+                self.curve_crosshatch_color_row.set_visible(crosshatch);
+                self.curve_color_row.set_visible(!crosshatch);
                 self.curve_crosshatch_color
                     .set_text(&settings.crosshatch_color);
-                self.curve_output_ink.set_selected(selected_output_ink);
                 self.curve_layout.set_selected(match settings.layout {
                     CurveLayout::FullWidth => 0,
                     CurveLayout::MotifPattern => 1,
@@ -5835,7 +5882,6 @@ impl AppUi {
                 self.motif_controls
                     .set_visible(settings.layout == CurveLayout::MotifPattern);
                 self.curve_shared.set_active(settings.use_shared_curve);
-                let crosshatch = mapping == ValueMode::CrosshatchLuminance;
                 let visible_spec =
                     help_for(if output_mode == OutputMode::RgbScreen && !crosshatch {
                         "Visible RGB Channels"
@@ -8096,13 +8142,21 @@ struct EditorWidgets {
     preset_save: gtk::Button,
     document_section: gtk::Expander,
     output_mode: gtk::DropDown,
+    artwork_source: gtk::DropDown,
+    artwork_source_note: gtk::Label,
+    source_alpha: gtk::DropDown,
+    source_alpha_row: gtk::Widget,
+    source_alpha_note: gtk::Label,
+    channel_assignment: gtk::DropDown,
+    channel_assignment_note: gtk::Label,
+    active_channel: gtk::DropDown,
+    active_channel_row: gtk::Widget,
+    crosshatch_action: gtk::Button,
+    crosshatch_note: gtk::Label,
     preview_surface: gtk::DropDown,
     preview_color: gtk::ColorDialogButton,
     export_background: gtk::DropDown,
     export_color: gtk::ColorDialogButton,
-    web_value_mode: gtk::DropDown,
-    web_output_ink: gtk::DropDown,
-    web_output_ink_row: gtk::Widget,
     web_shared: gtk::CheckButton,
     web_shared_help: Option<HelpHandle>,
     web_shape: gtk::DropDown,
@@ -8146,9 +8200,6 @@ struct EditorWidgets {
     web_detail_status: gtk::Label,
     web_mixed: gtk::Label,
     web_geometry_note: gtk::Label,
-    curve_value_mode: gtk::DropDown,
-    curve_output_ink: gtk::DropDown,
-    curve_output_ink_row: gtk::Widget,
     curve_layout: gtk::DropDown,
     curve_profile: gtk::DropDown,
     curve_editor_label: gtk::Label,
@@ -8493,13 +8544,6 @@ fn build_editor_view(
 
     let web_panel = gtk::Box::new(gtk::Orientation::Vertical, 10);
     web_panel.add_css_class("workflow-group");
-    let web_value_mode = source_mapping_dropdown();
-    web_panel.append(&combo_row("Artwork Mapping", &web_value_mode));
-    web_panel.append(&source_mapping_hint(&web_value_mode));
-    let web_output_ink = gtk::DropDown::from_strings(&["Cyan", "Magenta", "Yellow", "Black"]);
-    let web_output_ink_row = combo_row("Output Channel", &web_output_ink);
-    web_output_ink_row.set_visible(false);
-    web_panel.append(&web_output_ink_row);
     let web_shared = gtk::CheckButton::with_label("Share Mark Shape Across Inks");
     web_shared.set_active(true);
     let web_shared_help = help_for("Share Mark Shape Across Inks").map(help_handle);
@@ -8655,13 +8699,6 @@ fn build_editor_view(
 
     let curve_panel = gtk::Box::new(gtk::Orientation::Vertical, 10);
     curve_panel.add_css_class("workflow-group");
-    let curve_value_mode = source_mapping_dropdown();
-    curve_panel.append(&combo_row("Artwork Mapping", &curve_value_mode));
-    curve_panel.append(&source_mapping_hint(&curve_value_mode));
-    let curve_output_ink = gtk::DropDown::from_strings(&["Cyan", "Magenta", "Yellow", "Black"]);
-    let curve_output_ink_row = combo_row("Output Channel", &curve_output_ink);
-    curve_output_ink_row.set_visible(false);
-    curve_panel.append(&curve_output_ink_row);
     let curve_layout = gtk::DropDown::from_strings(&["Across Artwork", "Repeated Motif"]);
     curve_panel.append(&combo_row("Layout", &curve_layout));
     let curve_weight = control_scale(1.0, 200.0, 1.0);
@@ -8884,9 +8921,54 @@ fn build_editor_view(
     document_box.set_margin_top(10);
     document_box.append(source_label);
     document_box.append(autosave_status);
-    let output_mode = gtk::DropDown::from_strings(&["CMYK Inks", "RGB Screen"]);
+    let output_mode = gtk::DropDown::from_strings(&["CMYK Print", "RGB Screen"]);
     output_mode.set_tooltip_text(Some("Choose subtractive CMYK inks for print or additive RGB screens for transparent, light-based output."));
-    document_box.append(&combo_row("Output", &output_mode));
+    document_box.append(&combo_row("Output Model", &output_mode));
+    let artwork_source = gtk::DropDown::from_strings(&artwork_source_labels(false));
+    document_box.append(&combo_row("Artwork Source", &artwork_source));
+    let artwork_source_note = gtk::Label::builder()
+        .xalign(0.0)
+        .wrap(true)
+        .css_classes(["dim-label", "caption"])
+        .build();
+    document_box.append(&artwork_source_note);
+    let source_alpha = gtk::DropDown::from_strings(&source_alpha_labels(false));
+    let source_alpha_row = combo_row("Source Alpha", &source_alpha);
+    document_box.append(&source_alpha_row);
+    let source_alpha_note = gtk::Label::builder()
+        .label("Alpha is the source; source alpha is not applied again.")
+        .xalign(0.0)
+        .wrap(true)
+        .css_classes(["dim-label", "caption"])
+        .build();
+    source_alpha_note.set_visible(false);
+    document_box.append(&source_alpha_note);
+    let channel_assignment =
+        gtk::DropDown::from_strings(&channel_assignment_labels(true, OutputModel::CmykPrint));
+    document_box.append(&combo_row("Channel Assignment", &channel_assignment));
+    let channel_assignment_note = gtk::Label::builder()
+        .xalign(0.0)
+        .wrap(true)
+        .css_classes(["dim-label", "caption"])
+        .build();
+    document_box.append(&channel_assignment_note);
+    let active_channel =
+        gtk::DropDown::from_strings(&output_channel_labels(OutputModel::CmykPrint));
+    let active_channel_row = combo_row("Active Channel", &active_channel);
+    active_channel_row.set_visible(false);
+    document_box.append(&active_channel_row);
+    let crosshatch_action = gtk::Button::with_label("Use Legacy Crosshatch");
+    crosshatch_action.set_tooltip_text(Some(
+        "Temporarily use the legacy brightness crosshatch treatment with the current output model.",
+    ));
+    document_box.append(&crosshatch_action);
+    let crosshatch_note = gtk::Label::builder()
+        .label("Legacy Crosshatch temporarily switches to Curves. Exit restores ordinary Curves.")
+        .xalign(0.0)
+        .wrap(true)
+        .css_classes(["dim-label", "caption"])
+        .build();
+    document_box.append(&crosshatch_note);
     let appearance_controls = build_appearance_controls();
     let preview_surface = appearance_controls.preview_surface.clone();
     let preview_color = appearance_controls.preview_color.clone();
@@ -8941,13 +9023,21 @@ fn build_editor_view(
         preset_save,
         document_section: document,
         output_mode,
+        artwork_source,
+        artwork_source_note,
+        source_alpha,
+        source_alpha_row,
+        source_alpha_note,
+        channel_assignment,
+        channel_assignment_note,
+        active_channel,
+        active_channel_row,
+        crosshatch_action,
+        crosshatch_note,
         preview_surface,
         preview_color,
         export_background,
         export_color,
-        web_value_mode,
-        web_output_ink,
-        web_output_ink_row,
         web_shared,
         web_shared_help,
         web_shape,
@@ -8991,9 +9081,6 @@ fn build_editor_view(
         web_detail_status,
         web_mixed,
         web_geometry_note,
-        curve_value_mode,
-        curve_output_ink,
-        curve_output_ink_row,
         curve_layout,
         curve_profile,
         curve_editor_label,
@@ -9558,85 +9645,200 @@ fn labeled_combo_row_with_help(
     (row.upcast(), label, help)
 }
 
-#[derive(Clone, Copy)]
-struct SourceMappingOption {
-    name: &'static str,
-    description: &'static str,
-    mode: ValueMode,
-    source_svg: &'static [u8],
-    result_svg: &'static [u8],
-    source_description: &'static str,
-    result_description: &'static str,
-}
-
-const SOURCE_MAPPING_OPTIONS: [SourceMappingOption; 5] = [
-    SourceMappingOption {
-        name: "Color → CMYK Inks",
-        description: "Separate source color into cyan, magenta, yellow, and black inks.",
-        mode: ValueMode::Cmyk,
-        source_svg: COLOR_SOURCE_SVG,
-        result_svg: COLOR_TO_CMYK_SVG,
-        source_description: "Color source artwork",
-        result_description: "Result separated into cyan, magenta, yellow, and black inks",
-    },
-    SourceMappingOption {
-        name: "Brightness → One Ink",
-        description: "Map artwork brightness to one selected output channel.",
-        mode: ValueMode::SingleChannel,
-        source_svg: VALUE_SOURCE_SVG,
-        result_svg: VALUE_TO_ONE_INK_SVG,
-        source_description: "Source artwork represented by brightness",
-        result_description: "Artwork brightness mapped to one selected output channel",
-    },
-    SourceMappingOption {
-        name: "Brightness → All Inks",
-        description: "Apply the same artwork brightness to every enabled output channel.",
-        mode: ValueMode::Luminance,
-        source_svg: VALUE_SOURCE_SVG,
-        result_svg: VALUE_TO_CMYK_SVG,
-        source_description: "Source artwork represented by brightness",
-        result_description: "Artwork brightness mapped to all enabled output channels",
-    },
-    SourceMappingOption {
-        name: "Brightness → Crosshatch",
-        description: "Build brightness with monochrome K +45°, C -45°, M horizontal, and Y vertical hatch layers.",
-        mode: ValueMode::CrosshatchLuminance,
-        source_svg: VALUE_SOURCE_SVG,
-        result_svg: VALUE_TO_CROSSHATCH_SVG,
-        source_description: "Source artwork represented by brightness",
-        result_description: "Artwork brightness mapped to four directional crosshatch layers",
-    },
-    SourceMappingOption {
-        name: "RGB Color → Screen",
-        description: "Map source red, green, and blue directly to additive screen channels. Use this for luminous RGB output, not print separations.",
-        mode: ValueMode::Rgb,
-        source_svg: COLOR_SOURCE_SVG,
-        result_svg: COLOR_TO_RGB_SVG,
-        source_description: "Color source artwork",
-        result_description: "Red, green, and blue screens blend additively",
-    },
-];
-
-const SOURCE_MAPPING_ARTWORK_SIZE: i32 = 92;
-
 fn source_mapping_from_index(index: u32) -> Option<ValueMode> {
-    SOURCE_MAPPING_OPTIONS
-        .get(index as usize)
-        .map(|option| option.mode)
-}
-
-fn source_mapping_names(output_mode: OutputMode) -> [&'static str; 5] {
-    let mut names = SOURCE_MAPPING_OPTIONS.map(|option| option.name);
-    if output_mode == OutputMode::RgbScreen {
-        names[1] = "Brightness → One Channel";
-        names[2] = "Brightness → All Channels";
+    match index {
+        0 => Some(ValueMode::Cmyk),
+        1 => Some(ValueMode::SingleChannel),
+        2 => Some(ValueMode::Luminance),
+        3 => Some(ValueMode::CrosshatchLuminance),
+        4 => Some(ValueMode::Rgb),
+        _ => None,
     }
-    names
 }
 
-fn sync_source_mapping_names(dropdown: &gtk::DropDown, output_mode: OutputMode) {
-    let names = source_mapping_names(output_mode);
-    sync_dropdown_strings(dropdown, &names);
+fn artwork_source_labels(include_legacy: bool) -> Vec<&'static str> {
+    let mut labels = vec![
+        "Full Color",
+        "Red",
+        "Green",
+        "Blue",
+        "Value",
+        "Perceptual Lightness",
+        "Alpha",
+    ];
+    if include_legacy {
+        labels.push("Legacy Brightness");
+    }
+    labels
+}
+
+fn artwork_source_from_index(index: u32) -> Option<ArtworkSource> {
+    [
+        ArtworkSource::FullColor,
+        ArtworkSource::Red,
+        ArtworkSource::Green,
+        ArtworkSource::Blue,
+        ArtworkSource::Value,
+        ArtworkSource::PerceptualLightness,
+        ArtworkSource::Alpha,
+    ]
+    .get(index as usize)
+    .copied()
+}
+
+fn artwork_source_index(source: ArtworkSource) -> u32 {
+    match source {
+        ArtworkSource::FullColor => 0,
+        ArtworkSource::Red => 1,
+        ArtworkSource::Green => 2,
+        ArtworkSource::Blue => 3,
+        ArtworkSource::Value => 4,
+        ArtworkSource::PerceptualLightness => 5,
+        ArtworkSource::Alpha => 6,
+        ArtworkSource::LegacyBrightness(_) => 7,
+    }
+}
+
+fn artwork_source_guidance(source: ArtworkSource) -> &'static str {
+    match source {
+        ArtworkSource::FullColor => {
+            "Separate the source color automatically for the selected output model."
+        }
+        ArtworkSource::Red => "Use the encoded red component as sampled content.",
+        ArtworkSource::Green => "Use the encoded green component as sampled content.",
+        ArtworkSource::Blue => "Use the encoded blue component as sampled content.",
+        ArtworkSource::Value => {
+            "Use the strongest RGB component (HSV value semantics) as sampled content."
+        }
+        ArtworkSource::PerceptualLightness => {
+            "Use OKLab L for perceptual lightness as sampled content."
+        }
+        ArtworkSource::Alpha => "Use sampled alpha as content.",
+        ArtworkSource::LegacyBrightness(_) => {
+            "Legacy brightness is retained only for compatibility-loaded state."
+        }
+    }
+}
+
+fn source_alpha_labels(include_legacy: bool) -> Vec<&'static str> {
+    let mut labels = vec!["Preserve Source Alpha", "Ignore Source Alpha"];
+    if include_legacy {
+        labels.push("Legacy Source Alpha");
+    }
+    labels
+}
+
+fn source_alpha_from_index(index: u32) -> Option<SourceAlphaPolicy> {
+    match index {
+        0 => Some(SourceAlphaPolicy::Preserve),
+        1 => Some(SourceAlphaPolicy::Ignore),
+        2 => Some(SourceAlphaPolicy::LegacyCurrentV1),
+        _ => None,
+    }
+}
+
+fn source_alpha_index(alpha: SourceAlphaPolicy) -> u32 {
+    match alpha {
+        SourceAlphaPolicy::Preserve => 0,
+        SourceAlphaPolicy::Ignore => 1,
+        SourceAlphaPolicy::LegacyCurrentV1 => 2,
+    }
+}
+
+fn channel_assignment_labels(full_color: bool, output_model: OutputModel) -> Vec<&'static str> {
+    if full_color {
+        vec![match output_model {
+            OutputModel::CmykPrint => "Automatic CMYK Separation",
+            OutputModel::RgbScreen => "Direct RGB Channels",
+        }]
+    } else {
+        vec!["Apply To Active Channel", "Apply To All Channels"]
+    }
+}
+
+fn channel_assignment_from_index(index: u32, source: ArtworkSource) -> Option<ChannelAssignment> {
+    match (source == ArtworkSource::FullColor, index) {
+        (true, 0) => Some(ChannelAssignment::automatic(
+            AutomaticSeparationStrategy::CmykEncodedRgbMaxBlackV1,
+        )),
+        (false, 0) => Some(ChannelAssignment::ActiveChannel),
+        (false, 1) => Some(ChannelAssignment::AllChannels),
+        _ => None,
+    }
+}
+
+fn channel_assignment_index(assignment: ChannelAssignment, source: ArtworkSource) -> u32 {
+    if source == ArtworkSource::FullColor {
+        0
+    } else {
+        match assignment {
+            ChannelAssignment::AllChannels => 1,
+            _ => 0,
+        }
+    }
+}
+
+fn output_channel_labels(output: OutputModel) -> Vec<&'static str> {
+    output
+        .channels()
+        .iter()
+        .map(|channel| channel.label())
+        .collect()
+}
+
+fn pipeline_for_source(
+    current: &ArtworkPipelineSettings,
+    source: ArtworkSource,
+) -> ArtworkPipelineSettings {
+    let mut pipeline = current.clone();
+    pipeline.source = source;
+    if source == ArtworkSource::FullColor {
+        pipeline.assignment = ChannelAssignment::automatic(match pipeline.output_model {
+            OutputModel::CmykPrint => AutomaticSeparationStrategy::CmykEncodedRgbMaxBlackV1,
+            OutputModel::RgbScreen => AutomaticSeparationStrategy::RgbDirectEncodedComponentsV1,
+        });
+        pipeline.active_channel = pipeline
+            .active_channel
+            .filter(|channel| channel.belongs_to(pipeline.output_model));
+    } else if !matches!(
+        pipeline.assignment,
+        ChannelAssignment::ActiveChannel | ChannelAssignment::AllChannels
+    ) {
+        pipeline.assignment = ChannelAssignment::AllChannels;
+        pipeline.active_channel = None;
+    }
+    if matches!(pipeline.assignment, ChannelAssignment::ActiveChannel) {
+        pipeline.active_channel = pipeline
+            .active_channel
+            .filter(|channel| channel.belongs_to(pipeline.output_model))
+            .or_else(|| Some(pipeline.output_model.default_channel()));
+    }
+    pipeline
+}
+
+fn pipeline_for_assignment(
+    current: &ArtworkPipelineSettings,
+    assignment: ChannelAssignment,
+) -> ArtworkPipelineSettings {
+    let mut pipeline = current.clone();
+    pipeline.assignment = match assignment {
+        ChannelAssignment::Automatic { .. } => {
+            ChannelAssignment::automatic(match pipeline.output_model {
+                OutputModel::CmykPrint => AutomaticSeparationStrategy::CmykEncodedRgbMaxBlackV1,
+                OutputModel::RgbScreen => AutomaticSeparationStrategy::RgbDirectEncodedComponentsV1,
+            })
+        }
+        assignment => assignment,
+    };
+    pipeline.active_channel = if matches!(pipeline.assignment, ChannelAssignment::ActiveChannel) {
+        pipeline
+            .active_channel
+            .filter(|channel| channel.belongs_to(pipeline.output_model))
+            .or_else(|| Some(pipeline.output_model.default_channel()))
+    } else {
+        None
+    };
+    pipeline
 }
 
 fn output_channel_order(rgb: bool, crosshatch: bool) -> &'static [Ink] {
@@ -9661,14 +9863,6 @@ fn web_inks_for_target(selected: u32, rgb: bool, crosshatch: bool) -> Option<Vec
             .get(slot.checked_sub(1)? as usize)
             .copied()
             .map(|ink| vec![ink]),
-    }
-}
-
-fn output_ink_for_slot(index: u32, rgb: bool) -> Option<Ink> {
-    if rgb {
-        Ink::RGB.get(index as usize).copied()
-    } else {
-        Ink::ALL.get(index as usize).copied()
     }
 }
 
@@ -9779,14 +9973,6 @@ fn set_crosshatch_target_directions(dropdown: &gtk::DropDown, angles: [f64; 4]) 
     sync_dropdown_strings(dropdown, &refs);
 }
 
-fn source_mapping_dropdown() -> gtk::DropDown {
-    let names = source_mapping_names(OutputMode::CmykInks);
-    let dropdown = gtk::DropDown::from_strings(&names);
-    dropdown.set_hexpand(true);
-    dropdown.set_size_request(0, -1);
-    dropdown
-}
-
 fn sync_layer_terminology(
     dropdown: &gtk::DropDown,
     target_label: &gtk::Label,
@@ -9818,111 +10004,6 @@ fn sync_layer_terminology(
         &["All Inks", "Cyan", "Magenta", "Yellow", "Black"]
     };
     sync_dropdown_strings(dropdown, values);
-}
-
-fn render_embedded_svg_texture(
-    bytes: &'static [u8],
-    logical_size: i32,
-    scale_factor: i32,
-) -> Result<gdk::MemoryTexture, String> {
-    let tree = usvg::Tree::from_data(bytes, &usvg::Options::default())
-        .map_err(|error| format!("could not parse embedded Artwork Mapping SVG: {error}"))?;
-    let size = tree.size();
-    if size.width() <= 0.0 || size.height() <= 0.0 {
-        return Err("embedded Artwork Mapping SVG has no usable size".into());
-    }
-    let pixel_size = logical_size.max(1) * scale_factor.max(1);
-    let scale = pixel_size as f32 / size.width().max(size.height());
-    let width = (size.width() * scale).round().max(1.0) as u32;
-    let height = (size.height() * scale).round().max(1.0) as u32;
-    let mut pixmap = tiny_skia::Pixmap::new(width, height)
-        .ok_or_else(|| "could not allocate embedded Artwork Mapping texture".to_owned())?;
-    resvg::render(
-        &tree,
-        tiny_skia::Transform::from_scale(scale, scale),
-        &mut pixmap.as_mut(),
-    );
-    let stride = width as usize * 4;
-    let bytes = glib::Bytes::from_owned(pixmap.take());
-    Ok(gdk::MemoryTexture::new(
-        width as i32,
-        height as i32,
-        gdk::MemoryFormat::R8g8b8a8Premultiplied,
-        &bytes,
-        stride,
-    ))
-}
-
-fn source_mapping_picture(bytes: &'static [u8], description: &'static str) -> gtk::Picture {
-    let texture = render_embedded_svg_texture(bytes, SOURCE_MAPPING_ARTWORK_SIZE, 1)
-        .expect("embedded Artwork Mapping SVGs are validated application assets");
-    let picture = gtk::Picture::builder()
-        .paintable(&texture)
-        .content_fit(gtk::ContentFit::Contain)
-        .can_shrink(false)
-        .hexpand(true)
-        .width_request(SOURCE_MAPPING_ARTWORK_SIZE)
-        .height_request(SOURCE_MAPPING_ARTWORK_SIZE)
-        .accessible_role(gtk::AccessibleRole::Img)
-        .css_classes(["mapping-artwork"])
-        .build();
-    picture.update_property(&[gtk::accessible::Property::Label(description)]);
-    picture.connect_scale_factor_notify(move |picture| {
-        let texture =
-            render_embedded_svg_texture(bytes, SOURCE_MAPPING_ARTWORK_SIZE, picture.scale_factor())
-                .expect("embedded Artwork Mapping SVGs are validated application assets");
-        picture.set_paintable(Some(&texture));
-    });
-    picture
-}
-
-fn source_mapping_hint(dropdown: &gtk::DropDown) -> gtk::Widget {
-    let stack = gtk::Stack::builder()
-        .transition_type(gtk::StackTransitionType::Crossfade)
-        .transition_duration(120)
-        .build();
-    for (index, option) in SOURCE_MAPPING_OPTIONS.into_iter().enumerate() {
-        let group = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        let artwork = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        artwork.set_homogeneous(false);
-        artwork.append(&source_mapping_picture(
-            option.source_svg,
-            option.source_description,
-        ));
-        artwork.append(
-            &gtk::Label::builder()
-                .label("→")
-                .accessible_role(gtk::AccessibleRole::Presentation)
-                .css_classes(["title-2", "dim-label"])
-                .build(),
-        );
-        artwork.append(&source_mapping_picture(
-            option.result_svg,
-            option.result_description,
-        ));
-        group.append(&artwork);
-        group.append(
-            &gtk::Label::builder()
-                .label(option.description)
-                .xalign(0.0)
-                .wrap(true)
-                .hexpand(true)
-                .css_classes(["dim-label", "caption"])
-                .build(),
-        );
-        stack.add_named(&group, Some(&index.to_string()));
-    }
-    stack.set_visible_child_name("0");
-    dropdown.connect_selected_notify(glib::clone!(
-        #[weak]
-        stack,
-        move |dropdown| {
-            if source_mapping_from_index(dropdown.selected()).is_some() {
-                stack.set_visible_child_name(&dropdown.selected().to_string());
-            }
-        }
-    ));
-    stack.upcast()
 }
 
 fn entry_status_row(title: &str, status: &str, entry: &gtk::Entry) -> (gtk::Widget, gtk::Label) {
@@ -11767,7 +11848,7 @@ mod tests {
     fn realized_numeric_controls_leave_continuous_scroll_to_parent() {
         gtk::init().unwrap();
         verify_realized_dropdown_sync_keeps_the_live_model_and_valid_selection();
-        verify_realized_appui_selector_callbacks();
+        verify_realized_semantic_pipeline_callbacks();
         let appearance = build_appearance_controls();
         assert!(appearance.preview_color.dialog().unwrap().is_with_alpha());
         assert!(appearance.export_color.dialog().unwrap().is_with_alpha());
@@ -11849,20 +11930,6 @@ mod tests {
                 > 0
         );
         appearance_window.close();
-        use gtk::gdk::prelude::PaintableExt;
-
-        let mapping_picture = source_mapping_picture(
-            SOURCE_MAPPING_OPTIONS[0].source_svg,
-            SOURCE_MAPPING_OPTIONS[0].source_description,
-        );
-        assert!(!mapping_picture.can_shrink());
-        assert_eq!(mapping_picture.width_request(), SOURCE_MAPPING_ARTWORK_SIZE);
-        assert_eq!(
-            mapping_picture.height_request(),
-            SOURCE_MAPPING_ARTWORK_SIZE
-        );
-        assert_eq!(mapping_picture.accessible_role(), gtk::AccessibleRole::Img);
-
         let capture_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let capture_paintable = gtk::WidgetPaintable::new(Some(&capture_content));
         let capture_window = gtk::Window::builder()
@@ -12151,57 +12218,48 @@ mod tests {
     }
 
     #[test]
-    fn source_mapping_names_hints_and_enum_indices_are_one_table_order() {
-        let expected = [
-            ValueMode::Cmyk,
-            ValueMode::SingleChannel,
-            ValueMode::Luminance,
-            ValueMode::CrosshatchLuminance,
-        ];
-        for index in 0..4 {
-            assert_eq!(
-                source_mapping_from_index(index),
-                Some(expected[index as usize])
-            );
-            assert!(
-                !SOURCE_MAPPING_OPTIONS[index as usize]
-                    .description
-                    .is_empty()
-            );
-        }
-        assert_eq!(source_mapping_from_index(4), Some(ValueMode::Rgb));
+    fn semantic_artwork_controls_use_stable_labels_and_legacy_cli_mapping_only() {
         assert_eq!(
-            SOURCE_MAPPING_OPTIONS.map(|option| option.name),
+            artwork_source_labels(false),
             [
-                "Color → CMYK Inks",
-                "Brightness → One Ink",
-                "Brightness → All Inks",
-                "Brightness → Crosshatch",
-                "RGB Color → Screen",
+                "Full Color",
+                "Red",
+                "Green",
+                "Blue",
+                "Value",
+                "Perceptual Lightness",
+                "Alpha"
             ]
         );
         assert_eq!(
-            source_mapping_names(OutputMode::RgbScreen),
-            [
-                "Color → CMYK Inks",
-                "Brightness → One Channel",
-                "Brightness → All Channels",
-                "Brightness → Crosshatch",
-                "RGB Color → Screen",
-            ]
+            source_alpha_labels(false),
+            ["Preserve Source Alpha", "Ignore Source Alpha"]
         );
         assert_eq!(
-            source_mapping_names(OutputMode::CmykInks),
-            SOURCE_MAPPING_OPTIONS.map(|option| option.name)
+            channel_assignment_labels(true, OutputModel::CmykPrint),
+            ["Automatic CMYK Separation"]
         );
-        let user_facing = SOURCE_MAPPING_OPTIONS
-            .iter()
-            .flat_map(|option| [option.name, option.description])
-            .collect::<Vec<_>>()
-            .join(" ");
-        assert!(!user_facing.contains("Value →"));
-        assert!(user_facing.contains("brightness"));
-        assert!(SOURCE_MAPPING_OPTIONS[3].description.contains("K +45°"));
+        assert_eq!(
+            channel_assignment_labels(false, OutputModel::CmykPrint),
+            ["Apply To Active Channel", "Apply To All Channels"]
+        );
+        assert_eq!(
+            artwork_source_guidance(ArtworkSource::Value),
+            "Use the strongest RGB component (HSV value semantics) as sampled content."
+        );
+        assert_eq!(
+            artwork_source_guidance(ArtworkSource::PerceptualLightness),
+            "Use OKLab L for perceptual lightness as sampled content."
+        );
+        assert_eq!(
+            output_channel_labels(OutputModel::RgbScreen),
+            ["Red", "Green", "Blue"]
+        );
+        assert_eq!(
+            source_mapping_from_index(3),
+            Some(ValueMode::CrosshatchLuminance)
+        );
+        assert_eq!(source_mapping_from_index(5), None);
     }
 
     #[test]
@@ -12269,8 +12327,6 @@ mod tests {
         );
         assert_eq!(visible_ink_for_slot(0, true, false), Some(Ink::Red));
         assert_eq!(visible_ink_for_slot(2, true, false), Some(Ink::Blue));
-        assert_eq!(output_ink_for_slot(1, true), Some(Ink::Green));
-        assert_eq!(output_ink_for_slot(3, true), None);
     }
 
     #[test]
@@ -12339,6 +12395,213 @@ mod tests {
         }
     }
 
+    fn verify_realized_semantic_pipeline_callbacks() {
+        let application = adw::Application::builder()
+            .application_id("dev.toniator.semantic-pipeline-regression")
+            .build();
+        application.register(None::<&gio::Cancellable>).unwrap();
+        let ui = AppUi::new(
+            &application,
+            CliOptions {
+                demo: true,
+                artifact_window_size: Some((900, 680)),
+                ..CliOptions::default()
+            },
+        );
+        ui.window.present();
+        drain_ui_callbacks();
+        ui.activate_shape_treatment();
+        drain_ui_callbacks();
+
+        let source_model = ui.artwork_source.model().unwrap();
+        let active_model = ui.active_channel.model().unwrap();
+        assert!(!ui.state.borrow().syncing_controls);
+        assert!(!ui.channel_assignment.is_sensitive());
+        assert_eq!(
+            ui.channel_assignment_note.text(),
+            "Automatic CMYK Separation derives cyan, magenta, yellow, and black inks."
+        );
+        for source in 0..7 {
+            ui.artwork_source.set_selected(source);
+            drain_ui_callbacks();
+            assert_eq!(ui.artwork_source.selected(), source);
+            let pipeline = ui
+                .state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .artwork_pipeline
+                .clone();
+            assert_eq!(pipeline.source, artwork_source_from_index(source).unwrap());
+            if source == 0 {
+                assert!(matches!(
+                    pipeline.assignment,
+                    ChannelAssignment::Automatic { .. }
+                ));
+            } else {
+                assert!(matches!(
+                    pipeline.assignment,
+                    ChannelAssignment::AllChannels
+                ));
+            }
+            if source == 6 {
+                assert!(!ui.source_alpha_row.is_visible());
+                assert!(ui.source_alpha_note.is_visible());
+                assert_eq!(
+                    ui.source_alpha_note.text(),
+                    "Alpha is the source; source alpha is not applied again."
+                );
+            }
+        }
+        assert_eq!(ui.artwork_source.model().unwrap(), source_model);
+
+        ui.channel_assignment.set_selected(0);
+        drain_ui_callbacks();
+        ui.active_channel.set_selected(3);
+        drain_ui_callbacks();
+        assert_eq!(
+            ui.state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .artwork_pipeline
+                .active_channel,
+            Some(OutputChannelId::CmykBlack)
+        );
+        ui.active_channel.set_selected(gtk::INVALID_LIST_POSITION);
+        drain_ui_callbacks();
+        assert_eq!(
+            ui.state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .artwork_pipeline
+                .active_channel,
+            Some(OutputChannelId::CmykBlack)
+        );
+
+        for output in [
+            OutputMode::RgbScreen,
+            OutputMode::CmykInks,
+            OutputMode::RgbScreen,
+            OutputMode::CmykInks,
+            OutputMode::RgbScreen,
+        ] {
+            ui.output_mode
+                .set_selected((output == OutputMode::RgbScreen) as u32);
+            drain_ui_callbacks();
+            assert_eq!(
+                ui.state
+                    .borrow()
+                    .editor
+                    .as_ref()
+                    .unwrap()
+                    .document()
+                    .output_mode,
+                output
+            );
+            assert_eq!(ui.active_channel.model().unwrap(), active_model);
+        }
+        assert_eq!(ui.active_channel.model().unwrap().n_items(), 3);
+        ui.artwork_source.set_selected(0);
+        drain_ui_callbacks();
+        assert!(!ui.channel_assignment.is_sensitive());
+        assert_eq!(
+            ui.channel_assignment_note.text(),
+            "Direct RGB Channels map encoded red, green, and blue components."
+        );
+        ui.artwork_source.set_selected(4);
+        drain_ui_callbacks();
+        ui.source_alpha.set_selected(1);
+        drain_ui_callbacks();
+        assert_eq!(
+            ui.state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .artwork_pipeline
+                .alpha_policy,
+            SourceAlphaPolicy::Ignore
+        );
+        ui.channel_assignment.set_selected(0);
+        drain_ui_callbacks();
+        ui.active_channel.set_selected(2);
+        drain_ui_callbacks();
+        assert_eq!(
+            ui.state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .artwork_pipeline
+                .active_channel,
+            Some(OutputChannelId::RgbBlue)
+        );
+        ui.artwork_source.set_selected(6);
+        drain_ui_callbacks();
+        assert!(!ui.source_alpha.is_sensitive());
+
+        ui.crosshatch_action.emit_clicked();
+        drain_ui_callbacks();
+        let pipeline = ui
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .unwrap()
+            .document()
+            .artwork_pipeline
+            .clone();
+        assert!(matches!(
+            pipeline.assignment,
+            ChannelAssignment::LegacyCompatibility(_)
+        ));
+        assert_eq!(pipeline.output_model, OutputModel::RgbScreen);
+        assert!(matches!(
+            ui.state.borrow().editor.as_ref().unwrap().document().render,
+            RenderVariant::WebCurveV1 { .. }
+        ));
+        assert_eq!(
+            ui.crosshatch_note.text(),
+            "Legacy Crosshatch is active in Curves. Exit restores ordinary Curves."
+        );
+        ui.crosshatch_action.emit_clicked();
+        drain_ui_callbacks();
+        let pipeline = ui
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .unwrap()
+            .document()
+            .artwork_pipeline
+            .clone();
+        assert_eq!(pipeline.output_model, OutputModel::RgbScreen);
+        assert_eq!(pipeline.source, ArtworkSource::Value);
+        assert!(matches!(
+            pipeline.assignment,
+            ChannelAssignment::AllChannels
+        ));
+        assert_eq!(
+            ui.crosshatch_note.text(),
+            "Legacy Crosshatch temporarily switches to Curves. Exit restores ordinary Curves."
+        );
+        ui.window.close();
+    }
+
+    // Superseded by the semantic-pipeline selector regression below.  Keep
+    // the historic fixture out of the test build while its compatibility
+    // artifact vocabulary remains available only through the CLI adapter.
+    #[cfg(any())]
     fn assert_selector_state(ui: &AppUi, output: OutputMode, curve: bool) {
         let state = ui.state.borrow();
         assert!(!state.syncing_controls);
@@ -12391,6 +12654,7 @@ mod tests {
         }
     }
 
+    #[cfg(any())]
     fn verify_realized_appui_selector_callbacks() {
         let application = adw::Application::builder()
             .application_id("dev.toniator.selector-regression")
@@ -12695,10 +12959,6 @@ mod tests {
         ] {
             assert_eq!(settings.channels.get(ink).grid_rotation, angle);
         }
-        let description = SOURCE_MAPPING_OPTIONS[3].description;
-        for expected in ["K +45°", "C -45°", "M horizontal", "Y vertical"] {
-            assert!(description.contains(expected));
-        }
     }
 
     #[test]
@@ -12744,6 +13004,7 @@ mod tests {
         ));
     }
 
+    #[cfg(any())]
     #[test]
     fn source_mapping_embedded_svg_pairs_parse_render_and_match_the_table() {
         assert!(std::ptr::eq(
