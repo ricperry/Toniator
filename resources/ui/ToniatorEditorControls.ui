@@ -1,0 +1,93 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!-- Static editor controls. Rust owns models, callbacks, help popovers, and custom drawing. -->
+<interface>
+  <requires lib="gtk" version="4.0"/>
+  <object class="GtkBox" id="editor_controls">
+    <property name="orientation">vertical</property>
+    <property name="spacing">8</property>
+    <child>
+      <object class="GtkBox" id="source_controls">
+        <property name="orientation">vertical</property><property name="spacing">6</property>
+        <child><object class="GtkBox" id="source_dynamic_host"><property name="orientation">vertical</property><property name="spacing">4</property></object></child>
+        <child><object class="GtkLabel" id="artwork_source_label"><property name="label">Artwork Source</property><property name="xalign">0</property><style><class name="heading"/></style></object></child>
+        <child><object class="GtkDropDown" id="artwork_source"/></child>
+        <child><object class="GtkLabel" id="artwork_source_note"><property name="xalign">0</property><property name="wrap">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child>
+        <child><object class="GtkBox" id="source_alpha_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkLabel" id="source_alpha_label"><property name="label">Source Alpha</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkDropDown" id="source_alpha"/></child></object></child>
+        <child><object class="GtkLabel" id="source_alpha_note"><property name="label">Alpha is the source; source alpha is not applied again.</property><property name="xalign">0</property><property name="wrap">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child>
+      </object>
+    </child>
+    <child>
+      <object class="GtkBox" id="output_controls">
+        <property name="orientation">vertical</property><property name="spacing">6</property>
+        <child><object class="GtkLabel" id="output_mode_label"><property name="label">Output Model</property><property name="xalign">0</property><style><class name="heading"/></style></object></child>
+        <child><object class="GtkDropDown" id="output_mode"/></child>
+        <child><object class="GtkLabel" id="channel_assignment_label"><property name="label">Channel Assignment</property><property name="xalign">0</property><style><class name="heading"/></style></object></child>
+        <child><object class="GtkDropDown" id="channel_assignment"/></child>
+        <child><object class="GtkLabel" id="channel_assignment_note"><property name="xalign">0</property><property name="wrap">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child>
+        <child><object class="GtkBox" id="active_channel_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkLabel" id="active_channel_label"><property name="label">Active Channel</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkDropDown" id="active_channel"/></child></object></child>
+        <child><object class="GtkButton" id="crosshatch_action"><property name="label">Use Legacy Crosshatch</property></object></child>
+        <child><object class="GtkLabel" id="crosshatch_note"><property name="label">Legacy Crosshatch temporarily switches to Curves. Exit restores ordinary Curves.</property><property name="xalign">0</property><property name="wrap">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child>
+      </object>
+    </child>
+    <child>
+      <object class="GtkBox" id="appearance_controls">
+        <property name="orientation">vertical</property><property name="spacing">8</property>
+        <child><object class="GtkBox" id="preview_section"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkBox" id="preview_heading"><property name="orientation">horizontal</property><property name="spacing">4</property><child><object class="GtkLabel" id="preview_surface_label"><property name="label">Preview Surface — Canvas only · not exported</property><property name="xalign">0</property><property name="hexpand">True</property></object></child><child><object class="GtkBox" id="preview_help_host"/></child></object></child><child><object class="GtkDropDown" id="preview_surface"/></child><child><object class="GtkColorDialogButton" id="preview_color"/></child></object></child>
+        <child><object class="GtkBox" id="export_section"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkBox" id="export_heading"><property name="orientation">horizontal</property><property name="spacing">4</property><child><object class="GtkLabel" id="export_background_label"><property name="label">Export Background — Used for SVG and by default for PNG</property><property name="xalign">0</property><property name="hexpand">True</property></object></child><child><object class="GtkBox" id="export_help_host"/></child></object></child><child><object class="GtkDropDown" id="export_background"/></child><child><object class="GtkColorDialogButton" id="export_color"/></child></object></child>
+      </object>
+    </child>
+    <child>
+      <object class="GtkBox" id="treatment_chrome">
+        <property name="orientation">vertical</property><property name="spacing">8</property>
+        <child><object class="GtkLabel" id="treatment_title"><property name="label">Halftone</property><property name="xalign">0</property><style><class name="title-2"/></style></object></child>
+        <child><object class="GtkLabel" id="treatment_caption"><property name="label">Pattern Type</property><property name="xalign">0</property><style><class name="heading"/></style></object></child>
+        <child><object class="GtkBox" id="treatment_pattern_buttons"><property name="spacing">0</property><style><class name="linked"/></style><child><object class="GtkToggleButton" id="dots"><property name="label">Shapes</property><property name="hexpand">True</property></object></child><child><object class="GtkToggleButton" id="squares"><property name="label">Squares</property></object></child><child><object class="GtkToggleButton" id="lines"><property name="label">Lines</property></object></child><child><object class="GtkToggleButton" id="curves"><property name="label">Curves</property><property name="hexpand">True</property></object></child><child><object class="GtkToggleButton" id="legacy"><property name="label">Legacy</property></object></child></object></child>
+        <child><object class="GtkBox" id="treatment_preset_actions"><property name="spacing">0</property><style><class name="linked"/></style><child><object class="GtkButton" id="preset_import"><property name="label">Load Preset…</property><property name="hexpand">True</property></object></child><child><object class="GtkButton" id="preset_save"><property name="label">Save Preset…</property><property name="hexpand">True</property></object></child></object></child>
+        <child>
+          <object class="GtkStack" id="treatment_modes">
+            <property name="transition-type">crossfade</property>
+            <property name="transition-duration">120</property>
+            <child>
+              <object class="GtkBox" id="native_panel">
+                <property name="orientation">vertical</property>
+                <property name="spacing">12</property>
+                <style><class name="workflow-group"/></style>
+                <child><object class="GtkLabel" id="native_channel_copy"><property name="label">Automatic CMYK separation</property><property name="xalign">0</property><style><class name="heading"/></style></object></child>
+                <child>
+                  <object class="GtkBox" id="native_sampling_detail_row">
+                    <property name="orientation">vertical</property><property name="spacing">4</property>
+                    <child><object class="GtkBox" id="native_sampling_detail_heading"><property name="spacing">8</property><child><object class="GtkLabel" id="native_sampling_detail_label"><property name="label">Sampling Detail</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkLabel" id="native_sampling_detail_subtitle"><property name="label">Coarse — Fine</property><property name="xalign">1</property><property name="hexpand">True</property><property name="ellipsize">end</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child>
+                    <child><object class="GtkBox" id="native_sampling_detail_control"><property name="spacing">8</property><child><object class="GtkScale" id="native_sampling_detail_scale"><property name="orientation">horizontal</property><property name="draw-value">False</property><property name="hexpand">True</property></object></child></object></child>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkBox" id="native_coverage_row">
+                    <property name="orientation">vertical</property><property name="spacing">4</property>
+                    <child><object class="GtkBox" id="native_coverage_heading"><property name="spacing">8</property><child><object class="GtkLabel" id="native_coverage_label"><property name="label">Coverage</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkLabel" id="native_coverage_subtitle"><property name="label">How much ink fills the page</property><property name="xalign">1</property><property name="hexpand">True</property><property name="ellipsize">end</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child>
+                    <child><object class="GtkBox" id="native_coverage_control"><property name="spacing">8</property><child><object class="GtkScale" id="native_coverage_scale"><property name="orientation">horizontal</property><property name="draw-value">False</property><property name="hexpand">True</property></object></child></object></child>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkBox" id="native_contrast_row">
+                    <property name="orientation">vertical</property><property name="spacing">4</property>
+                    <child><object class="GtkBox" id="native_contrast_heading"><property name="spacing">8</property><child><object class="GtkLabel" id="native_contrast_label"><property name="label">Contrast</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkLabel" id="native_contrast_subtitle"><property name="label">Separate light and dark areas</property><property name="xalign">1</property><property name="hexpand">True</property><property name="ellipsize">end</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child>
+                    <child><object class="GtkBox" id="native_contrast_control"><property name="spacing">8</property><child><object class="GtkScale" id="native_contrast_scale"><property name="orientation">horizontal</property><property name="draw-value">False</property><property name="hexpand">True</property></object></child></object></child>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkBox" id="native_screen_angle_row">
+                    <property name="orientation">vertical</property><property name="spacing">4</property>
+                    <child><object class="GtkBox" id="native_screen_angle_heading"><property name="spacing">8</property><child><object class="GtkLabel" id="native_screen_angle_label"><property name="label">Screen Angle</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkLabel" id="native_screen_angle_subtitle"><property name="label">Rotate square and line screens</property><property name="xalign">1</property><property name="hexpand">True</property><property name="ellipsize">end</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child>
+                    <child><object class="GtkBox" id="native_screen_angle_control"><property name="spacing">8</property><child><object class="GtkScale" id="native_screen_angle_scale"><property name="orientation">horizontal</property><property name="draw-value">False</property><property name="hexpand">True</property></object></child></object></child>
+                  </object>
+                </child>
+              </object>
+            </child>
+            <child><object class="GtkBox" id="web_panel_host"><property name="orientation">vertical</property></object></child>
+            <child><object class="GtkBox" id="curve_panel_host"><property name="orientation">vertical</property></object></child>
+          </object>
+        </child>
+      </object>
+    </child>
+  </object>
+</interface>

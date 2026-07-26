@@ -1,0 +1,28 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!-- Separate aggregate scope. It is intentionally not a channel template instance. -->
+<interface>
+  <requires lib="gtk" version="4.0"/>
+  <object class="GtkBox" id="aggregate_channel_controls">
+    <property name="orientation">vertical</property>
+    <property name="spacing">6</property>
+    <child>
+      <object class="GtkLabel" id="aggregate_heading">
+        <property name="xalign">0</property>
+        <style><class name="heading"/></style>
+      </object>
+    </child>
+    <child>
+      <object class="GtkLabel" id="aggregate_mixed_message">
+        <property name="xalign">0</property>
+        <property name="wrap">True</property>
+        <style><class name="dim-label"/><class name="caption"/></style>
+      </object>
+    </child>
+    <child>
+      <object class="GtkBox" id="aggregate_content_host">
+        <property name="orientation">vertical</property>
+        <property name="spacing">4</property>
+      </object>
+    </child>
+  </object>
+</interface>

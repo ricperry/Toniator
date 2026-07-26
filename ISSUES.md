@@ -4233,7 +4233,7 @@ The main correction is:
 
 # TON-013 — Move Toniator's GTK/libadwaita UI to GtkBuilder and Cambalache
 
-* **Status:** Planned
+* **Status:** In Progress
 * **Priority:** P1
 * **Requires:** Completed TON-012 Stage 3 UI checkpoint
 * **Blocks:** Future substantial GTK layout work and UI-heavy portions of
@@ -4246,10 +4246,116 @@ Move Toniator's static GTK/libadwaita widget hierarchy from programmatic Rust
 construction into GtkBuilder `.ui` resources that can be opened and edited in
 Cambalache.
 
-The runtime UI source of truth should become one or more `.ui` files, including
-a main Toniator UI resource and reusable component templates. Rust continues to
-own application state, semantic callbacks, dynamic models, rendering,
-validation, undo, synchronization, and custom runtime behavior.
+## Progress — Stage 1
+
+The application shell is now loaded from `resources/ui/Toniator.ui` through
+`gtk::Builder`, with stable IDs for the window, header actions, toast overlay,
+and stack. Rust still inserts the dynamic `start` and `editor` pages and owns
+callbacks, models, drawing, dialogs, and synchronization. The editor hierarchy,
+selector-driven controls, and reusable channel composite remain In Progress for
+later TON-013 stages; this issue stays In Progress until those boundaries are
+implemented and verified.
+
+Stage 1 verification passed at this checkpoint: the XML parse, focused
+shell-builder contract and realized GTK/libadwaita builder checks, `cargo fmt
+--check`, strict Clippy, `cargo test --locked`, the release build, and
+`git diff --check`. A real GTK demo launch also produced and passed inspection
+of `test-artifacts/ton-013/shell.png` at 900x680. The host
+`gtk4-builder-tool validate` rejects `AdwApplicationWindow`, so it is not
+treated as acceptance evidence; Cambalache was not launched, so no round-trip
+claim is made.
+
+## Progress — Stage 2
+
+The actual top inspector order is `Source` -> `Output` -> `Channel Settings`
+through the Builder-owned expanders in `resources/ui/ToniatorInspector.ui`.
+Source and Output begin expanded; Channel Settings, `Appearance / Canvas &
+Export`, and Treatment Settings begin collapsed for progressive disclosure.
+Artifact expansion opens Source, Output, and Channel Settings. Source contains
+Artwork Source, Source Alpha, source guidance, and status. Output contains
+Output Model, Channel Assignment, Active Channel, and the explicit Legacy
+Crosshatch compatibility control.
+
+`resources/ui/ToniatorChannelControls.ui` is a reusable real-channel
+status/context composite for one semantic `OutputChannelId`; Rust caches one
+instance for each of the seven semantic CMYK C/M/Y/K and RGB R/G/B channels and
+selects them by stable semantic ID.
+`resources/ui/ToniatorAggregateChannelControls.ui` is a separate All
+Inks/All Channels scope-context/status composite with explicit mixed-value and
+apply-to-all messaging; it is not a fake channel. Crosshatch uses the aggregate
+composite with explicit All Layers terminology. The editable Cambalache project at
+`resources/ui/Toniator.cmb` records hashes for the main resource and all Stage
+2 auxiliary resources.
+
+The Output `Channel Assignment` and conditional `Active Channel` controls
+remain pipeline-authoritative and are the sole scalar-routing controls. The
+Stage 2 correction names the top selector `Treatment Editing Scope`: it is the
+sole visible treatment-recipient selector for both Shapes and Curves, including
+Full Color treatment editing, and it synchronizes the existing target models
+without mutating `ChannelAssignment` or `active_channel`. The duplicate visible
+`Adjust Ink` / `Adjust Channel` rows are hidden compatibility internals for
+established callbacks and mixed-value behavior. Crosshatch shows disabled `All
+Layers` scope, while aggregate scope remains separate from real
+`OutputChannelId` identity.
+
+Stage 2 verification and final UX review passed the focused Builder/realized
+GTK coverage, `cargo test --locked` (117 library and 45 binary/UI tests), strict
+Clippy, release build, XML/Cambalache-file parsing, and diff checks. The final
+bounded GTK artifact is
+`test-artifacts/ton-013/stage2-treatment-scope-correction.png` (1000x760) and
+was visually inspected. Separate normal and narrow artifact-mode launches were
+limited by the current Wayland compositor failing to provide a GTK render node
+within the capture timeout; those attempts produced no claimed artifacts. No
+dedicated assistive-technology tree or focus-order capture was run; static
+review found no visible or normal-keyboard focus artifact from the hidden
+compatibility rows. Narrow-window, screen-reader, and focus-order behavior
+remain follow-up checks.
+
+Stage 2 retains Rust ownership of dynamic models, callbacks, visibility,
+sensitivity, treatment-specific controls, rendering, dialogs, deferred sync,
+and the existing GTK crash protections. TON-013 remains In Progress: the
+remaining substantial editor/treatment hierarchy is still Rust-built, and the
+issue is not complete until later migration work is independently scoped and
+verified.
+
+## Progress — Control-exposure stage
+
+`resources/ui/ToniatorEditorControls.ui` now owns the practical static Source,
+Output, Appearance, and treatment-chrome structure: labels, explicitly named
+and labelled Source/Output dropdown shells, dropdown/color-button shells, the
+Legacy Crosshatch action, pattern/preset actions, and the native/Shapes/Curves
+stack shells. The Basic/native Sampling Detail, Coverage, Contrast, and Screen
+Angle row containers and scale shells are Builder-owned, with stable semantic
+IDs for Cambalache layout edits. Rust retrieves and configures those scales,
+attaches the existing adjustment-backed precision entries, and continues to own
+live dropdown models, callbacks, visibility/sensitivity, dynamic
+Shapes/Curves/Motif detail rows, mixed-value/help content, custom
+drawing/dialogs, and synchronization. The reusable real-channel template and
+aggregate scope remain separate.
+
+The distinction between `Treatment Editing Scope` and Output routing remains
+explicit: the former selects the treatment recipient, while Output `Channel
+Assignment` and conditional `Active Channel` remain the pipeline-authoritative
+scalar-routing controls. Aggregate All Inks/All Channels context remains
+separate from real semantic channels and is not a fake channel.
+
+TON-013 is still In Progress. Shapes, Curves, and Motif detail controls are
+not duplicated in XML: their stateful rows remain Rust-built within the stable
+`web_panel_host` and `curve_panel_host` Builder shells pending a dedicated
+follow-up that preserves mixed-value and drawing behavior.
+
+Control-exposure verification passed `cargo fmt --check`, `cargo test --locked`
+(117 library and 46 binary/UI tests), strict Clippy, the locked release build,
+XML/Cambalache-file parsing, and `git diff --check`. The corrected 1000x980
+GTK artifact at
+`test-artifacts/ton-013/control-exposure-stage-corrected.png` was visually
+inspected. Cambalache 1.0.3 is installed, but no round-trip edit was performed;
+narrow-window and assistive-technology checks remain follow-up verification.
+
+The current runtime UI source of truth is split between `.ui` layout resources
+and Rust runtime behavior. Further migration may move dynamic detail rows into
+stable Builder hosts only when their state, mixed/help content, custom drawing,
+dialogs, callbacks, and synchronization remain intact.
 
 ## Architecture boundary
 

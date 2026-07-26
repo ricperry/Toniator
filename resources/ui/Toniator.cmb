@@ -1,0 +1,10 @@
+<?xml version='1.0' encoding='UTF-8' standalone='no'?>
+<!DOCTYPE cambalache-project SYSTEM "cambalache-project.dtd">
+<!-- Created with Cambalache 1.0.3 -->
+<cambalache-project version="1.0.0" target_tk="gtk-4.0" depends="libadwaita-1">
+  <ui filename="Toniator.ui" sha256="5e91e8e92c1417bf7e59403bcbe3b5b2735e24f1c211a16230698da4265d6fba"/>
+  <ui filename="ToniatorInspector.ui" sha256="82b12a3f049fbc0cf089ba25999a084eaa67b2f25e1c957d60f587f491b46f6a"/>
+  <ui filename="ToniatorEditorControls.ui" sha256="203599b2461e8dd95c37e6e37f54460e3a9780ca2092f5780c3dce2eea7e6280"/>
+  <ui filename="ToniatorChannelControls.ui" sha256="9b4bd412cc8613ce898c8254ae8425dd2b020fea703aa3a0b9429f9246d90b5c"/>
+  <ui filename="ToniatorAggregateChannelControls.ui" sha256="eae71311fe87fb6ceacf7f723d9941c1f62cdac7edc1160bd470f9c3fd8105a6"/>
+</cambalache-project>
