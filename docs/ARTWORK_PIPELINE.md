@@ -1,6 +1,6 @@
 # Toniator Artwork Pipeline Architecture
 
-**Status:** Stage 0 architecture contract; confirmed facts are recorded in `ARTWORK_PIPELINE_AUDIT.md`
+**Status:** Stage 2 complete; Stages 3–5 remain planned. Confirmed facts are recorded in `ARTWORK_PIPELINE_AUDIT.md`.
 
 **Primary issue:** TON-012 — Separate artwork source sampling, output model, and channel assignment
 
@@ -632,10 +632,35 @@ strategy/model incompatibility, invalid or missing channels, invalid source /
 assignment combinations, invalid slots, malformed snapshots, and unsupported
 Crosshatch combinations.
 
-Stage 1B remains responsible for making these settings authoritative and
-migrating document/preset caches. No source sampling, alpha behavior, output
-formula, Crosshatch formula, schema, persistence, UI, preview, PNG, or SVG
-behavior changes in Stage 1A.
+**Stage 1B completion (2026-07-25, commit `32022df`):** the independent
+pipeline is authoritative for the active document, saved Shapes/Curves
+treatments, and inactive CMYK/RGB caches. Project schema v6 and preset schema
+v3 persist validated stable IDs; migration, validation, undo/redo, save/reopen,
+and the renderer/GTK compatibility projection are covered. Legacy source and
+render formulas remain unchanged.
+
+**Stage 2 completion (2026-07-26):** source
+preparation now produces an immutable `PreparedSource` snapshot. The canonical
+resolver produces normalized `ResolvedChannelField` values plus independent
+coverage, ordered by semantic `OutputChannelId`, with bounds and generation
+identity. Shapes and Curves consume the same resolved fields for a render
+request; preview, PNG, and SVG use the resulting geometry path. The 2400-pixel
+long-edge cap, SVG raster preparation, Triangle grid sampling, cancellation,
+and legacy generation behavior remain in place.
+
+Supported Stage 2 source fields are Full Color, Red, Green, Blue, Value
+(`max(R,G,B)`), Perceptual Lightness (encoded sRGB decoded to linear sRGB then
+OKLab `L`), Alpha, and the compatibility Legacy Brightness
+(`1 - (0.2126R + 0.7152G + 0.0722B)`). Preserve applies source alpha once as
+coverage; Ignore samples stored RGB with full source-bounds coverage; Alpha as
+the source does not apply alpha a second time; LegacyCurrentV1 retains current
+reachable behavior. Automatic separation produces exactly C/M/Y/K or R/G/B;
+Crosshatch remains the progressive K/C/M/Y compatibility assignment.
+
+The Stage 2 completion is not a public format or UI milestone: Stage 3 still
+owns the combined Artwork Mapping replacement, Stage 4 owns preset cleanup,
+and the existing RGB Curves feature gaps and RGB Crosshatch compositing issue
+remain outside this stage.
 
 ---
 
@@ -1781,6 +1806,8 @@ No broad refactor should begin before this audit.
 
 ### Stage 1 — Independent domain model
 
+**Status:** Complete through Stage 1B at commit `32022df`.
+
 Implement independent types for:
 
 - Artwork Source;
@@ -1799,6 +1826,8 @@ not reconstruct that state from a second mutable legacy mapping after reopen.
 
 ### Stage 2 — Resolved channel-field pipeline
 
+**Status:** Complete in the 2026-07-26 TON-012 checkpoint.
+
 Centralize:
 
 - source sampling;
@@ -1807,6 +1836,11 @@ Centralize:
 - scalar routing.
 
 Make Shapes and Curves consume the same resolved channel fields where practical.
+
+The implementation boundary is `PreparedSource` plus
+`ResolvedChannelFields`. Field caches are request-local and keyed by generation,
+prepared bounds, grid, source/alpha/output/assignment IDs, active channel, and
+enabled semantic channels; they must not cross incompatible render generations.
 
 ### Stage 3 — Preset migration and compatibility cleanup
 

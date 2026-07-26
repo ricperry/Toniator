@@ -1,4 +1,9 @@
 use crate::CancellationToken;
+use crate::artwork_pipeline::{
+    ArtworkPipelineSettings, ArtworkSource, AutomaticSeparationStrategy, ChannelAssignment,
+    LegacyBrightnessKind, LegacyCompatibilityAssignment, OutputChannelId, OutputModel,
+    PreparedSource, SourceAlphaPolicy, resolve_channel_fields_cancellable,
+};
 use crate::model::{
     Document, DocumentAppearance, ExportBackground, Ink, OutputMode, PreviewSurface, RenderVariant,
     RgbaColor, Settings, SourceArtwork, Treatment, ValueMode, WebShape, WebShapeChannel,
@@ -499,11 +504,12 @@ pub fn generate_document_marks_cancellable(
     token.checkpoint()?;
     // The renderer receives only a derived legacy snapshot.  It never uses
     // mutable document compatibility fields as semantic authority.
-    let mut canonical = document.projected_for_render()?;
+    let mut canonical = document.clone();
     let dimensions = source_dimensions(&canonical.source)?;
     canonical.normalize_canvas_aspect(dimensions.0, dimensions.1);
     canonical.validate()?;
     let source = decode_source(&canonical.source, 2400)?;
+    let prepared = PreparedSource::from_rgba_image(&source, 0);
     token.checkpoint()?;
     Ok(match &canonical.render {
         RenderVariant::NativeBasicV1 => {
@@ -513,10 +519,10 @@ pub fn generate_document_marks_cancellable(
                 generate_marks_cancellable(&source, canonical.settings, token)?
             }
         }
-        RenderVariant::WebShapeV1 { settings } => generate_web_shape_marks_for_output_mode(
-            &source,
+        RenderVariant::WebShapeV1 { settings } => generate_web_shape_marks_for_pipeline(
+            &prepared,
             settings,
-            canonical.output_mode,
+            &canonical.artwork_pipeline,
             token,
         )?,
         RenderVariant::WebCurveV1 { .. } => {
@@ -535,32 +541,40 @@ pub fn generate_web_shape_marks_cancellable(
     settings: &WebShapeSettings,
     token: &CancellationToken,
 ) -> Result<MarkSet> {
-    generate_web_shape_marks_for_output_mode(source, settings, OutputMode::CmykInks, token)
+    let prepared = PreparedSource::from_rgba_image(source, 0);
+    let pipeline = legacy_pipeline_from_facade(
+        settings.value_mode,
+        OutputMode::CmykInks,
+        settings.single_channel,
+    );
+    generate_web_shape_marks_for_pipeline(&prepared, settings, &pipeline, token)
 }
 
-fn generate_web_shape_marks_for_output_mode(
-    source: &RgbaImage,
+fn generate_web_shape_marks_for_pipeline(
+    prepared: &PreparedSource,
     settings: &WebShapeSettings,
-    output_mode: OutputMode,
+    pipeline: &ArtworkPipelineSettings,
     token: &CancellationToken,
 ) -> Result<MarkSet> {
-    let output_inks = if settings.value_mode == ValueMode::CrosshatchLuminance {
-        &Ink::ALL[..]
-    } else if output_mode == OutputMode::RgbScreen || settings.value_mode == ValueMode::Rgb {
-        &Ink::RGB[..]
+    let output_channels = if matches!(
+        pipeline.assignment,
+        ChannelAssignment::LegacyCompatibility(_)
+    ) {
+        OutputChannelId::CMYK.to_vec()
     } else {
-        &Ink::ALL[..]
+        pipeline.output_model.channels().to_vec()
     };
-    let enabled: Vec<Ink> = output_inks
+    let enabled: Vec<OutputChannelId> = output_channels
         .iter()
         .copied()
-        .filter(|ink| settings.channels.get(*ink).enabled)
+        .filter(|channel| settings.channels.get(channel.to_legacy_ink()).enabled)
         .collect();
     let mut marks = Vec::new();
     let mut sample_cache = HashMap::new();
 
-    for &ink in output_inks {
+    for channel_id in output_channels {
         token.checkpoint()?;
+        let ink = channel_id.to_legacy_ink();
         let channel = settings.channels.get(ink);
         if !channel.enabled {
             continue;
@@ -573,7 +587,18 @@ fn generate_web_shape_marks_for_output_mode(
             settings.output_height,
             long_edge_cells,
         );
-        let samples = cached_web_samples(&mut sample_cache, source, grid.cols, grid.rows, token)?;
+        let fields = cached_resolved_fields(
+            &mut sample_cache,
+            prepared,
+            pipeline,
+            grid.cols,
+            grid.rows,
+            &enabled,
+            token,
+        )?;
+        let Some(field) = fields.field(channel_id) else {
+            continue;
+        };
         let ranges = web_grid_ranges(settings, channel, grid);
         let shape = if settings.use_shared_mark {
             settings.shared_shape
@@ -589,25 +614,9 @@ fn generate_web_shape_marks_for_output_mode(
                 if !placement.visible {
                     continue;
                 }
-                let sample =
-                    samples[(placement.sample_row * grid.cols + placement.sample_col) as usize];
-                let mut raw = map_web_pixel(
-                    sample,
-                    settings.value_mode,
-                    settings.single_channel,
-                    &enabled,
-                )[ink_index(ink)];
-                // RGB Screen is additive light on a transparent surface. Unlike
-                // CMYK, brightness-driven shapes retain sampled source coverage
-                // at antialiased edges. Direct RGB mapping already does this.
-                if output_mode == OutputMode::RgbScreen
-                    && matches!(
-                        settings.value_mode,
-                        ValueMode::Luminance | ValueMode::SingleChannel
-                    )
-                {
-                    raw *= sample[3] as f64 / 255.0;
-                }
+                let sample_index =
+                    (placement.sample_row * grid.cols + placement.sample_col) as usize;
+                let raw = field.value_at(sample_index);
                 let value = map_web_threshold(raw, channel.threshold);
                 if value <= 0.0 {
                     continue;
@@ -630,24 +639,35 @@ fn generate_web_shape_marks_for_output_mode(
         }
     }
 
-    let layers = output_inks
-        .iter()
-        .copied()
-        .map(|ink| {
-            let channel = settings.channels.get(ink);
-            let color = if settings.value_mode == ValueMode::CrosshatchLuminance {
-                parse_hex_color(&settings.crosshatch_color).unwrap_or((17, 17, 17))
-            } else {
-                parse_hex_color(&channel.color).unwrap_or_else(|| Channel::from(ink).color())
-            };
-            InkLayer {
-                channel: ink.into(),
-                enabled: channel.enabled,
-                color,
-                opacity: channel.opacity as f32,
-            }
-        })
-        .collect();
+    let layers = if matches!(
+        pipeline.assignment,
+        ChannelAssignment::LegacyCompatibility(_)
+    ) {
+        OutputChannelId::CMYK.to_vec()
+    } else {
+        pipeline.output_model.channels().to_vec()
+    }
+    .iter()
+    .copied()
+    .map(|channel_id| {
+        let ink = channel_id.to_legacy_ink();
+        let channel = settings.channels.get(ink);
+        let color = if matches!(
+            pipeline.assignment,
+            ChannelAssignment::LegacyCompatibility(_)
+        ) {
+            parse_hex_color(&settings.crosshatch_color).unwrap_or((17, 17, 17))
+        } else {
+            parse_hex_color(&channel.color).unwrap_or_else(|| Channel::from(ink).color())
+        };
+        InkLayer {
+            channel: ink.into(),
+            enabled: channel.enabled,
+            color,
+            opacity: channel.opacity as f32,
+        }
+    })
+    .collect();
 
     Ok(MarkSet {
         width: settings.output_width,
@@ -657,21 +677,133 @@ fn generate_web_shape_marks_for_output_mode(
     })
 }
 
-fn cached_web_samples<'a>(
-    cache: &'a mut HashMap<(u32, u32), Vec<[u8; 4]>>,
+pub(crate) fn legacy_pipeline_from_facade(
+    mode: ValueMode,
+    output_mode: OutputMode,
+    single_channel: Ink,
+) -> ArtworkPipelineSettings {
+    let output_model = OutputModel::from_legacy(output_mode);
+    match mode {
+        ValueMode::Cmyk => ArtworkPipelineSettings {
+            source: ArtworkSource::FullColor,
+            alpha_policy: SourceAlphaPolicy::LegacyCurrentV1,
+            output_model: OutputModel::CmykPrint,
+            assignment: ChannelAssignment::automatic(
+                AutomaticSeparationStrategy::CmykEncodedRgbMaxBlackV1,
+            ),
+            active_channel: Some(OutputChannelId::CmykCyan),
+        },
+        ValueMode::Rgb => ArtworkPipelineSettings {
+            source: ArtworkSource::FullColor,
+            alpha_policy: SourceAlphaPolicy::LegacyCurrentV1,
+            output_model: OutputModel::RgbScreen,
+            assignment: ChannelAssignment::automatic(
+                AutomaticSeparationStrategy::RgbDirectEncodedComponentsV1,
+            ),
+            active_channel: Some(OutputChannelId::RgbRed),
+        },
+        ValueMode::Luminance => ArtworkPipelineSettings {
+            source: ArtworkSource::LegacyBrightness(LegacyBrightnessKind::EncodedRec709InvertedV1),
+            alpha_policy: SourceAlphaPolicy::LegacyCurrentV1,
+            output_model,
+            assignment: ChannelAssignment::AllChannels,
+            active_channel: None,
+        },
+        ValueMode::SingleChannel => ArtworkPipelineSettings {
+            source: ArtworkSource::LegacyBrightness(LegacyBrightnessKind::EncodedRec709InvertedV1),
+            alpha_policy: SourceAlphaPolicy::LegacyCurrentV1,
+            output_model,
+            assignment: ChannelAssignment::ActiveChannel,
+            active_channel: Some(OutputChannelId::from_legacy_ink(single_channel)),
+        },
+        ValueMode::CrosshatchLuminance => ArtworkPipelineSettings {
+            source: ArtworkSource::LegacyBrightness(LegacyBrightnessKind::EncodedRec709InvertedV1),
+            alpha_policy: SourceAlphaPolicy::LegacyCurrentV1,
+            output_model,
+            assignment: ChannelAssignment::LegacyCompatibility(
+                LegacyCompatibilityAssignment::CrosshatchProgressiveKcmyV1,
+            ),
+            active_channel: None,
+        },
+    }
+}
+
+// Kept for internal compatibility tests and old renderer entrypoints. Document
+// rendering bypasses this façade and supplies its semantic pipeline directly.
+#[cfg(test)]
+fn generate_web_shape_marks_for_output_mode(
     source: &RgbaImage,
+    settings: &WebShapeSettings,
+    output_mode: OutputMode,
+    token: &CancellationToken,
+) -> Result<MarkSet> {
+    let prepared = PreparedSource::from_rgba_image(source, 0);
+    let pipeline =
+        legacy_pipeline_from_facade(settings.value_mode, output_mode, settings.single_channel);
+    generate_web_shape_marks_for_pipeline(&prepared, settings, &pipeline, token)
+}
+
+pub(crate) fn cached_resolved_fields<'a>(
+    cache: &'a mut HashMap<String, crate::artwork_pipeline::ResolvedChannelFields>,
+    prepared: &PreparedSource,
+    pipeline: &ArtworkPipelineSettings,
     cols: u32,
     rows: u32,
+    enabled: &[OutputChannelId],
     token: &CancellationToken,
-) -> Result<&'a [[u8; 4]]> {
+) -> Result<&'a crate::artwork_pipeline::ResolvedChannelFields> {
     token.checkpoint()?;
-    if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry((cols, rows)) {
-        entry.insert(sample_web_image_cancellable(source, cols, rows, token)?);
+    let key = resolved_field_cache_key(prepared, pipeline, cols, rows, enabled);
+    if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(key.clone()) {
+        entry.insert(resolve_channel_fields_cancellable(
+            prepared,
+            pipeline,
+            cols,
+            rows,
+            prepared.generation,
+            enabled,
+            token,
+        )?);
     }
     Ok(cache
-        .get(&(cols, rows))
-        .expect("sample cache entry was inserted")
-        .as_slice())
+        .get(&key)
+        .expect("resolved field cache entry was inserted"))
+}
+
+fn resolved_field_cache_key(
+    prepared: &PreparedSource,
+    pipeline: &ArtworkPipelineSettings,
+    cols: u32,
+    rows: u32,
+    enabled: &[OutputChannelId],
+) -> String {
+    let active = pipeline
+        .active_channel
+        .map(OutputChannelId::stable_id)
+        .unwrap_or("none");
+    let payload = pipeline.assignment.payload_id().unwrap_or("none");
+    let enabled = enabled
+        .iter()
+        .map(|channel| channel.stable_id())
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "generation={};bounds={}x{}@{},{};grid={}x{};source={};alpha={};output={};assignment={};payload={};active={};enabled={}",
+        prepared.generation,
+        prepared.bounds.width,
+        prepared.bounds.height,
+        prepared.bounds.x,
+        prepared.bounds.y,
+        cols,
+        rows,
+        pipeline.source.stable_id(),
+        pipeline.alpha_policy.stable_id(),
+        pipeline.output_model.stable_id(),
+        pipeline.assignment.stable_id(),
+        payload,
+        active,
+        enabled,
+    )
 }
 
 #[allow(dead_code)]
@@ -1031,7 +1163,7 @@ pub fn render_document_preview_cancellable(
     token: &CancellationToken,
 ) -> Result<RenderResult> {
     token.checkpoint()?;
-    let mut canonical = document.projected_for_render()?;
+    let mut canonical = document.clone();
     let dimensions = source_dimensions(&canonical.source)?;
     canonical.normalize_canvas_aspect(dimensions.0, dimensions.1);
     // The common white canvas path retains the long-established native
@@ -1049,11 +1181,12 @@ pub fn render_document_preview_cancellable(
     if let RenderVariant::WebCurveV1 { settings } = &canonical.render {
         canonical.validate()?;
         let source = decode_source(&canonical.source, 2400)?;
+        let prepared = PreparedSource::from_rgba_image(&source, generation);
         token.checkpoint()?;
-        let geometry = crate::curve_render::generate_curve_geometry_for_output_mode(
-            &source,
+        let geometry = crate::curve_render::generate_curve_geometry_for_pipeline(
+            &prepared,
             settings,
-            canonical.output_mode,
+            &canonical.artwork_pipeline,
             token,
         )?;
         token.checkpoint()?;
@@ -1155,7 +1288,7 @@ pub fn render_document_output_cancellable(
     token: &CancellationToken,
 ) -> Result<RgbaImage> {
     token.checkpoint()?;
-    let mut canonical = document.projected_for_render()?;
+    let mut canonical = document.clone();
     let dimensions = source_dimensions(&canonical.source)?;
     canonical.normalize_canvas_aspect(dimensions.0, dimensions.1);
     canonical.validate()?;
@@ -1170,11 +1303,12 @@ pub fn render_document_output_cancellable(
     );
     if let RenderVariant::WebCurveV1 { settings } = &canonical.render {
         let source = decode_source(&canonical.source, 2400)?;
+        let prepared = PreparedSource::from_rgba_image(&source, 0);
         token.checkpoint()?;
-        let geometry = crate::curve_render::generate_curve_geometry_for_output_mode(
-            &source,
+        let geometry = crate::curve_render::generate_curve_geometry_for_pipeline(
+            &prepared,
             settings,
-            canonical.output_mode,
+            &canonical.artwork_pipeline,
             token,
         )?;
         return crate::curve_render::render_curve_geometry_output_cancellable(
@@ -2009,26 +2143,162 @@ mod tests {
     }
 
     #[test]
-    fn rgb_shape_sampling_reuses_matching_grids_and_checks_cancellation_on_hits() {
+    fn resolved_channel_fields_reuse_matching_grids_and_check_cancellation_on_hits() {
         let source = RgbaImage::from_pixel(4, 4, Rgba([24, 96, 192, 255]));
+        let prepared = PreparedSource::from_rgba_image(&source, 44);
+        let pipeline = legacy_pipeline_from_facade(ValueMode::Rgb, OutputMode::RgbScreen, Ink::Red);
         let token = CancellationToken::new();
         let mut cache = HashMap::new();
 
-        let first = cached_web_samples(&mut cache, &source, 3, 2, &token).unwrap();
-        assert_eq!(first.len(), 6);
+        let first = cached_resolved_fields(
+            &mut cache,
+            &prepared,
+            &pipeline,
+            3,
+            2,
+            &OutputChannelId::RGB,
+            &token,
+        )
+        .unwrap();
+        assert_eq!(
+            first.field(OutputChannelId::RgbRed).unwrap().values().len(),
+            6
+        );
         assert_eq!(cache.len(), 1);
-        let second = cached_web_samples(&mut cache, &source, 3, 2, &token).unwrap();
-        assert_eq!(second.len(), 6);
-        assert_eq!(cache.len(), 1, "matching RGB channel grids share samples");
-        cached_web_samples(&mut cache, &source, 4, 2, &token).unwrap();
+        let second = cached_resolved_fields(
+            &mut cache,
+            &prepared,
+            &pipeline,
+            3,
+            2,
+            &OutputChannelId::RGB,
+            &token,
+        )
+        .unwrap();
+        assert_eq!(second.generation, 44);
+        assert_eq!(
+            cache.len(),
+            1,
+            "matching enabled channels share resolved fields"
+        );
+        cached_resolved_fields(
+            &mut cache,
+            &prepared,
+            &pipeline,
+            4,
+            2,
+            &OutputChannelId::RGB,
+            &token,
+        )
+        .unwrap();
         assert_eq!(
             cache.len(),
             2,
             "different resolution scales keep distinct grids"
         );
 
+        let mut changed_pipeline = pipeline.clone();
+        changed_pipeline.source = crate::artwork_pipeline::ArtworkSource::Red;
+        changed_pipeline.alpha_policy = crate::artwork_pipeline::SourceAlphaPolicy::Ignore;
+        changed_pipeline.output_model = crate::artwork_pipeline::OutputModel::CmykPrint;
+        changed_pipeline.assignment = crate::artwork_pipeline::ChannelAssignment::ActiveChannel;
+        changed_pipeline.active_channel = Some(OutputChannelId::CmykBlack);
+        let changed = cached_resolved_fields(
+            &mut cache,
+            &prepared,
+            &changed_pipeline,
+            3,
+            2,
+            &[OutputChannelId::CmykBlack],
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            changed
+                .field(OutputChannelId::CmykBlack)
+                .unwrap()
+                .values()
+                .len(),
+            6
+        );
+        assert_eq!(
+            cache.len(),
+            3,
+            "semantic pipeline changes cannot hit an old field cache"
+        );
+
         assert!(token.cancel());
-        assert!(cached_web_samples(&mut cache, &source, 3, 2, &token).is_err());
+        assert!(
+            cached_resolved_fields(
+                &mut cache,
+                &prepared,
+                &pipeline,
+                3,
+                2,
+                &OutputChannelId::RGB,
+                &token
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn shapes_and_curves_consume_the_document_resolved_pipeline_not_value_mode() {
+        let mut encoded = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(RgbaImage::from_pixel(2, 2, Rgba([255, 0, 0, 0])))
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        let mut document = Document::new(SourceArtwork {
+            name: "transparent-red.png".into(),
+            media_type: "image/png".into(),
+            bytes: Arc::from(encoded.into_inner()),
+        });
+        let settings = web_settings(); // Deliberately contradictory legacy CMYK facade.
+        document.render = RenderVariant::WebShapeV1 {
+            settings: Box::new(settings),
+        };
+        document.artwork_pipeline = ArtworkPipelineSettings {
+            source: ArtworkSource::Red,
+            alpha_policy: SourceAlphaPolicy::Ignore,
+            output_model: OutputModel::CmykPrint,
+            assignment: ChannelAssignment::ActiveChannel,
+            active_channel: Some(OutputChannelId::CmykBlack),
+        };
+        let shape_marks = generate_document_marks(&document).unwrap();
+        assert!(
+            shape_marks
+                .marks
+                .iter()
+                .any(|mark| mark.channel == Channel::Black)
+        );
+        assert!(
+            render_document_output(&document, 100, 100, false, None)
+                .unwrap()
+                .pixels()
+                .any(|pixel| pixel[3] > 0)
+        );
+
+        let mut curve = crate::model::WebCurveSettings {
+            output_width: 100,
+            output_height: 100,
+            long_edge_cells: 3.0,
+            min_mark: 100.0,
+            max_mark: 100.0,
+            value_mode: ValueMode::Cmyk,
+            ..Default::default()
+        };
+        for ink in Ink::ALL {
+            curve.channels.get_mut(ink).enabled = ink == Ink::Black;
+        }
+        document.render = RenderVariant::WebCurveV1 {
+            settings: Box::new(curve),
+        };
+        assert!(
+            render_document_output(&document, 100, 100, false, None)
+                .unwrap()
+                .pixels()
+                .any(|pixel| pixel[3] > 0)
+        );
     }
 
     #[test]

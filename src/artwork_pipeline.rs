@@ -4,11 +4,177 @@
 //! mapping control and existing renderers consume temporary projections until
 //! their later TON-012 stages replace those runtime adapters.
 
+use crate::CancellationToken;
 use crate::model::{Ink, OutputMode, ValueMode};
+use anyhow::{Context, Result};
+use image::{ImageBuffer, Rgba, Rgba32FImage, RgbaImage, imageops::FilterType};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::error::Error;
 use std::fmt;
 use std::str::FromStr;
+use std::sync::Arc;
+
+/// Values in resolved fields are finite, normalized values in `0.0..=1.0`.
+/// A small tolerance keeps resampling round-off from creating sub-pixel marks
+/// at either endpoint without changing intentional image detail.
+pub const FIELD_ENDPOINT_EPSILON: f32 = 1.0e-6;
+
+fn normalized(value: f32) -> f32 {
+    let value = value.clamp(0.0, 1.0);
+    if value <= FIELD_ENDPOINT_EPSILON {
+        0.0
+    } else if value >= 1.0 - FIELD_ENDPOINT_EPSILON {
+        1.0
+    } else {
+        value
+    }
+}
+
+/// Pixel-space bounds for an immutable prepared source or resolved field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FieldBounds {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Decoded source data that can safely cross worker boundaries. Source decode,
+/// SVG rasterization, and long-edge capping remain owned by `render`; this
+/// type deliberately owns only normalized, straight encoded-sRGB samples.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreparedSource {
+    pub bounds: FieldBounds,
+    pub generation: u64,
+    pixels: Arc<[[f32; 4]]>,
+}
+
+impl PreparedSource {
+    pub fn from_rgba_image(image: &RgbaImage, generation: u64) -> Self {
+        let pixels = image
+            .pixels()
+            .map(|pixel| pixel.0.map(|component| component as f32 / 255.0))
+            .collect::<Vec<_>>();
+        Self {
+            bounds: FieldBounds {
+                x: 0,
+                y: 0,
+                width: image.width(),
+                height: image.height(),
+            },
+            generation,
+            pixels: Arc::from(pixels),
+        }
+    }
+
+    pub fn pixel_count(&self) -> usize {
+        self.pixels.len()
+    }
+
+    fn samples(
+        &self,
+        cols: u32,
+        rows: u32,
+        policy: SourceAlphaPolicy,
+        token: &CancellationToken,
+    ) -> Result<Vec<[f32; 4]>> {
+        anyhow::ensure!(
+            cols > 0 && rows > 0,
+            "resolved field dimensions must be positive"
+        );
+        anyhow::ensure!(
+            self.pixel_count()
+                == (self.bounds.width as usize).saturating_mul(self.bounds.height as usize),
+            "prepared source pixels do not match its bounds"
+        );
+        let premultiplied = policy != SourceAlphaPolicy::Ignore;
+        let input: Rgba32FImage =
+            ImageBuffer::from_fn(self.bounds.width, self.bounds.height, |x, y| {
+                let pixel = self.pixels[(y * self.bounds.width + x) as usize];
+                if premultiplied {
+                    Rgba([
+                        pixel[0] * pixel[3],
+                        pixel[1] * pixel[3],
+                        pixel[2] * pixel[3],
+                        pixel[3],
+                    ])
+                } else {
+                    Rgba(pixel)
+                }
+            });
+        token.checkpoint()?;
+        let resized = image::imageops::resize(&input, cols, rows, FilterType::Triangle);
+        let mut samples = Vec::with_capacity((cols * rows) as usize);
+        for (index, pixel) in resized.pixels().enumerate() {
+            if index % 1024 == 0 {
+                token.checkpoint()?;
+            }
+            let alpha = normalized(pixel[3]);
+            let (red, green, blue) = if premultiplied {
+                if alpha <= FIELD_ENDPOINT_EPSILON {
+                    (0.0, 0.0, 0.0)
+                } else {
+                    (
+                        normalized(pixel[0] / alpha),
+                        normalized(pixel[1] / alpha),
+                        normalized(pixel[2] / alpha),
+                    )
+                }
+            } else {
+                (
+                    normalized(pixel[0]),
+                    normalized(pixel[1]),
+                    normalized(pixel[2]),
+                )
+            };
+            samples.push([red, green, blue, alpha]);
+        }
+        Ok(samples)
+    }
+}
+
+/// One semantic output channel at one resolved sampling resolution. `values`
+/// are content and `coverage` is intentionally separate so alpha is applied at
+/// most once by consumers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedChannelField {
+    pub channel: OutputChannelId,
+    pub bounds: FieldBounds,
+    pub generation: u64,
+    values: Arc<[f32]>,
+    coverage: Arc<[f32]>,
+}
+
+impl ResolvedChannelField {
+    pub fn values(&self) -> &[f32] {
+        &self.values
+    }
+    pub fn coverage(&self) -> &[f32] {
+        &self.coverage
+    }
+    pub fn value_at(&self, index: usize) -> f64 {
+        f64::from(self.values[index] * self.coverage[index])
+    }
+}
+
+/// A complete, immutable assignment of sampled source content to semantic
+/// output channels. This is the Stage 2 authority used by Shapes and Curves.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedChannelFields {
+    pub output_model: OutputModel,
+    pub bounds: FieldBounds,
+    pub generation: u64,
+    fields: Arc<[ResolvedChannelField]>,
+}
+
+impl ResolvedChannelFields {
+    pub fn fields(&self) -> &[ResolvedChannelField] {
+        &self.fields
+    }
+    pub fn field(&self, channel: OutputChannelId) -> Option<&ResolvedChannelField> {
+        self.fields.iter().find(|field| field.channel == channel)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnknownStableIdError {
@@ -526,6 +692,234 @@ impl ArtworkPipelineSettings {
     }
 }
 
+/// Resolve one sampled source grid into semantic output fields.
+///
+/// `Preserve` separates encoded stored RGB and applies source alpha once as
+/// coverage. `Ignore` samples stored RGB without premultiplication and uses
+/// full coverage, including transparent pixels. `Alpha` is content, so it
+/// always carries full coverage and is never multiplied by alpha again.
+/// `LegacyCurrentV1` intentionally mirrors the established renderer: fully
+/// transparent samples are empty, CMYK/scalar ink is otherwise opaque, while
+/// RGB and scalar RGB retain source alpha as coverage.
+pub fn resolve_channel_fields_cancellable(
+    prepared: &PreparedSource,
+    settings: &ArtworkPipelineSettings,
+    cols: u32,
+    rows: u32,
+    generation: u64,
+    enabled_channels: &[OutputChannelId],
+    token: &CancellationToken,
+) -> Result<ResolvedChannelFields> {
+    settings
+        .validate()
+        .context("invalid artwork pipeline for field resolution")?;
+    token.checkpoint()?;
+    let samples = prepared.samples(cols, rows, settings.alpha_policy, token)?;
+    let channels: Vec<OutputChannelId> = match settings.assignment {
+        ChannelAssignment::Automatic { strategy } => strategy.output_model().channels().to_vec(),
+        ChannelAssignment::ActiveChannel => {
+            vec![settings.active_channel.expect("validated active channel")]
+        }
+        ChannelAssignment::AllChannels => settings.output_model.channels().to_vec(),
+        ChannelAssignment::LegacyCompatibility(_) => OutputChannelId::CMYK.to_vec(),
+    };
+    let mut values: Vec<Vec<f32>> = (0..channels.len())
+        .map(|_| Vec::with_capacity(samples.len()))
+        .collect();
+    let mut coverage: Vec<Vec<f32>> = (0..channels.len())
+        .map(|_| Vec::with_capacity(samples.len()))
+        .collect();
+
+    for (index, sample) in samples.into_iter().enumerate() {
+        if index % 1024 == 0 {
+            token.checkpoint()?;
+        }
+        let scalar = source_scalar(sample, settings.source);
+        let source_alpha = sample[3];
+        let coverage_value = resolved_coverage(settings, source_alpha);
+        match settings.assignment {
+            ChannelAssignment::Automatic { strategy } => {
+                let separated = match strategy {
+                    AutomaticSeparationStrategy::CmykEncodedRgbMaxBlackV1 => {
+                        cmyk_components(sample)
+                    }
+                    AutomaticSeparationStrategy::RgbDirectEncodedComponentsV1 => {
+                        [sample[0], sample[1], sample[2], 0.0]
+                    }
+                };
+                for (field_index, channel) in channels.iter().enumerate() {
+                    values[field_index]
+                        .push(normalized(separated[channel_component_index(*channel)]));
+                    coverage[field_index].push(coverage_value);
+                }
+            }
+            ChannelAssignment::ActiveChannel | ChannelAssignment::AllChannels => {
+                for field_index in 0..channels.len() {
+                    values[field_index].push(scalar);
+                    coverage[field_index].push(coverage_value);
+                }
+            }
+            ChannelAssignment::LegacyCompatibility(
+                LegacyCompatibilityAssignment::CrosshatchProgressiveKcmyV1,
+            ) => {
+                let active: Vec<OutputChannelId> = OutputChannelId::CMYK
+                    .into_iter()
+                    .filter(|channel| enabled_channels.contains(channel))
+                    .collect();
+                let span = (!active.is_empty()).then(|| 1.0 / active.len() as f32);
+                for (field_index, channel) in channels.iter().enumerate() {
+                    let value = match (
+                        span,
+                        active
+                            .iter()
+                            .position(|active_channel| active_channel == channel),
+                    ) {
+                        (Some(span), Some(order)) => {
+                            normalized((scalar - order as f32 * span).clamp(0.0, span))
+                        }
+                        _ => 0.0,
+                    };
+                    values[field_index].push(value);
+                    coverage[field_index].push(coverage_value);
+                }
+            }
+        }
+    }
+
+    let bounds = FieldBounds {
+        x: 0,
+        y: 0,
+        width: cols,
+        height: rows,
+    };
+    let fields: Vec<ResolvedChannelField> = channels
+        .into_iter()
+        .zip(values)
+        .zip(coverage)
+        .map(|((channel, values), coverage)| ResolvedChannelField {
+            channel,
+            bounds,
+            generation,
+            values: Arc::from(values),
+            coverage: Arc::from(coverage),
+        })
+        .collect();
+    Ok(ResolvedChannelFields {
+        output_model: settings.output_model,
+        bounds,
+        generation,
+        fields: Arc::from(fields),
+    })
+}
+
+pub fn resolve_channel_fields(
+    prepared: &PreparedSource,
+    settings: &ArtworkPipelineSettings,
+    cols: u32,
+    rows: u32,
+    generation: u64,
+    enabled_channels: &[OutputChannelId],
+) -> Result<ResolvedChannelFields> {
+    resolve_channel_fields_cancellable(
+        prepared,
+        settings,
+        cols,
+        rows,
+        generation,
+        enabled_channels,
+        &CancellationToken::new(),
+    )
+}
+
+fn channel_component_index(channel: OutputChannelId) -> usize {
+    match channel {
+        OutputChannelId::CmykCyan | OutputChannelId::RgbRed => 0,
+        OutputChannelId::CmykMagenta | OutputChannelId::RgbGreen => 1,
+        OutputChannelId::CmykYellow | OutputChannelId::RgbBlue => 2,
+        OutputChannelId::CmykBlack => 3,
+    }
+}
+
+fn cmyk_components(sample: [f32; 4]) -> [f32; 4] {
+    let black = 1.0 - sample[0].max(sample[1]).max(sample[2]);
+    if black >= 0.999 {
+        return [0.0, 0.0, 0.0, 1.0];
+    }
+    let denominator = 1.0 - black;
+    [
+        normalized((1.0 - sample[0] - black) / denominator),
+        normalized((1.0 - sample[1] - black) / denominator),
+        normalized((1.0 - sample[2] - black) / denominator),
+        normalized(black),
+    ]
+}
+
+fn source_scalar(sample: [f32; 4], source: ArtworkSource) -> f32 {
+    match source {
+        ArtworkSource::FullColor => 0.0,
+        ArtworkSource::Red => sample[0],
+        ArtworkSource::Green => sample[1],
+        ArtworkSource::Blue => sample[2],
+        ArtworkSource::Value => sample[0].max(sample[1]).max(sample[2]),
+        ArtworkSource::PerceptualLightness => {
+            encoded_srgb_to_oklab_lightness(sample[0], sample[1], sample[2])
+        }
+        ArtworkSource::Alpha => sample[3],
+        ArtworkSource::LegacyBrightness(LegacyBrightnessKind::EncodedRec709InvertedV1) => {
+            normalized(1.0 - (0.2126 * sample[0] + 0.7152 * sample[1] + 0.0722 * sample[2]))
+        }
+    }
+}
+
+/// Encoded sRGB to linear sRGB, then the OKLab L component. Inputs and output
+/// are normalized and clamped to `0.0..=1.0`.
+pub fn encoded_srgb_to_oklab_lightness(red: f32, green: f32, blue: f32) -> f32 {
+    let linear = |component: f32| {
+        let component = component.clamp(0.0, 1.0);
+        if component <= 0.04045 {
+            component / 12.92
+        } else {
+            ((component + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let red = linear(red);
+    let green = linear(green);
+    let blue = linear(blue);
+    let l = 0.412_221_46 * red + 0.536_332_55 * green + 0.051_445_995 * blue;
+    let m = 0.211_903_5 * red + 0.680_699_5 * green + 0.107_396_96 * blue;
+    let s = 0.088_302_46 * red + 0.281_718_85 * green + 0.629_978_7 * blue;
+    let l = l.cbrt();
+    let m = m.cbrt();
+    let s = s.cbrt();
+    normalized(0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s)
+}
+
+fn resolved_coverage(settings: &ArtworkPipelineSettings, source_alpha: f32) -> f32 {
+    if settings.source == ArtworkSource::Alpha {
+        return 1.0;
+    }
+    match settings.alpha_policy {
+        SourceAlphaPolicy::Preserve => source_alpha,
+        SourceAlphaPolicy::Ignore => 1.0,
+        SourceAlphaPolicy::LegacyCurrentV1 => {
+            if source_alpha <= FIELD_ENDPOINT_EPSILON {
+                return 0.0;
+            }
+            match settings.assignment {
+                ChannelAssignment::Automatic {
+                    strategy: AutomaticSeparationStrategy::RgbDirectEncodedComponentsV1,
+                } => source_alpha,
+                ChannelAssignment::ActiveChannel | ChannelAssignment::AllChannels
+                    if settings.output_model == OutputModel::RgbScreen =>
+                {
+                    source_alpha
+                }
+                _ => 1.0,
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LegacySlotError {
     pub slot: u32,
@@ -663,6 +1057,28 @@ pub fn project_legacy_value_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::{Rgba, RgbaImage};
+
+    fn prepared(pixels: &[[u8; 4]]) -> PreparedSource {
+        let mut image = RgbaImage::new(pixels.len() as u32, 1);
+        for (x, pixel) in pixels.iter().enumerate() {
+            image.put_pixel(x as u32, 0, Rgba(*pixel));
+        }
+        PreparedSource::from_rgba_image(&image, 17)
+    }
+
+    fn scalar_pipeline(
+        source: ArtworkSource,
+        alpha_policy: SourceAlphaPolicy,
+    ) -> ArtworkPipelineSettings {
+        ArtworkPipelineSettings {
+            source,
+            alpha_policy,
+            output_model: OutputModel::CmykPrint,
+            assignment: ChannelAssignment::ActiveChannel,
+            active_channel: Some(OutputChannelId::CmykBlack),
+        }
+    }
 
     #[test]
     fn every_stable_id_is_explicit_and_round_trips() {
@@ -1004,6 +1420,197 @@ mod tests {
         assert_eq!(
             project_legacy_value_mode(&unsupported),
             Err(LegacyProjectionError::UnsupportedReverseProjection)
+        );
+    }
+
+    #[test]
+    fn scalar_samplers_and_oklab_lightness_are_normalized() {
+        let source = prepared(&[[255, 128, 0, 64]]);
+        let expected = [
+            (ArtworkSource::Red, 1.0),
+            (ArtworkSource::Green, 128.0 / 255.0),
+            (ArtworkSource::Blue, 0.0),
+            (ArtworkSource::Value, 1.0),
+            (ArtworkSource::Alpha, 64.0 / 255.0),
+            (
+                ArtworkSource::LegacyBrightness(LegacyBrightnessKind::EncodedRec709InvertedV1),
+                1.0 - (0.2126 + 0.7152 * 128.0 / 255.0),
+            ),
+        ];
+        for (source_kind, expected_value) in expected {
+            let fields = resolve_channel_fields(
+                &source,
+                &scalar_pipeline(source_kind, SourceAlphaPolicy::Ignore),
+                1,
+                1,
+                19,
+                &[],
+            )
+            .unwrap();
+            assert!(
+                (fields.field(OutputChannelId::CmykBlack).unwrap().values()[0] - expected_value)
+                    .abs()
+                    < 1e-5
+            );
+        }
+        assert_eq!(encoded_srgb_to_oklab_lightness(0.0, 0.0, 0.0), 0.0);
+        assert!((encoded_srgb_to_oklab_lightness(1.0, 1.0, 1.0) - 1.0).abs() < 2e-5);
+        assert!((encoded_srgb_to_oklab_lightness(1.0, 0.0, 0.0) - 0.627_955).abs() < 2e-4);
+    }
+
+    #[test]
+    fn alpha_policies_keep_content_and_coverage_separate_without_double_application() {
+        let source = prepared(&[[255, 0, 0, 0], [0, 0, 255, 128]]);
+        let preserve = resolve_channel_fields(
+            &source,
+            &scalar_pipeline(ArtworkSource::Blue, SourceAlphaPolicy::Preserve),
+            2,
+            1,
+            20,
+            &[],
+        )
+        .unwrap();
+        let field = preserve.field(OutputChannelId::CmykBlack).unwrap();
+        assert_eq!(field.values(), &[0.0, 1.0]);
+        assert_eq!(field.coverage()[0], 0.0);
+        assert!((field.coverage()[1] - 128.0 / 255.0).abs() < 1e-5);
+        assert!((field.value_at(1) - 128.0 / 255.0).abs() < 1e-5);
+
+        let ignore = resolve_channel_fields(
+            &source,
+            &scalar_pipeline(ArtworkSource::Red, SourceAlphaPolicy::Ignore),
+            2,
+            1,
+            21,
+            &[],
+        )
+        .unwrap();
+        let field = ignore.field(OutputChannelId::CmykBlack).unwrap();
+        assert_eq!(field.values(), &[1.0, 0.0]);
+        assert_eq!(field.coverage(), &[1.0, 1.0]);
+
+        let alpha = resolve_channel_fields(
+            &source,
+            &scalar_pipeline(ArtworkSource::Alpha, SourceAlphaPolicy::Preserve),
+            2,
+            1,
+            22,
+            &[],
+        )
+        .unwrap();
+        let field = alpha.field(OutputChannelId::CmykBlack).unwrap();
+        assert_eq!(field.values(), &[0.0, 128.0 / 255.0]);
+        assert_eq!(field.coverage(), &[1.0, 1.0]);
+        assert!((field.value_at(1) - 128.0 / 255.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn automatic_scalar_and_crosshatch_assignments_have_canonical_order() {
+        let source = prepared(&[[255, 0, 0, 255]]);
+        let cmyk =
+            resolve_channel_fields(&source, &ArtworkPipelineSettings::default(), 1, 1, 23, &[])
+                .unwrap();
+        assert_eq!(
+            cmyk.fields()
+                .iter()
+                .map(|field| field.channel)
+                .collect::<Vec<_>>(),
+            OutputChannelId::CMYK
+        );
+        assert_eq!(
+            cmyk.field(OutputChannelId::CmykCyan).unwrap().values(),
+            &[0.0]
+        );
+        assert_eq!(
+            cmyk.field(OutputChannelId::CmykMagenta).unwrap().values(),
+            &[1.0]
+        );
+        let rgb = ArtworkPipelineSettings {
+            source: ArtworkSource::FullColor,
+            alpha_policy: SourceAlphaPolicy::Preserve,
+            output_model: OutputModel::RgbScreen,
+            assignment: ChannelAssignment::automatic(
+                AutomaticSeparationStrategy::RgbDirectEncodedComponentsV1,
+            ),
+            active_channel: None,
+        };
+        let rgb = resolve_channel_fields(&source, &rgb, 1, 1, 24, &[]).unwrap();
+        assert_eq!(
+            rgb.fields()
+                .iter()
+                .map(|field| field.channel)
+                .collect::<Vec<_>>(),
+            OutputChannelId::RGB
+        );
+        assert!(rgb.field(OutputChannelId::CmykBlack).is_none());
+
+        let hatch = ArtworkPipelineSettings {
+            source: ArtworkSource::LegacyBrightness(LegacyBrightnessKind::EncodedRec709InvertedV1),
+            alpha_policy: SourceAlphaPolicy::LegacyCurrentV1,
+            output_model: OutputModel::CmykPrint,
+            assignment: ChannelAssignment::LegacyCompatibility(
+                LegacyCompatibilityAssignment::CrosshatchProgressiveKcmyV1,
+            ),
+            active_channel: None,
+        };
+        let hatch = resolve_channel_fields(
+            &prepared(&[[0, 0, 0, 255]]),
+            &hatch,
+            1,
+            1,
+            25,
+            &[OutputChannelId::CmykBlack, OutputChannelId::CmykCyan],
+        )
+        .unwrap();
+        assert_eq!(
+            hatch.field(OutputChannelId::CmykBlack).unwrap().values(),
+            &[0.5]
+        );
+        assert_eq!(
+            hatch.field(OutputChannelId::CmykCyan).unwrap().values(),
+            &[0.5]
+        );
+        assert_eq!(
+            hatch.field(OutputChannelId::CmykMagenta).unwrap().values(),
+            &[0.0]
+        );
+    }
+
+    #[test]
+    fn resolved_fields_preserve_generation_bounds_and_cancellation() {
+        let source = prepared(&[[32, 64, 96, 255]]);
+        let fields =
+            resolve_channel_fields(&source, &ArtworkPipelineSettings::default(), 3, 2, 91, &[])
+                .unwrap();
+        assert_eq!(fields.generation, 91);
+        assert_eq!(
+            fields.bounds,
+            FieldBounds {
+                x: 0,
+                y: 0,
+                width: 3,
+                height: 2
+            }
+        );
+        assert!(
+            fields
+                .fields()
+                .iter()
+                .all(|field| field.generation == 91 && field.values().len() == 6)
+        );
+        let token = CancellationToken::new();
+        token.cancel();
+        assert!(
+            resolve_channel_fields_cancellable(
+                &source,
+                &ArtworkPipelineSettings::default(),
+                1,
+                1,
+                92,
+                &[],
+                &token
+            )
+            .is_err()
         );
     }
 }

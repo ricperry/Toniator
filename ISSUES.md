@@ -3157,7 +3157,7 @@ The smallest stable first architecture is **one TON-010 pattern instance per pri
 
 # TON-012 — Separate artwork source sampling, output model, and channel assignment
 
-* **Status:** Open
+* **Status:** In progress — Stage 2 complete
 * **Priority:** P1
 * **Area:** Artwork mapping / source sampling / color models
 * **Type:** Model and workflow refactor
@@ -3165,6 +3165,37 @@ The smallest stable first architecture is **one TON-010 pattern instance per pri
 * **Blocks:** Remaining TON-008 RGB Curves work, TON-010, and TON-011
 * **Related:** TON-009
 * **Implementation order:** Complete after TON-008 and before TON-010
+
+### Stage 1B completion record — 2026-07-25
+
+Stage 1B is complete at commit `32022df` (`TON-012: complete Stage 1 artwork
+pipeline`). The authoritative artwork-pipeline state now lives on `Document`,
+project schema v6 and treatment-preset schema v3 persist validated stable IDs,
+and active, saved, and inactive CMYK/RGB treatment containers retain paired
+pipeline snapshots. Legacy renderer and GTK fields remain projections rather
+than competing semantic state.
+
+Verification at the current checkout: `cargo fmt --check` and
+`cargo test --locked` passed with 93 library tests and 44 binary tests. TON-012
+remains in progress: Stage 2's resolved-field implementation is complete in
+the checkpoint below; Stage 3 UI, Stage 4 preset cleanup, and final
+preview/export parity remain later-stage work.
+
+### Stage 2 completion record — 2026-07-26
+
+The Stage 2 implementation adds immutable prepared-source
+snapshots and canonical resolved channel fields. It supports the documented
+Full Color, RGB component, Value, OKLab Lightness, Alpha, and Legacy Brightness
+samplers; Preserve, Ignore, Alpha-source, and LegacyCurrentV1 alpha semantics;
+versioned CMYK/RGB separation; semantic Active/All routing; and the retained
+progressive Crosshatch compatibility assignment. Shapes, Curves, preview, PNG,
+and SVG consume the resolved pipeline. SVG output metadata/blending follows the
+authoritative output model even if the legacy facade is stale.
+
+Verification: 99 library tests, 44 binary tests, strict Clippy, release build,
+desktop-file validation, AppStream validation, formatting, and diff checks pass.
+No new Toniator core dumps were found. The user accepted Stage 2 as complete;
+TON-012 stays In progress for later Stage 3–5 work.
 
 ## Problem
 
@@ -3953,7 +3984,19 @@ Implement:
 
 Do not broadly redesign the interface yet.
 
+## Stage 1B — Authoritative state and persistence
+
+**Status:** Complete at `32022df`.
+
+Make the independent pipeline authoritative across the active document, saved
+Shapes/Curves treatments, inactive output caches, serialization, validation,
+migration, undo/redo, and the renderer/GTK compatibility projection. Preserve
+legacy formulas and output behavior while ensuring save/reopen cannot rebuild
+semantic state from the combined legacy mapping.
+
 ## Stage 2 — Rendering and migration
+
+**Status:** Complete in the 2026-07-26 Stage 2 checkpoint.
 
 Implement:
 

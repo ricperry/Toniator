@@ -46,6 +46,17 @@ No application code or behavior changed during this audit.
 > formulas and known RGB Crosshatch PNG Multiply/SVG Screen mismatch remain
 > intentionally unchanged.
 
+> **Stage 2 follow-up (2026-07-26):** The runtime resolver now centralizes
+> prepared source snapshots, Triangle grid sampling, source formulas, alpha
+> coverage, automatic separation, scalar assignment, and Crosshatch partitioning
+> in `src/artwork_pipeline.rs`. Shapes and Curves consume semantic resolved
+> fields through request-local, generation-aware caches. SVG metadata and blend
+> mode derive from `Document.artwork_pipeline.output_model`; the legacy
+> `Document.output_mode`/`ValueMode` fields remain compatibility projections only.
+> Preserve, Ignore, Alpha, and LegacyCurrentV1 semantics are covered at the
+> resolver boundary. Stage 3 UI exposure, Stage 4 preset cleanup, and broader
+> translucent-SVG end-to-end fixture coverage remains a later hardening task.
+
 ## 2. Confirmed current pipeline
 
 ```text
@@ -54,16 +65,21 @@ GTK controls
         |
         v
 DocumentEditor
-  Document.output_mode
+  Document.artwork_pipeline (semantic authority)
+  Document.output_mode / ValueMode (compatibility projection)
   Document.render = Shapes settings OR Curves settings
   saved Shapes/Curves + inactive CMYK/RGB treatment caches
         |
-        +---------------------------+
+        |
+        v
+PreparedSource
+        |
+        v
+ResolvedChannelFields (shared per request/grid)
         |                           |
         v                           v
 Shapes generator                 Curves generator
-sample_web_image                sample_web_image (once per enabled layer)
-map_web_pixel                   map_web_pixel + cubic interpolation
+existing placement               existing path/width geometry
 MarkSet                         CurveGeometry
         |                           |
         +-------------+-------------+
@@ -82,9 +98,9 @@ shown in preview
 ```
 
 `ArtworkSource`, `SourceAlphaPolicy`, `ChannelAssignment`, stable output and
-channel IDs, and `Document.artwork_pipeline` now exist. `ResolvedChannelField`
-and semantic pattern IDs remain later-stage work. The table below is historical
-Stage 0 evidence; the Stage 1B contract supersedes its authority statements.
+channel IDs, `Document.artwork_pipeline`, and `ResolvedChannelField` now exist.
+The table below is historical Stage 0 evidence; the Stage 1B/Stage 2 contract
+supersedes its authority statements.
 
 ## 3. Model and state inventory
 
@@ -951,7 +967,10 @@ instead of inventing legacy renderer semantics. Related structured errors are
 `UnknownStableIdError`, `PipelineStateError`, `LegacySlotError`,
 `LegacyPipelineConversionError`, and `LegacyProjectionError`.
 
-Stage 1B is still deferred: it will make the domain state authoritative and
-migrate active, saved, and inactive containers. No live application behavior
-changed in Stage 1A, including the known RGB Crosshatch raster/PNG versus SVG
-blend mismatch.
+Stage 1B completed at commit `32022df` on 2026-07-25. The domain state is now
+authoritative and active, saved, and inactive containers carry validated
+pipeline snapshots through schema v6/v3 persistence, migration, save/reopen,
+undo/redo, and compatibility projection. No renderer formula or known RGB
+Crosshatch raster/PNG versus SVG blend behavior was changed. Resolved
+channel-field rendering and later parity work remain deferred to subsequent
+stages.
