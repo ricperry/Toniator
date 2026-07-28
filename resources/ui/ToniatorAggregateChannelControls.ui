@@ -1,0 +1,35 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!-- Created with Cambalache 1.0.3 -->
+<!-- Separate aggregate scope. It is intentionally not a channel template instance. -->
+<interface>
+  <!-- interface-name ToniatorAggregateChannelControls.ui -->
+  <requires lib="gtk" version="4.0"/>
+  <object class="GtkBox" id="aggregate_channel_controls">
+    <property name="orientation">vertical</property>
+    <property name="spacing">6</property>
+    <child>
+      <object class="GtkLabel" id="aggregate_heading">
+        <property name="xalign">0</property>
+        <style>
+          <class name="heading"/>
+        </style>
+      </object>
+    </child>
+    <child>
+      <object class="GtkLabel" id="aggregate_mixed_message">
+        <property name="wrap">True</property>
+        <property name="xalign">0</property>
+        <style>
+          <class name="dim-label"/>
+          <class name="caption"/>
+        </style>
+      </object>
+    </child>
+    <child>
+      <object class="GtkBox" id="aggregate_content_host">
+        <property name="orientation">vertical</property>
+        <property name="spacing">4</property>
+      </object>
+    </child>
+  </object>
+</interface>

@@ -1,0 +1,81 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!-- Created with Cambalache 1.0.3 -->
+<!--
+  TON-013 stage 1: the static application shell. Keep dynamic pages and their
+  models in Rust; see docs/UI_ARCHITECTURE.md before editing this file.
+-->
+<interface>
+  <!-- interface-name Toniator.ui -->
+  <requires lib="gtk" version="4.0"/>
+  <requires lib="libadwaita" version="1.4"/>
+  <object class="AdwApplicationWindow" id="main_window">
+    <property name="title">Toniator</property>
+    <child>
+      <object class="AdwToolbarView" id="main_toolbar_view">
+        <child type="top">
+          <object class="AdwHeaderBar" id="main_header_bar">
+            <child type="title">
+              <object class="AdwWindowTitle" id="window_title">
+                <property name="subtitle">Start a project</property>
+                <property name="title">Toniator</property>
+              </object>
+            </child>
+            <child type="start">
+              <object class="GtkButton" id="new_project_button">
+                <property name="label">New</property>
+                <property name="tooltip-text">Start a new project</property>
+              </object>
+            </child>
+            <child type="start">
+              <object class="GtkButton" id="open_button">
+                <property name="label">Open</property>
+                <property name="tooltip-text">Open artwork or document</property>
+              </object>
+            </child>
+            <child type="start">
+              <object class="GtkButton" id="save_button">
+                <property name="label">Save</property>
+                <property name="tooltip-text">Save Toniator document</property>
+              </object>
+            </child>
+            <child type="start">
+              <object class="GtkButton" id="undo_button">
+                <property name="icon-name">edit-undo-symbolic</property>
+                <property name="tooltip-text">Undo</property>
+              </object>
+            </child>
+            <child type="start">
+              <object class="GtkButton" id="redo_button">
+                <property name="icon-name">edit-redo-symbolic</property>
+                <property name="tooltip-text">Redo</property>
+              </object>
+            </child>
+            <child type="start">
+              <object class="GtkToggleButton" id="controls_toggle">
+                <property name="active">True</property>
+                <property name="label">Controls</property>
+                <property name="tooltip-text">Hide Controls</property>
+              </object>
+            </child>
+            <child type="end">
+              <object class="GtkButton" id="export_button">
+                <property name="label">Export…</property>
+                <property name="tooltip-text">Export editable SVG or PNG image</property>
+              </object>
+            </child>
+          </object>
+        </child>
+        <child>
+          <object class="AdwToastOverlay" id="toast_overlay">
+            <child>
+              <object class="GtkStack" id="main_stack">
+                <property name="transition-duration">180</property>
+                <property name="transition-type">crossfade</property>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+    </child>
+  </object>
+</interface>

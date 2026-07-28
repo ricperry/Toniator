@@ -4233,7 +4233,7 @@ The main correction is:
 
 # TON-013 — Move Toniator's GTK/libadwaita UI to GtkBuilder and Cambalache
 
-* **Status:** Planned
+* **Status:** In Progress
 * **Priority:** P1
 * **Requires:** Completed TON-012 Stage 3 UI checkpoint
 * **Blocks:** Future substantial GTK layout work and UI-heavy portions of
@@ -4246,10 +4246,111 @@ Move Toniator's static GTK/libadwaita widget hierarchy from programmatic Rust
 construction into GtkBuilder `.ui` resources that can be opened and edited in
 Cambalache.
 
-The runtime UI source of truth should become one or more `.ui` files, including
-a main Toniator UI resource and reusable component templates. Rust continues to
-own application state, semantic callbacks, dynamic models, rendering,
-validation, undo, synchronization, and custom runtime behavior.
+## Progress — Stage 1
+
+The application shell is now loaded from `resources/ui/Toniator.ui` through
+`gtk::Builder`, with stable IDs for the window, header actions, toast overlay,
+and stack. Rust still inserts the dynamic `start` and `editor` pages and owns
+callbacks, models, drawing, dialogs, and synchronization. The editor hierarchy,
+selector-driven controls, and reusable channel composite remain In Progress for
+later TON-013 stages; this issue stays In Progress until those boundaries are
+implemented and verified.
+
+Stage 1 verification passed at this checkpoint: the XML parse, focused
+shell-builder contract and realized GTK/libadwaita builder checks, `cargo fmt
+--check`, strict Clippy, `cargo test --locked`, the release build, and
+`git diff --check`. A real GTK demo launch also produced and passed inspection
+of `test-artifacts/ton-013/shell.png` at 900x680. The host
+`gtk4-builder-tool validate` rejects `AdwApplicationWindow`, so it is not
+treated as acceptance evidence; Cambalache was not launched, so no round-trip
+claim is made.
+
+## Progress — Stage 2
+
+The actual top inspector order is `Source` -> `Output` -> `Channel Settings`
+through the Builder-owned expanders in `resources/ui/ToniatorInspector.ui`.
+Source and Output begin expanded; Channel Settings, `Appearance / Canvas &
+Export`, and Treatment Settings begin collapsed for progressive disclosure.
+Artifact expansion opens Source, Output, and Channel Settings. Source contains
+Artwork Source, Source Alpha, source guidance, and status. Output contains
+Output Model, Channel Assignment, Active Channel, and the explicit Legacy
+Crosshatch compatibility control.
+
+`resources/ui/ToniatorChannelControls.ui` is a reusable real-channel
+status/context composite for one semantic `OutputChannelId`; Rust caches one
+instance for each of the seven semantic CMYK C/M/Y/K and RGB R/G/B channels and
+selects them by stable semantic ID.
+`resources/ui/ToniatorAggregateChannelControls.ui` is a separate All
+Inks/All Channels scope-context/status composite with explicit mixed-value and
+apply-to-all messaging; it is not a fake channel. Crosshatch uses the aggregate
+composite with explicit All Layers terminology. The editable Cambalache project at
+`resources/ui/Toniator.cmb` records hashes for the main resource and all Stage
+2 auxiliary resources.
+
+The Output `Channel Assignment` and conditional `Active Channel` controls
+remain pipeline-authoritative and are the sole scalar-routing controls. The
+Stage 2 correction names the top selector `Treatment Editing Scope`: it is the
+sole visible treatment-recipient selector for both Shapes and Curves, including
+Full Color treatment editing, and it synchronizes the existing target models
+without mutating `ChannelAssignment` or `active_channel`. The duplicate visible
+`Adjust Ink` / `Adjust Channel` rows are hidden compatibility internals for
+established callbacks and mixed-value behavior. Crosshatch shows disabled `All
+Layers` scope, while aggregate scope remains separate from real
+`OutputChannelId` identity.
+
+Stage 2 verification and final UX review passed the focused Builder/realized
+GTK coverage, `cargo test --locked` (117 library and 45 binary/UI tests), strict
+Clippy, release build, XML/Cambalache-file parsing, and diff checks. The final
+bounded GTK artifact is
+`test-artifacts/ton-013/stage2-treatment-scope-correction.png` (1000x760) and
+was visually inspected. Separate normal and narrow artifact-mode launches were
+limited by the current Wayland compositor failing to provide a GTK render node
+within the capture timeout; those attempts produced no claimed artifacts. No
+dedicated assistive-technology tree or focus-order capture was run; static
+review found no visible or normal-keyboard focus artifact from the hidden
+compatibility rows. Narrow-window, screen-reader, and focus-order behavior
+remain follow-up checks.
+
+Stage 2 retains Rust ownership of dynamic models, callbacks, visibility,
+sensitivity, treatment-specific controls, rendering, dialogs, deferred sync,
+and the existing GTK crash protections. TON-013 remains In Progress: the
+remaining substantial editor/treatment hierarchy is still Rust-built, and the
+issue is not complete until later migration work is independently scoped and
+verified.
+
+## Progress — Control-exposure stage
+
+`resources/ui/ToniatorEditorControls.ui` now owns the practical visible
+Source, Output, Appearance, Shapes, Curves, and Motif controls: labels,
+buttons, checkboxes, dropdowns, entries, expanders, scale rows, and the exact
+numeric `GtkSpinButton` companions. Every visible treatment row has a stable
+Builder ID and can be rearranged or restyled in Cambalache. Rust retrieves
+those widgets and supplies only live list models, document callbacks,
+visibility/sensitivity state, mixed-value/help updates, the custom curve
+drawing area, dialogs, and synchronization. The reusable real-channel
+template and aggregate scope remain separate.
+
+The distinction between `Treatment Editing Scope` and Output routing remains
+explicit: the former selects the treatment recipient, while Output `Channel
+Assignment` and conditional `Active Channel` remain the pipeline-authoritative
+scalar-routing controls. Aggregate All Inks/All Channels context remains
+separate from real semantic channels and is not a fake channel.
+
+The former duplicate Rust-built Shapes, Curves, and Motif panels were removed.
+`web_panel_host` and `curve_panel_host` are now Builder-owned panel pages
+containing the complete visible control hierarchy; only the custom curve
+drawing widget is inserted into its declared `curve_editor_host`.
+
+Control-exposure verification passed `cargo fmt --check`, `cargo test --locked`
+(117 library and 46 binary/UI tests), strict Clippy, the locked release build,
+XML/Cambalache-file parsing, and `git diff --check`. The corrected 1000x980
+GTK artifact at
+`test-artifacts/ton-013/control-exposure-stage-corrected.png` was visually
+inspected. Cambalache 1.0.3 is installed, but no round-trip edit was performed;
+narrow-window and assistive-technology checks remain follow-up verification.
+
+The runtime UI source of truth is now `.ui` layout resources plus Rust behavior
+for state, models, callbacks, custom drawing, dialogs, and synchronization.
 
 ## Architecture boundary
 
@@ -4434,6 +4535,140 @@ Requirements to design before implementation:
   remains to be designed.
 
 Keep this issue Planned. Do not inspect or implement it as part of TON-012.
+
+---
+
+# TON-015 — Eliminate Geometry Banding in Dense Line-Based SVG Output
+
+* **Status:** Planned
+* **Priority:** P1
+* **Requires:** TON-012
+* **Related:** TON-008 and TON-010
+
+## Summary
+
+Dense line-based SVG output can contain visible streaks or bands where a
+smooth progression is expected.
+
+The defect is embedded in the exported SVG geometry. It is not a display
+zoom, screen-resolution, antialiasing, or viewer-only artifact.
+
+The exact cause is not yet known. The cause may be affecting other halftone
+patterns as well. Possible causes include:
+
+* coordinate quantization;
+* premature `f32` conversion;
+* low-precision SVG serialization;
+* cumulative placement error;
+* chunk-local or tile-local phase resets;
+* nearest-neighbor or integer source sampling;
+* width quantization;
+* endpoint or clipping discontinuities;
+* outline-generation tolerances;
+* curve-flattening tolerances.
+
+## Objective
+
+Identify the exact numerical or algorithmic source of the streaking and
+correct it without masking the problem with cosmetic smoothing.
+
+The corrected output should preserve a smooth numerical progression in:
+
+* line placement;
+* sampled source values;
+* stroke widths;
+* generated outlines;
+* clipped endpoints;
+* serialized SVG coordinates.
+
+## Investigation requirements
+
+Create a small deterministic reproduction and instrument a contiguous run
+of affected geometry.
+
+For each generated line, record:
+
+* global line index;
+* semantic channel;
+* document-space pattern origin;
+* intended centerline position;
+* generated centerline position;
+* source-field sample coordinate;
+* sampled scalar value;
+* calculated width;
+* unclipped endpoints;
+* clipped endpoints;
+* generated outline coordinates;
+* tile, chunk, or batch identity;
+* serialized SVG values.
+
+Audit the complete path from source field to SVG for:
+
+* integer casts;
+* `f32` conversions;
+* `round`, `floor`, and `ceil`;
+* fixed low-decimal formatting;
+* cumulative `position += spacing`;
+* local phase origins;
+* nearest-neighbor sampling;
+* clipping tolerances;
+* width quantization;
+* outline offsets;
+* curve flattening tolerances.
+
+## Required invariants
+
+Repeated placement should derive from one stable document-space origin:
+
+```text
+position = origin + global_index * spacing
+```
+
+Pattern phase must not restart for:
+
+* tiles;
+* render chunks;
+* clipped regions;
+* channel subgroups;
+* export batches.
+
+Geometry calculations should remain in `f64` through SVG serialization
+unless a specific API requires otherwise.
+
+Every conversion to lower precision must be justified and tested.
+
+## Acceptance criteria
+
+* A deterministic fixture reproduces the original defect.
+* The root cause is demonstrated numerically before correction.
+* The correction addresses the source of the error rather than adding a
+  smoothing pass.
+* Adjacent geometry progresses smoothly within a documented tolerance.
+* No unintended phase reset occurs across chunks or tiles.
+* Preview, PNG, and SVG remain semantically consistent.
+* Existing line-based presets continue to render correctly.
+* Regression tests cover the previously defective region.
+* Before-and-after SVG artifacts demonstrate the correction.
+
+## Artifacts
+
+Preserve:
+
+* the minimal source artwork;
+* the defective SVG;
+* the corrected SVG;
+* a geometry-value dump for adjacent lines;
+* screenshots showing the defective and corrected regions;
+* any script used to verify spacing, width, or endpoint progression.
+
+## Out of scope
+
+* general UI redesign;
+* pattern-framework work;
+* maze-pattern implementation;
+* source-sampled mark colors;
+* unrelated SVG optimization;
+* cosmetic blur or raster post-processing.
 
 ---
 

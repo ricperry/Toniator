@@ -33,7 +33,9 @@ const EXAMPLE_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="960
 <defs><linearGradient id="warm" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffcf33"/><stop offset="0.48" stop-color="#ec008c"/><stop offset="1" stop-color="#0047ff"/></linearGradient><radialGradient id="cool" cx="42%" cy="40%" r="70%"><stop offset="0" stop-color="#fff"/><stop offset="0.45" stop-color="#00aeef"/><stop offset="1" stop-color="#08111f"/></radialGradient></defs>
 <rect width="100%" height="100%" fill="url(#warm)"/><circle cx="330" cy="310" r="235" fill="url(#cool)" opacity="0.92"/><rect x="565" y="115" width="260" height="365" rx="44" fill="#101114" opacity="0.78"/><path d="M90 555 C225 420 350 665 510 535 S745 440 870 585" fill="none" stroke="#fff" stroke-width="58" stroke-linecap="round" opacity="0.82"/><text x="620" y="345" font-family="sans-serif" font-size="122" font-weight="800" fill="#fff">T</text></svg>"##;
 
+#[cfg(test)]
 const PREVIEW_SURFACE_LABEL: &str = "Preview Surface — Canvas only · not exported";
+#[cfg(test)]
 const EXPORT_BACKGROUND_LABEL: &str = "Export Background — Used for SVG and by default for PNG";
 
 const BUNDLED_PRESETS: [(&str, &[u8]); 4] = [
@@ -56,6 +58,28 @@ const BUNDLED_PRESETS: [(&str, &[u8]); 4] = [
 ];
 const START_HERO: &[u8] = include_bytes!("../assets/splash-hero.png");
 const PREVIEW_INDICATOR_SVG: &[u8] = include_bytes!("../assets/preview-indicator.svg");
+const TOP_LEVEL_SHELL_UI: &str = include_str!("../resources/ui/Toniator.ui");
+const INSPECTOR_HIERARCHY_UI: &str = include_str!("../resources/ui/ToniatorInspector.ui");
+const EDITOR_CONTROLS_UI: &str = include_str!("../resources/ui/ToniatorEditorControls.ui");
+const CHANNEL_CONTROLS_UI: &str = include_str!("../resources/ui/ToniatorChannelControls.ui");
+const AGGREGATE_CHANNEL_CONTROLS_UI: &str =
+    include_str!("../resources/ui/ToniatorAggregateChannelControls.ui");
+#[cfg(test)]
+const TOP_LEVEL_SHELL_OBJECT_IDS: [&str; 13] = [
+    "main_window",
+    "main_toolbar_view",
+    "main_header_bar",
+    "toast_overlay",
+    "main_stack",
+    "window_title",
+    "new_project_button",
+    "open_button",
+    "save_button",
+    "undo_button",
+    "redo_button",
+    "controls_toggle",
+    "export_button",
+];
 const PREVIEW_INDICATOR_WIDTH: i32 = 40;
 const PREVIEW_INDICATOR_HEIGHT: i32 = 28;
 const PREVIEW_INDICATOR_RASTER_SCALE: i32 = 4;
@@ -1513,6 +1537,8 @@ pub struct AppUi {
     canvas: gtk::ScrolledWindow,
     canvas_content: gtk::Overlay,
     inspector_pane: Rc<InspectorPaneController>,
+    #[cfg(test)]
+    inspector_root: gtk::Box,
     source_label: gtk::Label,
     preview_indicator: PreviewIndicator,
     autosave_status: gtk::Label,
@@ -1532,7 +1558,9 @@ pub struct AppUi {
     treatment_modes: gtk::Stack,
     preset_import: gtk::Button,
     preset_save: gtk::Button,
-    document_section: gtk::Expander,
+    source_section: gtk::Expander,
+    output_section: gtk::Expander,
+    channel_settings_section: gtk::Expander,
     output_mode: gtk::DropDown,
     artwork_source: gtk::DropDown,
     artwork_source_note: gtk::Label,
@@ -1543,6 +1571,10 @@ pub struct AppUi {
     channel_assignment_note: gtk::Label,
     active_channel: gtk::DropDown,
     active_channel_row: gtk::Widget,
+    channel_scope: gtk::DropDown,
+    channel_panel_stack: gtk::Stack,
+    channel_controls: Vec<ChannelControlWidgets>,
+    aggregate_channel_controls: AggregateChannelControlWidgets,
     crosshatch_action: gtk::Button,
     crosshatch_note: gtk::Label,
     preview_surface: gtk::DropDown,
@@ -1693,6 +1725,203 @@ pub struct AppUi {
     deferred_candidate_artifact: bool,
 }
 
+struct ShellWidgets {
+    window: adw::ApplicationWindow,
+    stack: gtk::Stack,
+    toast_overlay: adw::ToastOverlay,
+    title: adw::WindowTitle,
+    new_project: gtk::Button,
+    open: gtk::Button,
+    save: gtk::Button,
+    undo: gtk::Button,
+    redo: gtk::Button,
+    controls_toggle: gtk::ToggleButton,
+    export: gtk::Button,
+}
+
+struct InspectorHierarchyWidgets {
+    root: gtk::Box,
+    source_section: gtk::Expander,
+    source_content: gtk::Box,
+    output_section: gtk::Expander,
+    output_content: gtk::Box,
+    channel_settings_section: gtk::Expander,
+    channel_scope_host: gtk::Box,
+    channel_panel_stack: gtk::Stack,
+    appearance_content: gtk::Box,
+    treatment_content: gtk::Box,
+}
+
+#[derive(Clone)]
+struct ChannelControlWidgets {
+    channel: OutputChannelId,
+    root: gtk::Box,
+    heading: gtk::Label,
+    inclusion_status: gtk::Label,
+}
+
+#[derive(Clone)]
+struct AggregateChannelControlWidgets {
+    root: gtk::Box,
+    heading: gtk::Label,
+    mixed_message: gtk::Label,
+}
+
+fn build_top_level_shell(
+    application: &adw::Application,
+    window_width: i32,
+    window_height: i32,
+) -> ShellWidgets {
+    let builder = gtk::Builder::from_string(TOP_LEVEL_SHELL_UI);
+    let window = builder
+        .object::<adw::ApplicationWindow>("main_window")
+        .expect("Toniator.ui must define main_window");
+    window.set_application(Some(application));
+    window.set_default_size(window_width.max(720), window_height.max(520));
+
+    ShellWidgets {
+        window,
+        stack: builder
+            .object("main_stack")
+            .expect("Toniator.ui must define main_stack"),
+        toast_overlay: builder
+            .object("toast_overlay")
+            .expect("Toniator.ui must define toast_overlay"),
+        title: builder
+            .object("window_title")
+            .expect("Toniator.ui must define window_title"),
+        new_project: builder
+            .object("new_project_button")
+            .expect("Toniator.ui must define new_project_button"),
+        open: builder
+            .object("open_button")
+            .expect("Toniator.ui must define open_button"),
+        save: builder
+            .object("save_button")
+            .expect("Toniator.ui must define save_button"),
+        undo: builder
+            .object("undo_button")
+            .expect("Toniator.ui must define undo_button"),
+        redo: builder
+            .object("redo_button")
+            .expect("Toniator.ui must define redo_button"),
+        controls_toggle: builder
+            .object("controls_toggle")
+            .expect("Toniator.ui must define controls_toggle"),
+        export: builder
+            .object("export_button")
+            .expect("Toniator.ui must define export_button"),
+    }
+}
+
+fn build_inspector_hierarchy() -> InspectorHierarchyWidgets {
+    let builder = gtk::Builder::from_string(INSPECTOR_HIERARCHY_UI);
+    InspectorHierarchyWidgets {
+        root: builder
+            .object("editor_inspector_hierarchy")
+            .expect("ToniatorInspector.ui must define editor_inspector_hierarchy"),
+        source_section: builder
+            .object("source_section")
+            .expect("ToniatorInspector.ui must define source_section"),
+        source_content: builder
+            .object("source_content_host")
+            .expect("ToniatorInspector.ui must define source_content_host"),
+        output_section: builder
+            .object("output_section")
+            .expect("ToniatorInspector.ui must define output_section"),
+        output_content: builder
+            .object("output_content_host")
+            .expect("ToniatorInspector.ui must define output_content_host"),
+        channel_settings_section: builder
+            .object("channel_settings_section")
+            .expect("ToniatorInspector.ui must define channel_settings_section"),
+        channel_scope_host: builder
+            .object("channel_scope_host")
+            .expect("ToniatorInspector.ui must define channel_scope_host"),
+        channel_panel_stack: builder
+            .object("channel_panel_stack")
+            .expect("ToniatorInspector.ui must define channel_panel_stack"),
+        appearance_content: builder
+            .object("appearance_content_host")
+            .expect("ToniatorInspector.ui must define appearance_content_host"),
+        treatment_content: builder
+            .object("treatment_content_host")
+            .expect("ToniatorInspector.ui must define treatment_content_host"),
+    }
+}
+
+fn channel_heading(channel: OutputChannelId) -> String {
+    format!(
+        "{} {}",
+        channel.label(),
+        if channel.output_model() == OutputModel::CmykPrint {
+            "Ink"
+        } else {
+            "Channel"
+        }
+    )
+}
+
+fn build_channel_controls(channel: OutputChannelId) -> ChannelControlWidgets {
+    let builder = gtk::Builder::from_string(CHANNEL_CONTROLS_UI);
+    let root = builder
+        .object::<gtk::Box>("channel_controls")
+        .expect("ToniatorChannelControls.ui must define channel_controls");
+    let heading = builder
+        .object::<gtk::Label>("channel_heading")
+        .expect("ToniatorChannelControls.ui must define channel_heading");
+    let inclusion_status = builder
+        .object::<gtk::Label>("channel_inclusion_status")
+        .expect("ToniatorChannelControls.ui must define channel_inclusion_status");
+    let content_host = builder
+        .object::<gtk::Box>("channel_content_host")
+        .expect("ToniatorChannelControls.ui must define channel_content_host");
+    heading.set_text(&channel_heading(channel));
+    content_host.append(
+        &gtk::Label::builder()
+            .label("Treatment edits apply to this real output channel when it is selected above.")
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["dim-label", "caption"])
+            .build(),
+    );
+    ChannelControlWidgets {
+        channel,
+        root,
+        heading,
+        inclusion_status,
+    }
+}
+
+fn build_aggregate_channel_controls() -> AggregateChannelControlWidgets {
+    let builder = gtk::Builder::from_string(AGGREGATE_CHANNEL_CONTROLS_UI);
+    let root = builder
+        .object::<gtk::Box>("aggregate_channel_controls")
+        .expect("ToniatorAggregateChannelControls.ui must define aggregate_channel_controls");
+    let heading = builder
+        .object::<gtk::Label>("aggregate_heading")
+        .expect("ToniatorAggregateChannelControls.ui must define aggregate_heading");
+    let mixed_message = builder
+        .object::<gtk::Label>("aggregate_mixed_message")
+        .expect("ToniatorAggregateChannelControls.ui must define aggregate_mixed_message");
+    let content_host = builder
+        .object::<gtk::Box>("aggregate_content_host")
+        .expect("ToniatorAggregateChannelControls.ui must define aggregate_content_host");
+    content_host.append(
+        &gtk::Label::builder()
+            .label("Treatment edits apply to every included ink or channel. Mixed values remain explicit.")
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["dim-label", "caption"])
+            .build(),
+    );
+    AggregateChannelControlWidgets {
+        root,
+        heading,
+        mixed_message,
+    }
+}
+
 type TransitionContinuation = Rc<dyn Fn(&Rc<AppUi>)>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1809,47 +2038,23 @@ impl AppUi {
         }
         let export_results = Arc::new(LatestSlot::default());
 
-        let stack = gtk::Stack::builder()
-            .transition_type(gtk::StackTransitionType::Crossfade)
-            .transition_duration(180)
-            .build();
-        let toast_overlay = adw::ToastOverlay::new();
-        toast_overlay.set_child(Some(&stack));
-
-        let title = adw::WindowTitle::new("Toniator", "Start a project");
-        let header = adw::HeaderBar::new();
-        header.set_title_widget(Some(&title));
-        let new = action_button("New", "Start a new project");
-        let open = action_button("Open", "Open artwork or document");
-        let save = action_button("Save", "Save Toniator document");
-        let undo = icon_button("edit-undo-symbolic", "Undo");
-        let redo = icon_button("edit-redo-symbolic", "Redo");
-        let controls_toggle = gtk::ToggleButton::with_label("Controls");
-        controls_toggle.set_active(true);
-        controls_toggle.set_tooltip_text(Some("Hide Controls"));
+        let ShellWidgets {
+            window,
+            stack,
+            toast_overlay,
+            title,
+            new_project: new,
+            open,
+            save,
+            undo,
+            redo,
+            controls_toggle,
+            export,
+        } = build_top_level_shell(application, window_width, window_height);
         controls_toggle.update_property(&[
             gtk::accessible::Property::Label("Controls"),
             gtk::accessible::Property::Description("Hide Controls"),
         ]);
-        let export = action_button("Export…", "Export editable SVG or PNG image");
-        header.pack_start(&new);
-        header.pack_start(&open);
-        header.pack_start(&save);
-        header.pack_start(&undo);
-        header.pack_start(&redo);
-        header.pack_start(&controls_toggle);
-        header.pack_end(&export);
-
-        let toolbar = adw::ToolbarView::new();
-        toolbar.add_top_bar(&header);
-        toolbar.set_content(Some(&toast_overlay));
-        let window = adw::ApplicationWindow::builder()
-            .application(application)
-            .title("Toniator")
-            .default_width(window_width.max(720))
-            .default_height(window_height.max(520))
-            .content(&toolbar)
-            .build();
 
         let picture = gtk::Picture::builder()
             .content_fit(gtk::ContentFit::Contain)
@@ -1873,25 +2078,6 @@ impl AppUi {
             .wrap(true)
             .css_classes(["dim-label", "caption"])
             .build();
-        let detail = control_scale(0.0, 100.0, 1.0);
-        let coverage = control_scale(0.0, 160.0, 1.0);
-        let contrast = control_scale(0.0, 200.0, 1.0);
-        let angle = control_scale(-180.0, 180.0, 1.0);
-        detail.set_format_value_func(|_, value| format!("{value:0.0}"));
-        coverage.set_format_value_func(|_, value| format!("{value:0.0}%"));
-        contrast.set_format_value_func(|_, value| format!("{value:0.0}%"));
-        angle.set_format_value_func(|_, value| format!("{value:0.0}°"));
-        let dots = gtk::ToggleButton::with_label("Shapes");
-        let squares = gtk::ToggleButton::with_label("Squares");
-        let lines = gtk::ToggleButton::with_label("Lines");
-        let curves = gtk::ToggleButton::with_label("Curves");
-        let legacy = gtk::ToggleButton::with_label("Legacy");
-        squares.set_group(Some(&dots));
-        lines.set_group(Some(&dots));
-        curves.set_group(Some(&dots));
-        legacy.set_group(Some(&dots));
-        legacy.set_visible(false);
-        dots.set_active(true);
         let compare = gtk::ToggleButton::with_label("Source");
 
         let start = build_start_view(recovery_enabled && recovery_path().exists());
@@ -1901,15 +2087,6 @@ impl AppUi {
             &source_label,
             &preview_indicator.area,
             &autosave_status,
-            &detail,
-            &coverage,
-            &contrast,
-            &angle,
-            &dots,
-            &squares,
-            &lines,
-            &curves,
-            &legacy,
             &compare,
             initial_inspector_width,
             window_width,
@@ -1966,6 +2143,8 @@ impl AppUi {
             canvas: editor_view.canvas.clone(),
             canvas_content: editor_view.canvas_content.clone(),
             inspector_pane,
+            #[cfg(test)]
+            inspector_root: editor_view.inspector_root.clone(),
             source_label,
             preview_indicator,
             autosave_status,
@@ -1973,19 +2152,21 @@ impl AppUi {
             cancel_preview: editor_view.cancel_preview.clone(),
             cancel_export: editor_view.cancel_export.clone(),
             editing_context: editor_view.editing_context.clone(),
-            detail,
-            coverage,
-            contrast,
-            angle,
-            dots,
-            squares,
-            lines,
-            curves,
-            legacy,
+            detail: editor_view.detail.clone(),
+            coverage: editor_view.coverage.clone(),
+            contrast: editor_view.contrast.clone(),
+            angle: editor_view.angle.clone(),
+            dots: editor_view.dots.clone(),
+            squares: editor_view.squares.clone(),
+            lines: editor_view.lines.clone(),
+            curves: editor_view.curves.clone(),
+            legacy: editor_view.legacy.clone(),
             treatment_modes: editor_view.treatment_modes.clone(),
             preset_import: editor_view.preset_import.clone(),
             preset_save: editor_view.preset_save.clone(),
-            document_section: editor_view.document_section.clone(),
+            source_section: editor_view.source_section.clone(),
+            output_section: editor_view.output_section.clone(),
+            channel_settings_section: editor_view.channel_settings_section.clone(),
             output_mode: editor_view.output_mode.clone(),
             artwork_source: editor_view.artwork_source.clone(),
             artwork_source_note: editor_view.artwork_source_note.clone(),
@@ -1996,6 +2177,10 @@ impl AppUi {
             channel_assignment_note: editor_view.channel_assignment_note.clone(),
             active_channel: editor_view.active_channel.clone(),
             active_channel_row: editor_view.active_channel_row.clone(),
+            channel_scope: editor_view.channel_scope.clone(),
+            channel_panel_stack: editor_view.channel_panel_stack.clone(),
+            channel_controls: editor_view.channel_controls.clone(),
+            aggregate_channel_controls: editor_view.aggregate_channel_controls.clone(),
             crosshatch_action: editor_view.crosshatch_action.clone(),
             crosshatch_note: editor_view.crosshatch_note.clone(),
             preview_surface: editor_view.preview_surface.clone(),
@@ -2582,6 +2767,49 @@ impl AppUi {
                     editor.document().clone()
                 };
                 ui.after_treatment_edit(document);
+            }
+        ));
+        self.channel_scope.connect_selected_notify(glib::clone!(
+            #[weak(rename_to = ui)]
+            self,
+            move |control| {
+                if ui.state.borrow().syncing_controls {
+                    return;
+                }
+                let Some((output_model, crosshatch)) =
+                    ui.state.borrow().editor.as_ref().map(|editor| {
+                        let pipeline = &editor.document().artwork_pipeline;
+                        (
+                            pipeline.output_model,
+                            matches!(
+                                pipeline.assignment,
+                                ChannelAssignment::LegacyCompatibility(
+                                    LegacyCompatibilityAssignment::CrosshatchProgressiveKcmyV1
+                                )
+                            ),
+                        )
+                    })
+                else {
+                    return;
+                };
+                if crosshatch {
+                    return;
+                }
+                let Some(scope_channel) = channel_scope_channel(control.selected(), output_model)
+                else {
+                    return;
+                };
+                let Some(target) = channel_scope_target_index(scope_channel, output_model) else {
+                    return;
+                };
+                ui.state.borrow_mut().syncing_controls = true;
+                ui.web_target.set_selected(target);
+                ui.curve_target.set_selected(target);
+                ui.state.borrow_mut().syncing_controls = false;
+                // Target selection changes the projected treatment controls,
+                // not the document pipeline. Reuse the established mixed-value
+                // synchronization without creating a document edit.
+                ui.sync_controls();
             }
         ));
         connect_clicked(&self.crosshatch_action, self, |ui| {
@@ -5163,7 +5391,9 @@ impl AppUi {
         expand_document: bool,
     ) {
         if expand_document {
-            self.document_section.set_expanded(true);
+            self.source_section.set_expanded(true);
+            self.output_section.set_expanded(true);
+            self.channel_settings_section.set_expanded(true);
         }
         let mut state = self.state.borrow_mut();
         let Some(editor) = state.editor.as_mut() else {
@@ -6272,10 +6502,71 @@ impl AppUi {
                 self.curve_editor.queue_draw();
             }
         }
+        self.sync_channel_scope_panels(&pipeline, crosshatch);
         self.source_label.set_text(&source_text);
         self.state.borrow_mut().syncing_controls = false;
         self.sync_motif_overlay();
         self.update_editing_context();
+    }
+
+    fn sync_channel_scope_panels(&self, pipeline: &ArtworkPipelineSettings, crosshatch: bool) {
+        let output_model = pipeline.output_model;
+        sync_dropdown_strings(
+            &self.channel_scope,
+            &channel_scope_labels(output_model, crosshatch),
+        );
+        self.channel_scope.set_selected(channel_scope_index(
+            self.web_target.selected(),
+            output_model,
+            crosshatch,
+        ));
+        self.channel_scope.set_sensitive(!crosshatch);
+
+        for controls in &self.channel_controls {
+            controls
+                .heading
+                .set_text(&channel_heading(controls.channel));
+            controls.inclusion_status.set_text(if controls.channel.belongs_to(output_model) {
+                "Included in the current output model and available as a treatment editing scope."
+            } else {
+                "Retained for this document and unavailable in the current output model."
+            });
+        }
+
+        let (aggregate_heading, mixed_message, panel_name) = if crosshatch {
+            (
+                "All Layers",
+                "Legacy Crosshatch edits its explicit layers together. Mixed treatment values remain mixed.",
+                "aggregate".to_owned(),
+            )
+        } else if self.channel_scope.selected() == 0 {
+            (
+                if output_model == OutputModel::CmykPrint {
+                    "All Inks"
+                } else {
+                    "All Channels"
+                },
+                "Treatment edits apply to every included output channel. Mixed values are shown without coercion.",
+                "aggregate".to_owned(),
+            )
+        } else if let Some(channel) =
+            channel_scope_channel(self.channel_scope.selected(), output_model).flatten()
+        {
+            ("", "", channel.stable_id().to_owned())
+        } else {
+            (
+                "All Channels",
+                "Choose a treatment editing scope before editing channel-specific settings.",
+                "aggregate".to_owned(),
+            )
+        };
+        self.aggregate_channel_controls
+            .heading
+            .set_text(aggregate_heading);
+        self.aggregate_channel_controls
+            .mixed_message
+            .set_text(mixed_message);
+        self.channel_panel_stack.set_visible_child_name(&panel_name);
     }
 
     fn web_uses_channel_copy(&self) -> bool {
@@ -8166,6 +8457,8 @@ struct EditorWidgets {
     container: gtk::Widget,
     paned: gtk::Paned,
     inspector_shell: gtk::Widget,
+    #[cfg(test)]
+    inspector_root: gtk::Box,
     workspace_status: gtk::Label,
     cancel_preview: gtk::Button,
     cancel_export: gtk::Button,
@@ -8177,10 +8470,21 @@ struct EditorWidgets {
     zoom: gtk::Scale,
     zoom_entry: gtk::Entry,
     zoom_in: gtk::Button,
+    detail: gtk::Scale,
+    coverage: gtk::Scale,
+    contrast: gtk::Scale,
+    angle: gtk::Scale,
+    dots: gtk::ToggleButton,
+    squares: gtk::ToggleButton,
+    lines: gtk::ToggleButton,
+    curves: gtk::ToggleButton,
+    legacy: gtk::ToggleButton,
     treatment_modes: gtk::Stack,
     preset_import: gtk::Button,
     preset_save: gtk::Button,
-    document_section: gtk::Expander,
+    source_section: gtk::Expander,
+    output_section: gtk::Expander,
+    channel_settings_section: gtk::Expander,
     output_mode: gtk::DropDown,
     artwork_source: gtk::DropDown,
     artwork_source_note: gtk::Label,
@@ -8191,6 +8495,10 @@ struct EditorWidgets {
     channel_assignment_note: gtk::Label,
     active_channel: gtk::DropDown,
     active_channel_row: gtk::Widget,
+    channel_scope: gtk::DropDown,
+    channel_panel_stack: gtk::Stack,
+    channel_controls: Vec<ChannelControlWidgets>,
+    aggregate_channel_controls: AggregateChannelControlWidgets,
     crosshatch_action: gtk::Button,
     crosshatch_note: gtk::Label,
     preview_surface: gtk::DropDown,
@@ -8303,61 +8611,61 @@ struct AppearanceControlWidgets {
 }
 
 fn build_appearance_controls() -> AppearanceControlWidgets {
-    let container = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    let preview_surface = gtk::DropDown::from_strings(&["Checkerboard", "Color over checkerboard"]);
+    let builder = gtk::Builder::from_string(EDITOR_CONTROLS_UI);
+    let container = builder
+        .object::<gtk::Box>("appearance_controls")
+        .expect("ToniatorEditorControls.ui must define appearance_controls");
+    builder
+        .object::<gtk::Box>("editor_controls")
+        .expect("ToniatorEditorControls.ui must define editor_controls")
+        .remove(&container);
+    let preview_surface = builder
+        .object::<gtk::DropDown>("preview_surface")
+        .expect("ToniatorEditorControls.ui must define preview_surface");
+    sync_dropdown_strings(
+        &preview_surface,
+        &["Checkerboard", "Color over checkerboard"],
+    );
     preview_surface.set_tooltip_text(Some(help_for("Preview Surface").unwrap().summary));
     preview_surface.update_property(&[gtk::accessible::Property::Label("Preview Surface")]);
-    let preview_color = gtk::ColorDialogButton::new(Some(
-        gtk::ColorDialog::builder()
+    let preview_color = builder
+        .object::<gtk::ColorDialogButton>("preview_color")
+        .expect("ToniatorEditorControls.ui must define preview_color");
+    preview_color.set_dialog(
+        &gtk::ColorDialog::builder()
             .title("Preview Surface Color")
             .with_alpha(true)
             .build(),
-    ));
-    preview_color.update_property(&[gtk::accessible::Property::Label("Preview Surface Color")]);
-    let preview_section = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    let preview_heading = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-    preview_heading.append(
-        &gtk::Label::builder()
-            .label(PREVIEW_SURFACE_LABEL)
-            .xalign(0.0)
-            .wrap(true)
-            .hexpand(true)
-            .build(),
     );
+    preview_color.update_property(&[gtk::accessible::Property::Label("Preview Surface Color")]);
     let preview_help = help_button(help_for("Preview Surface").unwrap());
     preview_help.set_tooltip_text(Some("Help: Preview Surface"));
-    preview_heading.append(&preview_help);
-    preview_section.append(&preview_heading);
-    preview_section.append(&preview_surface);
-    preview_section.append(&preview_color);
-    container.append(&preview_section);
-    let export_background = gtk::DropDown::from_strings(&["None", "Color"]);
+    builder
+        .object::<gtk::Box>("preview_help_host")
+        .expect("ToniatorEditorControls.ui must define preview_help_host")
+        .append(&preview_help);
+    let export_background = builder
+        .object::<gtk::DropDown>("export_background")
+        .expect("ToniatorEditorControls.ui must define export_background");
+    sync_dropdown_strings(&export_background, &["None", "Color"]);
     export_background.set_tooltip_text(Some(help_for("Export Background").unwrap().summary));
     export_background.update_property(&[gtk::accessible::Property::Label("Export Background")]);
-    let export_color = gtk::ColorDialogButton::new(Some(
-        gtk::ColorDialog::builder()
+    let export_color = builder
+        .object::<gtk::ColorDialogButton>("export_color")
+        .expect("ToniatorEditorControls.ui must define export_color");
+    export_color.set_dialog(
+        &gtk::ColorDialog::builder()
             .title("Export Background Color")
             .with_alpha(true)
             .build(),
-    ));
-    export_color.update_property(&[gtk::accessible::Property::Label("Export Background Color")]);
-    let export_section = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    let export_heading = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-    export_heading.append(
-        &gtk::Label::builder()
-            .label(EXPORT_BACKGROUND_LABEL)
-            .xalign(0.0)
-            .wrap(true)
-            .hexpand(true)
-            .build(),
     );
+    export_color.update_property(&[gtk::accessible::Property::Label("Export Background Color")]);
     let export_help = help_button(help_for("Export Background").unwrap());
     export_help.set_tooltip_text(Some("Help: Export Background"));
-    export_heading.append(&export_help);
-    export_section.append(&export_heading);
-    export_section.append(&export_background);
-    export_section.append(&export_color);
-    container.append(&export_section);
+    builder
+        .object::<gtk::Box>("export_help_host")
+        .expect("ToniatorEditorControls.ui must define export_help_host")
+        .append(&export_help);
     AppearanceControlWidgets {
         container,
         preview_surface,
@@ -8377,15 +8685,6 @@ fn build_editor_view(
     source_label: &gtk::Label,
     preview_indicator: &gtk::DrawingArea,
     autosave_status: &gtk::Label,
-    detail: &gtk::Scale,
-    coverage: &gtk::Scale,
-    contrast: &gtk::Scale,
-    angle: &gtk::Scale,
-    dots: &gtk::ToggleButton,
-    squares: &gtk::ToggleButton,
-    lines: &gtk::ToggleButton,
-    curves: &gtk::ToggleButton,
-    legacy: &gtk::ToggleButton,
     compare: &gtk::ToggleButton,
     inspector_width: i32,
     initial_layout_width: i32,
@@ -8501,48 +8800,57 @@ fn build_editor_view(
     inspector.set_margin_start(18);
     inspector.set_margin_end(18);
     inspector.add_css_class("inspector");
-    let inspector_title = gtk::Label::builder()
-        .label("Halftone")
-        .xalign(0.0)
-        .css_classes(["title-2"])
-        .build();
-    let treatment_caption = gtk::Label::builder()
-        .label("Pattern Type")
-        .xalign(0.0)
-        .css_classes(["heading"])
-        .build();
-    let treatment_buttons = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    treatment_buttons.add_css_class("linked");
+    let treatment_builder = gtk::Builder::from_string(EDITOR_CONTROLS_UI);
+    let treatment_chrome = treatment_builder
+        .object::<gtk::Box>("treatment_chrome")
+        .expect("ToniatorEditorControls.ui must define treatment_chrome");
+    treatment_builder
+        .object::<gtk::Box>("editor_controls")
+        .expect("ToniatorEditorControls.ui must define editor_controls")
+        .remove(&treatment_chrome);
+    let dots = treatment_builder
+        .object::<gtk::ToggleButton>("dots")
+        .expect("ToniatorEditorControls.ui must define dots");
+    let squares = treatment_builder
+        .object::<gtk::ToggleButton>("squares")
+        .expect("ToniatorEditorControls.ui must define squares");
+    let lines = treatment_builder
+        .object::<gtk::ToggleButton>("lines")
+        .expect("ToniatorEditorControls.ui must define lines");
+    let curves = treatment_builder
+        .object::<gtk::ToggleButton>("curves")
+        .expect("ToniatorEditorControls.ui must define curves");
+    let legacy = treatment_builder
+        .object::<gtk::ToggleButton>("legacy")
+        .expect("ToniatorEditorControls.ui must define legacy");
+    squares.set_group(Some(&dots));
+    lines.set_group(Some(&dots));
+    curves.set_group(Some(&dots));
+    legacy.set_group(Some(&dots));
+    legacy.set_visible(false);
+    dots.set_active(true);
     dots.set_hexpand(true);
     squares.set_visible(false);
     lines.set_visible(false);
     curves.set_hexpand(true);
-    treatment_buttons.append(dots);
-    treatment_buttons.append(squares);
-    treatment_buttons.append(lines);
-    treatment_buttons.append(curves);
-    treatment_buttons.append(legacy);
     for (button, label) in [
-        (dots, "Shapes pattern"),
-        (squares, "Squares treatment"),
-        (lines, "Lines treatment"),
-        (curves, "Curves pattern"),
+        (&dots, "Shapes pattern"),
+        (&squares, "Squares treatment"),
+        (&lines, "Lines treatment"),
+        (&curves, "Curves pattern"),
     ] {
         button.update_property(&[gtk::accessible::Property::Label(label)]);
     }
-    inspector.append(&inspector_title);
-    inspector.append(&treatment_caption);
-    inspector.append(&treatment_buttons);
-    let preset_actions = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    preset_actions.add_css_class("linked");
-    let preset_import = gtk::Button::with_label("Load Preset…");
+    let preset_import = treatment_builder
+        .object::<gtk::Button>("preset_import")
+        .expect("ToniatorEditorControls.ui must define preset_import");
     preset_import.set_hexpand(true);
     preset_import.set_tooltip_text(Some("Load a Toniator halftone preset (.tntr)"));
-    let preset_save = gtk::Button::with_label("Save Preset…");
+    let preset_save = treatment_builder
+        .object::<gtk::Button>("preset_save")
+        .expect("ToniatorEditorControls.ui must define preset_save");
     preset_save.set_hexpand(true);
     preset_save.set_tooltip_text(Some("Save this halftone setup without the artwork"));
-    preset_actions.append(&preset_import);
-    preset_actions.append(&preset_save);
     if let Some(spec) = help_for("Load Preset") {
         preset_import.set_tooltip_text(Some(spec.summary));
         preset_import.update_property(&[gtk::accessible::Property::Description(spec.summary)]);
@@ -8551,222 +8859,391 @@ fn build_editor_view(
         preset_save.set_tooltip_text(Some(spec.summary));
         preset_save.update_property(&[gtk::accessible::Property::Description(spec.summary)]);
     }
-    inspector.append(&preset_actions);
 
-    let native_panel = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    native_panel.add_css_class("workflow-group");
-    native_panel.append(&control_row("Sampling Detail", "Coarse — Fine", detail));
-    native_panel.append(&control_row(
-        "Coverage",
-        "How much ink fills the page",
-        coverage,
-    ));
-    native_panel.append(&control_row(
-        "Contrast",
-        "Separate light and dark areas",
-        contrast,
-    ));
-    native_panel.append(&control_row(
-        "Screen Angle",
-        "Rotate square and line screens",
-        angle,
-    ));
+    let native_panel = treatment_builder
+        .object::<gtk::Box>("native_panel")
+        .expect("ToniatorEditorControls.ui must define native_panel");
+    let detail = builder_control_scale(&treatment_builder, NATIVE_CONTROL_SCALES[0]);
+    detail.set_format_value_func(|_, value| format!("{value:0.0}"));
+    let coverage = builder_control_scale(&treatment_builder, NATIVE_CONTROL_SCALES[1]);
+    coverage.set_format_value_func(|_, value| format!("{value:0.0}%"));
+    let contrast = builder_control_scale(&treatment_builder, NATIVE_CONTROL_SCALES[2]);
+    contrast.set_format_value_func(|_, value| format!("{value:0.0}%"));
+    let angle = builder_control_scale(&treatment_builder, NATIVE_CONTROL_SCALES[3]);
+    angle.set_format_value_func(|_, value| format!("{value:0.0}°"));
 
-    let channel_copy = gtk::Label::builder()
-        .label("Automatic CMYK separation")
-        .xalign(0.0)
-        .css_classes(["heading"])
-        .build();
-    channel_copy.set_tooltip_text(Some(
+    let native_channel_copy = treatment_builder
+        .object::<gtk::Label>("native_channel_copy")
+        .expect("ToniatorEditorControls.ui must define native_channel_copy");
+    native_channel_copy.set_tooltip_text(Some(
         "Toniator automatically separates artwork into Cyan, Magenta, Yellow, and Black inks",
     ));
-    native_panel.append(&channel_copy);
+    native_panel.remove(&native_channel_copy);
+    native_panel.append(&native_channel_copy);
 
-    let web_panel = gtk::Box::new(gtk::Orientation::Vertical, 10);
-    web_panel.add_css_class("workflow-group");
-    let web_shared = gtk::CheckButton::with_label("Share Mark Shape Across Inks");
-    web_shared.set_active(true);
+    let web_panel_host = treatment_builder
+        .object::<gtk::Box>("web_panel_host")
+        .expect("ToniatorEditorControls.ui must define web_panel_host");
+    let web_shared = treatment_builder
+        .object::<gtk::CheckButton>("web_shared")
+        .expect("ToniatorEditorControls.ui must define web_shared");
     let web_shared_help = help_for("Share Mark Shape Across Inks").map(help_handle);
-    let web_shared_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-    web_shared_row.append(&web_shared);
     if let Some(help) = &web_shared_help {
-        web_shared_row.append(&help.button);
+        treatment_builder
+            .object::<gtk::Box>("web_shared_help_host")
+            .expect("ToniatorEditorControls.ui must define web_shared_help_host")
+            .append(&help.button);
     }
-    web_panel.append(&web_shared_row);
-    let web_shape = gtk::DropDown::from_strings(&["Circle", "Regular Polygon", "User Defined"]);
-    let web_shape_row = combo_row("Mark", &web_shape);
-    web_panel.append(&web_shape_row);
-    let web_mixed_shape_label = gtk::Label::builder()
-        .label("Mark: Mixed shapes")
-        .xalign(0.0)
-        .css_classes(["heading"])
-        .build();
-    web_mixed_shape_label.set_visible(false);
-    web_panel.append(&web_mixed_shape_label);
-    let web_mixed_shape_apply = gtk::DropDown::from_strings(&[
-        "Choose a mark…",
-        "Circle",
-        "Regular Polygon",
-        "User Defined",
-    ]);
-    let web_mixed_shape_apply_row = combo_row("Apply Mark to All", &web_mixed_shape_apply);
-    web_mixed_shape_apply_row.set_visible(false);
-    web_panel.append(&web_mixed_shape_apply_row);
-    let web_polygon_sides = gtk::SpinButton::with_range(3.0, 6.0, 1.0);
-    disable_pointer_scroll_adjustment(&web_polygon_sides);
+
+    let web_shape = treatment_builder
+        .object::<gtk::DropDown>("web_shape")
+        .expect("ToniatorEditorControls.ui must define web_shape");
+    let web_shape_label = treatment_builder
+        .object::<gtk::Label>("web_shape_label")
+        .expect("ToniatorEditorControls.ui must define web_shape_label");
+    configure_dropdown_accessibility(&web_shape, &web_shape_label, "Mark");
+    sync_dropdown_strings(&web_shape, &["Circle", "Regular Polygon", "User Defined"]);
+    let web_shape_row = treatment_builder
+        .object::<gtk::Box>("web_shape_row")
+        .expect("ToniatorEditorControls.ui must define web_shape_row")
+        .upcast();
+    let web_mixed_shape_label = treatment_builder
+        .object::<gtk::Label>("web_mixed_shape_label")
+        .expect("ToniatorEditorControls.ui must define web_mixed_shape_label");
+    let web_mixed_shape_apply = treatment_builder
+        .object::<gtk::DropDown>("web_mixed_shape_apply")
+        .expect("ToniatorEditorControls.ui must define web_mixed_shape_apply");
+    let web_mixed_shape_apply_label = treatment_builder
+        .object::<gtk::Label>("web_mixed_shape_apply_label")
+        .expect("ToniatorEditorControls.ui must define web_mixed_shape_apply_label");
+    configure_dropdown_accessibility(
+        &web_mixed_shape_apply,
+        &web_mixed_shape_apply_label,
+        "Apply Mark to All",
+    );
+    sync_dropdown_strings(
+        &web_mixed_shape_apply,
+        &[
+            "Choose a mark…",
+            "Circle",
+            "Regular Polygon",
+            "User Defined",
+        ],
+    );
+    let web_mixed_shape_apply_row = treatment_builder
+        .object::<gtk::Box>("web_mixed_shape_apply_row")
+        .expect("ToniatorEditorControls.ui must define web_mixed_shape_apply_row")
+        .upcast();
+    let web_polygon_sides = treatment_builder
+        .object::<gtk::SpinButton>("web_polygon_sides")
+        .expect("ToniatorEditorControls.ui must define web_polygon_sides");
+    web_polygon_sides.set_range(3.0, 6.0);
+    web_polygon_sides.set_increments(1.0, 1.0);
     web_polygon_sides.set_value(4.0);
-    let web_polygon_sides_label = gtk::Label::builder()
-        .label("Polygon Sides (3–6)")
-        .xalign(0.0)
-        .css_classes(["heading"])
-        .build();
-    let polygon_heading = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-    polygon_heading.set_visible(web_polygon_sides.is_visible());
-    web_polygon_sides.connect_visible_notify(glib::clone!(
-        #[weak]
-        polygon_heading,
-        move |spin| polygon_heading.set_visible(spin.is_visible())
-    ));
-    polygon_heading.append(&web_polygon_sides_label);
-    let polygon_spec = help_for("Polygon Sides (3–6)").unwrap();
-    polygon_heading.append(&help_button(polygon_spec));
-    web_polygon_sides.set_tooltip_text(Some(polygon_spec.summary));
-    web_polygon_sides
-        .update_property(&[gtk::accessible::Property::Description(polygon_spec.summary)]);
+    disable_pointer_scroll_adjustment(&web_polygon_sides);
+    let web_polygon_sides_label = treatment_builder
+        .object::<gtk::Label>("web_polygon_sides_label")
+        .expect("ToniatorEditorControls.ui must define web_polygon_sides_label");
+    let web_polygon_sides_row = treatment_builder
+        .object::<gtk::Box>("web_polygon_sides_row")
+        .expect("ToniatorEditorControls.ui must define web_polygon_sides_row");
+    web_polygon_sides.update_property(&[gtk::accessible::Property::Description(
+        help_for("Polygon Sides (3–6)").unwrap().summary,
+    )]);
     web_polygon_sides.update_relation(&[gtk::accessible::Relation::LabelledBy(&[
         web_polygon_sides_label.upcast_ref(),
     ])]);
-    web_panel.append(&polygon_heading);
-    web_panel.append(&web_polygon_sides);
-    let web_edit_shape = gtk::Button::with_label("Edit User-Defined Mark…");
-    web_panel.append(&button_with_help(&web_edit_shape, "Edit User-Defined Mark"));
-    let web_geometry_note = gtk::Label::builder()
-        .xalign(0.0)
-        .wrap(true)
-        .css_classes(["dim-label", "caption"])
-        .build();
-    web_panel.append(&web_geometry_note);
-    let web_target =
-        gtk::DropDown::from_strings(&["All Inks", "Cyan", "Magenta", "Yellow", "Black"]);
-    let (web_target_row, web_target_label, web_target_help) =
-        labeled_combo_row_with_help("Adjust Ink", &web_target);
-    web_panel.append(&web_target_row);
-    let visible_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    treatment_builder
+        .object::<gtk::Box>("web_polygon_sides_help_host")
+        .expect("ToniatorEditorControls.ui must define web_polygon_sides_help_host")
+        .append(&help_button(help_for("Polygon Sides (3–6)").unwrap()));
+    web_polygon_sides.connect_visible_notify(glib::clone!(
+        #[weak]
+        web_polygon_sides_row,
+        move |spin| web_polygon_sides_row.set_visible(spin.is_visible())
+    ));
+    let web_edit_shape = treatment_builder
+        .object::<gtk::Button>("web_edit_shape")
+        .expect("ToniatorEditorControls.ui must define web_edit_shape");
+    if let Some(spec) = help_for("Edit User-Defined Mark") {
+        web_edit_shape.set_tooltip_text(Some(spec.summary));
+        web_edit_shape.update_property(&[gtk::accessible::Property::Description(spec.summary)]);
+        treatment_builder
+            .object::<gtk::Box>("web_edit_shape_help_host")
+            .expect("ToniatorEditorControls.ui must define web_edit_shape_help_host")
+            .append(&help_button(spec));
+    }
+    let web_geometry_note = treatment_builder
+        .object::<gtk::Label>("web_geometry_note")
+        .expect("ToniatorEditorControls.ui must define web_geometry_note");
+    let web_target = treatment_builder
+        .object::<gtk::DropDown>("web_target")
+        .expect("ToniatorEditorControls.ui must define web_target");
+    let web_target_label = treatment_builder
+        .object::<gtk::Label>("web_target_label")
+        .expect("ToniatorEditorControls.ui must define web_target_label");
+    configure_dropdown_accessibility(&web_target, &web_target_label, "Adjust Ink");
+    sync_dropdown_strings(
+        &web_target,
+        &["All Inks", "Cyan", "Magenta", "Yellow", "Black"],
+    );
+    let web_target_row: gtk::Widget = treatment_builder
+        .object::<gtk::Box>("web_target_row")
+        .expect("ToniatorEditorControls.ui must define web_target_row")
+        .upcast();
+    web_target_row.set_visible(false);
+    let web_target_help = help_for("Adjust Ink").map(|spec| {
+        let handle = help_handle(spec);
+        treatment_builder
+            .object::<gtk::Box>("web_target_help_host")
+            .expect("ToniatorEditorControls.ui must define web_target_help_host")
+            .append(&handle.button);
+        handle
+    });
+    let web_visible_label = treatment_builder
+        .object::<gtk::Label>("web_visible_label")
+        .expect("ToniatorEditorControls.ui must define web_visible_label");
     let web_visible = [
-        gtk::CheckButton::with_label("C"),
-        gtk::CheckButton::with_label("M"),
-        gtk::CheckButton::with_label("Y"),
-        gtk::CheckButton::with_label("K"),
+        treatment_builder
+            .object::<gtk::CheckButton>("web_visible_c")
+            .expect("ToniatorEditorControls.ui must define web_visible_c"),
+        treatment_builder
+            .object::<gtk::CheckButton>("web_visible_m")
+            .expect("ToniatorEditorControls.ui must define web_visible_m"),
+        treatment_builder
+            .object::<gtk::CheckButton>("web_visible_y")
+            .expect("ToniatorEditorControls.ui must define web_visible_y"),
+        treatment_builder
+            .object::<gtk::CheckButton>("web_visible_k")
+            .expect("ToniatorEditorControls.ui must define web_visible_k"),
     ];
     for button in &web_visible {
         button.set_tooltip_text(Some("Toggle this ink in the output"));
-        visible_row.append(button);
     }
     let web_visible_help = help_handle(help_for("Visible Inks").unwrap());
-    visible_row.append(&web_visible_help.button);
-    let web_visible_label = gtk::Label::builder()
-        .label("Visible Inks")
-        .xalign(0.0)
-        .css_classes(["heading"])
-        .build();
-    web_panel.append(&web_visible_label);
-    web_panel.append(&visible_row);
-    let web_mixed = gtk::Label::builder()
-        .xalign(0.0)
-        .wrap(true)
-        .css_classes(["dim-label", "caption"])
-        .build();
-    web_panel.append(&web_mixed);
-    let web_color = gtk::Entry::builder()
-        .placeholder_text("#RRGGBB")
-        .tooltip_text("Hex ink color; valid colors apply automatically")
-        .build();
-    let (web_color_row, web_color_heading, web_color_status, web_color_help) =
-        entry_status_row_with_help("Ink Color", "Hex color", &web_color);
-    let web_color_help = web_color_help.expect("Ink Color has help copy");
-    web_panel.append(&web_color_row);
-    let web_crosshatch_color = gtk::Entry::builder()
-        .placeholder_text("#111111")
-        .tooltip_text("One monochrome color used by every crosshatch layer")
-        .build();
-    let web_crosshatch_color_row =
-        entry_status_row("Crosshatch Color", "Hex color", &web_crosshatch_color).0;
-    web_crosshatch_color_row.set_visible(false);
-    web_panel.append(&web_crosshatch_color_row);
-    let web_coverage = control_scale(0.0, 5.0, 0.05);
-    let web_angle = control_scale(-360.0, 360.0, 1.0);
-    let web_mark_angle = control_scale(-180.0, 180.0, 1.0);
-    let web_width_scale = control_scale(0.1, 4.0, 0.05);
-    let web_height_scale = control_scale(0.1, 4.0, 0.05);
-    let (web_coverage_row, web_coverage_status) =
-        control_status_row("Coverage", "Mark size", &web_coverage);
-    web_panel.append(&web_coverage_row);
-    let (web_angle_row, web_angle_status) =
-        control_status_row("Screen Angle", "Rotate sampling grid", &web_angle);
-    web_panel.append(&web_angle_row);
-    let (web_mark_angle_row, web_mark_angle_status) = control_status_row(
-        "Mark Rotation",
-        "Rotate marks within the grid",
-        &web_mark_angle,
-    );
-    web_panel.append(&web_mark_angle_row);
-    let (web_width_scale_row, web_width_scale_status) =
-        control_status_row("Mark Width", "Horizontal mark scale", &web_width_scale);
-    web_panel.append(&web_width_scale_row);
-    let (web_height_scale_row, web_height_scale_status) =
-        control_status_row("Mark Height", "Vertical mark scale", &web_height_scale);
-    web_panel.append(&web_height_scale_row);
-    let advanced = gtk::Expander::builder()
-        .label("Advanced")
-        .expanded(false)
-        .build();
-    let advanced_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    let web_threshold = control_scale(0.0, 1.0, 0.01);
-    let web_opacity = control_scale(0.0, 1.0, 0.01);
-    let web_detail = control_scale(0.1, 8.0, 0.1);
-    let (web_threshold_row, web_threshold_status) =
-        control_status_row("Light-Tone Cutoff", "Hide light marks", &web_threshold);
-    advanced_box.append(&web_threshold_row);
-    let (web_opacity_row, web_opacity_heading, web_opacity_status, web_opacity_help) =
-        control_status_row_with_help("Ink Opacity", "Transparent — Solid", &web_opacity);
-    let web_opacity_help = web_opacity_help.expect("Ink Opacity has help copy");
-    advanced_box.append(&web_opacity_row);
-    let (web_detail_row, web_detail_status) =
-        control_status_row("Sampling Detail", "Sample density", &web_detail);
-    advanced_box.append(&web_detail_row);
-    advanced.set_child(Some(&advanced_box));
-    web_panel.append(&advanced);
+    treatment_builder
+        .object::<gtk::Box>("web_visible_help_host")
+        .expect("ToniatorEditorControls.ui must define web_visible_help_host")
+        .append(&web_visible_help.button);
+    let web_mixed = treatment_builder
+        .object::<gtk::Label>("web_mixed")
+        .expect("ToniatorEditorControls.ui must define web_mixed");
+    let web_color = treatment_builder
+        .object::<gtk::Entry>("web_color")
+        .expect("ToniatorEditorControls.ui must define web_color");
+    web_color.set_tooltip_text(Some("Hex ink color; valid colors apply automatically"));
+    let web_color_row = treatment_builder
+        .object::<gtk::Box>("web_color_row")
+        .expect("ToniatorEditorControls.ui must define web_color_row")
+        .upcast();
+    let web_color_heading = treatment_builder
+        .object::<gtk::Label>("web_color_heading")
+        .expect("ToniatorEditorControls.ui must define web_color_heading");
+    let web_color_status = treatment_builder
+        .object::<gtk::Label>("web_color_status")
+        .expect("ToniatorEditorControls.ui must define web_color_status");
+    let web_color_help = help_handle(help_for("Ink Color").unwrap());
+    treatment_builder
+        .object::<gtk::Box>("web_color_help_host")
+        .expect("ToniatorEditorControls.ui must define web_color_help_host")
+        .append(&web_color_help.button);
+    web_color.update_relation(&[gtk::accessible::Relation::LabelledBy(&[
+        web_color_heading.upcast_ref()
+    ])]);
+    let web_crosshatch_color = treatment_builder
+        .object::<gtk::Entry>("web_crosshatch_color")
+        .expect("ToniatorEditorControls.ui must define web_crosshatch_color");
+    web_crosshatch_color
+        .set_tooltip_text(Some("One monochrome color used by every crosshatch layer"));
+    let web_crosshatch_color_row = treatment_builder
+        .object::<gtk::Box>("web_crosshatch_color_row")
+        .expect("ToniatorEditorControls.ui must define web_crosshatch_color_row")
+        .upcast();
 
-    let curve_panel = gtk::Box::new(gtk::Orientation::Vertical, 10);
-    curve_panel.add_css_class("workflow-group");
-    let curve_layout = gtk::DropDown::from_strings(&["Across Artwork", "Repeated Motif"]);
-    curve_panel.append(&combo_row("Layout", &curve_layout));
-    let curve_weight = control_scale(1.0, 200.0, 1.0);
-    curve_panel.append(&control_row(
-        "Line Weight",
-        "Global curve thickness",
-        &curve_weight,
-    ));
-    let curve_spacing = control_scale(8.0, 220.0, 1.0);
-    curve_panel.append(&control_row(
-        "Line Spacing",
-        "Global distance between curves",
-        &curve_spacing,
-    ));
-    let curve_profile = gtk::DropDown::from_strings(&[
-        "Straight",
-        "Soft Wave",
-        "Deep Wave",
-        "Custom",
-        "Mixed — Select One Ink",
-    ]);
-    curve_panel.append(&combo_row("Line Shape", &curve_profile));
-    let curve_editor_label = gtk::Label::builder()
-        .label("All Inks Curve")
-        .xalign(0.0)
-        .css_classes(["heading"])
-        .build();
-    curve_panel.append(&curve_editor_label);
+    let web_coverage = builder_control_scale(
+        &treatment_builder,
+        BuilderScaleSpec {
+            scale_id: "web_coverage_scale",
+            control_id: "web_coverage_control",
+            label_id: "web_coverage_label",
+            accessible_name: "Coverage",
+            minimum: 0.0,
+            maximum: 5.0,
+            step: 0.05,
+        },
+    );
+    let web_coverage_status = treatment_builder
+        .object::<gtk::Label>("web_coverage_status")
+        .expect("ToniatorEditorControls.ui must define web_coverage_status");
+    let web_angle = builder_control_scale(
+        &treatment_builder,
+        BuilderScaleSpec {
+            scale_id: "web_angle_scale",
+            control_id: "web_angle_control",
+            label_id: "web_angle_label",
+            accessible_name: "Screen Angle",
+            minimum: -360.0,
+            maximum: 360.0,
+            step: 1.0,
+        },
+    );
+    let web_angle_status = treatment_builder
+        .object::<gtk::Label>("web_angle_status")
+        .expect("ToniatorEditorControls.ui must define web_angle_status");
+    let web_mark_angle = builder_control_scale(
+        &treatment_builder,
+        BuilderScaleSpec {
+            scale_id: "web_mark_angle_scale",
+            control_id: "web_mark_angle_control",
+            label_id: "web_mark_angle_label",
+            accessible_name: "Mark Rotation",
+            minimum: -180.0,
+            maximum: 180.0,
+            step: 1.0,
+        },
+    );
+    let web_mark_angle_status = treatment_builder
+        .object::<gtk::Label>("web_mark_angle_status")
+        .expect("ToniatorEditorControls.ui must define web_mark_angle_status");
+    let web_width_scale = builder_control_scale(
+        &treatment_builder,
+        BuilderScaleSpec {
+            scale_id: "web_width_scale",
+            control_id: "web_width_scale_control",
+            label_id: "web_width_scale_label",
+            accessible_name: "Mark Width",
+            minimum: 0.1,
+            maximum: 4.0,
+            step: 0.05,
+        },
+    );
+    let web_width_scale_status = treatment_builder
+        .object::<gtk::Label>("web_width_scale_status")
+        .expect("ToniatorEditorControls.ui must define web_width_scale_status");
+    let web_height_scale = builder_control_scale(
+        &treatment_builder,
+        BuilderScaleSpec {
+            scale_id: "web_height_scale",
+            control_id: "web_height_scale_control",
+            label_id: "web_height_scale_label",
+            accessible_name: "Mark Height",
+            minimum: 0.1,
+            maximum: 4.0,
+            step: 0.05,
+        },
+    );
+    let web_height_scale_status = treatment_builder
+        .object::<gtk::Label>("web_height_scale_status")
+        .expect("ToniatorEditorControls.ui must define web_height_scale_status");
+    let web_threshold = builder_control_scale(
+        &treatment_builder,
+        BuilderScaleSpec {
+            scale_id: "web_threshold_scale",
+            control_id: "web_threshold_control",
+            label_id: "web_threshold_label",
+            accessible_name: "Light-Tone Cutoff",
+            minimum: 0.0,
+            maximum: 1.0,
+            step: 0.01,
+        },
+    );
+    let web_threshold_status = treatment_builder
+        .object::<gtk::Label>("web_threshold_status")
+        .expect("ToniatorEditorControls.ui must define web_threshold_status");
+    let web_opacity = builder_control_scale(
+        &treatment_builder,
+        BuilderScaleSpec {
+            scale_id: "web_opacity_scale",
+            control_id: "web_opacity_control",
+            label_id: "web_opacity_label",
+            accessible_name: "Ink Opacity",
+            minimum: 0.0,
+            maximum: 1.0,
+            step: 0.01,
+        },
+    );
+    let web_opacity_heading = treatment_builder
+        .object::<gtk::Label>("web_opacity_label")
+        .expect("ToniatorEditorControls.ui must define web_opacity_label");
+    let web_opacity_status = treatment_builder
+        .object::<gtk::Label>("web_opacity_status")
+        .expect("ToniatorEditorControls.ui must define web_opacity_status");
+    let web_opacity_help = help_handle(help_for("Ink Opacity").unwrap());
+    treatment_builder
+        .object::<gtk::Box>("web_opacity_help_host")
+        .expect("ToniatorEditorControls.ui must define web_opacity_help_host")
+        .append(&web_opacity_help.button);
+    let web_detail = builder_control_scale(
+        &treatment_builder,
+        BuilderScaleSpec {
+            scale_id: "web_detail_scale",
+            control_id: "web_detail_control",
+            label_id: "web_detail_label",
+            accessible_name: "Sampling Detail",
+            minimum: 0.1,
+            maximum: 8.0,
+            step: 0.1,
+        },
+    );
+    let web_detail_status = treatment_builder
+        .object::<gtk::Label>("web_detail_status")
+        .expect("ToniatorEditorControls.ui must define web_detail_status");
+
+    let curve_panel_host = treatment_builder
+        .object::<gtk::Box>("curve_panel_host")
+        .expect("ToniatorEditorControls.ui must define curve_panel_host");
+    let curve_layout = treatment_builder
+        .object::<gtk::DropDown>("curve_layout")
+        .expect("ToniatorEditorControls.ui must define curve_layout");
+    let curve_layout_label = treatment_builder
+        .object::<gtk::Label>("curve_layout_label")
+        .expect("ToniatorEditorControls.ui must define curve_layout_label");
+    configure_dropdown_accessibility(&curve_layout, &curve_layout_label, "Layout");
+    sync_dropdown_strings(&curve_layout, &["Across Artwork", "Repeated Motif"]);
+    let curve_weight = builder_control_scale(
+        &treatment_builder,
+        BuilderScaleSpec {
+            scale_id: "curve_weight_scale",
+            control_id: "curve_weight_control",
+            label_id: "curve_weight_label",
+            accessible_name: "Line Weight",
+            minimum: 1.0,
+            maximum: 200.0,
+            step: 1.0,
+        },
+    );
+    let curve_spacing = builder_control_scale(
+        &treatment_builder,
+        BuilderScaleSpec {
+            scale_id: "curve_spacing_scale",
+            control_id: "curve_spacing_control",
+            label_id: "curve_spacing_label",
+            accessible_name: "Line Spacing",
+            minimum: 8.0,
+            maximum: 220.0,
+            step: 1.0,
+        },
+    );
+    let curve_profile = treatment_builder
+        .object::<gtk::DropDown>("curve_profile")
+        .expect("ToniatorEditorControls.ui must define curve_profile");
+    let curve_profile_label = treatment_builder
+        .object::<gtk::Label>("curve_profile_label")
+        .expect("ToniatorEditorControls.ui must define curve_profile_label");
+    configure_dropdown_accessibility(&curve_profile, &curve_profile_label, "Line Shape");
+    sync_dropdown_strings(
+        &curve_profile,
+        &[
+            "Straight",
+            "Soft Wave",
+            "Deep Wave",
+            "Custom",
+            "Mixed — Select One Ink",
+        ],
+    );
+    let curve_editor_label = treatment_builder
+        .object::<gtk::Label>("curve_editor_label")
+        .expect("ToniatorEditorControls.ui must define curve_editor_label");
     let curve_editor = gtk::DrawingArea::builder()
         .content_width(300)
         .content_height(220)
@@ -8775,248 +9252,464 @@ fn build_editor_view(
         .tooltip_text("Drag curve anchors and handles; double-click a segment to add a point")
         .css_classes(["curve-editor"])
         .build();
-    curve_panel.append(&curve_editor);
     if let Some(spec) = help_for("Curve Editor") {
         curve_editor.set_tooltip_text(Some(spec.summary));
         curve_editor.update_property(&[gtk::accessible::Property::Description(spec.summary)]);
     }
-    curve_panel.append(
-        &gtk::Label::builder()
-            .label("Drag white points to shape the curve; blue points adjust bends. Double-click the line to add a point; Delete removes the selected point.")
-            .wrap(true)
-            .xalign(0.0)
-            .css_classes(["dim-label", "caption"])
-            .build(),
-    );
-    let curve_actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    let curve_reset = gtk::Button::with_label("Reset to Soft Wave");
-    curve_reset.add_css_class("flat");
-    let curve_shared = gtk::CheckButton::with_label("Share Line Shape Across Inks");
-    curve_shared.set_active(true);
-    curve_actions.append(&curve_reset);
+    treatment_builder
+        .object::<gtk::Box>("curve_editor_host")
+        .expect("ToniatorEditorControls.ui must define curve_editor_host")
+        .append(&curve_editor);
+    let curve_reset = treatment_builder
+        .object::<gtk::Button>("curve_reset")
+        .expect("ToniatorEditorControls.ui must define curve_reset");
     if let Some(spec) = help_for("Reset Line") {
         curve_reset.set_tooltip_text(Some(spec.summary));
         curve_reset.update_property(&[gtk::accessible::Property::Description(spec.summary)]);
     }
-    curve_panel.append(&curve_actions);
+    let curve_shared = treatment_builder
+        .object::<gtk::CheckButton>("curve_shared")
+        .expect("ToniatorEditorControls.ui must define curve_shared");
     let curve_shared_help = help_for("Share Line Shape Across Inks").map(help_handle);
-    let curve_shared_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-    curve_shared_row.append(&curve_shared);
-    if let Some(handle) = &curve_shared_help {
-        curve_shared_row.append(&handle.button);
+    if let Some(help) = &curve_shared_help {
+        treatment_builder
+            .object::<gtk::Box>("curve_shared_help_host")
+            .expect("ToniatorEditorControls.ui must define curve_shared_help_host")
+            .append(&help.button);
     }
-    curve_panel.append(&curve_shared_row);
-    let curve_target =
-        gtk::DropDown::from_strings(&["All Inks", "Cyan", "Magenta", "Yellow", "Black"]);
-    let (curve_target_row, curve_target_label, curve_target_help) =
-        labeled_combo_row_with_help("Adjust Ink", &curve_target);
-    curve_panel.append(&curve_target_row);
-    let motif_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    motif_box.append(
-        &gtk::Label::builder()
-            .label("Repeated Motif")
-            .xalign(0.0)
-            .css_classes(["heading"])
-            .build(),
+    let curve_target = treatment_builder
+        .object::<gtk::DropDown>("curve_target")
+        .expect("ToniatorEditorControls.ui must define curve_target");
+    let curve_target_label = treatment_builder
+        .object::<gtk::Label>("curve_target_label")
+        .expect("ToniatorEditorControls.ui must define curve_target_label");
+    configure_dropdown_accessibility(&curve_target, &curve_target_label, "Adjust Ink");
+    sync_dropdown_strings(
+        &curve_target,
+        &["All Inks", "Cyan", "Magenta", "Yellow", "Black"],
     );
-    let motif_coverage =
-        gtk::DropDown::from_strings(&["Cover Artwork Automatically", "Set Rows and Columns"]);
-    motif_box.append(&combo_row("Artwork Coverage", &motif_coverage));
-    let motif_size = control_scale(4.0, 200.0, 1.0);
-    motif_box.append(&control_status_row("Motif Size", "Repeated curve width", &motif_size).0);
-    let motif_columns = control_scale(1.0, 40.0, 1.0);
+    let curve_target_row: gtk::Widget = treatment_builder
+        .object::<gtk::Box>("curve_target_row")
+        .expect("ToniatorEditorControls.ui must define curve_target_row")
+        .upcast();
+    curve_target_row.set_visible(false);
+    let curve_target_help = help_for("Adjust Ink").map(|spec| {
+        let handle = help_handle(spec);
+        treatment_builder
+            .object::<gtk::Box>("curve_target_help_host")
+            .expect("ToniatorEditorControls.ui must define curve_target_help_host")
+            .append(&handle.button);
+        handle
+    });
+    let motif_controls: gtk::Widget = treatment_builder
+        .object::<gtk::Box>("motif_controls")
+        .expect("ToniatorEditorControls.ui must define motif_controls")
+        .upcast();
+    motif_controls.set_visible(false);
+    let motif_coverage = treatment_builder
+        .object::<gtk::DropDown>("motif_coverage")
+        .expect("ToniatorEditorControls.ui must define motif_coverage");
+    let motif_coverage_label = treatment_builder
+        .object::<gtk::Label>("motif_coverage_label")
+        .expect("ToniatorEditorControls.ui must define motif_coverage_label");
+    configure_dropdown_accessibility(&motif_coverage, &motif_coverage_label, "Artwork Coverage");
+    sync_dropdown_strings(
+        &motif_coverage,
+        &["Cover Artwork Automatically", "Set Rows and Columns"],
+    );
+    let motif_size = builder_control_scale(
+        &treatment_builder,
+        BuilderScaleSpec {
+            scale_id: "motif_size_scale",
+            control_id: "motif_size_control",
+            label_id: "motif_size_label",
+            accessible_name: "Motif Size",
+            minimum: 4.0,
+            maximum: 200.0,
+            step: 1.0,
+        },
+    );
+    let motif_columns = builder_control_scale(
+        &treatment_builder,
+        BuilderScaleSpec {
+            scale_id: "motif_columns_scale",
+            control_id: "motif_columns_control",
+            label_id: "motif_columns_label",
+            accessible_name: "Columns",
+            minimum: 1.0,
+            maximum: 40.0,
+            step: 1.0,
+        },
+    );
     motif_columns.set_digits(0);
-    motif_box.append(&control_status_row("Columns", "Copies across", &motif_columns).0);
-    let motif_rows = control_scale(1.0, 80.0, 1.0);
-    motif_rows.set_digits(0);
-    motif_box.append(&control_status_row("Rows", "Layered rows", &motif_rows).0);
-    let motif_row_spacing = control_scale(1.0, 160.0, 1.0);
-    motif_box
-        .append(&control_status_row("Row Spacing", "Distance between rows", &motif_row_spacing).0);
-    let motif_stagger = control_scale(-200.0, 200.0, 1.0);
-    motif_box.append(
-        &control_status_row(
-            "Alternate Row Offset",
-            "Alternate row shift",
-            &motif_stagger,
-        )
-        .0,
+    let motif_rows = builder_control_scale(
+        &treatment_builder,
+        BuilderScaleSpec {
+            scale_id: "motif_rows_scale",
+            control_id: "motif_rows_control",
+            label_id: "motif_rows_label",
+            accessible_name: "Rows",
+            minimum: 1.0,
+            maximum: 80.0,
+            step: 1.0,
+        },
     );
-    let motif_alternate = gtk::DropDown::from_strings(&["None", "Mirror", "Half Turn"]);
-    motif_box.append(&combo_row("Alternate Copies", &motif_alternate));
-    let motif_arrange = gtk::CheckButton::with_label("Adjust Layout on Artwork");
+    motif_rows.set_digits(0);
+    let motif_row_spacing = builder_control_scale(
+        &treatment_builder,
+        BuilderScaleSpec {
+            scale_id: "motif_row_spacing_scale",
+            control_id: "motif_row_spacing_control",
+            label_id: "motif_row_spacing_label",
+            accessible_name: "Row Spacing",
+            minimum: 1.0,
+            maximum: 160.0,
+            step: 1.0,
+        },
+    );
+    let motif_stagger = builder_control_scale(
+        &treatment_builder,
+        BuilderScaleSpec {
+            scale_id: "motif_stagger_scale",
+            control_id: "motif_stagger_control",
+            label_id: "motif_stagger_label",
+            accessible_name: "Alternate Row Offset",
+            minimum: -200.0,
+            maximum: 200.0,
+            step: 1.0,
+        },
+    );
+    let motif_alternate = treatment_builder
+        .object::<gtk::DropDown>("motif_alternate")
+        .expect("ToniatorEditorControls.ui must define motif_alternate");
+    let motif_alternate_label = treatment_builder
+        .object::<gtk::Label>("motif_alternate_label")
+        .expect("ToniatorEditorControls.ui must define motif_alternate_label");
+    configure_dropdown_accessibility(&motif_alternate, &motif_alternate_label, "Alternate Copies");
+    sync_dropdown_strings(&motif_alternate, &["None", "Mirror", "Half Turn"]);
+    let motif_arrange = treatment_builder
+        .object::<gtk::CheckButton>("motif_arrange")
+        .expect("ToniatorEditorControls.ui must define motif_arrange");
     motif_arrange.set_tooltip_text(Some(
         "Drag the center, rotation, and spacing handles on the artwork",
     ));
-    motif_box.append(&check_row(&motif_arrange, "Adjust Layout on Artwork"));
-    let motif_mixed = gtk::Label::builder()
-        .xalign(0.0)
-        .wrap(true)
-        .css_classes(["dim-label", "caption"])
-        .build();
-    motif_box.append(&motif_mixed);
-    motif_box.append(
-        &gtk::Label::builder()
-            .label("Drag the center to move, R to rotate, and S to separate rows. Esc cancels the drag.")
-            .xalign(0.0)
-            .wrap(true)
-            .css_classes(["dim-label", "caption"])
-            .build(),
-    );
-    let motif_controls: gtk::Widget = motif_box.upcast();
-    motif_controls.set_visible(false);
-    curve_panel.append(&motif_controls);
-    let curve_visible_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let motif_mixed = treatment_builder
+        .object::<gtk::Label>("motif_mixed")
+        .expect("ToniatorEditorControls.ui must define motif_mixed");
+
+    let curve_visible_label = treatment_builder
+        .object::<gtk::Label>("curve_visible_label")
+        .expect("ToniatorEditorControls.ui must define curve_visible_label");
     let curve_visible = [
-        gtk::CheckButton::with_label("C"),
-        gtk::CheckButton::with_label("M"),
-        gtk::CheckButton::with_label("Y"),
-        gtk::CheckButton::with_label("K"),
+        treatment_builder
+            .object::<gtk::CheckButton>("curve_visible_c")
+            .expect("ToniatorEditorControls.ui must define curve_visible_c"),
+        treatment_builder
+            .object::<gtk::CheckButton>("curve_visible_m")
+            .expect("ToniatorEditorControls.ui must define curve_visible_m"),
+        treatment_builder
+            .object::<gtk::CheckButton>("curve_visible_y")
+            .expect("ToniatorEditorControls.ui must define curve_visible_y"),
+        treatment_builder
+            .object::<gtk::CheckButton>("curve_visible_k")
+            .expect("ToniatorEditorControls.ui must define curve_visible_k"),
     ];
     for button in &curve_visible {
         button.set_tooltip_text(Some("Toggle this ink in the output"));
-        curve_visible_row.append(button);
     }
     let curve_visible_help = help_handle(help_for("Visible Inks").unwrap());
-    curve_visible_row.append(&curve_visible_help.button);
-    let curve_visible_label = gtk::Label::builder()
-        .label("Visible Inks")
-        .xalign(0.0)
-        .css_classes(["heading"])
-        .build();
-    curve_panel.append(&curve_visible_label);
-    curve_panel.append(&curve_visible_row);
-    let curve_mixed = gtk::Label::builder()
-        .xalign(0.0)
-        .wrap(true)
-        .css_classes(["dim-label", "caption"])
-        .build();
-    curve_panel.append(&curve_mixed);
-    let curve_color = gtk::Entry::builder()
-        .placeholder_text("#RRGGBB")
-        .tooltip_text("Hex ink color; valid colors apply automatically")
-        .build();
-    let (curve_color_row, curve_color_status) =
-        entry_status_row("Ink Color", "Hex color", &curve_color);
-    curve_panel.append(&curve_color_row);
-    let curve_crosshatch_color = gtk::Entry::builder()
-        .placeholder_text("#111111")
-        .tooltip_text("One monochrome color used by every crosshatch layer")
-        .build();
-    let curve_crosshatch_color_row =
-        entry_status_row("Crosshatch Color", "Hex color", &curve_crosshatch_color).0;
-    curve_crosshatch_color_row.set_visible(false);
-    curve_panel.append(&curve_crosshatch_color_row);
-    let curve_coverage = control_scale(0.0, 5.0, 0.05);
-    let (curve_coverage_row, curve_coverage_status) =
-        control_status_row("Line Coverage", "Curve scale", &curve_coverage);
-    curve_panel.append(&curve_coverage_row);
-    let curve_angle = control_scale(-360.0, 360.0, 1.0);
-    let (curve_angle_row, curve_angle_status) =
-        control_status_row("Screen Angle", "Rotate ink screen", &curve_angle);
-    curve_panel.append(&curve_angle_row);
-    let curve_position_x = control_scale(-1000.0, 1000.0, 1.0);
-    let (curve_position_x_row, curve_position_x_status) =
-        control_status_row("Position X", "Move across", &curve_position_x);
-    curve_panel.append(&curve_position_x_row);
-    let curve_position_y = control_scale(-1000.0, 1000.0, 1.0);
-    let (curve_position_y_row, curve_position_y_status) =
-        control_status_row("Position Y", "Move vertically", &curve_position_y);
-    curve_panel.append(&curve_position_y_row);
-    let curve_opacity = control_scale(0.0, 1.0, 0.01);
-    let (curve_opacity_row, curve_opacity_status) =
-        control_status_row("Ink Opacity", "Transparent — Solid", &curve_opacity);
-    curve_panel.append(&curve_opacity_row);
-    let curve_advanced = gtk::Expander::builder()
-        .label("Advanced")
-        .expanded(false)
-        .build();
-    let curve_advanced_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    let curve_threshold = control_scale(0.0, 1.0, 0.01);
-    let (curve_threshold_row, curve_threshold_status) =
-        control_status_row("Light-Tone Cutoff", "Hide light lines", &curve_threshold);
-    curve_advanced_box.append(&curve_threshold_row);
-    let curve_detail = control_scale(0.1, 8.0, 0.1);
-    let (curve_detail_row, curve_detail_status) =
-        control_status_row("Sampling Detail", "Sample density", &curve_detail);
-    curve_advanced_box.append(&curve_detail_row);
-    let curve_close_ends = gtk::CheckButton::with_label("Close Ends");
-    let curve_smooth_join = gtk::CheckButton::with_label("Smooth Join");
-    curve_advanced_box.append(&check_row(&curve_close_ends, "Close Ends"));
-    curve_advanced_box.append(&check_row(&curve_smooth_join, "Smooth Join"));
-    curve_advanced.set_child(Some(&curve_advanced_box));
-    curve_panel.append(&curve_advanced);
-    let treatment_modes = gtk::Stack::new();
-    treatment_modes.add_named(&native_panel, Some("native"));
-    treatment_modes.add_named(&web_panel, Some("web"));
-    treatment_modes.add_named(&curve_panel, Some("curve"));
-    treatment_modes.set_visible_child_name("native");
-    inspector.append(&treatment_modes);
+    treatment_builder
+        .object::<gtk::Box>("curve_visible_help_host")
+        .expect("ToniatorEditorControls.ui must define curve_visible_help_host")
+        .append(&curve_visible_help.button);
+    let curve_mixed = treatment_builder
+        .object::<gtk::Label>("curve_mixed")
+        .expect("ToniatorEditorControls.ui must define curve_mixed");
+    let curve_color = treatment_builder
+        .object::<gtk::Entry>("curve_color")
+        .expect("ToniatorEditorControls.ui must define curve_color");
+    curve_color.set_tooltip_text(Some("Hex ink color; valid colors apply automatically"));
+    let curve_color_row = treatment_builder
+        .object::<gtk::Box>("curve_color_row")
+        .expect("ToniatorEditorControls.ui must define curve_color_row")
+        .upcast();
+    let curve_color_status = treatment_builder
+        .object::<gtk::Label>("curve_color_status")
+        .expect("ToniatorEditorControls.ui must define curve_color_status");
+    let curve_crosshatch_color = treatment_builder
+        .object::<gtk::Entry>("curve_crosshatch_color")
+        .expect("ToniatorEditorControls.ui must define curve_crosshatch_color");
+    curve_crosshatch_color
+        .set_tooltip_text(Some("One monochrome color used by every crosshatch layer"));
+    let curve_crosshatch_color_row = treatment_builder
+        .object::<gtk::Box>("curve_crosshatch_color_row")
+        .expect("ToniatorEditorControls.ui must define curve_crosshatch_color_row")
+        .upcast();
 
-    let document = gtk::Expander::builder()
-        .label("Document")
-        .expanded(false)
-        .build();
-    let document_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    document_box.set_margin_top(10);
-    document_box.append(source_label);
-    document_box.append(autosave_status);
-    let output_mode = gtk::DropDown::from_strings(&["CMYK Print", "RGB Screen"]);
-    output_mode.set_tooltip_text(Some("Choose subtractive CMYK inks for print or additive RGB screens for transparent, light-based output."));
-    document_box.append(&combo_row("Output Model", &output_mode));
-    let artwork_source = gtk::DropDown::from_strings(&artwork_source_labels(false));
-    document_box.append(&combo_row("Artwork Source", &artwork_source));
-    let artwork_source_note = gtk::Label::builder()
-        .xalign(0.0)
-        .wrap(true)
-        .css_classes(["dim-label", "caption"])
-        .build();
-    document_box.append(&artwork_source_note);
-    let source_alpha = gtk::DropDown::from_strings(&source_alpha_labels(false));
-    let source_alpha_row = combo_row("Source Alpha", &source_alpha);
-    document_box.append(&source_alpha_row);
-    let source_alpha_note = gtk::Label::builder()
-        .label("Alpha is the source; source alpha is not applied again.")
-        .xalign(0.0)
-        .wrap(true)
-        .css_classes(["dim-label", "caption"])
-        .build();
+    let curve_coverage = builder_control_scale(
+        &treatment_builder,
+        BuilderScaleSpec {
+            scale_id: "curve_coverage_scale",
+            control_id: "curve_coverage_control",
+            label_id: "curve_coverage_label",
+            accessible_name: "Line Coverage",
+            minimum: 0.0,
+            maximum: 5.0,
+            step: 0.05,
+        },
+    );
+    let curve_coverage_status = treatment_builder
+        .object::<gtk::Label>("curve_coverage_status")
+        .expect("ToniatorEditorControls.ui must define curve_coverage_status");
+    let curve_angle = builder_control_scale(
+        &treatment_builder,
+        BuilderScaleSpec {
+            scale_id: "curve_angle_scale",
+            control_id: "curve_angle_control",
+            label_id: "curve_angle_label",
+            accessible_name: "Screen Angle",
+            minimum: -360.0,
+            maximum: 360.0,
+            step: 1.0,
+        },
+    );
+    let curve_angle_status = treatment_builder
+        .object::<gtk::Label>("curve_angle_status")
+        .expect("ToniatorEditorControls.ui must define curve_angle_status");
+    let curve_position_x = builder_control_scale(
+        &treatment_builder,
+        BuilderScaleSpec {
+            scale_id: "curve_position_x_scale",
+            control_id: "curve_position_x_control",
+            label_id: "curve_position_x_label",
+            accessible_name: "Position X",
+            minimum: -1000.0,
+            maximum: 1000.0,
+            step: 1.0,
+        },
+    );
+    let curve_position_x_status = treatment_builder
+        .object::<gtk::Label>("curve_position_x_status")
+        .expect("ToniatorEditorControls.ui must define curve_position_x_status");
+    let curve_position_y = builder_control_scale(
+        &treatment_builder,
+        BuilderScaleSpec {
+            scale_id: "curve_position_y_scale",
+            control_id: "curve_position_y_control",
+            label_id: "curve_position_y_label",
+            accessible_name: "Position Y",
+            minimum: -1000.0,
+            maximum: 1000.0,
+            step: 1.0,
+        },
+    );
+    let curve_position_y_status = treatment_builder
+        .object::<gtk::Label>("curve_position_y_status")
+        .expect("ToniatorEditorControls.ui must define curve_position_y_status");
+    let curve_opacity = builder_control_scale(
+        &treatment_builder,
+        BuilderScaleSpec {
+            scale_id: "curve_opacity_scale",
+            control_id: "curve_opacity_control",
+            label_id: "curve_opacity_label",
+            accessible_name: "Ink Opacity",
+            minimum: 0.0,
+            maximum: 1.0,
+            step: 0.01,
+        },
+    );
+    let curve_opacity_status = treatment_builder
+        .object::<gtk::Label>("curve_opacity_status")
+        .expect("ToniatorEditorControls.ui must define curve_opacity_status");
+    let curve_threshold = builder_control_scale(
+        &treatment_builder,
+        BuilderScaleSpec {
+            scale_id: "curve_threshold_scale",
+            control_id: "curve_threshold_control",
+            label_id: "curve_threshold_label",
+            accessible_name: "Light-Tone Cutoff",
+            minimum: 0.0,
+            maximum: 1.0,
+            step: 0.01,
+        },
+    );
+    let curve_threshold_status = treatment_builder
+        .object::<gtk::Label>("curve_threshold_status")
+        .expect("ToniatorEditorControls.ui must define curve_threshold_status");
+    let curve_detail = builder_control_scale(
+        &treatment_builder,
+        BuilderScaleSpec {
+            scale_id: "curve_detail_scale",
+            control_id: "curve_detail_control",
+            label_id: "curve_detail_label",
+            accessible_name: "Sampling Detail",
+            minimum: 0.1,
+            maximum: 8.0,
+            step: 0.1,
+        },
+    );
+    let curve_detail_status = treatment_builder
+        .object::<gtk::Label>("curve_detail_status")
+        .expect("ToniatorEditorControls.ui must define curve_detail_status");
+    let curve_close_ends = treatment_builder
+        .object::<gtk::CheckButton>("curve_close_ends")
+        .expect("ToniatorEditorControls.ui must define curve_close_ends");
+    let curve_smooth_join = treatment_builder
+        .object::<gtk::CheckButton>("curve_smooth_join")
+        .expect("ToniatorEditorControls.ui must define curve_smooth_join");
+
+    let treatment_modes = treatment_builder
+        .object::<gtk::Stack>("treatment_modes")
+        .expect("ToniatorEditorControls.ui must define treatment_modes");
+    treatment_modes.page(&native_panel).set_name("native");
+    treatment_modes.page(&web_panel_host).set_name("web");
+    treatment_modes.page(&curve_panel_host).set_name("curve");
+    treatment_modes.set_visible_child_name("native");
+    let hierarchy = build_inspector_hierarchy();
+    let controls_builder = gtk::Builder::from_string(EDITOR_CONTROLS_UI);
+    let editor_controls = controls_builder
+        .object::<gtk::Box>("editor_controls")
+        .expect("ToniatorEditorControls.ui must define editor_controls");
+    let source_controls = controls_builder
+        .object::<gtk::Box>("source_controls")
+        .expect("ToniatorEditorControls.ui must define source_controls");
+    editor_controls.remove(&source_controls);
+    controls_builder
+        .object::<gtk::Box>("source_dynamic_host")
+        .expect("ToniatorEditorControls.ui must define source_dynamic_host")
+        .append(source_label);
+    controls_builder
+        .object::<gtk::Box>("source_dynamic_host")
+        .expect("ToniatorEditorControls.ui must define source_dynamic_host")
+        .append(autosave_status);
+    let artwork_source = controls_builder
+        .object::<gtk::DropDown>("artwork_source")
+        .expect("ToniatorEditorControls.ui must define artwork_source");
+    let artwork_source_label = controls_builder
+        .object::<gtk::Label>("artwork_source_label")
+        .expect("ToniatorEditorControls.ui must define artwork_source_label");
+    configure_dropdown_accessibility(&artwork_source, &artwork_source_label, "Artwork Source");
+    sync_dropdown_strings(&artwork_source, &artwork_source_labels(false));
+    let artwork_source_note = controls_builder
+        .object::<gtk::Label>("artwork_source_note")
+        .expect("ToniatorEditorControls.ui must define artwork_source_note");
+    let source_alpha = controls_builder
+        .object::<gtk::DropDown>("source_alpha")
+        .expect("ToniatorEditorControls.ui must define source_alpha");
+    let source_alpha_label = controls_builder
+        .object::<gtk::Label>("source_alpha_label")
+        .expect("ToniatorEditorControls.ui must define source_alpha_label");
+    configure_dropdown_accessibility(&source_alpha, &source_alpha_label, "Source Alpha");
+    sync_dropdown_strings(&source_alpha, &source_alpha_labels(false));
+    let source_alpha_row: gtk::Widget = controls_builder
+        .object::<gtk::Box>("source_alpha_row")
+        .expect("ToniatorEditorControls.ui must define source_alpha_row")
+        .upcast();
+    let source_alpha_note = controls_builder
+        .object::<gtk::Label>("source_alpha_note")
+        .expect("ToniatorEditorControls.ui must define source_alpha_note");
     source_alpha_note.set_visible(false);
-    document_box.append(&source_alpha_note);
-    let channel_assignment =
-        gtk::DropDown::from_strings(&channel_assignment_labels(true, OutputModel::CmykPrint));
-    document_box.append(&combo_row("Channel Assignment", &channel_assignment));
-    let channel_assignment_note = gtk::Label::builder()
-        .xalign(0.0)
-        .wrap(true)
-        .css_classes(["dim-label", "caption"])
-        .build();
-    document_box.append(&channel_assignment_note);
-    let active_channel =
-        gtk::DropDown::from_strings(&output_channel_labels(OutputModel::CmykPrint));
-    let active_channel_row = combo_row("Active Channel", &active_channel);
+    hierarchy.source_content.append(&source_controls);
+
+    let output_controls = controls_builder
+        .object::<gtk::Box>("output_controls")
+        .expect("ToniatorEditorControls.ui must define output_controls");
+    editor_controls.remove(&output_controls);
+    let output_mode = controls_builder
+        .object::<gtk::DropDown>("output_mode")
+        .expect("ToniatorEditorControls.ui must define output_mode");
+    let output_mode_label = controls_builder
+        .object::<gtk::Label>("output_mode_label")
+        .expect("ToniatorEditorControls.ui must define output_mode_label");
+    configure_dropdown_accessibility(&output_mode, &output_mode_label, "Output Model");
+    sync_dropdown_strings(&output_mode, &["CMYK Print", "RGB Screen"]);
+    output_mode.set_tooltip_text(Some("Choose subtractive CMYK inks for print or additive RGB screens for transparent, light-based output."));
+    let channel_assignment = controls_builder
+        .object::<gtk::DropDown>("channel_assignment")
+        .expect("ToniatorEditorControls.ui must define channel_assignment");
+    let channel_assignment_label = controls_builder
+        .object::<gtk::Label>("channel_assignment_label")
+        .expect("ToniatorEditorControls.ui must define channel_assignment_label");
+    configure_dropdown_accessibility(
+        &channel_assignment,
+        &channel_assignment_label,
+        "Channel Assignment",
+    );
+    sync_dropdown_strings(
+        &channel_assignment,
+        &channel_assignment_labels(true, OutputModel::CmykPrint),
+    );
+    let channel_assignment_note = controls_builder
+        .object::<gtk::Label>("channel_assignment_note")
+        .expect("ToniatorEditorControls.ui must define channel_assignment_note");
+    let active_channel = controls_builder
+        .object::<gtk::DropDown>("active_channel")
+        .expect("ToniatorEditorControls.ui must define active_channel");
+    let active_channel_label = controls_builder
+        .object::<gtk::Label>("active_channel_label")
+        .expect("ToniatorEditorControls.ui must define active_channel_label");
+    configure_dropdown_accessibility(&active_channel, &active_channel_label, "Active Channel");
+    sync_dropdown_strings(
+        &active_channel,
+        &output_channel_labels(OutputModel::CmykPrint),
+    );
+    let active_channel_row: gtk::Widget = controls_builder
+        .object::<gtk::Box>("active_channel_row")
+        .expect("ToniatorEditorControls.ui must define active_channel_row")
+        .upcast();
     active_channel_row.set_visible(false);
-    document_box.append(&active_channel_row);
-    let crosshatch_action = gtk::Button::with_label("Use Legacy Crosshatch");
+    let crosshatch_action = controls_builder
+        .object::<gtk::Button>("crosshatch_action")
+        .expect("ToniatorEditorControls.ui must define crosshatch_action");
     crosshatch_action.set_tooltip_text(Some(
         "Temporarily use the legacy brightness crosshatch treatment with the current output model.",
     ));
-    document_box.append(&crosshatch_action);
-    let crosshatch_note = gtk::Label::builder()
-        .label("Legacy Crosshatch temporarily switches to Curves. Exit restores ordinary Curves.")
-        .xalign(0.0)
-        .wrap(true)
-        .css_classes(["dim-label", "caption"])
-        .build();
-    document_box.append(&crosshatch_note);
+    let crosshatch_note = controls_builder
+        .object::<gtk::Label>("crosshatch_note")
+        .expect("ToniatorEditorControls.ui must define crosshatch_note");
+    hierarchy.output_content.append(&output_controls);
+
+    let channel_scope = gtk::DropDown::from_strings(&[
+        "All Inks",
+        "Cyan Ink",
+        "Magenta Ink",
+        "Yellow Ink",
+        "Black Ink",
+    ]);
+    channel_scope.set_tooltip_text(Some(
+        "Choose which included inks or channels Shapes and Curves will edit.",
+    ));
+    channel_scope.update_property(&[gtk::accessible::Property::Label("Treatment Editing Scope")]);
+    hierarchy.channel_scope_host.append(&channel_scope);
+    let aggregate_channel_controls = build_aggregate_channel_controls();
+    hierarchy
+        .channel_panel_stack
+        .add_named(&aggregate_channel_controls.root, Some("aggregate"));
+    let mut channel_controls = Vec::new();
+    for channel in OutputChannelId::CMYK
+        .into_iter()
+        .chain(OutputChannelId::RGB)
+    {
+        let controls = build_channel_controls(channel);
+        hierarchy
+            .channel_panel_stack
+            .add_named(&controls.root, Some(channel.stable_id()));
+        channel_controls.push(controls);
+    }
+    hierarchy
+        .channel_panel_stack
+        .set_visible_child_name("aggregate");
+
     let appearance_controls = build_appearance_controls();
     let preview_surface = appearance_controls.preview_surface.clone();
     let preview_color = appearance_controls.preview_color.clone();
     let export_background = appearance_controls.export_background.clone();
     let export_color = appearance_controls.export_color.clone();
-    document_box.append(&appearance_controls.container);
-    document.set_child(Some(&document_box));
-    inspector.append(&document);
+    hierarchy
+        .appearance_content
+        .append(&appearance_controls.container);
+    inspector.append(&hierarchy.root);
+    hierarchy.treatment_content.append(&treatment_chrome);
 
     let inspector_scroll = gtk::ScrolledWindow::builder()
         .vexpand(true)
@@ -9047,6 +9740,8 @@ fn build_editor_view(
         container: layout.clone().upcast(),
         paned: layout,
         inspector_shell: inspector_shell.upcast(),
+        #[cfg(test)]
+        inspector_root: inspector,
         workspace_status,
         cancel_preview,
         cancel_export,
@@ -9058,10 +9753,21 @@ fn build_editor_view(
         zoom,
         zoom_entry,
         zoom_in,
+        detail,
+        coverage,
+        contrast,
+        angle,
+        dots,
+        squares,
+        lines,
+        curves,
+        legacy,
         treatment_modes,
         preset_import,
         preset_save,
-        document_section: document,
+        source_section: hierarchy.source_section,
+        output_section: hierarchy.output_section,
+        channel_settings_section: hierarchy.channel_settings_section,
         output_mode,
         artwork_source,
         artwork_source_note,
@@ -9072,6 +9778,10 @@ fn build_editor_view(
         channel_assignment_note,
         active_channel,
         active_channel_row,
+        channel_scope,
+        channel_panel_stack: hierarchy.channel_panel_stack,
+        channel_controls,
+        aggregate_channel_controls,
         crosshatch_action,
         crosshatch_note,
         preview_surface,
@@ -9595,33 +10305,7 @@ fn help_button(spec: &HelpSpec) -> gtk::MenuButton {
     help_handle(spec).button
 }
 
-fn row_heading(title: &str) -> (gtk::Box, gtk::Label, Option<gtk::MenuButton>) {
-    let labels = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let label = gtk::Label::builder()
-        .label(title)
-        .xalign(0.0)
-        .css_classes(["heading"])
-        .build();
-    labels.append(&label);
-    let help = help_for(title).map(help_button);
-    if let Some(button) = &help {
-        labels.append(button);
-    }
-    (labels, label, help)
-}
-
-fn check_row(button: &gtk::CheckButton, control: &str) -> gtk::Widget {
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-    row.append(button);
-    if let Some(spec) = help_for(control) {
-        button.set_tooltip_text(Some(spec.summary));
-        let help = help_button(spec);
-        button.update_property(&[gtk::accessible::Property::Description(spec.summary)]);
-        row.append(&help);
-    }
-    row.upcast()
-}
-
+#[cfg(test)]
 fn button_with_help(button: &gtk::Button, control: &str) -> gtk::Widget {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     row.set_visible(button.is_visible());
@@ -9826,6 +10510,65 @@ fn output_channel_labels(output: OutputModel) -> Vec<&'static str> {
         .collect()
 }
 
+fn channel_scope_labels(output: OutputModel, crosshatch: bool) -> Vec<&'static str> {
+    if crosshatch {
+        return vec!["All Layers"];
+    }
+    match output {
+        OutputModel::CmykPrint => vec![
+            "All Inks",
+            "Cyan Ink",
+            "Magenta Ink",
+            "Yellow Ink",
+            "Black Ink",
+        ],
+        OutputModel::RgbScreen => vec![
+            "All Channels",
+            "Red Channel",
+            "Green Channel",
+            "Blue Channel",
+        ],
+    }
+}
+
+/// Converts a transient treatment-scope presentation position into the current
+/// model's semantic channel only at the callback boundary. The cached widget
+/// identity remains the `OutputChannelId`; no index is retained as widget
+/// identity, and the aggregate scope remains `None` rather than an ID.
+fn channel_scope_channel(selected: u32, output: OutputModel) -> Option<Option<OutputChannelId>> {
+    if selected == 0 {
+        return Some(None);
+    }
+    output
+        .channels()
+        .get(selected.checked_sub(1)? as usize)
+        .copied()
+        .map(Some)
+}
+
+fn channel_scope_target_index(
+    channel: Option<OutputChannelId>,
+    output: OutputModel,
+) -> Option<u32> {
+    match channel {
+        None => Some(0),
+        Some(channel) => output
+            .channels()
+            .iter()
+            .position(|candidate| *candidate == channel)
+            .map(|index| index as u32 + 1),
+    }
+}
+
+fn channel_scope_index(selected_target: u32, output: OutputModel, crosshatch: bool) -> u32 {
+    if crosshatch {
+        return 0;
+    }
+    channel_scope_channel(selected_target, output)
+        .and_then(|channel| channel_scope_target_index(channel, output))
+        .unwrap_or(0)
+}
+
 fn pipeline_for_source(
     current: &ArtworkPipelineSettings,
     source: ArtworkSource,
@@ -9924,7 +10667,11 @@ fn sync_dropdown_strings(dropdown: &gtk::DropDown, values: &[&str]) {
     }
 
     let selected = dropdown.selected();
-    let new_selected = selected.min(values.len().saturating_sub(1) as u32);
+    let new_selected = if selected == gtk::INVALID_LIST_POSITION {
+        0
+    } else {
+        selected.min(values.len().saturating_sub(1) as u32)
+    };
     if let Some(model) = dropdown
         .model()
         .and_then(|model| model.downcast::<gtk::StringList>().ok())
@@ -10046,55 +10793,13 @@ fn sync_layer_terminology(
     sync_dropdown_strings(dropdown, values);
 }
 
-fn entry_status_row(title: &str, status: &str, entry: &gtk::Entry) -> (gtk::Widget, gtk::Label) {
-    let (row, _, status, _) = entry_status_row_with_help(title, status, entry);
-    (row, status)
-}
-
-fn entry_status_row_with_help(
-    title: &str,
-    status: &str,
-    entry: &gtk::Entry,
-) -> (gtk::Widget, gtk::Label, gtk::Label, Option<HelpHandle>) {
-    entry.set_hexpand(true);
-    entry.set_size_request(0, -1);
-    let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    let labels = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let heading = gtk::Label::builder()
-        .label(title)
-        .xalign(0.0)
-        .css_classes(["heading"])
-        .build();
-    labels.append(&heading);
-    let help = help_for(title).map(help_handle);
-    if let Some(handle) = &help {
-        labels.append(&handle.button);
-    }
-    let status = gtk::Label::builder()
-        .label(status)
-        .xalign(1.0)
-        .hexpand(true)
-        .ellipsize(gtk::pango::EllipsizeMode::End)
-        .css_classes(["dim-label", "caption"])
-        .build();
-    labels.append(&status);
-    row.append(&labels);
-    row.append(entry);
-    entry.update_relation(&[gtk::accessible::Relation::LabelledBy(&[
-        heading.upcast_ref()
-    ])]);
-    if let Some(spec) = help_for(title) {
-        entry.update_property(&[gtk::accessible::Property::Description(spec.summary)]);
-        entry.set_tooltip_text(Some(spec.summary));
-    }
-    (row.upcast(), heading, status, help)
-}
-
+#[cfg(test)]
 fn control_status_row(title: &str, status: &str, scale: &gtk::Scale) -> (gtk::Widget, gtk::Label) {
     let (row, _, status, _) = control_status_row_with_help(title, status, scale);
     (row, status)
 }
 
+#[cfg(test)]
 fn control_status_row_with_help(
     title: &str,
     status: &str,
@@ -10420,35 +11125,96 @@ fn curve_lerp(a: CurvePoint, b: CurvePoint, amount: f64) -> CurvePoint {
     }
 }
 
-fn control_row(title: &str, subtitle: &str, scale: &gtk::Scale) -> gtk::Widget {
-    let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    let (labels, title, help) = row_heading(title);
-    let subtitle = gtk::Label::builder()
-        .label(subtitle)
-        .xalign(1.0)
-        .hexpand(true)
-        .ellipsize(gtk::pango::EllipsizeMode::End)
-        .css_classes(["dim-label", "caption"])
-        .build();
-    labels.append(&subtitle);
-    row.append(&labels);
-    row.append(&precision_scale_control(scale));
-    scale.update_relation(&[gtk::accessible::Relation::LabelledBy(&[title.upcast_ref()])]);
-    if help.is_some() {
-        scale.update_property(&[gtk::accessible::Property::Description(
-            help_for(&title.text()).unwrap().summary,
-        )]);
-        scale.set_tooltip_text(help_for(&title.text()).map(|spec| spec.summary));
-    }
-    row.upcast()
+#[cfg(test)]
+fn control_scale(minimum: f64, maximum: f64, step: f64) -> gtk::Scale {
+    let scale = gtk::Scale::new(gtk::Orientation::Horizontal, None::<&gtk::Adjustment>);
+    configure_control_scale(&scale, minimum, maximum, step);
+    scale
 }
 
-fn control_scale(minimum: f64, maximum: f64, step: f64) -> gtk::Scale {
-    let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, minimum, maximum, step);
-    disable_pointer_scroll_adjustment(&scale);
+fn configure_control_scale(scale: &gtk::Scale, minimum: f64, maximum: f64, step: f64) {
+    scale.set_range(minimum, maximum);
+    scale.set_increments(step, step * 10.0);
+    disable_pointer_scroll_adjustment(scale);
     scale.set_draw_value(false);
     scale.set_hexpand(true);
+}
+
+#[derive(Clone, Copy)]
+struct BuilderScaleSpec {
+    scale_id: &'static str,
+    control_id: &'static str,
+    label_id: &'static str,
+    accessible_name: &'static str,
+    minimum: f64,
+    maximum: f64,
+    step: f64,
+}
+
+const NATIVE_CONTROL_SCALES: [BuilderScaleSpec; 4] = [
+    BuilderScaleSpec {
+        scale_id: "native_sampling_detail_scale",
+        control_id: "native_sampling_detail_control",
+        label_id: "native_sampling_detail_label",
+        accessible_name: "Sampling Detail",
+        minimum: 0.0,
+        maximum: 100.0,
+        step: 1.0,
+    },
+    BuilderScaleSpec {
+        scale_id: "native_coverage_scale",
+        control_id: "native_coverage_control",
+        label_id: "native_coverage_label",
+        accessible_name: "Coverage",
+        minimum: 0.0,
+        maximum: 160.0,
+        step: 1.0,
+    },
+    BuilderScaleSpec {
+        scale_id: "native_contrast_scale",
+        control_id: "native_contrast_control",
+        label_id: "native_contrast_label",
+        accessible_name: "Contrast",
+        minimum: 0.0,
+        maximum: 200.0,
+        step: 1.0,
+    },
+    BuilderScaleSpec {
+        scale_id: "native_screen_angle_scale",
+        control_id: "native_screen_angle_control",
+        label_id: "native_screen_angle_label",
+        accessible_name: "Screen Angle",
+        minimum: -180.0,
+        maximum: 180.0,
+        step: 1.0,
+    },
+];
+
+fn builder_control_scale(builder: &gtk::Builder, spec: BuilderScaleSpec) -> gtk::Scale {
+    let scale = builder
+        .object::<gtk::Scale>(spec.scale_id)
+        .unwrap_or_else(|| panic!("ToniatorEditorControls.ui must define {}", spec.scale_id));
+    let control = builder
+        .object::<gtk::Box>(spec.control_id)
+        .unwrap_or_else(|| panic!("ToniatorEditorControls.ui must define {}", spec.control_id));
+    let label = builder
+        .object::<gtk::Label>(spec.label_id)
+        .unwrap_or_else(|| panic!("ToniatorEditorControls.ui must define {}", spec.label_id));
+    configure_control_scale(&scale, spec.minimum, spec.maximum, spec.step);
+    attach_precision_entry(&scale, &control);
+    scale.update_property(&[gtk::accessible::Property::Label(spec.accessible_name)]);
+    scale.update_relation(&[gtk::accessible::Relation::LabelledBy(&[label.upcast_ref()])]);
     scale
+}
+
+fn configure_dropdown_accessibility(
+    dropdown: &gtk::DropDown,
+    label: &gtk::Label,
+    accessible_name: &str,
+) {
+    dropdown.set_focusable(true);
+    dropdown.update_property(&[gtk::accessible::Property::Label(accessible_name)]);
+    dropdown.update_relation(&[gtk::accessible::Relation::LabelledBy(&[label.upcast_ref()])]);
 }
 
 fn disable_pointer_scroll_adjustment(widget: &impl IsA<gtk::Widget>) -> usize {
@@ -10472,8 +11238,17 @@ fn disable_pointer_scroll_adjustment(widget: &impl IsA<gtk::Widget>) -> usize {
     disabled
 }
 
+#[cfg(test)]
 fn precision_scale_control(scale: &gtk::Scale) -> gtk::Widget {
     let control = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    attach_precision_entry(scale, &control);
+    control.upcast()
+}
+
+fn attach_precision_entry(scale: &gtk::Scale, control: &gtk::Box) {
+    if scale.parent().is_none() {
+        control.append(scale);
+    }
     let adjustment = scale.adjustment();
     let step = adjustment.step_increment().abs();
     let digits = if step >= 1.0 {
@@ -10483,16 +11258,23 @@ fn precision_scale_control(scale: &gtk::Scale) -> gtk::Widget {
     } else {
         2
     };
-    let entry = gtk::SpinButton::new(Some(&adjustment), step.max(0.01), digits);
+    let entry = control
+        .observe_children()
+        .iter::<glib::Object>()
+        .flatten()
+        .find_map(|child| child.downcast::<gtk::SpinButton>().ok())
+        .unwrap_or_else(|| gtk::SpinButton::new(Some(&adjustment), step.max(0.01), digits));
+    entry.set_adjustment(&adjustment);
+    entry.set_digits(digits);
     disable_pointer_scroll_adjustment(&entry);
     entry.set_width_chars(5);
     entry.set_max_width_chars(7);
     entry.set_numeric(true);
     entry.set_tooltip_text(Some("Enter an exact value"));
     entry.update_property(&[gtk::accessible::Property::Label("Exact value")]);
-    control.append(scale);
-    control.append(&entry);
-    control.upcast()
+    if entry.parent().is_none() {
+        control.append(&entry);
+    }
 }
 
 fn precision_entry(scale: &gtk::Scale) -> Option<gtk::SpinButton> {
@@ -10500,13 +11282,6 @@ fn precision_entry(scale: &gtk::Scale) -> Option<gtk::SpinButton> {
         .parent()
         .and_then(|parent| parent.last_child())
         .and_then(|child| child.downcast::<gtk::SpinButton>().ok())
-}
-
-fn action_button(label: &str, tooltip: &str) -> gtk::Button {
-    gtk::Button::builder()
-        .label(label)
-        .tooltip_text(tooltip)
-        .build()
 }
 
 fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
@@ -10602,6 +11377,332 @@ fn install_styles() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn top_level_shell_resource_declares_required_ids_without_display() {
+        for id in TOP_LEVEL_SHELL_OBJECT_IDS {
+            assert!(
+                TOP_LEVEL_SHELL_UI.contains(&format!(r#"id="{id}""#)),
+                "Toniator.ui must retain the {id} stable ID"
+            );
+        }
+        for class in [
+            "AdwApplicationWindow",
+            "AdwToolbarView",
+            "AdwHeaderBar",
+            "AdwToastOverlay",
+            "GtkStack",
+        ] {
+            assert!(
+                TOP_LEVEL_SHELL_UI.contains(&format!(r#"class="{class}""#)),
+                "Toniator.ui must retain the {class} shell layer"
+            );
+        }
+        assert!(TOP_LEVEL_SHELL_UI.contains("<property name=\"transition-type\">crossfade"));
+        assert!(TOP_LEVEL_SHELL_UI.contains("<property name=\"transition-duration\">180"));
+    }
+
+    #[test]
+    fn inspector_and_channel_resources_keep_the_stage_two_boundary_without_display() {
+        for id in [
+            "source_section",
+            "source_content_host",
+            "output_section",
+            "output_content_host",
+            "channel_settings_section",
+            "channel_scope_host",
+            "channel_scope_note",
+            "channel_panel_stack",
+            "appearance_section",
+            "treatment_section",
+        ] {
+            assert!(
+                INSPECTOR_HIERARCHY_UI.contains(&format!(r#"id="{id}""#)),
+                "ToniatorInspector.ui must retain {id}"
+            );
+        }
+        let source = INSPECTOR_HIERARCHY_UI
+            .find("id=\"source_section\"")
+            .unwrap();
+        let output = INSPECTOR_HIERARCHY_UI
+            .find("id=\"output_section\"")
+            .unwrap();
+        let channels = INSPECTOR_HIERARCHY_UI
+            .find("id=\"channel_settings_section\"")
+            .unwrap();
+        assert!(source < output && output < channels);
+        assert!(INSPECTOR_HIERARCHY_UI.contains("Treatment Editing Scope"));
+        assert!(INSPECTOR_HIERARCHY_UI.contains(
+            "Choose the inks or channels edited by Shapes and Curves. Output routing remains in Output."
+        ));
+        for id in [
+            "channel_controls",
+            "channel_heading",
+            "channel_inclusion_status",
+            "channel_content_host",
+        ] {
+            assert!(
+                CHANNEL_CONTROLS_UI.contains(&format!(r#"id="{id}""#)),
+                "ToniatorChannelControls.ui must retain {id}"
+            );
+        }
+        assert!(CHANNEL_CONTROLS_UI.contains("real OutputChannelId"));
+        assert!(!CHANNEL_CONTROLS_UI.contains("aggregate_channel_controls"));
+        for id in [
+            "aggregate_channel_controls",
+            "aggregate_heading",
+            "aggregate_mixed_message",
+            "aggregate_content_host",
+        ] {
+            assert!(
+                AGGREGATE_CHANNEL_CONTROLS_UI.contains(&format!(r#"id="{id}""#)),
+                "ToniatorAggregateChannelControls.ui must retain {id}"
+            );
+        }
+        assert!(!AGGREGATE_CHANNEL_CONTROLS_UI.contains(r#"id="channel_controls""#));
+    }
+
+    #[test]
+    fn editor_controls_resource_exposes_static_editor_structure_without_display() {
+        for id in [
+            "source_controls",
+            "source_dynamic_host",
+            "artwork_source",
+            "artwork_source_label",
+            "source_alpha",
+            "source_alpha_label",
+            "output_controls",
+            "output_mode",
+            "output_mode_label",
+            "channel_assignment",
+            "channel_assignment_label",
+            "active_channel",
+            "active_channel_label",
+            "crosshatch_action",
+            "appearance_controls",
+            "preview_surface",
+            "preview_color",
+            "export_background",
+            "export_color",
+            "treatment_chrome",
+            "treatment_pattern_buttons",
+            "treatment_preset_actions",
+            "treatment_modes",
+            "native_panel",
+            "native_sampling_detail_row",
+            "native_sampling_detail_control",
+            "native_sampling_detail_scale",
+            "native_coverage_row",
+            "native_coverage_control",
+            "native_coverage_scale",
+            "native_contrast_row",
+            "native_contrast_control",
+            "native_contrast_scale",
+            "native_screen_angle_row",
+            "native_screen_angle_control",
+            "native_screen_angle_scale",
+            "web_panel_host",
+            "web_shared",
+            "web_shape",
+            "web_polygon_sides",
+            "web_edit_shape",
+            "web_color",
+            "web_coverage_scale",
+            "web_coverage_entry",
+            "web_advanced",
+            "curve_panel_host",
+            "curve_layout",
+            "curve_weight_scale",
+            "curve_weight_entry",
+            "curve_profile",
+            "curve_editor_host",
+            "curve_reset",
+            "curve_shared",
+            "motif_controls",
+            "motif_coverage",
+            "motif_size_scale",
+            "motif_size_entry",
+            "motif_arrange",
+            "curve_close_ends",
+            "curve_smooth_join",
+        ] {
+            assert!(
+                EDITOR_CONTROLS_UI.contains(&format!(r#"id="{id}""#)),
+                "ToniatorEditorControls.ui must retain {id}"
+            );
+        }
+        assert!(EDITOR_CONTROLS_UI.contains("GtkColorDialogButton"));
+        assert!(EDITOR_CONTROLS_UI.contains("GtkDropDown"));
+        assert!(EDITOR_CONTROLS_UI.contains("GtkStack"));
+    }
+
+    fn verify_realized_top_level_shell_builder() {
+        let builder = gtk::Builder::from_string(TOP_LEVEL_SHELL_UI);
+        assert!(
+            builder
+                .object::<adw::ApplicationWindow>("main_window")
+                .is_some()
+        );
+        assert!(
+            builder
+                .object::<adw::ToolbarView>("main_toolbar_view")
+                .is_some()
+        );
+        assert!(
+            builder
+                .object::<adw::HeaderBar>("main_header_bar")
+                .is_some()
+        );
+        assert!(
+            builder
+                .object::<adw::ToastOverlay>("toast_overlay")
+                .is_some()
+        );
+        let stack = builder.object::<gtk::Stack>("main_stack").unwrap();
+        assert_eq!(stack.transition_type(), gtk::StackTransitionType::Crossfade);
+        assert_eq!(stack.transition_duration(), 180);
+        assert!(builder.object::<adw::WindowTitle>("window_title").is_some());
+        for id in [
+            "new_project_button",
+            "open_button",
+            "save_button",
+            "undo_button",
+            "redo_button",
+            "export_button",
+        ] {
+            assert!(builder.object::<gtk::Button>(id).is_some());
+        }
+        assert!(
+            builder
+                .object::<gtk::ToggleButton>("controls_toggle")
+                .is_some()
+        );
+    }
+
+    fn verify_realized_editor_controls_builder() {
+        let builder = gtk::Builder::from_string(EDITOR_CONTROLS_UI);
+        let dropdowns = [
+            ("artwork_source", "artwork_source_label", "Artwork Source"),
+            ("source_alpha", "source_alpha_label", "Source Alpha"),
+            ("output_mode", "output_mode_label", "Output Model"),
+            (
+                "channel_assignment",
+                "channel_assignment_label",
+                "Channel Assignment",
+            ),
+            ("active_channel", "active_channel_label", "Active Channel"),
+        ];
+        for (id, label_id, accessible_name) in dropdowns {
+            let dropdown = builder
+                .object::<gtk::DropDown>(id)
+                .unwrap_or_else(|| panic!("missing {id}"));
+            let label = builder
+                .object::<gtk::Label>(label_id)
+                .unwrap_or_else(|| panic!("missing {label_id}"));
+            assert_eq!(label.label(), accessible_name);
+            configure_dropdown_accessibility(&dropdown, &label, accessible_name);
+            sync_dropdown_strings(&dropdown, &["First option", "Second option"]);
+        }
+        for spec in NATIVE_CONTROL_SCALES {
+            let scale = builder_control_scale(&builder, spec);
+            assert_eq!(scale.adjustment().lower(), spec.minimum);
+            assert_eq!(scale.adjustment().upper(), spec.maximum);
+            assert_eq!(scale.adjustment().step_increment(), spec.step);
+            assert!(precision_entry(&scale).is_some());
+            assert_eq!(
+                builder
+                    .object::<gtk::Box>(spec.control_id)
+                    .unwrap()
+                    .observe_children()
+                    .n_items(),
+                2,
+                "{} must have one Builder scale and one precision entry",
+                spec.accessible_name
+            );
+        }
+        for id in [
+            "web_coverage_scale",
+            "web_angle_scale",
+            "web_mark_angle_scale",
+            "web_width_scale",
+            "web_height_scale",
+            "web_threshold_scale",
+            "web_opacity_scale",
+            "web_detail_scale",
+            "curve_weight_scale",
+            "curve_spacing_scale",
+            "motif_size_scale",
+            "motif_columns_scale",
+            "motif_rows_scale",
+            "motif_row_spacing_scale",
+            "motif_stagger_scale",
+            "curve_coverage_scale",
+            "curve_angle_scale",
+            "curve_position_x_scale",
+            "curve_position_y_scale",
+            "curve_opacity_scale",
+            "curve_threshold_scale",
+            "curve_detail_scale",
+        ] {
+            assert!(builder.object::<gtk::Scale>(id).is_some(), "missing {id}");
+            let entry_id = id.replace("_scale", "_entry");
+            assert!(
+                builder.object::<gtk::SpinButton>(&entry_id).is_some(),
+                "missing Builder precision entry {entry_id}"
+            );
+        }
+        for id in [
+            "web_shape",
+            "web_mixed_shape_apply",
+            "web_target",
+            "curve_layout",
+            "curve_profile",
+            "curve_target",
+            "motif_coverage",
+            "motif_alternate",
+        ] {
+            assert!(
+                builder.object::<gtk::DropDown>(id).is_some(),
+                "missing {id}"
+            );
+        }
+        for id in ["preview_color", "export_color"] {
+            assert!(
+                builder.object::<gtk::ColorDialogButton>(id).is_some(),
+                "missing {id}"
+            );
+        }
+        let stack = builder.object::<gtk::Stack>("treatment_modes").unwrap();
+        assert_eq!(stack.transition_type(), gtk::StackTransitionType::Crossfade);
+        assert_eq!(stack.observe_children().n_items(), 3);
+
+        let root = builder.object::<gtk::Box>("editor_controls").unwrap();
+        let window = gtk::Window::builder()
+            .default_width(320)
+            .default_height(600)
+            .child(&root)
+            .build();
+        window.present();
+        while glib::MainContext::default().iteration(false) {}
+        for (id, _, accessible_name) in dropdowns {
+            let dropdown = builder.object::<gtk::DropDown>(id).unwrap();
+            assert_eq!(dropdown.accessible_role(), gtk::AccessibleRole::ComboBox);
+            assert!(
+                dropdown.is_focusable(),
+                "{accessible_name} must remain keyboard focusable"
+            );
+            assert!(
+                dropdown.grab_focus(),
+                "{accessible_name} should accept focus"
+            );
+            while glib::MainContext::default().iteration(false) {}
+            assert!(
+                dropdown.bounds().is_some_and(|bounds| bounds.3 > 0),
+                "{accessible_name} should be realized"
+            );
+        }
+        window.close();
+    }
 
     #[test]
     fn export_inhibits_close_until_completion() {
@@ -11892,8 +12993,11 @@ mod tests {
     #[test]
     fn realized_numeric_controls_leave_continuous_scroll_to_parent() {
         gtk::init().unwrap();
+        verify_realized_top_level_shell_builder();
+        verify_realized_editor_controls_builder();
         verify_realized_dropdown_sync_keeps_the_live_model_and_valid_selection();
         verify_realized_semantic_pipeline_callbacks();
+        verify_realized_channel_scope_composites();
         let appearance = build_appearance_controls();
         assert!(appearance.preview_color.dialog().unwrap().is_with_alpha());
         assert!(appearance.export_color.dialog().unwrap().is_with_alpha());
@@ -12442,6 +13546,198 @@ mod tests {
         eprintln!(
             "realized GTK DropDown sync retained its StringList across CMYK/RGB changes, clamped K to Blue, and rejected INVALID_LIST_POSITION without an all-channels fallback"
         );
+    }
+
+    fn verify_realized_channel_scope_composites() {
+        let hierarchy = build_inspector_hierarchy();
+        assert!(hierarchy.source_section.is_expanded());
+        assert!(hierarchy.output_section.is_expanded());
+        assert!(!hierarchy.channel_settings_section.is_expanded());
+
+        let application = adw::Application::builder()
+            .application_id("dev.toniator.channel-scope-regression")
+            .build();
+        application.register(None::<&gio::Cancellable>).unwrap();
+        let ui = AppUi::new(
+            &application,
+            CliOptions {
+                demo: true,
+                artifact_window_size: Some((900, 680)),
+                ..CliOptions::default()
+            },
+        );
+        ui.window.present();
+        drain_ui_callbacks();
+
+        let hierarchy_child = ui
+            .inspector_root
+            .first_child()
+            .expect("hierarchy is the first inspector child");
+        let first_hierarchy_section = hierarchy_child
+            .first_child()
+            .expect("Source is the first hierarchy section")
+            .downcast::<gtk::Expander>()
+            .expect("first hierarchy section is an expander");
+        assert_eq!(first_hierarchy_section.label().as_deref(), Some("Source"));
+
+        assert_eq!(ui.channel_controls.len(), 7);
+        assert_eq!(
+            ui.channel_controls
+                .iter()
+                .map(|controls| controls.channel)
+                .collect::<Vec<_>>(),
+            [
+                OutputChannelId::CmykCyan,
+                OutputChannelId::CmykMagenta,
+                OutputChannelId::CmykYellow,
+                OutputChannelId::CmykBlack,
+                OutputChannelId::RgbRed,
+                OutputChannelId::RgbGreen,
+                OutputChannelId::RgbBlue,
+            ]
+        );
+        let scope_model = ui.channel_scope.model().unwrap();
+        let roots = ui
+            .channel_controls
+            .iter()
+            .map(|controls| controls.root.clone())
+            .collect::<Vec<_>>();
+        let aggregate_root = ui.aggregate_channel_controls.root.clone();
+        assert_eq!(
+            ui.channel_panel_stack.visible_child(),
+            Some(aggregate_root.clone().upcast())
+        );
+        assert_eq!(ui.channel_scope.model().unwrap().n_items(), 5);
+
+        // Full Color keeps automatic output routing, but treatment scope is
+        // still editable. The top control is the sole authoring locus for
+        // both Shapes and Curves.
+        assert!(ui.channel_scope.is_sensitive());
+        ui.activate_shape_treatment();
+        drain_ui_callbacks();
+        let web_target_model = ui.web_target.model().unwrap();
+        let curve_target_model = ui.curve_target.model().unwrap();
+        assert_eq!(ui.web_target.selected(), 0);
+        assert_eq!(ui.curve_target.selected(), 0);
+        let full_color_pipeline = ui
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .unwrap()
+            .document()
+            .artwork_pipeline
+            .clone();
+        ui.channel_scope.set_selected(4); // Black Ink, resolved through OutputChannelId.
+        drain_ui_callbacks();
+        assert_eq!(
+            ui.state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .artwork_pipeline
+                .clone(),
+            full_color_pipeline
+        );
+        assert_eq!(ui.web_target.model().unwrap(), web_target_model);
+        assert_eq!(ui.curve_target.model().unwrap(), curve_target_model);
+        assert_eq!(ui.web_target.selected(), 4);
+        assert_eq!(ui.curve_target.selected(), 4);
+        assert_eq!(ui.selected_web_inks(), Some(vec![Ink::Black]));
+        assert_eq!(ui.selected_curve_inks(), Some(vec![Ink::Black]));
+
+        // Output controls remain independent from treatment scope. Give the
+        // scalar pipeline its own active Black channel, then change treatment
+        // scope to Cyan without touching ChannelAssignment or active_channel.
+        ui.artwork_source.set_selected(4); // Value
+        drain_ui_callbacks();
+        ui.channel_assignment.set_selected(0); // Apply To Active Channel
+        drain_ui_callbacks();
+        ui.active_channel.set_selected(3); // Black
+        drain_ui_callbacks();
+        let output_pipeline = ui
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .unwrap()
+            .document()
+            .artwork_pipeline
+            .clone();
+        assert_eq!(
+            output_pipeline.active_channel,
+            Some(OutputChannelId::CmykBlack)
+        );
+        ui.channel_scope.set_selected(1); // Cyan Ink treatment scope.
+        drain_ui_callbacks();
+        assert_eq!(ui.web_target.selected(), 1);
+        assert_eq!(ui.curve_target.selected(), 1);
+        assert_eq!(ui.selected_web_inks(), Some(vec![Ink::Cyan]));
+        assert_eq!(ui.selected_curve_inks(), Some(vec![Ink::Cyan]));
+        assert_eq!(
+            ui.state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .artwork_pipeline
+                .clone(),
+            output_pipeline
+        );
+        assert_eq!(
+            ui.channel_panel_stack.visible_child_name().as_deref(),
+            Some(OutputChannelId::CmykCyan.stable_id())
+        );
+
+        ui.curves.set_active(true);
+        drain_ui_callbacks();
+        assert_eq!(ui.selected_curve_inks(), Some(vec![Ink::Cyan]));
+
+        for output in [
+            OutputMode::RgbScreen,
+            OutputMode::CmykInks,
+            OutputMode::RgbScreen,
+            OutputMode::CmykInks,
+        ] {
+            ui.output_mode
+                .set_selected((output == OutputMode::RgbScreen) as u32);
+            drain_ui_callbacks();
+            assert_eq!(ui.channel_scope.model().unwrap(), scope_model);
+            assert_eq!(ui.web_target.model().unwrap(), web_target_model);
+            assert_eq!(ui.curve_target.model().unwrap(), curve_target_model);
+            assert_eq!(
+                ui.channel_scope.model().unwrap().n_items(),
+                if output == OutputMode::RgbScreen {
+                    4
+                } else {
+                    5
+                }
+            );
+            for (controls, root) in ui.channel_controls.iter().zip(&roots) {
+                assert_eq!(controls.root, *root);
+            }
+        }
+
+        ui.crosshatch_action.emit_clicked();
+        drain_ui_callbacks();
+        assert_eq!(ui.channel_scope.model().unwrap(), scope_model);
+        assert_eq!(ui.channel_scope.model().unwrap().n_items(), 1);
+        assert!(!ui.channel_scope.is_sensitive());
+        assert_eq!(
+            ui.channel_panel_stack.visible_child(),
+            Some(aggregate_root.clone().upcast())
+        );
+        assert_eq!(ui.aggregate_channel_controls.heading.text(), "All Layers");
+        assert!(
+            ui.aggregate_channel_controls
+                .mixed_message
+                .text()
+                .contains("Mixed")
+        );
+        ui.window.close();
     }
 
     fn drain_ui_callbacks() {

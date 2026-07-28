@@ -16,6 +16,101 @@ The parent thread records read-only-agent updates here after persisting them.
 
 ## Current entries
 
+- `ton-013-control-exposure-documentation-reconciliation` —
+  `agents/documentation-maintainer/ton-013-control-exposure-documentation-reconciliation.md`;
+  reconciles current TON-013 control-exposure ownership, routing/scope and
+  aggregate/channel semantics, verification counts, the 1000x980 artifact, and
+  Cambalache round-trip limits against the dirty checkout on 2026-07-26.
+  Invalidate after relevant source/UI/CMB, docs, evidence, artifact, Git HEAD,
+  or dirty-worktree changes.
+
+- `ton-013-control-exposure-independent-ux-546ea4c-dirty` —
+  `evidence/ton-013-control-exposure-independent-ux-546ea4c-dirty.md`; historical
+  pre-correction review that identified the five dropdown relations and
+  native-row boundary correction. Superseded for current ownership by the
+  control-exposure correction record. Invalidate after relevant UI, source,
+  docs, artifact, GTK, HEAD, or dirty-worktree changes.
+
+- `ton-013-control-exposure-stage-implementation` —
+  `agents/desktop-implementer/ton-013-control-exposure-stage-implementation.md`;
+  pre-correction bounded Builder ownership for Source/Output/Appearance,
+  treatment chrome, and stable native/Shapes/Curves panel hosts, verified
+  against dirty HEAD `546ea4c` on 2026-07-26. The correction record supersedes
+  its accessibility/native-row details. Invalidate after `src/ui.rs`, UI/CMB,
+  focused GTK tests, screenshot artifact, Git HEAD, or relevant dirty-file
+  changes.
+
+- `ton-013-control-exposure-stage-correction` —
+  `agents/desktop-implementer/ton-013-control-exposure-stage-correction.md`;
+  corrected five Source/Output accessibility relations and moved the four
+  Basic/native scale row shells into Builder, preserving Rust adjustments and
+  callbacks. Includes focused realized GTK coverage and the 1000x980 artifact.
+  Invalidate after relevant source/UI/CMB/docs/tests/artifact/GTK/HEAD changes.
+
+- `ton-013-control-exposure-inventory-546ea4c-dirty` —
+  `evidence/ton-013-control-exposure-inventory-546ea4c-dirty.md`; read-only
+  inventory confirming that most concrete Source, Output, Appearance, and
+  Treatment controls remain Rust-created, with the practical Builder boundary,
+  stable ID groups, and Rust-only dynamic/custom exceptions. Invalidate after
+  changes to `src/ui.rs`, `resources/ui/*`, `Toniator.cmb`, GTK/libadwaita,
+  focused tests, relevant docs, Git HEAD, or dirty-file assumptions.
+
+- `ton-013-stage-2-documentation-reconciliation` —
+  `agents/documentation-maintainer/ton-013-stage-2-documentation-reconciliation.md`;
+  reconciled durable UI architecture and TON-013 Stage 2 tracker wording
+  against the corrected implementation, CMB/UI resources, final UX review,
+  and the 1000x760 screenshot artifact on 2026-07-26. Invalidate after
+  relevant Stage 2 implementation, resource, documentation, evidence, or
+  working-tree changes.
+
+- `ton-013-stage-2-treatment-scope-correction` —
+  `agents/desktop-implementer/ton-013-stage-2-treatment-scope-correction.md`;
+  final semantic correction making Treatment Editing Scope the sole visible
+  treatment recipient selector while Output routing remains authoritative.
+  Includes focused tests and the inspected 1000x760 GTK artifact. Invalidate
+  after target callbacks, pipeline controls, UI/CMB changes, or GTK changes.
+
+- `ton-013-stage-2-treatment-scope-final-ux-546ea4c-dirty` —
+  `evidence/ton-013-stage-2-treatment-scope-final-ux-546ea4c-dirty.md`; final
+  review passes the corrected treatment scope, hierarchy, semantic templates,
+  and 1000x760 GTK screenshot. Records focus/accessibility as follow-up.
+  Invalidate after relevant Stage 2 changes.
+
+- `ton-013-stage-2-independent-channel-inspector-ux-546ea4c-dirty` —
+  `evidence/ton-013-stage-2-independent-channel-inspector-ux-546ea4c-dirty.md`;
+  correction-required review: actual hierarchy placement, competing scalar vs
+  treatment scopes, structural-only panel hosts, and expanded-state concerns.
+  Invalidate after correction changes.
+
+- `ton-013-stage-2-channel-control-architecture-546ea4c-dirty` —
+  `evidence/ton-013-stage-2-channel-control-architecture-546ea4c-dirty.md`;
+  current code ownership, semantic channel identity, aggregate-panel boundary,
+  and safe Stage 2 implementation split.
+
+- `ton-013-stage-2-channel-inspector-ux-546ea4c-dirty` —
+  `evidence/ton-013-stage-2-channel-inspector-ux-546ea4c-dirty.md`; settled
+  Source/Output/Channel Settings hierarchy, terminology, defaults, and
+  aggregate-versus-real-channel acceptance criteria.
+
+- `ton-013-stage-1-independent-shell-ux-546ea4c-dirty` —
+  `evidence/ton-013-stage-1-independent-shell-ux-546ea4c-dirty.md`; reviewed
+  the current GtkBuilder shell, docs, and real GTK screenshot on 2026-07-26;
+  pass after correcting runtime ownership wording for the Controls tooltip.
+  Invalidate after relevant shell, docs, version, or worktree changes.
+
+- `ton-013-stage-1-documentation` —
+  `agents/documentation-maintainer/ton-013-stage-1-documentation-reconciliation.md`;
+  reconciled the Stage 1 architecture and TON-013 issue wording against the
+  current shell resource, Rust loader/page insertion, review evidence, and
+  GTK artifact on 2026-07-26. Invalidate after relevant shell, docs, evidence,
+  version, or worktree changes.
+
+- `ton-013-gtkbuilder-migration-seams-546ea4c` —
+  `evidence/ton-013-gtkbuilder-migration-seams-546ea4c.md`; valid for HEAD
+  `546ea4c` with only untracked `.codex-work/backups/`; safe first GtkBuilder
+  boundary and current GTK/model stability seams. Invalidate after relevant
+  source, build, packaging, or working-tree changes.
+
 - `ton-012-stage-1b-complete` — `evidence/ton-012-stage-1b-complete.md`;
   validated against HEAD `32022df` on 2026-07-26; authoritative pipeline state,
   schema v6/v3 persistence, migration, and active/saved/inactive snapshots.
