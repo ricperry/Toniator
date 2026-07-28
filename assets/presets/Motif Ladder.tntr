@@ -1,0 +1,85 @@
+{
+  "format": "toniator-preset",
+  "version": 5,
+  "name": "Motif Ladder",
+  "scope": "complete-workflow",
+  "pipeline": {
+    "alpha_policy": "source_alpha.legacy_current_v1",
+    "assignment": "assignment.automatic",
+    "assignment_payload": "separation.cmyk.encoded_rgb_max_black_v1",
+    "output_model": "output.cmyk_print",
+    "source": "source.full_color"
+  },
+  "treatment": {
+    "settings": {
+      "treatment": "lines",
+      "detail": 64.0,
+      "coverage": 96.0,
+      "contrast": 118.0,
+      "angle": -20.0
+    },
+    "pattern_state": {
+      "selected": {
+        "registered": "compat.curves.v1"
+      },
+      "instances": {
+        "compat.shapes.v1": {
+          "pattern_id": "compat.shapes.v1",
+          "schema_version": 1,
+          "generator_version": 1,
+          "values": {
+            "settings": {}
+          }
+        },
+        "compat.curves.v1": {
+          "pattern_id": "compat.curves.v1",
+          "schema_version": 1,
+          "generator_version": 1,
+          "values": {
+            "settings": {
+              "long_edge_cells": 34.0,
+              "min_mark": 5.0,
+              "max_mark": 72.0,
+              "layout": "motif-pattern",
+              "use_shared_curve": true,
+              "show_background": false,
+              "base_channel": {
+                "curve_scale": 46.0,
+                "motif_coverage": "manual",
+                "motif_bleed": 6.0,
+                "tile_count": 5,
+                "tile_spacing": 18.0,
+                "tile_angle": 20.0,
+                "stack_count": 3,
+                "stack_spacing": 14.0,
+                "stack_angle": -30.0,
+                "alternate_tile_transform": "flip"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "channel": {
+    "pattern_id": "compat.curves.v1",
+    "channels": {
+      "channel.cmyk.cyan": {
+        "color": "#00aeef",
+        "grid_rotation": 20.0
+      },
+      "channel.cmyk.magenta": {
+        "color": "#ec008c",
+        "grid_rotation": 55.0
+      },
+      "channel.cmyk.yellow": {
+        "color": "#ffd400",
+        "grid_rotation": 90.0
+      },
+      "channel.cmyk.black": {
+        "color": "#111111",
+        "grid_rotation": 125.0
+      }
+    }
+  }
+}

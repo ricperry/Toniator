@@ -8,22 +8,19 @@ use crate::artwork_pipeline::{
     ArtworkPipelineSettings, ChannelAssignment, LegacyCompatibilityAssignment, OutputChannelId,
 };
 use crate::model::{
-    ClosedShapePath, Document, RenderVariant, Settings, WebCurveChannel, WebCurveSettings,
-    WebShapeChannel, WebShapeSettings, normalize_crosshatch_render,
-    normalize_render_variant_canvas,
+    Document, PatternDocumentState, PatternSelection, RenderVariant, Settings, WebCurveChannel,
+    WebCurveSettings, WebShapeChannel, WebShapeSettings, normalize_canvas_dimensions,
+    normalize_crosshatch_render,
 };
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::collections::BTreeMap;
 
 /// The only treatment-preset format accepted by current Toniator builds.
-pub const CURRENT_PRESET_VERSION: u32 = 4;
+pub const CURRENT_PRESET_VERSION: u32 = 5;
 
 const FORMAT: &str = "toniator-preset";
-const KIND_NATIVE: &str = "treatment.native_basic.v1";
-const KIND_SHAPES: &str = "treatment.web_shape.v1";
-const KIND_CURVES: &str = "treatment.web_curve.v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -62,7 +59,7 @@ struct PresetHeader {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CurrentPresetV4 {
+struct CurrentPresetV5 {
     format: String,
     version: u32,
     name: String,
@@ -80,9 +77,8 @@ struct CurrentPresetV4 {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TreatmentSection {
-    kind: String,
     settings: Settings,
-    render: Value,
+    pattern_state: PatternDocumentState,
 }
 
 /// Semantic channel records are sorted before serialization.  A channel-scope
@@ -91,7 +87,7 @@ struct TreatmentSection {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ChannelSection {
-    treatment_kind: String,
+    pattern_id: crate::pattern::PatternId,
     channels: BTreeMap<String, Value>,
 }
 
@@ -109,8 +105,8 @@ pub fn parse_treatment(bytes: &[u8], source_dimensions: (u32, u32)) -> Result<Pa
         "This preset was created with an unsupported pre-release Toniator format."
     );
     let omitted_active_channel = inject_active_channel_for_current_parse(&mut raw)?;
-    validate_current_v4_nested_fields(&raw)?;
-    let mut preset: CurrentPresetV4 =
+    validate_current_v5_nested_fields(&raw)?;
+    let mut preset: CurrentPresetV5 =
         serde_json::from_value(raw).context("Could not read this current treatment preset")?;
     ensure!(
         !preset.name.trim().is_empty(),
@@ -131,12 +127,11 @@ pub fn parse_treatment(bytes: &[u8], source_dimensions: (u32, u32)) -> Result<Pa
 
     let mut canvas_normalized = false;
     if let Some(treatment) = &mut preset.treatment {
-        let mut render = render_from_treatment(treatment, None)?;
-        canvas_normalized =
-            normalize_render_variant_canvas(&mut render, source_dimensions.0, source_dimensions.1);
-        // Re-split the validated normalized form; this guarantees that no
-        // legacy projection or channel map can leak into the wire state.
-        *treatment = treatment_from_render(treatment.settings, &render)?;
+        canvas_normalized = normalize_pattern_state_canvas(
+            &mut treatment.pattern_state,
+            source_dimensions.0,
+            source_dimensions.1,
+        )?;
     }
     if let Some(channels) = &preset.channel {
         validate_channel_section(channels, preset.scope)?;
@@ -152,7 +147,7 @@ pub fn parse_treatment(bytes: &[u8], source_dimensions: (u32, u32)) -> Result<Pa
 }
 
 /// `ArtworkPipelineSettings` correctly rejects an ActiveChannel assignment
-/// without a destination.  A v4 preset is allowed to omit that destination to
+/// without a destination.  The current preset format allows that destination to
 /// request transition restoration, so insert a temporary valid representative
 /// solely for serde and restore `None` immediately after parsing.
 fn inject_active_channel_for_current_parse(raw: &mut Value) -> Result<bool> {
@@ -194,8 +189,17 @@ impl ParsedTreatment {
             candidate.switch_output_mode(pipeline.output_model.to_legacy());
         }
         if let Some(treatment) = &self.treatment {
-            let render = render_from_treatment(treatment, Some(&candidate.render))?;
-            candidate.apply_preset_treatment(render, Some(treatment.settings))?;
+            let same_pattern = candidate.pattern_state.selected == treatment.pattern_state.selected;
+            candidate.pattern_state = treatment.pattern_state.clone();
+            if same_pattern {
+                candidate
+                    .pattern_state
+                    .restore_selected_channels_from(&document.pattern_state)?;
+            }
+            candidate.apply_preset_treatment(
+                candidate.pattern_state.clone(),
+                Some(treatment.settings),
+            )?;
         }
         if let Some(pipeline) = &self.artwork_pipeline {
             candidate.apply_preset_pipeline_unchecked(pipeline.clone())?;
@@ -203,7 +207,7 @@ impl ParsedTreatment {
         if let Some(channels) = &self.channels {
             apply_channel_section(&mut candidate, channels)?;
         }
-        normalize_crosshatch_render(&mut candidate.render);
+        candidate.normalize_crosshatch_treatment();
         candidate.sync_legacy_projection()?;
         candidate.validate()?;
         Ok(candidate)
@@ -227,10 +231,14 @@ pub fn document_preset_bytes(
     canonical.validate()?;
 
     let treatment = match scope {
-        PresetScope::Treatment | PresetScope::CompleteWorkflow => Some(treatment_from_render(
-            canonical.settings,
-            &canonical.render,
-        )?),
+        PresetScope::Treatment | PresetScope::CompleteWorkflow => Some(TreatmentSection {
+            settings: canonical.settings,
+            pattern_state: if scope == PresetScope::Treatment {
+                canonical.pattern_state.for_treatment_scope()?
+            } else {
+                canonical.pattern_state.clone()
+            },
+        }),
         _ => None,
     };
     let pipeline = match scope {
@@ -250,7 +258,7 @@ pub fn document_preset_bytes(
         PresetScope::CompleteWorkflow => Some(channel_from_document(&canonical, true)?),
         _ => None,
     };
-    let preset = CurrentPresetV4 {
+    let preset = CurrentPresetV5 {
         format: FORMAT.to_owned(),
         version: CURRENT_PRESET_VERSION,
         name: name.to_owned(),
@@ -264,7 +272,7 @@ pub fn document_preset_bytes(
     Ok(bytes)
 }
 
-fn validate_scope(preset: &CurrentPresetV4) -> Result<()> {
+fn validate_scope(preset: &CurrentPresetV5) -> Result<()> {
     let expected = match preset.scope {
         PresetScope::Pipeline => (true, false, false),
         PresetScope::Treatment => (false, true, false),
@@ -285,10 +293,10 @@ fn validate_scope(preset: &CurrentPresetV4) -> Result<()> {
             "Crosshatch presets require Complete Workflow scope"
         );
         ensure!(
-            preset
-                .treatment
-                .as_ref()
-                .is_some_and(|treatment| treatment.kind == KIND_CURVES),
+            preset.treatment.as_ref().is_some_and(|treatment| matches!(
+                treatment.pattern_state.selected,
+                PatternSelection::Registered(crate::pattern::PatternId::CompatibilityCurvesV1)
+            )),
             "Crosshatch presets require a Curves treatment"
         );
         let Some(channel) = preset.channel.as_ref() else {
@@ -316,13 +324,10 @@ fn is_crosshatch_pipeline(pipeline: Option<&ArtworkPipelineSettings>) -> bool {
     })
 }
 
-/// Current v4 parsing is intentionally stricter than the project DTOs.  The
-/// shared model structs keep backward-compatible serde defaults for v6 project
-/// data, while this schema walk rejects unknown preset fields before serde can
-/// discard them.  Templates are produced from the current native types so the
-/// format stays aligned with supported geometry without making project loading
-/// stricter as a side effect.
-fn validate_current_v4_nested_fields(raw: &Value) -> Result<()> {
+/// Current v5 parsing rejects unknown pipeline fields before shared DTO serde
+/// can discard them. Treatment and channel sections use `deny_unknown_fields`
+/// and the authoritative typed pattern state validates its own payload.
+fn validate_current_v5_nested_fields(raw: &Value) -> Result<()> {
     let object = raw
         .as_object()
         .context("Current preset must be a JSON object")?;
@@ -338,9 +343,6 @@ fn validate_current_v4_nested_fields(raw: &Value) -> Result<()> {
         validate_known_fields(pipeline, &schema, "pipeline")?;
     }
     if let Some(treatment) = object.get("treatment") {
-        let treatment = treatment
-            .as_object()
-            .context("Treatment section must be an object")?;
         let settings = treatment
             .get("settings")
             .context("Treatment section is missing settings")?;
@@ -349,80 +351,116 @@ fn validate_current_v4_nested_fields(raw: &Value) -> Result<()> {
             &serde_json::to_value(Settings::default())?,
             "treatment.settings",
         )?;
-        let kind = treatment
-            .get("kind")
-            .and_then(Value::as_str)
-            .context("Treatment section is missing kind")?;
-        let render = treatment
-            .get("render")
-            .context("Treatment section is missing render")?;
-        match kind {
-            KIND_NATIVE => {}
-            KIND_SHAPES => {
-                validate_known_fields(render, &shape_treatment_schema()?, "treatment.render")?
-            }
-            KIND_CURVES => {
-                validate_known_fields(render, &curve_treatment_schema()?, "treatment.render")?
-            }
-            _ => {}
-        }
+        validate_authoritative_pattern_state(
+            treatment
+                .get("pattern_state")
+                .context("Treatment section is missing authoritative pattern state")?,
+        )?;
     }
     if let Some(channel) = object.get("channel") {
-        let channel = channel
-            .as_object()
-            .context("Channel section must be an object")?;
-        let kind = channel
-            .get("treatment_kind")
-            .and_then(Value::as_str)
-            .context("Channel section is missing treatment kind")?;
-        let values = channel
+        let pattern_id: crate::pattern::PatternId = serde_json::from_value(
+            channel
+                .get("pattern_id")
+                .cloned()
+                .context("Channel section is missing pattern ID")?,
+        )?;
+        let schema = match pattern_id {
+            crate::pattern::PatternId::CompatibilityShapesV1 => {
+                serde_json::to_value(WebShapeChannel::default())?
+            }
+            crate::pattern::PatternId::CompatibilityCurvesV1 => {
+                serde_json::to_value(WebCurveChannel::default())?
+            }
+        };
+        for (id, value) in channel
             .get("channels")
             .and_then(Value::as_object)
-            .context("Channel section is missing channel records")?;
-        let schema = match kind {
-            KIND_SHAPES => shape_channel_schema()?,
-            KIND_CURVES => serde_json::to_value(WebCurveChannel::default())?,
-            _ => return Ok(()),
-        };
-        for (id, value) in values {
+            .context("Channel section is missing channel records")?
+        {
             validate_known_fields(value, &schema, &format!("channel.channels.{id}"))?;
         }
     }
     Ok(())
 }
 
-fn shape_treatment_schema() -> Result<Value> {
-    let mut settings = WebShapeSettings::default();
-    settings.custom_shape_path = Some(ClosedShapePath::from_polygon(&settings.custom_nodes));
+fn validate_authoritative_pattern_state(pattern_state: &Value) -> Result<()> {
+    let instances = pattern_state
+        .get("instances")
+        .and_then(Value::as_object)
+        .context("Authoritative pattern state is missing instances")?;
+    for (key, record) in instances {
+        let pattern_id: crate::pattern::PatternId =
+            serde_json::from_value(record.get("pattern_id").cloned().with_context(|| {
+                format!("Authoritative pattern state {key} is missing pattern ID")
+            })?)?;
+        let schema = match pattern_id {
+            crate::pattern::PatternId::CompatibilityShapesV1 => {
+                pattern_settings_schema(WebShapeSettings::default())?
+            }
+            crate::pattern::PatternId::CompatibilityCurvesV1 => {
+                pattern_settings_schema(WebCurveSettings::default())?
+            }
+        };
+        let settings = record
+            .get("values")
+            .and_then(Value::as_object)
+            .and_then(|values| values.get("settings"))
+            .with_context(|| {
+                format!("Authoritative pattern state {key} is missing typed settings")
+            })?;
+        validate_known_fields(
+            settings,
+            &schema,
+            &format!("treatment.pattern_state.instances.{key}.values.settings"),
+        )?;
+    }
+    Ok(())
+}
+
+fn pattern_settings_schema<T: Serialize>(settings: T) -> Result<Value> {
     let mut schema = serde_json::to_value(settings)?;
     let object = schema
         .as_object_mut()
-        .expect("Shapes settings serialization is an object");
-    object.remove("channels");
+        .context("Pattern settings schema must serialize as an object")?;
     object.remove("value_mode");
     object.remove("single_channel");
     Ok(schema)
 }
 
-fn curve_treatment_schema() -> Result<Value> {
-    let mut schema = serde_json::to_value(WebCurveSettings::default())?;
-    let object = schema
-        .as_object_mut()
-        .expect("Curves settings serialization is an object");
-    object.remove("channels");
-    object.remove("value_mode");
-    object.remove("single_channel");
-    Ok(schema)
-}
-
-fn shape_channel_schema() -> Result<Value> {
-    let channel = WebShapeChannel {
-        custom_shape_path: Some(ClosedShapePath::from_polygon(
-            &crate::model::default_shape_nodes(),
-        )),
-        ..Default::default()
-    };
-    Ok(serde_json::to_value(channel)?)
+fn normalize_pattern_state_canvas(
+    state: &mut PatternDocumentState,
+    source_width: u32,
+    source_height: u32,
+) -> Result<bool> {
+    match state.selected {
+        PatternSelection::NativeBasicV1 => Ok(false),
+        PatternSelection::Registered(crate::pattern::PatternId::CompatibilityShapesV1) => {
+            let mut settings = state.shape_settings()?;
+            let changed = normalize_canvas_dimensions(
+                &mut settings.output_width,
+                &mut settings.output_height,
+                source_width,
+                source_height,
+            );
+            if changed {
+                state.set_shape_settings(settings);
+            }
+            Ok(changed)
+        }
+        PatternSelection::Registered(crate::pattern::PatternId::CompatibilityCurvesV1) => {
+            let mut settings = state.curve_settings()?;
+            let changed = normalize_canvas_dimensions(
+                &mut settings.output_width,
+                &mut settings.output_height,
+                source_width,
+                source_height,
+            );
+            if changed {
+                state.set_curve_settings(settings);
+            }
+            Ok(changed)
+        }
+    }
 }
 
 fn validate_known_fields(value: &Value, schema: &Value, path: &str) -> Result<()> {
@@ -447,119 +485,13 @@ fn validate_known_fields(value: &Value, schema: &Value, path: &str) -> Result<()
     Ok(())
 }
 
-fn treatment_kind(render: &RenderVariant) -> &'static str {
-    match render {
-        RenderVariant::NativeBasicV1 => KIND_NATIVE,
-        RenderVariant::WebShapeV1 { .. } => KIND_SHAPES,
-        RenderVariant::WebCurveV1 { .. } => KIND_CURVES,
-    }
-}
-
-fn treatment_from_render(settings: Settings, render: &RenderVariant) -> Result<TreatmentSection> {
-    let kind = treatment_kind(render).to_owned();
-    let mut body = match render {
-        RenderVariant::NativeBasicV1 => Value::Null,
-        RenderVariant::WebShapeV1 { settings } => serde_json::to_value(settings)?,
-        RenderVariant::WebCurveV1 { settings } => serde_json::to_value(settings)?,
-    };
-    if let Value::Object(object) = &mut body {
-        object.remove("channels");
-        // These fields are rebuilt from `Document.artwork_pipeline` and must
-        // never become preset authority again.
-        object.remove("value_mode");
-        object.remove("single_channel");
-    }
-    Ok(TreatmentSection {
-        kind,
-        settings,
-        render: body,
-    })
-}
-
-fn render_from_treatment(
-    treatment: &TreatmentSection,
-    existing: Option<&RenderVariant>,
-) -> Result<RenderVariant> {
-    match treatment.kind.as_str() {
-        KIND_NATIVE => {
-            ensure!(
-                treatment.render.is_null(),
-                "Native treatment must not contain render geometry"
-            );
-            Ok(RenderVariant::NativeBasicV1)
-        }
-        KIND_SHAPES => {
-            let channels = match existing {
-                Some(RenderVariant::WebShapeV1 { settings }) => {
-                    serde_json::to_value(&settings.channels)?
-                }
-                _ => serde_json::to_value(&WebShapeSettings::default().channels)?,
-            };
-            let settings = shape_settings_from_body(&treatment.render, channels)?;
-            Ok(RenderVariant::WebShapeV1 {
-                settings: Box::new(settings),
-            })
-        }
-        KIND_CURVES => {
-            let channels = match existing {
-                Some(RenderVariant::WebCurveV1 { settings }) => {
-                    serde_json::to_value(&settings.channels)?
-                }
-                _ => serde_json::to_value(&WebCurveSettings::default().channels)?,
-            };
-            let settings = curve_settings_from_body(&treatment.render, channels)?;
-            Ok(RenderVariant::WebCurveV1 {
-                settings: Box::new(settings),
-            })
-        }
-        _ => anyhow::bail!("Unsupported treatment kind: {}", treatment.kind),
-    }
-}
-
-fn body_object(body: &Value) -> Result<Map<String, Value>> {
-    let object = body
-        .as_object()
-        .cloned()
-        .context("Treatment render geometry must be an object")?;
-    ensure!(
-        !object.contains_key("channels")
-            && !object.contains_key("value_mode")
-            && !object.contains_key("single_channel"),
-        "Treatment render contains renderer compatibility data"
-    );
-    Ok(object)
-}
-
-fn shape_settings_from_body(body: &Value, channels: Value) -> Result<WebShapeSettings> {
-    let mut object = body_object(body)?;
-    object.insert("channels".into(), channels);
-    object.insert(
-        "value_mode".into(),
-        serde_json::to_value(crate::model::ValueMode::Cmyk)?,
-    );
-    object.insert(
-        "single_channel".into(),
-        serde_json::to_value(crate::model::Ink::Black)?,
-    );
-    serde_json::from_value(Value::Object(object)).context("Invalid Shapes treatment geometry")
-}
-
-fn curve_settings_from_body(body: &Value, channels: Value) -> Result<WebCurveSettings> {
-    let mut object = body_object(body)?;
-    object.insert("channels".into(), channels);
-    object.insert(
-        "value_mode".into(),
-        serde_json::to_value(crate::model::ValueMode::Cmyk)?,
-    );
-    object.insert(
-        "single_channel".into(),
-        serde_json::to_value(crate::model::Ink::Black)?,
-    );
-    serde_json::from_value(Value::Object(object)).context("Invalid Curves treatment geometry")
-}
-
 fn channel_from_document(document: &Document, all_channels: bool) -> Result<ChannelSection> {
-    let kind = treatment_kind(&document.render).to_owned();
+    let pattern_id = match document.pattern_state.selected {
+        PatternSelection::Registered(id) => id,
+        PatternSelection::NativeBasicV1 => {
+            anyhow::bail!("Native Basic does not have channel-specific treatment state")
+        }
+    };
     let selected: Vec<_> = if is_crosshatch_pipeline(Some(&document.artwork_pipeline)) {
         OutputChannelId::CMYK.to_vec()
     } else if all_channels {
@@ -580,7 +512,7 @@ fn channel_from_document(document: &Document, all_channels: bool) -> Result<Chan
         );
     }
     Ok(ChannelSection {
-        treatment_kind: kind,
+        pattern_id,
         channels,
     })
 }
@@ -602,9 +534,13 @@ fn channel_value(render: &RenderVariant, channel: OutputChannelId) -> Result<Val
 
 fn validate_channel_section(section: &ChannelSection, scope: PresetScope) -> Result<()> {
     ensure!(
-        matches!(section.treatment_kind.as_str(), KIND_SHAPES | KIND_CURVES),
-        "Unsupported channel treatment kind: {}",
-        section.treatment_kind
+        matches!(
+            section.pattern_id,
+            crate::pattern::PatternId::CompatibilityShapesV1
+                | crate::pattern::PatternId::CompatibilityCurvesV1
+        ),
+        "Unsupported channel pattern: {}",
+        section.pattern_id
     );
     ensure!(
         !section.channels.is_empty(),
@@ -618,16 +554,15 @@ fn validate_channel_section(section: &ChannelSection, scope: PresetScope) -> Res
     }
     for (id, value) in &section.channels {
         let _: OutputChannelId = id.parse().map_err(anyhow::Error::msg)?;
-        match section.treatment_kind.as_str() {
-            KIND_SHAPES => {
+        match section.pattern_id {
+            crate::pattern::PatternId::CompatibilityShapesV1 => {
                 let _: WebShapeChannel = serde_json::from_value(value.clone())
                     .context("Invalid Shapes channel state")?;
             }
-            KIND_CURVES => {
+            crate::pattern::PatternId::CompatibilityCurvesV1 => {
                 let _: WebCurveChannel = serde_json::from_value(value.clone())
                     .context("Invalid Curves channel state")?;
             }
-            _ => unreachable!(),
         }
     }
     Ok(())
@@ -635,8 +570,8 @@ fn validate_channel_section(section: &ChannelSection, scope: PresetScope) -> Res
 
 fn apply_channel_section(document: &mut Document, section: &ChannelSection) -> Result<()> {
     ensure!(
-        treatment_kind(&document.render) == section.treatment_kind,
-        "Channel preset treatment kind does not match the current treatment"
+        document.pattern_state.selected == PatternSelection::Registered(section.pattern_id),
+        "Channel preset pattern does not match the current pattern"
     );
     for (id, value) in &section.channels {
         let channel: OutputChannelId = id.parse().map_err(anyhow::Error::msg)?;
@@ -647,17 +582,18 @@ fn apply_channel_section(document: &mut Document, section: &ChannelSection) -> R
             "Channel preset is incompatible with the current output model"
         );
         let ink = channel.to_legacy_ink();
-        match &mut document.render {
-            RenderVariant::WebShapeV1 { settings } => {
+        match section.pattern_id {
+            crate::pattern::PatternId::CompatibilityShapesV1 => {
+                let mut settings = document.pattern_state.shape_settings()?;
                 *settings.channels.get_mut(ink) = serde_json::from_value(value.clone())
                     .context("Invalid Shapes channel state")?;
+                document.pattern_state.set_shape_settings(settings);
             }
-            RenderVariant::WebCurveV1 { settings } => {
+            crate::pattern::PatternId::CompatibilityCurvesV1 => {
+                let mut settings = document.pattern_state.curve_settings()?;
                 *settings.channels.get_mut(ink) = serde_json::from_value(value.clone())
                     .context("Invalid Curves channel state")?;
-            }
-            RenderVariant::NativeBasicV1 => {
-                anyhow::bail!("Native Basic does not have channel-specific treatment state")
+                document.pattern_state.set_curve_settings(settings);
             }
         }
     }
@@ -671,7 +607,7 @@ mod tests {
         ArtworkSource, AutomaticSeparationStrategy, ChannelAssignment, LegacyBrightnessKind,
         LegacyCompatibilityAssignment, OutputModel, SourceAlphaPolicy,
     };
-    use crate::model::{DocumentEditor, Ink, SourceArtwork};
+    use crate::model::{ClosedShapePath, DocumentEditor, Ink, SourceArtwork, WebCurveSettings};
 
     fn document() -> Document {
         Document::new(SourceArtwork {
@@ -758,6 +694,13 @@ mod tests {
         target.render = RenderVariant::WebCurveV1 {
             settings: Box::new(WebCurveSettings::default()),
         };
+        target
+            .pattern_state
+            .select_pattern(crate::pattern::PatternId::COMPATIBILITY_CURVES_V1)
+            .unwrap();
+        target
+            .pattern_state
+            .set_selected_parameters_for_test(&target.render);
         let mut editor = DocumentEditor::new(target.clone());
         let candidate = parsed.candidate_for(editor.document()).unwrap();
         assert!(editor.replace_with_preset_candidate(candidate));
@@ -779,6 +722,9 @@ mod tests {
             unreachable!()
         };
         settings.channels.c.color = "#222222".into();
+        source
+            .pattern_state
+            .set_selected_parameters_for_test(&source.render);
         let parsed = parse_treatment(
             &document_preset_bytes("Black", &source, PresetScope::Channel).unwrap(),
             (900, 620),
@@ -797,6 +743,9 @@ mod tests {
             unreachable!()
         };
         settings.channels.r.opacity = 0.37;
+        source
+            .pattern_state
+            .set_selected_parameters_for_test(&source.render);
         let parsed = parse_treatment(
             &document_preset_bytes("Blue", &source, PresetScope::Channel).unwrap(),
             (900, 620),
@@ -829,38 +778,50 @@ mod tests {
     }
 
     #[test]
-    fn current_v4_rejects_unknown_nested_treatment_and_channel_fields() {
+    fn current_v5_rejects_unknown_nested_treatment_and_channel_fields() {
         let mut shapes = document();
         let RenderVariant::WebShapeV1 { settings } = &mut shapes.render else {
             unreachable!()
         };
         settings.custom_shape_path = Some(ClosedShapePath::from_polygon(&settings.custom_nodes));
+        shapes
+            .pattern_state
+            .set_selected_parameters_for_test(&shapes.render);
         let shapes = document_preset_bytes("Shapes", &shapes, PresetScope::Treatment).unwrap();
         let mut unknown_settings: Value = serde_json::from_slice(&shapes).unwrap();
         unknown_settings["treatment"]["settings"]["unknown"] = serde_json::json!(1);
         assert!(parse_treatment(&serde_json::to_vec(&unknown_settings).unwrap(), (1, 1)).is_err());
 
+        let mut obsolete_render: Value = serde_json::from_slice(&shapes).unwrap();
+        obsolete_render["treatment"]["render"] = serde_json::json!({
+            "variant": "web-shape-v1"
+        });
+        assert!(parse_treatment(&serde_json::to_vec(&obsolete_render).unwrap(), (1, 1)).is_err());
+
         let mut unknown_custom_path: Value = serde_json::from_slice(&shapes).unwrap();
-        unknown_custom_path["treatment"]["render"]["custom_shape_path"]["anchors"][0]["point"]["unknown"] =
+        unknown_custom_path["treatment"]["pattern_state"]["instances"]["compat.shapes.v1"]["values"]
+            ["settings"]["custom_shape_path"]["anchors"][0]["point"]["unknown"] =
             serde_json::json!(1);
         assert!(
             parse_treatment(&serde_json::to_vec(&unknown_custom_path).unwrap(), (1, 1)).is_err()
         );
 
-        let curves = document_preset_bytes(
-            "Curves",
-            &Document {
-                render: RenderVariant::WebCurveV1 {
-                    settings: Box::new(WebCurveSettings::default()),
-                },
-                ..document()
-            },
-            PresetScope::Treatment,
-        )
-        .unwrap();
+        let mut curve_document = document();
+        curve_document.render = RenderVariant::WebCurveV1 {
+            settings: Box::new(WebCurveSettings::default()),
+        };
+        curve_document
+            .pattern_state
+            .select_pattern(crate::pattern::PatternId::COMPATIBILITY_CURVES_V1)
+            .unwrap();
+        curve_document
+            .pattern_state
+            .set_selected_parameters_for_test(&curve_document.render);
+        let curves =
+            document_preset_bytes("Curves", &curve_document, PresetScope::Treatment).unwrap();
         let mut unknown_shared_path: Value = serde_json::from_slice(&curves).unwrap();
-        unknown_shared_path["treatment"]["render"]["shared_path"]["start"]["unknown"] =
-            serde_json::json!(1);
+        unknown_shared_path["treatment"]["pattern_state"]["instances"]["compat.curves.v1"]["values"]
+            ["settings"]["shared_path"]["start"]["unknown"] = serde_json::json!(1);
         assert!(
             parse_treatment(&serde_json::to_vec(&unknown_shared_path).unwrap(), (1, 1)).is_err()
         );
@@ -879,6 +840,9 @@ mod tests {
             unreachable!()
         };
         settings.grid_scale = 71.0;
+        shape_source
+            .pattern_state
+            .set_selected_parameters_for_test(&shape_source.render);
         let shape_treatment = parse_treatment(
             &document_preset_bytes("Shape", &shape_source, PresetScope::Treatment).unwrap(),
             (900, 620),
@@ -889,6 +853,9 @@ mod tests {
             unreachable!()
         };
         settings.channels.c.color = "#123456".into();
+        shape_target
+            .pattern_state
+            .set_selected_parameters_for_test(&shape_target.render);
         let shape_candidate = shape_treatment.candidate_for(&shape_target).unwrap();
         let RenderVariant::WebShapeV1 { settings } = shape_candidate.render else {
             unreachable!()
@@ -903,6 +870,13 @@ mod tests {
                 ..Default::default()
             }),
         };
+        curve_source
+            .pattern_state
+            .select_pattern(crate::pattern::PatternId::COMPATIBILITY_CURVES_V1)
+            .unwrap();
+        curve_source
+            .pattern_state
+            .set_selected_parameters_for_test(&curve_source.render);
         let curve_treatment = parse_treatment(
             &document_preset_bytes("Curve", &curve_source, PresetScope::Treatment).unwrap(),
             (900, 620),
@@ -913,6 +887,13 @@ mod tests {
             unreachable!()
         };
         settings.channels.c.curve_scale = 77.0;
+        curve_target
+            .pattern_state
+            .select_pattern(crate::pattern::PatternId::COMPATIBILITY_CURVES_V1)
+            .unwrap();
+        curve_target
+            .pattern_state
+            .set_selected_parameters_for_test(&curve_target.render);
         let curve_candidate = curve_treatment.candidate_for(&curve_target).unwrap();
         let RenderVariant::WebCurveV1 { settings } = curve_candidate.render else {
             unreachable!()
@@ -1037,8 +1018,10 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(source, before);
         let value: Value = serde_json::from_slice(&first).unwrap();
-        assert!(value["treatment"]["render"].get("channels").is_none());
-        assert!(value["treatment"]["render"].get("value_mode").is_none());
+        assert!(value["treatment"]["render"].is_null());
+        assert!(value["treatment"]["pattern_state"].is_object());
+        assert!(value["treatment"]["pattern_state"]["instances"]
+            ["compat.shapes.v1"]["values"]["settings"].get("value_mode").is_none());
     }
 
     #[test]
@@ -1060,6 +1043,14 @@ mod tests {
                 "Tiled Stacked Motif Stress Test",
                 include_bytes!("../assets/presets/Tiled Stacked Motif Stress Test.tntr").as_slice(),
             ),
+            (
+                "Polygon Six",
+                include_bytes!("../assets/presets/Polygon Six.tntr").as_slice(),
+            ),
+            (
+                "Motif Ladder",
+                include_bytes!("../assets/presets/Motif Ladder.tntr").as_slice(),
+            ),
         ] {
             let parsed = parse_treatment(bytes, (900, 620))
                 .unwrap_or_else(|error| panic!("{name} did not parse: {error:#}"));
@@ -1068,6 +1059,83 @@ mod tests {
                 .candidate_for(&document())
                 .unwrap_or_else(|error| panic!("{name} did not apply: {error:#}"));
         }
+    }
+
+    #[test]
+    fn c1_matrix_presets_keep_selection_and_typed_parameters_in_authoritative_state() {
+        let polygon_bytes = include_bytes!("../assets/presets/Polygon Six.tntr").as_slice();
+        let motif_bytes = include_bytes!("../assets/presets/Motif Ladder.tntr").as_slice();
+
+        for (name, bytes, selected) in [
+            (
+                "Polygon Six",
+                polygon_bytes,
+                crate::pattern::PatternId::COMPATIBILITY_SHAPES_V1,
+            ),
+            (
+                "Motif Ladder",
+                motif_bytes,
+                crate::pattern::PatternId::COMPATIBILITY_CURVES_V1,
+            ),
+        ] {
+            let raw: Value = serde_json::from_slice(bytes).unwrap();
+            assert_eq!(raw["format"], FORMAT);
+            assert_eq!(raw["version"], CURRENT_PRESET_VERSION);
+            assert_eq!(raw["scope"], "complete-workflow");
+            assert!(raw["treatment"]["render"].is_null());
+            for pattern_id in [
+                crate::pattern::PatternId::COMPATIBILITY_SHAPES_V1,
+                crate::pattern::PatternId::COMPATIBILITY_CURVES_V1,
+            ] {
+                let record = &raw["treatment"]["pattern_state"]["instances"][pattern_id.as_str()];
+                assert_eq!(record["pattern_id"], pattern_id.as_str());
+                assert_eq!(record["schema_version"], 1);
+                assert_eq!(record["generator_version"], 1);
+                assert!(record["values"]["settings"].is_object());
+            }
+
+            let candidate = parse_treatment(bytes, (900, 620))
+                .unwrap_or_else(|error| panic!("{name} did not parse: {error:#}"))
+                .candidate_for(&document())
+                .unwrap_or_else(|error| panic!("{name} did not apply: {error:#}"));
+            assert_eq!(
+                candidate.pattern_state.selected_pattern_id(),
+                Some(selected)
+            );
+        }
+
+        let polygon = parse_treatment(polygon_bytes, (900, 620))
+            .unwrap()
+            .candidate_for(&document())
+            .unwrap();
+        let shapes = polygon.pattern_state.shape_settings().unwrap();
+        assert_eq!(shapes.shared_shape, crate::model::WebShape::RegularPolygon);
+        assert_eq!(shapes.polygon_sides, 6);
+        assert_eq!(shapes.grid_scale, 58.0);
+        assert_eq!(shapes.min_mark, 6.0);
+        assert_eq!(shapes.max_mark, 76.0);
+        assert_eq!(shapes.base_channel.rotation, 15.0);
+        assert_eq!(shapes.base_channel.scale, 0.82);
+
+        let motif = parse_treatment(motif_bytes, (900, 620))
+            .unwrap()
+            .candidate_for(&document())
+            .unwrap();
+        let curves = motif.pattern_state.curve_settings().unwrap();
+        assert_eq!(curves.layout, crate::model::CurveLayout::MotifPattern);
+        assert!(!curves.show_background);
+        assert_eq!(curves.long_edge_cells, 34.0);
+        assert_eq!(curves.base_channel.curve_scale, 46.0);
+        assert_eq!(
+            curves.base_channel.motif_coverage,
+            crate::model::MotifCoverage::Manual
+        );
+        assert_eq!(curves.base_channel.tile_count, 5);
+        assert_eq!(curves.base_channel.stack_count, 3);
+        assert_eq!(
+            curves.base_channel.alternate_tile_transform,
+            crate::model::AlternateTileTransform::Flip
+        );
     }
 
     #[test]
@@ -1088,6 +1156,13 @@ mod tests {
         source.render = RenderVariant::WebCurveV1 {
             settings: Box::new(curves),
         };
+        source
+            .pattern_state
+            .select_pattern(crate::pattern::PatternId::COMPATIBILITY_CURVES_V1)
+            .unwrap();
+        source
+            .pattern_state
+            .set_selected_parameters_for_test(&source.render);
         source.sync_legacy_projection().unwrap();
         let parsed = parse_treatment(
             &document_preset_bytes("Crosshatch", &source, PresetScope::CompleteWorkflow).unwrap(),
@@ -1121,6 +1196,9 @@ mod tests {
             unreachable!()
         };
         settings.channels.get_mut(Ink::Blue).enabled = true;
+        document
+            .pattern_state
+            .set_selected_parameters_for_test(&document.render);
         document
     }
 }

@@ -1,0 +1,29 @@
+using Gtk 4.0;
+
+Box aggregate_channel_controls {
+  orientation: vertical;
+  spacing: 6;
+
+  Label aggregate_heading {
+    xalign: 0;
+
+    styles [
+      "heading",
+    ]
+  }
+
+  Label aggregate_mixed_message {
+    wrap: true;
+    xalign: 0;
+
+    styles [
+      "dim-label",
+      "caption",
+    ]
+  }
+
+  Box aggregate_content_host {
+    orientation: vertical;
+    spacing: 4;
+  }
+}

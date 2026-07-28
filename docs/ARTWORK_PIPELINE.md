@@ -53,7 +53,7 @@ below are superseded investigation history, not supported load requirements.
 
 ### Current project schema: v6
 
-A saved project has `format: "toniator-project"`, `version: 6`, normal document
+A saved project has `format: "toniator-project"`, `version: 7`, normal document
 state, and a required `artwork_pipeline` object. The pipeline stores stable
 dotted IDs for `source`, `alpha_policy`, `output_model`, `assignment`, optional
 `assignment_payload`, and optional `active_channel`. Unknown IDs, inconsistent
@@ -1618,8 +1618,8 @@ Migration must preserve:
 Historical Stage 1 migration design (not a supported current load path)
 converted each legacy output-mode cache once to a complete semantic snapshot
 plus pattern/channel state. That design explains the retained mode-cache
-restoration boundary; current pre-release builds reject pre-v6 projects and
-pre-v4 presets rather than migrating them. New documents and ordinary
+restoration boundary; current builds reject obsolete pre-v8 projects and
+pre-v5 presets rather than migrating them. New documents and ordinary
 output-only edits must not create source/output coupling.
 
 ### 22.3 Legacy brightness audit
@@ -1693,7 +1693,7 @@ The following are mandatory.
 - Output Model does not silently replace Artwork Source.
 - Source-only presets do not change Output Model.
 - Output-only presets do not change Artwork Source.
-- The current pre-release loader rejects pre-v6 projects and pre-v4 presets;
+- The current loader rejects obsolete pre-v8 projects and pre-v5 presets;
   historical migration-only coupling is not a supported new-document rule.
 
 ### 24.2 Channels

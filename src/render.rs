@@ -9,13 +9,17 @@ use crate::model::{
     RgbaColor, Settings, SourceArtwork, Treatment, ValueMode, WebShape, WebShapeChannel,
     WebShapeSettings, parse_hex_color,
 };
+use crate::pattern::{
+    AffineTransform, CanonicalBlendMode, CanonicalLayer, CanonicalPatternOutput, CanonicalPoint,
+    FillRule as CanonicalFillRule, GeometryPolarity, NetworkPatternOutput, RegionPatternOutput,
+};
 use anyhow::{Context, Result, bail};
 use image::{DynamicImage, ImageBuffer, Rgba, RgbaImage, imageops::FilterType};
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use tiny_skia::{BlendMode, Color, FillRule, Paint, PathBuilder, Pixmap, Transform};
+use tiny_skia::{BlendMode, Color, FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Cmyk {
@@ -501,34 +505,79 @@ pub fn generate_document_marks_cancellable(
     document: &Document,
     token: &CancellationToken,
 ) -> Result<MarkSet> {
+    match generate_document_pattern_output_cancellable(document, token)? {
+        CanonicalPatternOutput::Marks(output) => Ok(output.geometry),
+        CanonicalPatternOutput::Paths(_) => {
+            bail!("full-width curve rendering is not available as marks")
+        }
+        CanonicalPatternOutput::Regions(_)
+        | CanonicalPatternOutput::Network(_)
+        | CanonicalPatternOutput::Composite(_) => {
+            bail!("canonical region and network output is not available as marks")
+        }
+    }
+}
+
+/// Produces the one runtime canonical output consumed by preview, PNG, and
+/// SVG. The authoritative document pattern state is projected only into the
+/// retained Shapes/Curves adapter before this function dispatches.
+pub fn generate_document_pattern_output(document: &Document) -> Result<CanonicalPatternOutput> {
+    generate_document_pattern_output_cancellable(document, &CancellationToken::new())
+}
+
+pub fn generate_document_pattern_output_cancellable(
+    document: &Document,
+    token: &CancellationToken,
+) -> Result<CanonicalPatternOutput> {
     token.checkpoint()?;
     // The renderer receives only a derived legacy snapshot.  It never uses
     // mutable document compatibility fields as semantic authority.
     let mut canonical = document.clone();
     let dimensions = source_dimensions(&canonical.source)?;
     canonical.normalize_canvas_aspect(dimensions.0, dimensions.1);
+    canonical.canonicalize_pipeline_facades()?;
     canonical.validate()?;
     let source = decode_source(&canonical.source, 2400)?;
     let prepared = PreparedSource::from_rgba_image(&source, 0);
     token.checkpoint()?;
-    Ok(match &canonical.render {
+    let output = match &canonical.render {
         RenderVariant::NativeBasicV1 => {
-            if canonical.output_mode == crate::model::OutputMode::RgbScreen {
+            let marks = if canonical.output_mode == crate::model::OutputMode::RgbScreen {
                 generate_rgb_marks_cancellable(&source, canonical.settings, token)?
             } else {
                 generate_marks_cancellable(&source, canonical.settings, token)?
-            }
+            };
+            CanonicalPatternOutput::Marks(crate::pattern::MarkPatternOutput { geometry: marks })
         }
-        RenderVariant::WebShapeV1 { settings } => generate_web_shape_marks_for_pipeline(
-            &prepared,
-            settings,
-            &canonical.artwork_pipeline,
-            token,
-        )?,
-        RenderVariant::WebCurveV1 { .. } => {
-            bail!("full-width curve rendering is not available yet")
+        RenderVariant::WebShapeV1 { settings } => {
+            let marks = generate_web_shape_marks_for_pipeline(
+                &prepared,
+                settings,
+                &canonical.artwork_pipeline,
+                token,
+            )?;
+            crate::pattern::adapt_legacy_shapes(
+                crate::pattern::PatternId::COMPATIBILITY_SHAPES_V1,
+                marks,
+            )
+            .map_err(anyhow::Error::new)?
         }
-    })
+        RenderVariant::WebCurveV1 { settings } => {
+            let geometry = crate::curve_render::generate_curve_geometry_for_pipeline(
+                &prepared,
+                settings,
+                &canonical.artwork_pipeline,
+                token,
+            )?;
+            crate::pattern::adapt_legacy_curves(
+                crate::pattern::PatternId::COMPATIBILITY_CURVES_V1,
+                geometry,
+            )
+            .map_err(anyhow::Error::new)?
+        }
+    };
+    output.validate().map_err(anyhow::Error::new)?;
+    Ok(output)
 }
 
 pub fn generate_web_shape_marks(source: &RgbaImage, settings: &WebShapeSettings) -> MarkSet {
@@ -1170,59 +1219,32 @@ pub fn render_document_preview_cancellable(
     let mut canonical = document.clone();
     let dimensions = source_dimensions(&canonical.source)?;
     canonical.normalize_canvas_aspect(dimensions.0, dimensions.1);
+    canonical.canonicalize_pipeline_facades()?;
     // The common white canvas path retains the long-established native
     // rasterization behavior (notably multiply blending at antialiased
     // edges). Non-white/translucent surfaces are composed after transparent
     // artwork so they remain presentation-only.
     let legacy_white_preview = matches!(canonical.appearance.preview_surface, PreviewSurface::Color { color } if color == RgbaColor::WHITE);
-    if let RenderVariant::WebCurveV1 { settings } = &canonical.render {
-        canonical.validate()?;
-        let source = decode_source(&canonical.source, 2400)?;
-        let prepared = PreparedSource::from_rgba_image(&source, generation);
-        token.checkpoint()?;
-        let geometry = crate::curve_render::generate_curve_geometry_for_pipeline(
-            &prepared,
-            settings,
-            &canonical.artwork_pipeline,
-            token,
-        )?;
-        token.checkpoint()?;
-        let rendered = if legacy_white_preview {
-            let scale = max_dimension as f32 / geometry.width.max(geometry.height) as f32;
-            let width = (geometry.width as f32 * scale).round().max(1.0) as u32;
-            let height = (geometry.height as f32 * scale).round().max(1.0) as u32;
-            RenderResult {
-                generation,
-                image: crate::curve_render::render_curve_geometry_output_cancellable(
-                    &geometry, width, height, true, None, token,
-                )?,
-            }
-        } else {
-            let scale = max_dimension as f32 / geometry.width.max(geometry.height) as f32;
-            let width = (geometry.width as f32 * scale).round().max(1.0) as u32;
-            let height = (geometry.height as f32 * scale).round().max(1.0) as u32;
-            RenderResult {
-                generation,
-                image: crate::curve_render::render_curve_geometry_output_cancellable(
-                    &geometry, width, height, false, None, token,
-                )?,
-            }
-        };
-        if legacy_white_preview {
-            return Ok(rendered);
-        }
-        return Ok(RenderResult {
-            generation: rendered.generation,
-            image: composite_preview(rendered.image, canonical.appearance),
-        });
-    }
-    let marks = generate_document_marks_cancellable(&canonical, token)?;
+    let output = generate_document_pattern_output_cancellable(&canonical, token)?;
     token.checkpoint()?;
+    let artboard = output.artboard();
+    let scale = max_dimension as f32 / artboard.width.max(artboard.height) as f32;
+    let width = (artboard.width as f32 * scale).round().max(1.0) as u32;
+    let height = (artboard.height as f32 * scale).round().max(1.0) as u32;
+    let rendered = RenderResult {
+        generation,
+        image: render_canonical_pattern_output_cancellable(
+            &output,
+            width,
+            height,
+            legacy_white_preview,
+            None,
+            token,
+        )?,
+    };
     if legacy_white_preview {
-        return render_mark_set_cancellable(&marks, max_dimension, generation, token);
+        return Ok(rendered);
     }
-    let rendered =
-        render_mark_set_transparent_cancellable(&marks, max_dimension, generation, token)?;
     Ok(RenderResult {
         generation: rendered.generation,
         image: composite_preview(rendered.image, canonical.appearance),
@@ -1243,19 +1265,6 @@ fn render_mark_set_cancellable(
     let width = (marks.width as f32 * scale).round().max(1.0) as u32;
     let height = (marks.height as f32 * scale).round().max(1.0) as u32;
     let image = render_mark_set_output_cancellable(marks, width, height, true, None, token)?;
-    Ok(RenderResult { generation, image })
-}
-
-fn render_mark_set_transparent_cancellable(
-    marks: &MarkSet,
-    max_dimension: u32,
-    generation: u64,
-    token: &CancellationToken,
-) -> Result<RenderResult> {
-    let scale = max_dimension as f32 / marks.width.max(marks.height) as f32;
-    let width = (marks.width as f32 * scale).round().max(1.0) as u32;
-    let height = (marks.height as f32 * scale).round().max(1.0) as u32;
-    let image = render_mark_set_output_cancellable(marks, width, height, false, None, token)?;
     Ok(RenderResult { generation, image })
 }
 
@@ -1288,6 +1297,7 @@ pub fn render_document_output_cancellable(
     let mut canonical = document.clone();
     let dimensions = source_dimensions(&canonical.source)?;
     canonical.normalize_canvas_aspect(dimensions.0, dimensions.1);
+    canonical.canonicalize_pipeline_facades()?;
     canonical.validate()?;
     anyhow::ensure!(
         width > 0 && height > 0,
@@ -1298,27 +1308,15 @@ pub fn render_document_output_cancellable(
         pixels <= 64_000_000,
         "PNG output exceeds the safe 64 megapixel limit"
     );
-    if let RenderVariant::WebCurveV1 { settings } = &canonical.render {
-        let source = decode_source(&canonical.source, 2400)?;
-        let prepared = PreparedSource::from_rgba_image(&source, 0);
-        token.checkpoint()?;
-        let geometry = crate::curve_render::generate_curve_geometry_for_pipeline(
-            &prepared,
-            settings,
-            &canonical.artwork_pipeline,
-            token,
-        )?;
-        return crate::curve_render::render_curve_geometry_output_cancellable(
-            &geometry,
-            width,
-            height,
-            white_background,
-            channel,
-            token,
-        );
-    }
-    let marks = generate_document_marks_cancellable(&canonical, token)?;
-    render_mark_set_output_cancellable(&marks, width, height, white_background, channel, token)
+    let output = generate_document_pattern_output_cancellable(&canonical, token)?;
+    render_canonical_pattern_output_cancellable(
+        &output,
+        width,
+        height,
+        white_background,
+        channel,
+        token,
+    )
 }
 
 /// Renders artwork using the document's export-background setting. This is
@@ -1485,6 +1483,279 @@ pub fn render_mark_set_output_cancellable(
 
     ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, pixmap.take())
         .context("renderer returned an invalid output buffer")
+}
+
+/// Renders any Stage 3 canonical output. Marks and paths deliberately
+/// delegate to their existing consumers so Shapes and Curves retain byte and
+/// geometry-equivalent behavior. Regions and networks use their own semantic
+/// raster path, including destination-out subtraction rather than a painted
+/// background colour.
+pub fn render_canonical_pattern_output_cancellable(
+    output: &CanonicalPatternOutput,
+    width: u32,
+    height: u32,
+    white_background: bool,
+    channel: Option<Ink>,
+    token: &CancellationToken,
+) -> Result<RgbaImage> {
+    token.checkpoint()?;
+    anyhow::ensure!(
+        width > 0 && height > 0,
+        "output dimensions must be positive"
+    );
+    anyhow::ensure!(
+        u64::from(width) * u64::from(height) <= 64_000_000,
+        "PNG output exceeds the safe 64 megapixel limit"
+    );
+    output.validate().map_err(anyhow::Error::new)?;
+    match output {
+        CanonicalPatternOutput::Marks(output) => render_mark_set_output_cancellable(
+            &output.geometry,
+            width,
+            height,
+            white_background,
+            channel,
+            token,
+        ),
+        CanonicalPatternOutput::Paths(output) => {
+            crate::curve_render::render_curve_geometry_output_cancellable(
+                &output.geometry,
+                width,
+                height,
+                white_background,
+                channel,
+                token,
+            )
+        }
+        CanonicalPatternOutput::Regions(output) => {
+            render_region_output_cancellable(output, width, height, white_background, token)
+        }
+        CanonicalPatternOutput::Network(output) => {
+            render_network_output_cancellable(output, width, height, white_background, token)
+        }
+        CanonicalPatternOutput::Composite(output) => render_composite_pattern_output_cancellable(
+            output,
+            width,
+            height,
+            white_background,
+            token,
+        ),
+    }
+}
+
+fn render_region_output_cancellable(
+    output: &RegionPatternOutput,
+    width: u32,
+    height: u32,
+    white_background: bool,
+    token: &CancellationToken,
+) -> Result<RgbaImage> {
+    let mut pixmap = Pixmap::new(width, height).context("output is too large")?;
+    if white_background {
+        pixmap.fill(Color::WHITE);
+    }
+    render_regions_into_pixmap(output, width, height, &mut pixmap, token)?;
+    ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, pixmap.take())
+        .context("canonical region renderer returned an invalid output buffer")
+}
+
+fn render_regions_into_pixmap(
+    output: &RegionPatternOutput,
+    width: u32,
+    height: u32,
+    pixmap: &mut Pixmap,
+    token: &CancellationToken,
+) -> Result<()> {
+    let scale_x = width as f32 / output.artboard.width as f32;
+    let scale_y = height as f32 / output.artboard.height as f32;
+    let mut layers: Vec<_> = output.layers.iter().collect();
+    layers.sort_by_key(|layer| (layer.order, layer.id));
+    for layer in layers {
+        token.checkpoint()?;
+        let mut regions: Vec<_> = output
+            .regions
+            .iter()
+            .filter(|region| region.layer_id == layer.id)
+            .collect();
+        regions.sort_by_key(|region| (region.order, region.id));
+        for (index, region) in regions.into_iter().enumerate() {
+            if index % 256 == 0 {
+                token.checkpoint()?;
+            }
+            let Some(path) = region_path(region, scale_x, scale_y) else {
+                continue;
+            };
+            let mut paint = canonical_layer_paint(layer);
+            if region.polarity == GeometryPolarity::Subtractive {
+                // This is an alpha-mask operation. In particular it does not
+                // draw a white/background-coloured outline into the artwork.
+                // Subtraction is geometric, so it removes the covered source
+                // alpha completely; layer opacity belongs only to positive
+                // paint and must not make raster masks disagree with SVG.
+                paint.set_color_rgba8(255, 255, 255, 255);
+                paint.blend_mode = BlendMode::DestinationOut;
+            }
+            pixmap.fill_path(
+                &path,
+                &paint,
+                match region.fill_rule {
+                    CanonicalFillRule::NonZero => FillRule::Winding,
+                    CanonicalFillRule::EvenOdd => FillRule::EvenOdd,
+                },
+                Transform::identity(),
+                None,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn render_network_output_cancellable(
+    output: &NetworkPatternOutput,
+    width: u32,
+    height: u32,
+    white_background: bool,
+    token: &CancellationToken,
+) -> Result<RgbaImage> {
+    let mut pixmap = Pixmap::new(width, height).context("output is too large")?;
+    if white_background {
+        pixmap.fill(Color::WHITE);
+    }
+    render_network_into_pixmap(output, width, height, &mut pixmap, token)?;
+    ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, pixmap.take())
+        .context("canonical network renderer returned an invalid output buffer")
+}
+
+fn render_network_into_pixmap(
+    output: &NetworkPatternOutput,
+    width: u32,
+    height: u32,
+    pixmap: &mut Pixmap,
+    token: &CancellationToken,
+) -> Result<()> {
+    let scale_x = width as f32 / output.artboard.width as f32;
+    let scale_y = height as f32 / output.artboard.height as f32;
+    let nodes: HashMap<_, _> = output
+        .nodes
+        .iter()
+        .map(|node| (node.id, node.point))
+        .collect();
+    let mut layers: Vec<_> = output.layers.iter().collect();
+    layers.sort_by_key(|layer| (layer.order, layer.id));
+    for layer in layers {
+        token.checkpoint()?;
+        let mut edges: Vec<_> = output
+            .edges
+            .iter()
+            .filter(|edge| edge.layer_id == layer.id)
+            .collect();
+        edges.sort_by_key(|edge| (edge.order, edge.id));
+        for (index, edge) in edges.into_iter().enumerate() {
+            if index % 256 == 0 {
+                token.checkpoint()?;
+            }
+            let start = transform_and_scale(
+                *nodes.get(&edge.start).expect("validated node"),
+                output.transform,
+                scale_x,
+                scale_y,
+            );
+            let end = transform_and_scale(
+                *nodes.get(&edge.end).expect("validated node"),
+                output.transform,
+                scale_x,
+                scale_y,
+            );
+            let mut builder = PathBuilder::new();
+            builder.move_to(start.x, start.y);
+            builder.line_to(end.x, end.y);
+            let Some(path) = builder.finish() else {
+                continue;
+            };
+            let mut paint = canonical_layer_paint(layer);
+            if edge.polarity == GeometryPolarity::Subtractive {
+                paint.set_color_rgba8(255, 255, 255, 255);
+                paint.blend_mode = BlendMode::DestinationOut;
+            }
+            let stroke = Stroke {
+                width: edge.width * (scale_x + scale_y) / 2.0,
+                ..Stroke::default()
+            };
+            pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+        }
+    }
+    Ok(())
+}
+
+fn render_composite_pattern_output_cancellable(
+    output: &crate::pattern::CompositePatternOutput,
+    width: u32,
+    height: u32,
+    white_background: bool,
+    token: &CancellationToken,
+) -> Result<RgbaImage> {
+    let mut pixmap = Pixmap::new(width, height).context("output is too large")?;
+    if white_background {
+        pixmap.fill(Color::WHITE);
+    }
+    // Filled regions establish the artwork surface; the network is then
+    // applied as a shared-boundary overlay, allowing a subtractive network
+    // edge to remove alpha from the region geometry beneath it.
+    if let Some(regions) = &output.regions {
+        render_regions_into_pixmap(regions, width, height, &mut pixmap, token)?;
+    }
+    if let Some(network) = &output.network {
+        render_network_into_pixmap(network, width, height, &mut pixmap, token)?;
+    }
+    ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, pixmap.take())
+        .context("canonical composite renderer returned an invalid output buffer")
+}
+
+fn region_path(
+    region: &crate::pattern::FilledRegion,
+    scale_x: f32,
+    scale_y: f32,
+) -> Option<tiny_skia::Path> {
+    let mut builder = PathBuilder::new();
+    for ring in &region.rings {
+        let first = transform_and_scale(ring.vertices[0], region.transform, scale_x, scale_y);
+        builder.move_to(first.x, first.y);
+        for point in &ring.vertices[1..] {
+            let point = transform_and_scale(*point, region.transform, scale_x, scale_y);
+            builder.line_to(point.x, point.y);
+        }
+        builder.close();
+    }
+    builder.finish()
+}
+
+fn transform_and_scale(
+    point: CanonicalPoint,
+    transform: AffineTransform,
+    scale_x: f32,
+    scale_y: f32,
+) -> CanonicalPoint {
+    let point = transform.apply(point);
+    CanonicalPoint {
+        x: point.x * scale_x,
+        y: point.y * scale_y,
+    }
+}
+
+fn canonical_layer_paint(layer: &CanonicalLayer) -> Paint<'static> {
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(
+        layer.color.red,
+        layer.color.green,
+        layer.color.blue,
+        (layer.opacity * 255.0).round() as u8,
+    );
+    paint.blend_mode = match layer.blend_mode {
+        CanonicalBlendMode::Multiply => BlendMode::Multiply,
+        CanonicalBlendMode::Screen => BlendMode::Screen,
+    };
+    paint.anti_alias = true;
+    paint
 }
 
 fn layer_paint(layer: &InkLayer) -> Paint<'static> {
@@ -2071,6 +2342,9 @@ mod tests {
         document.render = RenderVariant::WebShapeV1 {
             settings: Box::new(settings),
         };
+        document
+            .pattern_state
+            .set_selected_parameters_for_test(&document.render);
         document.appearance.preview_surface = PreviewSurface::Color {
             color: RgbaColor::opaque(12, 18, 28),
         };
@@ -2131,6 +2405,9 @@ mod tests {
                 ..Default::default()
             }),
         };
+        document
+            .pattern_state
+            .set_selected_parameters_for_test(&document.render);
         let token = CancellationToken::new();
         assert!(token.cancel());
         assert!(render_document_preview_cancellable(&document, 900, 11, &token).is_err());
@@ -2257,6 +2534,9 @@ mod tests {
         document.render = RenderVariant::WebShapeV1 {
             settings: Box::new(settings),
         };
+        document
+            .pattern_state
+            .set_selected_parameters_for_test(&document.render);
         document.artwork_pipeline = ArtworkPipelineSettings {
             source: ArtworkSource::Red,
             alpha_policy: SourceAlphaPolicy::Ignore,
@@ -2293,6 +2573,13 @@ mod tests {
         document.render = RenderVariant::WebCurveV1 {
             settings: Box::new(curve),
         };
+        document
+            .pattern_state
+            .select_pattern(crate::pattern::PatternId::COMPATIBILITY_CURVES_V1)
+            .unwrap();
+        document
+            .pattern_state
+            .set_selected_parameters_for_test(&document.render);
         assert!(
             render_document_output(&document, 100, 100, false, None)
                 .unwrap()
@@ -2649,6 +2936,13 @@ mod tests {
                 ..Default::default()
             }),
         };
+        curve
+            .pattern_state
+            .select_pattern(crate::pattern::PatternId::COMPATIBILITY_CURVES_V1)
+            .unwrap();
+        curve
+            .pattern_state
+            .set_selected_parameters_for_test(&curve.render);
         let source = decode_source(&curve.source, 2400).unwrap();
         let before = crate::curve_render::generate_curve_geometry(
             &source,
@@ -2786,10 +3080,16 @@ mod tests {
         let from_contradiction = render_document_preview(&document, 64, 1).unwrap().image;
         assert_eq!(document, before, "render projection must be read-only");
 
+        let output_from_contradiction =
+            render_document_output(&document, 64, 64, false, None).unwrap();
+
         let mut canonical = document.clone();
         canonical.sync_legacy_projection().unwrap();
         let from_canonical = render_document_preview(&canonical, 64, 2).unwrap().image;
         assert_eq!(from_contradiction, from_canonical);
+        let output_from_canonical =
+            render_document_output(&canonical, 64, 64, false, None).unwrap();
+        assert_eq!(output_from_contradiction, output_from_canonical);
     }
 
     #[test]

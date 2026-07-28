@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/com/toniator/Toniator">
+    <file>toniator-window.ui</file>
+    <file>toniator-channel-controls.ui</file>
+    <file>toniator-aggregate-channel-controls.ui</file>
+  </gresource>
+</gresources>

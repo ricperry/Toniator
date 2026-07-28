@@ -60,8 +60,8 @@ pub fn load_document_with_adjustments(path: &Path) -> Result<LoadedDocument> {
     let mut document: Document = serde_json::from_slice(&bytes)
         .with_context(|| format!("could not parse {}", path.display()))?;
 
-    // Current schema fields are required by serde. Legacy facade values are
-    // deliberately overwritten from the semantic pipeline at this boundary.
+    // Current schema fields are required by serde. The transient legacy
+    // adapter is rebuilt only from authoritative pattern state at this boundary.
     document.canonicalize_pipeline_facades()?;
     let canvas_aspect =
         if let Ok((width, height)) = crate::render::source_dimensions(&document.source) {
@@ -166,6 +166,10 @@ mod tests {
         DocumentEditor, RenderVariant, SettingKey, SourceArtwork, WebCurveSettings,
         WebShapeSettings,
     };
+    use crate::pattern::PatternId;
+    use crate::preset::parse_treatment;
+    use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
+    use std::io::Cursor;
 
     fn source(bytes: impl Into<std::sync::Arc<[u8]>>) -> SourceArtwork {
         SourceArtwork {
@@ -175,6 +179,24 @@ mod tests {
         }
     }
 
+    fn rendered_source() -> SourceArtwork {
+        // Match the C1 fixtures' 900 × 620 artboard ratio so current save/load
+        // normalization is a no-op and this test isolates adapter authority.
+        let image = RgbaImage::from_fn(45, 31, |x, y| {
+            Rgba([
+                (20 + x * 4) as u8,
+                (40 + y * 3) as u8,
+                (180 - ((x + y) % 20) * 7) as u8,
+                255,
+            ])
+        });
+        let mut png = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(image)
+            .write_to(&mut png, ImageFormat::Png)
+            .unwrap();
+        source(png.into_inner())
+    }
+
     #[test]
     fn current_project_roundtrips_and_rejects_pre_release_versions() {
         let directory = tempfile::tempdir().unwrap();
@@ -182,17 +204,36 @@ mod tests {
         let document = Document::new(source([1]));
         save_document_atomic(&path, &document).unwrap();
         assert_eq!(load_document(&path).unwrap(), document);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(saved["pattern_state"].is_object());
+        assert!(saved["render"].is_null());
+        assert!(saved["saved_web_shape"].is_null());
+        assert!(saved["saved_web_curve"].is_null());
+        assert!(saved["compatibility_pattern"].is_null());
+
+        let mut obsolete_projection = saved.clone();
+        obsolete_projection["render"] = serde_json::json!({ "variant": "native-basic-v1" });
+        std::fs::write(&path, serde_json::to_vec(&obsolete_projection).unwrap()).unwrap();
+        assert!(load_document(&path).is_err());
+
+        let mut obsolete_selector = saved;
+        obsolete_selector["compatibility_pattern"] = serde_json::json!("shapes");
+        std::fs::write(&path, serde_json::to_vec(&obsolete_selector).unwrap()).unwrap();
+        assert!(load_document(&path).is_err());
 
         let mut editor = DocumentEditor::new(document.clone());
         assert!(editor.set_output_mode(crate::model::OutputMode::RgbScreen));
         assert!(editor.apply_legacy_mapping_action(crate::model::ValueMode::CrosshatchLuminance));
         let crosshatch_path = directory.path().join("crosshatch.toniator");
         save_document_atomic(&crosshatch_path, editor.document()).unwrap();
-        assert_eq!(load_document(&crosshatch_path).unwrap(), *editor.document());
+        let loaded = load_document(&crosshatch_path).unwrap();
+        assert_eq!(loaded.pattern_state, editor.document().pattern_state);
+        assert_eq!(loaded.artwork_pipeline, editor.document().artwork_pipeline);
 
         let mut value: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        value["version"] = serde_json::json!(5);
+        value["version"] = serde_json::json!(6);
         std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
         assert!(
             load_document(&path)
@@ -203,7 +244,473 @@ mod tests {
     }
 
     #[test]
-    fn current_v6_requires_valid_pipeline_state_everywhere() {
+    fn current_v8_rejects_missing_mismatched_or_unsupported_authoritative_patterns() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("invalid-compatibility-pattern.toniator");
+        let bytes = document_json(&Document::new(source([1]))).unwrap();
+
+        let mut missing: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        missing.as_object_mut().unwrap().remove("pattern_state");
+        std::fs::write(&path, serde_json::to_vec(&missing).unwrap()).unwrap();
+        assert!(load_document(&path).is_err());
+
+        let mut mismatched: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        mismatched["pattern_state"]["instances"]["compat.shapes.v1"]["pattern_id"] =
+            serde_json::json!("compat.curves.v1");
+        std::fs::write(&path, serde_json::to_vec(&mismatched).unwrap()).unwrap();
+        assert!(
+            load_document(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("contradicts")
+        );
+
+        let mut unsupported: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        unsupported["pattern_state"]["instances"]["compat.shapes.v1"]["schema_version"] =
+            serde_json::json!(2);
+        std::fs::write(&path, serde_json::to_vec(&unsupported).unwrap()).unwrap();
+        assert!(
+            load_document(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("does not support parameter schema version")
+        );
+    }
+
+    #[test]
+    fn c2a_c1_fixtures_save_reopen_and_undo_redo_authoritative_pattern_edits() {
+        let directory = tempfile::tempdir().unwrap();
+        for (name, bytes, selected) in [
+            (
+                "polygon-six",
+                include_bytes!("../assets/presets/Polygon Six.tntr").as_slice(),
+                PatternId::COMPATIBILITY_SHAPES_V1,
+            ),
+            (
+                "motif-ladder",
+                include_bytes!("../assets/presets/Motif Ladder.tntr").as_slice(),
+                PatternId::COMPATIBILITY_CURVES_V1,
+            ),
+        ] {
+            let mut editor = DocumentEditor::new(Document::new(source([1])));
+            let candidate = parse_treatment(bytes, (900, 620))
+                .unwrap_or_else(|error| panic!("{name} did not parse: {error:#}"))
+                .candidate_for(editor.document())
+                .unwrap_or_else(|error| panic!("{name} did not apply: {error:#}"));
+            assert!(editor.replace_with_preset_candidate(candidate));
+            assert_eq!(
+                editor.document().pattern_state.selected_pattern_id(),
+                Some(selected)
+            );
+            let fixture_state = editor.document().pattern_state.clone();
+
+            match selected {
+                PatternId::COMPATIBILITY_SHAPES_V1 => {
+                    let mut settings = editor.document().pattern_state.shape_settings().unwrap();
+                    settings.polygon_sides = 3;
+                    settings.base_channel.rotation = 27.0;
+                    assert!(editor.set_shape_settings(settings));
+                }
+                PatternId::COMPATIBILITY_CURVES_V1 => {
+                    let mut settings = editor.document().pattern_state.curve_settings().unwrap();
+                    settings.base_channel.curve_scale = 52.0;
+                    settings.base_channel.tile_count = 6;
+                    settings.base_channel.stack_count = 4;
+                    assert!(editor.set_curve_settings(settings));
+                }
+            }
+
+            let edited_state = editor.document().pattern_state.clone();
+            let path = directory.path().join(format!("{name}.toniator"));
+            save_document_atomic(&path, editor.document()).unwrap();
+            let saved: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert!(saved["pattern_state"].is_object());
+            assert!(saved["render"].is_null());
+            assert_eq!(
+                saved["pattern_state"]["selected"]["registered"],
+                selected.as_str()
+            );
+
+            let reopened = load_document(&path).unwrap();
+            assert_eq!(reopened.pattern_state, edited_state);
+            assert_eq!(reopened.pattern_state.selected_pattern_id(), Some(selected));
+            match selected {
+                PatternId::COMPATIBILITY_SHAPES_V1 => {
+                    let settings = reopened.pattern_state.shape_settings().unwrap();
+                    assert_eq!(settings.polygon_sides, 3);
+                    assert_eq!(settings.base_channel.rotation, 27.0);
+                }
+                PatternId::COMPATIBILITY_CURVES_V1 => {
+                    let settings = reopened.pattern_state.curve_settings().unwrap();
+                    assert_eq!(settings.base_channel.curve_scale, 52.0);
+                    assert_eq!(settings.base_channel.tile_count, 6);
+                    assert_eq!(settings.base_channel.stack_count, 4);
+                }
+            }
+
+            assert!(editor.undo());
+            assert_eq!(editor.document().pattern_state, fixture_state);
+            assert!(editor.redo());
+            assert_eq!(editor.document().pattern_state, edited_state);
+        }
+    }
+
+    #[test]
+    fn c2b1_c1_fixtures_ignore_contradictory_transient_adapters_across_render_save_and_history() {
+        let directory = tempfile::tempdir().unwrap();
+        for (name, bytes, selected) in [
+            (
+                "polygon-six",
+                include_bytes!("../assets/presets/Polygon Six.tntr").as_slice(),
+                PatternId::COMPATIBILITY_SHAPES_V1,
+            ),
+            (
+                "motif-ladder",
+                include_bytes!("../assets/presets/Motif Ladder.tntr").as_slice(),
+                PatternId::COMPATIBILITY_CURVES_V1,
+            ),
+        ] {
+            let mut fixture_editor = DocumentEditor::new(Document::new(rendered_source()));
+            let candidate = parse_treatment(bytes, (900, 620))
+                .unwrap_or_else(|error| panic!("{name} did not parse: {error:#}"))
+                .candidate_for(fixture_editor.document())
+                .unwrap_or_else(|error| panic!("{name} did not apply: {error:#}"));
+            assert!(fixture_editor.replace_with_preset_candidate(candidate));
+            assert_eq!(
+                fixture_editor
+                    .document()
+                    .pattern_state
+                    .selected_pattern_id(),
+                Some(selected)
+            );
+
+            let authoritative_before = fixture_editor.document().pattern_state.clone();
+            let rendered_before = crate::render::render_document_output(
+                fixture_editor.document(),
+                120,
+                80,
+                false,
+                None,
+            )
+            .unwrap();
+
+            // This can never be produced by the current selected pattern. It
+            // deliberately reverses the adapter kind and uses incompatible
+            // parameter values, while retaining a real production Document,
+            // preset candidate, renderer, serializer, and editor history.
+            let mut contradictory = fixture_editor.document().clone();
+            contradictory.render = match selected {
+                PatternId::COMPATIBILITY_SHAPES_V1 => RenderVariant::WebCurveV1 {
+                    settings: Box::new(WebCurveSettings {
+                        output_width: 17,
+                        output_height: 13,
+                        long_edge_cells: 2.0,
+                        max_mark: 91.0,
+                        ..Default::default()
+                    }),
+                },
+                PatternId::COMPATIBILITY_CURVES_V1 => RenderVariant::WebShapeV1 {
+                    settings: Box::new(WebShapeSettings {
+                        output_width: 19,
+                        output_height: 11,
+                        long_edge_cells: 2.0,
+                        grid_scale: 77.0,
+                        ..Default::default()
+                    }),
+                },
+            };
+            assert!(matches!(
+                (&contradictory.pattern_state.selected, &contradictory.render),
+                (
+                    crate::model::PatternSelection::Registered(PatternId::COMPATIBILITY_SHAPES_V1),
+                    RenderVariant::WebCurveV1 { .. }
+                ) | (
+                    crate::model::PatternSelection::Registered(PatternId::COMPATIBILITY_CURVES_V1),
+                    RenderVariant::WebShapeV1 { .. }
+                )
+            ));
+            assert_eq!(
+                crate::render::render_document_output(&contradictory, 120, 80, false, None)
+                    .unwrap(),
+                rendered_before,
+                "{name} render must rebuild the adapter from pattern_state"
+            );
+
+            let mut editor = DocumentEditor::new(contradictory);
+            match selected {
+                PatternId::COMPATIBILITY_SHAPES_V1 => {
+                    let mut settings = editor.document().pattern_state.shape_settings().unwrap();
+                    settings.polygon_sides = 3;
+                    settings.base_channel.rotation = 27.0;
+                    assert!(editor.set_shape_settings(settings));
+                }
+                PatternId::COMPATIBILITY_CURVES_V1 => {
+                    let mut settings = editor.document().pattern_state.curve_settings().unwrap();
+                    settings.base_channel.curve_scale = 52.0;
+                    settings.base_channel.tile_count = 6;
+                    assert!(editor.set_curve_settings(settings));
+                }
+            }
+            let authoritative_after = editor.document().pattern_state.clone();
+            let rendered_after =
+                crate::render::render_document_output(editor.document(), 120, 80, false, None)
+                    .unwrap();
+
+            let path = directory.path().join(format!("{name}.toniator"));
+            save_document_atomic(&path, editor.document()).unwrap();
+            let serialized = std::fs::read_to_string(&path).unwrap();
+            assert!(serialized.contains("\"pattern_state\""));
+            assert!(!serialized.contains("\"render\""));
+            let reopened = load_document(&path).unwrap();
+            assert_eq!(reopened.pattern_state, authoritative_after);
+            assert_eq!(
+                crate::render::render_document_output(&reopened, 120, 80, false, None).unwrap(),
+                rendered_after,
+                "{name} reopen must render the saved pattern authority"
+            );
+            match selected {
+                PatternId::COMPATIBILITY_SHAPES_V1 => assert_eq!(
+                    reopened.pattern_state.shape_settings().unwrap(),
+                    authoritative_after.shape_settings().unwrap()
+                ),
+                PatternId::COMPATIBILITY_CURVES_V1 => assert_eq!(
+                    reopened.pattern_state.curve_settings().unwrap(),
+                    authoritative_after.curve_settings().unwrap()
+                ),
+            }
+
+            assert!(editor.undo());
+            assert_eq!(editor.document().pattern_state, authoritative_before);
+            assert_eq!(
+                crate::render::render_document_output(editor.document(), 120, 80, false, None)
+                    .unwrap(),
+                rendered_before,
+                "{name} undo must ignore the restored contradictory adapter"
+            );
+            assert!(editor.redo());
+            assert_eq!(editor.document().pattern_state, authoritative_after);
+            assert_eq!(
+                crate::render::render_document_output(editor.document(), 120, 80, false, None)
+                    .unwrap(),
+                rendered_after,
+                "{name} redo must restore the authoritative edit"
+            );
+        }
+    }
+
+    #[test]
+    fn c2b2a_c1_fixtures_keep_pattern_authority_across_output_caches_and_roundtrips() {
+        let directory = tempfile::tempdir().unwrap();
+        for (name, bytes, selected) in [
+            (
+                "polygon-six",
+                include_bytes!("../assets/presets/Polygon Six.tntr").as_slice(),
+                PatternId::COMPATIBILITY_SHAPES_V1,
+            ),
+            (
+                "motif-ladder",
+                include_bytes!("../assets/presets/Motif Ladder.tntr").as_slice(),
+                PatternId::COMPATIBILITY_CURVES_V1,
+            ),
+        ] {
+            let mut fixture_editor = DocumentEditor::new(Document::new(rendered_source()));
+            let candidate = parse_treatment(bytes, (900, 620))
+                .unwrap_or_else(|error| panic!("{name} did not parse: {error:#}"))
+                .candidate_for(fixture_editor.document())
+                .unwrap_or_else(|error| panic!("{name} did not apply: {error:#}"));
+            assert!(fixture_editor.replace_with_preset_candidate(candidate));
+            assert_eq!(
+                fixture_editor
+                    .document()
+                    .pattern_state
+                    .selected_pattern_id(),
+                Some(selected)
+            );
+            let cmyk_state = fixture_editor.document().pattern_state.clone();
+            let cmyk_preview = crate::model::PreviewSurface::Color {
+                color: crate::model::RgbaColor::opaque(241, 236, 225),
+            };
+            let export_background = crate::model::ExportBackground::Color {
+                color: crate::model::RgbaColor::opaque(11, 22, 33),
+            };
+            assert!(
+                fixture_editor.set_appearance(crate::model::DocumentAppearance {
+                    preview_surface: cmyk_preview,
+                    export_background,
+                })
+            );
+            let cmyk_rendered = crate::render::render_document_output(
+                fixture_editor.document(),
+                120,
+                80,
+                false,
+                None,
+            )
+            .unwrap();
+
+            // Begin with the opposite adapter kind and incompatible settings.
+            // The transition must snapshot typed authority, not this facade.
+            let mut active_contradiction = fixture_editor.document().clone();
+            active_contradiction.render = match selected {
+                PatternId::COMPATIBILITY_SHAPES_V1 => RenderVariant::WebCurveV1 {
+                    settings: Box::new(WebCurveSettings {
+                        output_width: 17,
+                        output_height: 13,
+                        long_edge_cells: 2.0,
+                        max_mark: 91.0,
+                        ..Default::default()
+                    }),
+                },
+                PatternId::COMPATIBILITY_CURVES_V1 => RenderVariant::WebShapeV1 {
+                    settings: Box::new(WebShapeSettings {
+                        output_width: 19,
+                        output_height: 11,
+                        long_edge_cells: 2.0,
+                        grid_scale: 77.0,
+                        ..Default::default()
+                    }),
+                },
+            };
+            assert_eq!(
+                crate::render::render_document_output(&active_contradiction, 120, 80, false, None)
+                    .unwrap(),
+                cmyk_rendered,
+                "{name} active adapter cannot override CMYK authority"
+            );
+            let mut editor = DocumentEditor::new(active_contradiction);
+            assert!(editor.set_output_mode(crate::model::OutputMode::RgbScreen));
+            assert_eq!(
+                editor.document().pattern_state,
+                cmyk_state,
+                "{name} first RGB cache must clone pattern authority"
+            );
+            assert_eq!(
+                editor.document().appearance.export_background,
+                export_background
+            );
+            assert_eq!(
+                editor.document().appearance.preview_surface,
+                crate::model::PreviewSurface::Color {
+                    color: crate::model::RgbaColor::opaque(0, 0, 0)
+                }
+            );
+
+            // Corrupt only the inactive CMYK adapter after its cache was
+            // created. Re-entering CMYK must rebuild it from cached authority.
+            let mut inactive_contradiction = editor.document().clone();
+            let cmyk_cache = inactive_contradiction
+                .inactive_cmyk
+                .as_mut()
+                .expect("CMYK treatment is cached while RGB is active");
+            cmyk_cache.render = match selected {
+                PatternId::COMPATIBILITY_SHAPES_V1 => RenderVariant::WebCurveV1 {
+                    settings: Box::new(WebCurveSettings {
+                        output_width: 23,
+                        output_height: 17,
+                        long_edge_cells: 2.0,
+                        max_mark: 88.0,
+                        ..Default::default()
+                    }),
+                },
+                PatternId::COMPATIBILITY_CURVES_V1 => RenderVariant::WebShapeV1 {
+                    settings: Box::new(WebShapeSettings {
+                        output_width: 29,
+                        output_height: 19,
+                        long_edge_cells: 2.0,
+                        grid_scale: 71.0,
+                        ..Default::default()
+                    }),
+                },
+            };
+            let mut editor = DocumentEditor::new(inactive_contradiction);
+
+            match selected {
+                PatternId::COMPATIBILITY_SHAPES_V1 => {
+                    let mut settings = editor.document().pattern_state.shape_settings().unwrap();
+                    settings.base_channel.rotation = 37.0;
+                    settings.polygon_sides = 3;
+                    assert!(editor.set_shape_settings(settings));
+                }
+                PatternId::COMPATIBILITY_CURVES_V1 => {
+                    let mut settings = editor.document().pattern_state.curve_settings().unwrap();
+                    settings.base_channel.curve_scale = 52.0;
+                    settings.base_channel.tile_count = 6;
+                    assert!(editor.set_curve_settings(settings));
+                }
+            }
+            let rgb_state = editor.document().pattern_state.clone();
+            let rgb_rendered =
+                crate::render::render_document_output(editor.document(), 120, 80, false, None)
+                    .unwrap();
+
+            assert!(editor.set_output_mode(crate::model::OutputMode::CmykInks));
+            assert_eq!(editor.document().pattern_state, cmyk_state);
+            assert_eq!(
+                crate::render::render_document_output(editor.document(), 120, 80, false, None)
+                    .unwrap(),
+                cmyk_rendered,
+                "{name} restored CMYK cache must ignore its contradictory adapter"
+            );
+            assert_eq!(editor.document().appearance.preview_surface, cmyk_preview);
+            assert_eq!(
+                editor.document().appearance.export_background,
+                export_background
+            );
+
+            assert!(editor.undo());
+            assert_eq!(
+                editor.document().artwork_pipeline.output_model,
+                crate::artwork_pipeline::OutputModel::RgbScreen
+            );
+            assert_eq!(editor.document().pattern_state, rgb_state);
+            assert_eq!(
+                crate::render::render_document_output(editor.document(), 120, 80, false, None)
+                    .unwrap(),
+                rgb_rendered
+            );
+            assert!(editor.redo());
+            assert_eq!(editor.document().pattern_state, cmyk_state);
+
+            let path = directory
+                .path()
+                .join(format!("{name}-output-cache.toniator"));
+            save_document_atomic(&path, editor.document()).unwrap();
+            let serialized = std::fs::read_to_string(&path).unwrap();
+            assert!(serialized.contains("\"inactive_rgb\""));
+            assert!(serialized.contains("\"pattern_state\""));
+            assert!(!serialized.contains("\"render\""));
+            let reopened = load_document(&path).unwrap();
+            assert_eq!(reopened.pattern_state, cmyk_state);
+            assert_eq!(reopened.appearance.preview_surface, cmyk_preview);
+            assert_eq!(reopened.appearance.export_background, export_background);
+
+            let mut reopened_editor = DocumentEditor::new(reopened);
+            assert!(reopened_editor.set_output_mode(crate::model::OutputMode::RgbScreen));
+            assert_eq!(reopened_editor.document().pattern_state, rgb_state);
+            assert_eq!(
+                crate::render::render_document_output(
+                    reopened_editor.document(),
+                    120,
+                    80,
+                    false,
+                    None,
+                )
+                .unwrap(),
+                rgb_rendered,
+                "{name} reopened RGB cache must project typed authority"
+            );
+            assert_eq!(
+                reopened_editor.document().appearance.export_background,
+                export_background
+            );
+        }
+    }
+
+    #[test]
+    fn current_v8_requires_valid_pipeline_and_cached_pattern_state_everywhere() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("strict.toniator");
         let mut editor = DocumentEditor::new(Document::new(source([1])));
@@ -235,10 +742,12 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec(&wrong_cache_owner).unwrap()).unwrap();
         assert!(load_document(&path).is_err());
 
-        let mut mismatched_saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        mismatched_saved["saved_web_shape"] =
-            serde_json::to_value(WebShapeSettings::default()).unwrap();
-        std::fs::write(&path, serde_json::to_vec(&mismatched_saved).unwrap()).unwrap();
+        let mut missing_cached_pattern: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        missing_cached_pattern["inactive_cmyk"]
+            .as_object_mut()
+            .unwrap()
+            .remove("pattern_state");
+        std::fs::write(&path, serde_json::to_vec(&missing_cached_pattern).unwrap()).unwrap();
         assert!(load_document(&path).is_err());
     }
 
@@ -265,11 +774,20 @@ mod tests {
         document.render = RenderVariant::WebCurveV1 {
             settings: Box::new(WebCurveSettings::default()),
         };
+        document
+            .pattern_state
+            .select_pattern(crate::pattern::PatternId::COMPATIBILITY_CURVES_V1)
+            .unwrap();
+        document
+            .pattern_state
+            .set_selected_parameters_for_test(&document.render);
         document.sync_legacy_projection().unwrap();
         let mut editor = DocumentEditor::new(document);
         assert!(editor.set_output_mode(crate::model::OutputMode::RgbScreen));
         save_document_atomic(&path, editor.document()).unwrap();
-        assert_eq!(load_document(&path).unwrap(), *editor.document());
+        let loaded = load_document(&path).unwrap();
+        assert_eq!(loaded.pattern_state, editor.document().pattern_state);
+        assert_eq!(loaded.artwork_pipeline, editor.document().artwork_pipeline);
         let text = std::fs::read_to_string(path).unwrap();
         assert!(text.contains("\"format\": \"toniator-document\""));
         assert!(text.contains("AAECA/7/"));
@@ -303,9 +821,9 @@ mod tests {
     }
 
     #[test]
-    fn old_v6_treatment_caches_without_preview_snapshots_use_model_defaults() {
+    fn current_cache_without_optional_preview_uses_model_defaults() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("old-cache.toniator");
+        let path = directory.path().join("current-cache.toniator");
         let mut editor = DocumentEditor::new(Document::new(source([1])));
         assert!(editor.set_output_mode(crate::model::OutputMode::RgbScreen));
         let mut value: serde_json::Value =
@@ -362,6 +880,9 @@ mod tests {
         };
         settings.output_width = 1000;
         settings.output_height = 1000;
+        document
+            .pattern_state
+            .set_selected_parameters_for_test(&document.render);
         document.saved_web_curve = Some(Box::new(WebCurveSettings {
             output_width: 700,
             output_height: 700,
@@ -380,14 +901,7 @@ mod tests {
             panic!()
         };
         assert_eq!((settings.output_width, settings.output_height), (1000, 563));
-        assert_eq!(
-            editor
-                .document()
-                .saved_web_curve
-                .as_ref()
-                .map(|settings| (settings.output_width, settings.output_height)),
-            Some((700, 394))
-        );
+        assert!(editor.document().saved_web_curve.is_none());
 
         save_document_atomic(&path, editor.document()).unwrap();
         editor.mark_clean();

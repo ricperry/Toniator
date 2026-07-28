@@ -16,6 +16,216 @@ The parent thread records read-only-agent updates here after persisting them.
 
 ## Current entries
 
+- `ton-010-stage-4.5c2-authoring-correction-accepted-f9c138c-dirty` — the
+  current export-background authoring/dialog correction was accepted by the
+  user on 2026-07-28; `Document.appearance.export_background` remains the sole
+  saved authority, with Preview Surface separate. C2B-1 has now completed its
+  parent review. Valid until appearance controls, persistence, export, or
+  current-stage sequencing changes; evidence remains in
+  `evidence/ton-010-stage-4.5c2-export-background-authoring-parent-review-f9c138c-dirty.md`.
+
+- `ton-010-stage-4.5c2b1-adapter-authority-f9c138c-dirty` —
+  `evidence/ton-010-stage-4.5c2b1-adapter-authority-f9c138c-dirty.md`; parent-
+  reviewed C2B-1 proof that contradictory Shapes/Curves adapters cannot
+  override authoritative rendering, save/reopen, undo/redo, or shipped
+  selector transitions, plus the Crosshatch source-authority correction. Full
+  validation is 143 library and 48 binary/UI tests on dirty HEAD `f9c138c`,
+  dated 2026-07-28. Valid until pattern projection, Crosshatch transitions,
+  persistence, legacy dispatch, C1 fixtures, or selector synchronization
+  changes; paused for approval before C2B-2.
+
+- `ton-010-stage-4.5c2b2a-output-cache-authority-f9c138c-dirty` —
+  `evidence/ton-010-stage-4.5c2b2a-output-cache-authority-f9c138c-dirty.md`;
+  parent-reviewed CMYK/RGB active/inactive cache authority proof for both C1
+  fixtures, covering rendering, transitions, cache restore, save/reopen,
+  undo/redo, Preview Surface, and Export Background separation. Full validation
+  is 144 library and 48 binary/UI tests on dirty HEAD `f9c138c`, dated
+  2026-07-28. Valid until output transition/cache lifecycle, persistence,
+  history, fixtures, or presentation ownership changes; paused before C2B2-B.
+
+- `ton-010-stage-4.5c2b2b-realized-output-authority-f9c138c-dirty` —
+  `evidence/ton-010-stage-4.5c2b2b-realized-output-authority-f9c138c-dirty.md`;
+  parent-reviewed realized Blueprint/GResource `AppUi` authority coverage for
+  CMYK/RGB switching, typed Shapes/Curves controls, contradictory active and
+  inactive adapters, cache restoration, undo/redo, Preview Surface, and Export
+  Background separation. Full validation is 144 library and 48 binary/UI
+  tests on dirty HEAD `f9c138c`, dated 2026-07-28. Valid until resources,
+  output callbacks, synchronization, cache lifecycle, fixtures, or presentation
+  ownership changes; paused before C2C.
+
+- `ton-010-stage-4.5c3a-preview-png-parity-f9c138c-dirty` —
+  `evidence/ton-010-stage-4.5c3a-preview-png-parity-f9c138c-dirty.md`;
+  parent-reviewed preview/PNG parity for current-format `Polygon Six` and
+  `Motif Ladder`, including contradictory adapter resistance, transparency,
+  Preview Surface versus Export Background separation, deterministic bytes,
+  and four inspectable artifacts under `test-artifacts/ton-010-stage-4.5c3a/`.
+  Full validation is 145 library and 48 binary/UI tests on dirty HEAD
+  `f9c138c`, dated 2026-07-28. Valid until fixture parsing, preview/PNG
+  composition, presentation ownership, adapter projection, or artifact routing
+  changes; paused before C3-B SVG parity.
+
+- `ton-010-stage-4.5c3b-svg-parity-parent-review-f9c138c-dirty` —
+  `evidence/ton-010-stage-4.5c3b-svg-parity-parent-review-f9c138c-dirty.md`;
+  parent-reviewed SVG parity for the current-format C1 fixtures, with editable
+  groups/path IDs, cubic geometry, clipping, deterministic projection,
+  transparency, Export Background separation, and contradictory-adapter
+  resistance. The writer hit a usage-limit blocker after leaving valid partial
+  work; the parent preserved and reviewed it. Full validation is 146 library
+  and 48 binary/UI tests on dirty HEAD `f9c138c`, dated 2026-07-28. Valid until
+  SVG exporter, canonical projection, fixture, presentation, or artifact
+  routing changes; 4.5D is active.
+
+- `ton-010-stage-4.5d-integrated-readiness-parent-review-f9c138c-dirty` —
+  `evidence/ton-010-stage-4.5d-integrated-readiness-parent-review-f9c138c-dirty.md`;
+  parent-owned final reconciliation of 4.5A through C3-B, including authority,
+  persistence, adapters, CMYK/RGB, preview/PNG/SVG artifacts, current-schema
+  rejection, and the preserved C3-B delegation blocker. Final validation is
+  146 library and 48 binary/UI tests on dirty HEAD `f9c138c`, dated 2026-07-28.
+  Valid until any 4.5 evidence, current schemas, adapter boundaries, fixtures,
+  or Stage 5 sequencing changes; Stage 5 remains untouched and gated.
+
+- `ton-010-stage-4.5c2-png-export-background-parent-review-f9c138c-dirty` —
+  `evidence/ton-010-stage-4.5c2-png-export-background-parent-review-f9c138c-dirty.md`;
+  parent-reviewed diagnosis and accessible PNG-dialog correction proving saved
+  `ExportBackground::None` intentionally yields transparency, with 140+47
+  validation on dirty HEAD `f9c138c` dated 2026-07-28. Valid until PNG
+  composition, appearance state, dialog summary, accessibility, or the dirty
+  baseline changes; paused before C2B.
+
+- `ton-010-stage-4.5c2a-parent-review-f9c138c-dirty` —
+  `evidence/ton-010-stage-4.5c2a-parent-review-f9c138c-dirty.md`; parent-reviewed
+  current-document save/reopen and authoritative undo/redo coverage for both
+  C1 production fixtures, with 140+46 validation on dirty HEAD `f9c138c` dated
+  2026-07-28. Valid until persistence, preset application, editor history, or
+  fixture contracts change; paused before C2B.
+
+- `ton-010-stage-4.5c1-parent-review-f9c138c-dirty` —
+  `evidence/ton-010-stage-4.5c1-parent-review-f9c138c-dirty.md`; parent-reviewed
+  C1 current-format fixture foundation with production bundled `Polygon Six`
+  Shapes and `Motif Ladder` Curves presets, authoritative schema assertions,
+  and 139+46 validation on dirty HEAD `f9c138c` dated 2026-07-28. Valid until
+  preset schema, registry versions, bundled inventory, or the dirty baseline
+  changes; paused before C2.
+
+- `ton-010-stage-4.5b-polygon-sides-f9c138c-dirty` —
+  `evidence/ton-010-stage-4.5b-polygon-sides-f9c138c-dirty.md`; parent-reviewed
+  correction of the shipping Blueprint/GResource Regular Polygon side-count
+  row visibility and realized GTK authority coverage on dirty HEAD `f9c138c`
+  dated 2026-07-28. Valid until `src/ui.rs`, current Blueprint/GResource
+  resources, Shapes authority, or the dirty baseline changes; 4.5B was
+  accepted by the user before 4.5C began.
+
+- `ton-010-stage-4.5b-shape-editor-f9c138c-dirty` —
+  `evidence/ton-010-stage-4.5b-shape-editor-f9c138c-dirty.md`; parent-reviewed
+  shipping Blueprint/GResource shape-editor correction, realized GTK authority
+  workflow, and four inspected visual artifacts on dirty HEAD `f9c138c` dated
+  2026-07-28. Valid until `src/ui.rs`, Blueprint/GResource resources, GTK
+  behavior, artifacts, or the dirty baseline changes; 4.5B was accepted by the
+  user before 4.5C began.
+
+- `ton-010-stage-4.5a-historical-audit-f9c138c-dirty` —
+  `evidence/ton-010-stage-4.5a-historical-audit-f9c138c-dirty.md`; parent-
+  reviewed read-only pre-TON-013 comparison, shape-editor inventory, and
+  4.5C/4.5D demonstrability matrix on dirty HEAD `f9c138c` dated 2026-07-28.
+  Valid until relevant UI/resource/model files or the dirty baseline changes;
+  4.5A is complete for review and paused before 4.5B.
+
+- `ton-010-stage-4.5-sequence-insertion-f9c138c-dirty` —
+  `evidence/ton-010-stage-4.5-sequence-insertion-f9c138c-dirty.md`; parent
+  record of the inserted four-gate baseline-restoration/demonstrability gate,
+  explicit Stage 4 preservation, and Stage 5 block on dirty HEAD `f9c138c`
+  dated 2026-07-28. Valid until the TON-010 sequence or 4.5 gate contract
+  changes; no 4.5 substage has started.
+
+- `ton-010-stage-4d1-validation-f9c138c-dirty` —
+  `evidence/ton-010-stage-4d1-validation-f9c138c-dirty.md`; parent-reviewed
+  final Stage 4 authority/UI validation, adapter inventory, durable docs, and
+  138+46 full-suite evidence on dirty HEAD `f9c138c` dated 2026-07-28. Valid
+  until Stage 4 authority/UI/docs or the dirty baseline changes; Stage 5
+  Weighted Voronoi is the next paused gate.
+
+- `ton-010-stage-4-substage-4c2a-curves-authority-f9c138c-dirty` —
+  `evidence/ton-010-stage-4-substage-4c2a-curves-authority-f9c138c-dirty.md`;
+  parent-reviewed Curves scalar/layout/color/visibility authority migration
+  and realized GTK contradiction coverage on dirty HEAD `f9c138c` dated
+  2026-07-28. Valid until Curves authority/UI files or the dirty baseline
+  change; next handoff is Stage 4C2b direct editor/motif/context migration.
+
+- `ton-010-stage-4-substage-4c2b-curves-direct-authority-f9c138c-dirty` —
+  `evidence/ton-010-stage-4-substage-4c2b-curves-direct-authority-f9c138c-dirty.md`;
+  parent-reviewed removal of all production Curves adapter reads from
+  `src/ui.rs`, authority-only editor/motif/context paths, and realized GTK
+  contradiction coverage on dirty HEAD `f9c138c` dated 2026-07-28. Valid until
+  Curves/UI authority files or the dirty baseline changes; safe handoff is
+  Stage 4D validation/documentation.
+
+- `ton-010-stage-4-substage-4c1-shapes-authority-f9c138c-dirty` —
+  `evidence/ton-010-stage-4-substage-4c1-shapes-authority-f9c138c-dirty.md`;
+  parent-reviewed Shapes parameter authority migration and realized GTK
+  contradiction coverage, with Curves intentionally deferred and full 138+46
+  validation on dirty HEAD `f9c138c` dated 2026-07-28. Valid until Shapes
+  authority/UI files or the dirty baseline change; next handoff is Stage 4C2.
+
+- `ton-010-stage-4-substage-4b-selector-authority-f9c138c-dirty` —
+  `evidence/ton-010-stage-4-substage-4b-selector-authority-f9c138c-dirty.md`;
+  parent-reviewed authoritative Shapes/Curves selector synchronization and GTK
+  regression coverage, with parameter migration intentionally deferred and
+  full 138+46 validation on dirty HEAD `f9c138c` dated 2026-07-28. Valid until
+  selector/UI authority files or the dirty baseline change; next handoff is
+  Stage 4C parameter binding.
+
+- `ton-010-stage-4-substage-4a-authority-schema-f9c138c-dirty` —
+  `evidence/ton-010-stage-4-substage-4a-authority-schema-f9c138c-dirty.md`;
+  parent-reviewed Stage 4A authority-only model/schema accessors and stable
+  control descriptor lookup, with no UI edits and 138 passing library tests on
+  dirty HEAD `f9c138c` dated 2026-07-28. Valid until the authority/schema
+  surface or relevant dirty files change; next handoff is Stage 4B selector
+  synchronization.
+
+- `ton-010-stage-3-canonical-output-f9c138c-dirty` —
+  `evidence/ton-010-stage-3-canonical-output-f9c138c-dirty.md`; canonical
+  Marks/Paths preservation, typed regions/networks/composition, shared
+  preview/PNG/SVG consumers, synthetic parity fixtures, and full validation on
+  dirty HEAD `f9c138c` dated 2026-07-28. Invalidate after Stage 4 or any
+  relevant pattern, renderer/export, tracker, HEAD, or dirty-tree changes.
+
+- `ton-010-stage-2-authority-implementation-f9c138c-dirty` —
+  `agents/desktop-implementer/ton-010-stage-2-authority-implementation.md`;
+  Stage 2 authority-first cutover, current document v8/preset v5, adapter
+  inventory, current-format rejection, and 130 passing library tests on the
+  dirty checkout dated 2026-07-28. This supersedes the paused Stage 2
+  implementation notes for authority and validation; invalidate after Stage 3
+  or any relevant pattern, persistence, renderer, preset, tracker, HEAD, or
+  dirty-tree changes.
+
+- `ton-010-stage-2-authority-pause-and-sequence-revision-f9c138c-dirty` —
+  `evidence/ton-010-stage-2-authority-pause-and-sequence-revision-f9c138c-dirty.md`;
+  records the paused unverified Stage 2 partial work, removal of dual-authority
+  UI scaffolding, the authoritative-pattern cutover rule, expanded canonical
+  output requirements, required Weighted Voronoi, and custom-pattern follow-up
+  boundary on dirty HEAD `f9c138c` dated 2026-07-28. Invalidate after relevant
+  implementation, persistence/preset, UI, renderer, tracker, HEAD, or dirty-tree
+  changes.
+
+- `ton-010-stage-2-current-pattern-schema-selector-ui-handoff-f9c138c-dirty` —
+  `evidence/ton-010-stage-2-current-pattern-schema-selector-ui-handoff-f9c138c-dirty.md`;
+  current Stage 2 implementation boundary for schema descriptors, registry-derived
+  stable selection, existing Shapes/Curves RenderVariant paths, and GTK review
+  checks against dirty HEAD `f9c138c` on 2026-07-28. Invalidate after relevant
+  pattern/UI/source/resource, HEAD, or dirty-worktree changes.
+
+- `ton-010-stage-1-regression-review-f9c138c-corrections` —
+  `evidence/ton-010-stage-1-regression-review-f9c138c-corrections.md`;
+  corrected Stage 1 review accepted the pre-policy compatibility-cache
+  preservation and typed adapters; superseded by the no-backwards-compatibility
+  policy and document-definition update to v7.
+
+- `ton-010-stage-1-reviewed-findings-implementation` —
+  `agents/desktop-implementer/ton-010-stage-1-reviewed-findings-implementation.md`;
+  superseded pre-policy evidence for the output-treatment compatibility
+  envelope and typed Shapes/Curves adapters. Current policy rejects obsolete
+  definitions and uses document version 7.
+
 - `ton-013-control-exposure-documentation-reconciliation` —
   `agents/documentation-maintainer/ton-013-control-exposure-documentation-reconciliation.md`;
   reconciles current TON-013 control-exposure ownership, routing/scope and
@@ -184,3 +394,4 @@ The parent thread records read-only-agent updates here after persisting them.
 - `ton-012-closeout-4161635` — `evidence/ton-012-closeout-4161635.md`;
   final accepted TON-012 architecture, verification, retained adapters, and
   deferred-issue record prepared for the closeout commit.
+| `ton-010-stage-3-canonical-output-f9c138c-dirty` | TON-010 Stage 3 canonical output algebra, shared geometry consumers, and parity evidence | `f9c138c` + dirty worktree | 2026-07-28 |

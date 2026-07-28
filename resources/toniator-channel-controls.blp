@@ -1,0 +1,29 @@
+using Gtk 4.0;
+
+Box channel_controls {
+  orientation: vertical;
+  spacing: 6;
+
+  Label channel_heading {
+    xalign: 0;
+
+    styles [
+      "heading",
+    ]
+  }
+
+  Label channel_inclusion_status {
+    wrap: true;
+    xalign: 0;
+
+    styles [
+      "dim-label",
+      "caption",
+    ]
+  }
+
+  Box channel_content_host {
+    orientation: vertical;
+    spacing: 4;
+  }
+}
