@@ -1,6 +1,8 @@
 <?xml version='1.0' encoding='UTF-8'?>
+<!-- Created with Cambalache 1.0.3 -->
 <!-- Reused for one real OutputChannelId only; no aggregate channel exists here. -->
 <interface>
+  <!-- interface-name ToniatorChannelControls.ui -->
   <requires lib="gtk" version="4.0"/>
   <object class="GtkBox" id="channel_controls">
     <property name="orientation">vertical</property>
@@ -8,14 +10,19 @@
     <child>
       <object class="GtkLabel" id="channel_heading">
         <property name="xalign">0</property>
-        <style><class name="heading"/></style>
+        <style>
+          <class name="heading"/>
+        </style>
       </object>
     </child>
     <child>
       <object class="GtkLabel" id="channel_inclusion_status">
-        <property name="xalign">0</property>
         <property name="wrap">True</property>
-        <style><class name="dim-label"/><class name="caption"/></style>
+        <property name="xalign">0</property>
+        <style>
+          <class name="dim-label"/>
+          <class name="caption"/>
+        </style>
       </object>
     </child>
     <child>

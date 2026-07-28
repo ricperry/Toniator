@@ -7,6 +7,7 @@
 <interface>
   <!-- interface-name Toniator.ui -->
   <requires lib="gtk" version="4.0"/>
+  <requires lib="libadwaita" version="1.4"/>
   <object class="AdwApplicationWindow" id="main_window">
     <property name="title">Toniator</property>
     <child>
@@ -15,8 +16,8 @@
           <object class="AdwHeaderBar" id="main_header_bar">
             <child type="title">
               <object class="AdwWindowTitle" id="window_title">
-                <property name="title">Toniator</property>
                 <property name="subtitle">Start a project</property>
+                <property name="title">Toniator</property>
               </object>
             </child>
             <child type="start">
@@ -51,8 +52,8 @@
             </child>
             <child type="start">
               <object class="GtkToggleButton" id="controls_toggle">
-                <property name="label">Controls</property>
                 <property name="active">True</property>
+                <property name="label">Controls</property>
                 <property name="tooltip-text">Hide Controls</property>
               </object>
             </child>
@@ -68,8 +69,8 @@
           <object class="AdwToastOverlay" id="toast_overlay">
             <child>
               <object class="GtkStack" id="main_stack">
-                <property name="transition-type">crossfade</property>
                 <property name="transition-duration">180</property>
+                <property name="transition-type">crossfade</property>
               </object>
             </child>
           </object>

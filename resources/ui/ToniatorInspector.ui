@@ -1,50 +1,53 @@
 <?xml version='1.0' encoding='UTF-8'?>
-<!-- Created with Cambalache 1.0.3. Dynamic controls are inserted by src/ui.rs. -->
+<!-- Created with Cambalache 1.0.3 -->
 <interface>
+  <!-- interface-name ToniatorInspector.ui -->
   <requires lib="gtk" version="4.0"/>
   <object class="GtkBox" id="editor_inspector_hierarchy">
     <property name="orientation">vertical</property>
     <property name="spacing">8</property>
     <child>
       <object class="GtkExpander" id="source_section">
-        <property name="label">Source</property>
         <property name="expanded">True</property>
+        <property name="label">Source</property>
         <child>
           <object class="GtkBox" id="source_content_host">
+            <property name="margin-top">10</property>
             <property name="orientation">vertical</property>
             <property name="spacing">6</property>
-            <property name="margin-top">10</property>
           </object>
         </child>
       </object>
     </child>
     <child>
       <object class="GtkExpander" id="output_section">
-        <property name="label">Output</property>
         <property name="expanded">True</property>
+        <property name="label">Output</property>
         <child>
           <object class="GtkBox" id="output_content_host">
+            <property name="margin-top">10</property>
             <property name="orientation">vertical</property>
             <property name="spacing">6</property>
-            <property name="margin-top">10</property>
           </object>
         </child>
       </object>
     </child>
     <child>
       <object class="GtkExpander" id="channel_settings_section">
-        <property name="label">Channel Settings</property>
         <property name="expanded">False</property>
+        <property name="label">Channel Settings</property>
         <child>
           <object class="GtkBox" id="channel_settings_content_host">
+            <property name="margin-top">10</property>
             <property name="orientation">vertical</property>
             <property name="spacing">8</property>
-            <property name="margin-top">10</property>
             <child>
               <object class="GtkLabel" id="channel_scope_heading">
                 <property name="label">Treatment Editing Scope</property>
                 <property name="xalign">0</property>
-                <style><class name="heading"/></style>
+                <style>
+                  <class name="heading"/>
+                </style>
               </object>
             </child>
             <child>
@@ -52,7 +55,10 @@
                 <property name="label">Choose the inks or channels edited by Shapes and Curves. Output routing remains in Output.</property>
                 <property name="wrap">True</property>
                 <property name="xalign">0</property>
-                <style><class name="dim-label"/><class name="caption"/></style>
+                <style>
+                  <class name="dim-label"/>
+                  <class name="caption"/>
+                </style>
               </object>
             </child>
             <child>
@@ -63,8 +69,8 @@
             </child>
             <child>
               <object class="GtkStack" id="channel_panel_stack">
-                <property name="transition-type">crossfade</property>
                 <property name="transition-duration">120</property>
+                <property name="transition-type">crossfade</property>
               </object>
             </child>
           </object>
@@ -73,26 +79,27 @@
     </child>
     <child>
       <object class="GtkExpander" id="appearance_section">
-        <property name="label">Appearance / Canvas &amp; Export</property>
         <property name="expanded">False</property>
+        <property name="label">Appearance / Canvas &amp; Export</property>
+        <property name="overflow">hidden</property>
         <child>
           <object class="GtkBox" id="appearance_content_host">
+            <property name="margin-top">10</property>
             <property name="orientation">vertical</property>
             <property name="spacing">8</property>
-            <property name="margin-top">10</property>
           </object>
         </child>
       </object>
     </child>
     <child>
       <object class="GtkExpander" id="treatment_section">
-        <property name="label">Treatment Settings</property>
         <property name="expanded">False</property>
+        <property name="label">Treatment Settings</property>
         <child>
           <object class="GtkBox" id="treatment_content_host">
+            <property name="margin-top">10</property>
             <property name="orientation">vertical</property>
             <property name="spacing">8</property>
-            <property name="margin-top">10</property>
           </object>
         </child>
       </object>

@@ -1,90 +1,584 @@
 <?xml version='1.0' encoding='UTF-8'?>
+<!-- Created with Cambalache 1.0.3 -->
 <!-- Static editor controls. Rust owns models, callbacks, help popovers, and custom drawing. -->
 <interface>
+  <!-- interface-name ToniatorEditorControls.ui -->
   <requires lib="gtk" version="4.0"/>
   <object class="GtkBox" id="editor_controls">
     <property name="orientation">vertical</property>
     <property name="spacing">8</property>
     <child>
       <object class="GtkBox" id="source_controls">
-        <property name="orientation">vertical</property><property name="spacing">6</property>
-        <child><object class="GtkBox" id="source_dynamic_host"><property name="orientation">vertical</property><property name="spacing">4</property></object></child>
-        <child><object class="GtkLabel" id="artwork_source_label"><property name="label">Artwork Source</property><property name="xalign">0</property><style><class name="heading"/></style></object></child>
-        <child><object class="GtkDropDown" id="artwork_source"/></child>
-        <child><object class="GtkLabel" id="artwork_source_note"><property name="xalign">0</property><property name="wrap">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child>
-        <child><object class="GtkBox" id="source_alpha_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkLabel" id="source_alpha_label"><property name="label">Source Alpha</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkDropDown" id="source_alpha"/></child></object></child>
-        <child><object class="GtkLabel" id="source_alpha_note"><property name="label">Alpha is the source; source alpha is not applied again.</property><property name="xalign">0</property><property name="wrap">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child>
+        <property name="orientation">vertical</property>
+        <property name="spacing">6</property>
+        <child>
+          <object class="GtkBox" id="source_dynamic_host">
+            <property name="orientation">vertical</property>
+            <property name="spacing">4</property>
+          </object>
+        </child>
+        <child>
+          <object class="GtkLabel" id="artwork_source_label">
+            <property name="label">Artwork Source</property>
+            <property name="xalign">0</property>
+            <style>
+              <class name="heading"/>
+            </style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkDropDown" id="artwork_source"/>
+        </child>
+        <child>
+          <object class="GtkLabel" id="artwork_source_note">
+            <property name="wrap">True</property>
+            <property name="xalign">0</property>
+            <style>
+              <class name="dim-label"/>
+              <class name="caption"/>
+            </style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkBox" id="source_alpha_row">
+            <property name="orientation">vertical</property>
+            <property name="spacing">4</property>
+            <child>
+              <object class="GtkLabel" id="source_alpha_label">
+                <property name="label">Source Alpha</property>
+                <property name="xalign">0</property>
+                <style>
+                  <class name="heading"/>
+                </style>
+              </object>
+            </child>
+            <child>
+              <object class="GtkDropDown" id="source_alpha"/>
+            </child>
+          </object>
+        </child>
+        <child>
+          <object class="GtkLabel" id="source_alpha_note">
+            <property name="label">Alpha is the source; source alpha is not applied again.</property>
+            <property name="wrap">True</property>
+            <property name="xalign">0</property>
+            <style>
+              <class name="dim-label"/>
+              <class name="caption"/>
+            </style>
+          </object>
+        </child>
       </object>
     </child>
     <child>
       <object class="GtkBox" id="output_controls">
-        <property name="orientation">vertical</property><property name="spacing">6</property>
-        <child><object class="GtkLabel" id="output_mode_label"><property name="label">Output Model</property><property name="xalign">0</property><style><class name="heading"/></style></object></child>
-        <child><object class="GtkDropDown" id="output_mode"/></child>
-        <child><object class="GtkLabel" id="channel_assignment_label"><property name="label">Channel Assignment</property><property name="xalign">0</property><style><class name="heading"/></style></object></child>
-        <child><object class="GtkDropDown" id="channel_assignment"/></child>
-        <child><object class="GtkLabel" id="channel_assignment_note"><property name="xalign">0</property><property name="wrap">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child>
-        <child><object class="GtkBox" id="active_channel_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkLabel" id="active_channel_label"><property name="label">Active Channel</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkDropDown" id="active_channel"/></child></object></child>
-        <child><object class="GtkButton" id="crosshatch_action"><property name="label">Use Legacy Crosshatch</property></object></child>
-        <child><object class="GtkLabel" id="crosshatch_note"><property name="label">Legacy Crosshatch temporarily switches to Curves. Exit restores ordinary Curves.</property><property name="xalign">0</property><property name="wrap">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child>
+        <property name="orientation">vertical</property>
+        <property name="spacing">6</property>
+        <child>
+          <object class="GtkLabel" id="output_mode_label">
+            <property name="label">Output Model</property>
+            <property name="xalign">0</property>
+            <style>
+              <class name="heading"/>
+            </style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkDropDown" id="output_mode"/>
+        </child>
+        <child>
+          <object class="GtkLabel" id="channel_assignment_label">
+            <property name="label">Channel Assignment</property>
+            <property name="xalign">0</property>
+            <style>
+              <class name="heading"/>
+            </style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkDropDown" id="channel_assignment"/>
+        </child>
+        <child>
+          <object class="GtkLabel" id="channel_assignment_note">
+            <property name="wrap">True</property>
+            <property name="xalign">0</property>
+            <style>
+              <class name="dim-label"/>
+              <class name="caption"/>
+            </style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkBox" id="active_channel_row">
+            <property name="orientation">vertical</property>
+            <property name="spacing">4</property>
+            <child>
+              <object class="GtkLabel" id="active_channel_label">
+                <property name="label">Active Channel</property>
+                <property name="xalign">0</property>
+                <style>
+                  <class name="heading"/>
+                </style>
+              </object>
+            </child>
+            <child>
+              <object class="GtkDropDown" id="active_channel"/>
+            </child>
+          </object>
+        </child>
+        <child>
+          <object class="GtkButton" id="crosshatch_action">
+            <property name="label">Use Legacy Crosshatch</property>
+          </object>
+        </child>
+        <child>
+          <object class="GtkLabel" id="crosshatch_note">
+            <property name="label">Legacy Crosshatch temporarily switches to Curves. Exit restores ordinary Curves.</property>
+            <property name="wrap">True</property>
+            <property name="xalign">0</property>
+            <style>
+              <class name="dim-label"/>
+              <class name="caption"/>
+            </style>
+          </object>
+        </child>
       </object>
     </child>
     <child>
       <object class="GtkBox" id="appearance_controls">
-        <property name="orientation">vertical</property><property name="spacing">8</property>
-        <child><object class="GtkBox" id="preview_section"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkBox" id="preview_heading"><property name="orientation">horizontal</property><property name="spacing">4</property><child><object class="GtkLabel" id="preview_surface_label"><property name="label">Preview Surface — Canvas only · not exported</property><property name="xalign">0</property><property name="hexpand">True</property></object></child><child><object class="GtkBox" id="preview_help_host"/></child></object></child><child><object class="GtkDropDown" id="preview_surface"/></child><child><object class="GtkColorDialogButton" id="preview_color"/></child></object></child>
-        <child><object class="GtkBox" id="export_section"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkBox" id="export_heading"><property name="orientation">horizontal</property><property name="spacing">4</property><child><object class="GtkLabel" id="export_background_label"><property name="label">Export Background — Used for SVG and by default for PNG</property><property name="xalign">0</property><property name="hexpand">True</property></object></child><child><object class="GtkBox" id="export_help_host"/></child></object></child><child><object class="GtkDropDown" id="export_background"/></child><child><object class="GtkColorDialogButton" id="export_color"/></child></object></child>
+        <property name="orientation">vertical</property>
+        <property name="spacing">8</property>
+        <child>
+          <object class="GtkBox" id="preview_section">
+            <property name="orientation">vertical</property>
+            <property name="spacing">4</property>
+            <child>
+              <object class="GtkBox" id="preview_heading">
+                <property name="orientation">horizontal</property>
+                <property name="spacing">4</property>
+                <child>
+                  <object class="GtkLabel" id="preview_surface_label">
+                    <property name="hexpand">True</property>
+                    <property name="label">Preview Surface — Canvas only · not exported</property>
+                    <property name="xalign">0</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkBox" id="preview_help_host"/>
+                </child>
+              </object>
+            </child>
+            <child>
+              <object class="GtkDropDown" id="preview_surface"/>
+            </child>
+            <child>
+              <object class="GtkColorDialogButton" id="preview_color"/>
+            </child>
+          </object>
+        </child>
+        <child>
+          <object class="GtkBox" id="export_section">
+            <property name="orientation">vertical</property>
+            <property name="spacing">4</property>
+            <child>
+              <object class="GtkBox" id="export_heading">
+                <property name="orientation">horizontal</property>
+                <property name="spacing">4</property>
+                <child>
+                  <object class="GtkLabel" id="export_background_label">
+                    <property name="hexpand">True</property>
+                    <property name="label">Export Background — Used for SVG and by default for PNG</property>
+                    <property name="xalign">0</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkBox" id="export_help_host"/>
+                </child>
+              </object>
+            </child>
+            <child>
+              <object class="GtkDropDown" id="export_background"/>
+            </child>
+            <child>
+              <object class="GtkColorDialogButton" id="export_color"/>
+            </child>
+          </object>
+        </child>
       </object>
     </child>
     <child>
       <object class="GtkBox" id="treatment_chrome">
-        <property name="orientation">vertical</property><property name="spacing">8</property>
-        <child><object class="GtkLabel" id="treatment_title"><property name="label">Halftone</property><property name="xalign">0</property><style><class name="title-2"/></style></object></child>
-        <child><object class="GtkLabel" id="treatment_caption"><property name="label">Pattern Type</property><property name="xalign">0</property><style><class name="heading"/></style></object></child>
-        <child><object class="GtkBox" id="treatment_pattern_buttons"><property name="spacing">0</property><style><class name="linked"/></style><child><object class="GtkToggleButton" id="dots"><property name="label">Shapes</property><property name="hexpand">True</property></object></child><child><object class="GtkToggleButton" id="squares"><property name="label">Squares</property></object></child><child><object class="GtkToggleButton" id="lines"><property name="label">Lines</property></object></child><child><object class="GtkToggleButton" id="curves"><property name="label">Curves</property><property name="hexpand">True</property></object></child><child><object class="GtkToggleButton" id="legacy"><property name="label">Legacy</property></object></child></object></child>
-        <child><object class="GtkBox" id="treatment_preset_actions"><property name="spacing">0</property><style><class name="linked"/></style><child><object class="GtkButton" id="preset_import"><property name="label">Load Preset…</property><property name="hexpand">True</property></object></child><child><object class="GtkButton" id="preset_save"><property name="label">Save Preset…</property><property name="hexpand">True</property></object></child></object></child>
+        <property name="orientation">vertical</property>
+        <property name="spacing">8</property>
+        <child>
+          <object class="GtkLabel" id="treatment_title">
+            <property name="label">Halftone</property>
+            <property name="xalign">0</property>
+            <style>
+              <class name="title-2"/>
+            </style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkLabel" id="treatment_caption">
+            <property name="label">Pattern Type</property>
+            <property name="xalign">0</property>
+            <style>
+              <class name="heading"/>
+            </style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkBox" id="treatment_pattern_buttons">
+            <property name="spacing">0</property>
+            <child>
+              <object class="GtkToggleButton" id="dots">
+                <property name="hexpand">True</property>
+                <property name="label">Shapes</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkToggleButton" id="squares">
+                <property name="label">Squares</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkToggleButton" id="lines">
+                <property name="label">Lines</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkToggleButton" id="curves">
+                <property name="hexpand">True</property>
+                <property name="label">Curves</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkToggleButton" id="legacy">
+                <property name="label">Legacy</property>
+              </object>
+            </child>
+            <style>
+              <class name="linked"/>
+            </style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkBox" id="treatment_preset_actions">
+            <property name="spacing">0</property>
+            <child>
+              <object class="GtkButton" id="preset_import">
+                <property name="hexpand">True</property>
+                <property name="label">Load Preset…</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkButton" id="preset_save">
+                <property name="hexpand">True</property>
+                <property name="label">Save Preset…</property>
+              </object>
+            </child>
+            <style>
+              <class name="linked"/>
+            </style>
+          </object>
+        </child>
         <child>
           <object class="GtkStack" id="treatment_modes">
-            <property name="transition-type">crossfade</property>
             <property name="transition-duration">120</property>
+            <property name="transition-type">crossfade</property>
             <child>
               <object class="GtkBox" id="native_panel">
                 <property name="orientation">vertical</property>
                 <property name="spacing">12</property>
-                <style><class name="workflow-group"/></style>
-                <child><object class="GtkLabel" id="native_channel_copy"><property name="label">Automatic CMYK separation</property><property name="xalign">0</property><style><class name="heading"/></style></object></child>
+                <child>
+                  <object class="GtkLabel" id="native_channel_copy">
+                    <property name="label">Automatic CMYK separation</property>
+                    <property name="xalign">0</property>
+                    <style>
+                      <class name="heading"/>
+                    </style>
+                  </object>
+                </child>
                 <child>
                   <object class="GtkBox" id="native_sampling_detail_row">
-                    <property name="orientation">vertical</property><property name="spacing">4</property>
-                    <child><object class="GtkBox" id="native_sampling_detail_heading"><property name="spacing">8</property><child><object class="GtkLabel" id="native_sampling_detail_label"><property name="label">Sampling Detail</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkLabel" id="native_sampling_detail_subtitle"><property name="label">Coarse — Fine</property><property name="xalign">1</property><property name="hexpand">True</property><property name="ellipsize">end</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child>
-                    <child><object class="GtkBox" id="native_sampling_detail_control"><property name="spacing">8</property><child><object class="GtkScale" id="native_sampling_detail_scale"><property name="orientation">horizontal</property><property name="draw-value">False</property><property name="hexpand">True</property></object></child></object></child>
+                    <property name="orientation">vertical</property>
+                    <property name="spacing">4</property>
+                    <child>
+                      <object class="GtkBox" id="native_sampling_detail_heading">
+                        <property name="spacing">8</property>
+                        <child>
+                          <object class="GtkLabel" id="native_sampling_detail_label">
+                            <property name="label">Sampling Detail</property>
+                            <property name="xalign">0</property>
+                            <style>
+                              <class name="heading"/>
+                            </style>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkLabel" id="native_sampling_detail_subtitle">
+                            <property name="ellipsize">end</property>
+                            <property name="hexpand">True</property>
+                            <property name="label">Coarse — Fine</property>
+                            <property name="xalign">1</property>
+                            <style>
+                              <class name="dim-label"/>
+                              <class name="caption"/>
+                            </style>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkBox" id="native_sampling_detail_control">
+                        <property name="spacing">8</property>
+                        <child>
+                          <object class="GtkScale" id="native_sampling_detail_scale">
+                            <property name="draw-value">False</property>
+                            <property name="hexpand">True</property>
+                            <property name="orientation">horizontal</property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkSpinButton" id="native_sampling_detail_entry">
+                            <property name="numeric">True</property>
+                            <property name="tooltip-text">Enter an exact value</property>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
                   </object>
                 </child>
                 <child>
                   <object class="GtkBox" id="native_coverage_row">
-                    <property name="orientation">vertical</property><property name="spacing">4</property>
-                    <child><object class="GtkBox" id="native_coverage_heading"><property name="spacing">8</property><child><object class="GtkLabel" id="native_coverage_label"><property name="label">Coverage</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkLabel" id="native_coverage_subtitle"><property name="label">How much ink fills the page</property><property name="xalign">1</property><property name="hexpand">True</property><property name="ellipsize">end</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child>
-                    <child><object class="GtkBox" id="native_coverage_control"><property name="spacing">8</property><child><object class="GtkScale" id="native_coverage_scale"><property name="orientation">horizontal</property><property name="draw-value">False</property><property name="hexpand">True</property></object></child></object></child>
+                    <property name="orientation">vertical</property>
+                    <property name="spacing">4</property>
+                    <child>
+                      <object class="GtkBox" id="native_coverage_heading">
+                        <property name="spacing">8</property>
+                        <child>
+                          <object class="GtkLabel" id="native_coverage_label">
+                            <property name="label">Coverage</property>
+                            <property name="xalign">0</property>
+                            <style>
+                              <class name="heading"/>
+                            </style>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkLabel" id="native_coverage_subtitle">
+                            <property name="ellipsize">end</property>
+                            <property name="hexpand">True</property>
+                            <property name="label">How much ink fills the page</property>
+                            <property name="xalign">1</property>
+                            <style>
+                              <class name="dim-label"/>
+                              <class name="caption"/>
+                            </style>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkBox" id="native_coverage_control">
+                        <property name="spacing">8</property>
+                        <child>
+                          <object class="GtkScale" id="native_coverage_scale">
+                            <property name="draw-value">False</property>
+                            <property name="hexpand">True</property>
+                            <property name="orientation">horizontal</property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkSpinButton" id="native_coverage_entry">
+                            <property name="numeric">True</property>
+                            <property name="tooltip-text">Enter an exact value</property>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
                   </object>
                 </child>
                 <child>
                   <object class="GtkBox" id="native_contrast_row">
-                    <property name="orientation">vertical</property><property name="spacing">4</property>
-                    <child><object class="GtkBox" id="native_contrast_heading"><property name="spacing">8</property><child><object class="GtkLabel" id="native_contrast_label"><property name="label">Contrast</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkLabel" id="native_contrast_subtitle"><property name="label">Separate light and dark areas</property><property name="xalign">1</property><property name="hexpand">True</property><property name="ellipsize">end</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child>
-                    <child><object class="GtkBox" id="native_contrast_control"><property name="spacing">8</property><child><object class="GtkScale" id="native_contrast_scale"><property name="orientation">horizontal</property><property name="draw-value">False</property><property name="hexpand">True</property></object></child></object></child>
+                    <property name="orientation">vertical</property>
+                    <property name="spacing">4</property>
+                    <child>
+                      <object class="GtkBox" id="native_contrast_heading">
+                        <property name="spacing">8</property>
+                        <child>
+                          <object class="GtkLabel" id="native_contrast_label">
+                            <property name="label">Contrast</property>
+                            <property name="xalign">0</property>
+                            <style>
+                              <class name="heading"/>
+                            </style>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkLabel" id="native_contrast_subtitle">
+                            <property name="ellipsize">end</property>
+                            <property name="hexpand">True</property>
+                            <property name="label">Separate light and dark areas</property>
+                            <property name="xalign">1</property>
+                            <style>
+                              <class name="dim-label"/>
+                              <class name="caption"/>
+                            </style>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkBox" id="native_contrast_control">
+                        <property name="spacing">8</property>
+                        <child>
+                          <object class="GtkScale" id="native_contrast_scale">
+                            <property name="draw-value">False</property>
+                            <property name="hexpand">True</property>
+                            <property name="orientation">horizontal</property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkSpinButton" id="native_contrast_entry">
+                            <property name="numeric">True</property>
+                            <property name="tooltip-text">Enter an exact value</property>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
                   </object>
                 </child>
                 <child>
                   <object class="GtkBox" id="native_screen_angle_row">
-                    <property name="orientation">vertical</property><property name="spacing">4</property>
-                    <child><object class="GtkBox" id="native_screen_angle_heading"><property name="spacing">8</property><child><object class="GtkLabel" id="native_screen_angle_label"><property name="label">Screen Angle</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkLabel" id="native_screen_angle_subtitle"><property name="label">Rotate square and line screens</property><property name="xalign">1</property><property name="hexpand">True</property><property name="ellipsize">end</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child>
-                    <child><object class="GtkBox" id="native_screen_angle_control"><property name="spacing">8</property><child><object class="GtkScale" id="native_screen_angle_scale"><property name="orientation">horizontal</property><property name="draw-value">False</property><property name="hexpand">True</property></object></child></object></child>
+                    <property name="orientation">vertical</property>
+                    <property name="spacing">4</property>
+                    <child>
+                      <object class="GtkBox" id="native_screen_angle_heading">
+                        <property name="spacing">8</property>
+                        <child>
+                          <object class="GtkLabel" id="native_screen_angle_label">
+                            <property name="label">Screen Angle</property>
+                            <property name="xalign">0</property>
+                            <style>
+                              <class name="heading"/>
+                            </style>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkLabel" id="native_screen_angle_subtitle">
+                            <property name="ellipsize">end</property>
+                            <property name="hexpand">True</property>
+                            <property name="label">Rotate square and line screens</property>
+                            <property name="xalign">1</property>
+                            <style>
+                              <class name="dim-label"/>
+                              <class name="caption"/>
+                            </style>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkBox" id="native_screen_angle_control">
+                        <property name="spacing">8</property>
+                        <child>
+                          <object class="GtkScale" id="native_screen_angle_scale">
+                            <property name="draw-value">False</property>
+                            <property name="hexpand">True</property>
+                            <property name="orientation">horizontal</property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkSpinButton" id="native_screen_angle_entry">
+                            <property name="numeric">True</property>
+                            <property name="tooltip-text">Enter an exact value</property>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
                   </object>
                 </child>
+                <style>
+                  <class name="workflow-group"/>
+                </style>
               </object>
             </child>
-            <child><object class="GtkBox" id="web_panel_host"><property name="orientation">vertical</property></object></child>
-            <child><object class="GtkBox" id="curve_panel_host"><property name="orientation">vertical</property></object></child>
+            <child>
+              <object class="GtkBox" id="web_panel_host">
+                <property name="orientation">vertical</property>
+                <property name="spacing">10</property>
+                <style><class name="workflow-group"/></style>
+                <child><object class="GtkBox" id="web_shared_row"><property name="spacing">4</property><child><object class="GtkCheckButton" id="web_shared"><property name="label">Share Mark Shape Across Inks</property><property name="active">True</property></object></child><child><object class="GtkBox" id="web_shared_help_host"/></child></object></child>
+                <child><object class="GtkBox" id="web_shape_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkLabel" id="web_shape_label"><property name="label">Mark</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkDropDown" id="web_shape"/></child></object></child>
+                <child><object class="GtkLabel" id="web_mixed_shape_label"><property name="label">Mark: Mixed shapes</property><property name="xalign">0</property><property name="visible">False</property><style><class name="heading"/></style></object></child>
+                <child><object class="GtkBox" id="web_mixed_shape_apply_row"><property name="orientation">vertical</property><property name="spacing">4</property><property name="visible">False</property><child><object class="GtkLabel" id="web_mixed_shape_apply_label"><property name="label">Apply Mark to All</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkDropDown" id="web_mixed_shape_apply"/></child></object></child>
+                <child><object class="GtkBox" id="web_polygon_sides_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkBox" id="web_polygon_sides_heading"><property name="spacing">4</property><child><object class="GtkLabel" id="web_polygon_sides_label"><property name="label">Polygon Sides (3–6)</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkBox" id="web_polygon_sides_help_host"/></child></object></child><child><object class="GtkSpinButton" id="web_polygon_sides"><property name="numeric">True</property><property name="value">4</property></object></child></object></child>
+                <child><object class="GtkBox" id="web_edit_shape_row"><property name="spacing">4</property><child><object class="GtkButton" id="web_edit_shape"><property name="label">Edit User-Defined Mark…</property></object></child><child><object class="GtkBox" id="web_edit_shape_help_host"/></child></object></child>
+                <child><object class="GtkLabel" id="web_geometry_note"><property name="xalign">0</property><property name="wrap">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child>
+                <child><object class="GtkBox" id="web_target_row"><property name="orientation">vertical</property><property name="spacing">4</property><property name="visible">False</property><child><object class="GtkBox" id="web_target_heading"><property name="spacing">4</property><child><object class="GtkLabel" id="web_target_label"><property name="label">Adjust Ink</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkBox" id="web_target_help_host"/></child></object></child><child><object class="GtkDropDown" id="web_target"/></child></object></child>
+                <child><object class="GtkLabel" id="web_visible_label"><property name="label">Visible Inks</property><property name="xalign">0</property><style><class name="heading"/></style></object></child>
+                <child><object class="GtkBox" id="web_visible_row"><property name="spacing">4</property><child><object class="GtkCheckButton" id="web_visible_c"><property name="label">C</property></object></child><child><object class="GtkCheckButton" id="web_visible_m"><property name="label">M</property></object></child><child><object class="GtkCheckButton" id="web_visible_y"><property name="label">Y</property></object></child><child><object class="GtkCheckButton" id="web_visible_k"><property name="label">K</property></object></child><child><object class="GtkBox" id="web_visible_help_host"/></child></object></child>
+                <child><object class="GtkLabel" id="web_mixed"><property name="xalign">0</property><property name="wrap">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child>
+                <child><object class="GtkBox" id="web_color_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkBox" id="web_color_heading_row"><property name="spacing">4</property><child><object class="GtkLabel" id="web_color_heading"><property name="label">Ink Color</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkBox" id="web_color_help_host"/></child></object></child><child><object class="GtkBox" id="web_color_control"><property name="spacing">8</property><child><object class="GtkEntry" id="web_color"><property name="placeholder-text">#RRGGBB</property></object></child><child><object class="GtkLabel" id="web_color_status"><property name="label">Hex color</property><property name="xalign">1</property><property name="hexpand">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child></object></child>
+                <child><object class="GtkBox" id="web_crosshatch_color_row"><property name="orientation">vertical</property><property name="spacing">4</property><property name="visible">False</property><child><object class="GtkLabel" id="web_crosshatch_color_label"><property name="label">Crosshatch Color</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkBox" id="web_crosshatch_color_control"><property name="spacing">8</property><child><object class="GtkEntry" id="web_crosshatch_color"><property name="placeholder-text">#111111</property></object></child><child><object class="GtkLabel" id="web_crosshatch_color_status"><property name="label">Hex color</property><property name="xalign">1</property><property name="hexpand">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child></object></child>
+                <child><object class="GtkBox" id="web_coverage_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkBox" id="web_coverage_heading"><property name="spacing">8</property><child><object class="GtkLabel" id="web_coverage_label"><property name="label">Coverage</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkLabel" id="web_coverage_status"><property name="label">Mark size</property><property name="xalign">1</property><property name="hexpand">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child><child><object class="GtkBox" id="web_coverage_control"><property name="spacing">8</property><child><object class="GtkScale" id="web_coverage_scale"><property name="orientation">horizontal</property><property name="draw-value">False</property><property name="hexpand">True</property></object></child><child><object class="GtkSpinButton" id="web_coverage_entry"><property name="numeric">True</property><property name="tooltip-text">Enter an exact value</property></object></child></object></child></object></child>
+                <child><object class="GtkBox" id="web_angle_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkBox" id="web_angle_heading"><property name="spacing">8</property><child><object class="GtkLabel" id="web_angle_label"><property name="label">Screen Angle</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkLabel" id="web_angle_status"><property name="label">Rotate sampling grid</property><property name="xalign">1</property><property name="hexpand">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child><child><object class="GtkBox" id="web_angle_control"><property name="spacing">8</property><child><object class="GtkScale" id="web_angle_scale"><property name="orientation">horizontal</property><property name="draw-value">False</property><property name="hexpand">True</property></object></child><child><object class="GtkSpinButton" id="web_angle_entry"><property name="numeric">True</property><property name="tooltip-text">Enter an exact value</property></object></child></object></child></object></child>
+                <child><object class="GtkBox" id="web_mark_angle_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkBox" id="web_mark_angle_heading"><property name="spacing">8</property><child><object class="GtkLabel" id="web_mark_angle_label"><property name="label">Mark Rotation</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkLabel" id="web_mark_angle_status"><property name="label">Rotate marks within the grid</property><property name="xalign">1</property><property name="hexpand">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child><child><object class="GtkBox" id="web_mark_angle_control"><property name="spacing">8</property><child><object class="GtkScale" id="web_mark_angle_scale"><property name="orientation">horizontal</property><property name="draw-value">False</property><property name="hexpand">True</property></object></child><child><object class="GtkSpinButton" id="web_mark_angle_entry"><property name="numeric">True</property><property name="tooltip-text">Enter an exact value</property></object></child></object></child></object></child>
+                <child><object class="GtkBox" id="web_width_scale_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkBox" id="web_width_scale_heading"><property name="spacing">8</property><child><object class="GtkLabel" id="web_width_scale_label"><property name="label">Mark Width</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkLabel" id="web_width_scale_status"><property name="label">Horizontal mark scale</property><property name="xalign">1</property><property name="hexpand">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child><child><object class="GtkBox" id="web_width_scale_control"><property name="spacing">8</property><child><object class="GtkScale" id="web_width_scale"><property name="orientation">horizontal</property><property name="draw-value">False</property><property name="hexpand">True</property></object></child><child><object class="GtkSpinButton" id="web_width_entry"><property name="numeric">True</property><property name="tooltip-text">Enter an exact value</property></object></child></object></child></object></child>
+                <child><object class="GtkBox" id="web_height_scale_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkBox" id="web_height_scale_heading"><property name="spacing">8</property><child><object class="GtkLabel" id="web_height_scale_label"><property name="label">Mark Height</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkLabel" id="web_height_scale_status"><property name="label">Vertical mark scale</property><property name="xalign">1</property><property name="hexpand">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child><child><object class="GtkBox" id="web_height_scale_control"><property name="spacing">8</property><child><object class="GtkScale" id="web_height_scale"><property name="orientation">horizontal</property><property name="draw-value">False</property><property name="hexpand">True</property></object></child><child><object class="GtkSpinButton" id="web_height_entry"><property name="numeric">True</property><property name="tooltip-text">Enter an exact value</property></object></child></object></child></object></child>
+                <child><object class="GtkExpander" id="web_advanced"><property name="label">Advanced</property><property name="expanded">False</property><child><object class="GtkBox" id="web_advanced_content"><property name="orientation">vertical</property><property name="spacing">8</property>
+                  <child><object class="GtkBox" id="web_threshold_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkBox" id="web_threshold_heading"><property name="spacing">8</property><child><object class="GtkLabel" id="web_threshold_label"><property name="label">Light-Tone Cutoff</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkLabel" id="web_threshold_status"><property name="label">Hide light marks</property><property name="xalign">1</property><property name="hexpand">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child><child><object class="GtkBox" id="web_threshold_control"><property name="spacing">8</property><child><object class="GtkScale" id="web_threshold_scale"><property name="orientation">horizontal</property><property name="draw-value">False</property><property name="hexpand">True</property></object></child><child><object class="GtkSpinButton" id="web_threshold_entry"><property name="numeric">True</property><property name="tooltip-text">Enter an exact value</property></object></child></object></child></object></child>
+                  <child><object class="GtkBox" id="web_opacity_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkBox" id="web_opacity_heading"><property name="spacing">4</property><child><object class="GtkLabel" id="web_opacity_label"><property name="label">Ink Opacity</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkBox" id="web_opacity_help_host"/></child><child><object class="GtkLabel" id="web_opacity_status"><property name="label">Transparent — Solid</property><property name="xalign">1</property><property name="hexpand">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child><child><object class="GtkBox" id="web_opacity_control"><property name="spacing">8</property><child><object class="GtkScale" id="web_opacity_scale"><property name="orientation">horizontal</property><property name="draw-value">False</property><property name="hexpand">True</property></object></child><child><object class="GtkSpinButton" id="web_opacity_entry"><property name="numeric">True</property><property name="tooltip-text">Enter an exact value</property></object></child></object></child></object></child>
+                  <child><object class="GtkBox" id="web_detail_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkBox" id="web_detail_heading"><property name="spacing">8</property><child><object class="GtkLabel" id="web_detail_label"><property name="label">Sampling Detail</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkLabel" id="web_detail_status"><property name="label">Sample density</property><property name="xalign">1</property><property name="hexpand">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child><child><object class="GtkBox" id="web_detail_control"><property name="spacing">8</property><child><object class="GtkScale" id="web_detail_scale"><property name="orientation">horizontal</property><property name="draw-value">False</property><property name="hexpand">True</property></object></child><child><object class="GtkSpinButton" id="web_detail_entry"><property name="numeric">True</property><property name="tooltip-text">Enter an exact value</property></object></child></object></child></object></child>
+                </object></child></object></child>
+              </object>
+            </child>
+            <child>
+              <object class="GtkBox" id="curve_panel_host">
+                <property name="orientation">vertical</property>
+                <property name="spacing">10</property>
+                <style><class name="workflow-group"/></style>
+                <child><object class="GtkBox" id="curve_layout_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkLabel" id="curve_layout_label"><property name="label">Layout</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkDropDown" id="curve_layout"/></child></object></child>
+                <child><object class="GtkBox" id="curve_weight_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkBox" id="curve_weight_heading"><property name="spacing">8</property><child><object class="GtkLabel" id="curve_weight_label"><property name="label">Line Weight</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkLabel" id="curve_weight_subtitle"><property name="label">Global curve thickness</property><property name="xalign">1</property><property name="hexpand">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child><child><object class="GtkBox" id="curve_weight_control"><property name="spacing">8</property><child><object class="GtkScale" id="curve_weight_scale"><property name="orientation">horizontal</property><property name="draw-value">False</property><property name="hexpand">True</property></object></child><child><object class="GtkSpinButton" id="curve_weight_entry"><property name="numeric">True</property><property name="tooltip-text">Enter an exact value</property></object></child></object></child></object></child>
+                <child><object class="GtkBox" id="curve_spacing_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkBox" id="curve_spacing_heading"><property name="spacing">8</property><child><object class="GtkLabel" id="curve_spacing_label"><property name="label">Line Spacing</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkLabel" id="curve_spacing_subtitle"><property name="label">Global distance between curves</property><property name="xalign">1</property><property name="hexpand">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child><child><object class="GtkBox" id="curve_spacing_control"><property name="spacing">8</property><child><object class="GtkScale" id="curve_spacing_scale"><property name="orientation">horizontal</property><property name="draw-value">False</property><property name="hexpand">True</property></object></child><child><object class="GtkSpinButton" id="curve_spacing_entry"><property name="numeric">True</property><property name="tooltip-text">Enter an exact value</property></object></child></object></child></object></child>
+                <child><object class="GtkBox" id="curve_profile_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkLabel" id="curve_profile_label"><property name="label">Line Shape</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkDropDown" id="curve_profile"/></child></object></child>
+                <child><object class="GtkLabel" id="curve_editor_label"><property name="label">All Inks Curve</property><property name="xalign">0</property><style><class name="heading"/></style></object></child>
+                <child><object class="GtkBox" id="curve_editor_host"><property name="hexpand">True</property></object></child>
+                <child><object class="GtkLabel" id="curve_instructions"><property name="label">Drag white points to shape the curve; blue points adjust bends. Double-click the line to add a point; Delete removes the selected point.</property><property name="wrap">True</property><property name="xalign">0</property><style><class name="dim-label"/><class name="caption"/></style></object></child>
+                <child><object class="GtkBox" id="curve_actions"><property name="spacing">6</property><child><object class="GtkButton" id="curve_reset"><property name="label">Reset to Soft Wave</property><style><class name="flat"/></style></object></child></object></child>
+                <child><object class="GtkBox" id="curve_shared_row"><property name="spacing">4</property><child><object class="GtkCheckButton" id="curve_shared"><property name="label">Share Line Shape Across Inks</property><property name="active">True</property></object></child><child><object class="GtkBox" id="curve_shared_help_host"/></child></object></child>
+                <child><object class="GtkBox" id="curve_target_row"><property name="orientation">vertical</property><property name="spacing">4</property><property name="visible">False</property><child><object class="GtkBox" id="curve_target_heading"><property name="spacing">4</property><child><object class="GtkLabel" id="curve_target_label"><property name="label">Adjust Ink</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkBox" id="curve_target_help_host"/></child></object></child><child><object class="GtkDropDown" id="curve_target"/></child></object></child>
+                <child><object class="GtkBox" id="motif_controls"><property name="orientation">vertical</property><property name="spacing">8</property><property name="visible">False</property><child><object class="GtkLabel" id="motif_title"><property name="label">Repeated Motif</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkBox" id="motif_coverage_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkLabel" id="motif_coverage_label"><property name="label">Artwork Coverage</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkDropDown" id="motif_coverage"/></child></object></child>
+                  <child><object class="GtkBox" id="motif_size_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkBox" id="motif_size_heading"><property name="spacing">8</property><child><object class="GtkLabel" id="motif_size_label"><property name="label">Motif Size</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkLabel" id="motif_size_status"><property name="label">Repeated curve width</property><property name="xalign">1</property><property name="hexpand">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child><child><object class="GtkBox" id="motif_size_control"><property name="spacing">8</property><child><object class="GtkScale" id="motif_size_scale"><property name="orientation">horizontal</property><property name="draw-value">False</property><property name="hexpand">True</property></object></child><child><object class="GtkSpinButton" id="motif_size_entry"><property name="numeric">True</property><property name="tooltip-text">Enter an exact value</property></object></child></object></child></object></child>
+                  <child><object class="GtkBox" id="motif_columns_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkBox" id="motif_columns_heading"><property name="spacing">8</property><child><object class="GtkLabel" id="motif_columns_label"><property name="label">Columns</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkLabel" id="motif_columns_status"><property name="label">Copies across</property><property name="xalign">1</property><property name="hexpand">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child><child><object class="GtkBox" id="motif_columns_control"><property name="spacing">8</property><child><object class="GtkScale" id="motif_columns_scale"><property name="orientation">horizontal</property><property name="draw-value">False</property><property name="hexpand">True</property></object></child><child><object class="GtkSpinButton" id="motif_columns_entry"><property name="numeric">True</property><property name="tooltip-text">Enter an exact value</property></object></child></object></child></object></child>
+                  <child><object class="GtkBox" id="motif_rows_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkBox" id="motif_rows_heading"><property name="spacing">8</property><child><object class="GtkLabel" id="motif_rows_label"><property name="label">Rows</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkLabel" id="motif_rows_status"><property name="label">Layered rows</property><property name="xalign">1</property><property name="hexpand">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child><child><object class="GtkBox" id="motif_rows_control"><property name="spacing">8</property><child><object class="GtkScale" id="motif_rows_scale"><property name="orientation">horizontal</property><property name="draw-value">False</property><property name="hexpand">True</property></object></child><child><object class="GtkSpinButton" id="motif_rows_entry"><property name="numeric">True</property><property name="tooltip-text">Enter an exact value</property></object></child></object></child></object></child>
+                  <child><object class="GtkBox" id="motif_row_spacing_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkBox" id="motif_row_spacing_heading"><property name="spacing">8</property><child><object class="GtkLabel" id="motif_row_spacing_label"><property name="label">Row Spacing</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkLabel" id="motif_row_spacing_status"><property name="label">Distance between rows</property><property name="xalign">1</property><property name="hexpand">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child><child><object class="GtkBox" id="motif_row_spacing_control"><property name="spacing">8</property><child><object class="GtkScale" id="motif_row_spacing_scale"><property name="orientation">horizontal</property><property name="draw-value">False</property><property name="hexpand">True</property></object></child><child><object class="GtkSpinButton" id="motif_row_spacing_entry"><property name="numeric">True</property><property name="tooltip-text">Enter an exact value</property></object></child></object></child></object></child>
+                  <child><object class="GtkBox" id="motif_stagger_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkBox" id="motif_stagger_heading"><property name="spacing">8</property><child><object class="GtkLabel" id="motif_stagger_label"><property name="label">Alternate Row Offset</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkLabel" id="motif_stagger_status"><property name="label">Alternate row shift</property><property name="xalign">1</property><property name="hexpand">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child><child><object class="GtkBox" id="motif_stagger_control"><property name="spacing">8</property><child><object class="GtkScale" id="motif_stagger_scale"><property name="orientation">horizontal</property><property name="draw-value">False</property><property name="hexpand">True</property></object></child><child><object class="GtkSpinButton" id="motif_stagger_entry"><property name="numeric">True</property><property name="tooltip-text">Enter an exact value</property></object></child></object></child></object></child>
+                  <child><object class="GtkBox" id="motif_alternate_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkLabel" id="motif_alternate_label"><property name="label">Alternate Copies</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkDropDown" id="motif_alternate"/></child></object></child>
+                  <child><object class="GtkBox" id="motif_arrange_row"><property name="spacing">4</property><child><object class="GtkCheckButton" id="motif_arrange"><property name="label">Adjust Layout on Artwork</property></object></child></object></child>
+                  <child><object class="GtkLabel" id="motif_mixed"><property name="xalign">0</property><property name="wrap">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child>
+                  <child><object class="GtkLabel" id="motif_instructions"><property name="label">Drag the center to move, R to rotate, and S to separate rows. Esc cancels the drag.</property><property name="xalign">0</property><property name="wrap">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child>
+                </object></child>
+                <child><object class="GtkLabel" id="curve_visible_label"><property name="label">Visible Inks</property><property name="xalign">0</property><style><class name="heading"/></style></object></child>
+                <child><object class="GtkBox" id="curve_visible_row"><property name="spacing">4</property><child><object class="GtkCheckButton" id="curve_visible_c"><property name="label">C</property></object></child><child><object class="GtkCheckButton" id="curve_visible_m"><property name="label">M</property></object></child><child><object class="GtkCheckButton" id="curve_visible_y"><property name="label">Y</property></object></child><child><object class="GtkCheckButton" id="curve_visible_k"><property name="label">K</property></object></child><child><object class="GtkBox" id="curve_visible_help_host"/></child></object></child>
+                <child><object class="GtkLabel" id="curve_mixed"><property name="xalign">0</property><property name="wrap">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child>
+                <child><object class="GtkBox" id="curve_color_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkLabel" id="curve_color_heading"><property name="label">Ink Color</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkBox" id="curve_color_control"><property name="spacing">8</property><child><object class="GtkEntry" id="curve_color"><property name="placeholder-text">#RRGGBB</property></object></child><child><object class="GtkLabel" id="curve_color_status"><property name="label">Hex color</property><property name="xalign">1</property><property name="hexpand">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child></object></child>
+                <child><object class="GtkBox" id="curve_crosshatch_color_row"><property name="orientation">vertical</property><property name="spacing">4</property><property name="visible">False</property><child><object class="GtkLabel" id="curve_crosshatch_color_label"><property name="label">Crosshatch Color</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkBox" id="curve_crosshatch_color_control"><property name="spacing">8</property><child><object class="GtkEntry" id="curve_crosshatch_color"><property name="placeholder-text">#111111</property></object></child><child><object class="GtkLabel" id="curve_crosshatch_color_status"><property name="label">Hex color</property><property name="xalign">1</property><property name="hexpand">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child></object></child>
+                <child><object class="GtkBox" id="curve_coverage_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkBox" id="curve_coverage_heading"><property name="spacing">8</property><child><object class="GtkLabel" id="curve_coverage_label"><property name="label">Line Coverage</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkLabel" id="curve_coverage_status"><property name="label">Curve scale</property><property name="xalign">1</property><property name="hexpand">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child><child><object class="GtkBox" id="curve_coverage_control"><property name="spacing">8</property><child><object class="GtkScale" id="curve_coverage_scale"><property name="orientation">horizontal</property><property name="draw-value">False</property><property name="hexpand">True</property></object></child><child><object class="GtkSpinButton" id="curve_coverage_entry"><property name="numeric">True</property><property name="tooltip-text">Enter an exact value</property></object></child></object></child></object></child>
+                <child><object class="GtkBox" id="curve_angle_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkBox" id="curve_angle_heading"><property name="spacing">8</property><child><object class="GtkLabel" id="curve_angle_label"><property name="label">Screen Angle</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkLabel" id="curve_angle_status"><property name="label">Rotate ink screen</property><property name="xalign">1</property><property name="hexpand">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child><child><object class="GtkBox" id="curve_angle_control"><property name="spacing">8</property><child><object class="GtkScale" id="curve_angle_scale"><property name="orientation">horizontal</property><property name="draw-value">False</property><property name="hexpand">True</property></object></child><child><object class="GtkSpinButton" id="curve_angle_entry"><property name="numeric">True</property><property name="tooltip-text">Enter an exact value</property></object></child></object></child></object></child>
+                <child><object class="GtkBox" id="curve_position_x_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkBox" id="curve_position_x_heading"><property name="spacing">8</property><child><object class="GtkLabel" id="curve_position_x_label"><property name="label">Position X</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkLabel" id="curve_position_x_status"><property name="label">Move across</property><property name="xalign">1</property><property name="hexpand">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child><child><object class="GtkBox" id="curve_position_x_control"><property name="spacing">8</property><child><object class="GtkScale" id="curve_position_x_scale"><property name="orientation">horizontal</property><property name="draw-value">False</property><property name="hexpand">True</property></object></child><child><object class="GtkSpinButton" id="curve_position_x_entry"><property name="numeric">True</property><property name="tooltip-text">Enter an exact value</property></object></child></object></child></object></child>
+                <child><object class="GtkBox" id="curve_position_y_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkBox" id="curve_position_y_heading"><property name="spacing">8</property><child><object class="GtkLabel" id="curve_position_y_label"><property name="label">Position Y</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkLabel" id="curve_position_y_status"><property name="label">Move vertically</property><property name="xalign">1</property><property name="hexpand">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child><child><object class="GtkBox" id="curve_position_y_control"><property name="spacing">8</property><child><object class="GtkScale" id="curve_position_y_scale"><property name="orientation">horizontal</property><property name="draw-value">False</property><property name="hexpand">True</property></object></child><child><object class="GtkSpinButton" id="curve_position_y_entry"><property name="numeric">True</property><property name="tooltip-text">Enter an exact value</property></object></child></object></child></object></child>
+                <child><object class="GtkBox" id="curve_opacity_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkBox" id="curve_opacity_heading"><property name="spacing">8</property><child><object class="GtkLabel" id="curve_opacity_label"><property name="label">Ink Opacity</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkLabel" id="curve_opacity_status"><property name="label">Transparent — Solid</property><property name="xalign">1</property><property name="hexpand">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child><child><object class="GtkBox" id="curve_opacity_control"><property name="spacing">8</property><child><object class="GtkScale" id="curve_opacity_scale"><property name="orientation">horizontal</property><property name="draw-value">False</property><property name="hexpand">True</property></object></child><child><object class="GtkSpinButton" id="curve_opacity_entry"><property name="numeric">True</property><property name="tooltip-text">Enter an exact value</property></object></child></object></child></object></child>
+                <child><object class="GtkExpander" id="curve_advanced"><property name="label">Advanced</property><property name="expanded">False</property><child><object class="GtkBox" id="curve_advanced_content"><property name="orientation">vertical</property><property name="spacing">8</property>
+                  <child><object class="GtkBox" id="curve_threshold_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkBox" id="curve_threshold_heading"><property name="spacing">8</property><child><object class="GtkLabel" id="curve_threshold_label"><property name="label">Light-Tone Cutoff</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkLabel" id="curve_threshold_status"><property name="label">Hide light lines</property><property name="xalign">1</property><property name="hexpand">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child><child><object class="GtkBox" id="curve_threshold_control"><property name="spacing">8</property><child><object class="GtkScale" id="curve_threshold_scale"><property name="orientation">horizontal</property><property name="draw-value">False</property><property name="hexpand">True</property></object></child><child><object class="GtkSpinButton" id="curve_threshold_entry"><property name="numeric">True</property><property name="tooltip-text">Enter an exact value</property></object></child></object></child></object></child>
+                  <child><object class="GtkBox" id="curve_detail_row"><property name="orientation">vertical</property><property name="spacing">4</property><child><object class="GtkBox" id="curve_detail_heading"><property name="spacing">8</property><child><object class="GtkLabel" id="curve_detail_label"><property name="label">Sampling Detail</property><property name="xalign">0</property><style><class name="heading"/></style></object></child><child><object class="GtkLabel" id="curve_detail_status"><property name="label">Sample density</property><property name="xalign">1</property><property name="hexpand">True</property><style><class name="dim-label"/><class name="caption"/></style></object></child></object></child><child><object class="GtkBox" id="curve_detail_control"><property name="spacing">8</property><child><object class="GtkScale" id="curve_detail_scale"><property name="orientation">horizontal</property><property name="draw-value">False</property><property name="hexpand">True</property></object></child><child><object class="GtkSpinButton" id="curve_detail_entry"><property name="numeric">True</property><property name="tooltip-text">Enter an exact value</property></object></child></object></child></object></child>
+                  <child><object class="GtkBox" id="curve_close_ends_row"><property name="spacing">4</property><child><object class="GtkCheckButton" id="curve_close_ends"><property name="label">Close Ends</property></object></child></object></child>
+                  <child><object class="GtkBox" id="curve_smooth_join_row"><property name="spacing">4</property><child><object class="GtkCheckButton" id="curve_smooth_join"><property name="label">Smooth Join</property></object></child></object></child>
+                </object></child></object></child>
+              </object>
+            </child>
           </object>
         </child>
       </object>
