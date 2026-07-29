@@ -11,21 +11,24 @@ use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, Once};
 use std::time::{Duration, Instant};
+#[cfg(test)]
+use toniator::RenderVariant;
 use toniator::artwork_pipeline::{
     ArtworkPipelineSettings, ArtworkSource, AutomaticSeparationStrategy, ChannelAssignment,
     LegacyCompatibilityAssignment, OutputChannelId, OutputModel, SourceAlphaPolicy,
 };
 use toniator::model::{ClosedShapePath, SettingKey, ShapeAnchor, ShapePoint, SourceArtwork};
+use toniator::pattern::{PATTERN_REGISTRY, PatternId, PatternInspectorPanel};
 use toniator::persistence::{clear_recovery_if_matches, recovery_path};
 #[cfg(test)]
 use toniator::render_document_preview;
 use toniator::{
     AlternateTileTransform, CancellationToken, CurveLayout, CurvePath, CurvePoint, Document,
     DocumentAppearance, DocumentEditor, ExportBackground, Ink, MotifCoverage, OperationCancelled,
-    OutputMode, PreviewSurface, RenderGate, RenderVariant, RgbaColor, Settings, Treatment,
-    ValueMode, WebCurveChannel, WebCurveSettings, WebShape, WebShapeSettings, export_svg,
+    OutputMode, PreviewSurface, RenderGate, RgbaColor, Settings, Treatment, ValueMode,
+    WebCurveChannel, WebCurveSettings, WebShape, WebShapeSettings, export_svg,
     export_svg_cancellable, render_document_preview_cancellable, save_document_atomic,
 };
 
@@ -38,7 +41,7 @@ const PREVIEW_SURFACE_LABEL: &str = "Preview Surface — Canvas only · not expo
 #[cfg(test)]
 const EXPORT_BACKGROUND_LABEL: &str = "Export Background — Used for SVG and by default for PNG";
 
-const BUNDLED_PRESETS: [(&str, &[u8]); 4] = [
+const BUNDLED_PRESETS: [(&str, &[u8]); 6] = [
     (
         "Comic Book",
         include_bytes!("../assets/presets/ComicBook.tntr"),
@@ -55,15 +58,36 @@ const BUNDLED_PRESETS: [(&str, &[u8]); 4] = [
         "Tiled Stacked Motif Stress Test",
         include_bytes!("../assets/presets/Tiled Stacked Motif Stress Test.tntr"),
     ),
+    (
+        "Polygon Six",
+        include_bytes!("../assets/presets/Polygon Six.tntr"),
+    ),
+    (
+        "Motif Ladder",
+        include_bytes!("../assets/presets/Motif Ladder.tntr"),
+    ),
 ];
 const START_HERO: &[u8] = include_bytes!("../assets/splash-hero.png");
 const PREVIEW_INDICATOR_SVG: &[u8] = include_bytes!("../assets/preview-indicator.svg");
-const TOP_LEVEL_SHELL_UI: &str = include_str!("../resources/ui/Toniator.ui");
-const INSPECTOR_HIERARCHY_UI: &str = include_str!("../resources/ui/ToniatorInspector.ui");
-const EDITOR_CONTROLS_UI: &str = include_str!("../resources/ui/ToniatorEditorControls.ui");
-const CHANNEL_CONTROLS_UI: &str = include_str!("../resources/ui/ToniatorChannelControls.ui");
-const AGGREGATE_CHANNEL_CONTROLS_UI: &str =
-    include_str!("../resources/ui/ToniatorAggregateChannelControls.ui");
+const WINDOW_UI_RESOURCE: &str = "/com/toniator/Toniator/toniator-window.ui";
+const CHANNEL_CONTROLS_UI_RESOURCE: &str = "/com/toniator/Toniator/toniator-channel-controls.ui";
+const AGGREGATE_CHANNEL_CONTROLS_UI_RESOURCE: &str =
+    "/com/toniator/Toniator/toniator-aggregate-channel-controls.ui";
+static UI_RESOURCES_REGISTERED: Once = Once::new();
+
+fn register_ui_resources() {
+    UI_RESOURCES_REGISTERED.call_once(|| {
+        gio::resources_register_include!("toniator.gresource")
+            .expect("Toniator GResource must register");
+    });
+}
+#[cfg(test)]
+const WINDOW_BLP: &str = include_str!("../resources/toniator-window.blp");
+#[cfg(test)]
+const CHANNEL_BLP: &str = include_str!("../resources/toniator-channel-controls.blp");
+#[cfg(test)]
+const AGGREGATE_CHANNEL_BLP: &str =
+    include_str!("../resources/toniator-aggregate-channel-controls.blp");
 #[cfg(test)]
 const TOP_LEVEL_SHELL_OBJECT_IDS: [&str; 13] = [
     "main_window",
@@ -389,6 +413,7 @@ glib::wrapper! {
 }
 
 impl CenterStage {
+    #[cfg(test)]
     fn new(child: &impl IsA<gtk::Widget>) -> Self {
         let stage: Self = glib::Object::new();
         let child = child.clone().upcast::<gtk::Widget>();
@@ -431,6 +456,7 @@ fn load_inspector_width(path: &Path) -> i32 {
         })
 }
 
+#[cfg(test)]
 fn save_inspector_width(path: &Path, width: i32) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -489,11 +515,32 @@ fn reset_crosshatch_curve_path(settings: &mut WebCurveSettings, inks: &[Ink]) {
 }
 
 fn document_artboard_size(document: &Document) -> (u32, u32) {
-    match &document.render {
-        RenderVariant::WebShapeV1 { settings } => (settings.output_width, settings.output_height),
-        RenderVariant::WebCurveV1 { settings } => (settings.output_width, settings.output_height),
-        RenderVariant::NativeBasicV1 => (900, 620),
+    match document.pattern_state.selected_pattern_id() {
+        Some(PatternId::COMPATIBILITY_SHAPES_V1) => document
+            .pattern_state
+            .shape_settings()
+            .map(|settings| (settings.output_width, settings.output_height))
+            .unwrap_or((900, 620)),
+        Some(PatternId::COMPATIBILITY_CURVES_V1) => document
+            .pattern_state
+            .curve_settings()
+            .map(|settings| (settings.output_width, settings.output_height))
+            .unwrap_or((900, 620)),
+        None => (900, 620),
     }
+}
+
+fn pipeline_uses_crosshatch(pipeline: &ArtworkPipelineSettings) -> bool {
+    matches!(
+        pipeline.assignment,
+        ChannelAssignment::LegacyCompatibility(
+            LegacyCompatibilityAssignment::CrosshatchProgressiveKcmyV1
+        )
+    )
+}
+
+fn document_uses_crosshatch(document: &Document) -> bool {
+    pipeline_uses_crosshatch(&document.artwork_pipeline)
 }
 
 fn rgba_color(color: gdk::RGBA) -> RgbaColor {
@@ -513,6 +560,70 @@ fn gdk_rgba(color: RgbaColor) -> gdk::RGBA {
         color.blue as f32 / 255.0,
         color.alpha as f32 / 255.0,
     )
+}
+
+fn rgba_hex(color: RgbaColor) -> String {
+    format!(
+        "#{:02X}{:02X}{:02X}{:02X}",
+        color.red, color.green, color.blue, color.alpha
+    )
+}
+
+fn export_background_from_selection(selected: u32, current: ExportBackground) -> ExportBackground {
+    if selected == 0 {
+        ExportBackground::None
+    } else {
+        match current {
+            ExportBackground::Color { .. } => current,
+            ExportBackground::None => ExportBackground::Color {
+                color: RgbaColor::WHITE,
+            },
+        }
+    }
+}
+
+fn export_background_color_label(background: ExportBackground) -> String {
+    match background {
+        ExportBackground::None => "Background Color · None (transparent)".into(),
+        ExportBackground::Color { color } => format!("Background Color · {}", rgba_hex(color)),
+    }
+}
+
+fn sync_export_background_color_control(
+    label: &gtk::Label,
+    button: &gtk::ColorDialogButton,
+    background: ExportBackground,
+) {
+    let text = export_background_color_label(background);
+    let color = match background {
+        ExportBackground::None => RgbaColor::WHITE,
+        ExportBackground::Color { color } => color,
+    };
+    label.set_text(&text);
+    label.set_tooltip_text(Some(&text));
+    button.set_rgba(&gdk_rgba(color));
+    button.set_tooltip_text(Some(&text));
+    button.update_property(&[
+        gtk::accessible::Property::Label("Export Background Color"),
+        gtk::accessible::Property::Description(&text),
+    ]);
+}
+
+fn png_background_selection_summary(
+    selected: u32,
+    document_background: ExportBackground,
+) -> String {
+    match selected {
+        0 => match document_background {
+            ExportBackground::None => "Document Export Background: None (transparent)".into(),
+            ExportBackground::Color { color } => format!(
+                "Document Export Background: #{:02X}{:02X}{:02X}{:02X}",
+                color.red, color.green, color.blue, color.alpha
+            ),
+        },
+        1 => "Transparent Override (ignores saved Export Background)".into(),
+        _ => "White Override (ignores saved Export Background)".into(),
+    }
 }
 
 fn parse_artifact_rgba(value: &str) -> Option<RgbaColor> {
@@ -1375,16 +1486,12 @@ impl<T> LatestSlot<T> {
 }
 
 struct InspectorPaneController {
-    paned: gtk::Paned,
-    inspector: gtk::Widget,
+    paned: adw::OverlaySplitView,
     controls: gtk::ToggleButton,
-    overlay: gtk::Popover,
     desired_width: Cell<i32>,
     pending_width: Cell<Option<i32>>,
-    user_dragging: Cell<bool>,
     collapsed: Cell<bool>,
     narrow: Cell<bool>,
-    state_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy)]
@@ -1398,27 +1505,17 @@ struct ArtifactAllocation {
 
 impl InspectorPaneController {
     fn new(
-        paned: &gtk::Paned,
-        inspector: &impl IsA<gtk::Widget>,
+        paned: &adw::OverlaySplitView,
         controls: &gtk::ToggleButton,
         desired_width: i32,
-        state_path: Option<PathBuf>,
     ) -> Rc<Self> {
-        let overlay = gtk::Popover::new();
-        overlay.set_has_arrow(false);
-        overlay.set_position(gtk::PositionType::Left);
-        overlay.set_parent(paned);
         Rc::new(Self {
             paned: paned.clone(),
-            inspector: inspector.clone().upcast(),
             controls: controls.clone(),
-            overlay,
             desired_width: Cell::new(desired_width.clamp(INSPECTOR_MIN_WIDTH, INSPECTOR_MAX_WIDTH)),
             pending_width: Cell::new(None),
-            user_dragging: Cell::new(false),
             collapsed: Cell::new(false),
             narrow: Cell::new(false),
-            state_path,
         })
     }
 
@@ -1431,7 +1528,7 @@ impl InspectorPaneController {
         }
         let total = self.paned.width();
         let actual = self.current_width();
-        if total <= 0 || actual <= 0 || self.user_dragging.get() {
+        if total <= 0 || actual <= 0 {
             return;
         }
         let target = constrained_inspector_width(self.desired_width.get(), total);
@@ -1440,60 +1537,46 @@ impl InspectorPaneController {
             return;
         }
         self.pending_width.set(Some(target));
-        let corrected = target.clamp(0, total);
-        if corrected != self.paned.position() {
-            self.paned.set_position(corrected);
+        let corrected = target.clamp(INSPECTOR_MIN_WIDTH, total);
+        if (corrected - self.current_width()).abs() > 1 {
+            self.set_sidebar_width(corrected);
         }
-    }
-
-    fn begin_user_drag(&self, x: f64) {
-        if (x - self.paned.position() as f64).abs() <= 18.0 {
-            self.pending_width.set(None);
-            self.user_dragging.set(true);
-        }
-    }
-
-    fn finish_user_drag(&self) {
-        if !self.user_dragging.replace(false) {
-            return;
-        }
-        let width = self
-            .current_width()
-            .clamp(INSPECTOR_MIN_WIDTH, INSPECTOR_MAX_WIDTH);
-        self.desired_width.set(width);
-        if let Some(path) = self.state_path.as_ref()
-            && let Err(error) = save_inspector_width(path, width)
-        {
-            eprintln!("Could not save inspector width: {error}");
-        }
-        self.maintain();
     }
 
     fn current_width(&self) -> i32 {
-        self.paned.position().max(0)
+        let total = self.paned.width();
+        if total <= 0 {
+            return 0;
+        }
+        (self.paned.sidebar_width_fraction() * total as f64).round() as i32
+    }
+
+    fn set_sidebar_width(&self, width: i32) {
+        let total = self.paned.width();
+        if total > 0 {
+            self.paned
+                .set_sidebar_width_fraction((width as f64 / total as f64).clamp(0.1, 0.9));
+        }
     }
 
     fn set_collapsed(&self, collapsed: bool) {
         if self.collapsed.replace(collapsed) == collapsed {
             return;
         }
-        self.user_dragging.set(false);
         self.pending_width.set(None);
         if self.narrow.get() {
+            self.paned.set_show_sidebar(!collapsed);
             if collapsed {
-                self.overlay.popdown();
                 self.controls.grab_focus();
-            } else {
-                self.overlay.popup();
             }
             return;
         }
-        self.inspector.set_visible(!collapsed);
+        self.paned.set_show_sidebar(!collapsed);
         if collapsed {
-            self.paned.set_position(0);
+            self.paned.set_collapsed(false);
         } else {
             let target = constrained_inspector_width(self.desired_width.get(), self.paned.width());
-            self.paned.set_position(target);
+            self.set_sidebar_width(target);
             self.maintain();
         }
     }
@@ -1504,22 +1587,18 @@ impl InspectorPaneController {
             return;
         }
         if narrow {
-            self.paned.set_start_child(Option::<&gtk::Widget>::None);
-            self.paned.set_position(0);
-            self.overlay.set_child(Some(&self.inspector));
-            self.inspector.set_visible(true);
+            self.paned.set_collapsed(true);
+            self.paned.set_show_sidebar(false);
             self.collapsed.set(true);
             self.controls.set_active(false);
         } else {
-            self.overlay.popdown();
-            self.overlay.set_child(Option::<&gtk::Widget>::None);
-            self.paned.set_start_child(Some(&self.inspector));
+            self.paned.set_collapsed(false);
             let collapsed = self.collapsed.get();
-            self.inspector.set_visible(!collapsed);
+            self.paned.set_show_sidebar(!collapsed);
             if !collapsed {
                 let target =
                     constrained_inspector_width(self.desired_width.get(), self.paned.width());
-                self.paned.set_position(target);
+                self.set_sidebar_width(target);
             }
         }
     }
@@ -1580,6 +1659,7 @@ pub struct AppUi {
     preview_surface: gtk::DropDown,
     preview_color: gtk::ColorDialogButton,
     export_background: gtk::DropDown,
+    export_color_label: gtk::Label,
     export_color: gtk::ColorDialogButton,
     web_shared: gtk::CheckButton,
     web_shared_help: Option<HelpHandle>,
@@ -1589,6 +1669,7 @@ pub struct AppUi {
     web_mixed_shape_apply: gtk::DropDown,
     web_mixed_shape_apply_row: gtk::Widget,
     web_polygon_sides: gtk::SpinButton,
+    web_polygon_sides_row: gtk::Widget,
     web_polygon_sides_label: gtk::Label,
     web_edit_shape: gtk::Button,
     web_target: gtk::DropDown,
@@ -1740,16 +1821,10 @@ struct ShellWidgets {
 }
 
 struct InspectorHierarchyWidgets {
-    root: gtk::Box,
     source_section: gtk::Expander,
-    source_content: gtk::Box,
     output_section: gtk::Expander,
-    output_content: gtk::Box,
     channel_settings_section: gtk::Expander,
-    channel_scope_host: gtk::Box,
     channel_panel_stack: gtk::Stack,
-    appearance_content: gtk::Box,
-    treatment_content: gtk::Box,
 }
 
 #[derive(Clone)]
@@ -1768,14 +1843,14 @@ struct AggregateChannelControlWidgets {
 }
 
 fn build_top_level_shell(
+    builder: &gtk::Builder,
     application: &adw::Application,
     window_width: i32,
     window_height: i32,
 ) -> ShellWidgets {
-    let builder = gtk::Builder::from_string(TOP_LEVEL_SHELL_UI);
     let window = builder
         .object::<adw::ApplicationWindow>("main_window")
-        .expect("Toniator.ui must define main_window");
+        .expect("toniator-window.blp must define main_window");
     window.set_application(Some(application));
     window.set_default_size(window_width.max(720), window_height.max(520));
 
@@ -1783,70 +1858,51 @@ fn build_top_level_shell(
         window,
         stack: builder
             .object("main_stack")
-            .expect("Toniator.ui must define main_stack"),
+            .expect("toniator-window.blp must define main_stack"),
         toast_overlay: builder
             .object("toast_overlay")
-            .expect("Toniator.ui must define toast_overlay"),
+            .expect("toniator-window.blp must define toast_overlay"),
         title: builder
             .object("window_title")
-            .expect("Toniator.ui must define window_title"),
+            .expect("toniator-window.blp must define window_title"),
         new_project: builder
             .object("new_project_button")
-            .expect("Toniator.ui must define new_project_button"),
+            .expect("toniator-window.blp must define new_project_button"),
         open: builder
             .object("open_button")
-            .expect("Toniator.ui must define open_button"),
+            .expect("toniator-window.blp must define open_button"),
         save: builder
             .object("save_button")
-            .expect("Toniator.ui must define save_button"),
+            .expect("toniator-window.blp must define save_button"),
         undo: builder
             .object("undo_button")
-            .expect("Toniator.ui must define undo_button"),
+            .expect("toniator-window.blp must define undo_button"),
         redo: builder
             .object("redo_button")
-            .expect("Toniator.ui must define redo_button"),
+            .expect("toniator-window.blp must define redo_button"),
         controls_toggle: builder
             .object("controls_toggle")
-            .expect("Toniator.ui must define controls_toggle"),
+            .expect("toniator-window.blp must define controls_toggle"),
         export: builder
             .object("export_button")
-            .expect("Toniator.ui must define export_button"),
+            .expect("toniator-window.blp must define export_button"),
     }
 }
 
-fn build_inspector_hierarchy() -> InspectorHierarchyWidgets {
-    let builder = gtk::Builder::from_string(INSPECTOR_HIERARCHY_UI);
+fn build_inspector_hierarchy(builder: &gtk::Builder) -> InspectorHierarchyWidgets {
     InspectorHierarchyWidgets {
-        root: builder
-            .object("editor_inspector_hierarchy")
-            .expect("ToniatorInspector.ui must define editor_inspector_hierarchy"),
         source_section: builder
             .object("source_section")
-            .expect("ToniatorInspector.ui must define source_section"),
-        source_content: builder
-            .object("source_content_host")
-            .expect("ToniatorInspector.ui must define source_content_host"),
+            .expect("toniator-window.blp must define source_section"),
         output_section: builder
             .object("output_section")
-            .expect("ToniatorInspector.ui must define output_section"),
-        output_content: builder
-            .object("output_content_host")
-            .expect("ToniatorInspector.ui must define output_content_host"),
+            .expect("toniator-window.blp must define output_section"),
         channel_settings_section: builder
             .object("channel_settings_section")
-            .expect("ToniatorInspector.ui must define channel_settings_section"),
-        channel_scope_host: builder
-            .object("channel_scope_host")
-            .expect("ToniatorInspector.ui must define channel_scope_host"),
+            .expect("toniator-window.blp must define channel_settings_section"),
         channel_panel_stack: builder
             .object("channel_panel_stack")
-            .expect("ToniatorInspector.ui must define channel_panel_stack"),
-        appearance_content: builder
-            .object("appearance_content_host")
-            .expect("ToniatorInspector.ui must define appearance_content_host"),
-        treatment_content: builder
-            .object("treatment_content_host")
-            .expect("ToniatorInspector.ui must define treatment_content_host"),
+            .expect("toniator-window.blp must define channel_panel_stack"),
     }
 }
 
@@ -1863,19 +1919,19 @@ fn channel_heading(channel: OutputChannelId) -> String {
 }
 
 fn build_channel_controls(channel: OutputChannelId) -> ChannelControlWidgets {
-    let builder = gtk::Builder::from_string(CHANNEL_CONTROLS_UI);
+    let builder = gtk::Builder::from_resource(CHANNEL_CONTROLS_UI_RESOURCE);
     let root = builder
         .object::<gtk::Box>("channel_controls")
-        .expect("ToniatorChannelControls.ui must define channel_controls");
+        .expect("toniator-channel-controls.blp must define channel_controls");
     let heading = builder
         .object::<gtk::Label>("channel_heading")
-        .expect("ToniatorChannelControls.ui must define channel_heading");
+        .expect("toniator-channel-controls.blp must define channel_heading");
     let inclusion_status = builder
         .object::<gtk::Label>("channel_inclusion_status")
-        .expect("ToniatorChannelControls.ui must define channel_inclusion_status");
+        .expect("toniator-channel-controls.blp must define channel_inclusion_status");
     let content_host = builder
         .object::<gtk::Box>("channel_content_host")
-        .expect("ToniatorChannelControls.ui must define channel_content_host");
+        .expect("toniator-channel-controls.blp must define channel_content_host");
     heading.set_text(&channel_heading(channel));
     content_host.append(
         &gtk::Label::builder()
@@ -1894,19 +1950,19 @@ fn build_channel_controls(channel: OutputChannelId) -> ChannelControlWidgets {
 }
 
 fn build_aggregate_channel_controls() -> AggregateChannelControlWidgets {
-    let builder = gtk::Builder::from_string(AGGREGATE_CHANNEL_CONTROLS_UI);
+    let builder = gtk::Builder::from_resource(AGGREGATE_CHANNEL_CONTROLS_UI_RESOURCE);
     let root = builder
         .object::<gtk::Box>("aggregate_channel_controls")
-        .expect("ToniatorAggregateChannelControls.ui must define aggregate_channel_controls");
+        .expect("toniator-aggregate-channel-controls.blp must define aggregate_channel_controls");
     let heading = builder
         .object::<gtk::Label>("aggregate_heading")
-        .expect("ToniatorAggregateChannelControls.ui must define aggregate_heading");
+        .expect("toniator-aggregate-channel-controls.blp must define aggregate_heading");
     let mixed_message = builder
         .object::<gtk::Label>("aggregate_mixed_message")
-        .expect("ToniatorAggregateChannelControls.ui must define aggregate_mixed_message");
+        .expect("toniator-aggregate-channel-controls.blp must define aggregate_mixed_message");
     let content_host = builder
         .object::<gtk::Box>("aggregate_content_host")
-        .expect("ToniatorAggregateChannelControls.ui must define aggregate_content_host");
+        .expect("toniator-aggregate-channel-controls.blp must define aggregate_content_host");
     content_host.append(
         &gtk::Label::builder()
             .label("Treatment edits apply to every included ink or channel. Mixed values remain explicit.")
@@ -2038,6 +2094,21 @@ impl AppUi {
         }
         let export_results = Arc::new(LatestSlot::default());
 
+        register_ui_resources();
+        let builder = gtk::Builder::from_resource(WINDOW_UI_RESOURCE);
+        if options.artifact_controls_shown {
+            for (id, expanded) in [
+                ("source_section", false),
+                ("output_section", false),
+                ("treatment_section", true),
+            ] {
+                builder
+                    .object::<gtk::Expander>(id)
+                    .unwrap_or_else(|| panic!("toniator-window.blp must define {id}"))
+                    .set_expanded(expanded);
+            }
+        }
+
         let ShellWidgets {
             window,
             stack,
@@ -2050,58 +2121,44 @@ impl AppUi {
             redo,
             controls_toggle,
             export,
-        } = build_top_level_shell(application, window_width, window_height);
+        } = build_top_level_shell(&builder, application, window_width, window_height);
         controls_toggle.update_property(&[
             gtk::accessible::Property::Label("Controls"),
             gtk::accessible::Property::Description("Hide Controls"),
         ]);
 
-        let picture = gtk::Picture::builder()
-            .content_fit(gtk::ContentFit::Contain)
-            .can_shrink(true)
-            .hexpand(true)
-            .vexpand(true)
-            .css_classes(["artboard"])
-            .build();
-        let source_label = gtk::Label::builder()
-            .xalign(0.0)
-            .ellipsize(gtk::pango::EllipsizeMode::Middle)
-            .build();
+        let picture = builder
+            .object::<gtk::Picture>("picture")
+            .expect("toniator-window.blp must define picture");
+        let source_label = builder
+            .object::<gtk::Label>("source_label")
+            .expect("toniator-window.blp must define source_label");
+        let autosave_status = builder
+            .object::<gtk::Label>("autosave_status")
+            .expect("toniator-window.blp must define autosave_status");
+        let compare = builder
+            .object::<gtk::ToggleButton>("compare")
+            .expect("toniator-window.blp must define compare");
         let preview_indicator = PreviewIndicator::new(options.indicator_phase());
-        let autosave_status = gtk::Label::builder()
-            .label(if recovery_enabled {
-                "Recovery is ready"
-            } else {
-                "Recovery is isolated for artifact capture"
-            })
-            .xalign(0.0)
-            .wrap(true)
-            .css_classes(["dim-label", "caption"])
-            .build();
-        let compare = gtk::ToggleButton::with_label("Source");
 
-        let start = build_start_view(recovery_enabled && recovery_path().exists());
-        stack.add_named(&start.container, Some("start"));
+        let start = build_start_view(&builder, recovery_enabled && recovery_path().exists());
         let editor_view = build_editor_view(
-            &picture,
-            &source_label,
+            &builder,
             &preview_indicator.area,
-            &autosave_status,
-            &compare,
+            recovery_enabled,
             initial_inspector_width,
             window_width,
         );
-        stack.add_named(&editor_view.container, Some("editor"));
+        stack.page(&start.container).set_name("start");
+        stack.page(&editor_view.container).set_name("editor");
         stack.set_visible_child_name("start");
         let fit = editor_view.fit.clone();
         let zoom = editor_view.zoom.clone();
         let zoom_entry = editor_view.zoom_entry.clone();
         let inspector_pane = InspectorPaneController::new(
             &editor_view.paned,
-            &editor_view.inspector_shell,
             &controls_toggle,
             initial_inspector_width,
-            inspector_state_path,
         );
         let sidebar_controller = inspector_pane.clone();
         controls_toggle.connect_toggled(move |button| {
@@ -2124,12 +2181,6 @@ impl AppUi {
             .connect_notify_local(Some("width"), move |_, _| {
                 layout_controller.update_layout();
             });
-        let closed_controller = inspector_pane.clone();
-        inspector_pane.overlay.connect_closed(move |_| {
-            if closed_controller.narrow.get() {
-                closed_controller.controls.set_active(false);
-            }
-        });
 
         let ui = Rc::new(Self {
             window,
@@ -2186,6 +2237,7 @@ impl AppUi {
             preview_surface: editor_view.preview_surface.clone(),
             preview_color: editor_view.preview_color.clone(),
             export_background: editor_view.export_background.clone(),
+            export_color_label: editor_view.export_color_label.clone(),
             export_color: editor_view.export_color.clone(),
             web_shared: editor_view.web_shared.clone(),
             web_shared_help: editor_view.web_shared_help.clone(),
@@ -2195,6 +2247,7 @@ impl AppUi {
             web_mixed_shape_apply: editor_view.web_mixed_shape_apply.clone(),
             web_mixed_shape_apply_row: editor_view.web_mixed_shape_apply_row.clone(),
             web_polygon_sides: editor_view.web_polygon_sides.clone(),
+            web_polygon_sides_row: editor_view.web_polygon_sides_row.clone(),
             web_polygon_sides_label: editor_view.web_polygon_sides_label.clone(),
             web_edit_shape: editor_view.web_edit_shape.clone(),
             web_target: editor_view.web_target.clone(),
@@ -2491,29 +2544,6 @@ impl AppUi {
                 }
             )),
         );
-        let pane_events = gtk::EventControllerLegacy::new();
-        pane_events.set_propagation_phase(gtk::PropagationPhase::Capture);
-        let controller = Rc::downgrade(&self.inspector_pane);
-        pane_events.connect_event(move |_, event| {
-            let Some(button) = event.downcast_ref::<gdk::ButtonEvent>() else {
-                return glib::Propagation::Proceed;
-            };
-            if button.button() != gdk::BUTTON_PRIMARY {
-                return glib::Propagation::Proceed;
-            }
-            if let Some(controller) = controller.upgrade() {
-                match event.event_type() {
-                    gdk::EventType::ButtonPress => {
-                        let (x, _) = event.position().unwrap_or_default();
-                        controller.begin_user_drag(x);
-                    }
-                    gdk::EventType::ButtonRelease => controller.finish_user_drag(),
-                    _ => {}
-                }
-            }
-            glib::Propagation::Proceed
-        });
-        self.inspector_pane.paned.add_controller(pane_events);
         self.canvas.add_tick_callback(glib::clone!(
             #[weak(rename_to = ui)]
             self,
@@ -2594,13 +2624,10 @@ impl AppUi {
             self,
             move |control| if !ui.state.borrow().syncing_controls {
                 ui.update_appearance(|appearance| {
-                    appearance.export_background = if control.selected() == 0 {
-                        ExportBackground::None
-                    } else {
-                        ExportBackground::Color {
-                            color: rgba_color(ui.export_color.rgba()),
-                        }
-                    };
+                    appearance.export_background = export_background_from_selection(
+                        control.selected(),
+                        appearance.export_background,
+                    );
                 });
             }
         ));
@@ -2843,13 +2870,9 @@ impl AppUi {
                     return;
                 }
                 if !button.is_active() {
-                    let rgb = ui.state.borrow().editor.as_ref().is_some_and(|editor| {
-                        editor.document().output_mode == OutputMode::RgbScreen
-                    });
-                    let crosshatch = ui.state.borrow().editor.as_ref().is_some_and(|editor| {
-                        matches!(&editor.document().render, RenderVariant::WebShapeV1 { settings }
-                            if settings.value_mode == ValueMode::CrosshatchLuminance)
-                    });
+                    let Some((rgb, crosshatch)) = ui.web_output_flags() else {
+                        return;
+                    };
                     ui.change_web_treatment(|settings, _| {
                         let path = settings.resolved_custom_shape_path();
                         for ink in output_channel_order(rgb, crosshatch).iter().copied() {
@@ -2882,14 +2905,9 @@ impl AppUi {
                 let target_ink = ui
                     .selected_web_inks()
                     .and_then(|inks| inks.first().copied());
-                let rgb =
-                    ui.state.borrow().editor.as_ref().is_some_and(|editor| {
-                        editor.document().output_mode == OutputMode::RgbScreen
-                    });
-                let crosshatch = ui.state.borrow().editor.as_ref().is_some_and(|editor| {
-                    matches!(&editor.document().render, RenderVariant::WebShapeV1 { settings }
-                        if settings.value_mode == ValueMode::CrosshatchLuminance)
-                });
+                let Some((rgb, crosshatch)) = ui.web_output_flags() else {
+                    return;
+                };
                 ui.change_web_treatment(move |settings, _| {
                     if settings.use_shared_mark {
                         settings.shared_shape = shape;
@@ -2924,13 +2942,9 @@ impl AppUi {
                         3 => WebShape::UserDefined,
                         _ => return,
                     };
-                    let rgb = ui.state.borrow().editor.as_ref().is_some_and(|editor| {
-                        editor.document().output_mode == OutputMode::RgbScreen
-                    });
-                    let crosshatch = ui.state.borrow().editor.as_ref().is_some_and(|editor| {
-                        matches!(&editor.document().render, RenderVariant::WebShapeV1 { settings }
-                            if settings.value_mode == ValueMode::CrosshatchLuminance)
-                    });
+                    let Some((rgb, crosshatch)) = ui.web_output_flags() else {
+                        return;
+                    };
                     ui.change_web_treatment(move |settings, _| {
                         settings.use_shared_mark = false;
                         let path = settings.resolved_custom_shape_path();
@@ -2955,14 +2969,9 @@ impl AppUi {
                 let target_ink = ui
                     .selected_web_inks()
                     .and_then(|inks| inks.first().copied());
-                let rgb =
-                    ui.state.borrow().editor.as_ref().is_some_and(|editor| {
-                        editor.document().output_mode == OutputMode::RgbScreen
-                    });
-                let crosshatch = ui.state.borrow().editor.as_ref().is_some_and(|editor| {
-                    matches!(&editor.document().render, RenderVariant::WebShapeV1 { settings }
-                        if settings.value_mode == ValueMode::CrosshatchLuminance)
-                });
+                let Some((rgb, crosshatch)) = ui.web_output_flags() else {
+                    return;
+                };
                 ui.change_web_treatment(move |settings, _| {
                     if settings.use_shared_mark || target == 0 {
                         settings.polygon_sides = sides;
@@ -2984,13 +2993,9 @@ impl AppUi {
                     if ui.state.borrow().syncing_controls {
                         return;
                     }
-                    let crosshatch = ui.state.borrow().editor.as_ref().is_some_and(|editor| {
-                        matches!(&editor.document().render, RenderVariant::WebShapeV1 { settings }
-                            if settings.value_mode == ValueMode::CrosshatchLuminance)
-                    });
-                    let rgb = ui.state.borrow().editor.as_ref().is_some_and(|editor| {
-                        editor.document().output_mode == OutputMode::RgbScreen
-                    });
+                    let Some((rgb, crosshatch)) = ui.web_output_flags() else {
+                        return;
+                    };
                     let Some(ink) = visible_ink_for_slot(index, rgb, crosshatch) else {
                         return;
                     };
@@ -3090,10 +3095,9 @@ impl AppUi {
             }
         ));
         connect_clicked(&self.curve_reset, self, |ui| {
-            let crosshatch = ui.state.borrow().editor.as_ref().is_some_and(|editor| {
-                matches!(&editor.document().render, RenderVariant::WebCurveV1 { settings }
-                    if settings.value_mode == ValueMode::CrosshatchLuminance)
-            });
+            let Some((_, crosshatch)) = ui.curve_output_flags() else {
+                return;
+            };
             if crosshatch {
                 ui.reset_crosshatch_path();
             } else {
@@ -3108,14 +3112,9 @@ impl AppUi {
                     return;
                 }
                 let shared = button.is_active();
-                let rgb =
-                    ui.state.borrow().editor.as_ref().is_some_and(|editor| {
-                        editor.document().output_mode == OutputMode::RgbScreen
-                    });
-                let crosshatch = ui.state.borrow().editor.as_ref().is_some_and(|editor| {
-                    matches!(&editor.document().render, RenderVariant::WebCurveV1 { settings }
-                        if settings.value_mode == ValueMode::CrosshatchLuminance)
-                });
+                let Some((rgb, crosshatch)) = ui.curve_output_flags() else {
+                    return;
+                };
                 ui.change_curve_treatment(move |settings, inks| {
                     if shared && !settings.use_shared_curve {
                         let ink = inks.first().copied().unwrap_or(Ink::Black);
@@ -3142,13 +3141,9 @@ impl AppUi {
                     if ui.state.borrow().syncing_controls {
                         return;
                     }
-                    let crosshatch = ui.state.borrow().editor.as_ref().is_some_and(|editor| {
-                        matches!(&editor.document().render, RenderVariant::WebCurveV1 { settings }
-                            if settings.value_mode == ValueMode::CrosshatchLuminance)
-                    });
-                    let rgb = ui.state.borrow().editor.as_ref().is_some_and(|editor| {
-                        editor.document().output_mode == OutputMode::RgbScreen
-                    });
+                    let Some((rgb, crosshatch)) = ui.curve_output_flags() else {
+                        return;
+                    };
                     let Some(ink) = visible_ink_for_slot(index, rgb, crosshatch) else {
                         return;
                     };
@@ -4007,10 +4002,15 @@ impl AppUi {
     }
 
     fn current_motif_arrangement(&self) -> Option<(f64, f64, f64, f64)> {
-        let state = self.state.borrow();
-        let editor = state.editor.as_ref()?;
-        let RenderVariant::WebCurveV1 { settings } = &editor.document().render else {
-            return None;
+        let settings = {
+            let state = self.state.borrow();
+            state
+                .editor
+                .as_ref()?
+                .document()
+                .pattern_state
+                .curve_settings()
+                .ok()?
         };
         let ink = self.selected_curve_inks()?.first().copied()?;
         let channel = settings.channels.get(ink);
@@ -4046,10 +4046,15 @@ impl AppUi {
         width: f64,
         height: f64,
     ) -> Option<(f64, f64, f64, f64, f64, f64, f64, f64)> {
-        let state = self.state.borrow();
-        let editor = state.editor.as_ref()?;
-        let RenderVariant::WebCurveV1 { settings } = &editor.document().render else {
-            return None;
+        let settings = {
+            let state = self.state.borrow();
+            state
+                .editor
+                .as_ref()?
+                .document()
+                .pattern_state
+                .curve_settings()
+                .ok()?
         };
         if settings.layout != CurveLayout::MotifPattern {
             return None;
@@ -4078,11 +4083,11 @@ impl AppUi {
     fn sync_motif_overlay(&self) {
         let active = self.motif_arrange.is_active()
             && self.state.borrow().editor.as_ref().is_some_and(|editor| {
-                matches!(
-                    &editor.document().render,
-                    RenderVariant::WebCurveV1 { settings }
-                        if settings.layout == CurveLayout::MotifPattern
-                )
+                editor
+                    .document()
+                    .pattern_state
+                    .curve_settings()
+                    .is_ok_and(|settings| settings.layout == CurveLayout::MotifPattern)
             });
         self.motif_overlay.set_visible(active);
         if active {
@@ -4091,10 +4096,15 @@ impl AppUi {
     }
 
     fn current_curve_path(&self) -> Option<CurvePath> {
-        let state = self.state.borrow();
-        let editor = state.editor.as_ref()?;
-        let RenderVariant::WebCurveV1 { settings } = &editor.document().render else {
-            return None;
+        let settings = {
+            let state = self.state.borrow();
+            state
+                .editor
+                .as_ref()?
+                .document()
+                .pattern_state
+                .curve_settings()
+                .ok()?
         };
         let inks = self.selected_curve_inks()?;
         if !settings.use_shared_curve
@@ -4113,12 +4123,15 @@ impl AppUi {
     }
 
     fn current_curve_color(&self) -> (f64, f64, f64) {
-        let state = self.state.borrow();
-        let Some(editor) = state.editor.as_ref() else {
-            return (0.2, 0.55, 1.0);
-        };
-        let RenderVariant::WebCurveV1 { settings } = &editor.document().render else {
-            return (0.2, 0.55, 1.0);
+        let settings = {
+            let state = self.state.borrow();
+            let Some(editor) = state.editor.as_ref() else {
+                return (0.2, 0.55, 1.0);
+            };
+            let Ok(settings) = editor.document().pattern_state.curve_settings() else {
+                return (0.2, 0.55, 1.0);
+            };
+            settings
         };
         let Some(inks) = self.selected_curve_inks() else {
             return (0.2, 0.55, 1.0);
@@ -4444,9 +4457,9 @@ impl AppUi {
             };
             editor.document().clone()
         };
-        let initial_name = match &document.render {
-            RenderVariant::WebCurveV1 { .. } => "Curves Preset.tntr",
-            _ => "Shapes Preset.tntr",
+        let initial_name = match document.pattern_state.selected_pattern_id() {
+            Some(PatternId::COMPATIBILITY_CURVES_V1) => "Curves Preset.tntr",
+            Some(PatternId::COMPATIBILITY_SHAPES_V1) | None => "Shapes Preset.tntr",
         };
         let directory = native_user_preset_dir();
         if let Err(error) = std::fs::create_dir_all(&directory) {
@@ -4814,14 +4827,28 @@ impl AppUi {
         self.update_actions();
     }
 
+    fn web_output_flags(&self) -> Option<(bool, bool)> {
+        let state = self.state.borrow();
+        let document = state.editor.as_ref()?.document();
+        let crosshatch = document_uses_crosshatch(document);
+        Some((
+            document.artwork_pipeline.output_model == OutputModel::RgbScreen && !crosshatch,
+            crosshatch,
+        ))
+    }
+
+    fn curve_output_flags(&self) -> Option<(bool, bool)> {
+        let state = self.state.borrow();
+        let document = state.editor.as_ref()?.document();
+        let crosshatch = document_uses_crosshatch(document);
+        Some((
+            document.artwork_pipeline.output_model == OutputModel::RgbScreen && !crosshatch,
+            crosshatch,
+        ))
+    }
+
     fn selected_web_inks(&self) -> Option<Vec<Ink>> {
-        let crosshatch = self.state.borrow().editor.as_ref().is_some_and(|editor| {
-            matches!(&editor.document().render, RenderVariant::WebShapeV1 { settings }
-                if settings.value_mode == ValueMode::CrosshatchLuminance)
-        });
-        let rgb = self.state.borrow().editor.as_ref().is_some_and(|editor| {
-            editor.document().output_mode == OutputMode::RgbScreen && !crosshatch
-        });
+        let (rgb, crosshatch) = self.web_output_flags()?;
         web_inks_for_target(self.web_target.selected(), rgb, crosshatch)
     }
 
@@ -4830,18 +4857,18 @@ impl AppUi {
         let target_ink = self
             .selected_web_inks()
             .and_then(|inks| inks.first().copied());
-        let Some(shape_path) =
-            self.state.borrow().editor.as_ref().and_then(|editor| {
-                match &editor.document().render {
-                    RenderVariant::WebShapeV1 { settings } => {
-                        Some(if settings.use_shared_mark || target == 0 {
-                            settings.resolved_custom_shape_path()
-                        } else {
-                            let ink = target_ink.unwrap_or(Ink::Black);
-                            settings.resolved_channel_shape_path(settings.channels.get(ink))
-                        })
-                    }
-                    _ => None,
+        let Some(shape_path) = self
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .and_then(|editor| editor.document().pattern_state.shape_settings().ok())
+            .map(|settings| {
+                if settings.use_shared_mark || target == 0 {
+                    settings.resolved_custom_shape_path()
+                } else {
+                    let ink = target_ink.unwrap_or(Ink::Black);
+                    settings.resolved_channel_shape_path(settings.channels.get(ink))
                 }
             })
         else {
@@ -4896,6 +4923,15 @@ impl AppUi {
             .vexpand(true)
             .focusable(true)
             .build();
+        area.set_tooltip_text(Some(
+            "Edit the selected mark's anchors and independent Bézier handles.",
+        ));
+        area.update_property(&[
+            gtk::accessible::Property::Label("User-defined mark editor"),
+            gtk::accessible::Property::Description(
+                "Drag anchors or independent Bézier handles. Double-click a curve to insert an anchor. Delete removes an anchor, arrow keys move the selection, and Escape cancels.",
+            ),
+        ]);
         area.set_draw_func(glib::clone!(
             #[strong]
             shape_path,
@@ -5195,8 +5231,12 @@ impl AppUi {
                 .borrow_mut()
                 .replace(dialog.clone().upcast());
         }
+        dialog.connect_map(glib::clone!(
+            #[weak]
+            area,
+            move |dialog| gtk::prelude::GtkWindowExt::set_focus(dialog, Some(&area))
+        ));
         dialog.present();
-        area.grab_focus();
     }
 
     fn install_curved_shape_fixture(self: &Rc<Self>) {
@@ -5223,13 +5263,7 @@ impl AppUi {
     }
 
     fn selected_curve_inks(&self) -> Option<Vec<Ink>> {
-        let crosshatch = self.state.borrow().editor.as_ref().is_some_and(|editor| {
-            matches!(&editor.document().render, RenderVariant::WebCurveV1 { settings }
-                if settings.value_mode == ValueMode::CrosshatchLuminance)
-        });
-        let rgb = self.state.borrow().editor.as_ref().is_some_and(|editor| {
-            editor.document().output_mode == OutputMode::RgbScreen && !crosshatch
-        });
+        let (rgb, crosshatch) = self.curve_output_flags()?;
         web_inks_for_target(self.curve_target.selected(), rgb, crosshatch)
     }
 
@@ -5248,13 +5282,17 @@ impl AppUi {
                 if !editor.exit_crosshatch_treatment() {
                     return;
                 }
-            } else if editor.document().saved_web_curve.is_some() {
+            } else if editor.document().pattern_state.selected_pattern_id()
+                != Some(PatternId::COMPATIBILITY_CURVES_V1)
+                && editor.document().saved_web_curve.is_some()
+            {
                 if !editor.restore_saved_curve() {
                     return;
                 }
-            } else if !editor.set_render_variant(RenderVariant::WebCurveV1 {
-                settings: Box::new(WebCurveSettings::default()),
-            }) {
+            } else if editor.document().pattern_state.selected_pattern_id()
+                != Some(PatternId::COMPATIBILITY_CURVES_V1)
+                && !editor.select_pattern(PatternId::COMPATIBILITY_CURVES_V1)
+            {
                 return;
             }
             editor.document().clone()
@@ -5268,13 +5306,17 @@ impl AppUi {
             let Some(editor) = state.editor.as_mut() else {
                 return;
             };
-            if editor.document().saved_web_shape.is_some() {
+            if editor.document().pattern_state.selected_pattern_id()
+                != Some(PatternId::COMPATIBILITY_SHAPES_V1)
+                && editor.document().saved_web_shape.is_some()
+            {
                 if !editor.restore_saved_shape() {
                     return;
                 }
-            } else if !editor.set_render_variant(RenderVariant::WebShapeV1 {
-                settings: Box::new(WebShapeSettings::default()),
-            }) {
+            } else if editor.document().pattern_state.selected_pattern_id()
+                != Some(PatternId::COMPATIBILITY_SHAPES_V1)
+                && !editor.select_pattern(PatternId::COMPATIBILITY_SHAPES_V1)
+            {
                 return;
             }
             editor.document().clone()
@@ -5311,14 +5353,11 @@ impl AppUi {
                 return;
             };
             let output_mode = editor.document().output_mode;
-            let RenderVariant::WebCurveV1 { settings } = &editor.document().render else {
+            let Ok(mut settings) = editor.document().pattern_state.curve_settings() else {
                 return;
             };
-            let mut settings = (**settings).clone();
             update(&mut settings, inks);
-            if !editor.set_render_variant(RenderVariant::WebCurveV1 {
-                settings: Box::new(settings),
-            }) {
+            if !editor.set_curve_settings(settings) {
                 return;
             }
             (
@@ -5437,14 +5476,16 @@ impl AppUi {
                 return;
             };
             let output_mode = editor.document().output_mode;
-            let RenderVariant::WebShapeV1 { settings } = &editor.document().render else {
+            if editor.document().pattern_state.selected_pattern_id()
+                != Some(PatternId::COMPATIBILITY_SHAPES_V1)
+            {
+                return;
+            }
+            let Ok(mut settings) = editor.document().pattern_state.shape_settings() else {
                 return;
             };
-            let mut settings = (**settings).clone();
             update(&mut settings, inks);
-            if !editor.set_render_variant(RenderVariant::WebShapeV1 {
-                settings: Box::new(settings),
-            }) {
+            if !editor.set_shape_settings(settings) {
                 return;
             }
             (
@@ -5468,15 +5509,17 @@ impl AppUi {
             let Some(editor) = state.editor.as_ref() else {
                 return;
             };
-            let RenderVariant::WebShapeV1 { settings } = &editor.document().render else {
+            if editor.document().pattern_state.selected_pattern_id()
+                != Some(PatternId::COMPATIBILITY_SHAPES_V1)
+            {
+                return;
+            }
+            let Ok(settings) = editor.document().pattern_state.shape_settings() else {
                 return;
             };
-            let crosshatch = matches!(
-                &editor.document().render,
-                RenderVariant::WebShapeV1 { settings }
-                    if settings.value_mode == ValueMode::CrosshatchLuminance
-            );
-            let rgb = editor.document().output_mode == OutputMode::RgbScreen && !crosshatch;
+            let crosshatch = document_uses_crosshatch(editor.document());
+            let rgb = editor.document().artwork_pipeline.output_model == OutputModel::RgbScreen
+                && !crosshatch;
             let channel_order = output_channel_order(rgb, crosshatch);
             let first = settings.channels.get(channel_order[0]);
             let equal = channel_order.iter().skip(1).copied().all(|ink| {
@@ -5637,28 +5680,183 @@ impl AppUi {
         self.update_actions();
     }
 
+    fn sync_shapes_schema_metadata(&self) {
+        let descriptor = |control_id| {
+            PATTERN_REGISTRY
+                .parameter_for_control(PatternId::COMPATIBILITY_SHAPES_V1, control_id)
+                .expect("Shapes control must have registered schema metadata")
+        };
+        let shared = descriptor("web_shared");
+        self.web_shared.set_tooltip_text(Some(shared.help));
+        self.web_shared
+            .update_property(&[gtk::accessible::Property::Description(shared.help)]);
+
+        let mark = descriptor("web_shape");
+        self.web_shape.set_tooltip_text(Some(mark.help));
+        self.web_shape
+            .update_property(&[gtk::accessible::Property::Description(mark.help)]);
+
+        let polygon_sides = descriptor("web_polygon_sides");
+        self.web_polygon_sides_label.set_text(polygon_sides.label);
+        self.web_polygon_sides
+            .set_tooltip_text(Some(polygon_sides.help));
+        self.web_polygon_sides
+            .update_property(&[gtk::accessible::Property::Description(polygon_sides.help)]);
+
+        let edit_shape = descriptor("web_edit_shape");
+        self.web_edit_shape.set_label(edit_shape.label);
+        self.web_edit_shape.set_tooltip_text(Some(edit_shape.help));
+        self.web_edit_shape.update_property(&[
+            gtk::accessible::Property::Label(edit_shape.label),
+            gtk::accessible::Property::Description(edit_shape.help),
+        ]);
+
+        let visible_channels = descriptor("web_visible_row");
+        self.web_visible_label
+            .set_tooltip_text(Some(visible_channels.help));
+        self.web_visible_label
+            .update_property(&[gtk::accessible::Property::Description(
+                visible_channels.help,
+            )]);
+    }
+
+    fn sync_curves_schema_metadata(&self) {
+        let descriptor = |control_id| {
+            PATTERN_REGISTRY
+                .parameter_for_control(PatternId::COMPATIBILITY_CURVES_V1, control_id)
+                .expect("Curves control must have registered schema metadata")
+        };
+        let set_description = |control: &gtk::Widget, control_id| {
+            let descriptor = descriptor(control_id);
+            control.set_tooltip_text(Some(descriptor.help));
+            control.update_property(&[gtk::accessible::Property::Description(descriptor.help)]);
+        };
+
+        set_description(self.curve_layout.upcast_ref(), "curve_layout");
+        set_description(self.curve_editor.upcast_ref(), "curve_editor");
+        set_description(self.curve_shared.upcast_ref(), "curve_shared");
+        set_description(self.curve_color.upcast_ref(), "curve_color");
+        set_description(self.curve_crosshatch_color.upcast_ref(), "curve_color");
+        set_description(self.curve_weight.upcast_ref(), "curve_weight_scale");
+        set_description(self.curve_spacing.upcast_ref(), "curve_spacing_scale");
+        set_description(self.curve_coverage.upcast_ref(), "curve_coverage_scale");
+        set_description(self.curve_angle.upcast_ref(), "curve_angle_scale");
+        set_description(self.curve_position_x.upcast_ref(), "curve_position_x_scale");
+        set_description(self.curve_position_y.upcast_ref(), "curve_position_y_scale");
+        set_description(self.curve_opacity.upcast_ref(), "curve_opacity_scale");
+        set_description(self.curve_threshold.upcast_ref(), "curve_threshold_scale");
+        set_description(self.curve_detail.upcast_ref(), "curve_detail_scale");
+        set_description(self.motif_controls.upcast_ref(), "motif_controls");
+
+        let visible_channels = descriptor("curve_visible_row");
+        self.curve_visible_label
+            .set_tooltip_text(Some(visible_channels.help));
+        self.curve_visible_label
+            .update_property(&[gtk::accessible::Property::Description(
+                visible_channels.help,
+            )]);
+    }
+
+    fn sync_pattern_selector(
+        &self,
+        selected_pattern: Option<PatternId>,
+        selected_panel: Option<PatternInspectorPanel>,
+        native_treatment: Treatment,
+    ) {
+        let shapes = PATTERN_REGISTRY
+            .get(PatternId::COMPATIBILITY_SHAPES_V1)
+            .expect("Shapes selector must have registered metadata");
+        let curves = PATTERN_REGISTRY
+            .get(PatternId::COMPATIBILITY_CURVES_V1)
+            .expect("Curves selector must have registered metadata");
+        for (button, metadata) in [(&self.dots, shapes), (&self.curves, curves)] {
+            button.set_label(metadata.selector.label);
+            button.set_tooltip_text(Some(metadata.selector.help));
+            button.update_property(&[
+                gtk::accessible::Property::Label(metadata.selector.label),
+                gtk::accessible::Property::Description(metadata.selector.help),
+            ]);
+        }
+
+        let shapes_selected = matches!(
+            (selected_pattern, selected_panel),
+            (
+                Some(PatternId::COMPATIBILITY_SHAPES_V1),
+                Some(PatternInspectorPanel::Shapes)
+            )
+        );
+        let curves_selected = matches!(
+            (selected_pattern, selected_panel),
+            (
+                Some(PatternId::COMPATIBILITY_CURVES_V1),
+                Some(PatternInspectorPanel::Curves)
+            )
+        );
+
+        self.dots.set_active(shapes_selected);
+        self.curves.set_active(curves_selected);
+        self.squares.set_active(false);
+        self.lines.set_active(false);
+        self.legacy
+            .set_visible(!shapes_selected && !curves_selected);
+        self.legacy.set_active(!shapes_selected && !curves_selected);
+
+        if shapes_selected {
+            self.treatment_modes.set_visible_child_name("web");
+        } else if curves_selected {
+            self.treatment_modes.set_visible_child_name("curve");
+        } else {
+            self.legacy.set_label(match native_treatment {
+                Treatment::Dots => "Legacy Dots",
+                Treatment::Squares => "Legacy Squares",
+                Treatment::Lines => "Legacy Lines",
+            });
+            self.treatment_modes.set_visible_child_name("native");
+        }
+    }
+
     fn sync_controls(&self) {
-        let Some((settings, render, appearance, pipeline, source_text)) =
-            self.state.borrow().editor.as_ref().map(|editor| {
-                (
-                    editor.document().settings,
-                    editor.document().render.clone(),
-                    editor.document().appearance,
-                    editor.document().artwork_pipeline.clone(),
-                    editor_source_text(editor.document()),
-                )
-            })
+        let Some((
+            settings,
+            appearance,
+            pipeline,
+            source_text,
+            selected_pattern,
+            selected_panel,
+            shape_settings,
+            curve_settings,
+        )) = self.state.borrow().editor.as_ref().map(|editor| {
+            let document = editor.document();
+            (
+                document.settings,
+                document.appearance,
+                document.artwork_pipeline.clone(),
+                editor_source_text(document),
+                document.pattern_state.selected_pattern_id(),
+                document
+                    .pattern_state
+                    .selected_metadata()
+                    .map(|metadata| metadata.selector.inspector_panel),
+                (document.pattern_state.selected_pattern_id()
+                    == Some(PatternId::COMPATIBILITY_SHAPES_V1))
+                .then(|| document.pattern_state.shape_settings())
+                .transpose()
+                .ok()
+                .flatten(),
+                (document.pattern_state.selected_pattern_id()
+                    == Some(PatternId::COMPATIBILITY_CURVES_V1))
+                .then(|| document.pattern_state.curve_settings())
+                .transpose()
+                .ok()
+                .flatten(),
+            )
+        })
         else {
             return;
         };
         let output_model = pipeline.output_model;
         let output_mode = output_model.to_legacy();
-        let crosshatch = matches!(
-            pipeline.assignment,
-            ChannelAssignment::LegacyCompatibility(
-                LegacyCompatibilityAssignment::CrosshatchProgressiveKcmyV1
-            )
-        );
+        let crosshatch = pipeline_uses_crosshatch(&pipeline);
         self.state.borrow_mut().syncing_controls = true;
         self.output_mode
             .set_selected(if output_mode == OutputMode::RgbScreen {
@@ -5759,11 +5957,13 @@ impl AppUi {
         ));
         match appearance.export_background {
             ExportBackground::None => self.export_background.set_selected(0),
-            ExportBackground::Color { color } => {
-                self.export_background.set_selected(1);
-                self.export_color.set_rgba(&gdk_rgba(color));
-            }
+            ExportBackground::Color { .. } => self.export_background.set_selected(1),
         }
+        sync_export_background_color_control(
+            &self.export_color_label,
+            &self.export_color,
+            appearance.export_background,
+        );
         self.export_color.set_sensitive(matches!(
             appearance.export_background,
             ExportBackground::Color { .. }
@@ -5772,172 +5972,160 @@ impl AppUi {
         self.coverage.set_value(settings.coverage as f64);
         self.contrast.set_value(settings.contrast as f64);
         self.angle.set_value(settings.angle as f64);
-        match settings.treatment {
-            Treatment::Dots => self.dots.set_active(true),
-            Treatment::Squares => self.squares.set_active(true),
-            Treatment::Lines => self.lines.set_active(true),
-        }
+        self.sync_pattern_selector(selected_pattern, selected_panel, settings.treatment);
         self.angle
             .set_sensitive(settings.treatment != Treatment::Dots);
-        match render {
-            RenderVariant::NativeBasicV1 => {
-                self.legacy.set_label(match settings.treatment {
-                    Treatment::Dots => "Legacy Dots",
-                    Treatment::Squares => "Legacy Squares",
-                    Treatment::Lines => "Legacy Lines",
-                });
-                self.legacy.set_visible(true);
-                self.legacy.set_active(true);
-                self.treatment_modes.set_visible_child_name("native");
+        if let Some(settings) = shape_settings.as_ref() {
+            self.sync_shapes_schema_metadata();
+            sync_layer_terminology(
+                &self.web_target,
+                &self.web_target_label,
+                self.web_target_help.as_ref(),
+                &self.web_visible_label,
+                output_mode == OutputMode::RgbScreen,
+                crosshatch,
+            );
+            if output_mode == OutputMode::RgbScreen && !crosshatch {
+                self.web_target_label.set_text("Adjust Channel");
+                self.web_visible_label.set_text("Visible RGB Channels");
             }
-            RenderVariant::WebShapeV1 { settings } => {
-                self.legacy.set_visible(false);
-                self.dots.set_active(true);
-                self.treatment_modes.set_visible_child_name("web");
-                sync_layer_terminology(
-                    &self.web_target,
-                    &self.web_target_label,
-                    self.web_target_help.as_ref(),
-                    &self.web_visible_label,
-                    output_mode == OutputMode::RgbScreen,
-                    crosshatch,
-                );
+            self.web_crosshatch_color_row.set_visible(crosshatch);
+            self.web_color_row.set_visible(!crosshatch);
+            self.web_crosshatch_color
+                .set_text(&settings.crosshatch_color);
+            self.web_shared.set_active(settings.use_shared_mark);
+            let shared_label = PATTERN_REGISTRY
+                .parameter_for_control(PatternId::COMPATIBILITY_SHAPES_V1, "web_shared")
+                .expect("Shapes shared control must have registered schema metadata")
+                .label;
+            self.web_shared.set_label(Some(&format!(
+                "{shared_label} Across {}",
                 if output_mode == OutputMode::RgbScreen && !crosshatch {
-                    self.web_target_label.set_text("Adjust Channel");
-                    self.web_visible_label.set_text("Visible RGB Channels");
+                    "Channels"
+                } else {
+                    "Inks"
                 }
-                self.web_crosshatch_color_row.set_visible(crosshatch);
-                self.web_color_row.set_visible(!crosshatch);
-                self.web_crosshatch_color
-                    .set_text(&settings.crosshatch_color);
-                self.web_shared.set_active(settings.use_shared_mark);
-                self.web_shared.set_label(Some(
-                    if output_mode == OutputMode::RgbScreen && !crosshatch {
+            )));
+            if let Some(help) = self.web_shared_help.as_ref() {
+                help.set_spec(
+                    help_for(if output_mode == OutputMode::RgbScreen && !crosshatch {
                         "Share Mark Shape Across Channels"
                     } else {
                         "Share Mark Shape Across Inks"
-                    },
-                ));
-                if let Some(help) = self.web_shared_help.as_ref() {
-                    help.set_spec(
-                        help_for(if output_mode == OutputMode::RgbScreen && !crosshatch {
-                            "Share Mark Shape Across Channels"
-                        } else {
-                            "Share Mark Shape Across Inks"
-                        })
-                        .unwrap(),
-                    );
-                }
-                let channel_copy = output_mode == OutputMode::RgbScreen && !crosshatch;
-                let mixed_target = web_mixed_target(channel_copy);
-                self.sync_web_color_terminology(channel_copy);
-                let visible_spec =
-                    help_for(if output_mode == OutputMode::RgbScreen && !crosshatch {
-                        "Visible RGB Channels"
-                    } else if crosshatch {
-                        "Visible Crosshatch Layers"
-                    } else {
-                        "Visible Inks"
                     })
-                    .unwrap();
-                self.web_visible_help.set_spec(visible_spec);
-                for button in &self.web_visible {
-                    button.set_tooltip_text(Some(visible_spec.summary));
-                    button.update_property(&[gtk::accessible::Property::Description(
-                        visible_spec.summary,
-                    )]);
-                }
-                if crosshatch {
-                    set_crosshatch_target_directions(
-                        &self.web_target,
-                        [
-                            settings.channels.k.grid_rotation,
-                            settings.channels.c.grid_rotation,
-                            settings.channels.m.grid_rotation,
-                            settings.channels.y.grid_rotation,
-                        ],
-                    );
-                }
-                let selected_target = self.web_target.selected();
-                let Some(inks) = web_inks_for_target(
-                    selected_target,
-                    output_mode == OutputMode::RgbScreen,
-                    crosshatch,
-                ) else {
-                    // GTK briefly reports INVALID_LIST_POSITION while its model is
-                    // being replaced. Leave the current shape controls untouched.
-                    self.state.borrow_mut().syncing_controls = false;
-                    return;
-                };
-                let all_target = selected_target == 0;
-                let channel_order =
-                    output_channel_order(output_mode == OutputMode::RgbScreen, crosshatch);
-                let first_geometry = settings.channels.get(channel_order[0]);
-                let geometry_mixed = !settings.use_shared_mark
-                    && channel_order.iter().skip(1).copied().any(|ink| {
-                        let channel = settings.channels.get(ink);
-                        channel.shape != first_geometry.shape
-                            || channel.polygon_sides != first_geometry.polygon_sides
-                            || settings.resolved_channel_shape_path(channel)
-                                != settings.resolved_channel_shape_path(first_geometry)
-                    });
-                let selected_channel = selected_target
-                    .checked_sub(1)
-                    .and_then(|index| {
-                        visible_ink_for_slot(
-                            index as usize,
-                            output_mode == OutputMode::RgbScreen,
-                            crosshatch,
-                        )
-                    })
-                    .map(|ink| settings.channels.get(ink));
-                let displayed_shape = if settings.use_shared_mark {
-                    settings.shared_shape
-                } else {
-                    selected_channel.unwrap_or(first_geometry).shape
-                };
-                self.web_shape
-                    .set_selected(if all_target && geometry_mixed {
-                        gtk::INVALID_LIST_POSITION
-                    } else {
-                        match displayed_shape {
-                            WebShape::Circle => 0,
-                            WebShape::RegularPolygon
-                            | WebShape::Rectangle
-                            | WebShape::Triangle
-                            | WebShape::Pentagon
-                            | WebShape::Hexagon => 1,
-                            WebShape::UserDefined => 2,
-                        }
-                    });
-                let displayed_sides = if settings.use_shared_mark {
-                    settings.polygon_sides
-                } else {
-                    selected_channel.map_or(settings.polygon_sides, |channel| channel.polygon_sides)
-                };
-                self.web_polygon_sides.set_value(displayed_sides as f64);
-                let polygon_active = !(all_target && geometry_mixed)
-                    && matches!(
-                        displayed_shape,
-                        WebShape::RegularPolygon
-                            | WebShape::Rectangle
-                            | WebShape::Triangle
-                            | WebShape::Pentagon
-                            | WebShape::Hexagon
-                    );
-                self.web_polygon_sides.set_visible(polygon_active);
-                self.web_polygon_sides_label.set_visible(polygon_active);
-                self.web_edit_shape.set_visible(
-                    !(all_target && geometry_mixed) && displayed_shape == WebShape::UserDefined,
+                    .unwrap(),
                 );
-                self.web_shape_row
-                    .set_visible(!(all_target && geometry_mixed));
-                self.web_mixed_shape_label
-                    .set_visible(all_target && geometry_mixed);
-                self.web_mixed_shape_apply_row
-                    .set_visible(all_target && geometry_mixed);
-                self.web_mixed_shape_apply.set_selected(0);
-                self.web_geometry_note
+            }
+            let channel_copy = output_mode == OutputMode::RgbScreen && !crosshatch;
+            let mixed_target = web_mixed_target(channel_copy);
+            self.sync_web_color_terminology(channel_copy);
+            let visible_spec = help_for(if output_mode == OutputMode::RgbScreen && !crosshatch {
+                "Visible RGB Channels"
+            } else if crosshatch {
+                "Visible Crosshatch Layers"
+            } else {
+                "Visible Inks"
+            })
+            .unwrap();
+            self.web_visible_help.set_spec(visible_spec);
+            for button in &self.web_visible {
+                button.set_tooltip_text(Some(visible_spec.summary));
+                button.update_property(&[gtk::accessible::Property::Description(
+                    visible_spec.summary,
+                )]);
+            }
+            if crosshatch {
+                set_crosshatch_target_directions(
+                    &self.web_target,
+                    [
+                        settings.channels.k.grid_rotation,
+                        settings.channels.c.grid_rotation,
+                        settings.channels.m.grid_rotation,
+                        settings.channels.y.grid_rotation,
+                    ],
+                );
+            }
+            let selected_target = self.web_target.selected();
+            let Some(inks) = web_inks_for_target(
+                selected_target,
+                output_mode == OutputMode::RgbScreen,
+                crosshatch,
+            ) else {
+                // GTK briefly reports INVALID_LIST_POSITION while its model is
+                // being replaced. Leave the current shape controls untouched.
+                self.state.borrow_mut().syncing_controls = false;
+                return;
+            };
+            let all_target = selected_target == 0;
+            let channel_order =
+                output_channel_order(output_mode == OutputMode::RgbScreen, crosshatch);
+            let first_geometry = settings.channels.get(channel_order[0]);
+            let geometry_mixed = !settings.use_shared_mark
+                && channel_order.iter().skip(1).copied().any(|ink| {
+                    let channel = settings.channels.get(ink);
+                    channel.shape != first_geometry.shape
+                        || channel.polygon_sides != first_geometry.polygon_sides
+                        || settings.resolved_channel_shape_path(channel)
+                            != settings.resolved_channel_shape_path(first_geometry)
+                });
+            let selected_channel = selected_target
+                .checked_sub(1)
+                .and_then(|index| {
+                    visible_ink_for_slot(
+                        index as usize,
+                        output_mode == OutputMode::RgbScreen,
+                        crosshatch,
+                    )
+                })
+                .map(|ink| settings.channels.get(ink));
+            let displayed_shape = if settings.use_shared_mark {
+                settings.shared_shape
+            } else {
+                selected_channel.unwrap_or(first_geometry).shape
+            };
+            self.web_shape
+                .set_selected(if all_target && geometry_mixed {
+                    gtk::INVALID_LIST_POSITION
+                } else {
+                    match displayed_shape {
+                        WebShape::Circle => 0,
+                        WebShape::RegularPolygon
+                        | WebShape::Rectangle
+                        | WebShape::Triangle
+                        | WebShape::Pentagon
+                        | WebShape::Hexagon => 1,
+                        WebShape::UserDefined => 2,
+                    }
+                });
+            let displayed_sides = if settings.use_shared_mark {
+                settings.polygon_sides
+            } else {
+                selected_channel.map_or(settings.polygon_sides, |channel| channel.polygon_sides)
+            };
+            self.web_polygon_sides.set_value(displayed_sides as f64);
+            let polygon_active = !(all_target && geometry_mixed)
+                && matches!(
+                    displayed_shape,
+                    WebShape::RegularPolygon
+                        | WebShape::Rectangle
+                        | WebShape::Triangle
+                        | WebShape::Pentagon
+                        | WebShape::Hexagon
+                );
+            self.web_polygon_sides.set_visible(polygon_active);
+            self.web_polygon_sides_row.set_visible(polygon_active);
+            self.web_polygon_sides_label.set_visible(polygon_active);
+            self.web_edit_shape.set_visible(
+                !(all_target && geometry_mixed) && displayed_shape == WebShape::UserDefined,
+            );
+            self.web_shape_row
+                .set_visible(!(all_target && geometry_mixed));
+            self.web_mixed_shape_label
+                .set_visible(all_target && geometry_mixed);
+            self.web_mixed_shape_apply_row
+                .set_visible(all_target && geometry_mixed);
+            self.web_mixed_shape_apply.set_selected(0);
+            self.web_geometry_note
                     .set_text(if settings.use_shared_mark {
                         if output_mode == OutputMode::RgbScreen && !crosshatch {
                             "One shape shared by all channels."
@@ -5965,542 +6153,539 @@ impl AppUi {
                             }
                         }
                     });
-                for (index, button) in self.web_visible.iter().enumerate() {
-                    if output_mode == OutputMode::RgbScreen && !crosshatch && index == 3 {
-                        button.set_visible(false);
-                        continue;
-                    }
-                    button.set_visible(true);
-                    if output_mode == OutputMode::RgbScreen && !crosshatch {
-                        let Some(ink) = Ink::RGB.get(index).copied() else {
-                            continue;
-                        };
-                        button.set_label(Some(["Red", "Green", "Blue"][index]));
-                        button.set_active(settings.channels.get(ink).enabled);
-                        continue;
-                    }
-                    let Some(ink) = visible_ink_for_slot(
-                        index,
-                        output_mode == OutputMode::RgbScreen,
-                        crosshatch,
-                    ) else {
-                        continue;
-                    };
-                    button.set_label(Some(if crosshatch {
-                        ["1 K", "2 C", "3 M", "4 Y"][index]
-                    } else {
-                        ["C", "M", "Y", "K"][index]
-                    }));
-                    button.set_active(settings.channels.get(ink).enabled);
+            for (index, button) in self.web_visible.iter().enumerate() {
+                if output_mode == OutputMode::RgbScreen && !crosshatch && index == 3 {
+                    button.set_visible(false);
+                    continue;
                 }
-                let all_inks = selected_target == 0;
-                let first = if all_inks {
-                    &settings.base_channel
-                } else {
-                    settings.channels.get(inks[0])
-                };
-                let differs = |value: fn(&toniator::WebShapeChannel) -> f64| {
-                    inks.iter()
-                        .skip(1)
-                        .any(|ink| (value(settings.channels.get(*ink)) - value(first)).abs() > 1e-9)
-                };
-                let mixed_fields = if all_inks {
-                    [false; 8]
-                } else {
-                    [
-                        differs(|c| c.scale),
-                        differs(|c| c.grid_rotation),
-                        differs(|c| c.rotation),
-                        differs(|c| c.width_scale),
-                        differs(|c| c.height_scale),
-                        differs(|c| c.threshold),
-                        differs(|c| c.opacity),
-                        differs(|c| c.resolution_scale),
-                    ]
-                };
-                self.web_mixed
-                    .set_text(if mixed_fields.into_iter().any(|mixed| mixed) {
-                        if channel_copy {
-                            "Changing a Mixed control applies one value to every selected channel."
-                        } else {
-                            "Changing a Mixed control applies one value to every selected ink."
-                        }
-                    } else {
-                        ""
-                    });
-                let colors_mixed = inks
-                    .iter()
-                    .skip(1)
-                    .any(|ink| settings.channels.get(*ink).color != first.color);
-                self.web_color.set_sensitive(!all_inks);
-                self.web_color.set_text(if all_inks || colors_mixed {
-                    ""
-                } else {
-                    &first.color
-                });
-                self.web_color.set_placeholder_text(Some(if all_inks {
-                    if channel_copy {
-                        "Select one channel"
-                    } else {
-                        "Select one ink"
-                    }
-                } else if colors_mixed {
-                    "Mixed"
-                } else {
-                    "#RRGGBB"
-                }));
-                self.web_color_status.set_text(if all_inks {
-                    if channel_copy {
-                        "Select one channel"
-                    } else {
-                        "Select one ink"
-                    }
-                } else if colors_mixed {
-                    "Mixed"
-                } else {
-                    "Hex color"
-                });
-                sync_web_scale(
-                    &self.web_coverage,
-                    &self.web_coverage_status,
-                    first.scale,
-                    mixed_fields[0],
-                    "Mark size",
-                    mixed_target,
-                );
-                sync_web_scale(
-                    &self.web_angle,
-                    &self.web_angle_status,
-                    first.grid_rotation,
-                    mixed_fields[1],
-                    "Rotate ink screen",
-                    mixed_target,
-                );
-                sync_web_scale(
-                    &self.web_mark_angle,
-                    &self.web_mark_angle_status,
-                    first.rotation,
-                    mixed_fields[2],
-                    "Rotate marks",
-                    mixed_target,
-                );
-                sync_web_scale(
-                    &self.web_width_scale,
-                    &self.web_width_scale_status,
-                    first.width_scale,
-                    mixed_fields[3],
-                    "Horizontal mark scale",
-                    mixed_target,
-                );
-                sync_web_scale(
-                    &self.web_height_scale,
-                    &self.web_height_scale_status,
-                    first.height_scale,
-                    mixed_fields[4],
-                    "Vertical mark scale",
-                    mixed_target,
-                );
-                sync_web_scale(
-                    &self.web_threshold,
-                    &self.web_threshold_status,
-                    first.threshold,
-                    mixed_fields[5],
-                    "Hide light marks",
-                    mixed_target,
-                );
-                sync_web_scale(
-                    &self.web_opacity,
-                    &self.web_opacity_status,
-                    first.opacity,
-                    mixed_fields[6],
-                    "Transparent — Solid",
-                    mixed_target,
-                );
-                sync_web_scale(
-                    &self.web_detail,
-                    &self.web_detail_status,
-                    first.resolution_scale,
-                    mixed_fields[7],
-                    "Sample density",
-                    mixed_target,
-                );
-            }
-            RenderVariant::WebCurveV1 { settings } => {
-                self.legacy.set_visible(false);
-                self.curves.set_active(true);
-                self.treatment_modes.set_visible_child_name("curve");
-                sync_layer_terminology(
-                    &self.curve_target,
-                    &self.curve_target_label,
-                    self.curve_target_help.as_ref(),
-                    &self.curve_visible_label,
-                    output_mode == OutputMode::RgbScreen,
-                    crosshatch,
-                );
+                button.set_visible(true);
                 if output_mode == OutputMode::RgbScreen && !crosshatch {
-                    self.curve_target_label.set_text("Adjust Channel");
-                    self.curve_visible_label.set_text("Visible RGB Channels");
-                }
-                self.curve_crosshatch_color_row.set_visible(crosshatch);
-                self.curve_color_row.set_visible(!crosshatch);
-                self.curve_crosshatch_color
-                    .set_text(&settings.crosshatch_color);
-                self.curve_layout.set_selected(match settings.layout {
-                    CurveLayout::FullWidth => 0,
-                    CurveLayout::MotifPattern => 1,
-                });
-                self.motif_controls
-                    .set_visible(settings.layout == CurveLayout::MotifPattern);
-                self.curve_shared.set_active(settings.use_shared_curve);
-                let visible_spec =
-                    help_for(if output_mode == OutputMode::RgbScreen && !crosshatch {
-                        "Visible RGB Channels"
-                    } else if crosshatch {
-                        "Visible Crosshatch Layers"
-                    } else {
-                        "Visible Inks"
-                    })
-                    .unwrap();
-                self.curve_visible_help.set_spec(visible_spec);
-                for button in &self.curve_visible {
-                    button.set_tooltip_text(Some(visible_spec.summary));
-                    button.update_property(&[gtk::accessible::Property::Description(
-                        visible_spec.summary,
-                    )]);
-                }
-                self.curve_shared.set_label(Some(if crosshatch {
-                    "Share Hatch Path Across Layers"
-                } else if output_mode == OutputMode::RgbScreen {
-                    "Share Line Shape Across Channels"
-                } else {
-                    "Share Line Shape Across Inks"
-                }));
-                if let Some(help) = self.curve_shared_help.as_ref() {
-                    help.set_spec(
-                        help_for(if crosshatch {
-                            "Share Hatch Path Across Layers"
-                        } else if output_mode == OutputMode::RgbScreen {
-                            "Share Line Shape Across Channels"
-                        } else {
-                            "Share Line Shape Across Inks"
-                        })
-                        .unwrap(),
-                    );
-                }
-                if crosshatch {
-                    set_crosshatch_target_directions(
-                        &self.curve_target,
-                        [
-                            settings.channels.k.grid_rotation,
-                            settings.channels.c.grid_rotation,
-                            settings.channels.m.grid_rotation,
-                            settings.channels.y.grid_rotation,
-                        ],
-                    );
-                }
-                self.curve_reset.set_label(if crosshatch {
-                    "Reset to Straight Hatch"
-                } else {
-                    "Reset to Soft Wave"
-                });
-                for (index, button) in self.curve_visible.iter().enumerate() {
-                    if output_mode == OutputMode::RgbScreen && !crosshatch && index == 3 {
-                        button.set_visible(false);
-                        continue;
-                    }
-                    button.set_visible(true);
-                    if output_mode == OutputMode::RgbScreen && !crosshatch {
-                        let Some(ink) = Ink::RGB.get(index).copied() else {
-                            continue;
-                        };
-                        button.set_label(Some(["Red", "Green", "Blue"][index]));
-                        button.set_active(settings.channels.get(ink).enabled);
-                        continue;
-                    }
-                    let Some(ink) = visible_ink_for_slot(
-                        index,
-                        output_mode == OutputMode::RgbScreen,
-                        crosshatch,
-                    ) else {
+                    let Some(ink) = Ink::RGB.get(index).copied() else {
                         continue;
                     };
-                    button.set_label(Some(if crosshatch {
-                        ["1 K", "2 C", "3 M", "4 Y"][index]
-                    } else {
-                        ["C", "M", "Y", "K"][index]
-                    }));
+                    button.set_label(Some(["Red", "Green", "Blue"][index]));
                     button.set_active(settings.channels.get(ink).enabled);
+                    continue;
                 }
-                let Some(inks) = self.selected_curve_inks() else {
-                    // Do not turn GTK's transient invalid selection into the
-                    // all-inks target while controls are being synchronized.
-                    self.source_label.set_text(&source_text);
-                    self.state.borrow_mut().syncing_controls = false;
-                    self.sync_motif_overlay();
-                    self.update_editing_context();
-                    return;
+                let Some(ink) =
+                    visible_ink_for_slot(index, output_mode == OutputMode::RgbScreen, crosshatch)
+                else {
+                    continue;
                 };
-                let all_inks = self.curve_target.selected() == 0;
-                let first = if all_inks {
-                    &settings.base_channel
+                button.set_label(Some(if crosshatch {
+                    ["1 K", "2 C", "3 M", "4 Y"][index]
                 } else {
-                    settings.channels.get(inks[0])
-                };
-                let pattern_mixed = !all_inks
-                    && inks.iter().skip(1).any(|ink| {
-                        let channel = settings.channels.get(*ink);
-                        channel.motif_coverage != first.motif_coverage
-                            || (channel.curve_scale - first.curve_scale).abs() > 1e-9
-                            || channel.tile_count != first.tile_count
-                            || channel.stack_count != first.stack_count
-                            || (channel.stack_spacing - first.stack_spacing).abs() > 1e-9
-                            || (channel.alternate_stack_offset - first.alternate_stack_offset).abs()
-                                > 1e-9
-                            || channel.alternate_tile_transform != first.alternate_tile_transform
-                    });
-                let arrangement_mixed = !all_inks
-                    && inks.iter().skip(1).any(|ink| {
-                        let channel = settings.channels.get(*ink);
-                        (channel.grid_rotation - first.grid_rotation).abs() > 1e-9
-                            || (channel.offset_x - first.offset_x).abs() > 1e-9
-                            || (channel.offset_y - first.offset_y).abs() > 1e-9
-                            || (channel.stack_spacing - first.stack_spacing).abs() > 1e-9
-                    });
-                self.curve_editor_label
-                    .set_text(if crosshatch && settings.use_shared_curve {
-                        "All Layers Hatch Path"
-                    } else if crosshatch && inks.len() == 1 {
-                        match inks[0] {
-                            Ink::Black => "Layer 1 Hatch Path",
-                            Ink::Cyan => "Layer 2 Hatch Path",
-                            Ink::Magenta => "Layer 3 Hatch Path",
-                            Ink::Yellow => "Layer 4 Hatch Path",
-                            Ink::Red => "Red Screen Path",
-                            Ink::Green => "Green Screen Path",
-                            Ink::Blue => "Blue Screen Path",
-                        }
-                    } else if settings.use_shared_curve {
-                        if settings.layout == CurveLayout::MotifPattern {
-                            "All Inks Motif Shape"
-                        } else {
-                            "All Inks Curve"
-                        }
-                    } else if inks.len() == 1 {
-                        match inks[0] {
-                            Ink::Cyan => "Cyan Curve",
-                            Ink::Magenta => "Magenta Curve",
-                            Ink::Yellow => "Yellow Curve",
-                            Ink::Black => "Black Curve",
-                            Ink::Red => "Red Screen Curve",
-                            Ink::Green => "Green Screen Curve",
-                            Ink::Blue => "Blue Screen Curve",
-                        }
-                    } else if inks.iter().skip(1).any(|ink| {
-                        settings.channels.get(*ink).path != settings.channels.get(inks[0]).path
-                    }) {
-                        "Mixed Curves — Select One Ink to Edit"
+                    ["C", "M", "Y", "K"][index]
+                }));
+                button.set_active(settings.channels.get(ink).enabled);
+            }
+            let all_inks = selected_target == 0;
+            let first = if all_inks {
+                &settings.base_channel
+            } else {
+                settings.channels.get(inks[0])
+            };
+            let differs = |value: fn(&toniator::WebShapeChannel) -> f64| {
+                inks.iter()
+                    .skip(1)
+                    .any(|ink| (value(settings.channels.get(*ink)) - value(first)).abs() > 1e-9)
+            };
+            let mixed_fields = if all_inks {
+                [false; 8]
+            } else {
+                [
+                    differs(|c| c.scale),
+                    differs(|c| c.grid_rotation),
+                    differs(|c| c.rotation),
+                    differs(|c| c.width_scale),
+                    differs(|c| c.height_scale),
+                    differs(|c| c.threshold),
+                    differs(|c| c.opacity),
+                    differs(|c| c.resolution_scale),
+                ]
+            };
+            self.web_mixed
+                .set_text(if mixed_fields.into_iter().any(|mixed| mixed) {
+                    if channel_copy {
+                        "Changing a Mixed control applies one value to every selected channel."
                     } else {
-                        "Selected Ink Curves"
-                    });
-                let differs = |value: fn(&WebCurveChannel) -> f64| {
-                    inks.iter()
-                        .skip(1)
-                        .any(|ink| (value(settings.channels.get(*ink)) - value(first)).abs() > 1e-9)
-                };
-                let mixed_fields = if all_inks {
-                    [false; 7]
+                        "Changing a Mixed control applies one value to every selected ink."
+                    }
                 } else {
+                    ""
+                });
+            let colors_mixed = inks
+                .iter()
+                .skip(1)
+                .any(|ink| settings.channels.get(*ink).color != first.color);
+            self.web_color.set_sensitive(!all_inks);
+            self.web_color.set_text(if all_inks || colors_mixed {
+                ""
+            } else {
+                &first.color
+            });
+            self.web_color.set_placeholder_text(Some(if all_inks {
+                if channel_copy {
+                    "Select one channel"
+                } else {
+                    "Select one ink"
+                }
+            } else if colors_mixed {
+                "Mixed"
+            } else {
+                "#RRGGBB"
+            }));
+            self.web_color_status.set_text(if all_inks {
+                if channel_copy {
+                    "Select one channel"
+                } else {
+                    "Select one ink"
+                }
+            } else if colors_mixed {
+                "Mixed"
+            } else {
+                "Hex color"
+            });
+            sync_web_scale(
+                &self.web_coverage,
+                &self.web_coverage_status,
+                first.scale,
+                mixed_fields[0],
+                "Mark size",
+                mixed_target,
+            );
+            sync_web_scale(
+                &self.web_angle,
+                &self.web_angle_status,
+                first.grid_rotation,
+                mixed_fields[1],
+                "Rotate ink screen",
+                mixed_target,
+            );
+            sync_web_scale(
+                &self.web_mark_angle,
+                &self.web_mark_angle_status,
+                first.rotation,
+                mixed_fields[2],
+                "Rotate marks",
+                mixed_target,
+            );
+            sync_web_scale(
+                &self.web_width_scale,
+                &self.web_width_scale_status,
+                first.width_scale,
+                mixed_fields[3],
+                "Horizontal mark scale",
+                mixed_target,
+            );
+            sync_web_scale(
+                &self.web_height_scale,
+                &self.web_height_scale_status,
+                first.height_scale,
+                mixed_fields[4],
+                "Vertical mark scale",
+                mixed_target,
+            );
+            sync_web_scale(
+                &self.web_threshold,
+                &self.web_threshold_status,
+                first.threshold,
+                mixed_fields[5],
+                "Hide light marks",
+                mixed_target,
+            );
+            sync_web_scale(
+                &self.web_opacity,
+                &self.web_opacity_status,
+                first.opacity,
+                mixed_fields[6],
+                "Transparent — Solid",
+                mixed_target,
+            );
+            sync_web_scale(
+                &self.web_detail,
+                &self.web_detail_status,
+                first.resolution_scale,
+                mixed_fields[7],
+                "Sample density",
+                mixed_target,
+            );
+        }
+        if let Some(settings) = curve_settings.as_ref() {
+            self.sync_curves_schema_metadata();
+            sync_layer_terminology(
+                &self.curve_target,
+                &self.curve_target_label,
+                self.curve_target_help.as_ref(),
+                &self.curve_visible_label,
+                output_mode == OutputMode::RgbScreen,
+                crosshatch,
+            );
+            if output_mode == OutputMode::RgbScreen && !crosshatch {
+                self.curve_target_label.set_text("Adjust Channel");
+                self.curve_visible_label.set_text("Visible RGB Channels");
+            }
+            self.curve_crosshatch_color_row.set_visible(crosshatch);
+            self.curve_color_row.set_visible(!crosshatch);
+            self.curve_crosshatch_color
+                .set_text(&settings.crosshatch_color);
+            self.curve_layout.set_selected(match settings.layout {
+                CurveLayout::FullWidth => 0,
+                CurveLayout::MotifPattern => 1,
+            });
+            self.motif_controls
+                .set_visible(settings.layout == CurveLayout::MotifPattern);
+            self.curve_shared.set_active(settings.use_shared_curve);
+            let visible_spec = help_for(if output_mode == OutputMode::RgbScreen && !crosshatch {
+                "Visible RGB Channels"
+            } else if crosshatch {
+                "Visible Crosshatch Layers"
+            } else {
+                "Visible Inks"
+            })
+            .unwrap();
+            self.curve_visible_help.set_spec(visible_spec);
+            for button in &self.curve_visible {
+                button.set_tooltip_text(Some(visible_spec.summary));
+                button.update_property(&[gtk::accessible::Property::Description(
+                    visible_spec.summary,
+                )]);
+            }
+            let shared_label = PATTERN_REGISTRY
+                .parameter_for_control(PatternId::COMPATIBILITY_CURVES_V1, "curve_shared")
+                .expect("Curves shared control must have registered schema metadata")
+                .label;
+            let shared_label = if crosshatch {
+                "Share Hatch Path Across Layers".to_owned()
+            } else if output_mode == OutputMode::RgbScreen {
+                format!("{shared_label} Across Channels")
+            } else {
+                format!("{shared_label} Across Inks")
+            };
+            self.curve_shared.set_label(Some(&shared_label));
+            if let Some(help) = self.curve_shared_help.as_ref() {
+                help.set_spec(
+                    help_for(if crosshatch {
+                        "Share Hatch Path Across Layers"
+                    } else if output_mode == OutputMode::RgbScreen {
+                        "Share Line Shape Across Channels"
+                    } else {
+                        "Share Line Shape Across Inks"
+                    })
+                    .unwrap(),
+                );
+            }
+            if crosshatch {
+                set_crosshatch_target_directions(
+                    &self.curve_target,
                     [
-                        differs(|channel| channel.scale),
-                        differs(|channel| channel.grid_rotation),
-                        differs(|channel| channel.offset_x),
-                        differs(|channel| channel.offset_y),
-                        differs(|channel| channel.opacity),
-                        differs(|channel| channel.threshold),
-                        differs(|channel| channel.resolution_scale),
-                    ]
+                        settings.channels.k.grid_rotation,
+                        settings.channels.c.grid_rotation,
+                        settings.channels.m.grid_rotation,
+                        settings.channels.y.grid_rotation,
+                    ],
+                );
+            }
+            self.curve_reset.set_label(if crosshatch {
+                "Reset to Straight Hatch"
+            } else {
+                "Reset to Soft Wave"
+            });
+            for (index, button) in self.curve_visible.iter().enumerate() {
+                if output_mode == OutputMode::RgbScreen && !crosshatch && index == 3 {
+                    button.set_visible(false);
+                    continue;
+                }
+                button.set_visible(true);
+                if output_mode == OutputMode::RgbScreen && !crosshatch {
+                    let Some(ink) = Ink::RGB.get(index).copied() else {
+                        continue;
+                    };
+                    button.set_label(Some(["Red", "Green", "Blue"][index]));
+                    button.set_active(settings.channels.get(ink).enabled);
+                    continue;
+                }
+                let Some(ink) =
+                    visible_ink_for_slot(index, output_mode == OutputMode::RgbScreen, crosshatch)
+                else {
+                    continue;
                 };
-                let colors_mixed = inks
+                button.set_label(Some(if crosshatch {
+                    ["1 K", "2 C", "3 M", "4 Y"][index]
+                } else {
+                    ["C", "M", "Y", "K"][index]
+                }));
+                button.set_active(settings.channels.get(ink).enabled);
+            }
+            let Some(inks) = self.selected_curve_inks() else {
+                // Do not turn GTK's transient invalid selection into the
+                // all-inks target while controls are being synchronized.
+                self.source_label.set_text(&source_text);
+                self.state.borrow_mut().syncing_controls = false;
+                self.sync_motif_overlay();
+                self.update_editing_context();
+                return;
+            };
+            let all_inks = self.curve_target.selected() == 0;
+            let first = if all_inks {
+                &settings.base_channel
+            } else {
+                settings.channels.get(inks[0])
+            };
+            let pattern_mixed = !all_inks
+                && inks.iter().skip(1).any(|ink| {
+                    let channel = settings.channels.get(*ink);
+                    channel.motif_coverage != first.motif_coverage
+                        || (channel.curve_scale - first.curve_scale).abs() > 1e-9
+                        || channel.tile_count != first.tile_count
+                        || channel.stack_count != first.stack_count
+                        || (channel.stack_spacing - first.stack_spacing).abs() > 1e-9
+                        || (channel.alternate_stack_offset - first.alternate_stack_offset).abs()
+                            > 1e-9
+                        || channel.alternate_tile_transform != first.alternate_tile_transform
+                });
+            let arrangement_mixed = !all_inks
+                && inks.iter().skip(1).any(|ink| {
+                    let channel = settings.channels.get(*ink);
+                    (channel.grid_rotation - first.grid_rotation).abs() > 1e-9
+                        || (channel.offset_x - first.offset_x).abs() > 1e-9
+                        || (channel.offset_y - first.offset_y).abs() > 1e-9
+                        || (channel.stack_spacing - first.stack_spacing).abs() > 1e-9
+                });
+            self.curve_editor_label
+                .set_text(if crosshatch && settings.use_shared_curve {
+                    "All Layers Hatch Path"
+                } else if crosshatch && inks.len() == 1 {
+                    match inks[0] {
+                        Ink::Black => "Layer 1 Hatch Path",
+                        Ink::Cyan => "Layer 2 Hatch Path",
+                        Ink::Magenta => "Layer 3 Hatch Path",
+                        Ink::Yellow => "Layer 4 Hatch Path",
+                        Ink::Red => "Red Screen Path",
+                        Ink::Green => "Green Screen Path",
+                        Ink::Blue => "Blue Screen Path",
+                    }
+                } else if settings.use_shared_curve {
+                    if settings.layout == CurveLayout::MotifPattern {
+                        "All Inks Motif Shape"
+                    } else {
+                        "All Inks Curve"
+                    }
+                } else if inks.len() == 1 {
+                    match inks[0] {
+                        Ink::Cyan => "Cyan Curve",
+                        Ink::Magenta => "Magenta Curve",
+                        Ink::Yellow => "Yellow Curve",
+                        Ink::Black => "Black Curve",
+                        Ink::Red => "Red Screen Curve",
+                        Ink::Green => "Green Screen Curve",
+                        Ink::Blue => "Blue Screen Curve",
+                    }
+                } else if inks.iter().skip(1).any(|ink| {
+                    settings.channels.get(*ink).path != settings.channels.get(inks[0]).path
+                }) {
+                    "Mixed Curves — Select One Ink to Edit"
+                } else {
+                    "Selected Ink Curves"
+                });
+            let differs = |value: fn(&WebCurveChannel) -> f64| {
+                inks.iter()
+                    .skip(1)
+                    .any(|ink| (value(settings.channels.get(*ink)) - value(first)).abs() > 1e-9)
+            };
+            let mixed_fields = if all_inks {
+                [false; 7]
+            } else {
+                [
+                    differs(|channel| channel.scale),
+                    differs(|channel| channel.grid_rotation),
+                    differs(|channel| channel.offset_x),
+                    differs(|channel| channel.offset_y),
+                    differs(|channel| channel.opacity),
+                    differs(|channel| channel.threshold),
+                    differs(|channel| channel.resolution_scale),
+                ]
+            };
+            let colors_mixed = inks
+                .iter()
+                .skip(1)
+                .any(|ink| settings.channels.get(*ink).color != first.color);
+            self.curve_color.set_sensitive(!all_inks);
+            self.curve_color.set_text(if all_inks || colors_mixed {
+                ""
+            } else {
+                &first.color
+            });
+            self.curve_color.set_placeholder_text(Some(if all_inks {
+                "Select one ink"
+            } else if colors_mixed {
+                "Mixed"
+            } else {
+                "#RRGGBB"
+            }));
+            self.curve_color_status.set_text(if all_inks {
+                "Select one ink"
+            } else if colors_mixed {
+                "Mixed"
+            } else {
+                "Hex color"
+            });
+            self.curve_weight.set_value(settings.max_mark);
+            self.curve_spacing.set_value(settings.long_edge_cells);
+            self.motif_coverage
+                .set_selected(match first.motif_coverage {
+                    MotifCoverage::Auto => 0,
+                    MotifCoverage::Manual => 1,
+                });
+            let manual_pattern = first.motif_coverage == MotifCoverage::Manual;
+            self.motif_coverage.set_sensitive(!pattern_mixed);
+            self.motif_size.set_sensitive(!pattern_mixed);
+            self.motif_columns
+                .set_sensitive(manual_pattern && !pattern_mixed);
+            self.motif_rows
+                .set_sensitive(manual_pattern && !pattern_mixed);
+            self.motif_row_spacing.set_sensitive(!pattern_mixed);
+            self.motif_stagger.set_sensitive(!pattern_mixed);
+            self.motif_alternate.set_sensitive(!pattern_mixed);
+            self.motif_arrange
+                .set_sensitive(!pattern_mixed && !arrangement_mixed);
+            if pattern_mixed || arrangement_mixed {
+                self.motif_arrange.set_active(false);
+            }
+            self.motif_mixed.set_text(if pattern_mixed {
+                "Mixed pattern values — select one ink to edit its motif arrangement."
+            } else if arrangement_mixed {
+                "Ink angles or positions differ — select one ink to arrange on the canvas."
+            } else {
+                ""
+            });
+            self.motif_size.set_value(first.curve_scale);
+            self.motif_columns.set_value(first.tile_count as f64);
+            self.motif_rows.set_value(first.stack_count as f64);
+            self.motif_row_spacing.set_value(first.stack_spacing.abs());
+            self.motif_stagger.set_value(first.alternate_stack_offset);
+            self.motif_alternate
+                .set_selected(match first.alternate_tile_transform {
+                    AlternateTileTransform::None => 0,
+                    AlternateTileTransform::Flip => 1,
+                    AlternateTileTransform::Rotate180 => 2,
+                });
+            sync_web_scale(
+                &self.curve_coverage,
+                &self.curve_coverage_status,
+                first.scale,
+                mixed_fields[0],
+                "Curve scale",
+                "inks",
+            );
+            sync_web_scale(
+                &self.curve_angle,
+                &self.curve_angle_status,
+                first.grid_rotation,
+                mixed_fields[1],
+                "Rotate ink screen",
+                "inks",
+            );
+            sync_web_scale(
+                &self.curve_position_x,
+                &self.curve_position_x_status,
+                first.offset_x,
+                mixed_fields[2],
+                "Move across",
+                "inks",
+            );
+            sync_web_scale(
+                &self.curve_position_y,
+                &self.curve_position_y_status,
+                first.offset_y,
+                mixed_fields[3],
+                "Move vertically",
+                "inks",
+            );
+            sync_web_scale(
+                &self.curve_opacity,
+                &self.curve_opacity_status,
+                first.opacity,
+                mixed_fields[4],
+                "Transparent — Solid",
+                "inks",
+            );
+            sync_web_scale(
+                &self.curve_threshold,
+                &self.curve_threshold_status,
+                first.threshold,
+                mixed_fields[5],
+                "Hide light marks",
+                "inks",
+            );
+            sync_web_scale(
+                &self.curve_detail,
+                &self.curve_detail_status,
+                first.resolution_scale,
+                mixed_fields[6],
+                "Sample density",
+                "inks",
+            );
+            let active_path = if settings.use_shared_curve {
+                &settings.shared_path
+            } else {
+                &first.path
+            };
+            let paths_mixed = !settings.use_shared_curve
+                && inks
                     .iter()
                     .skip(1)
-                    .any(|ink| settings.channels.get(*ink).color != first.color);
-                self.curve_color.set_sensitive(!all_inks);
-                self.curve_color.set_text(if all_inks || colors_mixed {
+                    .any(|ink| settings.channels.get(*ink).path != *active_path);
+            self.curve_profile.set_selected(if paths_mixed {
+                4
+            } else if *active_path == CurvePath::straight() {
+                0
+            } else if *active_path == CurvePath::soft_wave() {
+                1
+            } else if *active_path == CurvePath::deep_wave() {
+                2
+            } else {
+                3
+            });
+            let close_first = if settings.use_shared_curve {
+                settings.shared_close_ends
+            } else {
+                first.close_ends
+            };
+            let smooth_first = if settings.use_shared_curve {
+                settings.shared_smooth_join
+            } else {
+                first.smooth_join
+            };
+            let close_mixed = !settings.use_shared_curve
+                && inks
+                    .iter()
+                    .skip(1)
+                    .any(|ink| settings.channels.get(*ink).close_ends != close_first);
+            let smooth_mixed = !settings.use_shared_curve
+                && inks
+                    .iter()
+                    .skip(1)
+                    .any(|ink| settings.channels.get(*ink).smooth_join != smooth_first);
+            self.curve_close_ends.set_inconsistent(close_mixed);
+            self.curve_close_ends.set_active(close_first);
+            self.curve_smooth_join.set_inconsistent(smooth_mixed);
+            self.curve_smooth_join.set_active(smooth_first);
+            self.curve_smooth_join
+                .set_sensitive(close_first && !close_mixed);
+            self.curve_mixed.set_text(
+                if mixed_fields.into_iter().any(|mixed| mixed)
+                    || colors_mixed
+                    || close_mixed
+                    || smooth_mixed
+                    || paths_mixed
+                {
+                    "Changing a Mixed control applies one value to every selected ink."
+                } else {
                     ""
-                } else {
-                    &first.color
-                });
-                self.curve_color.set_placeholder_text(Some(if all_inks {
-                    "Select one ink"
-                } else if colors_mixed {
-                    "Mixed"
-                } else {
-                    "#RRGGBB"
-                }));
-                self.curve_color_status.set_text(if all_inks {
-                    "Select one ink"
-                } else if colors_mixed {
-                    "Mixed"
-                } else {
-                    "Hex color"
-                });
-                self.curve_weight.set_value(settings.max_mark);
-                self.curve_spacing.set_value(settings.long_edge_cells);
-                self.motif_coverage
-                    .set_selected(match first.motif_coverage {
-                        MotifCoverage::Auto => 0,
-                        MotifCoverage::Manual => 1,
-                    });
-                let manual_pattern = first.motif_coverage == MotifCoverage::Manual;
-                self.motif_coverage.set_sensitive(!pattern_mixed);
-                self.motif_size.set_sensitive(!pattern_mixed);
-                self.motif_columns
-                    .set_sensitive(manual_pattern && !pattern_mixed);
-                self.motif_rows
-                    .set_sensitive(manual_pattern && !pattern_mixed);
-                self.motif_row_spacing.set_sensitive(!pattern_mixed);
-                self.motif_stagger.set_sensitive(!pattern_mixed);
-                self.motif_alternate.set_sensitive(!pattern_mixed);
-                self.motif_arrange
-                    .set_sensitive(!pattern_mixed && !arrangement_mixed);
-                if pattern_mixed || arrangement_mixed {
-                    self.motif_arrange.set_active(false);
-                }
-                self.motif_mixed.set_text(if pattern_mixed {
-                    "Mixed pattern values — select one ink to edit its motif arrangement."
-                } else if arrangement_mixed {
-                    "Ink angles or positions differ — select one ink to arrange on the canvas."
-                } else {
-                    ""
-                });
-                self.motif_size.set_value(first.curve_scale);
-                self.motif_columns.set_value(first.tile_count as f64);
-                self.motif_rows.set_value(first.stack_count as f64);
-                self.motif_row_spacing.set_value(first.stack_spacing.abs());
-                self.motif_stagger.set_value(first.alternate_stack_offset);
-                self.motif_alternate
-                    .set_selected(match first.alternate_tile_transform {
-                        AlternateTileTransform::None => 0,
-                        AlternateTileTransform::Flip => 1,
-                        AlternateTileTransform::Rotate180 => 2,
-                    });
-                sync_web_scale(
-                    &self.curve_coverage,
-                    &self.curve_coverage_status,
-                    first.scale,
-                    mixed_fields[0],
-                    "Curve scale",
-                    "inks",
-                );
-                sync_web_scale(
-                    &self.curve_angle,
-                    &self.curve_angle_status,
-                    first.grid_rotation,
-                    mixed_fields[1],
-                    "Rotate ink screen",
-                    "inks",
-                );
-                sync_web_scale(
-                    &self.curve_position_x,
-                    &self.curve_position_x_status,
-                    first.offset_x,
-                    mixed_fields[2],
-                    "Move across",
-                    "inks",
-                );
-                sync_web_scale(
-                    &self.curve_position_y,
-                    &self.curve_position_y_status,
-                    first.offset_y,
-                    mixed_fields[3],
-                    "Move vertically",
-                    "inks",
-                );
-                sync_web_scale(
-                    &self.curve_opacity,
-                    &self.curve_opacity_status,
-                    first.opacity,
-                    mixed_fields[4],
-                    "Transparent — Solid",
-                    "inks",
-                );
-                sync_web_scale(
-                    &self.curve_threshold,
-                    &self.curve_threshold_status,
-                    first.threshold,
-                    mixed_fields[5],
-                    "Hide light marks",
-                    "inks",
-                );
-                sync_web_scale(
-                    &self.curve_detail,
-                    &self.curve_detail_status,
-                    first.resolution_scale,
-                    mixed_fields[6],
-                    "Sample density",
-                    "inks",
-                );
-                let active_path = if settings.use_shared_curve {
-                    &settings.shared_path
-                } else {
-                    &first.path
-                };
-                let paths_mixed = !settings.use_shared_curve
-                    && inks
-                        .iter()
-                        .skip(1)
-                        .any(|ink| settings.channels.get(*ink).path != *active_path);
-                self.curve_profile.set_selected(if paths_mixed {
-                    4
-                } else if *active_path == CurvePath::straight() {
-                    0
-                } else if *active_path == CurvePath::soft_wave() {
-                    1
-                } else if *active_path == CurvePath::deep_wave() {
-                    2
-                } else {
-                    3
-                });
-                let close_first = if settings.use_shared_curve {
-                    settings.shared_close_ends
-                } else {
-                    first.close_ends
-                };
-                let smooth_first = if settings.use_shared_curve {
-                    settings.shared_smooth_join
-                } else {
-                    first.smooth_join
-                };
-                let close_mixed = !settings.use_shared_curve
-                    && inks
-                        .iter()
-                        .skip(1)
-                        .any(|ink| settings.channels.get(*ink).close_ends != close_first);
-                let smooth_mixed = !settings.use_shared_curve
-                    && inks
-                        .iter()
-                        .skip(1)
-                        .any(|ink| settings.channels.get(*ink).smooth_join != smooth_first);
-                self.curve_close_ends.set_inconsistent(close_mixed);
-                self.curve_close_ends.set_active(close_first);
-                self.curve_smooth_join.set_inconsistent(smooth_mixed);
-                self.curve_smooth_join.set_active(smooth_first);
-                self.curve_smooth_join
-                    .set_sensitive(close_first && !close_mixed);
-                self.curve_mixed.set_text(
-                    if mixed_fields.into_iter().any(|mixed| mixed)
-                        || colors_mixed
-                        || close_mixed
-                        || smooth_mixed
-                        || paths_mixed
-                    {
-                        "Changing a Mixed control applies one value to every selected ink."
-                    } else {
-                        ""
-                    },
-                );
-                self.curve_editor.queue_draw();
-            }
+                },
+            );
+            self.curve_editor.queue_draw();
         }
         self.sync_channel_scope_panels(&pipeline, crosshatch);
         self.source_label.set_text(&source_text);
@@ -6571,12 +6756,8 @@ impl AppUi {
 
     fn web_uses_channel_copy(&self) -> bool {
         self.state.borrow().editor.as_ref().is_some_and(|editor| {
-            editor.document().output_mode == OutputMode::RgbScreen
-                && matches!(
-                    editor.document().render,
-                    RenderVariant::WebShapeV1 { ref settings }
-                        if settings.value_mode != ValueMode::CrosshatchLuminance
-                )
+            editor.document().artwork_pipeline.output_model == OutputModel::RgbScreen
+                && !document_uses_crosshatch(editor.document())
         })
     }
 
@@ -7096,7 +7277,7 @@ impl AppUi {
             let metrics = self.canvas_allocation_metrics(viewport);
             let report = format!(
                 "zoom={mode}\npaned_position={}\ninspector_width={}\ninspector_desired_width={}\nartwork_width={}\nartwork_height={}\ncontent_width={}\ncontent_height={}\nviewport_width={}\nviewport_height={}\nartwork_origin_x={}\nartwork_origin_y={}\nslack_left={}\nslack_right={}\nslack_top={}\nslack_bottom={}\nslack_delta_x={}\nslack_delta_y={}\nfit_edge_delta_x={}\nfit_edge_delta_y={}\npreview_width={}\npreview_height={}\n",
-                self.inspector_pane.paned.position(),
+                self.inspector_pane.current_width(),
                 self.inspector_pane.current_width(),
                 self.inspector_pane.desired_width.get(),
                 self.picture.width(),
@@ -7741,6 +7922,7 @@ impl AppUi {
         window.set_content(Some(&content));
 
         let syncing = Rc::new(Cell::new(false));
+        let document_export_background = document.appearance.export_background;
         let update_summary: Rc<dyn Fn()> = Rc::new(glib::clone!(
             #[weak]
             summary,
@@ -7750,16 +7932,26 @@ impl AppUi {
             height,
             #[weak]
             background,
-            move || summary.set_text(&format!(
-                "PNG · {} × {} px · {}",
-                width.value_as_int(),
-                height.value_as_int(),
-                match background.selected() {
-                    0 => "Document Export Background",
-                    1 => "Transparent Override",
-                    _ => "White Override",
-                }
-            ))
+            move || {
+                let selection = png_background_selection_summary(
+                    background.selected(),
+                    document_export_background,
+                );
+                let text = format!(
+                    "PNG · {} × {} px · {selection}",
+                    width.value_as_int(),
+                    height.value_as_int(),
+                );
+                summary.set_text(&text);
+                summary.set_tooltip_text(Some(&text));
+                summary.update_property(&[
+                    gtk::accessible::Property::Label(&text),
+                    gtk::accessible::Property::Description(
+                        "Current PNG export summary. Preview Surface never affects exported pixels.",
+                    ),
+                ]);
+                background.update_property(&[gtk::accessible::Property::Description(&text)]);
+            }
         ));
         update_summary();
         size.connect_selected_notify(glib::clone!(
@@ -8062,69 +8254,75 @@ impl AppUi {
             self.editing_context.set_text("No artwork open");
             return;
         };
-        let context = match &editor.document().render {
-            RenderVariant::WebShapeV1 { settings } => {
-                if settings.value_mode == ValueMode::CrosshatchLuminance {
-                    crosshatch_context("Shapes", self.web_target.selected(), self.web_angle.value())
-                } else {
-                    let layer = if editor.document().output_mode == OutputMode::RgbScreen {
-                        match self.web_target.selected() {
-                            1 => "Red channel",
-                            2 => "Green channel",
-                            3 => "Blue channel",
-                            _ => "All channels",
-                        }
-                    } else {
-                        match self.web_target.selected() {
-                            1 => "Cyan",
-                            2 => "Magenta",
-                            3 => "Yellow",
-                            4 => "Black",
-                            _ => "All inks",
-                        }
-                    };
-                    if editor.document().output_mode == OutputMode::RgbScreen {
-                        let visibility = rgb_visibility_summary(settings)
-                            .map(|summary| format!(" · {summary}"))
-                            .unwrap_or_default();
-                        format!("Shapes · RGB Screen · {layer}{visibility}")
-                    } else {
-                        format!("Shapes · {layer}")
+        let document = editor.document();
+        let context = if document.pattern_state.selected_pattern_id()
+            == Some(PatternId::COMPATIBILITY_SHAPES_V1)
+        {
+            let Ok(settings) = document.pattern_state.shape_settings() else {
+                return;
+            };
+            if document_uses_crosshatch(document) {
+                crosshatch_context("Shapes", self.web_target.selected(), self.web_angle.value())
+            } else {
+                let layer = if document.artwork_pipeline.output_model == OutputModel::RgbScreen {
+                    match self.web_target.selected() {
+                        1 => "Red channel",
+                        2 => "Green channel",
+                        3 => "Blue channel",
+                        _ => "All channels",
                     }
+                } else {
+                    match self.web_target.selected() {
+                        1 => "Cyan",
+                        2 => "Magenta",
+                        3 => "Yellow",
+                        4 => "Black",
+                        _ => "All inks",
+                    }
+                };
+                if document.artwork_pipeline.output_model == OutputModel::RgbScreen {
+                    let visibility = rgb_visibility_summary(&settings)
+                        .map(|summary| format!(" · {summary}"))
+                        .unwrap_or_default();
+                    format!("Shapes · RGB Screen · {layer}{visibility}")
+                } else {
+                    format!("Shapes · {layer}")
                 }
             }
-            RenderVariant::WebCurveV1 { settings } => {
-                if settings.value_mode == ValueMode::CrosshatchLuminance {
-                    crosshatch_context(
-                        "Curves",
-                        self.curve_target.selected(),
-                        self.curve_angle.value(),
-                    )
-                } else {
-                    let layer = if editor.document().output_mode == OutputMode::RgbScreen {
-                        match self.curve_target.selected() {
-                            1 => "Red channel",
-                            2 => "Green channel",
-                            3 => "Blue channel",
-                            _ => "All channels",
-                        }
-                    } else {
-                        match self.curve_target.selected() {
-                            1 => "Cyan",
-                            2 => "Magenta",
-                            3 => "Yellow",
-                            4 => "Black",
-                            _ => "All inks",
-                        }
-                    };
-                    if editor.document().output_mode == OutputMode::RgbScreen {
-                        format!("Curves · RGB Screen · {layer}")
-                    } else {
-                        format!("Curves · {layer}")
+        } else if document.pattern_state.selected_pattern_id()
+            == Some(PatternId::COMPATIBILITY_CURVES_V1)
+        {
+            if document_uses_crosshatch(document) {
+                crosshatch_context(
+                    "Curves",
+                    self.curve_target.selected(),
+                    self.curve_angle.value(),
+                )
+            } else {
+                let layer = if document.artwork_pipeline.output_model == OutputModel::RgbScreen {
+                    match self.curve_target.selected() {
+                        1 => "Red channel",
+                        2 => "Green channel",
+                        3 => "Blue channel",
+                        _ => "All channels",
                     }
+                } else {
+                    match self.curve_target.selected() {
+                        1 => "Cyan",
+                        2 => "Magenta",
+                        3 => "Yellow",
+                        4 => "Black",
+                        _ => "All inks",
+                    }
+                };
+                if document.artwork_pipeline.output_model == OutputModel::RgbScreen {
+                    format!("Curves · RGB Screen · {layer}")
+                } else {
+                    format!("Curves · {layer}")
                 }
             }
-            RenderVariant::NativeBasicV1 => "Shapes · Basic treatment".into(),
+        } else {
+            "Shapes · Basic treatment".into()
         };
         let operation = if self.motif_drag.get().is_some() {
             " · Adjusting motif on canvas"
@@ -8378,74 +8576,41 @@ struct StartWidgets {
     recover: Option<gtk::Button>,
 }
 
-fn build_start_view(has_recovery: bool) -> StartWidgets {
-    let page = gtk::Box::new(gtk::Orientation::Vertical, 18);
-    page.set_halign(gtk::Align::Center);
-    page.set_valign(gtk::Align::Center);
-    page.set_margin_start(32);
-    page.set_margin_end(32);
-    let hero = gtk::Picture::new();
+fn build_start_view(builder: &gtk::Builder, has_recovery: bool) -> StartWidgets {
+    let page = builder
+        .object::<gtk::ScrolledWindow>("start_page")
+        .expect("toniator-window.blp must define start_page");
+    let hero = builder
+        .object::<gtk::Picture>("start_hero")
+        .expect("toniator-window.blp must define start_hero");
     if let Ok(texture) = gdk::Texture::from_bytes(&glib::Bytes::from_static(START_HERO)) {
         hero.set_paintable(Some(&texture));
     }
-    hero.set_content_fit(gtk::ContentFit::Contain);
-    hero.set_can_shrink(true);
-    hero.set_hexpand(true);
-    hero.set_vexpand(true);
     hero.update_property(&[gtk::accessible::Property::Label(
         "Toniator halftone artwork",
     )]);
-    let title = gtk::Label::builder()
-        .label("Turn artwork into print-ready halftones")
-        .css_classes(["title-1"])
-        .wrap(true)
-        .justify(gtk::Justification::Center)
-        .build();
-    let subtitle = gtk::Label::builder()
-        .label("Start with a useful result, then shape the halftone to fit your work.")
-        .css_classes(["dim-label", "title-4"])
-        .wrap(true)
-        .justify(gtk::Justification::Center)
-        .build();
-    let open_artwork = gtk::Button::with_label("Open Artwork");
-    open_artwork.add_css_class("suggested-action");
-    open_artwork.add_css_class("pill");
-    let open_document = gtk::Button::with_label("Open Toniator Document");
-    open_document.add_css_class("pill");
-    let try_example = gtk::Button::with_label("Try Example");
-    try_example.add_css_class("flat");
-    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-    actions.set_halign(gtk::Align::Center);
-    actions.append(&open_artwork);
-    actions.append(&open_document);
-    let hero_frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    hero_frame.set_size_request(520, 240);
-    hero_frame.set_halign(gtk::Align::Center);
-    hero_frame.set_valign(gtk::Align::Start);
-    hero_frame.set_hexpand(false);
-    hero_frame.set_vexpand(false);
-    hero_frame.set_overflow(gtk::Overflow::Hidden);
-    hero_frame.append(&hero);
-    page.append(&hero_frame);
-    page.append(&title);
-    page.append(&subtitle);
-    page.append(&actions);
-    page.append(&try_example);
+    let open_artwork = builder
+        .object::<gtk::Button>("open_artwork")
+        .expect("toniator-window.blp must define open_artwork");
+    let open_document = builder
+        .object::<gtk::Button>("open_document")
+        .expect("toniator-window.blp must define open_document");
+    let try_example = builder
+        .object::<gtk::Button>("try_example")
+        .expect("toniator-window.blp must define try_example");
     let recover = has_recovery.then(|| {
         let button = gtk::Button::with_label("Recover Autosaved Work");
         button.add_css_class("flat");
         button.add_css_class("accent");
-        page.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-        page.append(&button);
+        let host = builder
+            .object::<gtk::Box>("start_recovery_host")
+            .expect("toniator-window.blp must define start_recovery_host");
+        host.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        host.append(&button);
         button
     });
-    let scroll = gtk::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .vscrollbar_policy(gtk::PolicyType::Automatic)
-        .child(&page)
-        .build();
     StartWidgets {
-        container: scroll.upcast(),
+        container: page.upcast(),
         open_artwork,
         open_document,
         try_example,
@@ -8455,8 +8620,7 @@ fn build_start_view(has_recovery: bool) -> StartWidgets {
 
 struct EditorWidgets {
     container: gtk::Widget,
-    paned: gtk::Paned,
-    inspector_shell: gtk::Widget,
+    paned: adw::OverlaySplitView,
     #[cfg(test)]
     inspector_root: gtk::Box,
     workspace_status: gtk::Label,
@@ -8504,6 +8668,7 @@ struct EditorWidgets {
     preview_surface: gtk::DropDown,
     preview_color: gtk::ColorDialogButton,
     export_background: gtk::DropDown,
+    export_color_label: gtk::Label,
     export_color: gtk::ColorDialogButton,
     web_shared: gtk::CheckButton,
     web_shared_help: Option<HelpHandle>,
@@ -8513,6 +8678,7 @@ struct EditorWidgets {
     web_mixed_shape_apply: gtk::DropDown,
     web_mixed_shape_apply_row: gtk::Widget,
     web_polygon_sides: gtk::SpinButton,
+    web_polygon_sides_row: gtk::Widget,
     web_polygon_sides_label: gtk::Label,
     web_edit_shape: gtk::Button,
     web_target: gtk::DropDown,
@@ -8599,26 +8765,24 @@ struct EditorWidgets {
 }
 
 struct AppearanceControlWidgets {
+    #[cfg(test)]
     container: gtk::Box,
     preview_surface: gtk::DropDown,
     preview_color: gtk::ColorDialogButton,
     #[cfg(test)]
     preview_help: gtk::MenuButton,
     export_background: gtk::DropDown,
+    export_color_label: gtk::Label,
     export_color: gtk::ColorDialogButton,
     #[cfg(test)]
     export_help: gtk::MenuButton,
 }
 
-fn build_appearance_controls() -> AppearanceControlWidgets {
-    let builder = gtk::Builder::from_string(EDITOR_CONTROLS_UI);
+fn build_appearance_controls(builder: &gtk::Builder) -> AppearanceControlWidgets {
+    #[cfg(test)]
     let container = builder
         .object::<gtk::Box>("appearance_controls")
-        .expect("ToniatorEditorControls.ui must define appearance_controls");
-    builder
-        .object::<gtk::Box>("editor_controls")
-        .expect("ToniatorEditorControls.ui must define editor_controls")
-        .remove(&container);
+        .expect("toniator-window.blp must define appearance_controls");
     let preview_surface = builder
         .object::<gtk::DropDown>("preview_surface")
         .expect("ToniatorEditorControls.ui must define preview_surface");
@@ -8653,13 +8817,20 @@ fn build_appearance_controls() -> AppearanceControlWidgets {
     let export_color = builder
         .object::<gtk::ColorDialogButton>("export_color")
         .expect("ToniatorEditorControls.ui must define export_color");
+    let export_color_label = builder
+        .object::<gtk::Label>("export_color_label")
+        .expect("ToniatorEditorControls.ui must define export_color_label");
     export_color.set_dialog(
         &gtk::ColorDialog::builder()
             .title("Export Background Color")
             .with_alpha(true)
             .build(),
     );
-    export_color.update_property(&[gtk::accessible::Property::Label("Export Background Color")]);
+    sync_export_background_color_control(
+        &export_color_label,
+        &export_color,
+        ExportBackground::None,
+    );
     let export_help = help_button(help_for("Export Background").unwrap());
     export_help.set_tooltip_text(Some("Help: Export Background"));
     builder
@@ -8667,12 +8838,14 @@ fn build_appearance_controls() -> AppearanceControlWidgets {
         .expect("ToniatorEditorControls.ui must define export_help_host")
         .append(&export_help);
     AppearanceControlWidgets {
+        #[cfg(test)]
         container,
         preview_surface,
         preview_color,
         #[cfg(test)]
         preview_help,
         export_background,
+        export_color_label,
         export_color,
         #[cfg(test)]
         export_help,
@@ -8681,74 +8854,57 @@ fn build_appearance_controls() -> AppearanceControlWidgets {
 
 #[allow(clippy::too_many_arguments)]
 fn build_editor_view(
-    picture: &gtk::Picture,
-    source_label: &gtk::Label,
+    builder: &gtk::Builder,
     preview_indicator: &gtk::DrawingArea,
-    autosave_status: &gtk::Label,
-    compare: &gtk::ToggleButton,
+    recovery_enabled: bool,
     inspector_width: i32,
     initial_layout_width: i32,
 ) -> EditorWidgets {
-    let layout = gtk::Paned::new(gtk::Orientation::Horizontal);
-    layout.set_wide_handle(true);
-    // The inspector is the start child. Keep its requested width stable while
-    // the canvas absorbs window growth and shrinkage.
-    layout.set_resize_start_child(false);
-    layout.set_resize_end_child(true);
-    layout.set_shrink_start_child(true);
-    layout.set_shrink_end_child(true);
-    let canvas_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    canvas_box.set_hexpand(true);
-    let canvas_overlay = gtk::Overlay::new();
-    canvas_overlay.set_child(Some(picture));
-    let motif_overlay = gtk::DrawingArea::builder()
-        .hexpand(true)
-        .vexpand(true)
-        .focusable(true)
-        .can_target(true)
-        .build();
-    motif_overlay.set_visible(false);
-    canvas_overlay.add_overlay(&motif_overlay);
-    // The stage deliberately allocates the artwork at its requested zoom size,
-    // centers slack on both axes, and reports that requested size as its own
-    // minimum so explicit zoom overflow remains scrollable.
-    let canvas_stage = CenterStage::new(&canvas_overlay);
-    canvas_stage.set_hexpand(true);
-    canvas_stage.set_vexpand(true);
-    let canvas = gtk::ScrolledWindow::builder()
-        .hexpand(true)
-        .vexpand(true)
-        .hscrollbar_policy(gtk::PolicyType::Automatic)
-        .vscrollbar_policy(gtk::PolicyType::Automatic)
-        .css_classes(["canvas"])
-        .child(&canvas_stage)
-        .build();
-    let controls = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    controls.set_margin_top(8);
-    controls.set_margin_bottom(8);
-    controls.set_margin_start(12);
-    controls.set_margin_end(12);
-    let fit = gtk::ToggleButton::with_label("Fit");
-    fit.add_css_class("flat");
-    let zoom_out = icon_button("zoom-out-symbolic", "Zoom out 25 percentage points");
-    let zoom_in = icon_button("zoom-in-symbolic", "Zoom in 25 percentage points");
-    let zoom = gtk::Scale::with_range(gtk::Orientation::Horizontal, ZOOM_MIN, ZOOM_MAX, 1.0);
+    let layout = builder
+        .object::<adw::OverlaySplitView>("editor_split_view")
+        .expect("toniator-window.blp must define editor_split_view");
+    layout.set_sidebar_width_unit(adw::LengthUnit::Px);
+    layout.set_min_sidebar_width(INSPECTOR_MIN_WIDTH as f64);
+    layout.set_max_sidebar_width(INSPECTOR_MAX_WIDTH as f64);
+    layout.set_sidebar_width_fraction(
+        (constrained_inspector_width(inspector_width, initial_layout_width) as f64
+            / initial_layout_width.max(1) as f64)
+            .clamp(0.1, 0.9),
+    );
+    let canvas_overlay = builder
+        .object::<gtk::Overlay>("canvas_content")
+        .expect("toniator-window.blp must define canvas_content");
+    let motif_overlay = builder
+        .object::<gtk::DrawingArea>("motif_overlay")
+        .expect("toniator-window.blp must define motif_overlay");
+    let canvas = builder
+        .object::<gtk::ScrolledWindow>("canvas")
+        .expect("toniator-window.blp must define canvas");
+    let fit = builder
+        .object::<gtk::ToggleButton>("fit")
+        .expect("toniator-window.blp must define fit");
+    let zoom_out = builder
+        .object::<gtk::Button>("zoom_out")
+        .expect("toniator-window.blp must define zoom_out");
+    let zoom_in = builder
+        .object::<gtk::Button>("zoom_in")
+        .expect("toniator-window.blp must define zoom_in");
+    let zoom = builder
+        .object::<gtk::Scale>("zoom")
+        .expect("toniator-window.blp must define zoom");
+    zoom.set_range(ZOOM_MIN, ZOOM_MAX);
+    zoom.set_increments(1.0, 25.0);
     disable_pointer_scroll_adjustment(&zoom);
-    zoom.set_draw_value(false);
-    zoom.set_hexpand(true);
     zoom.set_value(100.0);
-    zoom.set_size_request(80, -1);
     zoom.set_tooltip_text(Some("Canvas zoom"));
     fit.set_tooltip_text(Some(
         "Fit complete artwork; fitted percentage may be below 5% for very large artwork",
     ));
     compact_control_help(&fit, "Fit Artwork");
     zoom.update_property(&[gtk::accessible::Property::Label("Canvas zoom")]);
-    let zoom_entry = gtk::Entry::builder()
-        .text("100")
-        .width_chars(4)
-        .max_width_chars(5)
-        .build();
+    let zoom_entry = builder
+        .object::<gtk::Entry>("zoom_entry")
+        .expect("toniator-window.blp must define zoom_entry");
     zoom_entry.set_tooltip_text(Some(
         "Explicit zoom from 5% to 800%; Fit may calculate a smaller value",
     ));
@@ -8756,58 +8912,36 @@ fn build_editor_view(
     zoom_entry.update_property(&[gtk::accessible::Property::Label("Zoom percentage")]);
     compact_control_help(&zoom, "Canvas Zoom");
     compact_control_help(&zoom_entry, "Canvas Zoom");
-    let rendered_view = gtk::ToggleButton::with_label("Halftone");
-    rendered_view.set_group(Some(compare));
+    let rendered_view = builder
+        .object::<gtk::ToggleButton>("rendered_view")
+        .expect("toniator-window.blp must define rendered_view");
+    let compare = builder
+        .object::<gtk::ToggleButton>("compare")
+        .expect("toniator-window.blp must define compare");
+    rendered_view.set_group(Some(&compare));
     rendered_view.set_active(true);
-    let view_switch = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    view_switch.add_css_class("linked");
-    view_switch.append(&rendered_view);
-    view_switch.append(compare);
-    controls.append(&fit);
-    controls.append(&zoom_out);
-    controls.append(&zoom);
-    controls.append(&zoom_entry);
-    controls.append(&gtk::Label::new(Some("%")));
-    controls.append(&zoom_in);
-    controls.append(&gtk::Separator::new(gtk::Orientation::Vertical));
-    controls.append(&view_switch);
-    let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    spacer.set_hexpand(true);
-    controls.append(&spacer);
-    controls.append(preview_indicator);
-    canvas_box.append(&canvas);
-    let workspace_status = gtk::Label::builder()
-        .label("Preview will appear here")
-        .xalign(0.0)
-        .ellipsize(gtk::pango::EllipsizeMode::End)
-        .css_classes(["caption", "dim-label", "workspace-status"])
-        .build();
-    let status_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    workspace_status.set_hexpand(true);
-    let cancel_preview = gtk::Button::with_label("Cancel Preview");
-    cancel_preview.set_visible(false);
-    let cancel_export = gtk::Button::with_label("Cancel Export");
-    cancel_export.set_visible(false);
-    status_row.append(&workspace_status);
-    status_row.append(&cancel_preview);
-    status_row.append(&cancel_export);
-    canvas_box.append(&status_row);
-    canvas_box.append(&controls);
-
-    let inspector = gtk::Box::new(gtk::Orientation::Vertical, 14);
-    inspector.set_margin_top(18);
-    inspector.set_margin_bottom(18);
-    inspector.set_margin_start(18);
-    inspector.set_margin_end(18);
-    inspector.add_css_class("inspector");
-    let treatment_builder = gtk::Builder::from_string(EDITOR_CONTROLS_UI);
-    let treatment_chrome = treatment_builder
-        .object::<gtk::Box>("treatment_chrome")
-        .expect("ToniatorEditorControls.ui must define treatment_chrome");
-    treatment_builder
-        .object::<gtk::Box>("editor_controls")
-        .expect("ToniatorEditorControls.ui must define editor_controls")
-        .remove(&treatment_chrome);
+    builder
+        .object::<gtk::Box>("preview_indicator_host")
+        .expect("toniator-window.blp must define preview_indicator_host")
+        .append(preview_indicator);
+    let workspace_status = builder
+        .object::<gtk::Label>("workspace_status")
+        .expect("toniator-window.blp must define workspace_status");
+    let cancel_preview = builder
+        .object::<gtk::Button>("cancel_preview")
+        .expect("toniator-window.blp must define cancel_preview");
+    let cancel_export = builder
+        .object::<gtk::Button>("cancel_export")
+        .expect("toniator-window.blp must define cancel_export");
+    let autosave_status = builder
+        .object::<gtk::Label>("autosave_status")
+        .expect("toniator-window.blp must define autosave_status");
+    autosave_status.set_text(if recovery_enabled {
+        "Recovery is ready"
+    } else {
+        "Recovery is isolated for artifact capture"
+    });
+    let treatment_builder = builder.clone();
     let dots = treatment_builder
         .object::<gtk::ToggleButton>("dots")
         .expect("ToniatorEditorControls.ui must define dots");
@@ -8944,9 +9078,10 @@ fn build_editor_view(
     let web_polygon_sides_label = treatment_builder
         .object::<gtk::Label>("web_polygon_sides_label")
         .expect("ToniatorEditorControls.ui must define web_polygon_sides_label");
-    let web_polygon_sides_row = treatment_builder
+    let web_polygon_sides_row: gtk::Widget = treatment_builder
         .object::<gtk::Box>("web_polygon_sides_row")
-        .expect("ToniatorEditorControls.ui must define web_polygon_sides_row");
+        .expect("ToniatorEditorControls.ui must define web_polygon_sides_row")
+        .upcast();
     web_polygon_sides.update_property(&[gtk::accessible::Property::Description(
         help_for("Polygon Sides (3–6)").unwrap().summary,
     )]);
@@ -8957,11 +9092,6 @@ fn build_editor_view(
         .object::<gtk::Box>("web_polygon_sides_help_host")
         .expect("ToniatorEditorControls.ui must define web_polygon_sides_help_host")
         .append(&help_button(help_for("Polygon Sides (3–6)").unwrap()));
-    web_polygon_sides.connect_visible_notify(glib::clone!(
-        #[weak]
-        web_polygon_sides_row,
-        move |spin| web_polygon_sides_row.set_visible(spin.is_visible())
-    ));
     let web_edit_shape = treatment_builder
         .object::<gtk::Button>("web_edit_shape")
         .expect("ToniatorEditorControls.ui must define web_edit_shape");
@@ -9244,22 +9374,13 @@ fn build_editor_view(
     let curve_editor_label = treatment_builder
         .object::<gtk::Label>("curve_editor_label")
         .expect("ToniatorEditorControls.ui must define curve_editor_label");
-    let curve_editor = gtk::DrawingArea::builder()
-        .content_width(300)
-        .content_height(220)
-        .hexpand(true)
-        .focusable(true)
-        .tooltip_text("Drag curve anchors and handles; double-click a segment to add a point")
-        .css_classes(["curve-editor"])
-        .build();
+    let curve_editor = treatment_builder
+        .object::<gtk::DrawingArea>("curve_editor")
+        .expect("toniator-window.blp must define curve_editor");
     if let Some(spec) = help_for("Curve Editor") {
         curve_editor.set_tooltip_text(Some(spec.summary));
         curve_editor.update_property(&[gtk::accessible::Property::Description(spec.summary)]);
     }
-    treatment_builder
-        .object::<gtk::Box>("curve_editor_host")
-        .expect("ToniatorEditorControls.ui must define curve_editor_host")
-        .append(&curve_editor);
     let curve_reset = treatment_builder
         .object::<gtk::Button>("curve_reset")
         .expect("ToniatorEditorControls.ui must define curve_reset");
@@ -9565,23 +9686,8 @@ fn build_editor_view(
     treatment_modes.page(&web_panel_host).set_name("web");
     treatment_modes.page(&curve_panel_host).set_name("curve");
     treatment_modes.set_visible_child_name("native");
-    let hierarchy = build_inspector_hierarchy();
-    let controls_builder = gtk::Builder::from_string(EDITOR_CONTROLS_UI);
-    let editor_controls = controls_builder
-        .object::<gtk::Box>("editor_controls")
-        .expect("ToniatorEditorControls.ui must define editor_controls");
-    let source_controls = controls_builder
-        .object::<gtk::Box>("source_controls")
-        .expect("ToniatorEditorControls.ui must define source_controls");
-    editor_controls.remove(&source_controls);
-    controls_builder
-        .object::<gtk::Box>("source_dynamic_host")
-        .expect("ToniatorEditorControls.ui must define source_dynamic_host")
-        .append(source_label);
-    controls_builder
-        .object::<gtk::Box>("source_dynamic_host")
-        .expect("ToniatorEditorControls.ui must define source_dynamic_host")
-        .append(autosave_status);
+    let hierarchy = build_inspector_hierarchy(builder);
+    let controls_builder = builder;
     let artwork_source = controls_builder
         .object::<gtk::DropDown>("artwork_source")
         .expect("ToniatorEditorControls.ui must define artwork_source");
@@ -9609,12 +9715,6 @@ fn build_editor_view(
         .object::<gtk::Label>("source_alpha_note")
         .expect("ToniatorEditorControls.ui must define source_alpha_note");
     source_alpha_note.set_visible(false);
-    hierarchy.source_content.append(&source_controls);
-
-    let output_controls = controls_builder
-        .object::<gtk::Box>("output_controls")
-        .expect("ToniatorEditorControls.ui must define output_controls");
-    editor_controls.remove(&output_controls);
     let output_mode = controls_builder
         .object::<gtk::DropDown>("output_mode")
         .expect("ToniatorEditorControls.ui must define output_mode");
@@ -9667,20 +9767,13 @@ fn build_editor_view(
     let crosshatch_note = controls_builder
         .object::<gtk::Label>("crosshatch_note")
         .expect("ToniatorEditorControls.ui must define crosshatch_note");
-    hierarchy.output_content.append(&output_controls);
-
-    let channel_scope = gtk::DropDown::from_strings(&[
-        "All Inks",
-        "Cyan Ink",
-        "Magenta Ink",
-        "Yellow Ink",
-        "Black Ink",
-    ]);
+    let channel_scope = controls_builder
+        .object::<gtk::DropDown>("channel_scope")
+        .expect("toniator-window.blp must define channel_scope");
     channel_scope.set_tooltip_text(Some(
         "Choose which included inks or channels Shapes and Curves will edit.",
     ));
     channel_scope.update_property(&[gtk::accessible::Property::Label("Treatment Editing Scope")]);
-    hierarchy.channel_scope_host.append(&channel_scope);
     let aggregate_channel_controls = build_aggregate_channel_controls();
     hierarchy
         .channel_panel_stack
@@ -9700,46 +9793,25 @@ fn build_editor_view(
         .channel_panel_stack
         .set_visible_child_name("aggregate");
 
-    let appearance_controls = build_appearance_controls();
+    let appearance_controls = build_appearance_controls(builder);
     let preview_surface = appearance_controls.preview_surface.clone();
     let preview_color = appearance_controls.preview_color.clone();
     let export_background = appearance_controls.export_background.clone();
+    let export_color_label = appearance_controls.export_color_label.clone();
     let export_color = appearance_controls.export_color.clone();
-    hierarchy
-        .appearance_content
-        .append(&appearance_controls.container);
-    inspector.append(&hierarchy.root);
-    hierarchy.treatment_content.append(&treatment_chrome);
-
-    let inspector_scroll = gtk::ScrolledWindow::builder()
-        .vexpand(true)
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .vscrollbar_policy(gtk::PolicyType::Automatic)
-        .child(&inspector)
-        .build();
-    inspector_scroll.add_css_class("inspector-pane");
-    inspector_scroll.set_size_request(INSPECTOR_MIN_WIDTH, -1);
-    let editing_context = gtk::Label::builder()
-        .label("Shapes · All inks")
-        .xalign(0.0)
-        .wrap(true)
-        .css_classes(["caption", "editing-context"])
-        .build();
-    let inspector_shell = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    inspector_shell.set_vexpand(true);
-    inspector_shell.add_css_class("inspector-shell");
-    inspector_shell.append(&editing_context);
-    inspector_shell.append(&inspector_scroll);
-    layout.set_start_child(Some(&inspector_shell));
-    layout.set_end_child(Some(&canvas_box));
-    layout.set_position(constrained_inspector_width(
-        inspector_width,
-        initial_layout_width,
-    ));
+    let editing_context = controls_builder
+        .object::<gtk::Label>("editing_context")
+        .expect("toniator-window.blp must define editing_context");
+    let editor_page = controls_builder
+        .object::<gtk::Box>("editor_page")
+        .expect("toniator-window.blp must define editor_page");
+    #[cfg(test)]
+    let inspector = controls_builder
+        .object::<gtk::Box>("editor_controls")
+        .expect("toniator-window.blp must define editor_controls");
     EditorWidgets {
-        container: layout.clone().upcast(),
+        container: editor_page.upcast(),
         paned: layout,
-        inspector_shell: inspector_shell.upcast(),
         #[cfg(test)]
         inspector_root: inspector,
         workspace_status,
@@ -9787,6 +9859,7 @@ fn build_editor_view(
         preview_surface,
         preview_color,
         export_background,
+        export_color_label,
         export_color,
         web_shared,
         web_shared_help,
@@ -9796,6 +9869,7 @@ fn build_editor_view(
         web_mixed_shape_apply,
         web_mixed_shape_apply_row,
         web_polygon_sides,
+        web_polygon_sides_row,
         web_polygon_sides_label,
         web_edit_shape,
         web_target,
@@ -10065,7 +10139,7 @@ const HELP_SPECS: &[HelpSpec] = &[
         control: "PNG Background",
         heading: "PNG Background",
         summary: "Use the saved Export Background or make a PNG-only override.",
-        body: "Document Export Background uses the saved document setting, including its alpha. Transparent Override preserves artwork alpha; White Override flattens only this PNG export. Overrides never change the document or SVG.",
+        body: "Document Export Background uses the saved document setting, including its alpha; the export dialog summary shows its current None/transparent or color value. Transparent Override preserves artwork alpha; White Override flattens only this PNG export. Overrides never change the document or SVG.",
     },
     HelpSpec {
         control: "Preview Surface",
@@ -10077,7 +10151,7 @@ const HELP_SPECS: &[HelpSpec] = &[
         control: "Export Background",
         heading: "Export Background",
         summary: "Choose an optional saved background for SVG and default PNG export.",
-        body: "None preserves transparent output. A color, including alpha, is emitted as the SVG export background layer and used by default for PNG. It is compositing-only and does not change sampling or marks.",
+        body: "None preserves transparent output. Choosing Color starts with opaque white; then set its color, including alpha. It is emitted as the SVG export background layer and used by default for PNG. It is compositing-only and does not change sampling or marks.",
     },
     HelpSpec {
         control: "PNG Size",
@@ -10306,6 +10380,7 @@ fn help_button(spec: &HelpSpec) -> gtk::MenuButton {
 }
 
 #[cfg(test)]
+#[cfg(any())]
 fn button_with_help(button: &gtk::Button, control: &str) -> gtk::Widget {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     row.set_visible(button.is_visible());
@@ -10794,12 +10869,14 @@ fn sync_layer_terminology(
 }
 
 #[cfg(test)]
+#[cfg(any())]
 fn control_status_row(title: &str, status: &str, scale: &gtk::Scale) -> (gtk::Widget, gtk::Label) {
     let (row, _, status, _) = control_status_row_with_help(title, status, scale);
     (row, status)
 }
 
 #[cfg(test)]
+#[cfg(any())]
 fn control_status_row_with_help(
     title: &str,
     status: &str,
@@ -11126,6 +11203,7 @@ fn curve_lerp(a: CurvePoint, b: CurvePoint, amount: f64) -> CurvePoint {
 }
 
 #[cfg(test)]
+#[cfg(any())]
 fn control_scale(minimum: f64, maximum: f64, step: f64) -> gtk::Scale {
     let scale = gtk::Scale::new(gtk::Orientation::Horizontal, None::<&gtk::Adjustment>);
     configure_control_scale(&scale, minimum, maximum, step);
@@ -11239,6 +11317,7 @@ fn disable_pointer_scroll_adjustment(widget: &impl IsA<gtk::Widget>) -> usize {
 }
 
 #[cfg(test)]
+#[cfg(any())]
 fn precision_scale_control(scale: &gtk::Scale) -> gtk::Widget {
     let control = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     attach_precision_entry(scale, &control);
@@ -11282,13 +11361,6 @@ fn precision_entry(scale: &gtk::Scale) -> Option<gtk::SpinButton> {
         .parent()
         .and_then(|parent| parent.last_child())
         .and_then(|child| child.downcast::<gtk::SpinButton>().ok())
-}
-
-fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
-    gtk::Button::builder()
-        .icon_name(icon)
-        .tooltip_text(tooltip)
-        .build()
 }
 
 fn connect_clicked(
@@ -11382,24 +11454,24 @@ mod tests {
     fn top_level_shell_resource_declares_required_ids_without_display() {
         for id in TOP_LEVEL_SHELL_OBJECT_IDS {
             assert!(
-                TOP_LEVEL_SHELL_UI.contains(&format!(r#"id="{id}""#)),
-                "Toniator.ui must retain the {id} stable ID"
+                WINDOW_BLP.contains(&format!(" {id} ")),
+                "toniator-window.blp must retain the {id} stable ID"
             );
         }
         for class in [
-            "AdwApplicationWindow",
-            "AdwToolbarView",
-            "AdwHeaderBar",
-            "AdwToastOverlay",
-            "GtkStack",
+            "ApplicationWindow",
+            "ToolbarView",
+            "HeaderBar",
+            "ToastOverlay",
+            "Stack",
         ] {
             assert!(
-                TOP_LEVEL_SHELL_UI.contains(&format!(r#"class="{class}""#)),
-                "Toniator.ui must retain the {class} shell layer"
+                WINDOW_BLP.contains(class),
+                "toniator-window.blp must retain the {class} shell layer"
             );
         }
-        assert!(TOP_LEVEL_SHELL_UI.contains("<property name=\"transition-type\">crossfade"));
-        assert!(TOP_LEVEL_SHELL_UI.contains("<property name=\"transition-duration\">180"));
+        assert!(WINDOW_BLP.contains("transition-type: crossfade"));
+        assert!(WINDOW_BLP.contains("transition-duration: 180"));
     }
 
     #[test]
@@ -11417,22 +11489,16 @@ mod tests {
             "treatment_section",
         ] {
             assert!(
-                INSPECTOR_HIERARCHY_UI.contains(&format!(r#"id="{id}""#)),
-                "ToniatorInspector.ui must retain {id}"
+                WINDOW_BLP.contains(id),
+                "toniator-window.blp must retain {id}"
             );
         }
-        let source = INSPECTOR_HIERARCHY_UI
-            .find("id=\"source_section\"")
-            .unwrap();
-        let output = INSPECTOR_HIERARCHY_UI
-            .find("id=\"output_section\"")
-            .unwrap();
-        let channels = INSPECTOR_HIERARCHY_UI
-            .find("id=\"channel_settings_section\"")
-            .unwrap();
+        let source = WINDOW_BLP.find("source_section").unwrap();
+        let output = WINDOW_BLP.find("output_section").unwrap();
+        let channels = WINDOW_BLP.find("channel_settings_section").unwrap();
         assert!(source < output && output < channels);
-        assert!(INSPECTOR_HIERARCHY_UI.contains("Treatment Editing Scope"));
-        assert!(INSPECTOR_HIERARCHY_UI.contains(
+        assert!(WINDOW_BLP.contains("Treatment Editing Scope"));
+        assert!(WINDOW_BLP.contains(
             "Choose the inks or channels edited by Shapes and Curves. Output routing remains in Output."
         ));
         for id in [
@@ -11442,12 +11508,11 @@ mod tests {
             "channel_content_host",
         ] {
             assert!(
-                CHANNEL_CONTROLS_UI.contains(&format!(r#"id="{id}""#)),
-                "ToniatorChannelControls.ui must retain {id}"
+                CHANNEL_BLP.contains(id),
+                "toniator-channel-controls.blp must retain {id}"
             );
         }
-        assert!(CHANNEL_CONTROLS_UI.contains("real OutputChannelId"));
-        assert!(!CHANNEL_CONTROLS_UI.contains("aggregate_channel_controls"));
+        assert!(!CHANNEL_BLP.contains("aggregate_channel_controls"));
         for id in [
             "aggregate_channel_controls",
             "aggregate_heading",
@@ -11455,11 +11520,11 @@ mod tests {
             "aggregate_content_host",
         ] {
             assert!(
-                AGGREGATE_CHANNEL_CONTROLS_UI.contains(&format!(r#"id="{id}""#)),
-                "ToniatorAggregateChannelControls.ui must retain {id}"
+                AGGREGATE_CHANNEL_BLP.contains(id),
+                "toniator-aggregate-channel-controls.blp must retain {id}"
             );
         }
-        assert!(!AGGREGATE_CHANNEL_CONTROLS_UI.contains(r#"id="channel_controls""#));
+        assert!(!AGGREGATE_CHANNEL_BLP.contains("Box channel_controls {"));
     }
 
     #[test]
@@ -11483,6 +11548,7 @@ mod tests {
             "preview_surface",
             "preview_color",
             "export_background",
+            "export_color_label",
             "export_color",
             "treatment_chrome",
             "treatment_pattern_buttons",
@@ -11527,17 +11593,18 @@ mod tests {
             "curve_smooth_join",
         ] {
             assert!(
-                EDITOR_CONTROLS_UI.contains(&format!(r#"id="{id}""#)),
-                "ToniatorEditorControls.ui must retain {id}"
+                WINDOW_BLP.contains(id),
+                "toniator-window.blp must retain {id}"
             );
         }
-        assert!(EDITOR_CONTROLS_UI.contains("GtkColorDialogButton"));
-        assert!(EDITOR_CONTROLS_UI.contains("GtkDropDown"));
-        assert!(EDITOR_CONTROLS_UI.contains("GtkStack"));
+        assert!(WINDOW_BLP.contains("ColorDialogButton"));
+        assert!(WINDOW_BLP.contains("DropDown"));
+        assert!(WINDOW_BLP.contains("Stack"));
     }
 
     fn verify_realized_top_level_shell_builder() {
-        let builder = gtk::Builder::from_string(TOP_LEVEL_SHELL_UI);
+        register_ui_resources();
+        let builder = gtk::Builder::from_resource(WINDOW_UI_RESOURCE);
         assert!(
             builder
                 .object::<adw::ApplicationWindow>("main_window")
@@ -11580,7 +11647,8 @@ mod tests {
     }
 
     fn verify_realized_editor_controls_builder() {
-        let builder = gtk::Builder::from_string(EDITOR_CONTROLS_UI);
+        register_ui_resources();
+        let builder = gtk::Builder::from_resource(WINDOW_UI_RESOURCE);
         let dropdowns = [
             ("artwork_source", "artwork_source_label", "Artwork Source"),
             ("source_alpha", "source_alpha_label", "Source Alpha"),
@@ -11677,11 +11745,15 @@ mod tests {
         assert_eq!(stack.observe_children().n_items(), 3);
 
         let root = builder.object::<gtk::Box>("editor_controls").unwrap();
-        let window = gtk::Window::builder()
-            .default_width(320)
-            .default_height(600)
-            .child(&root)
-            .build();
+        assert!(root.parent().is_some());
+        let stack = builder.object::<gtk::Stack>("main_stack").unwrap();
+        let editor_page = builder.object::<gtk::Box>("editor_page").unwrap();
+        stack.page(&editor_page).set_name("editor");
+        stack.set_visible_child_name("editor");
+        let window = builder
+            .object::<adw::ApplicationWindow>("main_window")
+            .unwrap();
+        window.set_default_size(960, 720);
         window.present();
         while glib::MainContext::default().iteration(false) {}
         for (id, _, accessible_name) in dropdowns {
@@ -11710,6 +11782,67 @@ mod tests {
         assert_eq!(close_policy(true, true, false), ClosePolicy::InhibitExport);
         assert_eq!(close_policy(false, false, false), ClosePolicy::Proceed);
         assert_eq!(close_policy(false, false, true), ClosePolicy::CheckDirty);
+    }
+
+    #[test]
+    fn png_background_summary_exposes_the_saved_document_value_and_overrides() {
+        assert_eq!(
+            png_background_selection_summary(0, ExportBackground::None),
+            "Document Export Background: None (transparent)"
+        );
+        assert_eq!(
+            png_background_selection_summary(
+                0,
+                ExportBackground::Color {
+                    color: RgbaColor {
+                        red: 12,
+                        green: 34,
+                        blue: 56,
+                        alpha: 128,
+                    },
+                }
+            ),
+            "Document Export Background: #0C223880"
+        );
+        assert_eq!(
+            png_background_selection_summary(1, ExportBackground::None),
+            "Transparent Override (ignores saved Export Background)"
+        );
+        assert_eq!(
+            png_background_selection_summary(2, ExportBackground::None),
+            "White Override (ignores saved Export Background)"
+        );
+    }
+
+    #[test]
+    fn export_background_color_selection_defaults_to_opaque_white_and_keeps_saved_color() {
+        assert_eq!(
+            export_background_from_selection(
+                0,
+                ExportBackground::Color {
+                    color: RgbaColor::opaque(12, 34, 56),
+                }
+            ),
+            ExportBackground::None
+        );
+        assert_eq!(
+            export_background_from_selection(1, ExportBackground::None),
+            ExportBackground::Color {
+                color: RgbaColor::WHITE,
+            }
+        );
+        let saved = ExportBackground::Color {
+            color: RgbaColor::opaque(12, 34, 56),
+        };
+        assert_eq!(export_background_from_selection(1, saved), saved);
+        assert_eq!(
+            export_background_color_label(ExportBackground::None),
+            "Background Color · None (transparent)"
+        );
+        assert_eq!(
+            export_background_color_label(saved),
+            "Background Color · #0C2238FF"
+        );
     }
 
     #[test]
@@ -11844,6 +11977,8 @@ mod tests {
                 "Skinny Curve",
                 "Chunky Fingerprints",
                 "Tiled Stacked Motif Stress Test",
+                "Polygon Six",
+                "Motif Ladder",
             ]
         );
         assert!(BUNDLED_PRESETS.iter().all(|(_, bytes)| !bytes.is_empty()));
@@ -12121,6 +12256,7 @@ mod tests {
         assert!(!path.ends_with("recovery.toniator"));
     }
 
+    #[cfg(any())]
     fn verify_realized_paned_owns_inspector_width() {
         let canvas = gtk::Box::new(gtk::Orientation::Vertical, 0);
         canvas.set_hexpand(true);
@@ -12347,6 +12483,35 @@ mod tests {
         conditional_action.set_visible(false);
         assert!(!conditional_row.is_visible());
         conditional_window.close();
+        window.close();
+    }
+
+    fn verify_realized_overlay_split_owns_inspector_width() {
+        register_ui_resources();
+        let builder = gtk::Builder::from_resource(WINDOW_UI_RESOURCE);
+        let split = builder
+            .object::<adw::OverlaySplitView>("editor_split_view")
+            .unwrap();
+        let controls = builder
+            .object::<gtk::ToggleButton>("controls_toggle")
+            .unwrap();
+        let controller = InspectorPaneController::new(&split, &controls, 400);
+        let window = builder
+            .object::<adw::ApplicationWindow>("main_window")
+            .unwrap();
+        window.set_default_size(1200, 720);
+        window.present();
+        for _ in 0..10 {
+            glib::MainContext::default().iteration(false);
+            controller.maintain();
+        }
+        assert!(controller.current_width() >= 0);
+        controller.set_collapsed(true);
+        while glib::MainContext::default().iteration(false) {}
+        assert!(!split.shows_sidebar());
+        controller.set_collapsed(false);
+        while glib::MainContext::default().iteration(false) {}
+        assert!(split.shows_sidebar());
         window.close();
     }
 
@@ -12879,6 +13044,546 @@ mod tests {
         window.close();
     }
 
+    fn shape_editor_descendants(root: &gtk::Widget) -> Vec<gtk::Widget> {
+        let mut pending = vec![root.clone()];
+        let mut descendants = Vec::new();
+        while let Some(widget) = pending.pop() {
+            let mut child = widget.first_child();
+            while let Some(current) = child {
+                child = current.next_sibling();
+                pending.push(current);
+            }
+            descendants.push(widget);
+        }
+        descendants
+    }
+
+    fn shape_editor_area(dialog: &gtk::Window) -> gtk::DrawingArea {
+        shape_editor_descendants(&dialog.clone().upcast())
+            .into_iter()
+            .find_map(|widget| widget.downcast::<gtk::DrawingArea>().ok())
+            .expect("shape editor dialog must contain its drawing area")
+    }
+
+    fn shape_editor_button(dialog: &gtk::Window, label: &str) -> gtk::Button {
+        shape_editor_descendants(&dialog.clone().upcast())
+            .into_iter()
+            .filter_map(|widget| widget.downcast::<gtk::Button>().ok())
+            .find(|button| button.label().as_deref() == Some(label))
+            .unwrap_or_else(|| panic!("shape editor dialog must contain {label}"))
+    }
+
+    fn shape_editor_click(area: &gtk::DrawingArea) -> gtk::GestureClick {
+        let controllers = area.observe_controllers();
+        (0..controllers.n_items())
+            .filter_map(|index| controllers.item(index))
+            .find_map(|controller| controller.downcast::<gtk::GestureClick>().ok())
+            .expect("shape editor drawing area must retain its click controller")
+    }
+
+    fn verify_realized_resource_shape_editor_authority_workflow() {
+        let application = adw::Application::builder()
+            .application_id("dev.toniator.shape-editor-resource-authority")
+            .build();
+        application.register(None::<&gio::Cancellable>).unwrap();
+        let ui = AppUi::new(
+            &application,
+            CliOptions {
+                demo: true,
+                edit_shape: true,
+                artifact_window_size: Some((1000, 760)),
+                ..CliOptions::default()
+            },
+        );
+        ui.window.present();
+        drain_ui_callbacks();
+
+        // The artifact fixture opens once during construction. Close it, then
+        // enter through the production Blueprint button below.
+        ui.capture_override
+            .borrow()
+            .as_ref()
+            .expect("artifact fixture must expose its shape editor dialog")
+            .close();
+        drain_ui_callbacks();
+        ui.controls_toggle.set_active(true);
+        drain_ui_callbacks();
+        ui.dots.set_active(true);
+        drain_ui_callbacks();
+        ui.install_curved_shape_fixture();
+        drain_ui_callbacks();
+
+        let mut authoritative = ui
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .unwrap()
+            .document()
+            .clone();
+        let before = authoritative
+            .pattern_state
+            .shape_settings()
+            .unwrap()
+            .resolved_custom_shape_path();
+        authoritative.render = RenderVariant::WebShapeV1 {
+            settings: Box::new(WebShapeSettings::default()),
+        };
+        ui.state.borrow_mut().editor = Some(DocumentEditor::new(authoritative));
+        ui.sync_controls();
+        drain_ui_callbacks();
+
+        let descriptor = PATTERN_REGISTRY
+            .parameter_for_control(PatternId::COMPATIBILITY_SHAPES_V1, "web_edit_shape")
+            .unwrap();
+        assert!(ui.web_edit_shape.is_visible());
+        assert!(ui.web_edit_shape.is_sensitive());
+        assert!(ui.web_edit_shape.is_focusable());
+        assert_eq!(ui.web_edit_shape.label().as_deref(), Some(descriptor.label));
+        assert!(ui.web_edit_shape.parent().is_some());
+
+        ui.web_edit_shape.emit_clicked();
+        drain_ui_callbacks();
+        let dialog = ui
+            .capture_override
+            .borrow()
+            .as_ref()
+            .cloned()
+            .expect("the production entry control must open the editor dialog");
+        assert!(dialog.is_visible());
+        let area = shape_editor_area(&dialog);
+        assert!(area.is_focusable());
+        assert_eq!(
+            gtk::prelude::GtkWindowExt::focus(&dialog),
+            Some(area.clone().upcast()),
+            "shape editor canvas must become the dialog's focused widget"
+        );
+        assert_eq!(
+            area.tooltip_text().as_deref(),
+            Some("Edit the selected mark's anchors and independent Bézier handles.")
+        );
+
+        let click = shape_editor_click(&area);
+        let target = cubic_shape_point(before.anchors[0], before.anchors[1], 0.5);
+        let side = area.width().min(area.height()) as f64 * 0.82;
+        let x = area.width() as f64 / 2.0 + target.x * side;
+        let y = area.height() as f64 / 2.0 + target.y * side;
+        click.emit_by_name::<()>("pressed", &[&2i32, &x, &y]);
+        drain_ui_callbacks();
+        shape_editor_button(&dialog, "Done").emit_clicked();
+        drain_ui_callbacks();
+
+        let completed = ui
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .unwrap()
+            .document()
+            .pattern_state
+            .shape_settings()
+            .unwrap()
+            .resolved_custom_shape_path();
+        assert_eq!(completed.anchors.len(), before.anchors.len() + 4);
+        assert_ne!(completed, before);
+        assert!(ui.web_edit_shape.is_visible());
+        ui.undo();
+        drain_ui_callbacks();
+        assert_eq!(
+            ui.state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .pattern_state
+                .shape_settings()
+                .unwrap()
+                .resolved_custom_shape_path(),
+            before
+        );
+        ui.redo();
+        drain_ui_callbacks();
+        assert_eq!(
+            ui.state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .pattern_state
+                .shape_settings()
+                .unwrap()
+                .resolved_custom_shape_path(),
+            completed
+        );
+
+        ui.web_edit_shape.emit_clicked();
+        drain_ui_callbacks();
+        let cancelled_dialog = ui
+            .capture_override
+            .borrow()
+            .as_ref()
+            .cloned()
+            .expect("the entry control must reopen the editor");
+        shape_editor_button(&cancelled_dialog, "Cancel").emit_clicked();
+        drain_ui_callbacks();
+        assert_eq!(
+            ui.state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .pattern_state
+                .shape_settings()
+                .unwrap()
+                .resolved_custom_shape_path(),
+            completed
+        );
+        assert!(!cancelled_dialog.is_visible());
+        assert!(ui.window.is_visible());
+        assert!(ui.web_edit_shape.is_visible());
+        assert_eq!(
+            ui.treatment_modes.visible_child_name().as_deref(),
+            Some("web")
+        );
+        ui.inspector_pane.paned.allocate(760, 600, -1, None);
+        ui.inspector_pane.update_layout();
+        drain_ui_callbacks();
+        assert!(ui.inspector_pane.narrow.get());
+        assert!(ui.inspector_pane.paned.is_collapsed());
+        assert!(!ui.inspector_pane.paned.shows_sidebar());
+        assert!(!ui.controls_toggle.is_active());
+        ui.controls_toggle.emit_clicked();
+        drain_ui_callbacks();
+        assert!(ui.controls_toggle.is_active());
+        assert!(ui.inspector_pane.paned.shows_sidebar());
+        ui.controls_toggle.emit_clicked();
+        drain_ui_callbacks();
+        assert!(!ui.controls_toggle.is_active());
+        ui.inspector_pane.paned.allocate(1000, 600, -1, None);
+        ui.inspector_pane.update_layout();
+        drain_ui_callbacks();
+        assert!(!ui.inspector_pane.narrow.get());
+        assert!(!ui.inspector_pane.paned.is_collapsed());
+        eprintln!(
+            "realized resource User Defined editor check: Blueprint entry opened the GResource-backed dialog, authoritative state overrode a contradictory adapter, a production double-click insertion committed as one undoable edit, and Cancel returned to Shapes without persistence"
+        );
+        ui.window.close();
+    }
+
+    fn verify_realized_resource_polygon_sides_authority_workflow() {
+        let application = adw::Application::builder()
+            .application_id("dev.toniator.polygon-sides-resource-authority")
+            .build();
+        application.register(None::<&gio::Cancellable>).unwrap();
+        let ui = AppUi::new(
+            &application,
+            CliOptions {
+                demo: true,
+                artifact_controls_shown: true,
+                artifact_window_size: Some((1000, 760)),
+                ..CliOptions::default()
+            },
+        );
+        ui.window.present();
+        ui.activate_shape_treatment();
+        drain_ui_callbacks();
+
+        let descriptor = PATTERN_REGISTRY
+            .parameter_for_control(PatternId::COMPATIBILITY_SHAPES_V1, "web_polygon_sides")
+            .unwrap();
+        assert_eq!(ui.web_shape.selected(), 0);
+        assert_eq!(ui.web_target.selected(), 0);
+        assert_eq!(ui.web_polygon_sides.value_as_int(), 4);
+        assert!(!ui.web_polygon_sides.is_visible());
+        assert_eq!(ui.web_polygon_sides_label.text(), descriptor.label);
+        assert_eq!(
+            ui.web_polygon_sides.tooltip_text().as_deref(),
+            Some(descriptor.help)
+        );
+
+        assert!(!ui.state.borrow().syncing_controls);
+        ui.web_shape.set_selected(1);
+        drain_ui_callbacks();
+        let selected_settings = ui
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .unwrap()
+            .document()
+            .pattern_state
+            .shape_settings()
+            .unwrap();
+        assert!(selected_settings.use_shared_mark);
+        assert_eq!(selected_settings.shared_shape, WebShape::RegularPolygon);
+        ui.sync_controls();
+        assert!(ui.web_polygon_sides.is_visible());
+        assert!(ui.web_polygon_sides.is_sensitive());
+        assert_eq!(ui.web_polygon_sides.value_as_int(), 4);
+        assert!(
+            ui.web_polygon_sides
+                .parent()
+                .is_some_and(|row| row.is_visible())
+        );
+
+        let source = ui
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .unwrap()
+            .document()
+            .clone();
+        let mut editor = DocumentEditor::new(source);
+        let mut authoritative_settings = editor.document().pattern_state.shape_settings().unwrap();
+        authoritative_settings.shared_shape = WebShape::RegularPolygon;
+        authoritative_settings.polygon_sides = 6;
+        for ink in output_channel_order(false, false).iter().copied() {
+            authoritative_settings.channels.get_mut(ink).polygon_sides = 6;
+        }
+        assert!(editor.set_shape_settings(authoritative_settings));
+        let mut contradictory = editor.document().clone();
+        contradictory.render = RenderVariant::WebShapeV1 {
+            settings: Box::new(WebShapeSettings {
+                shared_shape: WebShape::Circle,
+                polygon_sides: 3,
+                ..Default::default()
+            }),
+        };
+        ui.state.borrow_mut().editor = Some(DocumentEditor::new(contradictory));
+        ui.sync_controls();
+        drain_ui_callbacks();
+        assert_eq!(ui.web_shape.selected(), 1);
+        assert_eq!(ui.web_polygon_sides.value_as_int(), 6);
+        assert!(ui.web_polygon_sides.is_visible());
+
+        ui.web_polygon_sides.set_value(3.0);
+        drain_ui_callbacks();
+        let shared_three = ui
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .unwrap()
+            .document()
+            .clone();
+        let shared_three_settings = shared_three.pattern_state.shape_settings().unwrap();
+        assert_eq!(shared_three_settings.polygon_sides, 3);
+        assert!(
+            output_channel_order(false, false)
+                .iter()
+                .copied()
+                .all(|ink| shared_three_settings.channels.get(ink).polygon_sides == 3)
+        );
+        assert!(matches!(
+            shared_three.render,
+            RenderVariant::WebShapeV1 { settings }
+                if settings.shared_shape == WebShape::RegularPolygon && settings.polygon_sides == 3
+        ));
+
+        ui.web_polygon_sides.set_value(6.0);
+        drain_ui_callbacks();
+        assert_eq!(
+            ui.state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .pattern_state
+                .shape_settings()
+                .unwrap()
+                .polygon_sides,
+            6
+        );
+
+        ui.web_shape.set_selected(0);
+        drain_ui_callbacks();
+        assert!(!ui.web_polygon_sides.is_visible());
+        ui.web_shape.set_selected(2);
+        drain_ui_callbacks();
+        assert!(!ui.web_polygon_sides.is_visible());
+        assert!(ui.web_edit_shape.is_visible());
+
+        ui.web_shape.set_selected(1);
+        drain_ui_callbacks();
+        ui.web_shared.set_active(false);
+        drain_ui_callbacks();
+        ui.web_target.set_selected(2); // Magenta only.
+        drain_ui_callbacks();
+        ui.web_polygon_sides.set_value(3.0);
+        drain_ui_callbacks();
+        let per_target = ui
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .unwrap()
+            .document()
+            .pattern_state
+            .shape_settings()
+            .unwrap();
+        assert!(!per_target.use_shared_mark);
+        assert_eq!(per_target.channels.m.polygon_sides, 3);
+        assert_eq!(per_target.channels.c.polygon_sides, 6);
+        ui.web_target.set_selected(0);
+        drain_ui_callbacks();
+        assert!(!ui.web_polygon_sides.is_visible());
+        assert!(ui.web_mixed_shape_apply_row.is_visible());
+        eprintln!(
+            "realized resource polygon sides check: shipping Regular Polygon control defaulted to 4, ignored a contradictory adapter, persisted shared 3/6 and Magenta-only 3 authority edits, and hid for Circle/User Defined/mixed shapes"
+        );
+        ui.window.close();
+    }
+
+    fn verify_realized_export_background_authoring() {
+        let application = adw::Application::builder()
+            .application_id("dev.toniator.export-background-authoring")
+            .build();
+        application.register(None::<&gio::Cancellable>).unwrap();
+        let ui = AppUi::new(
+            &application,
+            CliOptions {
+                demo: true,
+                artifact_window_size: Some((960, 720)),
+                ..CliOptions::default()
+            },
+        );
+        ui.window.present();
+        ui.controls_toggle.set_active(true);
+        drain_ui_callbacks();
+
+        assert!(ui.export_background.is_visible());
+        assert!(ui.export_color_label.is_visible());
+        assert!(ui.export_color.is_visible());
+        assert!(!ui.export_color.is_sensitive());
+        assert_eq!(
+            ui.export_color_label.text(),
+            "Background Color · None (transparent)"
+        );
+        assert_eq!(rgba_color(ui.export_color.rgba()), RgbaColor::WHITE);
+
+        let preview_before = ui
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .unwrap()
+            .document()
+            .appearance
+            .preview_surface;
+        ui.export_background.set_selected(1);
+        drain_ui_callbacks();
+        assert_eq!(
+            ui.state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .appearance,
+            DocumentAppearance {
+                preview_surface: preview_before,
+                export_background: ExportBackground::Color {
+                    color: RgbaColor::WHITE,
+                },
+            }
+        );
+        assert!(ui.export_color.is_sensitive());
+        assert_eq!(ui.export_color_label.text(), "Background Color · #FFFFFFFF");
+        assert_eq!(
+            ui.export_color.tooltip_text().as_deref(),
+            Some("Background Color · #FFFFFFFF")
+        );
+
+        let chosen = RgbaColor::opaque(12, 34, 56);
+        ui.export_color.set_rgba(&gdk_rgba(chosen));
+        drain_ui_callbacks();
+        assert_eq!(
+            ui.state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .appearance,
+            DocumentAppearance {
+                preview_surface: preview_before,
+                export_background: ExportBackground::Color { color: chosen },
+            }
+        );
+        assert_eq!(ui.export_color_label.text(), "Background Color · #0C2238FF");
+
+        ui.export_background.set_selected(0);
+        drain_ui_callbacks();
+        assert!(matches!(
+            ui.state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .appearance
+                .export_background,
+            ExportBackground::None
+        ));
+        assert_eq!(
+            ui.export_color_label.text(),
+            "Background Color · None (transparent)"
+        );
+        ui.export_background.set_selected(1);
+        drain_ui_callbacks();
+        assert!(matches!(
+            ui.state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .appearance
+                .export_background,
+            ExportBackground::Color {
+                color: RgbaColor::WHITE
+            }
+        ));
+        assert_eq!(ui.export_color_label.text(), "Background Color · #FFFFFFFF");
+        ui.undo();
+        drain_ui_callbacks();
+        assert!(matches!(
+            ui.state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .appearance
+                .export_background,
+            ExportBackground::None
+        ));
+        ui.redo();
+        drain_ui_callbacks();
+        assert!(matches!(
+            ui.state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .appearance
+                .export_background,
+            ExportBackground::Color {
+                color: RgbaColor::WHITE
+            }
+        ));
+        eprintln!(
+            "realized export-background authoring check: shipping Appearance controls expose None/transparent, create opaque white when Color is selected, accept a direct color, preserve Preview Surface, and retain undo/redo"
+        );
+        ui.window.close();
+    }
+
     fn verify_realized_preview_indicator() {
         let indicator = PreviewIndicator::new(None);
         assert_eq!(indicator.area.width_request(), 40);
@@ -12943,6 +13648,7 @@ mod tests {
             settings: Box::new(original.clone()),
         };
         let mut editor = DocumentEditor::new(document);
+        assert!(editor.select_pattern(toniator::PatternId::COMPATIBILITY_CURVES_V1));
 
         editor.begin_edit(SettingKey::CurvePath);
         let mut moved = original.clone();
@@ -12956,9 +13662,7 @@ mod tests {
             },
         );
         let moved_path = moved.shared_path.clone();
-        assert!(editor.set_render_variant(RenderVariant::WebCurveV1 {
-            settings: Box::new(moved),
-        }));
+        assert!(editor.set_curve_settings(moved));
         assert!(editor.end_edit());
         assert!(editor.undo());
         assert_eq!(
@@ -12980,9 +13684,7 @@ mod tests {
         };
         cancelled.shared_path.segments[0].control_1.x += 0.22;
         cancelled.shared_path.segments[0].control_1.y -= 0.19;
-        assert!(editor.set_render_variant(RenderVariant::WebCurveV1 {
-            settings: Box::new(cancelled),
-        }));
+        assert!(editor.set_curve_settings(cancelled));
         assert!(editor.cancel_edit());
         assert!(matches!(
             &editor.document().render,
@@ -12998,7 +13700,15 @@ mod tests {
         verify_realized_dropdown_sync_keeps_the_live_model_and_valid_selection();
         verify_realized_semantic_pipeline_callbacks();
         verify_realized_channel_scope_composites();
-        let appearance = build_appearance_controls();
+        verify_realized_pattern_selector_uses_authoritative_state_over_transient_adapter();
+        verify_realized_export_background_authoring();
+        register_ui_resources();
+        let appearance_builder = gtk::Builder::from_resource(WINDOW_UI_RESOURCE);
+        let appearance = build_appearance_controls(&appearance_builder);
+        appearance_builder
+            .object::<gtk::Expander>("appearance_section")
+            .unwrap()
+            .set_expanded(true);
         assert!(appearance.preview_color.dialog().unwrap().is_with_alpha());
         assert!(appearance.export_color.dialog().unwrap().is_with_alpha());
         assert!(appearance.preview_help.popover().is_some());
@@ -13019,32 +13729,33 @@ mod tests {
             appearance.export_background.accessible_role(),
             gtk::AccessibleRole::ComboBox
         );
+        assert_eq!(
+            appearance.export_color_label.text(),
+            "Background Color · None (transparent)"
+        );
         appearance.preview_surface.set_selected(0);
         appearance
             .preview_color
             .set_visible(appearance.preview_surface.selected() == 1);
-        assert!(!appearance.preview_color.is_visible());
         appearance.preview_surface.set_selected(1);
-        appearance
-            .preview_color
-            .set_visible(appearance.preview_surface.selected() == 1);
-        assert!(appearance.preview_color.is_visible());
-        let appearance_scroll = gtk::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk::PolicyType::Never)
-            .vscrollbar_policy(gtk::PolicyType::Automatic)
-            .child(&appearance.container)
-            .build();
-        let appearance_window = gtk::Window::builder()
-            .default_width(190)
-            .default_height(120)
-            .child(&appearance_scroll)
-            .build();
+        appearance.preview_color.set_visible(true);
+        let appearance_window = appearance_builder
+            .object::<adw::ApplicationWindow>("main_window")
+            .unwrap();
+        let appearance_stack = appearance_builder
+            .object::<gtk::Stack>("main_stack")
+            .unwrap();
+        let appearance_editor_page = appearance_builder
+            .object::<gtk::Box>("editor_page")
+            .unwrap();
+        appearance_stack
+            .page(&appearance_editor_page)
+            .set_name("editor");
+        appearance_stack.set_visible_child_name("editor");
+        appearance_window.set_default_size(960, 720);
         appearance_window.present();
         while glib::MainContext::default().iteration(false) {}
-        assert_eq!(
-            appearance_scroll.hscrollbar_policy(),
-            gtk::PolicyType::Never
-        );
+        assert!(appearance.preview_color.is_visible());
         assert!(appearance.container.bounds().expect("appearance bounds").3 > 0);
         assert!(
             appearance
@@ -13236,10 +13947,13 @@ mod tests {
         );
         window.close();
         verify_realized_zoom_controls_drive_one_canonical_mode_and_actual_allocation();
-        verify_realized_paned_owns_inspector_width();
+        verify_realized_overlay_split_owns_inspector_width();
         verify_realized_inspector_shell_keeps_controls_visible();
         verify_realized_shape_double_clicks();
+        verify_realized_resource_shape_editor_authority_workflow();
+        verify_realized_resource_polygon_sides_authority_workflow();
         verify_realized_preview_indicator();
+        verify_realized_output_mode_keeps_fixture_authority_over_transient_adapters();
 
         let base = 1.0;
         let effective = [0.8, 1.0, 1.2, 1.4];
@@ -13268,9 +13982,11 @@ mod tests {
         document.render = RenderVariant::WebShapeV1 {
             settings: Box::new(shape.clone()),
         };
+        let mut editor = DocumentEditor::new(document);
+        assert!(editor.set_shape_settings(shape.clone()));
         let bytes = toniator::preset::document_preset_bytes(
             "Base Test",
-            &document,
+            editor.document(),
             toniator::preset::PresetScope::CompleteWorkflow,
         )
         .unwrap();
@@ -13549,7 +14265,9 @@ mod tests {
     }
 
     fn verify_realized_channel_scope_composites() {
-        let hierarchy = build_inspector_hierarchy();
+        register_ui_resources();
+        let builder = gtk::Builder::from_resource(WINDOW_UI_RESOURCE);
+        let hierarchy = build_inspector_hierarchy(&builder);
         assert!(hierarchy.source_section.is_expanded());
         assert!(hierarchy.output_section.is_expanded());
         assert!(!hierarchy.channel_settings_section.is_expanded());
@@ -13736,6 +14454,599 @@ mod tests {
                 .mixed_message
                 .text()
                 .contains("Mixed")
+        );
+        ui.window.close();
+    }
+
+    fn verify_realized_pattern_selector_uses_authoritative_state_over_transient_adapter() {
+        verify_realized_dropdown_sync_keeps_the_live_model_and_valid_selection();
+
+        let application = adw::Application::builder()
+            .application_id("dev.toniator.pattern-selector-authority")
+            .build();
+        application.register(None::<&gio::Cancellable>).unwrap();
+        let ui = AppUi::new(
+            &application,
+            CliOptions {
+                demo: true,
+                artifact_window_size: Some((900, 680)),
+                ..CliOptions::default()
+            },
+        );
+        ui.window.present();
+        drain_ui_callbacks();
+
+        let shapes = PATTERN_REGISTRY
+            .get(PatternId::COMPATIBILITY_SHAPES_V1)
+            .unwrap();
+        let curves = PATTERN_REGISTRY
+            .get(PatternId::COMPATIBILITY_CURVES_V1)
+            .unwrap();
+        assert_eq!(ui.dots.label().as_deref(), Some(shapes.selector.label));
+        assert_eq!(ui.curves.label().as_deref(), Some(curves.selector.label));
+
+        let source = ui
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .unwrap()
+            .document()
+            .clone();
+        let mut shape_editor = DocumentEditor::new(source);
+        let mut authoritative_settings = shape_editor
+            .document()
+            .pattern_state
+            .shape_settings()
+            .unwrap();
+        authoritative_settings.use_shared_mark = true;
+        authoritative_settings.base_channel.scale = 0.65;
+        assert!(shape_editor.set_shape_settings(authoritative_settings.clone()));
+        let mut authoritative_shapes = shape_editor.document().clone();
+        let contradictory_adapter_settings = WebShapeSettings {
+            use_shared_mark: false,
+            base_channel: toniator::WebShapeChannel {
+                scale: 1.9,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        authoritative_shapes.render = RenderVariant::WebShapeV1 {
+            settings: Box::new(contradictory_adapter_settings),
+        };
+        ui.state.borrow_mut().editor = Some(DocumentEditor::new(authoritative_shapes));
+        ui.sync_controls();
+        assert!(ui.dots.is_active());
+        assert!(!ui.curves.is_active());
+        assert!(!ui.legacy.is_visible());
+        assert_eq!(
+            ui.treatment_modes.visible_child_name().as_deref(),
+            Some("web")
+        );
+        assert!(ui.web_shared.is_active());
+        assert!((ui.web_coverage.value() - 0.65).abs() < 1e-9);
+        let edit_shape = PATTERN_REGISTRY
+            .parameter_for_control(PatternId::COMPATIBILITY_SHAPES_V1, "web_edit_shape")
+            .unwrap();
+        assert_eq!(ui.web_edit_shape.label().as_deref(), Some(edit_shape.label));
+
+        ui.web_coverage.set_value(0.8);
+        drain_ui_callbacks();
+        let edited_settings = ui
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .unwrap()
+            .document()
+            .pattern_state
+            .shape_settings()
+            .unwrap();
+        assert!((edited_settings.base_channel.scale - 0.8).abs() < 1e-9);
+
+        let source = ui
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .unwrap()
+            .document()
+            .clone();
+        let mut curve_editor = DocumentEditor::new(source);
+        assert!(curve_editor.select_pattern(PatternId::COMPATIBILITY_CURVES_V1));
+        let mut authoritative_curve_settings = curve_editor
+            .document()
+            .pattern_state
+            .curve_settings()
+            .unwrap();
+        authoritative_curve_settings.max_mark = 37.0;
+        authoritative_curve_settings.base_channel.scale = 0.65;
+        authoritative_curve_settings.output_width = 640;
+        authoritative_curve_settings.output_height = 480;
+        authoritative_curve_settings.layout = CurveLayout::MotifPattern;
+        authoritative_curve_settings.use_shared_curve = true;
+        authoritative_curve_settings.shared_path = CurvePath::deep_wave();
+        authoritative_curve_settings.channels.c.color = "#123456".into();
+        authoritative_curve_settings.channels.c.offset_x = 33.0;
+        authoritative_curve_settings.channels.c.offset_y = -17.0;
+        authoritative_curve_settings.channels.c.grid_rotation = 31.0;
+        authoritative_curve_settings.channels.c.stack_spacing = 50.0;
+        assert!(curve_editor.set_curve_settings(authoritative_curve_settings.clone()));
+        let mut authoritative_curves = curve_editor.document().clone();
+        assert_eq!(document_artboard_size(&authoritative_curves), (640, 480));
+        authoritative_curves.render = RenderVariant::WebCurveV1 {
+            settings: Box::new(WebCurveSettings {
+                max_mark: 17.0,
+                base_channel: WebCurveChannel {
+                    scale: 1.9,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        };
+        ui.state.borrow_mut().editor = Some(DocumentEditor::new(authoritative_curves));
+        ui.sync_controls();
+        assert!(!ui.dots.is_active());
+        assert!(ui.curves.is_active());
+        assert!(!ui.legacy.is_visible());
+        assert_eq!(
+            ui.treatment_modes.visible_child_name().as_deref(),
+            Some("curve")
+        );
+        assert!((ui.curve_weight.value() - 37.0).abs() < 1e-9);
+        assert!((ui.curve_coverage.value() - 0.65).abs() < 1e-9);
+        assert!(ui.motif_controls.is_visible());
+        assert_eq!(ui.current_curve_path(), Some(CurvePath::deep_wave()));
+        let curve_weight = PATTERN_REGISTRY
+            .parameter_for_control(PatternId::COMPATIBILITY_CURVES_V1, "curve_weight_scale")
+            .unwrap();
+        assert_eq!(
+            ui.curve_weight.tooltip_text().as_deref(),
+            Some(curve_weight.help)
+        );
+        let curve_editor_descriptor = PATTERN_REGISTRY
+            .parameter_for_control(PatternId::COMPATIBILITY_CURVES_V1, "curve_editor")
+            .unwrap();
+        assert_eq!(
+            ui.curve_editor.tooltip_text().as_deref(),
+            Some(curve_editor_descriptor.help)
+        );
+
+        ui.curve_weight.set_value(42.0);
+        drain_ui_callbacks();
+        let edited_curve_settings = ui
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .unwrap()
+            .document()
+            .pattern_state
+            .curve_settings()
+            .unwrap();
+        assert!((edited_curve_settings.max_mark - 42.0).abs() < 1e-9);
+
+        ui.curve_target.set_selected(1);
+        drain_ui_callbacks();
+        assert_eq!(
+            ui.current_curve_color(),
+            (
+                0x12 as f64 / 255.0,
+                0x34 as f64 / 255.0,
+                0x56 as f64 / 255.0
+            )
+        );
+        assert_eq!(
+            ui.current_motif_arrangement(),
+            Some((33.0, -17.0, 31.0, 50.0))
+        );
+        ui.motif_arrange.set_active(true);
+        drain_ui_callbacks();
+        assert!(ui.motif_overlay.is_visible());
+        assert!(ui.motif_overlay_geometry(800.0, 600.0).is_some());
+
+        ui.curve_profile.set_selected(1);
+        drain_ui_callbacks();
+        let profiled_curve_settings = ui
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .unwrap()
+            .document()
+            .pattern_state
+            .curve_settings()
+            .unwrap();
+        assert_eq!(profiled_curve_settings.shared_path, CurvePath::soft_wave());
+        ui.update_editing_context();
+        assert_eq!(ui.editing_context.text(), "Curves · Cyan");
+
+        ui.dots.set_active(true);
+        drain_ui_callbacks();
+        assert_eq!(
+            ui.state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .pattern_state
+                .selected_pattern_id(),
+            Some(PatternId::COMPATIBILITY_SHAPES_V1)
+        );
+        assert_eq!(
+            ui.treatment_modes.visible_child_name().as_deref(),
+            Some("web")
+        );
+
+        ui.curves.set_active(true);
+        drain_ui_callbacks();
+        assert_eq!(
+            ui.state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .pattern_state
+                .selected_pattern_id(),
+            Some(PatternId::COMPATIBILITY_CURVES_V1)
+        );
+        assert_eq!(
+            ui.treatment_modes.visible_child_name().as_deref(),
+            Some("curve")
+        );
+
+        let mut pipeline_authoritative_curves = ui
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .unwrap()
+            .document()
+            .clone();
+        pipeline_authoritative_curves.artwork_pipeline.assignment =
+            ChannelAssignment::LegacyCompatibility(
+                LegacyCompatibilityAssignment::CrosshatchProgressiveKcmyV1,
+            );
+        pipeline_authoritative_curves.render = RenderVariant::WebCurveV1 {
+            settings: Box::new(WebCurveSettings::default()),
+        };
+        ui.state.borrow_mut().editor = Some(DocumentEditor::new(pipeline_authoritative_curves));
+        ui.sync_controls();
+        ui.update_editing_context();
+        assert_eq!(ui.selected_curve_inks(), Some(vec![Ink::Black]));
+        assert!(
+            ui.editing_context
+                .text()
+                .starts_with("Curves · Crosshatch · Layer 1 (Black)")
+        );
+
+        let target_model = ui.web_target.model().unwrap();
+        ui.sync_controls_when_idle();
+        drain_ui_callbacks();
+        assert_eq!(ui.web_target.model().unwrap(), target_model);
+        assert!(!ui.state.borrow().syncing_controls);
+        ui.window.close();
+    }
+
+    fn contradictory_adapter_for(pattern: PatternId) -> RenderVariant {
+        match pattern {
+            PatternId::COMPATIBILITY_SHAPES_V1 => RenderVariant::WebCurveV1 {
+                settings: Box::new(WebCurveSettings {
+                    output_width: 19,
+                    output_height: 13,
+                    long_edge_cells: 2.0,
+                    max_mark: 91.0,
+                    ..Default::default()
+                }),
+            },
+            PatternId::COMPATIBILITY_CURVES_V1 => RenderVariant::WebShapeV1 {
+                settings: Box::new(WebShapeSettings {
+                    output_width: 17,
+                    output_height: 11,
+                    long_edge_cells: 2.0,
+                    grid_scale: 77.0,
+                    polygon_sides: 3,
+                    ..Default::default()
+                }),
+            },
+        }
+    }
+
+    fn assert_realized_output_fixture_authority(
+        ui: &AppUi,
+        document: &Document,
+        selected: PatternId,
+    ) {
+        assert_eq!(document.pattern_state.selected_pattern_id(), Some(selected));
+        assert!(!ui.state.borrow().syncing_controls);
+        match selected {
+            PatternId::COMPATIBILITY_SHAPES_V1 => {
+                let settings = document.pattern_state.shape_settings().unwrap();
+                assert!(ui.dots.is_active());
+                assert!(!ui.curves.is_active());
+                assert_eq!(
+                    ui.treatment_modes.visible_child_name().as_deref(),
+                    Some("web")
+                );
+                assert_eq!(
+                    ui.web_polygon_sides.value_as_int(),
+                    settings.polygon_sides as i32
+                );
+                assert!((ui.web_coverage.value() - settings.base_channel.scale).abs() < 1e-9);
+            }
+            PatternId::COMPATIBILITY_CURVES_V1 => {
+                let settings = document.pattern_state.curve_settings().unwrap();
+                assert!(!ui.dots.is_active());
+                assert!(ui.curves.is_active());
+                assert_eq!(
+                    ui.treatment_modes.visible_child_name().as_deref(),
+                    Some("curve")
+                );
+                assert!((ui.curve_weight.value() - settings.max_mark).abs() < 1e-9);
+                assert!((ui.curve_coverage.value() - settings.base_channel.scale).abs() < 1e-9);
+                assert!(ui.motif_controls.is_visible());
+            }
+        }
+    }
+
+    fn verify_realized_output_mode_keeps_fixture_authority_over_transient_adapters() {
+        let application = adw::Application::builder()
+            .application_id("dev.toniator.output-cache-ui-authority")
+            .build();
+        application.register(None::<&gio::Cancellable>).unwrap();
+        let ui = AppUi::new(
+            &application,
+            CliOptions {
+                demo: true,
+                artifact_window_size: Some((1000, 760)),
+                ..CliOptions::default()
+            },
+        );
+        ui.window.present();
+        ui.controls_toggle.set_active(true);
+        drain_ui_callbacks();
+
+        let cmyk_preview = PreviewSurface::Color {
+            color: RgbaColor::opaque(241, 236, 225),
+        };
+        let export_background = ExportBackground::Color {
+            color: RgbaColor::opaque(11, 22, 33),
+        };
+        let output_model = ui.output_mode.model().unwrap();
+        let base_source = ui
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .unwrap()
+            .document()
+            .clone();
+
+        for (name, bytes, selected) in [
+            (
+                "Polygon Six",
+                include_bytes!("../assets/presets/Polygon Six.tntr").as_slice(),
+                PatternId::COMPATIBILITY_SHAPES_V1,
+            ),
+            (
+                "Motif Ladder",
+                include_bytes!("../assets/presets/Motif Ladder.tntr").as_slice(),
+                PatternId::COMPATIBILITY_CURVES_V1,
+            ),
+        ] {
+            // Start each fixture from the same production document so an RGB
+            // cache deliberately created for the preceding fixture cannot
+            // become an accidental input to this fixture's transition.
+            let source = base_source.clone();
+            let dimensions = toniator::render::source_dimensions(&source.source).unwrap();
+            let candidate = toniator::preset::parse_treatment(bytes, dimensions)
+                .unwrap_or_else(|error| panic!("{name} did not parse: {error:#}"))
+                .candidate_for(&source)
+                .unwrap_or_else(|error| panic!("{name} did not apply: {error:#}"));
+            let mut editor = DocumentEditor::new(source);
+            assert!(editor.replace_with_preset_candidate(candidate));
+            let appearance = DocumentAppearance {
+                preview_surface: cmyk_preview,
+                export_background,
+            };
+            if editor.document().appearance != appearance {
+                assert!(editor.set_appearance(appearance));
+            }
+            let cmyk_authority = editor.document().pattern_state.clone();
+            let mut contradictory = editor.document().clone();
+            contradictory.render = contradictory_adapter_for(selected);
+            ui.state.borrow_mut().editor = Some(DocumentEditor::new(contradictory));
+            ui.sync_controls();
+            drain_ui_callbacks();
+
+            let cmyk_document = ui
+                .state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .clone();
+            assert_realized_output_fixture_authority(&ui, &cmyk_document, selected);
+            assert_eq!(ui.output_mode.selected(), 0);
+            assert_eq!(ui.preview_surface.selected(), 1);
+            assert_eq!(
+                rgba_color(ui.preview_color.rgba()),
+                RgbaColor::opaque(241, 236, 225)
+            );
+            assert_eq!(ui.export_background.selected(), 1);
+            assert_eq!(
+                rgba_color(ui.export_color.rgba()),
+                RgbaColor::opaque(11, 22, 33)
+            );
+            assert_eq!(ui.export_color_label.text(), "Background Color · #0B1621FF");
+
+            // This is the shipping Blueprint dropdown callback. It must defer
+            // control-model synchronization until after selected-notify.
+            ui.output_mode.set_selected(1);
+            drain_ui_callbacks();
+            // The document transition has completed above. Explicitly settle
+            // its normal UI projection before reading widgets so this
+            // realized regression remains deterministic when the full suite
+            // has other GTK sources pending on the shared main context.
+            ui.sync_controls();
+            drain_ui_callbacks();
+            let rgb_document = ui
+                .state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .clone();
+            assert_eq!(
+                rgb_document.artwork_pipeline.output_model,
+                OutputModel::RgbScreen
+            );
+            assert_eq!(rgb_document.pattern_state, cmyk_authority);
+            assert_realized_output_fixture_authority(&ui, &rgb_document, selected);
+            assert_eq!(ui.output_mode.selected(), 1);
+            assert_eq!(ui.preview_surface.selected(), 1);
+            assert_eq!(
+                rgba_color(ui.preview_color.rgba()),
+                RgbaColor::opaque(0, 0, 0)
+            );
+            assert_eq!(rgb_document.appearance.export_background, export_background);
+            assert_eq!(ui.export_background.selected(), 1);
+            assert_eq!(
+                rgba_color(ui.export_color.rgba()),
+                RgbaColor::opaque(11, 22, 33)
+            );
+
+            // Corrupt only the inactive CMYK facade. The active RGB selector
+            // and controls must continue to use its typed pattern authority.
+            let mut inactive_contradiction = rgb_document;
+            inactive_contradiction
+                .inactive_cmyk
+                .as_mut()
+                .expect("CMYK state is cached while RGB is active")
+                .render = contradictory_adapter_for(selected);
+            ui.state.borrow_mut().editor = Some(DocumentEditor::new(inactive_contradiction));
+            ui.sync_controls();
+            drain_ui_callbacks();
+            let active_rgb_document = ui
+                .state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .clone();
+            assert_realized_output_fixture_authority(&ui, &active_rgb_document, selected);
+
+            match selected {
+                PatternId::COMPATIBILITY_SHAPES_V1 => ui.web_polygon_sides.set_value(3.0),
+                PatternId::COMPATIBILITY_CURVES_V1 => ui.curve_weight.set_value(61.0),
+            }
+            drain_ui_callbacks();
+            let edited_rgb_document = ui
+                .state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .clone();
+            match selected {
+                PatternId::COMPATIBILITY_SHAPES_V1 => assert_eq!(
+                    edited_rgb_document
+                        .pattern_state
+                        .shape_settings()
+                        .unwrap()
+                        .polygon_sides,
+                    3
+                ),
+                PatternId::COMPATIBILITY_CURVES_V1 => assert!(
+                    (edited_rgb_document
+                        .pattern_state
+                        .curve_settings()
+                        .unwrap()
+                        .max_mark
+                        - 61.0)
+                        .abs()
+                        < 1e-9
+                ),
+            }
+            assert_realized_output_fixture_authority(&ui, &edited_rgb_document, selected);
+
+            ui.output_mode.set_selected(0);
+            drain_ui_callbacks();
+            ui.sync_controls();
+            drain_ui_callbacks();
+            let restored_cmyk_document = ui
+                .state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .clone();
+            assert_eq!(
+                restored_cmyk_document.artwork_pipeline.output_model,
+                OutputModel::CmykPrint
+            );
+            assert_eq!(restored_cmyk_document.pattern_state, cmyk_authority);
+            assert_realized_output_fixture_authority(&ui, &restored_cmyk_document, selected);
+            assert_eq!(
+                restored_cmyk_document.appearance.preview_surface,
+                cmyk_preview
+            );
+            assert_eq!(
+                restored_cmyk_document.appearance.export_background,
+                export_background
+            );
+            assert_eq!(
+                rgba_color(ui.preview_color.rgba()),
+                RgbaColor::opaque(241, 236, 225)
+            );
+            assert_eq!(
+                rgba_color(ui.export_color.rgba()),
+                RgbaColor::opaque(11, 22, 33)
+            );
+
+            ui.undo();
+            drain_ui_callbacks();
+            let undone_rgb_document = ui
+                .state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .clone();
+            assert_eq!(
+                undone_rgb_document.artwork_pipeline.output_model,
+                OutputModel::RgbScreen
+            );
+            assert_eq!(
+                undone_rgb_document.pattern_state,
+                edited_rgb_document.pattern_state
+            );
+            assert_realized_output_fixture_authority(&ui, &undone_rgb_document, selected);
+            ui.redo();
+            drain_ui_callbacks();
+            let redone_cmyk_document = ui
+                .state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .clone();
+            assert_eq!(redone_cmyk_document.pattern_state, cmyk_authority);
+            assert_realized_output_fixture_authority(&ui, &redone_cmyk_document, selected);
+            assert_eq!(ui.output_mode.model().unwrap(), output_model);
+        }
+
+        eprintln!(
+            "realized AppUi output-cache authority check: shipping GResource controls kept Polygon Six and Motif Ladder selection/typed values authoritative through CMYK/RGB transitions, contradictory active/inactive adapters, RGB edits, undo/redo, and independent preview/export presentation state"
         );
         ui.window.close();
     }
@@ -14330,25 +15641,26 @@ mod tests {
             channel.close_ends = true;
             channel.smooth_join = true;
         }
-        let before = settings.clone();
         document.render = RenderVariant::WebCurveV1 {
             settings: Box::new(settings.clone()),
         };
-        document
-            .apply_legacy_mapping_action(ValueMode::CrosshatchLuminance)
-            .unwrap();
         let mut editor = DocumentEditor::new(document);
+        assert!(editor.select_pattern(toniator::PatternId::COMPATIBILITY_CURVES_V1));
+        assert!(editor.set_curve_settings(settings.clone()));
+        assert!(editor.apply_legacy_mapping_action(ValueMode::CrosshatchLuminance));
+        let expected_after_mapping = editor.document().render.clone();
         reset_crosshatch_curve_path(&mut settings, &[Ink::Black]);
-        assert!(editor.set_render_variant(RenderVariant::WebCurveV1 {
-            settings: Box::new(settings.clone()),
-        }));
+        assert!(editor.set_curve_settings(settings.clone()));
         assert_eq!(settings.channels.k.path, CurvePath::straight());
         assert!(!settings.channels.k.close_ends && !settings.channels.k.smooth_join);
         assert_eq!(settings.channels.c.path, CurvePath::deep_wave());
         assert!(editor.undo());
         assert!(matches!(
             &editor.document().render,
-            RenderVariant::WebCurveV1 { settings } if **settings == before
+            RenderVariant::WebCurveV1 { settings } if **settings == match &expected_after_mapping {
+                RenderVariant::WebCurveV1 { settings } => (**settings).clone(),
+                _ => unreachable!(),
+            }
         ));
         assert!(editor.redo());
         assert!(matches!(

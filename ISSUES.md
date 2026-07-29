@@ -818,7 +818,7 @@ Track these separately unless required by the current rendering pipeline:
 
 # Shape-pattern expansion
 
-## TON-010 — Add an extensible halftone-pattern framework and user-defined patterns
+## TON-010 — Add an extensible halftone-pattern framework and required proof patterns
 
 * **Status:** Open
 * **Priority:** P1
@@ -838,7 +838,7 @@ Adding a new pattern currently risks requiring coordinated changes to:
 * dropdown indexes;
 * UI callbacks;
 * reverse UI synchronization;
-* persistence and migration;
+* current-format persistence and strict schema validation;
 * preview generation;
 * PNG and SVG export;
 * contextual help;
@@ -861,13 +861,15 @@ Toniator needs a pattern framework rather than another expanding collection of h
 Create a versioned, extensible halftone-pattern framework through which:
 
 * built-in patterns are registered using stable identifiers;
-* user-defined patterns use the same discovery and execution path;
+* the registry contract leaves a common discovery and execution path for
+  future user-defined patterns;
 * pattern metadata and parameter definitions drive the interface;
 * mark-based and path-based patterns are both supported;
 * deterministic and stochastic patterns use shared framework services;
 * new patterns can be added without redesigning the document model;
 * supported pattern components can be combined into reusable user recipes;
-* projects can embed custom definitions so they remain portable;
+* future project-embedded definitions have a defined extension point without
+  implementing the custom-pattern ecosystem in this issue;
 * preview, PNG, and SVG consume the same generated geometry.
 
 The framework must support future expansion toward pattern families such as:
@@ -887,6 +889,50 @@ The framework must support future expansion toward pattern families such as:
 
 Implementing every pattern in that list is not required for the initial framework.
 
+### Pattern-generation families
+
+The pattern library must not be organized primarily as a flat list of
+patterns. Patterns belong to generation families with different inputs,
+invariants, and parameter vocabulary. The registry should record the family
+for each pattern so the UI, help, validation, and future pattern catalog can
+use creator-facing terminology without treating every pattern as a special
+case.
+
+The initial family taxonomy is:
+
+* **Structured Fields** — one or more mathematically defined families of
+  curves determine intersections, crossings, cells, nearest approaches, or
+  other structured placement. A rectangular grid is one special case: two
+  parallel fields at a 90-degree relationship. Triangular, angled, curved,
+  warped, mesh, and wave fields must not be forced into a rectangular-grid
+  abstraction. Relevant parameters may include field count, angle, spacing,
+  phase or offset, curvature, distortion, placement rule, mark primitive, and
+  source-to-size mapping.
+* **Stochastic Distributions** — a deterministic pseudorandom algorithm
+  produces sites, marks, or cells from a domain, density field, and seed.
+  Parameters may include seed, density, minimum separation, clustering,
+  jitter, source weighting, relaxation, and boundary behavior. Voronoi is a
+  layered case: site distribution, then Voronoi or power-cell construction,
+  then a cell mark or fill rule.
+* **Parametric Paths** — an explicit mathematical path or path family is
+  sampled into marks or emitted as a variable-width path. Spirals,
+  concentric contours, sinusoidal paths, radial waves, and procedural contour
+  lines belong here. The contract includes path equation or family, spacing,
+  sampling, and source modulation rather than lattice placement.
+* **Constructive Patterns** — topology, local rules, and deterministic
+  randomness construct a network, cell arrangement, or routed result. Maze,
+  randomized line network, paver, clustered-lattice, cellular-mesh, and
+  branching-path patterns belong here. A maze may combine a base lattice,
+  connectivity rules, seeded choices, and path extraction; it is therefore
+  neither merely a grid nor merely an unstructured distribution.
+
+The family is a design and capability boundary, not a requirement that every
+generator be split into the same implementation classes. A concrete pattern
+must declare its family, inputs, output kind, supported composition stages,
+randomness policy, and invariants. Variants that differ only by ordinary
+parameters, such as horizontal, vertical, and angled line waves, should
+remain one pattern where that is semantically accurate.
+
 ---
 
 # Pattern architecture
@@ -903,7 +949,7 @@ Each pattern must have:
 * a declared output kind;
 * a declared parameter schema;
 * documented compatibility with Shapes, Curves, CMYK, and RGB workflows;
-* deterministic migration behavior.
+* strict current-schema validation and explicit rejection of obsolete schemas.
 
 Pattern selection must not depend on:
 
@@ -928,7 +974,9 @@ Renaming a pattern in the interface must not break saved projects.
 
 ## Pattern registry
 
-Built-in and imported patterns must be discoverable through a common registry.
+Built-in patterns must be discoverable through a common registry. The registry
+contract must leave a compatible extension point for future imported and
+user-defined patterns, but TON-010 does not implement their library workflows.
 
 The registry must provide:
 
@@ -938,7 +986,7 @@ The registry must provide:
 * parameter definitions;
 * generator or recipe construction;
 * capability checks;
-* migration support;
+* current-schema validation;
 * clear errors for missing or incompatible patterns.
 
 Built-in patterns must not bypass the registry through private dropdown branches or renderer-specific switches.
@@ -959,6 +1007,9 @@ trait PatternGenerator {
 enum PatternOutput {
     Marks(Vec<MarkInstance>),
     Paths(Vec<GeneratedPath>),
+    FilledCells(Vec<GeneratedCell>),
+    Networks(Vec<GeneratedNetwork>),
+    NegativeSpace(Vec<NegativeSpaceBoundary>),
 }
 ```
 
@@ -976,6 +1027,29 @@ The same canonical output must feed:
 * artifact validation.
 
 Preview and export must not independently reimplement the pattern algorithm.
+
+## Generation pipeline
+
+Keep the following responsibilities conceptually separate even when a
+performance-oriented implementation fuses adjacent steps internally:
+
+1. **Generator** — creates sites, paths, cells, or constructive topology.
+2. **Sampler** — obtains source values from the artwork through the shared
+   sampling context.
+3. **Mark mapper** — converts source values into size, width, density,
+   coverage, or other supported modulation.
+4. **Geometry builder** — emits canonical dots, marks, paths, polygons, or
+   cells.
+5. **Renderer/exporter** — consumes canonical geometry for preview, PNG, and
+   SVG without regenerating or reinterpreting the pattern.
+
+For example, a triangular field may generate intersections, sample luminance,
+map luminance to dot area, and emit circles. A seeded blue-noise pattern may
+generate sites, derive Voronoi cells, sample a cell value, map it to inset
+coverage, and emit cell polygons. An Archimedean spiral may generate a path,
+sample along it, map values to stroke width, and emit a variable-width path.
+These combinations must not require a separate monolithic pattern for every
+placement, sampler, mapper, and geometry combination.
 
 Color compositing may differ by output mode, but generated positions, paths, transforms, and clipping must remain equivalent.
 
@@ -1000,7 +1074,9 @@ Individual pattern generators must not independently recreate these systems.
 
 ## Pattern output kinds
 
-The initial framework must support at least:
+The initial framework must support the geometry needed by the required proof
+patterns and by weighted Voronoi. Do not force every result into marks or
+paths when that loses cell, network, or polarity semantics.
 
 ### Mark-based output
 
@@ -1040,6 +1116,28 @@ A generated path should retain sufficient information for:
 * variable width where supported;
 * clipping and edge coverage;
 * clean SVG output.
+
+### Filled-cell output
+
+For Voronoi or power-diagram regions whose interiors are filled, optionally
+inset, or clipped by source response. A cell must retain its polygonal boundary,
+source-derived fill/inset state, and stable identity where needed for seeded
+regeneration.
+
+### Boundary and network output
+
+For shared cell boundaries, maze-like networks, routed lines, and future
+constructive patterns. Boundary/network geometry must be reusable by both
+Voronoi and future maze generators rather than being duplicated in each
+pattern.
+
+### Negative-space and polarity output
+
+For patterns whose visible result is the region between or outside generated
+boundaries. The output must preserve fill polarity, subtraction intent, and
+compositing order so preview, PNG, and SVG agree. Voronoi cell interiors must
+support subtracted boundaries without baking a single polarity assumption into
+the cell primitive.
 
 Supporting mark and path output does not require mixed Shapes and Curves within one document. Mixed-generator documents remain part of TON-017.
 
@@ -1331,7 +1429,11 @@ The same combination of:
 
 must reproduce equivalent geometry.
 
-Application updates must not silently alter saved stochastic patterns without an explicit migration or generator-version change.
+Application updates must not silently alter saved stochastic patterns. When a
+current generator or parameter definition changes, update the current document
+and preset definitions, bundled fixtures, and expected artifacts together,
+bump the current generator/schema version, and reject the obsolete definition.
+TON-010 does not retain migration code or require opening obsolete formats.
 
 ## Seed interface
 
@@ -1375,7 +1477,8 @@ Numeric seeds must be manually editable through an advanced but accessible contr
 * Save and reopen preserve exact seed state.
 * Undo and redo restore exact seed values and generated geometry.
 * Presets preserve seed policy and values where appropriate.
-* Imported custom patterns preserve seed configuration.
+* Future imported custom patterns must preserve seed configuration when the
+  separate custom-pattern follow-up is implemented.
 * Cancelled generation does not advance or replace the saved seed.
 * A stale result cannot replace geometry generated from a newer seed.
 
@@ -1388,11 +1491,20 @@ Custom recipes must declare whether they:
 
 ---
 
-# User-defined patterns
+# Follow-up: user-defined patterns
 
-## Initial scope
+The full custom-pattern editor, local library management, pattern
+import/export, project embedding, and embedded-asset recovery are outside the
+TON-010 core deliverable. Create a separate follow-up issue for that ecosystem.
+TON-010 must leave the registry, authoritative pattern state, versioned
+parameter contract, canonical output algebra, and asset-reference boundary
+capable of supporting it later, but must not implement these workflows unless
+a narrowly required contract test proves they are necessary.
 
-The initial custom-pattern system must support declarative pattern recipes built from registered and safe pattern components.
+## Follow-up scope
+
+The separate custom-pattern follow-up should support declarative pattern recipes
+built from registered and safe pattern components.
 
 It must not initially execute arbitrary:
 
@@ -1477,13 +1589,16 @@ Imported assets must be copied or embedded according to a clear ownership model 
 
 ---
 
-# Existing behavior and migration
+# Existing behavior and current definitions
 
 ## Existing patterns
 
-Current Shapes and Curves behavior must be represented through the framework without changing output.
+Current Shapes and Curves behavior must be represented through the framework
+without changing output. Existing visual behavior is preserved by updating the
+current definitions, bundled presets, fixtures, and expected artifacts as the
+authoritative pattern contract changes.
 
-At minimum, migrate the existing equivalents of:
+At minimum, represent the existing equivalents of:
 
 * rectangular shape grid;
 * full-width curve layout;
@@ -1491,26 +1606,34 @@ At minimum, migrate the existing equivalents of:
 * existing mark selection;
 * existing custom SVG mark behavior.
 
-Migration may initially use built-in generator adapters, but those adapters must enter through the same registry and output contracts as future generators.
+The existing equivalents may initially execute through built-in registry
+adapters, but rendering must project from authoritative pattern state into
+those adapters. Adapters must enter through the same registry and canonical
+output contracts as future generators.
 
 ## Compatibility
 
-Existing projects must:
+Current-format projects and bundled presets must:
 
-* open without user intervention;
 * retain their current pattern behavior;
 * render equivalent geometry;
 * retain undo and redo behavior;
-* save into the current document version;
+* save using the current document and preset definitions;
 * continue to export matching PNG and SVG output.
 
-Legacy enum values may remain internally supported for migration, but newly saved projects should use stable pattern identifiers and versioned parameters.
+Once authoritative pattern state is introduced, `RenderVariant` must stop
+owning pattern selection. It may remain only as a transient execution adapter
+for current Shapes and Curves during the bounded implementation transition; it
+must not remain a second persisted selector or parameter store. The exact
+cutover is the Stage 2 gate below.
 
-Unknown legacy values must fail visibly rather than choosing an arbitrary default.
+Obsolete document, preset, and pattern schemas must fail visibly rather than
+being migrated, defaulted, or silently substituted.
 
 ## Output preservation
 
-Before visible new patterns are added, establish deterministic fixtures demonstrating that framework migration does not change current output.
+Before visible new patterns are added, establish deterministic fixtures
+demonstrating that the authoritative framework does not change current output.
 
 Where byte-identical comparison is practical, use it.
 
@@ -1531,6 +1654,33 @@ Otherwise compare:
 The framework must be validated with patterns from meaningfully different families.
 
 These proofs must use the registry, parameter schema, canonical output, persistence, help, cancellation, and export contracts. They must not use private shortcuts.
+
+## Required core pattern — Weighted Voronoi
+
+Weighted Voronoi is a required TON-010 deliverable, not a deferred catalog
+item. It must validate the stochastic, filled-cell, boundary, polarity, and
+canonical-output portions of the framework.
+
+Required behavior:
+
+* seeded, deterministic source-weighted site distribution;
+* explicit density/weight response and documented relaxation or acceptance
+  policy;
+* intentional edge and corner coverage, including a defined domain-boundary
+  policy;
+* optional uniform rendered size independent of source weighting;
+* canonical preview, PNG, and SVG geometry from one generated result;
+* filled polygonal cell output with cell interiors separated by subtracted
+  shared boundaries;
+* reusable boundary/network and polarity infrastructure that future maze
+  patterns can consume;
+* cancellation, stale-result suppression, save/reopen, undo/redo, and exact
+  seed restoration;
+* CMYK and RGB behavior where the current source model supports it.
+
+The implementation may use a power diagram or another documented weighted
+Voronoi construction, but it must not flatten cells into ordinary marks or
+force shared boundaries into unrelated path-only semantics.
 
 ## Proof 1 — Triangular Dot Grid
 
@@ -1619,7 +1769,9 @@ The first implementation may deliver the proofs in separate reviewable stages. A
 
 # Pattern-library direction
 
-After the framework and proof patterns are complete, additional pattern-library work should be tracked as separate issues or batches.
+After the framework proofs and required Weighted Voronoi are complete,
+additional catalog and custom-pattern work should be tracked as separate issues
+or batches.
 
 Likely families include:
 
@@ -1638,7 +1790,7 @@ Likely families include:
 * pointillism;
 * grain;
 * Poisson or blue-noise distributions;
-* weighted Voronoi stippling;
+* further weighted Voronoi variants beyond the required core implementation;
 * controlled clusters.
 
 ## Cellular and contour patterns
@@ -1744,9 +1896,9 @@ Switching patterns must not:
 
 Where practical, switching away from a pattern and back should restore its prior parameter values.
 
-## Pattern creation and management
+## Follow-up only: pattern creation and management
 
-The initial user-defined workflow must provide understandable actions for:
+The separate custom-pattern follow-up may provide understandable actions for:
 
 * Duplicate as Custom Pattern;
 * Save Pattern;
@@ -1793,18 +1945,31 @@ Pattern metadata should identify potentially expensive parameters so the interfa
 * Patterns use stable identifiers rather than numeric dropdown indexes.
 * Pattern definitions and parameters are versioned.
 * Built-in patterns are registered through the common registry.
-* Imported user patterns use the same discovery and execution path.
-* Mark-based and path-based outputs are supported.
+* Future user-defined patterns have a documented extension point in the same
+  discovery and execution contract; the editor/library workflows are tracked
+  separately.
+* Mark-based, path-based, filled-cell, boundary/network, and negative-space
+  outputs are supported where applicable.
 * Preview, PNG, and SVG consume equivalent canonical geometry.
-* Existing Shapes and Curves projects open and render unchanged.
+* Current-format Shapes and Curves definitions render unchanged after the
+  authoritative-state cutover.
 * Existing custom SVG marks remain supported.
-* Pattern migration is deterministic and tested.
-* Unknown or incompatible patterns fail visibly.
+* Obsolete document, preset, and pattern schemas are rejected visibly; no
+  migration or silent defaulting path is retained.
 * The interface is driven by pattern parameter schemas.
 * Unsupported controls are not shown as functional.
 * Pattern help follows TON-002 and TON-003 conventions.
 * Pattern generation is cancellable.
 * Stale results cannot replace newer previews or exports.
+* Every registered pattern declares one of the supported generation families,
+  its family-specific inputs and invariants, and its compatible composition
+  stages.
+* Structured fields do not assume straight lines or 90-degree relationships;
+  stochastic distributions persist deterministic seed state; parametric paths
+  expose path and sampling semantics; and constructive patterns document
+  topology, local rules, and seeded decisions.
+* Generator, source sampler, mark mapper, geometry builder, and renderer/export
+  boundaries are exercised through the same canonical-output contract.
 
 ## Proof patterns
 
@@ -1837,17 +2002,12 @@ Pattern metadata should identify potentially expensive parameters so the interfa
 * Preview, PNG, and SVG use the same seeded geometry.
 * The random-stream version prevents silent output changes after upgrades.
 
-## User-defined patterns
+## Follow-up: user-defined patterns
 
-* A user can create a declarative pattern from supported components.
-* A user can use an imported SVG mark or motif.
-* A custom pattern can be saved to the pattern library.
-* A custom pattern can be exported and imported.
-* A project can embed its custom pattern definition and assets.
-* Opening the embedded project reproduces the pattern without depending on an absolute local path.
-* Invalid recipes and assets fail safely with actionable errors.
-* Custom recipes declare their randomness requirements.
-* At least one proof pattern can be duplicated and saved as a working custom variation.
+The separate custom-pattern follow-up, not TON-010, owns creation, imported
+motifs, local saving, import/export, embedding, recovery, and recipe UX. TON-010
+only verifies that its authoritative registry and canonical-output contracts
+leave those future workflows possible.
 
 ## User experience
 
@@ -1856,9 +2016,12 @@ Pattern metadata should identify potentially expensive parameters so the interfa
 * Keyboard focus follows the visible workflow.
 * Hidden controls leave no orphan widgets or help buttons.
 * Disabled controls explain why they are unavailable.
-* Built-in and custom patterns are clearly distinguishable.
+* Built-in pattern identity and family terminology are clear; custom-pattern
+  distinction is a follow-up concern.
 * Seed synchronization is understandable without requiring knowledge of pseudorandom generators.
-* The `creative_tester` finds no blocker-level confusion in selecting, adjusting, saving, importing, or regenerating patterns.
+* The `creative_tester` finds no blocker-level confusion in selecting and
+  adjusting built-in patterns, understanding scope, or regenerating seeded
+  patterns. Custom save/import workflows are follow-up scope.
 
 ---
 
@@ -1866,15 +2029,15 @@ Pattern metadata should identify potentially expensive parameters so the interfa
 
 Include deterministic tests and representative visual artifacts for:
 
-* migration of every existing pattern or layout;
+* current-definition replacement for every existing pattern or layout;
 * unchanged legacy Shapes output;
 * unchanged legacy Curves output;
 * stable pattern identifiers;
 * renamed display labels;
-* pattern schema migration;
-* missing pattern definitions;
+* obsolete pattern-schema rejection;
+* missing or unsupported pattern definitions;
 * invalid parameter values;
-* invalid custom SVG assets;
+* invalid future asset references fail visibly at the defined contract boundary;
 * mark-based output;
 * path-based output;
 * pattern switching;
@@ -1891,8 +2054,7 @@ Include deterministic tests and representative visual artifacts for:
 * save and reopen;
 * undo and redo;
 * preset save and load where supported;
-* pattern import and export;
-* embedded project definitions;
+* no custom import/export or embedded-definition workflow (tracked separately);
 * wide and tall artwork;
 * rotated and transformed artwork;
 * edge and corner coverage;
@@ -1909,134 +2071,563 @@ Include deterministic tests and representative visual artifacts for:
 
 Representative artifacts must include:
 
-* migrated rectangular grid;
-* migrated repeated-motif curve layout;
+* current-definition rectangular grid;
+* current-definition repeated-motif curve layout;
 * Triangular Dot Grid;
 * horizontal Wave Line Field;
 * vertical or angled Wave Line Field;
 * Evenly Spaced Pointillism with Shared Arrangement;
 * Evenly Spaced Pointillism with Independent Arrangements;
-* one imported or duplicated custom pattern;
+* weighted Voronoi with shared-boundary subtraction and polarity;
 * equivalent CMYK and RGB examples where supported.
 
 ---
 
 # Implementation sequence
 
-Implement TON-010 as separate reviewable stages.
+Implement TON-010 as separate reviewable stages. The sequence below is the
+corrected order after the Stage 2 pause on 2026-07-28.
 
-## Stage 1 — Registry, identifiers, and model migration
+## Staged execution and pause protocol
 
-Implement:
+TON-010 is executed as nine independently reviewable gates, including the
+inserted Stage 4.5 baseline gate. Stages 1 through 4 are complete. Stage 4.5
+and Stages 5 through 8 remain planned until their preceding gates pass and the
+user has had an opportunity to steer the next one.
 
-* pattern registry;
-* stable identifiers;
-* schema and generator versions;
-* versioned parameter storage;
-* canonical mark/path output boundary;
-* document migration;
-* adapters for existing Shapes and Curves behavior;
-* deterministic output regressions.
+At the end of every stage, stop. The completion report must identify what
+changed, affected files and architectural boundaries, tests/artifacts/review
+evidence, limitations and follow-up issues, and what the user should inspect
+before approving the next stage. No later stage starts automatically.
 
-Do not add new visible patterns in this stage.
+Stage 4.5 has four independently approved substages. Each substage stops for
+parent review, evidence-cache update, and explicit user approval before the
+next substage begins. A delayed subagent is treated as progressing unless it
+reports an error or concrete blocker; elapsed time alone never causes
+interruption, replacement, or overlapping delegation.
 
-Completion evidence must show that existing output remains unchanged.
+## Stage 1 — Registry vocabulary and current compatibility adapters
 
-## Stage 2 — Parameter-schema-driven interface
+**Status:** Complete — Stage gate accepted 2026-07-28
 
-Implement:
+Keep the valid non-visual groundwork already delivered: stable pattern IDs,
+family metadata, schema/generator version fields, versioned parameter envelope,
+canonical legacy adapters, and the current-format document projection used only
+as a compatibility projection. Preserve current Shapes and Curves behavior.
 
-* schema-defined controls;
-* parameter scope;
-* dynamic visibility;
-* contextual help;
-* pattern selection by stable identifier;
-* restoration of per-pattern settings;
-* narrow-layout and accessibility behavior.
+This stage did not establish authoritative pattern selection. Its former
+`RenderVariant` compatibility boundary was temporary and is superseded by the
+Stage 2 persisted `pattern_state`; it is not a model to build the UI on.
+Obsolete document and preset definitions are rejected; current definitions and
+fixtures are updated when later stages change their contracts.
 
-Do not add broad new algorithm families in this stage.
+### Stage 1 completion record — 2026-07-28
 
-## Stage 3 — Triangular Dot Grid
+Added `src/pattern.rs` with stable dotted compatibility identifiers, the four
+generation-family values, output-kind metadata, schema/generator versions,
+registry lookup and uniqueness validation, versioned parameter envelopes,
+separate canonical mark/path output types, and typed Shapes/Curves adapters.
+The Stage 1 checkpoint document was v7 and rejected obsolete v6 definitions;
+the Stage 2 cutover below advances the current definitions directly to
+document v8 and preset v5. No UI or registry-driven render dispatch was added.
 
-Implement the deterministic mark-based proof through the common framework.
+The Stage 1 registry groundwork remains isolated from UI selection. The
+current Stage 2 cutover supersedes the former compatibility projection: the
+document now persists the authoritative pattern state directly and rejects
+obsolete definitions rather than migrating them.
 
-Verify:
+## Stage 2 — Authoritative pattern state and current-format cutover
 
-* geometry;
-* source modulation;
-* transforms;
-* coverage;
-* persistence;
-* preview and export parity.
+**Status:** Complete — Stage gate paused for user review 2026-07-28
 
-## Stage 4 — Wave Line Field
-
-Implement the deterministic path-based proof through the common framework.
-
-Verify:
-
-* orientation;
-* amplitude;
-* wavelength;
-* phase;
-* path continuity;
-* transformed coverage;
-* persistence;
-* preview and export parity.
-
-## Stage 5 — Seed framework and Evenly Spaced Pointillism
+Do this before any schema-driven UI synchronization or registry-driven selector.
 
 Implement:
 
-* explicit deterministic random-stream version;
-* Shared Arrangement;
-* Independent Arrangements;
-* stable channel seed storage;
-* seed editing;
-* Regenerate Active Channel;
-* Regenerate All;
-* Evenly Spaced Pointillism as the stochastic proof.
+* an authoritative persisted `PatternInstance`/pattern-state field containing
+  stable pattern ID, schema version, generator version, and validated typed
+  parameter state;
+* the authoritative scope and seed state needed by the current document model,
+  without introducing TON-011 per-channel pattern assignment;
+* one explicit projection from authoritative pattern state into existing Shapes
+  and Curves registry adapters;
+* removal of pattern-selection and pattern-parameter authority from persisted
+  `RenderVariant`, `saved_web_*`, and compatibility projections;
+* current document and preset definition updates (including bundled presets,
+  fixtures, and expected artifacts) with obsolete v7/v4 and obsolete pattern
+  schemas rejected rather than migrated or defaulted;
+* exact validation errors for unknown IDs, unsupported schema/generator
+  versions, malformed parameter state, and unsupported output capabilities.
 
-Verify cancellation, repeatability, channel synchronization, persistence, and export parity.
+The cutover rule is exact: when Stage 2 begins its implementation, the new
+authoritative pattern state becomes the only persisted pattern selector. By the
+Stage 2 gate, `RenderVariant` is only a transient execution adapter/cache for
+current Shapes and Curves. It may not select a pattern, own persisted pattern
+parameters, or provide a second undo/persistence authority. All rendering,
+preview, PNG, and SVG calls must receive their pattern choice and parameters by
+projecting from authoritative pattern state into the adapter.
 
-## Stage 6 — Declarative custom-pattern recipes
+Do not build UI synchronization in this stage beyond contract-level tests.
 
-Implement:
+### Stage 2 completion record — 2026-07-28
 
-* supported component composition;
-* custom naming;
-* custom SVG primitive or motif;
-* parameter persistence;
-* randomness declarations;
-* duplicate-as-custom workflow.
+Implemented the authority-first cutover in `src/model.rs`, `src/persistence.rs`,
+`src/preset.rs`, `src/render.rs`, `src/png_export.rs`, and `src/svg_export.rs`.
+Current documents are schema v8 and current presets are v5. `Document.pattern_state`
+now persists the selected pattern plus the versioned typed parameter instances;
+the four bundled runtime presets and current fixtures use that definition.
+Document save/reopen and preset parsing reject missing, mismatched, unsupported,
+or unknown current pattern data, and exact version checks reject obsolete
+document/preset versions without migration paths.
 
-Do not introduce arbitrary executable code.
+`RenderVariant` is now `serde(skip)` transient execution state. Its only remaining
+role is a derived Shapes/Curves adapter for the current renderer/exporter and a
+test fixture boundary that requires explicit authority selection first. It is
+rebuilt from `pattern_state` before preview, raster output, PNG, and SVG work;
+contradictory in-memory adapter state cannot select or override the persisted
+pattern. `value_mode` and `single_channel` are transient pipeline projections,
+not pattern parameters.
 
-## Stage 7 — Pattern library import, export, and embedding
+Remaining adapter inventory and removal boundary:
 
-Implement:
+* `Document.render`: retain as a `serde(skip)` transient Shapes/Curves execution
+  adapter until Stages 5–6 replace the current legacy renderer branches with
+  canonical generators; it is not UI, persistence, or undo authority.
+* `OutputTreatmentCache.render` and inactive RGB/CMYK treatment caches: retain
+  as transient per-output execution/cache state for current transitions until
+  the canonical generators and output cache replace those branches in Stages
+  5–6; the cache carries authoritative `pattern_state` separately.
+* `saved_web_shape`, `saved_web_curve`, and their pipeline snapshots: retain
+  only for lossless Crosshatch exit and output-mode restoration until later
+  canonical transition handling replaces that legacy escape path; they are
+  skipped from persistence and never select a pattern.
+* `src/preset.rs` channel extraction and renderer-facing export helpers: retain
+  as narrow projections until current Shapes/Curves preset and channel-export
+  consumers use canonical output, then remove them.
+* Registry adapter metadata and test-only adapter setters: retain through the
+  current compatibility execution contract and contradictory-adapter tests;
+  remove at the Stage 8 review after all pattern consumers use canonical
+  output.
 
-* versioned pattern-library file format;
-* validation;
-* import;
-* export;
-* local library management;
-* project embedding;
-* missing-pattern recovery from embedded definitions.
+Validation covered save/reopen, bundled presets, preset rejection, undo/redo,
+CMYK/RGB transitions, Shapes/Curves transitions, Crosshatch restoration, and
+deliberately contradictory adapter state. The complete test matrix passes (130
+library tests and 46 UI/binary tests), with format, Clippy, all-target check,
+and diff checks clean. At that Stage 2 closeout, Stage 3 had not started; the
+custom-pattern editor, local library,
+import/export, and embedded-asset recovery remain the Stage 7 follow-up issue.
 
-## Stage 8 — Full review and follow-up catalog
+## Stage 3 — Canonical output algebra and shared geometry services
 
-Perform:
+Extend the canonical output boundary and shared generation context before adding
+new visible patterns. Support discrete marks, continuous paths, filled cells or
+polygonal regions, shared boundaries/networks, and negative-space boundaries
+with explicit polarity/subtraction semantics. Keep generator, source sampler,
+mapper, geometry builder, and renderer/exporter boundaries distinct.
 
-* complete regression validation;
-* real preview, PNG, and SVG artifact comparison;
-* performance and cancellation evaluation;
-* memory-use evaluation;
-* creative workflow review;
-* accessibility review;
-* migration review.
+Add shared seeded-random, edge-coverage, clipping, cancellation, stale-result,
+and preview/PNG/SVG consumption services. Define reusable cell-boundary and
+network infrastructure for Weighted Voronoi and future maze patterns.
 
-After the framework passes, create separate follow-up issues for additional pattern families. Do not silently add the full target catalog to this issue.
+### Stage 3 completion — 2026-07-28
+
+Implemented and validated the canonical runtime output algebra in
+`src/pattern.rs`, `src/render.rs`, `src/png_export.rs`, and `src/svg_export.rs`.
+Existing `MarkSet` and `CurveGeometry` remain the exact Shapes/Curves output
+forms. The new typed forms add filled regions/cells, shared node/edge boundary
+networks, positive/subtractive polarity, holes, affine transforms, explicit
+Y-down artboard coordinates, clipping at the artboard, fill rules/winding,
+layer identity/order, transparency, bounded limits, and cancellation. A typed
+regions-plus-network composite preserves both semantics for future cell
+patterns without introducing an untyped geometry bag.
+
+Preview, PNG, and SVG consume the same generated canonical output. SVG keeps
+editable semantic groups, compound fill rules, and explicit subtraction masks;
+negative geometry is never painted as background colour. Synthetic fixtures
+cover filled cells, holes, shared topology, negative space, clipping,
+transforms, opacity, deterministic ordering, cancellation, and raster/PNG/SVG
+parity. The full current test, Clippy, format, and diff checks pass.
+
+Stage 4 was deliberately not started until this canonical output gate was
+accepted. Its completion is recorded below; the remaining Shapes/Curves
+adapters remain narrowly bounded execution projections and do not own or
+persist pattern selection.
+
+## Stage 4 — Schema-driven selection and parameter interface
+
+Only after Stage 2’s authority cutover and Stage 3’s output contract are
+accepted, implement:
+
+* registry-derived pattern selection by stable identifier;
+* schema-defined controls, scope, defaults, validation, dynamic visibility, and
+  contextual help;
+* restoration of inactive pattern parameter state without duplicate persisted
+  authority;
+* narrow-layout, keyboard, focus, accessibility, and invalid-state behavior.
+
+Start with current Shapes and Curves plus the output kinds already accepted by
+the registry. Do not add broad catalog work or TON-011 per-channel assignment.
+
+**Status:** Complete — implementation and automated validation accepted; gate
+paused before Stage 5 Weighted Voronoi 2026-07-28
+
+### Stage 4 completion record — 2026-07-28
+
+Added registry-derived selector and schema metadata binding in `src/pattern.rs`,
+`src/model.rs`, `src/lib.rs`, and `src/ui.rs`. The selector reads the stable
+identifier and panel from `Document.pattern_state`; Shapes and Curves controls
+read typed authoritative settings and write through the authority APIs. No
+production `src/ui.rs` path reads pattern selection or parameters from
+`RenderVariant`. Descriptor metadata supplies contextual help and
+accessibility text while preserving the current Shapes/Curves layout and
+visual behavior.
+
+The implementation was split into parent-reviewed substages 4A (authority and
+descriptor API), 4B (selector synchronization), 4C1 (Shapes), 4C2a (Curves
+scalar controls), 4C2b (Curves editor/motif/context), and 4D1 (read-only final
+validation). Evidence is cached under `.codex-work/evidence/` and indexed in
+`.codex-work/cache-index.md`; the durable design record is
+`docs/TON-010_STAGE_4_SCHEMA_UI.md`.
+
+Validation passes with 138 library tests and 46 binary/UI tests, strict
+all-targets Clippy/check, formatting, and diff checks. Coverage includes
+contradictory transient adapters, selector/panel authority, schema help,
+scalar/editor/motif behavior, CMYK/RGB and Crosshatch pipeline semantics,
+undo/autosave/render refresh paths, and the current document/preset rejection
+tests. No manual GNOME/Wayland click-through or screenshot acceptance is
+claimed.
+
+Weighted Voronoi, the three proof-pattern implementations, and the separate
+custom-pattern editor/library/import/export/embedding/recovery ecosystem have
+not started. Stage 4 remains technically accepted and is neither failed nor
+superseded. The next authorized gate is Stage 4.5A; Stage 5 remains blocked
+until the user explicitly accepts Stage 4.5D.
+
+## Stage 4.5 — Baseline restoration and framework demonstrability
+
+**Status:** Planned — inserted after technically accepted Stage 4; Stage 5
+blocked until explicit Stage 4.5D acceptance
+
+Stage 4.5 is not a reimplementation of Stage 4. It addresses a shape-editing
+UI regression introduced during TON-013 and the missing testing presets,
+fixtures, and manual demonstrations that were not previously required by the
+TON-010 tracker. It preserves the completed Stage 4 authority and
+schema-driven UI work.
+
+The four gates are independently reviewable and do not auto-advance:
+
+### Stage 4.5A — Historical audit and demonstrability plan
+
+**Status:** Audit complete for review — gate paused for user approval
+
+Compare current behavior with pre-TON-013 behavior, inventory every lost or
+changed shape-editor feature, and produce the testing-preset matrix and bounded
+restoration/artifact plan. No implementation begins in this substage.
+
+#### Stage 4.5A completion record — 2026-07-28
+
+The read-only comparison of pre-TON-013 `546ea4c`, TON-013 checkpoints
+`ec908d4`/`f9c138c`, and the current dirty checkout found the core anchor,
+handle, insertion, deletion, keyboard, cancel, validation, Done, and undo/redo
+behavior present in both historical and current Rust paths. The verified
+TON-013 changes are static ownership and resource packaging: editor surfaces
+moved into GtkBuilder/Blueprint, while the dialog drawing/gesture/keyboard
+implementation remains Rust-owned. Current shape reads/writes use authoritative
+`Document.pattern_state` and `set_shape_settings`.
+
+The audit does not prove that no user-visible regression exists. It identifies
+current Blueprint/GResource realization, focus/accessibility, and observable
+workflow behavior as the bounded 4.5B restoration target. The complete
+lost/changed-feature inventory, current-format testing matrix, CLI artifact
+inputs, and 4.5B–D acceptance checks are recorded in
+`.codex-work/evidence/ton-010-stage-4.5a-historical-audit-f9c138c-dirty.md`
+and indexed in `.codex-work/cache-index.md`. Blueprint lint, all-targets check,
+and diff checks pass; no implementation or artifacts were created.
+
+This gate is paused for user approval. Stage 4 remains technically accepted;
+4.5B has not started.
+
+### Stage 4.5B — Shape-editor restoration
+
+**Status:** Accepted — 2026-07-28
+
+Restore the complete shape-editor workflow in Blueprint, reconnect its
+behavior, and add GTK regression coverage plus visual artifacts. Preserve
+authoritative `Document.pattern_state` ownership and transient-only Shapes
+adapters.
+
+#### Stage 4.5B completion record — 2026-07-28
+
+The existing shape-editor algorithms and local edit state were preserved. The
+shipping Blueprint → GResource → `gtk::Builder::from_resource` path now has a
+realized GTK regression covering discovery and activation of the existing
+`web_edit_shape` entry, dialog focus, canvas accessibility metadata,
+representative insertion, Done, undo/redo, reopen, Cancel, return to Shapes,
+and the shipping narrow `OverlaySplitView` branch.
+
+The verified shipping issues were modal-map focus loss on the canvas and
+missing canvas accessible name/description/tooltip; both were corrected in
+`src/ui.rs`. No duplicate entry control or shape-editor algorithm rewrite was
+introduced. Four inspected artifacts are cached under
+`test-artifacts/ton-010-stage-4.5b/`: wide Shapes entry, active editor with
+anchors/handles, narrow entry, and completed-edit preview.
+
+A follow-up 4.5B correction found that the existing Blueprint
+`web_polygon_sides` control, descriptor, and authoritative mutation callback
+were present, but the enclosing Blueprint row was not retained and explicitly
+synchronized. The row could remain hidden after selecting Regular Polygon.
+`src/ui.rs` now synchronizes the shipping row, label, and integer 3–6 control
+from authoritative pattern state. Realized GResource coverage proves the
+default value 4, shared and per-target edits to 3 and 6, contradictory-adapter
+resistance, and contextual hiding for Circle, User Defined, and mixed marks.
+No shape algorithm or editor-state rewrite was made. Evidence is recorded in
+`.codex-work/evidence/ton-010-stage-4.5b-polygon-sides-f9c138c-dirty.md`.
+
+Parent validation passes Blueprint lint, 138 library tests, 46 binary/UI
+tests, all-targets check, strict Clippy, formatting, and diff checks. The user
+accepted this gate on 2026-07-28 after manual inspection. 4.5C is now active.
+
+### Stage 4.5C — Testing presets and observable fixtures
+
+**Status:** 4.5D complete — Stage 5 ready and explicitly gated
+
+Create visibly distinct current-format testing presets and fixtures proving
+authoritative pattern state, schema parameters, save/reopen, undo/redo,
+transient adapters, CMYK/RGB transitions, and preview/PNG/SVG behavior. Update
+current definitions and reject obsolete schemas; do not add migration or
+obsolete-format opening behavior.
+
+#### 4.5C1 completion record — 2026-07-28
+
+Added two production-loadable current-format v5 complete-workflow fixtures:
+`Polygon Six` (Shapes with a six-sided Regular Polygon) and `Motif Ladder`
+(Curves with a manual flipped motif arrangement). Both use the real bundled
+preset inventory and keep selection and typed parameters under authoritative
+`Document.pattern_state`; neither persists `treatment.render`. Focused
+authority/schema, bundled-applicability, and inventory tests plus the full
+139-library/46-binary suite, all-targets check, strict Clippy, formatting, and
+diff checks pass. Evidence is recorded in
+`.codex-work/evidence/ton-010-stage-4.5c1-parent-review-f9c138c-dirty.md`.
+
+C1 does not claim save/reopen, undo/redo, contradictory-adapter, CMYK/RGB, or
+preview/PNG/SVG parity coverage. Those remain bounded C2/C3 work. Stop here
+for user feedback; do not begin C2 automatically.
+
+#### 4.5C2A completion record — 2026-07-28
+
+The two C1 fixtures now have current-document persistence and history coverage
+through the real preset candidate, `DocumentEditor`, save, and reopen paths.
+`Polygon Six` verifies authoritative polygon-side/rotation edits; `Motif
+Ladder` verifies authoritative curve-scale/tile/stack edits. Save/reopen
+preserves `pattern_state` and omits serialized `render`; undo/redo restores and
+reapplies the authoritative values. Full validation passes with 140 library
+and 46 binary/UI tests. Evidence:
+`.codex-work/evidence/ton-010-stage-4.5c2a-parent-review-f9c138c-dirty.md`.
+
+C2B remains for contradictory-adapter and CMYK/RGB transition coverage. Pause
+here for user feedback; do not begin C2B automatically.
+
+#### 4.5C2 PNG export-background correction — 2026-07-28
+
+The supplied PNG was correctly transparent because the saved document export
+background was `None`; the PNG dialog's “Document Export Background” wording
+did not disclose that effective value. The production renderer already used
+the saved `Document.appearance.export_background` and never used Preview
+Surface. The dialog now reports `None (transparent)`, the saved RGBA color, or
+that an override ignores the saved setting, with accessible equivalent text.
+Focused PNG composition/UI tests and the full 140-library/47-binary suite pass.
+Evidence: `.codex-work/evidence/ton-010-stage-4.5c2-png-export-background-parent-review-f9c138c-dirty.md`.
+
+At the time of this correction C2B remained paused for user feedback; the
+user subsequently accepted the correction and authorized C2B-1.
+
+#### 4.5C2 current-work acceptance — 2026-07-28
+
+The user accepted the current export-background behavior and organization after
+review. The saved `Document.appearance.export_background` remains authoritative:
+`None` is explicitly transparent, `Color` exposes the saved RGBA value, and the
+Output/Appearance controls now disclose the effective state. Preview Surface
+remains separate. This acceptance does not claim that the Output section's
+organization is ideal; it clears the correction and advances the substage.
+
+#### 4.5C2B-1 completion record — 2026-07-28
+
+**Status:** Complete — parent-reviewed; paused for explicit approval before C2B-2
+
+Deliberately contradictory Shapes/Curves adapters are now covered through the
+production `Polygon Six` and `Motif Ladder` fixtures, renderer, save/reopen,
+undo/redo, and shipping selector transitions. Rendering and persistence follow
+`Document.pattern_state`, and `RenderVariant` remains a derived, non-persisted
+legacy executor. The audit found and corrected one real authority leak:
+Crosshatch entry had selected its source from `Document.render`; it now reads
+the authoritative pattern selection and typed settings. The remaining adapter
+inventory and removal boundaries are recorded in
+`.codex-work/evidence/ton-010-stage-4.5c2b1-adapter-authority-f9c138c-dirty.md`.
+
+Parent validation: focused C2B-1 tests, full `cargo test --locked` (143 library,
+48 binary/UI, 0 doc tests), formatting, and diff checks pass. The writer also
+passed locked all-targets check and strict Clippy. No manual GNOME/Wayland or
+screen-reader acceptance is claimed. C2B2 is complete; C3-A now owns the
+preview/PNG parity fixture handoff.
+
+#### 4.5C2B-2 — CMYK/RGB transition coverage
+
+**Status:** C2B2 complete — parent-reviewed; C3-B complete
+
+Prove that output-model transitions and inactive CMYK/RGB treatment caches
+retain authoritative pattern selection and typed parameters, ignore
+contradictory transient adapters, preserve each model's Preview Surface and
+export-background state, and remain correct through rendering, save/reopen,
+undo/redo, and the shipping controls. Do not begin preview/PNG/SVG parity
+fixture work until this handoff is reviewed.
+
+#### 4.5C2B2-A completion record — 2026-07-28
+
+Parent review found no CMYK/RGB cache-authority defect. A production regression
+now corrupts both active and inactive adapters for `Polygon Six` and `Motif
+Ladder` and proves that output transitions, cache restoration, rendering,
+save/reopen, undo/redo, Preview Surface restoration, and Export Background
+separation all follow per-output authoritative `pattern_state`. The active and
+inactive `render` fields remain derived compatibility adapters. Evidence:
+`.codex-work/evidence/ton-010-stage-4.5c2b2a-output-cache-authority-f9c138c-dirty.md`.
+
+Validation passes with 144 library tests, 48 binary/UI tests, 0 doc tests,
+formatting, all-targets check, strict Clippy, and diff checks. No manual GTK or
+screen-reader acceptance is claimed. Pause here for explicit approval before
+C2B2-B, the realized shipping UI transition slice.
+
+#### 4.5C2B-2B — Shipping UI transition coverage
+
+**Status:** Complete — parent-reviewed; paused before C2C
+
+Exercise the actual Blueprint/GResource `AppUi` surface for CMYK/RGB switching.
+Verify that selector and parameter controls remain bound to authoritative
+`Document.pattern_state`, deliberately contradictory adapters cannot alter the
+visible state, and Preview Surface and Export Background remain distinct. Add
+realized GTK regression coverage or correct a demonstrated shipping UI defect.
+Do not begin preview/PNG/SVG parity fixtures until this handoff is reviewed.
+
+#### 4.5C2B-2B completion record — 2026-07-28
+
+The actual shipping Blueprint/GResource `AppUi` surface now has realized GTK
+coverage using `Polygon Six` and `Motif Ladder`. It proves that CMYK/RGB
+switching, typed Shapes/Curves controls, RGB edits, cache restoration,
+undo/redo, and presentation controls follow authoritative `pattern_state` and
+keep Preview Surface separate from document-wide Export Background despite
+contradictory active and inactive adapters. No shipping UI defect was found;
+the change is test-only in `src/ui.rs`.
+
+Parent validation passes the focused realized GTK test, the full `cargo test
+--locked` suite (144 library, 48 binary/UI, 0 doc tests), locked all-targets
+check, strict Clippy, formatting, and diff checks. No manual GNOME/Wayland or
+screen-reader acceptance is claimed. Evidence:
+`.codex-work/evidence/ton-010-stage-4.5c2b2b-realized-output-authority-f9c138c-dirty.md`.
+Pause here for explicit approval before C2C.
+
+#### 4.5C3-A — Preview/PNG parity fixtures
+
+**Status:** Complete — parent-reviewed; C3-B complete
+
+Use the current-format `Polygon Six` and `Motif Ladder` fixtures through the
+production preview and PNG paths. Prove that preview and PNG consume the same
+authoritative pattern output, preserve transparency and saved Export Background
+semantics, remain deterministic, and ignore contradictory transient adapters.
+Create inspectable artifacts and bounded regression coverage. C3-A has been
+parent-reviewed; SVG parity is now the active handoff.
+
+#### 4.5C3-B — SVG parity and editable artifacts
+
+**Status:** Complete — parent-reviewed; 4.5D active
+
+Use the same current-format fixtures through the production SVG exporter. Prove
+that SVG and preview/PNG share authoritative geometry and presentation
+semantics, preserve editable semantic grouping and valid compound paths/masks,
+retain transparency and Export Background behavior, and ignore contradictory
+adapters. Produce inspectable SVG artifacts and parity regressions. Proceed to
+4.5D after this handoff as authorized.
+
+#### 4.5C3-B completion record — 2026-07-28
+
+The current-format `Polygon Six` and `Motif Ladder` fixtures now have SVG
+parity coverage through the production exporter. The regression proves
+authoritative geometry, deterministic and read-only projection, editable layer
+groups/path IDs, cubic paths, clipping, transparency, Export Background
+composition, Preview Surface separation, and contradictory active/inactive
+adapter resistance. Inspectable artifacts are under
+`test-artifacts/ton-010-stage-4.5c3b/`.
+
+The writing subagent hit an external usage-limit blocker before returning its
+report; its partial work was preserved and parent-reviewed without overlapping
+reassignment. Parent validation passes 146 library tests, 48 binary/UI tests,
+0 doc tests, all-targets check, strict Clippy, formatting, and diff checks.
+No manual GNOME/Wayland or screen-reader acceptance is claimed. 4.5D is now
+active.
+
+### Stage 4.5D — Integrated readiness review
+
+**Status:** Complete — parent-reviewed; pause before Stage 5
+
+The parent reconciled 4.5A through C3-B, inspected the restored shape-editor,
+preview/PNG, and SVG artifacts, and completed the integrated authority,
+persistence, adapter, CMYK/RGB, presentation, and current-schema review.
+Final validation passes 146 library tests, 48 binary/UI tests, 0 doc tests,
+all-targets check, strict Clippy, formatting, and diff checks. The C3-B writer
+usage-limit blocker was preserved and resolved through parent review without
+discarding valid work or overlapping reassignment. Evidence:
+`.codex-work/evidence/ton-010-stage-4.5d-integrated-readiness-parent-review-f9c138c-dirty.md`.
+
+No human GNOME/Wayland click-through or screen-reader acceptance is claimed;
+realized GTK regression coverage and visual artifact inspection are complete.
+Stage 5 remains untouched and requires explicit user approval.
+
+## Stage 5 — Weighted Voronoi required deliverable
+
+**Status:** Planned — blocked until explicit acceptance of Stage 4.5D
+
+Implement Weighted Voronoi through the authoritative registry and canonical
+output contract. It must include seeded source-weighted site distribution,
+intentional edge/corner coverage, optional uniform rendered size, canonical
+preview/PNG/SVG geometry, filled cell interiors, subtracted shared boundaries,
+and reusable polarity/boundary/network infrastructure. Verify deterministic
+seeds, cancellation, stale-result suppression, save/reopen, undo/redo, CMYK/RGB
+behavior, and visual artifact parity.
+
+Weighted Voronoi is mandatory for TON-010 completion and must not be moved to a
+future catalog issue.
+
+## Stage 6 — Framework proof catalog
+
+Implement and review the useful framework proofs:
+
+* Triangular Dot Grid — deterministic mark/field proof;
+* Wave Line Field — deterministic path/field proof, with orientation as a
+  parameter rather than separate hard-coded patterns;
+* Evenly Spaced Pointillism — seeded stochastic proof with Shared and
+  Independent Arrangements, seed editing, Regenerate Active Channel, and
+  Regenerate All.
+
+Verify source modulation, transforms, edge coverage, cancellation, persistence
+of current definitions, undo/redo, and preview/PNG/SVG parity. The proofs do
+not replace Weighted Voronoi.
+
+## Stage 7 — Full framework review and follow-up boundary
+
+Perform complete regression, canonical artifact comparison, performance,
+cancellation, memory, creative workflow, accessibility, and current-format
+rejection review. Confirm that the registry contract can support future
+declarative recipes and embedded definitions without implementing their editor,
+library, import/export, or asset-recovery ecosystem.
+
+Create a separate follow-up issue for the full custom-pattern editor, local
+library management, import/export format, project embedding, embedded-asset
+recovery, and recipe UX. Do not count those capabilities as TON-010 work.
+
+## Stage 8 — TON-010 closeout
+
+Close TON-010 only after Stages 2–7 pass, current bundled definitions and
+fixtures are updated, obsolete document/preset/pattern schemas are rejected,
+Weighted Voronoi and all three framework proofs pass preview/PNG/SVG parity,
+and no duplicate persisted pattern authority remains.
 
 ---
 
@@ -2046,7 +2637,7 @@ For every stage, report:
 
 * files changed;
 * architecture introduced or changed;
-* migration behavior;
+* current-format rejection behavior;
 * user-visible behavior;
 * tests performed;
 * artifacts produced;
@@ -2059,14 +2650,20 @@ Do not mark TON-010 Done when:
 
 * only the registry exists;
 * only the interface exists;
-* only one output kind works;
-* user-defined patterns cannot be saved and restored;
+* only one output kind works when the required cell, boundary, network, and
+  negative-space contracts are needed;
 * seeded channel behavior remains undefined;
 * preview and export differ;
 * existing projects change output;
 * cancellation is incomplete.
 
-TON-010 is complete only when the common framework, mark/path proofs, stochastic seed behavior, declarative custom recipe workflow, and project portability have all passed their respective review gates.
+TON-010 is complete only when the common framework, authoritative pattern
+state, expanded canonical output contract, required Weighted Voronoi pattern,
+three framework proofs, stochastic seed behavior, current-definition updates,
+and strict obsolete-schema rejection have all passed their respective review
+gates. The full custom-pattern editor, local library, import/export,
+project-embedding, and embedded-asset recovery workflow belong to a separate
+follow-up issue.
 
 ---
 
@@ -4231,261 +4828,68 @@ The main correction is:
 
 ---
 
-# TON-013 — Move Toniator's GTK/libadwaita UI to GtkBuilder and Cambalache
+# TON-013 — Complete declarative UI migration with Blueprint
 
-* **Status:** In Progress
+* **Status:** Complete
 * **Priority:** P1
 * **Requires:** Completed TON-012 Stage 3 UI checkpoint
-* **Blocks:** Future substantial GTK layout work and UI-heavy portions of
-  TON-010 and TON-011
 * **Related:** TON-012
 
 ## Objective
 
-Move Toniator's static GTK/libadwaita widget hierarchy from programmatic Rust
-construction into GtkBuilder `.ui` resources that can be opened and edited in
-Cambalache.
+Make Blueprint the authoritative, externally editable source for Toniator's
+static GTK/libadwaita interface while preserving Rust-owned state, models,
+callbacks, rendering, dialogs, and other runtime behavior.
 
-## Progress — Stage 1
+## Completion
 
-The application shell is now loaded from `resources/ui/Toniator.ui` through
-`gtk::Builder`, with stable IDs for the window, header actions, toast overlay,
-and stack. Rust still inserts the dynamic `start` and `editor` pages and owns
-callbacks, models, drawing, dialogs, and synchronization. The editor hierarchy,
-selector-driven controls, and reusable channel composite remain In Progress for
-later TON-013 stages; this issue stays In Progress until those boundaries are
-implemented and verified.
+`resources/toniator-window.blp` now contains the reconstructed main-window
+hierarchy in one file: the Adw toolbar/header, start page, complete
+`Adw.OverlaySplitView`, canvas, status and zoom controls, inspector hierarchy,
+and all Source, Output, Channel Settings, Appearance, Shapes, Curves, and
+Motif controls. Source and Output are expanded by default; Channel Settings,
+Appearance / Canvas & Export, and Treatment Settings remain collapsible.
 
-Stage 1 verification passed at this checkpoint: the XML parse, focused
-shell-builder contract and realized GTK/libadwaita builder checks, `cargo fmt
---check`, strict Clippy, `cargo test --locked`, the release build, and
-`git diff --check`. A real GTK demo launch also produced and passed inspection
-of `test-artifacts/ton-013/shell.png` at 900x680. The host
-`gtk4-builder-tool validate` rejects `AdwApplicationWindow`, so it is not
-treated as acceptance evidence; Cambalache was not launched, so no round-trip
-claim is made.
+`toniator-channel-controls.blp` is the reusable per-semantic-channel template.
+`toniator-aggregate-channel-controls.blp` is the intentionally distinct
+aggregate scope panel and is not treated as a channel panel. These are the only
+separate Blueprint sources because their instances are dynamically repeated or
+semantically independent from the main window.
 
-## Progress — Stage 2
+`build.rs` compiles every tracked `.blp` into Cargo `OUT_DIR` and then compiles
+`resources/toniator.gresource.xml`. Runtime registration loads the generated
+main-window UI from GResource. Generated `.ui` files, the old fragmented UI
+sources, and the Cambalache project are not tracked; a clean checkout starts
+with Blueprint sources only.
 
-The actual top inspector order is `Source` -> `Output` -> `Channel Settings`
-through the Builder-owned expanders in `resources/ui/ToniatorInspector.ui`.
-Source and Output begin expanded; Channel Settings, `Appearance / Canvas &
-Export`, and Treatment Settings begin collapsed for progressive disclosure.
-Artifact expansion opens Source, Output, and Channel Settings. Source contains
-Artwork Source, Source Alpha, source guidance, and status. Output contains
-Output Model, Channel Assignment, Active Channel, and the explicit Legacy
-Crosshatch compatibility control.
+Rust no longer constructs ordinary static main-window widgets. It retrieves
+those widgets by their existing IDs and retains only dynamic models, semantic
+channel instances, conditional recovery content, custom drawing/layout
+surfaces, transient dialogs/popovers, controllers, and behavior. The complete
+inventory and justification are in `docs/UI_WIDGET_INVENTORY.md`.
 
-`resources/ui/ToniatorChannelControls.ui` is a reusable real-channel
-status/context composite for one semantic `OutputChannelId`; Rust caches one
-instance for each of the seven semantic CMYK C/M/Y/K and RGB R/G/B channels and
-selects them by stable semantic ID.
-`resources/ui/ToniatorAggregateChannelControls.ui` is a separate All
-Inks/All Channels scope-context/status composite with explicit mixed-value and
-apply-to-all messaging; it is not a fake channel. Crosshatch uses the aggregate
-composite with explicit All Layers terminology. The editable Cambalache project at
-`resources/ui/Toniator.cmb` records hashes for the main resource and all Stage
-2 auxiliary resources.
+## Verification
 
-The Output `Channel Assignment` and conditional `Active Channel` controls
-remain pipeline-authoritative and are the sole scalar-routing controls. The
-Stage 2 correction names the top selector `Treatment Editing Scope`: it is the
-sole visible treatment-recipient selector for both Shapes and Curves, including
-Full Color treatment editing, and it synchronizes the existing target models
-without mutating `ChannelAssignment` or `active_channel`. The duplicate visible
-`Adjust Ink` / `Adjust Channel` rows are hidden compatibility internals for
-established callbacks and mixed-value behavior. Crosshatch shows disabled `All
-Layers` scope, while aggregate scope remains separate from real
-`OutputChannelId` identity.
+- Blueprint syntax lint and compilation passed for all three `.blp` sources.
+- Generated resources are compiled by the Cargo build script and loaded by the
+  application through GResource.
+- `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and the
+  complete locked test suite passed.
+- A clean-target locked build was run with no generated `.ui` files in the
+  checkout.
+- The demo launch completed and the expanded main window was visually
+  inspected from `/tmp/toniator-blueprint-migration.png`.
 
-Stage 2 verification and final UX review passed the focused Builder/realized
-GTK coverage, `cargo test --locked` (117 library and 45 binary/UI tests), strict
-Clippy, release build, XML/Cambalache-file parsing, and diff checks. The final
-bounded GTK artifact is
-`test-artifacts/ton-013/stage2-treatment-scope-correction.png` (1000x760) and
-was visually inspected. Separate normal and narrow artifact-mode launches were
-limited by the current Wayland compositor failing to provide a GTK render node
-within the capture timeout; those attempts produced no claimed artifacts. No
-dedicated assistive-technology tree or focus-order capture was run; static
-review found no visible or normal-keyboard focus artifact from the hidden
-compatibility rows. Narrow-window, screen-reader, and focus-order behavior
-remain follow-up checks.
+## Ownership boundary
 
-Stage 2 retains Rust ownership of dynamic models, callbacks, visibility,
-sensitivity, treatment-specific controls, rendering, dialogs, deferred sync,
-and the existing GTK crash protections. TON-013 remains In Progress: the
-remaining substantial editor/treatment hierarchy is still Rust-built, and the
-issue is not complete until later migration work is independently scoped and
-verified.
+Blueprint owns static hierarchy, widget construction, labels, properties,
+layout, CSS classes, accessibility structure, and translatable display text.
+Rust owns document state, model contents, callback wiring, conditional state,
+custom drawing, transient windows, and runtime-only controllers.
 
-## Progress — Control-exposure stage
-
-`resources/ui/ToniatorEditorControls.ui` now owns the practical visible
-Source, Output, Appearance, Shapes, Curves, and Motif controls: labels,
-buttons, checkboxes, dropdowns, entries, expanders, scale rows, and the exact
-numeric `GtkSpinButton` companions. Every visible treatment row has a stable
-Builder ID and can be rearranged or restyled in Cambalache. Rust retrieves
-those widgets and supplies only live list models, document callbacks,
-visibility/sensitivity state, mixed-value/help updates, the custom curve
-drawing area, dialogs, and synchronization. The reusable real-channel
-template and aggregate scope remain separate.
-
-The distinction between `Treatment Editing Scope` and Output routing remains
-explicit: the former selects the treatment recipient, while Output `Channel
-Assignment` and conditional `Active Channel` remain the pipeline-authoritative
-scalar-routing controls. Aggregate All Inks/All Channels context remains
-separate from real semantic channels and is not a fake channel.
-
-The former duplicate Rust-built Shapes, Curves, and Motif panels were removed.
-`web_panel_host` and `curve_panel_host` are now Builder-owned panel pages
-containing the complete visible control hierarchy; only the custom curve
-drawing widget is inserted into its declared `curve_editor_host`.
-
-Control-exposure verification passed `cargo fmt --check`, `cargo test --locked`
-(117 library and 46 binary/UI tests), strict Clippy, the locked release build,
-XML/Cambalache-file parsing, and `git diff --check`. The corrected 1000x980
-GTK artifact at
-`test-artifacts/ton-013/control-exposure-stage-corrected.png` was visually
-inspected. Cambalache 1.0.3 is installed, but no round-trip edit was performed;
-narrow-window and assistive-technology checks remain follow-up verification.
-
-The runtime UI source of truth is now `.ui` layout resources plus Rust behavior
-for state, models, callbacks, custom drawing, dialogs, and synchronization.
-
-## Architecture boundary
-
-Move into GtkBuilder resources:
-
-* application windows and major containers;
-* libadwaita pages, groups, rows, and navigation structure;
-* static labels, buttons, switches, scales, entries, and dropdown shells;
-* widget properties, layout relationships, style classes, tooltips, and
-  accessibility relationships;
-* translatable strings, stable widget IDs, and reusable static control
-  structures.
-
-Keep in Rust:
-
-* document and pipeline state;
-* callback implementations, undo/redo, rendering, preview, and export;
-* dynamic list contents and semantic `OutputChannelId` mappings;
-* conditional model population, sensitivity, visibility, and deferred
-  synchronization;
-* custom drawing, preview widgets, GTK crash protections, and runtime-only
-  content.
-
-Dynamic content may use stable placeholder containers and model objects declared
-in `.ui` resources and populated by Rust.
-
-## Reusable channel controls
-
-Implement per-channel controls as one reusable GTK composite template rather
-than duplicating separate static hierarchies for Cyan, Magenta, Yellow, Black,
-Red, Green, and Blue. The component must support:
-
-* semantic `OutputChannelId`;
-* localized channel name and channel color;
-* visibility, opacity, and current channel-specific treatment controls;
-* future per-channel pattern assignment, transforms, and source-response
-  controls;
-* stable widget/model identity and CMYK/RGB terminology.
-
-Do not represent “All Channels” as a fake output channel. It remains an
-aggregate editing mode over real semantic channels.
-
-Prefer stable CMYK and RGB component instances or pages over destroying and
-rebuilding live controls during output-model transitions.
-
-## Dynamic models and composite templates
-
-`.ui` resources may define `GtkDropDown` widgets, empty `GtkStringList` models,
-list factories, placeholder containers, and static row templates. Rust owns
-dynamic contents. Channel dropdowns must retain model identity, use
-`GtkStringList::splice()` or an equivalent safe operation, map positions through
-semantic Rust channel arrays, reject `GTK_INVALID_LIST_POSITION`, and never use
-display strings or indexes as authoritative identities.
-
-For richer future rows, use a custom `GObject` item model with `GListStore` and
-a reusable list-item template. Prefer composite templates where appropriate.
-Likely resources include:
-
-```text
-Toniator.ui
-ToniatorChannelControls.ui
-```
-
-Additional focused resources such as `ToniatorPatternControls.ui` or
-`ToniatorExportControls.ui` require a clear ownership boundary. Do not split
-the UI into excessive files.
-
-## Required work
-
-1. Audit and classify current widget construction as static, reusable,
-   dynamic-model-backed, or custom/runtime-only.
-2. Define the target `.ui` resource structure and create valid GTK 4/libadwaita
-   GtkBuilder resources.
-3. Add resources to the application bundle and load the main interface through
-   GtkBuilder or gtk-rs composite templates.
-4. Bind widgets through stable IDs or template children.
-5. Convert repeated channel controls into one reusable composite template.
-6. Remove duplicated programmatic construction only after parity is proven.
-7. Create a Cambalache project if it improves maintainability.
-8. Document the XML/Rust ownership boundary and resource workflow.
-
-Do not begin this implementation speculatively or as part of TON-012 Stage 3.
-
-## GTK stability requirements
-
-Preserve the existing P0 protections:
-
-* never replace live dropdown models during selection notifications;
-* retain stable model identity where required;
-* reject invalid list positions;
-* preserve deferred synchronization and bounded `RefCell` borrows;
-* avoid callback recursion, refresh-induced dirty state, and semantic channel
-  validation regressions;
-* preserve output-model transition safety.
-
-Do not move dynamic model ownership into GtkBuilder when doing so weakens these
-protections.
-
-## UI parity requirements
-
-Preserve the current window structure, inspector organization, control
-visibility and sensitivity, labels, terminology, keyboard behavior, pipeline
-controls, channel selection, Crosshatch handling, preset loading, save/reopen,
-undo/redo, preview, PNG, and SVG behavior. This is an architecture conversion,
-not a visual redesign.
-
-## Cambalache requirements
-
-* Main and reusable `.ui` resources open in Cambalache without structural
-  errors.
-* Unsupported custom/runtime behavior uses stable placeholder containers.
-* Cambalache edits do not require manual reconstruction of generated Rust
-  widget hierarchies.
-* Resource paths and template class names are documented.
-* Checked-in Cambalache projects contain no machine-specific absolute paths.
-
-## Documentation
-
-Add `docs/UI_ARCHITECTURE.md` covering GtkBuilder layout, Cambalache workflow,
-composite templates, stable widget IDs, reusable channel controls, static and
-dynamic ownership, model population, callback ownership, custom widgets,
-resource compilation, localization, accessibility, testing, and rules for
-future UI changes.
-
-## Acceptance criteria
-
-* Toniator builds and launches using GtkBuilder `.ui` resources.
-* Primary static UI is no longer duplicated in Rust.
-* Reusable channel controls use one composite template.
-* CMYK and RGB channel instances preserve semantic identity.
-* Dynamic dropdown models retain stable identity.
-* Current callbacks operate through the new widgets.
-* Existing visibility and sensitivity behavior is preserved.
-* Current presets and project save/reopen continue to work.
-* Undo/redo, preview, PNG, and SVG continue to work.
+Any new static main-window widget belongs in `resources/toniator-window.blp`.
+An unexplained Rust widget construction or ordinary main-window fragmentation is
+outside this completed TON-013 boundary.
 
 ---
 
@@ -4671,6 +5075,94 @@ Preserve:
 * cosmetic blur or raster post-processing.
 
 ---
+
+# TON-016 — Plan UI feature exposure and information architecture
+
+* **Status:** Planned
+* **Priority:** P2
+* **Requires:** TON-013
+* **Related:** TON-010, TON-011, TON-014
+
+## Summary
+
+TON-013 establishes Blueprint as the authoritative, externally editable UI
+source. It does not settle the product's final feature organization or the
+best location for every action and control.
+
+Defer broad UI reorganization until the currently planned creative features
+have been added or their boundaries are stable. Track the exposure work
+separately so feature implementation does not repeatedly force a new sidebar
+or header arrangement.
+
+The working inventory is maintained in `docs/UI_FEATURE_EXPOSURE.md`.
+
+## Objective
+
+Create a stable information architecture for exposing the complete Toniator
+feature set in the GUI, with a hierarchy that can grow as patterns, source
+processing, channel behavior, and output features are added.
+
+The work must identify:
+
+* every user-facing capability and adjustable setting;
+* whether it is currently exposed, conditionally exposed, runtime-only, or
+  not yet exposed;
+* the owning document/model state and current widget or action ID;
+* the intended hierarchy and progressive-disclosure level;
+* actions that should remain prominent versus actions that belong in a menu;
+* dependencies on unfinished features before the layout can be finalized.
+
+## Candidate information architecture
+
+Treat this as a design direction, not an implementation mandate:
+
+* **Application and document** — New, Open, Save, recovery, recent files,
+  export, and document-level actions.
+* **Source** — artwork source, source alpha policy, source guidance, and
+  source-processing additions.
+* **Output** — output model, channel assignment, and compatibility actions.
+* **Channels** — aggregate scope, per-channel settings, visibility, colors,
+  opacity, and channel-specific overrides.
+* **Treatment** — pattern selection, Shapes, Curves, motifs, geometry, and
+  advanced sampling controls.
+* **Canvas and presentation** — preview surface, export background, zoom,
+  fit, source comparison, and editing overlays.
+* **Help and accessibility** — contextual help, stable labels, keyboard
+  actions, and status feedback.
+
+One candidate grouping is to move **New**, **Open**, and **Save** from the
+header bar into an application/document hamburger menu. Evaluate Undo, Redo,
+Export, Controls, and other header actions at the same time; do not move them
+solely to make the header appear less crowded.
+
+## Acceptance criteria
+
+* `docs/UI_FEATURE_EXPOSURE.md` inventories the current and planned feature
+  surface and is updated as dependent features land.
+* The inventory is hierarchical and maps each feature to its state owner,
+  current exposure, and likely UI location.
+* Unexposed capabilities are recorded as planned work instead of being
+  silently omitted from the interface.
+* Header, sidebar, canvas, menus, dialogs, and contextual actions have an
+  explicit responsibility boundary.
+* The final hierarchy is reviewed against the complete planned feature set
+  before implementation begins.
+* The eventual reorganization preserves stable semantics, accessibility,
+  keyboard operation, discoverability, and external Blueprint editability.
+* Any grouping such as a hamburger menu is validated through a real workflow
+  review before it replaces prominent actions.
+
+## Out of scope until this issue is scheduled
+
+* Reorganizing the TON-013 Blueprint hierarchy merely for visual preference.
+* Moving New, Open, Save, Undo, Redo, Export, or Controls without a settled
+  information-architecture decision.
+* Adding placeholder controls for features that do not yet exist.
+* Replacing dynamic models, callbacks, or runtime behavior with static UI.
+* Treating the current sidebar arrangement as the final product hierarchy.
+
+Keep TON-016 Planned while dependent feature work is still changing the set of
+controls that must be exposed.
 
 # Cross-cutting completion checklist
 

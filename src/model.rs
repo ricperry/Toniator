@@ -2,13 +2,16 @@ use crate::artwork_pipeline::{
     ArtworkPipelineSettings, ArtworkSource, AutomaticSeparationStrategy, ChannelAssignment,
     LegacyBrightnessKind, LegacyCompatibilityAssignment, OutputChannelId, OutputModel,
 };
+use crate::pattern::{PATTERN_REGISTRY, PatternId, VersionedPatternParameters};
 use serde::{Deserialize, Serialize};
+use serde_json::Map;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const DOCUMENT_FORMAT: &str = "toniator-document";
-pub const DOCUMENT_VERSION: u32 = 6;
+pub const DOCUMENT_VERSION: u32 = 8;
 
 /// Determines how source colour is separated into output layers. CMYK is
 /// subtractive ink; RGB is additive light on a transparent screen.
@@ -208,12 +211,14 @@ pub enum WebShape {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ShapePoint {
     pub x: f64,
     pub y: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ShapeAnchor {
     pub point: ShapePoint,
     pub incoming: ShapePoint,
@@ -221,6 +226,7 @@ pub struct ShapeAnchor {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClosedShapePath {
     pub anchors: Vec<ShapeAnchor>,
 }
@@ -263,7 +269,7 @@ pub fn default_shape_nodes() -> Vec<ShapePoint> {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct WebShapeChannel {
     pub enabled: bool,
     pub color: String,
@@ -323,6 +329,7 @@ impl Default for WebShapeChannel {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WebShapeChannels {
     pub c: WebShapeChannel,
     pub m: WebShapeChannel,
@@ -514,12 +521,14 @@ impl WebShapeSettings {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct CurvePoint {
     pub x: f64,
     pub y: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CubicCurveSegment {
     pub control_1: CurvePoint,
     pub control_2: CurvePoint,
@@ -527,6 +536,7 @@ pub struct CubicCurveSegment {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CurvePath {
     pub start: CurvePoint,
     pub segments: Vec<CubicCurveSegment>,
@@ -612,7 +622,7 @@ pub enum AlternateTileTransform {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct WebCurveChannel {
     pub enabled: bool,
     pub color: String,
@@ -682,6 +692,7 @@ impl Default for WebCurveChannel {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WebCurveChannels {
     pub c: WebCurveChannel,
     pub m: WebCurveChannel,
@@ -872,6 +883,294 @@ pub enum RenderVariant {
     },
 }
 
+/// The only persisted pattern authority.  The selected pattern and each
+/// registered compatibility pattern's typed settings live here exactly once;
+/// `RenderVariant` is rebuilt from this state for the legacy renderer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PatternSelection {
+    NativeBasicV1,
+    Registered(PatternId),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PatternDocumentState {
+    pub selected: PatternSelection,
+    pub instances: BTreeMap<PatternId, VersionedPatternParameters>,
+}
+
+impl PatternDocumentState {
+    fn new() -> Self {
+        let mut instances = BTreeMap::new();
+        instances.insert(
+            PatternId::COMPATIBILITY_SHAPES_V1,
+            pattern_parameters_from_settings(
+                PatternId::COMPATIBILITY_SHAPES_V1,
+                &WebShapeSettings::default(),
+            ),
+        );
+        instances.insert(
+            PatternId::COMPATIBILITY_CURVES_V1,
+            pattern_parameters_from_settings(
+                PatternId::COMPATIBILITY_CURVES_V1,
+                &WebCurveSettings::default(),
+            ),
+        );
+        Self {
+            selected: PatternSelection::Registered(PatternId::COMPATIBILITY_SHAPES_V1),
+            instances,
+        }
+    }
+
+    /// Returns the registered selection from persisted authority, never from
+    /// the transient `RenderVariant` execution adapter.
+    pub fn selected_pattern_id(&self) -> Option<PatternId> {
+        match self.selected {
+            PatternSelection::NativeBasicV1 => None,
+            PatternSelection::Registered(id) => Some(id),
+        }
+    }
+
+    /// Returns metadata for the persisted selected pattern, if it is
+    /// registered. Native Basic deliberately has no registry entry.
+    pub fn selected_metadata(&self) -> Option<&'static crate::pattern::PatternMetadata> {
+        PATTERN_REGISTRY.get(self.selected_pattern_id()?)
+    }
+
+    /// Returns the persisted parameter record for the selected registered
+    /// pattern. The record is intentionally read-only; edits remain routed
+    /// through `DocumentEditor`.
+    pub fn selected_parameters(&self) -> Option<&VersionedPatternParameters> {
+        self.instances.get(&self.selected_pattern_id()?)
+    }
+
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        for id in [
+            PatternId::COMPATIBILITY_SHAPES_V1,
+            PatternId::COMPATIBILITY_CURVES_V1,
+        ] {
+            let record = self
+                .instances
+                .get(&id)
+                .ok_or_else(|| anyhow::anyhow!("missing authoritative pattern state for {id}"))?;
+            anyhow::ensure!(
+                record.pattern_id == id,
+                "authoritative pattern state key {id} contradicts record {}",
+                record.pattern_id
+            );
+            record.validate().map_err(anyhow::Error::new)?;
+            match id {
+                PatternId::COMPATIBILITY_SHAPES_V1 => {
+                    let _: WebShapeSettings = pattern_settings_from_parameters(record)?;
+                }
+                PatternId::COMPATIBILITY_CURVES_V1 => {
+                    let _: WebCurveSettings = pattern_settings_from_parameters(record)?;
+                }
+            }
+        }
+        anyhow::ensure!(
+            self.instances.len() == 2,
+            "authoritative pattern state contains an unsupported pattern instance"
+        );
+        if let Some(id) = self.selected_pattern_id() {
+            anyhow::ensure!(
+                self.instances.contains_key(&id),
+                "selected pattern {id} has no authoritative parameter state"
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn adapter(&self) -> anyhow::Result<RenderVariant> {
+        self.validate()?;
+        match self.selected {
+            PatternSelection::NativeBasicV1 => Ok(RenderVariant::NativeBasicV1),
+            PatternSelection::Registered(PatternId::COMPATIBILITY_SHAPES_V1) => {
+                Ok(RenderVariant::WebShapeV1 {
+                    settings: Box::new(pattern_settings_from_parameters(
+                        self.instances
+                            .get(&PatternId::COMPATIBILITY_SHAPES_V1)
+                            .expect("validated Shapes state"),
+                    )?),
+                })
+            }
+            PatternSelection::Registered(PatternId::COMPATIBILITY_CURVES_V1) => {
+                Ok(RenderVariant::WebCurveV1 {
+                    settings: Box::new(pattern_settings_from_parameters(
+                        self.instances
+                            .get(&PatternId::COMPATIBILITY_CURVES_V1)
+                            .expect("validated Curves state"),
+                    )?),
+                })
+            }
+        }
+    }
+
+    /// Selects a registered pattern explicitly. The transient renderer adapter
+    /// is deliberately absent from this API: it cannot choose state.
+    pub(crate) fn select_pattern(&mut self, pattern_id: PatternId) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.instances.contains_key(&pattern_id),
+            "selected pattern {pattern_id} has no authoritative parameter state"
+        );
+        self.selected = PatternSelection::Registered(pattern_id);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn select_native_basic(&mut self) {
+        self.selected = PatternSelection::NativeBasicV1;
+    }
+
+    /// Reads typed Shapes settings from authoritative registered parameters.
+    /// This does not inspect the transient renderer adapter.
+    pub fn shape_settings(&self) -> anyhow::Result<WebShapeSettings> {
+        pattern_settings_from_parameters(
+            self.instances
+                .get(&PatternId::COMPATIBILITY_SHAPES_V1)
+                .ok_or_else(|| anyhow::anyhow!("missing authoritative Shapes state"))?,
+        )
+    }
+
+    /// Reads typed Curves settings from authoritative registered parameters.
+    /// This does not inspect the transient renderer adapter.
+    pub fn curve_settings(&self) -> anyhow::Result<WebCurveSettings> {
+        pattern_settings_from_parameters(
+            self.instances
+                .get(&PatternId::COMPATIBILITY_CURVES_V1)
+                .ok_or_else(|| anyhow::anyhow!("missing authoritative Curves state"))?,
+        )
+    }
+
+    /// Replaces typed Shapes parameters while retaining the existing explicit
+    /// selection. Callers choose a pattern separately through `select_pattern`.
+    pub(crate) fn set_shape_settings(&mut self, settings: WebShapeSettings) {
+        self.instances.insert(
+            PatternId::COMPATIBILITY_SHAPES_V1,
+            pattern_parameters_from_settings(PatternId::COMPATIBILITY_SHAPES_V1, &settings),
+        );
+    }
+
+    /// Replaces typed Curves parameters while retaining the existing explicit
+    /// selection. Callers choose a pattern separately through `select_pattern`.
+    pub(crate) fn set_curve_settings(&mut self, settings: WebCurveSettings) {
+        self.instances.insert(
+            PatternId::COMPATIBILITY_CURVES_V1,
+            pattern_parameters_from_settings(PatternId::COMPATIBILITY_CURVES_V1, &settings),
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_selected_parameters_for_test(&mut self, render: &RenderVariant) {
+        // Test fixtures may seed typed parameters through this convenience
+        // method, but the fixture must select the authoritative pattern first.
+        // In particular, never infer or mutate selection from a RenderVariant.
+        match (&self.selected, render) {
+            (PatternSelection::NativeBasicV1, RenderVariant::NativeBasicV1) => {}
+            (
+                PatternSelection::Registered(PatternId::COMPATIBILITY_SHAPES_V1),
+                RenderVariant::WebShapeV1 { settings },
+            ) => self.set_shape_settings((**settings).clone()),
+            (
+                PatternSelection::Registered(PatternId::COMPATIBILITY_CURVES_V1),
+                RenderVariant::WebCurveV1 { settings },
+            ) => self.set_curve_settings((**settings).clone()),
+            _ => {
+                panic!("select the authoritative pattern explicitly before setting test parameters")
+            }
+        }
+    }
+
+    pub(crate) fn for_treatment_scope(&self) -> anyhow::Result<Self> {
+        self.validate()?;
+        let mut state = self.clone();
+        let mut shapes = state.shape_settings()?;
+        shapes.channels = WebShapeSettings::default().channels;
+        state.set_shape_settings(shapes);
+        let mut curves = state.curve_settings()?;
+        curves.channels = WebCurveSettings::default().channels;
+        state.set_curve_settings(curves);
+        Ok(state)
+    }
+
+    pub(crate) fn restore_selected_channels_from(&mut self, source: &Self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.selected == source.selected,
+            "cannot restore channels across different pattern selections"
+        );
+        match self.selected {
+            PatternSelection::NativeBasicV1 => {}
+            PatternSelection::Registered(PatternId::COMPATIBILITY_SHAPES_V1) => {
+                let mut settings = self.shape_settings()?;
+                settings.channels = source.shape_settings()?.channels;
+                self.set_shape_settings(settings);
+            }
+            PatternSelection::Registered(PatternId::COMPATIBILITY_CURVES_V1) => {
+                let mut settings = self.curve_settings()?;
+                settings.channels = source.curve_settings()?.channels;
+                self.set_curve_settings(settings);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn pattern_parameters_from_settings<T: Serialize>(
+    pattern_id: PatternId,
+    settings: &T,
+) -> VersionedPatternParameters {
+    let metadata = PATTERN_REGISTRY
+        .get(pattern_id)
+        .expect("built-in compatibility pattern must be registered");
+    let mut values = Map::new();
+    let mut serialized =
+        serde_json::to_value(settings).expect("compatibility settings must serialize");
+    let object = serialized
+        .as_object_mut()
+        .expect("compatibility settings serialize as objects");
+    // These are projections of `ArtworkPipelineSettings`, never pattern
+    // parameters. They are restored only while building the transient adapter.
+    object.remove("value_mode");
+    object.remove("single_channel");
+    values.insert("settings".into(), serialized);
+    VersionedPatternParameters {
+        pattern_id,
+        schema_version: metadata.parameter_schema_version,
+        generator_version: metadata.generator_version,
+        values,
+    }
+}
+
+fn pattern_settings_from_parameters<T: for<'de> Deserialize<'de>>(
+    parameters: &VersionedPatternParameters,
+) -> anyhow::Result<T> {
+    anyhow::ensure!(
+        parameters.values.len() == 1 && parameters.values.contains_key("settings"),
+        "authoritative pattern {} has malformed typed settings",
+        parameters.pattern_id
+    );
+    let mut settings = parameters
+        .values
+        .get("settings")
+        .expect("checked settings key")
+        .clone();
+    let object = settings.as_object_mut().ok_or_else(|| {
+        anyhow::anyhow!(
+            "authoritative pattern {} has malformed typed settings",
+            parameters.pattern_id
+        )
+    })?;
+    object.insert("value_mode".into(), serde_json::json!("cmyk"));
+    object.insert("single_channel".into(), serde_json::json!("black"));
+    serde_json::from_value(settings).map_err(|error| {
+        anyhow::anyhow!(
+            "authoritative pattern {} has malformed typed settings: {error}",
+            parameters.pattern_id
+        )
+    })
+}
+
 fn finite_clamp(value: f32, min: f32, max: f32, fallback: f32) -> f32 {
     if value.is_finite() {
         value.clamp(min, max)
@@ -892,26 +1191,34 @@ pub struct SourceArtwork {
 /// visible. Keeping this in the document makes switching output modes lossless
 /// and makes undo/redo a single ordinary document edit.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OutputTreatmentCache {
     pub settings: Settings,
+    pub pattern_state: PatternDocumentState,
+    /// A derived, non-persisted adapter retained only for the legacy Shapes
+    /// and Curves renderer during the TON-010 transition.
+    #[serde(skip)]
     pub render: RenderVariant,
-    /// Presentation snapshot for this output model. Older v6 documents did
-    /// not store it, so absence resolves to the model-specific default.
+    /// Optional presentation snapshot for this output model. A missing current
+    /// cache snapshot resolves to the model-specific default; document schema
+    /// versions remain current-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview_surface: Option<PreviewSurface>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip)]
     pub saved_web_shape: Option<Box<WebShapeSettings>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip)]
     pub saved_web_curve: Option<Box<WebCurveSettings>>,
     pub artwork_pipeline: ArtworkPipelineSettings,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip)]
     pub saved_web_shape_pipeline: Option<ArtworkPipelineSettings>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip)]
     pub saved_web_curve_pipeline: Option<ArtworkPipelineSettings>,
 }
 
 impl OutputTreatmentCache {
     fn canonicalize_pipeline_facades(&mut self) -> anyhow::Result<()> {
+        self.pattern_state.validate()?;
+        self.render = self.pattern_state.adapter()?;
         apply_pipeline_projection(&mut self.render, &self.artwork_pipeline)?;
         canonicalize_saved_shape_facade(&mut self.saved_web_shape, &self.saved_web_shape_pipeline)?;
         canonicalize_saved_curve_facade(&mut self.saved_web_curve, &self.saved_web_curve_pipeline)?;
@@ -971,6 +1278,7 @@ impl OutputTreatmentCache {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Document {
     pub format: String,
     pub version: u32,
@@ -982,14 +1290,18 @@ pub struct Document {
     /// below are a renderer/UI compatibility projection.
     pub artwork_pipeline: ArtworkPipelineSettings,
     pub output_mode: OutputMode,
+    pub pattern_state: PatternDocumentState,
+    /// A derived, non-persisted adapter retained only for the legacy Shapes
+    /// and Curves renderer during the TON-010 transition.
+    #[serde(skip)]
     pub render: RenderVariant,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip)]
     pub saved_web_shape: Option<Box<WebShapeSettings>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip)]
     pub saved_web_shape_pipeline: Option<ArtworkPipelineSettings>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip)]
     pub saved_web_curve: Option<Box<WebCurveSettings>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip)]
     pub saved_web_curve_pipeline: Option<ArtworkPipelineSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inactive_cmyk: Option<Box<OutputTreatmentCache>>,
@@ -1008,6 +1320,7 @@ impl Document {
             appearance: DocumentAppearance::default(),
             artwork_pipeline: ArtworkPipelineSettings::default(),
             output_mode: OutputMode::CmykInks,
+            pattern_state: PatternDocumentState::new(),
             render: RenderVariant::WebShapeV1 {
                 settings: Box::new(WebShapeSettings::default()),
             },
@@ -1023,6 +1336,7 @@ impl Document {
     fn active_treatment(&self) -> OutputTreatmentCache {
         OutputTreatmentCache {
             settings: self.settings,
+            pattern_state: self.pattern_state.clone(),
             render: self.render.clone(),
             preview_surface: Some(self.appearance.preview_surface),
             saved_web_shape: self.saved_web_shape.clone(),
@@ -1035,6 +1349,7 @@ impl Document {
 
     fn apply_treatment(&mut self, treatment: OutputTreatmentCache) {
         self.settings = treatment.settings;
+        self.pattern_state = treatment.pattern_state;
         self.render = treatment.render;
         self.saved_web_shape = treatment.saved_web_shape;
         self.saved_web_shape_pipeline = treatment.saved_web_shape_pipeline;
@@ -1055,24 +1370,6 @@ impl Document {
     }
 
     fn new_rgb_treatment(&self) -> OutputTreatmentCache {
-        let mut render = self.render.clone();
-        match &mut render {
-            RenderVariant::WebShapeV1 { settings } => {
-                settings.value_mode = ValueMode::Rgb;
-                settings.single_channel = Ink::Red;
-                for ink in Ink::RGB {
-                    settings.channels.get_mut(ink).enabled = true;
-                }
-            }
-            RenderVariant::WebCurveV1 { settings } => {
-                settings.value_mode = ValueMode::Rgb;
-                settings.single_channel = Ink::Red;
-                for ink in Ink::RGB {
-                    settings.channels.get_mut(ink).enabled = true;
-                }
-            }
-            RenderVariant::NativeBasicV1 => {}
-        }
         // The first RGB visit has no cached treatment yet.  Preserve the
         // semantic source/alpha/assignment state and translate only its
         // output-model-dependent channel before installing this treatment.
@@ -1083,7 +1380,8 @@ impl Document {
             .expect("valid pipeline output transition");
         OutputTreatmentCache {
             settings: self.settings,
-            render,
+            pattern_state: self.pattern_state.clone(),
+            render: self.render.clone(),
             preview_surface: None,
             saved_web_shape: None,
             saved_web_curve: None,
@@ -1152,7 +1450,7 @@ impl Document {
         let omitted_active_channel = pipeline.active_channel.is_none()
             && matches!(pipeline.assignment, ChannelAssignment::ActiveChannel);
         if omitted_active_channel {
-            // Scoped v4 presets may omit Active Channel to request the
+            // Current presets may omit Active Channel to request the
             // receiving/output-transition destination. Validate every other
             // invariant against a representative valid destination first.
             let mut representative = pipeline.clone();
@@ -1205,10 +1503,12 @@ impl Document {
     /// constructs and validates a complete candidate before this is called.
     pub fn apply_preset_treatment(
         &mut self,
-        render: RenderVariant,
+        pattern_state: PatternDocumentState,
         native_settings: Option<Settings>,
     ) -> anyhow::Result<()> {
-        if render_kind(&self.render) != render_kind(&render) {
+        pattern_state.validate()?;
+        let next_render = pattern_state.adapter()?;
+        if render_kind(&self.render) != render_kind(&next_render) {
             match &self.render {
                 RenderVariant::WebShapeV1 { settings } => {
                     self.saved_web_shape = Some(settings.clone());
@@ -1224,7 +1524,7 @@ impl Document {
         if let Some(settings) = native_settings {
             self.settings = settings.sanitized();
         }
-        self.render = render;
+        self.pattern_state = pattern_state;
         self.sync_legacy_projection()?;
         self.validate()
     }
@@ -1234,6 +1534,8 @@ impl Document {
     /// their established formulas byte-for-byte.
     pub fn sync_legacy_projection(&mut self) -> anyhow::Result<()> {
         self.output_mode = self.artwork_pipeline.output_model.to_legacy();
+        self.pattern_state.validate()?;
+        self.render = self.pattern_state.adapter()?;
         apply_pipeline_projection(&mut self.render, &self.artwork_pipeline)?;
         Ok(())
     }
@@ -1275,7 +1577,7 @@ impl Document {
 
     pub fn projected_for_render(&self) -> anyhow::Result<Self> {
         let mut projected = self.clone();
-        projected.sync_legacy_projection()?;
+        projected.canonicalize_pipeline_facades()?;
         Ok(projected)
     }
 
@@ -1368,10 +1670,16 @@ impl Document {
 
     pub fn new_with_artboard(source: SourceArtwork, width: u32, height: u32) -> Self {
         let mut document = Self::new(source);
-        if let RenderVariant::WebShapeV1 { settings } = &mut document.render {
-            settings.output_width = width.max(1);
-            settings.output_height = height.max(1);
-        }
+        let mut settings = document
+            .pattern_state
+            .shape_settings()
+            .expect("new document has Shapes state");
+        settings.output_width = width.max(1);
+        settings.output_height = height.max(1);
+        document.pattern_state.set_shape_settings(settings);
+        document
+            .sync_legacy_projection()
+            .expect("new document pattern state projects");
         document
     }
 
@@ -1379,8 +1687,41 @@ impl Document {
     /// requested long edge is preserved (subject to the document cap), so old
     /// presets retain their intended scale without retaining distortion.
     pub fn normalize_canvas_aspect(&mut self, source_width: u32, source_height: u32) -> bool {
-        let mut changed =
-            normalize_render_variant_canvas(&mut self.render, source_width, source_height);
+        let mut changed = match self.pattern_state.selected {
+            PatternSelection::NativeBasicV1 => false,
+            PatternSelection::Registered(PatternId::COMPATIBILITY_SHAPES_V1) => {
+                let mut settings = self
+                    .pattern_state
+                    .shape_settings()
+                    .expect("validated Shapes state");
+                let changed = normalize_canvas_dimensions(
+                    &mut settings.output_width,
+                    &mut settings.output_height,
+                    source_width,
+                    source_height,
+                );
+                if changed {
+                    self.pattern_state.set_shape_settings(settings);
+                }
+                changed
+            }
+            PatternSelection::Registered(PatternId::COMPATIBILITY_CURVES_V1) => {
+                let mut settings = self
+                    .pattern_state
+                    .curve_settings()
+                    .expect("validated Curves state");
+                let changed = normalize_canvas_dimensions(
+                    &mut settings.output_width,
+                    &mut settings.output_height,
+                    source_width,
+                    source_height,
+                );
+                if changed {
+                    self.pattern_state.set_curve_settings(settings);
+                }
+                changed
+            }
+        };
         if let Some(settings) = self.saved_web_shape.as_deref_mut() {
             changed |= normalize_canvas_dimensions(
                 &mut settings.output_width,
@@ -1397,13 +1738,37 @@ impl Document {
                 source_height,
             );
         }
+        if changed {
+            let _ = self.sync_legacy_projection();
+        }
         changed
     }
 
     /// Keeps the current Crosshatch compatibility assignment on its configured
     /// curve treatment so it never renders dot layers under a hatch label.
     pub fn normalize_crosshatch_treatment(&mut self) -> bool {
-        normalize_crosshatch_render(&mut self.render)
+        let changed = matches!(
+            self.artwork_pipeline.assignment,
+            ChannelAssignment::LegacyCompatibility(
+                LegacyCompatibilityAssignment::CrosshatchProgressiveKcmyV1
+            )
+        ) && matches!(
+            self.pattern_state.selected,
+            PatternSelection::Registered(PatternId::COMPATIBILITY_SHAPES_V1)
+        );
+        if changed {
+            let shapes = self
+                .pattern_state
+                .shape_settings()
+                .expect("validated Shapes state");
+            self.pattern_state
+                .set_curve_settings(WebCurveSettings::crosshatch_from_shape(&shapes));
+            self.pattern_state
+                .select_pattern(PatternId::COMPATIBILITY_CURVES_V1)
+                .expect("registered Curves state");
+            let _ = self.sync_legacy_projection();
+        }
+        changed
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -1414,6 +1779,7 @@ impl Document {
             self.version
         );
         self.artwork_pipeline.validate()?;
+        self.pattern_state.validate()?;
         if matches!(
             self.artwork_pipeline.assignment,
             ChannelAssignment::LegacyCompatibility(
@@ -1856,7 +2222,7 @@ pub fn aspect_locked_dimensions(
     }
 }
 
-fn normalize_canvas_dimensions(
+pub(crate) fn normalize_canvas_dimensions(
     width: &mut u32,
     height: &mut u32,
     source_width: u32,
@@ -2032,6 +2398,7 @@ struct TreatmentState {
     appearance: DocumentAppearance,
     output_mode: OutputMode,
     artwork_pipeline: ArtworkPipelineSettings,
+    pattern_state: PatternDocumentState,
     render: RenderVariant,
     saved_web_shape: Option<Box<WebShapeSettings>>,
     saved_web_shape_pipeline: Option<ArtworkPipelineSettings>,
@@ -2192,7 +2559,7 @@ impl DocumentEditor {
         }
         let before = TreatmentState::from_document(&self.document);
         let output_model = self.document.artwork_pipeline.output_model;
-        let (render, pipeline) = match (
+        let (settings, pipeline) = match (
             self.document.saved_web_curve.clone(),
             self.document.saved_web_curve_pipeline.clone(),
         ) {
@@ -2203,12 +2570,10 @@ impl DocumentEditor {
                         ChannelAssignment::LegacyCompatibility(_)
                     ) =>
             {
-                (RenderVariant::WebCurveV1 { settings }, pipeline)
+                (*settings, pipeline)
             }
             _ => (
-                RenderVariant::WebCurveV1 {
-                    settings: Box::new(WebCurveSettings::default()),
-                },
+                WebCurveSettings::default(),
                 ArtworkPipelineSettings {
                     source: ArtworkSource::Value,
                     alpha_policy: crate::artwork_pipeline::SourceAlphaPolicy::Preserve,
@@ -2218,7 +2583,11 @@ impl DocumentEditor {
                 },
             ),
         };
-        self.document.render = render;
+        self.document.pattern_state.set_curve_settings(settings);
+        self.document
+            .pattern_state
+            .select_pattern(PatternId::COMPATIBILITY_CURVES_V1)
+            .expect("registered Curves state");
         self.document.artwork_pipeline = pipeline;
         if self.document.sync_legacy_projection().is_err() {
             before.apply(&mut self.document);
@@ -2236,11 +2605,19 @@ impl DocumentEditor {
 
     pub fn apply_legacy_mapping_action(&mut self, mapping: ValueMode) -> bool {
         let before = TreatmentState::from_document(&self.document);
-        let requested_kind = render_kind(&self.document.render);
+        let requested_kind =
+            (mapping != ValueMode::CrosshatchLuminance).then(|| render_kind(&self.document.render));
         if mapping == ValueMode::CrosshatchLuminance {
-            match &self.document.render {
-                RenderVariant::WebShapeV1 { settings } => {
-                    let mut saved = settings.clone();
+            // Crosshatch is a legacy transition, but its source treatment is
+            // still selected and parameterized only by persisted authority.
+            // `render` may be a stale or deliberately contradictory adapter.
+            match self.document.pattern_state.selected {
+                PatternSelection::Registered(PatternId::COMPATIBILITY_SHAPES_V1) => {
+                    let settings = match self.document.pattern_state.shape_settings() {
+                        Ok(settings) => settings,
+                        Err(_) => return false,
+                    };
+                    let mut saved = Box::new(settings.clone());
                     saved.value_mode = ValueMode::Luminance;
                     self.document.saved_web_shape = Some(saved);
                     self.document.saved_web_shape_pipeline = Some(ArtworkPipelineSettings {
@@ -2252,23 +2629,33 @@ impl DocumentEditor {
                         assignment: ChannelAssignment::AllChannels,
                         active_channel: None,
                     });
-                    self.document.render = RenderVariant::WebCurveV1 {
-                        settings: Box::new(WebCurveSettings::crosshatch_from_shape(settings)),
-                    };
+                    self.document
+                        .pattern_state
+                        .set_curve_settings(WebCurveSettings::crosshatch_from_shape(&settings));
+                    self.document
+                        .pattern_state
+                        .select_pattern(PatternId::COMPATIBILITY_CURVES_V1)
+                        .expect("registered Curves state");
                 }
-                RenderVariant::WebCurveV1 { settings } => {
+                PatternSelection::Registered(PatternId::COMPATIBILITY_CURVES_V1) => {
                     // Keep the ordinary curve treatment intact so Exit can
                     // restore its geometry, visibility, and color settings.
-                    self.document.saved_web_curve = Some(settings.clone());
+                    let settings = match self.document.pattern_state.curve_settings() {
+                        Ok(settings) => settings,
+                        Err(_) => return false,
+                    };
+                    self.document.saved_web_curve = Some(Box::new(settings.clone()));
                     self.document.saved_web_curve_pipeline =
                         Some(self.document.artwork_pipeline.clone());
-                    let mut configured = (**settings).clone();
+                    let mut configured = settings;
                     configured.configure_crosshatch();
-                    self.document.render = RenderVariant::WebCurveV1 {
-                        settings: Box::new(configured),
-                    };
+                    self.document.pattern_state.set_curve_settings(configured);
+                    self.document
+                        .pattern_state
+                        .select_pattern(PatternId::COMPATIBILITY_CURVES_V1)
+                        .expect("registered Curves state");
                 }
-                RenderVariant::NativeBasicV1 => return false,
+                PatternSelection::NativeBasicV1 => return false,
             }
         }
         if self.document.apply_legacy_mapping_action(mapping).is_err() {
@@ -2279,7 +2666,7 @@ impl DocumentEditor {
         // changing a mapping from the Curves inspector must not silently
         // replace the selected treatment with the cached Shapes treatment.
         if matches!(mapping, ValueMode::Cmyk | ValueMode::Rgb)
-            && render_kind(&self.document.render) != requested_kind
+            && render_kind(&self.document.render) != requested_kind.expect("non-Crosshatch mapping")
         {
             match &self.document.render {
                 RenderVariant::WebShapeV1 { settings } => {
@@ -2294,7 +2681,7 @@ impl DocumentEditor {
                 }
                 RenderVariant::NativeBasicV1 => {}
             }
-            self.document.render = before.render.clone();
+            self.document.pattern_state = before.pattern_state.clone();
             let _ = self.document.sync_legacy_projection();
         }
         if TreatmentState::from_document(&self.document) == before {
@@ -2328,21 +2715,57 @@ impl DocumentEditor {
         true
     }
 
-    pub fn set_render_variant(&mut self, render: RenderVariant) -> bool {
+    pub fn set_pattern_state(&mut self, pattern_state: PatternDocumentState) -> bool {
         let before = TreatmentState::from_document(&self.document);
-        self.set_render_variant_from_before(render, before)
+        self.set_pattern_state_from_before(pattern_state, before)
     }
 
-    fn set_render_variant_from_before(
-        &mut self,
-        render: RenderVariant,
-        before: TreatmentState,
-    ) -> bool {
-        if self.document.render == render && TreatmentState::from_document(&self.document) == before
-        {
+    pub fn select_pattern(&mut self, pattern_id: PatternId) -> bool {
+        let mut state = self.document.pattern_state.clone();
+        if state.select_pattern(pattern_id).is_err() {
             return false;
         }
-        if render_kind(&self.document.render) != render_kind(&render) {
+        self.set_pattern_state(state)
+    }
+
+    pub fn set_shape_settings(&mut self, settings: WebShapeSettings) -> bool {
+        let mut state = self.document.pattern_state.clone();
+        state.set_shape_settings(settings);
+        self.set_pattern_state(state)
+    }
+
+    pub fn set_curve_settings(&mut self, settings: WebCurveSettings) -> bool {
+        let mut state = self.document.pattern_state.clone();
+        state.set_curve_settings(settings);
+        self.set_pattern_state(state)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn select_pattern_for_test(&mut self, pattern_id: PatternId) -> bool {
+        let mut state = self.document.pattern_state.clone();
+        if state.select_pattern(pattern_id).is_err() {
+            return false;
+        }
+        if self.document.pattern_state == state {
+            return false;
+        }
+        self.document.pattern_state = state;
+        self.document.sync_legacy_projection().is_ok()
+    }
+
+    fn set_pattern_state_from_before(
+        &mut self,
+        pattern_state: PatternDocumentState,
+        before: TreatmentState,
+    ) -> bool {
+        if pattern_state.validate().is_err() || self.document.pattern_state == pattern_state {
+            return false;
+        }
+        let next_render = match pattern_state.adapter() {
+            Ok(render) => render,
+            Err(_) => return false,
+        };
+        if render_kind(&self.document.render) != render_kind(&next_render) {
             match &self.document.render {
                 RenderVariant::WebShapeV1 { settings } => {
                     self.document.saved_web_shape = Some(settings.clone());
@@ -2357,10 +2780,11 @@ impl DocumentEditor {
                 RenderVariant::NativeBasicV1 => {}
             }
         }
-        self.document.render = render;
-        // Generic treatment edits cannot alter semantic mapping/output. The
-        // compatibility fields supplied by callers are overwritten here.
-        let _ = self.document.sync_legacy_projection();
+        self.document.pattern_state = pattern_state;
+        if self.document.sync_legacy_projection().is_err() {
+            before.apply(&mut self.document);
+            return false;
+        }
         if self.active.is_none() {
             let after = TreatmentState::from_document(&self.document);
             self.undo.push(Edit { before, after });
@@ -2371,20 +2795,20 @@ impl DocumentEditor {
 
     pub fn set_treatment(
         &mut self,
-        render: RenderVariant,
+        pattern_state: PatternDocumentState,
         native_settings: Option<Settings>,
     ) -> bool {
         self.begin_edit(SettingKey::Treatment);
         if let Some(settings) = native_settings {
             self.set_settings(SettingKey::Treatment, settings);
         }
-        self.set_render_variant(render);
+        self.set_pattern_state(pattern_state);
         self.end_edit()
     }
 
     pub fn set_treatment_with_pipeline(
         &mut self,
-        render: RenderVariant,
+        pattern_state: PatternDocumentState,
         native_settings: Option<Settings>,
         pipeline: ArtworkPipelineSettings,
     ) -> bool {
@@ -2399,7 +2823,14 @@ impl DocumentEditor {
         if let Some(settings) = native_settings {
             self.document.settings = settings.sanitized();
         }
-        if render_kind(&self.document.render) != render_kind(&render) {
+        if pattern_state.validate().is_err() {
+            return false;
+        }
+        let next_render = match pattern_state.adapter() {
+            Ok(render) => render,
+            Err(_) => return false,
+        };
+        if render_kind(&self.document.render) != render_kind(&next_render) {
             match &self.document.render {
                 RenderVariant::WebShapeV1 { settings } => {
                     self.document.saved_web_shape = Some(settings.clone());
@@ -2414,7 +2845,7 @@ impl DocumentEditor {
                 RenderVariant::NativeBasicV1 => {}
             }
         }
-        self.document.render = render;
+        self.document.pattern_state = pattern_state;
         self.document.artwork_pipeline = pipeline;
         if self.document.sync_legacy_projection().is_err() {
             before.apply(&mut self.document);
@@ -2454,7 +2885,15 @@ impl DocumentEditor {
         ) else {
             return false;
         };
-        self.set_treatment_with_pipeline(RenderVariant::WebShapeV1 { settings }, None, pipeline)
+        let mut state = self.document.pattern_state.clone();
+        state.set_shape_settings(*settings);
+        if state
+            .select_pattern(PatternId::COMPATIBILITY_SHAPES_V1)
+            .is_err()
+        {
+            return false;
+        }
+        self.set_treatment_with_pipeline(state, None, pipeline)
     }
 
     pub fn restore_saved_curve(&mut self) -> bool {
@@ -2464,7 +2903,15 @@ impl DocumentEditor {
         ) else {
             return false;
         };
-        self.set_treatment_with_pipeline(RenderVariant::WebCurveV1 { settings }, None, pipeline)
+        let mut state = self.document.pattern_state.clone();
+        state.set_curve_settings(*settings);
+        if state
+            .select_pattern(PatternId::COMPATIBILITY_CURVES_V1)
+            .is_err()
+        {
+            return false;
+        }
+        self.set_treatment_with_pipeline(state, None, pipeline)
     }
 
     pub fn end_edit(&mut self) -> bool {
@@ -2518,6 +2965,7 @@ impl TreatmentState {
             appearance: document.appearance,
             output_mode: document.output_mode,
             artwork_pipeline: document.artwork_pipeline.clone(),
+            pattern_state: document.pattern_state.clone(),
             render: document.render.clone(),
             saved_web_shape: document.saved_web_shape.clone(),
             saved_web_shape_pipeline: document.saved_web_shape_pipeline.clone(),
@@ -2533,6 +2981,7 @@ impl TreatmentState {
         document.appearance = self.appearance;
         document.output_mode = self.output_mode;
         document.artwork_pipeline = self.artwork_pipeline.clone();
+        document.pattern_state = self.pattern_state.clone();
         document.render = self.render.clone();
         document.saved_web_shape = self.saved_web_shape.clone();
         document.saved_web_shape_pipeline = self.saved_web_shape_pipeline.clone();
@@ -2561,6 +3010,216 @@ mod tests {
             media_type: "image/png".into(),
             bytes: Arc::from([1]),
         }))
+    }
+
+    #[test]
+    fn new_document_initializes_authoritative_shapes_pattern_state() {
+        let document = editor().document().clone();
+        assert_eq!(
+            document.pattern_state.selected,
+            PatternSelection::Registered(PatternId::COMPATIBILITY_SHAPES_V1)
+        );
+        let record = document
+            .pattern_state
+            .instances
+            .get(&PatternId::COMPATIBILITY_SHAPES_V1)
+            .unwrap();
+        assert_eq!(record.pattern_id, PatternId::COMPATIBILITY_SHAPES_V1);
+        assert_eq!(record.schema_version, 1);
+        assert_eq!(record.generator_version, 1);
+        assert!(record.values.contains_key("settings"));
+        document.validate().unwrap();
+    }
+
+    #[test]
+    fn output_mode_restoration_preserves_authoritative_pattern_values() {
+        let mut document = Document::new(SourceArtwork {
+            name: "pixel.png".into(),
+            media_type: "image/png".into(),
+            bytes: Arc::from([1]),
+        });
+        let cmyk_values = document
+            .pattern_state
+            .instances
+            .get(&PatternId::COMPATIBILITY_SHAPES_V1)
+            .unwrap()
+            .values
+            .clone();
+
+        assert!(document.switch_output_mode(OutputMode::RgbScreen));
+        assert_eq!(
+            document
+                .inactive_cmyk
+                .as_ref()
+                .unwrap()
+                .pattern_state
+                .instances
+                .get(&PatternId::COMPATIBILITY_SHAPES_V1)
+                .unwrap()
+                .values,
+            cmyk_values
+        );
+
+        document
+            .pattern_state
+            .instances
+            .get_mut(&PatternId::COMPATIBILITY_SHAPES_V1)
+            .unwrap()
+            .values
+            .get_mut("settings")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("grid_scale".into(), serde_json::json!(2.0));
+        assert!(document.switch_output_mode(OutputMode::CmykInks));
+
+        let restored = document
+            .pattern_state
+            .instances
+            .get(&PatternId::COMPATIBILITY_SHAPES_V1)
+            .unwrap();
+        assert_eq!(restored.pattern_id, PatternId::COMPATIBILITY_SHAPES_V1);
+        assert_eq!(restored.values, cmyk_values);
+    }
+
+    #[test]
+    fn authoritative_pattern_state_overwrites_a_contradictory_transient_adapter() {
+        let mut document = editor().document().clone();
+        document.render = RenderVariant::WebCurveV1 {
+            settings: Box::new(WebCurveSettings::default()),
+        };
+        document.canonicalize_pipeline_facades().unwrap();
+        assert_eq!(
+            document.pattern_state.selected,
+            PatternSelection::Registered(PatternId::COMPATIBILITY_SHAPES_V1)
+        );
+        assert!(matches!(document.render, RenderVariant::WebShapeV1 { .. }));
+    }
+
+    #[test]
+    fn authority_read_accessors_ignore_a_contradictory_transient_adapter() {
+        let mut document = editor().document().clone();
+        let mut shapes = document.pattern_state.shape_settings().unwrap();
+        shapes.grid_scale = 2.75;
+        document.pattern_state.set_shape_settings(shapes.clone());
+
+        // This is deliberately contradictory transient execution state. UI
+        // reads must continue to use persisted pattern authority until the
+        // normal projection seam rebuilds this adapter.
+        let mut contradictory_curves = WebCurveSettings::default();
+        contradictory_curves.base_channel.curve_scale = 99.0;
+        document.render = RenderVariant::WebCurveV1 {
+            settings: Box::new(contradictory_curves),
+        };
+
+        assert_eq!(
+            document.pattern_state.selected_pattern_id(),
+            Some(PatternId::COMPATIBILITY_SHAPES_V1)
+        );
+        assert_eq!(
+            document
+                .pattern_state
+                .selected_metadata()
+                .map(|metadata| metadata.id),
+            Some(PatternId::COMPATIBILITY_SHAPES_V1)
+        );
+        assert_eq!(
+            document
+                .pattern_state
+                .selected_parameters()
+                .map(|parameters| parameters.pattern_id),
+            Some(PatternId::COMPATIBILITY_SHAPES_V1)
+        );
+        assert_eq!(document.pattern_state.shape_settings().unwrap(), shapes);
+        assert!(matches!(document.render, RenderVariant::WebCurveV1 { .. }));
+    }
+
+    #[test]
+    fn crosshatch_transition_uses_authoritative_shapes_not_a_contradictory_curve_adapter() {
+        let mut initial = editor();
+        let mut shapes = initial.document().pattern_state.shape_settings().unwrap();
+        shapes.shared_shape = WebShape::RegularPolygon;
+        shapes.polygon_sides = 6;
+        shapes.grid_scale = 41.0;
+        shapes.base_channel.rotation = 23.0;
+        assert!(initial.set_shape_settings(shapes.clone()));
+
+        let mut contradictory = initial.document().clone();
+        contradictory.render = RenderVariant::WebCurveV1 {
+            settings: Box::new(WebCurveSettings {
+                output_width: 17,
+                output_height: 13,
+                long_edge_cells: 2.0,
+                max_mark: 91.0,
+                ..Default::default()
+            }),
+        };
+        let mut editor = DocumentEditor::new(contradictory);
+        assert!(editor.apply_legacy_mapping_action(ValueMode::CrosshatchLuminance));
+
+        assert_eq!(
+            editor.document().pattern_state.selected_pattern_id(),
+            Some(PatternId::COMPATIBILITY_CURVES_V1)
+        );
+        let mut expected_crosshatch = WebCurveSettings::crosshatch_from_shape(&shapes);
+        // The legacy adapter's value mode is still projected from the
+        // authoritative Crosshatch pipeline after the transition.
+        expected_crosshatch.value_mode = ValueMode::Cmyk;
+        assert_eq!(
+            editor.document().pattern_state.curve_settings().unwrap(),
+            expected_crosshatch
+        );
+        let mut expected_saved = shapes.clone();
+        expected_saved.value_mode = ValueMode::Luminance;
+        assert_eq!(
+            editor.document().saved_web_shape.as_deref(),
+            Some(&expected_saved)
+        );
+        assert!(
+            editor.document().saved_web_curve.is_none(),
+            "a contradictory Curve adapter cannot choose the transition source"
+        );
+
+        assert!(editor.undo());
+        assert_eq!(
+            editor.document().pattern_state.selected_pattern_id(),
+            Some(PatternId::COMPATIBILITY_SHAPES_V1)
+        );
+        assert_eq!(
+            editor.document().pattern_state.shape_settings().unwrap(),
+            shapes
+        );
+        assert!(editor.redo());
+        assert_eq!(
+            editor.document().pattern_state.curve_settings().unwrap(),
+            expected_crosshatch
+        );
+    }
+
+    #[test]
+    fn pattern_selection_and_one_undo_restore_inactive_typed_settings() {
+        let mut editor = editor();
+        let mut curves = WebCurveSettings::default();
+        curves.base_channel.curve_scale = 57.0;
+        let mut curve_state = editor.document().pattern_state.clone();
+        curve_state
+            .select_pattern(PatternId::COMPATIBILITY_CURVES_V1)
+            .unwrap();
+        curve_state.set_curve_settings(curves.clone());
+        assert!(editor.set_pattern_state(curve_state));
+        let mut shape_state = editor.document().pattern_state.clone();
+        shape_state
+            .select_pattern(PatternId::COMPATIBILITY_SHAPES_V1)
+            .unwrap();
+        assert!(editor.set_pattern_state(shape_state));
+        assert!(editor.undo());
+        assert!(
+            matches!(editor.document().render, RenderVariant::WebCurveV1 { ref settings } if **settings == curves)
+        );
+        assert_eq!(
+            editor.document().pattern_state.selected,
+            PatternSelection::Registered(PatternId::COMPATIBILITY_CURVES_V1)
+        );
     }
 
     #[test]
@@ -2720,9 +3379,8 @@ mod tests {
             active_channel: None,
         };
         assert!(editor.set_artwork_pipeline(ordinary_pipeline.clone()));
-        assert!(editor.set_render_variant(RenderVariant::WebCurveV1 {
-            settings: Box::new(ordinary_curve.clone()),
-        }));
+        assert!(editor.select_pattern_for_test(PatternId::COMPATIBILITY_CURVES_V1));
+        assert!(editor.set_curve_settings(ordinary_curve.clone()));
         assert!(editor.apply_legacy_mapping_action(ValueMode::CrosshatchLuminance));
         assert!(editor.exit_crosshatch_treatment());
         assert_eq!(editor.document().artwork_pipeline, ordinary_pipeline);
@@ -2761,6 +3419,32 @@ mod tests {
         assert!(editor.undo());
         assert_eq!(editor.document().appearance, DocumentAppearance::default());
         assert!(!editor.is_dirty());
+        assert!(editor.redo());
+        assert_eq!(editor.document().appearance, appearance);
+    }
+
+    #[test]
+    fn export_background_is_authoritative_and_does_not_change_preview_surface() {
+        let mut editor = editor();
+        let preview_surface = editor.document().appearance.preview_surface;
+        let appearance = DocumentAppearance {
+            preview_surface,
+            export_background: ExportBackground::Color {
+                color: RgbaColor::WHITE,
+            },
+        };
+
+        assert!(editor.set_appearance(appearance));
+        assert_eq!(editor.document().appearance, appearance);
+        assert!(editor.undo());
+        assert_eq!(
+            editor.document().appearance.export_background,
+            ExportBackground::None
+        );
+        assert_eq!(
+            editor.document().appearance.preview_surface,
+            preview_surface
+        );
         assert!(editor.redo());
         assert_eq!(editor.document().appearance, appearance);
     }
@@ -2907,9 +3591,7 @@ mod tests {
         rgb.channels.b.grid_rotation = 37.0;
         rgb.channels.b.shape = WebShape::RegularPolygon;
         rgb.channels.b.polygon_sides = 6;
-        assert!(editor.set_render_variant(RenderVariant::WebShapeV1 {
-            settings: Box::new(rgb.clone()),
-        }));
+        assert!(editor.set_shape_settings(rgb.clone()));
         let rgb_before_switch = editor.document().render.clone();
 
         assert!(editor.set_output_mode(OutputMode::CmykInks));
@@ -2934,9 +3616,7 @@ mod tests {
             value_mode: ValueMode::Rgb,
             ..Default::default()
         };
-        assert!(editor.set_render_variant(RenderVariant::WebShapeV1 {
-            settings: Box::new(rgb),
-        }));
+        assert!(!editor.set_shape_settings(rgb));
         assert_eq!(editor.document().output_mode, OutputMode::CmykInks);
         assert!(editor.apply_legacy_mapping_action(ValueMode::Rgb));
         assert_eq!(editor.document().output_mode, OutputMode::RgbScreen);
@@ -2948,18 +3628,14 @@ mod tests {
             value_mode: ValueMode::Luminance,
             ..Default::default()
         };
-        assert!(editor.set_render_variant(RenderVariant::WebShapeV1 {
-            settings: Box::new(neutral),
-        }));
+        assert!(!editor.set_shape_settings(neutral));
         assert_eq!(editor.document().output_mode, OutputMode::RgbScreen);
 
         let cmyk = WebShapeSettings {
             value_mode: ValueMode::Cmyk,
             ..Default::default()
         };
-        assert!(editor.set_render_variant(RenderVariant::WebShapeV1 {
-            settings: Box::new(cmyk),
-        }));
+        assert!(!editor.set_shape_settings(cmyk));
         assert_eq!(editor.document().output_mode, OutputMode::RgbScreen);
         assert!(editor.apply_legacy_mapping_action(ValueMode::Cmyk));
         assert_eq!(editor.document().output_mode, OutputMode::CmykInks);
@@ -2970,12 +3646,7 @@ mod tests {
         let mut editor = editor();
         editor.set_output_mode(OutputMode::RgbScreen);
         let appearance = editor.document().appearance;
-        assert!(editor.set_treatment(
-            RenderVariant::WebShapeV1 {
-                settings: Box::default()
-            },
-            None,
-        ));
+        assert!(!editor.set_treatment(editor.document().pattern_state.clone(), None));
         assert_eq!(editor.document().appearance, appearance);
         assert_eq!(editor.document().output_mode, OutputMode::RgbScreen);
         let RenderVariant::WebShapeV1 { settings } = &editor.document().render else {
@@ -3028,19 +3699,28 @@ mod tests {
     #[test]
     fn web_shape_treatment_is_one_undoable_document_edit() {
         let mut editor = editor();
-        assert!(editor.set_render_variant(RenderVariant::NativeBasicV1));
+        let mut native_state = editor.document().pattern_state.clone();
+        native_state.select_native_basic();
+        assert!(editor.set_pattern_state(native_state));
         editor.mark_clean();
-        let web = RenderVariant::WebShapeV1 {
-            settings: Box::new(WebShapeSettings::default()),
-        };
-        assert!(editor.set_render_variant(web.clone()));
-        assert_eq!(editor.document().render, web);
+        let mut shape_state = editor.document().pattern_state.clone();
+        shape_state
+            .select_pattern(PatternId::COMPATIBILITY_SHAPES_V1)
+            .unwrap();
+        assert!(editor.set_pattern_state(shape_state));
+        assert!(matches!(
+            editor.document().render,
+            RenderVariant::WebShapeV1 { .. }
+        ));
         assert!(editor.is_dirty());
         assert!(editor.undo());
         assert_eq!(editor.document().render, RenderVariant::NativeBasicV1);
         assert!(!editor.is_dirty());
         assert!(editor.redo());
-        assert_eq!(editor.document().render, web);
+        assert!(matches!(
+            editor.document().render,
+            RenderVariant::WebShapeV1 { .. }
+        ));
     }
 
     #[test]
@@ -3089,6 +3769,9 @@ mod tests {
         document.render = RenderVariant::WebShapeV1 {
             settings: Box::new(settings.clone()),
         };
+        document
+            .pattern_state
+            .set_selected_parameters_for_test(&document.render);
         assert!(document.validate().is_err());
 
         settings.channels.c.opacity = 1.0;
@@ -3096,6 +3779,9 @@ mod tests {
         document.render = RenderVariant::WebShapeV1 {
             settings: Box::new(settings.clone()),
         };
+        document
+            .pattern_state
+            .set_selected_parameters_for_test(&document.render);
         assert!(document.validate().is_err());
 
         settings.channels.m.threshold = 0.0;
@@ -3103,6 +3789,9 @@ mod tests {
         document.render = RenderVariant::WebShapeV1 {
             settings: Box::new(settings),
         };
+        document
+            .pattern_state
+            .set_selected_parameters_for_test(&document.render);
         assert!(document.validate().is_err());
     }
 
@@ -3155,7 +3844,10 @@ mod tests {
         let expected = RenderVariant::WebShapeV1 {
             settings: Box::new(settings),
         };
-        assert!(editor.set_render_variant(expected.clone()));
+        let RenderVariant::WebShapeV1 { settings } = &expected else {
+            unreachable!()
+        };
+        assert!(editor.set_shape_settings((**settings).clone()));
         assert_eq!(editor.document().render, expected);
         assert!(editor.undo());
         assert_eq!(editor.document(), &before);
@@ -3175,14 +3867,20 @@ mod tests {
             shared_path: CurvePath::deep_wave(),
             ..Default::default()
         };
-        let curve_variant = RenderVariant::WebCurveV1 {
-            settings: Box::new(curve.clone()),
-        };
-        assert!(editor.set_render_variant(curve_variant.clone()));
-        assert!(editor.set_render_variant(RenderVariant::NativeBasicV1));
+        let mut curve_state = editor.document().pattern_state.clone();
+        curve_state
+            .select_pattern(PatternId::COMPATIBILITY_CURVES_V1)
+            .unwrap();
+        curve_state.set_curve_settings(curve.clone());
+        assert!(editor.set_pattern_state(curve_state));
+        let mut native_state = editor.document().pattern_state.clone();
+        native_state.select_native_basic();
+        assert!(editor.set_pattern_state(native_state));
         assert_eq!(editor.document().saved_web_curve.as_deref(), Some(&curve));
         assert!(editor.undo());
-        assert_eq!(editor.document().render, curve_variant);
+        assert!(
+            matches!(editor.document().render, RenderVariant::WebCurveV1 { ref settings } if **settings == curve)
+        );
         assert!(editor.redo());
         assert_eq!(editor.document().render, RenderVariant::NativeBasicV1);
         assert_eq!(editor.document().saved_web_curve.as_deref(), Some(&curve));
@@ -3194,18 +3892,14 @@ mod tests {
         // CMYK Shapes -> RGB Shapes -> CMYK Shapes
         assert!(editor.apply_legacy_mapping_action(ValueMode::Luminance));
         assert!(editor.set_output_mode(OutputMode::RgbScreen));
-        assert!(editor.set_render_variant(RenderVariant::WebCurveV1 {
-            settings: Box::new(WebCurveSettings::default())
-        }));
+        assert!(editor.select_pattern(PatternId::COMPATIBILITY_CURVES_V1));
         let saved_rgb_shape_pipeline = editor.document().saved_web_shape_pipeline.clone().unwrap();
         assert!(editor.restore_saved_shape());
         assert_eq!(editor.document().artwork_pipeline, saved_rgb_shape_pipeline);
 
         // RGB Shapes -> CMYK Curves -> RGB Shapes and CMYK Curves -> RGB Curves -> CMYK Curves.
         assert!(editor.set_output_mode(OutputMode::CmykInks));
-        assert!(editor.set_render_variant(RenderVariant::WebCurveV1 {
-            settings: Box::new(WebCurveSettings::default())
-        }));
+        assert!(editor.select_pattern(PatternId::COMPATIBILITY_CURVES_V1));
         let cmyk_curve_pipeline = editor.document().artwork_pipeline.clone();
         let saved_shape_pipeline = editor.document().saved_web_shape_pipeline.clone().unwrap();
         assert!(editor.restore_saved_shape());
@@ -3235,14 +3929,19 @@ mod tests {
         document.render = RenderVariant::WebCurveV1 {
             settings: Box::new(original.clone()),
         };
+        document
+            .pattern_state
+            .select_pattern(PatternId::COMPATIBILITY_CURVES_V1)
+            .unwrap();
+        document
+            .pattern_state
+            .set_selected_parameters_for_test(&document.render);
         let mut editor = DocumentEditor::new(document);
         editor.begin_edit(SettingKey::CurvePath);
         for y in [-0.2, -0.3, -0.35] {
             let mut changed = original.clone();
             changed.shared_path.segments[0].control_1.y = y;
-            editor.set_render_variant(RenderVariant::WebCurveV1 {
-                settings: Box::new(changed),
-            });
+            editor.set_curve_settings(changed);
         }
         assert!(editor.end_edit());
         assert!(editor.undo());
@@ -3269,13 +3968,18 @@ mod tests {
         document.render = RenderVariant::WebCurveV1 {
             settings: Box::new(original.clone()),
         };
+        document
+            .pattern_state
+            .select_pattern(PatternId::COMPATIBILITY_CURVES_V1)
+            .unwrap();
+        document
+            .pattern_state
+            .set_selected_parameters_for_test(&document.render);
         let mut editor = DocumentEditor::new(document);
         editor.begin_edit(SettingKey::CurvePositionX);
         let mut changed = original.clone();
         changed.channels.c.offset_x = 75.0;
-        assert!(editor.set_render_variant(RenderVariant::WebCurveV1 {
-            settings: Box::new(changed),
-        }));
+        assert!(editor.set_curve_settings(changed));
         assert!(editor.cancel_edit());
         assert_eq!(
             editor.document().render,
@@ -3306,7 +4010,9 @@ mod tests {
             contrast: 136.0,
             angle: -12.0,
         };
-        assert!(editor.set_treatment(RenderVariant::NativeBasicV1, Some(settings)));
+        let mut pattern_state = editor.document().pattern_state.clone();
+        pattern_state.select_native_basic();
+        assert!(editor.set_treatment(pattern_state, Some(settings)));
         assert_eq!(editor.document().settings, settings);
         assert_eq!(
             editor.document().appearance,
@@ -3336,9 +4042,7 @@ mod tests {
             active_channel: Some(OutputChannelId::RgbGreen),
         };
         assert!(editor.set_treatment_with_pipeline(
-            RenderVariant::WebShapeV1 {
-                settings: Box::new(WebShapeSettings::default()),
-            },
+            editor.document().pattern_state.clone(),
             None,
             pipeline.clone(),
         ));
@@ -3375,6 +4079,13 @@ mod tests {
         preset_document.render = RenderVariant::WebCurveV1 {
             settings: Box::new(curve.clone()),
         };
+        preset_document
+            .pattern_state
+            .select_pattern(PatternId::COMPATIBILITY_CURVES_V1)
+            .unwrap();
+        preset_document
+            .pattern_state
+            .set_selected_parameters_for_test(&preset_document.render);
         let bytes = crate::preset::document_preset_bytes(
             "Curve Base",
             &preset_document,
@@ -3407,9 +4118,7 @@ mod tests {
         for ink in Ink::ALL {
             shifted.channels.get_mut(ink).scale += delta;
         }
-        assert!(editor.set_render_variant(RenderVariant::WebCurveV1 {
-            settings: Box::new(shifted),
-        }));
+        assert!(editor.set_curve_settings(shifted));
         assert!(editor.undo());
         assert_eq!(editor.document().render, before_shift);
     }
@@ -3449,6 +4158,13 @@ mod tests {
         curve_document.render = RenderVariant::WebCurveV1 {
             settings: Box::new(WebCurveSettings::default()),
         };
+        curve_document
+            .pattern_state
+            .select_pattern(PatternId::COMPATIBILITY_CURVES_V1)
+            .unwrap();
+        curve_document
+            .pattern_state
+            .set_selected_parameters_for_test(&curve_document.render);
         let RenderVariant::WebCurveV1 { settings } = &mut curve_document.render else {
             panic!("expected curve render");
         };
@@ -3527,7 +4243,7 @@ mod tests {
     }
 
     #[test]
-    fn value_mode_serialization_has_four_runtime_variants_and_rejects_removed_inverse() {
+    fn value_mode_is_a_transient_adapter_projection_and_rejects_removed_inverse() {
         assert_eq!(
             serde_json::to_string(&ValueMode::Luminance).unwrap(),
             "\"luminance\""
@@ -3539,21 +4255,18 @@ mod tests {
             panic!()
         };
         settings.value_mode = ValueMode::Luminance;
-        document.saved_web_curve = Some(Box::new(WebCurveSettings {
-            value_mode: ValueMode::Luminance,
-            ..Default::default()
-        }));
+        document
+            .pattern_state
+            .set_selected_parameters_for_test(&document.render);
         let json = serde_json::to_string(&document).unwrap();
-        assert!(json.contains("\"value_mode\":\"luminance\""));
+        assert!(!json.contains("\"value_mode\""));
+        assert!(!json.contains("\"render\""));
         assert!(!json.contains("inverted-luminance"));
         let decoded: Document = serde_json::from_str(&json).unwrap();
-        assert!(matches!(
-            decoded.render,
-            RenderVariant::WebShapeV1 { settings } if settings.value_mode == ValueMode::Luminance
-        ));
-        assert_eq!(
-            decoded.saved_web_curve.unwrap().value_mode,
-            ValueMode::Luminance
+        assert!(matches!(decoded.render, RenderVariant::NativeBasicV1));
+        let projected = decoded.projected_for_render().unwrap();
+        assert!(
+            matches!(projected.render, RenderVariant::WebShapeV1 { settings } if settings.value_mode == ValueMode::Cmyk)
         );
     }
 }
