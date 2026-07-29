@@ -881,6 +881,158 @@ pub enum RenderVariant {
     WebCurveV1 {
         settings: Box<WebCurveSettings>,
     },
+    /// Derived dispatch only; persisted Weighted Voronoi data lives solely in
+    /// `PatternDocumentState`.
+    WeightedVoronoiCanonicalV1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum WeightedVoronoiArrangementPolicy {
+    #[default]
+    Shared,
+    Independent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum WeightedVoronoiPlacementMode {
+    #[default]
+    SourceWeighted,
+    Uniform,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum WeightedVoronoiDensityPolarity {
+    #[default]
+    DarkerMoreDense,
+    LighterMoreDense,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WeightedVoronoiChannelSettings {
+    pub enabled: bool,
+    pub arrangement: WeightedVoronoiArrangementPolicy,
+    pub cell_count: u32,
+    pub seed: u64,
+    pub boundary_gap: f64,
+    pub placement: WeightedVoronoiPlacementMode,
+    pub density_polarity: WeightedVoronoiDensityPolarity,
+    pub density_strength: f64,
+    pub response_strength: f64,
+    pub minimum_cell_scale: f64,
+}
+
+impl Default for WeightedVoronoiChannelSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            arrangement: WeightedVoronoiArrangementPolicy::Shared,
+            cell_count: 256,
+            seed: 0,
+            boundary_gap: 1.0,
+            placement: WeightedVoronoiPlacementMode::SourceWeighted,
+            density_polarity: WeightedVoronoiDensityPolarity::DarkerMoreDense,
+            density_strength: 1.0,
+            response_strength: 1.0,
+            minimum_cell_scale: 0.0,
+        }
+    }
+}
+
+impl WeightedVoronoiChannelSettings {
+    fn validate(&self, channel: OutputChannelId) -> anyhow::Result<()> {
+        let limits = crate::site_distribution::DistributionLimits::default();
+        anyhow::ensure!(
+            (2..=limits.max_sites).contains(&(self.cell_count as usize)),
+            "Weighted Voronoi cell count for {} must be between 2 and {}",
+            channel.stable_id(),
+            limits.max_sites
+        );
+        for (label, value, range) in [
+            ("boundary gap", self.boundary_gap, 0.0..=64.0),
+            ("density strength", self.density_strength, 0.001..=16.0),
+            ("response strength", self.response_strength, 0.0..=16.0),
+            ("minimum cell scale", self.minimum_cell_scale, 0.0..=1.0),
+        ] {
+            anyhow::ensure!(
+                value.is_finite() && range.contains(&value),
+                "Weighted Voronoi {label} for {} is outside its supported range",
+                channel.stable_id()
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WeightedVoronoiSettings {
+    pub channels: BTreeMap<String, WeightedVoronoiChannelSettings>,
+}
+
+impl Default for WeightedVoronoiSettings {
+    fn default() -> Self {
+        Self {
+            channels: weighted_voronoi_channels()
+                .map(|channel| {
+                    (
+                        channel.stable_id().to_owned(),
+                        WeightedVoronoiChannelSettings::default(),
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
+impl WeightedVoronoiSettings {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let expected: Vec<_> = weighted_voronoi_channels().collect();
+        anyhow::ensure!(
+            self.channels.len() == expected.len()
+                && expected
+                    .iter()
+                    .all(|channel| self.channels.contains_key(channel.stable_id())),
+            "Weighted Voronoi settings must retain every semantic channel"
+        );
+        for channel in expected {
+            self.channel_settings(channel)?.validate(channel)?;
+        }
+        Ok(())
+    }
+
+    pub fn channel_settings(
+        &self,
+        channel: OutputChannelId,
+    ) -> anyhow::Result<&WeightedVoronoiChannelSettings> {
+        self.channels.get(channel.stable_id()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Weighted Voronoi settings are missing semantic channel {}",
+                channel.stable_id()
+            )
+        })
+    }
+
+    pub fn channel_settings_mut(
+        &mut self,
+        channel: OutputChannelId,
+    ) -> anyhow::Result<&mut WeightedVoronoiChannelSettings> {
+        self.channels.get_mut(channel.stable_id()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Weighted Voronoi settings are missing semantic channel {}",
+                channel.stable_id()
+            )
+        })
+    }
+}
+
+fn weighted_voronoi_channels() -> impl Iterator<Item = OutputChannelId> {
+    OutputChannelId::CMYK
+        .into_iter()
+        .chain(OutputChannelId::RGB)
 }
 
 /// The only persisted pattern authority.  The selected pattern and each
@@ -967,12 +1119,25 @@ impl PatternDocumentState {
                 PatternId::COMPATIBILITY_CURVES_V1 => {
                     let _: WebCurveSettings = pattern_settings_from_parameters(record)?;
                 }
+                PatternId::WEIGHTED_VORONOI_V1 => {
+                    unreachable!("core instances exclude optional Weighted Voronoi state")
+                }
             }
         }
         anyhow::ensure!(
-            self.instances.len() == 2,
+            self.instances.len() == 2
+                || (self.instances.len() == 3
+                    && self.instances.contains_key(&PatternId::WEIGHTED_VORONOI_V1)),
             "authoritative pattern state contains an unsupported pattern instance"
         );
+        if let Some(record) = self.instances.get(&PatternId::WEIGHTED_VORONOI_V1) {
+            anyhow::ensure!(
+                record.pattern_id == PatternId::WEIGHTED_VORONOI_V1,
+                "authoritative Weighted Voronoi state has a contradictory record"
+            );
+            record.validate().map_err(anyhow::Error::new)?;
+            weighted_voronoi_settings_from_parameters(record)?.validate()?;
+        }
         if let Some(id) = self.selected_pattern_id() {
             anyhow::ensure!(
                 self.instances.contains_key(&id),
@@ -1004,12 +1169,22 @@ impl PatternDocumentState {
                     )?),
                 })
             }
+            PatternSelection::Registered(PatternId::WEIGHTED_VORONOI_V1) => {
+                Ok(RenderVariant::WeightedVoronoiCanonicalV1)
+            }
         }
     }
 
     /// Selects a registered pattern explicitly. The transient renderer adapter
     /// is deliberately absent from this API: it cannot choose state.
     pub(crate) fn select_pattern(&mut self, pattern_id: PatternId) -> anyhow::Result<()> {
+        if pattern_id == PatternId::WEIGHTED_VORONOI_V1 && !self.instances.contains_key(&pattern_id)
+        {
+            self.instances.insert(
+                pattern_id,
+                pattern_parameters_from_settings(pattern_id, &WeightedVoronoiSettings::default()),
+            );
+        }
         anyhow::ensure!(
             self.instances.contains_key(&pattern_id),
             "selected pattern {pattern_id} has no authoritative parameter state"
@@ -1043,6 +1218,15 @@ impl PatternDocumentState {
         )
     }
 
+    /// Reads typed Weighted Voronoi settings from persisted authority only.
+    pub fn weighted_voronoi_settings(&self) -> anyhow::Result<WeightedVoronoiSettings> {
+        weighted_voronoi_settings_from_parameters(
+            self.instances
+                .get(&PatternId::WEIGHTED_VORONOI_V1)
+                .ok_or_else(|| anyhow::anyhow!("missing authoritative Weighted Voronoi state"))?,
+        )
+    }
+
     /// Replaces typed Shapes parameters while retaining the existing explicit
     /// selection. Callers choose a pattern separately through `select_pattern`.
     pub(crate) fn set_shape_settings(&mut self, settings: WebShapeSettings) {
@@ -1061,6 +1245,13 @@ impl PatternDocumentState {
         );
     }
 
+    pub(crate) fn set_weighted_voronoi_settings(&mut self, settings: WeightedVoronoiSettings) {
+        self.instances.insert(
+            PatternId::WEIGHTED_VORONOI_V1,
+            pattern_parameters_from_settings(PatternId::WEIGHTED_VORONOI_V1, &settings),
+        );
+    }
+
     #[cfg(test)]
     pub(crate) fn set_selected_parameters_for_test(&mut self, render: &RenderVariant) {
         // Test fixtures may seed typed parameters through this convenience
@@ -1076,6 +1267,10 @@ impl PatternDocumentState {
                 PatternSelection::Registered(PatternId::COMPATIBILITY_CURVES_V1),
                 RenderVariant::WebCurveV1 { settings },
             ) => self.set_curve_settings((**settings).clone()),
+            (
+                PatternSelection::Registered(PatternId::WEIGHTED_VORONOI_V1),
+                RenderVariant::WeightedVoronoiCanonicalV1,
+            ) => {}
             _ => {
                 panic!("select the authoritative pattern explicitly before setting test parameters")
             }
@@ -1111,6 +1306,7 @@ impl PatternDocumentState {
                 settings.channels = source.curve_settings()?.channels;
                 self.set_curve_settings(settings);
             }
+            PatternSelection::Registered(PatternId::WEIGHTED_VORONOI_V1) => {}
         }
         Ok(())
     }
@@ -1164,6 +1360,29 @@ fn pattern_settings_from_parameters<T: for<'de> Deserialize<'de>>(
     object.insert("value_mode".into(), serde_json::json!("cmyk"));
     object.insert("single_channel".into(), serde_json::json!("black"));
     serde_json::from_value(settings).map_err(|error| {
+        anyhow::anyhow!(
+            "authoritative pattern {} has malformed typed settings: {error}",
+            parameters.pattern_id
+        )
+    })
+}
+
+fn weighted_voronoi_settings_from_parameters(
+    parameters: &VersionedPatternParameters,
+) -> anyhow::Result<WeightedVoronoiSettings> {
+    anyhow::ensure!(
+        parameters.values.len() == 1 && parameters.values.contains_key("settings"),
+        "authoritative pattern {} has malformed typed settings",
+        parameters.pattern_id
+    );
+    serde_json::from_value(
+        parameters
+            .values
+            .get("settings")
+            .expect("checked settings key")
+            .clone(),
+    )
+    .map_err(|error| {
         anyhow::anyhow!(
             "authoritative pattern {} has malformed typed settings: {error}",
             parameters.pattern_id
@@ -1518,7 +1737,7 @@ impl Document {
                     self.saved_web_curve = Some(settings.clone());
                     self.saved_web_curve_pipeline = Some(self.artwork_pipeline.clone());
                 }
-                RenderVariant::NativeBasicV1 => {}
+                RenderVariant::NativeBasicV1 | RenderVariant::WeightedVoronoiCanonicalV1 => {}
             }
         }
         if let Some(settings) = native_settings {
@@ -1571,7 +1790,7 @@ impl Document {
             RenderVariant::WebCurveV1 { settings } => {
                 apply(&mut settings.value_mode, &mut settings.single_channel)
             }
-            RenderVariant::NativeBasicV1 => {}
+            RenderVariant::NativeBasicV1 | RenderVariant::WeightedVoronoiCanonicalV1 => {}
         }
     }
 
@@ -1721,6 +1940,7 @@ impl Document {
                 }
                 changed
             }
+            PatternSelection::Registered(PatternId::WEIGHTED_VORONOI_V1) => false,
         };
         if let Some(settings) = self.saved_web_shape.as_deref_mut() {
             changed |= normalize_canvas_dimensions(
@@ -2189,7 +2409,7 @@ pub fn normalize_render_variant_canvas(
     source_height: u32,
 ) -> bool {
     match render {
-        RenderVariant::NativeBasicV1 => false,
+        RenderVariant::NativeBasicV1 | RenderVariant::WeightedVoronoiCanonicalV1 => false,
         RenderVariant::WebShapeV1 { settings } => normalize_canvas_dimensions(
             &mut settings.output_width,
             &mut settings.output_height,
@@ -2655,7 +2875,8 @@ impl DocumentEditor {
                         .select_pattern(PatternId::COMPATIBILITY_CURVES_V1)
                         .expect("registered Curves state");
                 }
-                PatternSelection::NativeBasicV1 => return false,
+                PatternSelection::NativeBasicV1
+                | PatternSelection::Registered(PatternId::WEIGHTED_VORONOI_V1) => return false,
             }
         }
         if self.document.apply_legacy_mapping_action(mapping).is_err() {
@@ -2679,7 +2900,7 @@ impl DocumentEditor {
                     self.document.saved_web_curve_pipeline =
                         Some(self.document.artwork_pipeline.clone());
                 }
-                RenderVariant::NativeBasicV1 => {}
+                RenderVariant::NativeBasicV1 | RenderVariant::WeightedVoronoiCanonicalV1 => {}
             }
             self.document.pattern_state = before.pattern_state.clone();
             let _ = self.document.sync_legacy_projection();
@@ -2740,6 +2961,15 @@ impl DocumentEditor {
         self.set_pattern_state(state)
     }
 
+    pub fn set_weighted_voronoi_settings(&mut self, settings: WeightedVoronoiSettings) -> bool {
+        if settings.validate().is_err() {
+            return false;
+        }
+        let mut state = self.document.pattern_state.clone();
+        state.set_weighted_voronoi_settings(settings);
+        self.set_pattern_state(state)
+    }
+
     #[cfg(test)]
     pub(crate) fn select_pattern_for_test(&mut self, pattern_id: PatternId) -> bool {
         let mut state = self.document.pattern_state.clone();
@@ -2777,7 +3007,7 @@ impl DocumentEditor {
                     self.document.saved_web_curve_pipeline =
                         Some(self.document.artwork_pipeline.clone());
                 }
-                RenderVariant::NativeBasicV1 => {}
+                RenderVariant::NativeBasicV1 | RenderVariant::WeightedVoronoiCanonicalV1 => {}
             }
         }
         self.document.pattern_state = pattern_state;
@@ -2842,7 +3072,7 @@ impl DocumentEditor {
                     self.document.saved_web_curve_pipeline =
                         Some(self.document.artwork_pipeline.clone());
                 }
-                RenderVariant::NativeBasicV1 => {}
+                RenderVariant::NativeBasicV1 | RenderVariant::WeightedVoronoiCanonicalV1 => {}
             }
         }
         self.document.pattern_state = pattern_state;
@@ -2997,6 +3227,7 @@ fn render_kind(render: &RenderVariant) -> u8 {
         RenderVariant::NativeBasicV1 => 0,
         RenderVariant::WebShapeV1 { .. } => 1,
         RenderVariant::WebCurveV1 { .. } => 2,
+        RenderVariant::WeightedVoronoiCanonicalV1 => 3,
     }
 }
 
@@ -4026,6 +4257,48 @@ mod tests {
             editor.can_undo(),
             "the earlier appearance edit remains independently undoable"
         );
+    }
+
+    #[test]
+    fn weighted_voronoi_state_is_authoritative_undoable_and_rejects_old_generator_versions() {
+        let mut editor = editor();
+        assert!(editor.select_pattern(PatternId::WEIGHTED_VORONOI_V1));
+        let mut settings = editor
+            .document()
+            .pattern_state
+            .weighted_voronoi_settings()
+            .unwrap();
+        settings
+            .channel_settings_mut(OutputChannelId::CmykCyan)
+            .unwrap()
+            .cell_count = 32;
+        assert!(editor.set_weighted_voronoi_settings(settings.clone()));
+        assert_eq!(
+            editor
+                .document()
+                .pattern_state
+                .weighted_voronoi_settings()
+                .unwrap(),
+            settings
+        );
+        assert!(editor.undo());
+        assert_eq!(
+            editor
+                .document()
+                .pattern_state
+                .weighted_voronoi_settings()
+                .unwrap(),
+            WeightedVoronoiSettings::default()
+        );
+        assert!(editor.redo());
+        let mut obsolete = editor.document().clone();
+        obsolete
+            .pattern_state
+            .instances
+            .get_mut(&PatternId::WEIGHTED_VORONOI_V1)
+            .unwrap()
+            .generator_version = 1;
+        assert!(obsolete.validate().is_err());
     }
 
     #[test]

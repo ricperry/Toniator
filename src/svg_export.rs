@@ -58,6 +58,7 @@ fn export_mark_svg(
         RenderVariant::NativeBasicV1 => source_dimensions(&document.source)?,
         RenderVariant::WebShapeV1 { settings } => (settings.output_width, settings.output_height),
         RenderVariant::WebCurveV1 { settings } => (settings.output_width, settings.output_height),
+        RenderVariant::WeightedVoronoiCanonicalV1 => source_dimensions(&document.source)?,
     };
     let scale_x = artboard_width as f32 / mark_set.width as f32;
     let scale_y = artboard_height as f32 / mark_set.height as f32;
@@ -811,6 +812,7 @@ mod tests {
                     ..Default::default()
                 }),
             },
+            crate::pattern::PatternId::WEIGHTED_VORONOI_V1 => RenderVariant::NativeBasicV1,
         }
     }
 
@@ -1230,6 +1232,9 @@ mod tests {
                     assert!(text.contains("-curve-"));
                     assert!(text.contains("clip-path=\"url(#toniator-artboard-clip)\""));
                     assert!(text.contains(" C "));
+                }
+                crate::pattern::PatternId::WeightedVoronoiV1 => {
+                    unreachable!("compatibility fixture")
                 }
             }
             usvg::Tree::from_data(&svg, &usvg::Options::default()).unwrap();

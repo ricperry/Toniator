@@ -46,6 +46,7 @@ pub fn document_artboard(document: &Document) -> Result<(u32, u32)> {
         RenderVariant::NativeBasicV1 => return Ok(source),
         RenderVariant::WebShapeV1 { settings } => settings.output_width.max(settings.output_height),
         RenderVariant::WebCurveV1 { settings } => settings.output_width.max(settings.output_height),
+        RenderVariant::WeightedVoronoiCanonicalV1 => return Ok(source),
     };
     Ok(crate::model::aspect_locked_dimensions(
         source.0, source.1, long_edge,
@@ -295,6 +296,7 @@ mod tests {
                     ..Default::default()
                 }),
             },
+            PatternId::WEIGHTED_VORONOI_V1 => RenderVariant::NativeBasicV1,
         }
     }
 

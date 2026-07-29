@@ -23,16 +23,20 @@ pub enum PatternId {
     CompatibilityShapesV1,
     #[serde(rename = "compat.curves.v1")]
     CompatibilityCurvesV1,
+    #[serde(rename = "weighted-voronoi.v1")]
+    WeightedVoronoiV1,
 }
 
 impl PatternId {
     pub const COMPATIBILITY_SHAPES_V1: Self = Self::CompatibilityShapesV1;
     pub const COMPATIBILITY_CURVES_V1: Self = Self::CompatibilityCurvesV1;
+    pub const WEIGHTED_VORONOI_V1: Self = Self::WeightedVoronoiV1;
 
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::CompatibilityShapesV1 => "compat.shapes.v1",
             Self::CompatibilityCurvesV1 => "compat.curves.v1",
+            Self::WeightedVoronoiV1 => "weighted-voronoi.v1",
         }
     }
 }
@@ -54,6 +58,7 @@ impl FromStr for PatternId {
         match value {
             "compat.shapes.v1" => Ok(Self::CompatibilityShapesV1),
             "compat.curves.v1" => Ok(Self::CompatibilityCurvesV1),
+            "weighted-voronoi.v1" => Ok(Self::WeightedVoronoiV1),
             _ => Err(PatternIdError::Unknown(value.to_owned())),
         }
     }
@@ -116,6 +121,7 @@ pub enum PatternOutputKind {
 pub enum PatternInspectorPanel {
     Shapes,
     Curves,
+    WeightedVoronoi,
 }
 
 impl PatternInspectorPanel {
@@ -123,6 +129,7 @@ impl PatternInspectorPanel {
         match self {
             Self::Shapes => "web",
             Self::Curves => "curve",
+            Self::WeightedVoronoi => "weighted-voronoi",
         }
     }
 }
@@ -134,6 +141,7 @@ impl PatternInspectorPanel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PatternParameterScope {
     TreatmentScope,
+    PatternScope,
 }
 
 /// Conditions under which an existing compatibility control is applicable.
@@ -179,8 +187,11 @@ pub enum LegacyPatternCompatibility {
 /// Compatibility constraints for an entry retained from the pre-registry
 /// renderer. These are declarations only; they do not route rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PatternCompatibility {
-    pub legacy_render_variant: LegacyPatternCompatibility,
+pub enum PatternCompatibility {
+    Legacy {
+        legacy_render_variant: LegacyPatternCompatibility,
+    },
+    CanonicalRegions,
 }
 
 /// Persistable identity and version contract for one registered pattern.
@@ -438,14 +449,81 @@ const CURVES_PARAMETERS: [PatternParameterDescriptor; 15] = [
     },
 ];
 
-const BUILTIN_PATTERN_METADATA: [PatternMetadata; 2] = [
+const WEIGHTED_VORONOI_PARAMETERS: [PatternParameterDescriptor; 8] = [
+    PatternParameterDescriptor {
+        key: "enabled-channels",
+        control_id: "weighted_voronoi_visible",
+        label: "Enabled Channels",
+        help: "Include or omit each semantic output channel from the generated regions.",
+        scope: PatternParameterScope::PatternScope,
+        visibility: PatternParameterVisibility::Always,
+    },
+    PatternParameterDescriptor {
+        key: "cell-count",
+        control_id: "weighted_voronoi_cell_count",
+        label: "Cell Count",
+        help: "Exact bounded cells per enabled semantic channel.",
+        scope: PatternParameterScope::PatternScope,
+        visibility: PatternParameterVisibility::Always,
+    },
+    PatternParameterDescriptor {
+        key: "arrangement",
+        control_id: "weighted_voronoi_arrangement",
+        label: "Arrangement",
+        help: "Share candidates across channels or use channel-specific candidates.",
+        scope: PatternParameterScope::PatternScope,
+        visibility: PatternParameterVisibility::Always,
+    },
+    PatternParameterDescriptor {
+        key: "placement",
+        control_id: "weighted_voronoi_placement",
+        label: "Placement",
+        help: "Use uniform or source-weighted site placement.",
+        scope: PatternParameterScope::PatternScope,
+        visibility: PatternParameterVisibility::Always,
+    },
+    PatternParameterDescriptor {
+        key: "density-strength",
+        control_id: "weighted_voronoi_density_strength",
+        label: "Density Strength",
+        help: "Controls how strongly source values bias weighted site placement.",
+        scope: PatternParameterScope::PatternScope,
+        visibility: PatternParameterVisibility::Always,
+    },
+    PatternParameterDescriptor {
+        key: "response-strength",
+        control_id: "weighted_voronoi_response_strength",
+        label: "Interior Response",
+        help: "Controls how strongly source values inset each cell interior.",
+        scope: PatternParameterScope::PatternScope,
+        visibility: PatternParameterVisibility::Always,
+    },
+    PatternParameterDescriptor {
+        key: "boundary-gap",
+        control_id: "weighted_voronoi_boundary_gap",
+        label: "Boundary Gap",
+        help: "Sets the artboard-safe gap between a cell interior and its boundary region.",
+        scope: PatternParameterScope::PatternScope,
+        visibility: PatternParameterVisibility::Always,
+    },
+    PatternParameterDescriptor {
+        key: "seed",
+        control_id: "weighted_voronoi_seed",
+        label: "Seed",
+        help: "Fixed deterministic distribution seed.",
+        scope: PatternParameterScope::PatternScope,
+        visibility: PatternParameterVisibility::Always,
+    },
+];
+
+const BUILTIN_PATTERN_METADATA: [PatternMetadata; 3] = [
     PatternMetadata {
         id: PatternId::CompatibilityShapesV1,
         family: PatternFamily::StructuredFields,
         output_kind: PatternOutputKind::Marks,
         parameter_schema_version: 1,
         generator_version: 1,
-        compatibility: PatternCompatibility {
+        compatibility: PatternCompatibility::Legacy {
             legacy_render_variant: LegacyPatternCompatibility::ShapesV1,
         },
         selector: PatternSelectorMetadata {
@@ -461,7 +539,7 @@ const BUILTIN_PATTERN_METADATA: [PatternMetadata; 2] = [
         output_kind: PatternOutputKind::Paths,
         parameter_schema_version: 1,
         generator_version: 1,
-        compatibility: PatternCompatibility {
+        compatibility: PatternCompatibility::Legacy {
             legacy_render_variant: LegacyPatternCompatibility::CurvesV1,
         },
         selector: PatternSelectorMetadata {
@@ -470,6 +548,21 @@ const BUILTIN_PATTERN_METADATA: [PatternMetadata; 2] = [
             inspector_panel: PatternInspectorPanel::Curves,
         },
         parameters: &CURVES_PARAMETERS,
+    },
+    PatternMetadata {
+        id: PatternId::WeightedVoronoiV1,
+        family: PatternFamily::StochasticDistributions,
+        output_kind: PatternOutputKind::Regions,
+        parameter_schema_version: 1,
+        // v2 is the framework-restart algorithm. v1 is deliberately rejected.
+        generator_version: 2,
+        compatibility: PatternCompatibility::CanonicalRegions,
+        selector: PatternSelectorMetadata {
+            label: "Weighted Voronoi",
+            help: "Generate deterministic source-responsive cell regions.",
+            inspector_panel: PatternInspectorPanel::WeightedVoronoi,
+        },
+        parameters: &WEIGHTED_VORONOI_PARAMETERS,
     },
 ];
 
@@ -1149,6 +1242,7 @@ fn validate_network(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LegacyPatternAdapterError {
     UnregisteredPattern(PatternId),
+    NonLegacyPattern(PatternId),
     LegacyRenderMismatch {
         id: PatternId,
         expected: LegacyPatternCompatibility,
@@ -1165,6 +1259,7 @@ impl fmt::Display for LegacyPatternAdapterError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnregisteredPattern(id) => write!(formatter, "pattern {id} is not registered"),
+            Self::NonLegacyPattern(id) => write!(formatter, "pattern {id} has no legacy adapter"),
             Self::LegacyRenderMismatch {
                 id,
                 expected,
@@ -1195,7 +1290,12 @@ fn legacy_adapter_metadata(
     let metadata = PATTERN_REGISTRY
         .get(id)
         .ok_or(LegacyPatternAdapterError::UnregisteredPattern(id))?;
-    let actual_legacy_render = metadata.compatibility.legacy_render_variant;
+    let PatternCompatibility::Legacy {
+        legacy_render_variant: actual_legacy_render,
+    } = metadata.compatibility
+    else {
+        return Err(LegacyPatternAdapterError::NonLegacyPattern(id));
+    };
     if actual_legacy_render != expected_legacy_render {
         return Err(LegacyPatternAdapterError::LegacyRenderMismatch {
             id,
@@ -1424,10 +1524,12 @@ mod tests {
             .get(PatternId::COMPATIBILITY_SHAPES_V1)
             .unwrap();
         assert_eq!(shapes.output_kind, PatternOutputKind::Marks);
-        assert_eq!(
-            shapes.compatibility.legacy_render_variant,
-            LegacyPatternCompatibility::ShapesV1
-        );
+        assert!(matches!(
+            shapes.compatibility,
+            PatternCompatibility::Legacy {
+                legacy_render_variant: LegacyPatternCompatibility::ShapesV1
+            }
+        ));
         assert!(matches!(
             adapt_legacy_shapes(PatternId::COMPATIBILITY_SHAPES_V1, marks.clone()).unwrap(),
             CanonicalPatternOutput::Marks(MarkPatternOutput { geometry }) if geometry == marks
@@ -1442,10 +1544,12 @@ mod tests {
             .get(PatternId::COMPATIBILITY_CURVES_V1)
             .unwrap();
         assert_eq!(curve_metadata.output_kind, PatternOutputKind::Paths);
-        assert_eq!(
-            curve_metadata.compatibility.legacy_render_variant,
-            LegacyPatternCompatibility::CurvesV1
-        );
+        assert!(matches!(
+            curve_metadata.compatibility,
+            PatternCompatibility::Legacy {
+                legacy_render_variant: LegacyPatternCompatibility::CurvesV1
+            }
+        ));
         assert!(matches!(
             adapt_legacy_curves(PatternId::COMPATIBILITY_CURVES_V1, curves.clone()).unwrap(),
             CanonicalPatternOutput::Paths(PathPatternOutput { geometry }) if geometry == curves

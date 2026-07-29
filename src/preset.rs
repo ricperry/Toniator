@@ -9,8 +9,8 @@ use crate::artwork_pipeline::{
 };
 use crate::model::{
     Document, PatternDocumentState, PatternSelection, RenderVariant, Settings, WebCurveChannel,
-    WebCurveSettings, WebShapeChannel, WebShapeSettings, normalize_canvas_dimensions,
-    normalize_crosshatch_render,
+    WebCurveSettings, WebShapeChannel, WebShapeSettings, WeightedVoronoiChannelSettings,
+    WeightedVoronoiSettings, normalize_canvas_dimensions, normalize_crosshatch_render,
 };
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -371,6 +371,9 @@ fn validate_current_v5_nested_fields(raw: &Value) -> Result<()> {
             crate::pattern::PatternId::CompatibilityCurvesV1 => {
                 serde_json::to_value(WebCurveChannel::default())?
             }
+            crate::pattern::PatternId::WeightedVoronoiV1 => {
+                serde_json::to_value(WeightedVoronoiChannelSettings::default())?
+            }
         };
         for (id, value) in channel
             .get("channels")
@@ -400,6 +403,9 @@ fn validate_authoritative_pattern_state(pattern_state: &Value) -> Result<()> {
             crate::pattern::PatternId::CompatibilityCurvesV1 => {
                 pattern_settings_schema(WebCurveSettings::default())?
             }
+            crate::pattern::PatternId::WeightedVoronoiV1 => {
+                pattern_settings_schema(WeightedVoronoiSettings::default())?
+            }
         };
         let settings = record
             .get("values")
@@ -413,6 +419,11 @@ fn validate_authoritative_pattern_state(pattern_state: &Value) -> Result<()> {
             &schema,
             &format!("treatment.pattern_state.instances.{key}.values.settings"),
         )?;
+        if pattern_id == crate::pattern::PatternId::WeightedVoronoiV1 {
+            let settings: WeightedVoronoiSettings = serde_json::from_value(settings.clone())
+                .context("Authoritative Weighted Voronoi settings are malformed")?;
+            settings.validate()?;
+        }
     }
     Ok(())
 }
@@ -460,6 +471,7 @@ fn normalize_pattern_state_canvas(
             }
             Ok(changed)
         }
+        PatternSelection::Registered(crate::pattern::PatternId::WeightedVoronoiV1) => Ok(false),
     }
 }
 
@@ -495,7 +507,14 @@ fn channel_from_document(document: &Document, all_channels: bool) -> Result<Chan
     let selected: Vec<_> = if is_crosshatch_pipeline(Some(&document.artwork_pipeline)) {
         OutputChannelId::CMYK.to_vec()
     } else if all_channels {
-        document.artwork_pipeline.output_model.channels().to_vec()
+        if pattern_id == crate::pattern::PatternId::WeightedVoronoiV1 {
+            OutputChannelId::CMYK
+                .into_iter()
+                .chain(OutputChannelId::RGB)
+                .collect()
+        } else {
+            document.artwork_pipeline.output_model.channels().to_vec()
+        }
     } else {
         vec![
             document
@@ -508,7 +527,7 @@ fn channel_from_document(document: &Document, all_channels: bool) -> Result<Chan
     for channel in selected {
         channels.insert(
             channel.stable_id().to_owned(),
-            channel_value(&document.render, channel)?,
+            channel_value(&document.pattern_state, &document.render, channel)?,
         );
     }
     Ok(ChannelSection {
@@ -517,7 +536,11 @@ fn channel_from_document(document: &Document, all_channels: bool) -> Result<Chan
     })
 }
 
-fn channel_value(render: &RenderVariant, channel: OutputChannelId) -> Result<Value> {
+fn channel_value(
+    pattern_state: &PatternDocumentState,
+    render: &RenderVariant,
+    channel: OutputChannelId,
+) -> Result<Value> {
     let ink = channel.to_legacy_ink();
     match render {
         RenderVariant::WebShapeV1 { settings } => {
@@ -529,6 +552,11 @@ fn channel_value(render: &RenderVariant, channel: OutputChannelId) -> Result<Val
         RenderVariant::NativeBasicV1 => {
             anyhow::bail!("Native Basic does not have channel-specific treatment state")
         }
+        RenderVariant::WeightedVoronoiCanonicalV1 => Ok(serde_json::to_value(
+            pattern_state
+                .weighted_voronoi_settings()?
+                .channel_settings(channel)?,
+        )?),
     }
 }
 
@@ -538,6 +566,7 @@ fn validate_channel_section(section: &ChannelSection, scope: PresetScope) -> Res
             section.pattern_id,
             crate::pattern::PatternId::CompatibilityShapesV1
                 | crate::pattern::PatternId::CompatibilityCurvesV1
+                | crate::pattern::PatternId::WeightedVoronoiV1
         ),
         "Unsupported channel pattern: {}",
         section.pattern_id
@@ -563,6 +592,10 @@ fn validate_channel_section(section: &ChannelSection, scope: PresetScope) -> Res
                 let _: WebCurveChannel = serde_json::from_value(value.clone())
                     .context("Invalid Curves channel state")?;
             }
+            crate::pattern::PatternId::WeightedVoronoiV1 => {
+                let _: WeightedVoronoiChannelSettings = serde_json::from_value(value.clone())
+                    .context("Invalid Weighted Voronoi channel state")?;
+            }
         }
     }
     Ok(())
@@ -575,12 +608,14 @@ fn apply_channel_section(document: &mut Document, section: &ChannelSection) -> R
     );
     for (id, value) in &section.channels {
         let channel: OutputChannelId = id.parse().map_err(anyhow::Error::msg)?;
-        ensure!(
-            channel.belongs_to(document.artwork_pipeline.output_model)
-                || (is_crosshatch_pipeline(Some(&document.artwork_pipeline))
-                    && channel.belongs_to(crate::artwork_pipeline::OutputModel::CmykPrint)),
-            "Channel preset is incompatible with the current output model"
-        );
+        if section.pattern_id != crate::pattern::PatternId::WeightedVoronoiV1 {
+            ensure!(
+                channel.belongs_to(document.artwork_pipeline.output_model)
+                    || (is_crosshatch_pipeline(Some(&document.artwork_pipeline))
+                        && channel.belongs_to(crate::artwork_pipeline::OutputModel::CmykPrint)),
+                "Channel preset is incompatible with the current output model"
+            );
+        }
         let ink = channel.to_legacy_ink();
         match section.pattern_id {
             crate::pattern::PatternId::CompatibilityShapesV1 => {
@@ -595,6 +630,15 @@ fn apply_channel_section(document: &mut Document, section: &ChannelSection) -> R
                     .context("Invalid Curves channel state")?;
                 document.pattern_state.set_curve_settings(settings);
             }
+            crate::pattern::PatternId::WeightedVoronoiV1 => {
+                let mut settings = document.pattern_state.weighted_voronoi_settings()?;
+                *settings.channel_settings_mut(channel)? = serde_json::from_value(value.clone())
+                    .context("Invalid Weighted Voronoi channel state")?;
+                settings.validate()?;
+                document
+                    .pattern_state
+                    .set_weighted_voronoi_settings(settings);
+            }
         }
     }
     Ok(())
@@ -607,7 +651,10 @@ mod tests {
         ArtworkSource, AutomaticSeparationStrategy, ChannelAssignment, LegacyBrightnessKind,
         LegacyCompatibilityAssignment, OutputModel, SourceAlphaPolicy,
     };
-    use crate::model::{ClosedShapePath, DocumentEditor, Ink, SourceArtwork, WebCurveSettings};
+    use crate::model::{
+        ClosedShapePath, DocumentEditor, Ink, SourceArtwork, WebCurveSettings,
+        WeightedVoronoiSettings,
+    };
 
     fn document() -> Document {
         Document::new(SourceArtwork {
@@ -627,6 +674,46 @@ mod tests {
                 OutputModel::RgbScreen => AutomaticSeparationStrategy::RgbDirectEncodedComponentsV1,
             }),
             active_channel: None,
+        }
+    }
+
+    #[test]
+    fn weighted_voronoi_treatment_and_channel_presets_preserve_semantic_state() {
+        let mut source = DocumentEditor::new(document());
+        assert!(source.select_pattern(crate::pattern::PatternId::WEIGHTED_VORONOI_V1));
+        let mut settings = WeightedVoronoiSettings::default();
+        settings
+            .channel_settings_mut(OutputChannelId::RgbBlue)
+            .unwrap()
+            .seed = 99;
+        settings
+            .channel_settings_mut(OutputChannelId::RgbBlue)
+            .unwrap()
+            .cell_count = 32;
+        assert!(source.set_weighted_voronoi_settings(settings.clone()));
+        for scope in [
+            PresetScope::Treatment,
+            PresetScope::Channel,
+            PresetScope::CompleteWorkflow,
+        ] {
+            let bytes = document_preset_bytes("Weighted", source.document(), scope).unwrap();
+            let parsed = parse_treatment(&bytes, (900, 620)).unwrap();
+            let receiving = if scope == PresetScope::Channel {
+                source.document().clone()
+            } else {
+                document()
+            };
+            let candidate = parsed.candidate_for(&receiving).unwrap();
+            assert_eq!(
+                candidate.pattern_state.selected_pattern_id(),
+                Some(crate::pattern::PatternId::WEIGHTED_VORONOI_V1)
+            );
+            if scope != PresetScope::Channel {
+                assert_eq!(
+                    candidate.pattern_state.weighted_voronoi_settings().unwrap(),
+                    settings
+                );
+            }
         }
     }
 

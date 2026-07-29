@@ -502,6 +502,11 @@ Adw.ApplicationWindow main_window {
                                   hexpand: true;
                                   label: "Curves";
                                 }
+
+                                ToggleButton weighted_voronoi {
+                                  hexpand: true;
+                                  label: "Weighted Voronoi";
+                                }
                           
                                 ToggleButton legacy {
                                   label: "Legacy";
@@ -2285,6 +2290,186 @@ Adw.ApplicationWindow main_window {
                                           label: "Smooth Join";
                                         }
                                       }
+                                    }
+                                  }
+                                }
+
+                                Box weighted_voronoi_panel {
+                                  orientation: vertical;
+                                  spacing: 10;
+
+                                  styles [
+                                    "workflow-group",
+                                  ]
+
+                                  Label weighted_voronoi_note {
+                                    label: "Source-responsive cells use the same canonical geometry for preview, PNG, and SVG.";
+                                    xalign: 0;
+                                    wrap: true;
+
+                                    styles [
+                                      "dim-label",
+                                      "caption",
+                                    ]
+                                  }
+
+                                  Box weighted_voronoi_channel_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+
+                                    Label weighted_voronoi_channel_label {
+                                      label: "Edit Channel";
+                                      xalign: 0;
+
+                                      styles [
+                                        "heading",
+                                      ]
+                                    }
+
+                                    DropDown weighted_voronoi_channel {}
+                                  }
+
+                                  Box weighted_voronoi_cell_count_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+
+                                    Label weighted_voronoi_cell_count_label {
+                                      label: "Cell Count";
+                                      xalign: 0;
+
+                                      styles [
+                                        "heading",
+                                      ]
+                                    }
+
+                                    Scale weighted_voronoi_cell_count {
+                                      orientation: horizontal;
+                                      draw-value: true;
+                                    }
+                                  }
+
+                                  Label weighted_voronoi_visible_label {
+                                    label: "Enabled Semantic Channels";
+                                    xalign: 0;
+
+                                    styles [
+                                      "heading",
+                                    ]
+                                  }
+
+                                  Box weighted_voronoi_visible_row {
+                                    spacing: 4;
+
+                                    CheckButton weighted_voronoi_visible_0 { label: "C"; }
+                                    CheckButton weighted_voronoi_visible_1 { label: "M"; }
+                                    CheckButton weighted_voronoi_visible_2 { label: "Y"; }
+                                    CheckButton weighted_voronoi_visible_3 { label: "K"; }
+                                  }
+
+                                  Box weighted_voronoi_arrangement_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+
+                                    Label weighted_voronoi_arrangement_label {
+                                      label: "Arrangement";
+                                      xalign: 0;
+
+                                      styles [
+                                        "heading",
+                                      ]
+                                    }
+
+                                    DropDown weighted_voronoi_arrangement {}
+                                  }
+
+                                  Box weighted_voronoi_placement_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+
+                                    Label weighted_voronoi_placement_label {
+                                      label: "Placement";
+                                      xalign: 0;
+
+                                      styles [
+                                        "heading",
+                                      ]
+                                    }
+
+                                    DropDown weighted_voronoi_placement {}
+                                  }
+
+                                  Box weighted_voronoi_density_strength_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+
+                                    Label weighted_voronoi_density_strength_label {
+                                      label: "Density Strength";
+                                      xalign: 0;
+
+                                      styles [
+                                        "heading",
+                                      ]
+                                    }
+
+                                    Scale weighted_voronoi_density_strength {
+                                      orientation: horizontal;
+                                      draw-value: true;
+                                    }
+                                  }
+
+                                  Box weighted_voronoi_response_strength_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+
+                                    Label weighted_voronoi_response_strength_label {
+                                      label: "Interior Response";
+                                      xalign: 0;
+
+                                      styles [
+                                        "heading",
+                                      ]
+                                    }
+
+                                    Scale weighted_voronoi_response_strength {
+                                      orientation: horizontal;
+                                      draw-value: true;
+                                    }
+                                  }
+
+                                  Box weighted_voronoi_boundary_gap_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+
+                                    Label weighted_voronoi_boundary_gap_label {
+                                      label: "Boundary Gap";
+                                      xalign: 0;
+
+                                      styles [
+                                        "heading",
+                                      ]
+                                    }
+
+                                    Scale weighted_voronoi_boundary_gap {
+                                      orientation: horizontal;
+                                      draw-value: true;
+                                    }
+                                  }
+
+                                  Box weighted_voronoi_seed_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+
+                                    Label weighted_voronoi_seed_label {
+                                      label: "Seed";
+                                      xalign: 0;
+
+                                      styles [
+                                        "heading",
+                                      ]
+                                    }
+
+                                    Entry weighted_voronoi_seed {
+                                      input-purpose: digits;
                                     }
                                   }
                                 }

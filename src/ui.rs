@@ -19,17 +19,20 @@ use toniator::artwork_pipeline::{
     ArtworkPipelineSettings, ArtworkSource, AutomaticSeparationStrategy, ChannelAssignment,
     LegacyCompatibilityAssignment, OutputChannelId, OutputModel, SourceAlphaPolicy,
 };
-use toniator::model::{ClosedShapePath, SettingKey, ShapeAnchor, ShapePoint, SourceArtwork};
+use toniator::model::{
+    ClosedShapePath, SettingKey, ShapeAnchor, ShapePoint, SourceArtwork,
+    WeightedVoronoiArrangementPolicy, WeightedVoronoiPlacementMode, WeightedVoronoiSettings,
+};
 use toniator::pattern::{PATTERN_REGISTRY, PatternId, PatternInspectorPanel};
 use toniator::persistence::{clear_recovery_if_matches, recovery_path};
 #[cfg(test)]
 use toniator::render_document_preview;
 use toniator::{
-    AlternateTileTransform, CancellationToken, CurveLayout, CurvePath, CurvePoint, Document,
-    DocumentAppearance, DocumentEditor, ExportBackground, Ink, MotifCoverage, OperationCancelled,
-    OutputMode, PreviewSurface, RenderGate, RgbaColor, Settings, Treatment, ValueMode,
-    WebCurveChannel, WebCurveSettings, WebShape, WebShapeSettings, export_svg,
-    export_svg_cancellable, render_document_preview_cancellable, save_document_atomic,
+    AlternateTileTransform, CancellationToken, CurveLayout, CurvePath, CurvePoint,
+    DistributionLimits, Document, DocumentAppearance, DocumentEditor, ExportBackground, Ink,
+    MotifCoverage, OperationCancelled, OutputMode, PreviewSurface, RenderGate, RgbaColor, Settings,
+    Treatment, ValueMode, WebCurveChannel, WebCurveSettings, WebShape, WebShapeSettings,
+    export_svg, export_svg_cancellable, render_document_preview_cancellable, save_document_atomic,
 };
 
 const EXAMPLE_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="960" height="680" viewBox="0 0 960 680">
@@ -526,6 +529,7 @@ fn document_artboard_size(document: &Document) -> (u32, u32) {
             .curve_settings()
             .map(|settings| (settings.output_width, settings.output_height))
             .unwrap_or((900, 620)),
+        Some(PatternId::WEIGHTED_VORONOI_V1) => (900, 620),
         None => (900, 620),
     }
 }
@@ -1633,8 +1637,18 @@ pub struct AppUi {
     squares: gtk::ToggleButton,
     lines: gtk::ToggleButton,
     curves: gtk::ToggleButton,
+    weighted_voronoi: gtk::ToggleButton,
     legacy: gtk::ToggleButton,
     treatment_modes: gtk::Stack,
+    weighted_voronoi_channel: gtk::DropDown,
+    weighted_voronoi_cell_count: gtk::Scale,
+    weighted_voronoi_visible: [gtk::CheckButton; 4],
+    weighted_voronoi_arrangement: gtk::DropDown,
+    weighted_voronoi_placement: gtk::DropDown,
+    weighted_voronoi_density_strength: gtk::Scale,
+    weighted_voronoi_response_strength: gtk::Scale,
+    weighted_voronoi_boundary_gap: gtk::Scale,
+    weighted_voronoi_seed: gtk::Entry,
     preset_import: gtk::Button,
     preset_save: gtk::Button,
     source_section: gtk::Expander,
@@ -1804,6 +1818,13 @@ pub struct AppUi {
     artifact_controls_shown: bool,
     capture_override: RefCell<Option<gtk::Window>>,
     deferred_candidate_artifact: bool,
+}
+
+#[derive(Clone, Copy)]
+enum WeightedVoronoiScalarSetting {
+    DensityStrength,
+    ResponseStrength,
+    BoundaryGap,
 }
 
 struct ShellWidgets {
@@ -2211,8 +2232,22 @@ impl AppUi {
             squares: editor_view.squares.clone(),
             lines: editor_view.lines.clone(),
             curves: editor_view.curves.clone(),
+            weighted_voronoi: editor_view.weighted_voronoi.clone(),
             legacy: editor_view.legacy.clone(),
             treatment_modes: editor_view.treatment_modes.clone(),
+            weighted_voronoi_channel: editor_view.weighted_voronoi_channel.clone(),
+            weighted_voronoi_cell_count: editor_view.weighted_voronoi_cell_count.clone(),
+            weighted_voronoi_visible: editor_view.weighted_voronoi_visible.clone(),
+            weighted_voronoi_arrangement: editor_view.weighted_voronoi_arrangement.clone(),
+            weighted_voronoi_placement: editor_view.weighted_voronoi_placement.clone(),
+            weighted_voronoi_density_strength: editor_view
+                .weighted_voronoi_density_strength
+                .clone(),
+            weighted_voronoi_response_strength: editor_view
+                .weighted_voronoi_response_strength
+                .clone(),
+            weighted_voronoi_boundary_gap: editor_view.weighted_voronoi_boundary_gap.clone(),
+            weighted_voronoi_seed: editor_view.weighted_voronoi_seed.clone(),
             preset_import: editor_view.preset_import.clone(),
             preset_save: editor_view.preset_save.clone(),
             source_section: editor_view.source_section.clone(),
@@ -2582,6 +2617,146 @@ impl AppUi {
                 }
             }
         ));
+        self.weighted_voronoi.connect_toggled(glib::clone!(
+            #[weak(rename_to = ui)]
+            self,
+            move |button| {
+                if button.is_active() && !ui.state.borrow().syncing_controls {
+                    ui.activate_weighted_voronoi_treatment();
+                }
+            }
+        ));
+        self.weighted_voronoi_channel
+            .connect_selected_notify(glib::clone!(
+                #[weak(rename_to = ui)]
+                self,
+                move |_| if !ui.state.borrow().syncing_controls {
+                    // This is presentation-only selection for a persisted
+                    // semantic channel; it does not mutate the document.
+                    ui.sync_controls();
+                }
+            ));
+        for (index, button) in self.weighted_voronoi_visible.iter().enumerate() {
+            button.connect_toggled(glib::clone!(
+                #[weak(rename_to = ui)]
+                self,
+                move |button| if !ui.state.borrow().syncing_controls {
+                    let enabled = button.is_active();
+                    let Some(channel) = ui.weighted_voronoi_channel_at(index) else {
+                        return;
+                    };
+                    ui.change_weighted_voronoi_settings_for_channel(
+                        channel,
+                        move |settings, channel| {
+                            settings
+                                .channel_settings_mut(channel)
+                                .expect("registered semantic channel")
+                                .enabled = enabled;
+                        },
+                    );
+                }
+            ));
+        }
+        self.weighted_voronoi_cell_count
+            .connect_value_changed(glib::clone!(
+                #[weak(rename_to = ui)]
+                self,
+                move |control| if !ui.state.borrow().syncing_controls {
+                    let value = control.value().round() as u32;
+                    ui.change_weighted_voronoi_settings(move |settings, channel| {
+                        settings
+                            .channel_settings_mut(channel)
+                            .expect("registered semantic channel")
+                            .cell_count = value;
+                    });
+                }
+            ));
+        self.weighted_voronoi_arrangement
+            .connect_selected_notify(glib::clone!(
+                #[weak(rename_to = ui)]
+                self,
+                move |control| if !ui.state.borrow().syncing_controls {
+                    let arrangement = if control.selected() == 1 {
+                        WeightedVoronoiArrangementPolicy::Independent
+                    } else {
+                        WeightedVoronoiArrangementPolicy::Shared
+                    };
+                    ui.change_weighted_voronoi_settings(move |settings, channel| {
+                        settings
+                            .channel_settings_mut(channel)
+                            .expect("registered semantic channel")
+                            .arrangement = arrangement;
+                    });
+                }
+            ));
+        self.weighted_voronoi_placement
+            .connect_selected_notify(glib::clone!(
+                #[weak(rename_to = ui)]
+                self,
+                move |control| if !ui.state.borrow().syncing_controls {
+                    let placement = if control.selected() == 1 {
+                        WeightedVoronoiPlacementMode::Uniform
+                    } else {
+                        WeightedVoronoiPlacementMode::SourceWeighted
+                    };
+                    ui.change_weighted_voronoi_settings(move |settings, channel| {
+                        settings
+                            .channel_settings_mut(channel)
+                            .expect("registered semantic channel")
+                            .placement = placement;
+                    });
+                }
+            ));
+        for (control, update) in [
+            (
+                self.weighted_voronoi_density_strength.clone(),
+                WeightedVoronoiScalarSetting::DensityStrength,
+            ),
+            (
+                self.weighted_voronoi_response_strength.clone(),
+                WeightedVoronoiScalarSetting::ResponseStrength,
+            ),
+            (
+                self.weighted_voronoi_boundary_gap.clone(),
+                WeightedVoronoiScalarSetting::BoundaryGap,
+            ),
+        ] {
+            control.connect_value_changed(glib::clone!(
+                #[weak(rename_to = ui)]
+                self,
+                move |control| if !ui.state.borrow().syncing_controls {
+                    let value = control.value();
+                    ui.change_weighted_voronoi_settings(move |settings, channel| {
+                        let settings = settings
+                            .channel_settings_mut(channel)
+                            .expect("registered semantic channel");
+                        match update {
+                            WeightedVoronoiScalarSetting::DensityStrength => {
+                                settings.density_strength = value
+                            }
+                            WeightedVoronoiScalarSetting::ResponseStrength => {
+                                settings.response_strength = value
+                            }
+                            WeightedVoronoiScalarSetting::BoundaryGap => {
+                                settings.boundary_gap = value
+                            }
+                        }
+                    });
+                }
+            ));
+        }
+        self.weighted_voronoi_seed.connect_activate(glib::clone!(
+            #[weak(rename_to = ui)]
+            self,
+            move |entry| ui.apply_weighted_voronoi_seed(entry)
+        ));
+        let seed_focus = gtk::EventControllerFocus::new();
+        seed_focus.connect_leave(glib::clone!(
+            #[weak(rename_to = ui)]
+            self,
+            move |_| ui.apply_weighted_voronoi_seed(&ui.weighted_voronoi_seed)
+        ));
+        self.weighted_voronoi_seed.add_controller(seed_focus);
         self.connect_scale(&self.detail, SettingKey::Detail, |settings, value| {
             settings.detail = value
         });
@@ -4459,6 +4634,7 @@ impl AppUi {
         };
         let initial_name = match document.pattern_state.selected_pattern_id() {
             Some(PatternId::COMPATIBILITY_CURVES_V1) => "Curves Preset.tntr",
+            Some(PatternId::WEIGHTED_VORONOI_V1) => "Weighted Voronoi Preset.tntr",
             Some(PatternId::COMPATIBILITY_SHAPES_V1) | None => "Shapes Preset.tntr",
         };
         let directory = native_user_preset_dir();
@@ -5324,6 +5500,95 @@ impl AppUi {
         self.after_treatment_edit(document);
     }
 
+    fn activate_weighted_voronoi_treatment(self: &Rc<Self>) {
+        let document = {
+            let mut state = self.state.borrow_mut();
+            let Some(editor) = state.editor.as_mut() else {
+                return;
+            };
+            if editor.document().pattern_state.selected_pattern_id()
+                != Some(PatternId::WEIGHTED_VORONOI_V1)
+                && !editor.select_pattern(PatternId::WEIGHTED_VORONOI_V1)
+            {
+                return;
+            }
+            editor.document().clone()
+        };
+        self.after_treatment_edit(document);
+    }
+
+    fn selected_weighted_voronoi_channel(&self) -> Option<OutputChannelId> {
+        let output_model = self
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .map(|editor| editor.document().artwork_pipeline.output_model)?;
+        output_model
+            .channels()
+            .get(self.weighted_voronoi_channel.selected() as usize)
+            .copied()
+    }
+
+    fn weighted_voronoi_channel_at(&self, index: usize) -> Option<OutputChannelId> {
+        let output_model = self
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .map(|editor| editor.document().artwork_pipeline.output_model)?;
+        output_model.channels().get(index).copied()
+    }
+
+    fn change_weighted_voronoi_settings(
+        &self,
+        update: impl FnOnce(&mut WeightedVoronoiSettings, OutputChannelId),
+    ) {
+        let Some(channel) = self.selected_weighted_voronoi_channel() else {
+            return;
+        };
+        self.change_weighted_voronoi_settings_for_channel(channel, update);
+    }
+
+    fn change_weighted_voronoi_settings_for_channel(
+        &self,
+        channel: OutputChannelId,
+        update: impl FnOnce(&mut WeightedVoronoiSettings, OutputChannelId),
+    ) {
+        let document = {
+            let mut state = self.state.borrow_mut();
+            let Some(editor) = state.editor.as_mut() else {
+                return;
+            };
+            let Ok(mut settings) = editor.document().pattern_state.weighted_voronoi_settings()
+            else {
+                return;
+            };
+            update(&mut settings, channel);
+            if !editor.set_weighted_voronoi_settings(settings) {
+                return;
+            }
+            editor.document().clone()
+        };
+        self.after_treatment_edit(document);
+    }
+
+    fn apply_weighted_voronoi_seed(&self, entry: &gtk::Entry) {
+        if self.state.borrow().syncing_controls {
+            return;
+        }
+        let Ok(seed) = entry.text().parse::<u64>() else {
+            self.sync_controls();
+            return;
+        };
+        self.change_weighted_voronoi_settings(move |settings, channel| {
+            settings
+                .channel_settings_mut(channel)
+                .expect("registered semantic channel")
+                .seed = seed;
+        });
+    }
+
     fn apply_curve_profile(self: &Rc<Self>, path: CurvePath) {
         self.change_curve_treatment(move |settings, inks| {
             if settings.use_shared_curve {
@@ -5757,6 +6022,125 @@ impl AppUi {
             )]);
     }
 
+    fn sync_weighted_voronoi_controls(
+        &self,
+        settings: &WeightedVoronoiSettings,
+        output_model: OutputModel,
+    ) {
+        let descriptor = |control_id| {
+            PATTERN_REGISTRY
+                .parameter_for_control(PatternId::WEIGHTED_VORONOI_V1, control_id)
+                .expect("Weighted Voronoi control must have registered schema metadata")
+        };
+        let set_description = |control: &gtk::Widget, control_id| {
+            let descriptor = descriptor(control_id);
+            control.set_tooltip_text(Some(descriptor.help));
+            control.update_property(&[gtk::accessible::Property::Description(descriptor.help)]);
+        };
+        set_description(
+            self.weighted_voronoi_cell_count.upcast_ref(),
+            "weighted_voronoi_cell_count",
+        );
+        set_description(
+            self.weighted_voronoi_arrangement.upcast_ref(),
+            "weighted_voronoi_arrangement",
+        );
+        set_description(
+            self.weighted_voronoi_placement.upcast_ref(),
+            "weighted_voronoi_placement",
+        );
+        set_description(
+            self.weighted_voronoi_density_strength.upcast_ref(),
+            "weighted_voronoi_density_strength",
+        );
+        set_description(
+            self.weighted_voronoi_response_strength.upcast_ref(),
+            "weighted_voronoi_response_strength",
+        );
+        set_description(
+            self.weighted_voronoi_boundary_gap.upcast_ref(),
+            "weighted_voronoi_boundary_gap",
+        );
+        set_description(
+            self.weighted_voronoi_seed.upcast_ref(),
+            "weighted_voronoi_seed",
+        );
+        let visible = descriptor("weighted_voronoi_visible");
+        for button in &self.weighted_voronoi_visible {
+            button.set_tooltip_text(Some(visible.help));
+            button.update_property(&[gtk::accessible::Property::Description(visible.help)]);
+        }
+
+        let channels = output_model.channels();
+        sync_dropdown_strings(
+            &self.weighted_voronoi_channel,
+            &channels
+                .iter()
+                .map(|channel| channel.label())
+                .collect::<Vec<_>>(),
+        );
+        let selected = self.weighted_voronoi_channel.selected() as usize;
+        let selected = if selected < channels.len() {
+            selected
+        } else {
+            0
+        };
+        self.weighted_voronoi_channel.set_selected(selected as u32);
+        let channel = channels[selected];
+        let channel_settings = settings
+            .channel_settings(channel)
+            .expect("persisted settings must contain every semantic channel");
+
+        self.weighted_voronoi_cell_count
+            .set_value(channel_settings.cell_count as f64);
+        self.weighted_voronoi_arrangement
+            .set_selected(match channel_settings.arrangement {
+                WeightedVoronoiArrangementPolicy::Shared => 0,
+                WeightedVoronoiArrangementPolicy::Independent => 1,
+            });
+        self.weighted_voronoi_placement
+            .set_selected(match channel_settings.placement {
+                WeightedVoronoiPlacementMode::SourceWeighted => 0,
+                WeightedVoronoiPlacementMode::Uniform => 1,
+            });
+        self.weighted_voronoi_density_strength
+            .set_value(channel_settings.density_strength);
+        self.weighted_voronoi_response_strength
+            .set_value(channel_settings.response_strength);
+        self.weighted_voronoi_boundary_gap
+            .set_value(channel_settings.boundary_gap);
+        self.weighted_voronoi_seed
+            .set_text(&channel_settings.seed.to_string());
+        self.weighted_voronoi_density_strength
+            .set_sensitive(matches!(
+                channel_settings.placement,
+                WeightedVoronoiPlacementMode::SourceWeighted
+            ));
+
+        for (index, button) in self.weighted_voronoi_visible.iter().enumerate() {
+            let Some(channel) = channels.get(index).copied() else {
+                button.set_visible(false);
+                continue;
+            };
+            button.set_visible(true);
+            button.set_label(Some(match channel {
+                OutputChannelId::CmykCyan => "C",
+                OutputChannelId::CmykMagenta => "M",
+                OutputChannelId::CmykYellow => "Y",
+                OutputChannelId::CmykBlack => "K",
+                OutputChannelId::RgbRed => "R",
+                OutputChannelId::RgbGreen => "G",
+                OutputChannelId::RgbBlue => "B",
+            }));
+            button.set_active(
+                settings
+                    .channel_settings(channel)
+                    .expect("persisted settings must contain every semantic channel")
+                    .enabled,
+            );
+        }
+    }
+
     fn sync_pattern_selector(
         &self,
         selected_pattern: Option<PatternId>,
@@ -5769,7 +6153,14 @@ impl AppUi {
         let curves = PATTERN_REGISTRY
             .get(PatternId::COMPATIBILITY_CURVES_V1)
             .expect("Curves selector must have registered metadata");
-        for (button, metadata) in [(&self.dots, shapes), (&self.curves, curves)] {
+        let weighted_voronoi = PATTERN_REGISTRY
+            .get(PatternId::WEIGHTED_VORONOI_V1)
+            .expect("Weighted Voronoi selector must have registered metadata");
+        for (button, metadata) in [
+            (&self.dots, shapes),
+            (&self.curves, curves),
+            (&self.weighted_voronoi, weighted_voronoi),
+        ] {
             button.set_label(metadata.selector.label);
             button.set_tooltip_text(Some(metadata.selector.help));
             button.update_property(&[
@@ -5792,19 +6183,31 @@ impl AppUi {
                 Some(PatternInspectorPanel::Curves)
             )
         );
+        let weighted_voronoi_selected = matches!(
+            (selected_pattern, selected_panel),
+            (
+                Some(PatternId::WEIGHTED_VORONOI_V1),
+                Some(PatternInspectorPanel::WeightedVoronoi)
+            )
+        );
 
         self.dots.set_active(shapes_selected);
         self.curves.set_active(curves_selected);
+        self.weighted_voronoi.set_active(weighted_voronoi_selected);
         self.squares.set_active(false);
         self.lines.set_active(false);
         self.legacy
-            .set_visible(!shapes_selected && !curves_selected);
-        self.legacy.set_active(!shapes_selected && !curves_selected);
+            .set_visible(!shapes_selected && !curves_selected && !weighted_voronoi_selected);
+        self.legacy
+            .set_active(!shapes_selected && !curves_selected && !weighted_voronoi_selected);
 
         if shapes_selected {
             self.treatment_modes.set_visible_child_name("web");
         } else if curves_selected {
             self.treatment_modes.set_visible_child_name("curve");
+        } else if weighted_voronoi_selected {
+            self.treatment_modes
+                .set_visible_child_name("weighted-voronoi");
         } else {
             self.legacy.set_label(match native_treatment {
                 Treatment::Dots => "Legacy Dots",
@@ -5825,6 +6228,7 @@ impl AppUi {
             selected_panel,
             shape_settings,
             curve_settings,
+            weighted_voronoi_settings,
         )) = self.state.borrow().editor.as_ref().map(|editor| {
             let document = editor.document();
             (
@@ -5846,6 +6250,12 @@ impl AppUi {
                 (document.pattern_state.selected_pattern_id()
                     == Some(PatternId::COMPATIBILITY_CURVES_V1))
                 .then(|| document.pattern_state.curve_settings())
+                .transpose()
+                .ok()
+                .flatten(),
+                (document.pattern_state.selected_pattern_id()
+                    == Some(PatternId::WEIGHTED_VORONOI_V1))
+                .then(|| document.pattern_state.weighted_voronoi_settings())
                 .transpose()
                 .ok()
                 .flatten(),
@@ -5973,6 +6383,9 @@ impl AppUi {
         self.contrast.set_value(settings.contrast as f64);
         self.angle.set_value(settings.angle as f64);
         self.sync_pattern_selector(selected_pattern, selected_panel, settings.treatment);
+        if let Some(settings) = weighted_voronoi_settings.as_ref() {
+            self.sync_weighted_voronoi_controls(settings, output_model);
+        }
         self.angle
             .set_sensitive(settings.treatment != Treatment::Dots);
         if let Some(settings) = shape_settings.as_ref() {
@@ -8642,8 +9055,18 @@ struct EditorWidgets {
     squares: gtk::ToggleButton,
     lines: gtk::ToggleButton,
     curves: gtk::ToggleButton,
+    weighted_voronoi: gtk::ToggleButton,
     legacy: gtk::ToggleButton,
     treatment_modes: gtk::Stack,
+    weighted_voronoi_channel: gtk::DropDown,
+    weighted_voronoi_cell_count: gtk::Scale,
+    weighted_voronoi_visible: [gtk::CheckButton; 4],
+    weighted_voronoi_arrangement: gtk::DropDown,
+    weighted_voronoi_placement: gtk::DropDown,
+    weighted_voronoi_density_strength: gtk::Scale,
+    weighted_voronoi_response_strength: gtk::Scale,
+    weighted_voronoi_boundary_gap: gtk::Scale,
+    weighted_voronoi_seed: gtk::Entry,
     preset_import: gtk::Button,
     preset_save: gtk::Button,
     source_section: gtk::Expander,
@@ -9679,12 +10102,96 @@ fn build_editor_view(
         .object::<gtk::CheckButton>("curve_smooth_join")
         .expect("ToniatorEditorControls.ui must define curve_smooth_join");
 
+    let weighted_voronoi_panel = treatment_builder
+        .object::<gtk::Box>("weighted_voronoi_panel")
+        .expect("toniator-window.blp must define weighted_voronoi_panel");
+    let weighted_voronoi_channel = treatment_builder
+        .object::<gtk::DropDown>("weighted_voronoi_channel")
+        .expect("toniator-window.blp must define weighted_voronoi_channel");
+    let weighted_voronoi_channel_label = treatment_builder
+        .object::<gtk::Label>("weighted_voronoi_channel_label")
+        .expect("toniator-window.blp must define weighted_voronoi_channel_label");
+    configure_dropdown_accessibility(
+        &weighted_voronoi_channel,
+        &weighted_voronoi_channel_label,
+        "Edit Channel",
+    );
+    let weighted_voronoi_cell_count = treatment_builder
+        .object::<gtk::Scale>("weighted_voronoi_cell_count")
+        .expect("toniator-window.blp must define weighted_voronoi_cell_count");
+    weighted_voronoi_cell_count.set_range(2.0, DistributionLimits::default().max_sites as f64);
+    weighted_voronoi_cell_count.set_increments(1.0, 32.0);
+    weighted_voronoi_cell_count.set_digits(0);
+    let weighted_voronoi_visible = [
+        treatment_builder
+            .object::<gtk::CheckButton>("weighted_voronoi_visible_0")
+            .expect("toniator-window.blp must define weighted_voronoi_visible_0"),
+        treatment_builder
+            .object::<gtk::CheckButton>("weighted_voronoi_visible_1")
+            .expect("toniator-window.blp must define weighted_voronoi_visible_1"),
+        treatment_builder
+            .object::<gtk::CheckButton>("weighted_voronoi_visible_2")
+            .expect("toniator-window.blp must define weighted_voronoi_visible_2"),
+        treatment_builder
+            .object::<gtk::CheckButton>("weighted_voronoi_visible_3")
+            .expect("toniator-window.blp must define weighted_voronoi_visible_3"),
+    ];
+    let weighted_voronoi_arrangement = treatment_builder
+        .object::<gtk::DropDown>("weighted_voronoi_arrangement")
+        .expect("toniator-window.blp must define weighted_voronoi_arrangement");
+    let weighted_voronoi_arrangement_label = treatment_builder
+        .object::<gtk::Label>("weighted_voronoi_arrangement_label")
+        .expect("toniator-window.blp must define weighted_voronoi_arrangement_label");
+    configure_dropdown_accessibility(
+        &weighted_voronoi_arrangement,
+        &weighted_voronoi_arrangement_label,
+        "Arrangement",
+    );
+    sync_dropdown_strings(&weighted_voronoi_arrangement, &["Shared", "Independent"]);
+    let weighted_voronoi_placement = treatment_builder
+        .object::<gtk::DropDown>("weighted_voronoi_placement")
+        .expect("toniator-window.blp must define weighted_voronoi_placement");
+    let weighted_voronoi_placement_label = treatment_builder
+        .object::<gtk::Label>("weighted_voronoi_placement_label")
+        .expect("toniator-window.blp must define weighted_voronoi_placement_label");
+    configure_dropdown_accessibility(
+        &weighted_voronoi_placement,
+        &weighted_voronoi_placement_label,
+        "Placement",
+    );
+    sync_dropdown_strings(&weighted_voronoi_placement, &["Source Weighted", "Uniform"]);
+    let weighted_voronoi_density_strength = treatment_builder
+        .object::<gtk::Scale>("weighted_voronoi_density_strength")
+        .expect("toniator-window.blp must define weighted_voronoi_density_strength");
+    weighted_voronoi_density_strength.set_range(0.001, 16.0);
+    weighted_voronoi_density_strength.set_increments(0.05, 0.5);
+    weighted_voronoi_density_strength.set_digits(3);
+    let weighted_voronoi_response_strength = treatment_builder
+        .object::<gtk::Scale>("weighted_voronoi_response_strength")
+        .expect("toniator-window.blp must define weighted_voronoi_response_strength");
+    weighted_voronoi_response_strength.set_range(0.0, 16.0);
+    weighted_voronoi_response_strength.set_increments(0.05, 0.5);
+    weighted_voronoi_response_strength.set_digits(2);
+    let weighted_voronoi_boundary_gap = treatment_builder
+        .object::<gtk::Scale>("weighted_voronoi_boundary_gap")
+        .expect("toniator-window.blp must define weighted_voronoi_boundary_gap");
+    weighted_voronoi_boundary_gap.set_range(0.0, 64.0);
+    weighted_voronoi_boundary_gap.set_increments(0.25, 2.0);
+    weighted_voronoi_boundary_gap.set_digits(2);
+    let weighted_voronoi_seed = treatment_builder
+        .object::<gtk::Entry>("weighted_voronoi_seed")
+        .expect("toniator-window.blp must define weighted_voronoi_seed");
+    weighted_voronoi_seed.set_tooltip_text(Some("Enter an exact deterministic seed"));
+
     let treatment_modes = treatment_builder
         .object::<gtk::Stack>("treatment_modes")
         .expect("ToniatorEditorControls.ui must define treatment_modes");
     treatment_modes.page(&native_panel).set_name("native");
     treatment_modes.page(&web_panel_host).set_name("web");
     treatment_modes.page(&curve_panel_host).set_name("curve");
+    treatment_modes
+        .page(&weighted_voronoi_panel)
+        .set_name("weighted-voronoi");
     treatment_modes.set_visible_child_name("native");
     let hierarchy = build_inspector_hierarchy(builder);
     let controls_builder = builder;
@@ -9833,8 +10340,20 @@ fn build_editor_view(
         squares,
         lines,
         curves,
+        weighted_voronoi: treatment_builder
+            .object::<gtk::ToggleButton>("weighted_voronoi")
+            .expect("toniator-window.blp must define weighted_voronoi"),
         legacy,
         treatment_modes,
+        weighted_voronoi_channel,
+        weighted_voronoi_cell_count,
+        weighted_voronoi_visible,
+        weighted_voronoi_arrangement,
+        weighted_voronoi_placement,
+        weighted_voronoi_density_strength,
+        weighted_voronoi_response_strength,
+        weighted_voronoi_boundary_gap,
+        weighted_voronoi_seed,
         preset_import,
         preset_save,
         source_section: hierarchy.source_section,
@@ -11591,6 +12110,17 @@ mod tests {
             "motif_arrange",
             "curve_close_ends",
             "curve_smooth_join",
+            "weighted_voronoi",
+            "weighted_voronoi_panel",
+            "weighted_voronoi_channel",
+            "weighted_voronoi_cell_count",
+            "weighted_voronoi_visible_0",
+            "weighted_voronoi_arrangement",
+            "weighted_voronoi_placement",
+            "weighted_voronoi_density_strength",
+            "weighted_voronoi_response_strength",
+            "weighted_voronoi_boundary_gap",
+            "weighted_voronoi_seed",
         ] {
             assert!(
                 WINDOW_BLP.contains(id),
@@ -11728,6 +12258,9 @@ mod tests {
             "curve_target",
             "motif_coverage",
             "motif_alternate",
+            "weighted_voronoi_channel",
+            "weighted_voronoi_arrangement",
+            "weighted_voronoi_placement",
         ] {
             assert!(
                 builder.object::<gtk::DropDown>(id).is_some(),
@@ -11742,7 +12275,18 @@ mod tests {
         }
         let stack = builder.object::<gtk::Stack>("treatment_modes").unwrap();
         assert_eq!(stack.transition_type(), gtk::StackTransitionType::Crossfade);
-        assert_eq!(stack.observe_children().n_items(), 3);
+        assert_eq!(stack.observe_children().n_items(), 4);
+        for id in [
+            "weighted_voronoi",
+            "weighted_voronoi_panel",
+            "weighted_voronoi_cell_count",
+            "weighted_voronoi_density_strength",
+            "weighted_voronoi_response_strength",
+            "weighted_voronoi_boundary_gap",
+            "weighted_voronoi_seed",
+        ] {
+            assert!(builder.object::<gtk::Widget>(id).is_some(), "missing {id}");
+        }
 
         let root = builder.object::<gtk::Box>("editor_controls").unwrap();
         assert!(root.parent().is_some());
@@ -14697,6 +15241,63 @@ mod tests {
             Some("curve")
         );
 
+        ui.weighted_voronoi.set_active(true);
+        drain_ui_callbacks();
+        assert_eq!(
+            ui.state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .document()
+                .pattern_state
+                .selected_pattern_id(),
+            Some(PatternId::WEIGHTED_VORONOI_V1)
+        );
+        assert_eq!(
+            ui.treatment_modes.visible_child_name().as_deref(),
+            Some("weighted-voronoi")
+        );
+        assert!(ui.weighted_voronoi_cell_count.is_visible());
+        ui.weighted_voronoi_cell_count.set_value(333.0);
+        ui.weighted_voronoi_visible[1].set_active(false);
+        ui.weighted_voronoi_arrangement.set_selected(1);
+        ui.weighted_voronoi_placement.set_selected(1);
+        ui.weighted_voronoi_seed.set_text("18446744073709551615");
+        ui.weighted_voronoi_seed.emit_activate();
+        drain_ui_callbacks();
+        let weighted = ui
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .unwrap()
+            .document()
+            .pattern_state
+            .weighted_voronoi_settings()
+            .unwrap();
+        let cyan = weighted
+            .channel_settings(OutputChannelId::CmykCyan)
+            .unwrap();
+        assert_eq!(cyan.cell_count, 333);
+        assert_eq!(
+            cyan.arrangement,
+            WeightedVoronoiArrangementPolicy::Independent
+        );
+        assert_eq!(cyan.placement, WeightedVoronoiPlacementMode::Uniform);
+        assert_eq!(cyan.seed, u64::MAX);
+        assert!(
+            !weighted
+                .channel_settings(OutputChannelId::CmykMagenta)
+                .unwrap()
+                .enabled
+        );
+
+        // Continue the existing Curves fixture from an authoritative pattern
+        // selection after exercising the new Weighted Voronoi controls.
+        ui.curves.set_active(true);
+        drain_ui_callbacks();
+
         let mut pipeline_authoritative_curves = ui
             .state
             .borrow()
@@ -14751,6 +15352,7 @@ mod tests {
                     ..Default::default()
                 }),
             },
+            PatternId::WEIGHTED_VORONOI_V1 => RenderVariant::NativeBasicV1,
         }
     }
 
@@ -14788,6 +15390,7 @@ mod tests {
                 assert!((ui.curve_coverage.value() - settings.base_channel.scale).abs() < 1e-9);
                 assert!(ui.motif_controls.is_visible());
             }
+            PatternId::WEIGHTED_VORONOI_V1 => unreachable!("compatibility fixture"),
         }
     }
 
@@ -14944,6 +15547,7 @@ mod tests {
             match selected {
                 PatternId::COMPATIBILITY_SHAPES_V1 => ui.web_polygon_sides.set_value(3.0),
                 PatternId::COMPATIBILITY_CURVES_V1 => ui.curve_weight.set_value(61.0),
+                PatternId::WEIGHTED_VORONOI_V1 => unreachable!("compatibility fixture"),
             }
             drain_ui_callbacks();
             let edited_rgb_document = ui
@@ -14973,6 +15577,7 @@ mod tests {
                         .abs()
                         < 1e-9
                 ),
+                PatternId::WEIGHTED_VORONOI_V1 => unreachable!("compatibility fixture"),
             }
             assert_realized_output_fixture_authority(&ui, &edited_rgb_document, selected);
 

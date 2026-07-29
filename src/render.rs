@@ -575,6 +575,31 @@ pub fn generate_document_pattern_output_cancellable(
             )
             .map_err(anyhow::Error::new)?
         }
+        RenderVariant::WeightedVoronoiCanonicalV1 => {
+            let domain = crate::site_distribution::DomainBounds {
+                width: source.width(),
+                height: source.height(),
+            };
+            let (columns, rows) =
+                crate::weighted_voronoi::weighted_voronoi_field_dimensions(domain)?;
+            let enabled = canonical.artwork_pipeline.output_model.channels();
+            let fields = resolve_channel_fields_cancellable(
+                &prepared,
+                &canonical.artwork_pipeline,
+                columns,
+                rows,
+                prepared.generation,
+                enabled,
+                token,
+            )?;
+            crate::weighted_voronoi::generate_weighted_voronoi_cancellable(
+                domain,
+                &canonical.pattern_state.weighted_voronoi_settings()?,
+                &fields,
+                token,
+            )?
+            .output
+        }
     };
     output.validate().map_err(anyhow::Error::new)?;
     Ok(output)

@@ -6,7 +6,10 @@ pub mod persistence;
 pub mod png_export;
 pub mod preset;
 pub mod render;
+pub mod site_distribution;
 pub mod svg_export;
+pub mod voronoi_geometry;
+pub mod weighted_voronoi;
 
 pub use artwork_pipeline::{
     ArtworkPipelineSettings, ArtworkSource, AutomaticSeparationStrategy, ChannelAssignment,
@@ -21,6 +24,8 @@ pub use model::{
     PatternDocumentState, PatternSelection, PreviewSurface, RenderVariant, RgbaColor, Settings,
     SourceArtwork, Treatment, ValueMode, WebCurveChannel, WebCurveChannels, WebCurveSettings,
     WebShape, WebShapeChannel, WebShapeChannels, WebShapeDeltas, WebShapeSettings,
+    WeightedVoronoiArrangementPolicy, WeightedVoronoiChannelSettings,
+    WeightedVoronoiDensityPolarity, WeightedVoronoiPlacementMode, WeightedVoronoiSettings,
 };
 pub use pattern::{
     AffineTransform, ArtboardSpace, CanonicalBlendMode, CanonicalColor, CanonicalLayer,
@@ -50,8 +55,24 @@ pub use render::{
     render_document_export_cancellable, render_document_output_cancellable,
     render_document_preview, render_document_preview_cancellable, render_preview,
 };
+pub use site_distribution::{
+    ArrangementPolicy, DistributionField, DistributionFingerprint, DistributionIdentity,
+    DistributionLimits, DistributionMode, DistributionPolarity, DistributionRequest,
+    DistributionRequestMetadata, DomainBounds, OrderedPoint, SiteDistribution,
+    generate_site_distribution, generate_site_distribution_cancellable,
+};
 pub use svg_export::{
     canonical_pattern_svg_bytes, canonical_pattern_svg_bytes_cancellable, export_svg,
     export_svg_cancellable,
+};
+pub use voronoi_geometry::{
+    ClippedVoronoiCell, GeometryLimits, VoronoiBoundary, VoronoiBoundaryKind, VoronoiDiagram,
+    build_voronoi_diagram, build_voronoi_diagram_cancellable, inset_clipped_cell,
+    inset_clipped_cell_for_response,
+};
+pub use weighted_voronoi::{
+    WEIGHTED_VORONOI_MAX_FIELD_EDGE, WeightedVoronoiCacheMetadata, WeightedVoronoiCellRelationship,
+    WeightedVoronoiGeneratedOutput, generate_weighted_voronoi_cancellable,
+    weighted_voronoi_field_dimensions,
 };
 pub mod cancel;

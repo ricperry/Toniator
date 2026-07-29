@@ -320,6 +320,7 @@ mod tests {
                     settings.base_channel.stack_count = 4;
                     assert!(editor.set_curve_settings(settings));
                 }
+                PatternId::WEIGHTED_VORONOI_V1 => unreachable!("compatibility fixture"),
             }
 
             let edited_state = editor.document().pattern_state.clone();
@@ -349,6 +350,7 @@ mod tests {
                     assert_eq!(settings.base_channel.tile_count, 6);
                     assert_eq!(settings.base_channel.stack_count, 4);
                 }
+                PatternId::WEIGHTED_VORONOI_V1 => unreachable!("compatibility fixture"),
             }
 
             assert!(editor.undo());
@@ -421,6 +423,7 @@ mod tests {
                         ..Default::default()
                     }),
                 },
+                PatternId::WEIGHTED_VORONOI_V1 => unreachable!("compatibility fixture"),
             };
             assert!(matches!(
                 (&contradictory.pattern_state.selected, &contradictory.render),
@@ -453,6 +456,7 @@ mod tests {
                     settings.base_channel.tile_count = 6;
                     assert!(editor.set_curve_settings(settings));
                 }
+                PatternId::WEIGHTED_VORONOI_V1 => unreachable!("compatibility fixture"),
             }
             let authoritative_after = editor.document().pattern_state.clone();
             let rendered_after =
@@ -480,6 +484,7 @@ mod tests {
                     reopened.pattern_state.curve_settings().unwrap(),
                     authoritative_after.curve_settings().unwrap()
                 ),
+                PatternId::WEIGHTED_VORONOI_V1 => unreachable!("compatibility fixture"),
             }
 
             assert!(editor.undo());
@@ -573,6 +578,7 @@ mod tests {
                         ..Default::default()
                     }),
                 },
+                PatternId::WEIGHTED_VORONOI_V1 => unreachable!("compatibility fixture"),
             };
             assert_eq!(
                 crate::render::render_document_output(&active_contradiction, 120, 80, false, None)
@@ -624,6 +630,7 @@ mod tests {
                         ..Default::default()
                     }),
                 },
+                PatternId::WEIGHTED_VORONOI_V1 => unreachable!("compatibility fixture"),
             };
             let mut editor = DocumentEditor::new(inactive_contradiction);
 
@@ -640,6 +647,7 @@ mod tests {
                     settings.base_channel.tile_count = 6;
                     assert!(editor.set_curve_settings(settings));
                 }
+                PatternId::WEIGHTED_VORONOI_V1 => unreachable!("compatibility fixture"),
             }
             let rgb_state = editor.document().pattern_state.clone();
             let rgb_rendered =
