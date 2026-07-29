@@ -16,6 +16,22 @@ The parent thread records read-only-agent updates here after persisting them.
 
 ## Current entries
 
+- `ton-010-stage5-framework-substage-d-2026-07-29` — parent correction and
+  focused acceptance evidence for the restarted Stage 5 framework on branch
+  `TON-010-Stage5-Framework-Restart`; covers the realized Weighted Voronoi UI
+  fixture reset, explicit non-adjacent region relationships, fmt/check,
+  focused Weighted Voronoi tests, and the realized GTK selector/control test.
+  Valid until the Stage 5 implementation or current dirty state changes;
+  evidence is in `evidence/ton-010-stage5-framework-substage-d-2026-07-29.md`.
+
+- `ton-010-stage5-framework-final-validation-2026-07-29` — comprehensive
+  restart validation: 161 library tests, 48 binary/UI tests, strict Clippy,
+  locked release build, formatting, diff checks, and focused realized GTK
+  coverage. Blueprint lint parses but remains nonzero on repository-wide
+  existing warning policy; production Blueprint compilation and GTK resource
+  realization pass. Evidence is in
+  `evidence/ton-010-stage5-framework-final-validation-2026-07-29.md`.
+
 - `ton-010-stage-4.5c2-authoring-correction-accepted-f9c138c-dirty` — the
   current export-background authoring/dialog correction was accepted by the
   user on 2026-07-28; `Document.appearance.export_background` remains the sole
