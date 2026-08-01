@@ -71,7 +71,7 @@ pub use voronoi_geometry::{
     inset_clipped_cell_for_response,
 };
 pub use weighted_voronoi::{
-    WEIGHTED_VORONOI_MAX_FIELD_EDGE, WeightedVoronoiCacheMetadata, WeightedVoronoiCellRelationship,
+    WEIGHTED_VORONOI_MAX_FIELD_EDGE, WeightedVoronoiCacheMetadata, WeightedVoronoiCellRegion,
     WeightedVoronoiGeneratedOutput, generate_weighted_voronoi_cancellable,
     weighted_voronoi_field_dimensions,
 };

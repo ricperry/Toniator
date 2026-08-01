@@ -1655,7 +1655,7 @@ mod tests {
     }
 
     #[test]
-    fn regions_preserve_holes_clipping_opacity_and_subtractive_masks() {
+    fn canonical_region_algebra_retains_genuine_subtractive_masks() {
         let output = region_fixture();
         output.validate().unwrap();
         let image = crate::render::render_canonical_pattern_output_cancellable(

@@ -36,21 +36,22 @@ pub struct WeightedVoronoiCacheMetadata {
     pub view_key: &'static str,
 }
 
-/// Makes each positive cell and its subtractive boundary region inspectably
-/// related without adding renderer-specific state.
+/// Maps a semantic channel/site pair to its visible final canonical region.
+///
+/// The raw clipped cell and its response inset are producer intermediates;
+/// only the inset polygon is canonical artwork.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WeightedVoronoiCellRelationship {
+pub struct WeightedVoronoiCellRegion {
     pub channel: OutputChannelId,
     pub site_index: usize,
-    pub positive_region: RegionId,
-    pub subtractive_boundary_region: RegionId,
+    pub visible_region: RegionId,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WeightedVoronoiGeneratedOutput {
     pub output: CanonicalPatternOutput,
     pub cache_metadata: Vec<WeightedVoronoiCacheMetadata>,
-    pub relationships: Vec<WeightedVoronoiCellRelationship>,
+    pub cell_regions: Vec<WeightedVoronoiCellRegion>,
 }
 
 pub fn weighted_voronoi_field_dimensions(domain: DomainBounds) -> Result<(u32, u32)> {
@@ -63,8 +64,8 @@ pub fn weighted_voronoi_field_dimensions(domain: DomainBounds) -> Result<(u32, u
     ))
 }
 
-/// Converts validated semantic fields into canonical positive and subtractive
-/// regions. Uniform placement still resolves fields
+/// Converts validated semantic fields into canonical final visible regions.
+/// Uniform placement still resolves fields
 /// for interior response, but never reads them for distribution.
 pub fn generate_weighted_voronoi_cancellable(
     domain: DomainBounds,
@@ -89,7 +90,7 @@ pub fn generate_weighted_voronoi_cancellable(
     let mut layers = Vec::new();
     let mut regions = Vec::new();
     let mut metadata = Vec::new();
-    let mut relationships = Vec::new();
+    let mut cell_regions = Vec::new();
 
     for (channel_index, field) in fields.fields().iter().enumerate() {
         token.checkpoint()?;
@@ -154,33 +155,20 @@ pub fn generate_weighted_voronoi_cancellable(
                 .saturating_mul(DistributionLimits::default().max_sites as u32)
                 .saturating_add(cell.site_index as u32)
                 .saturating_add(1);
-            // Canonical region IDs deliberately occupy disjoint ranges. The
-            // relationship record below, not numeric proximity, owns pairing.
-            let positive = RegionId(region_offset);
-            let subtractive = RegionId(1_000_000u32.saturating_add(region_offset));
+            let visible_region = RegionId(region_offset);
             regions.push(FilledRegion {
-                id: positive,
+                id: visible_region,
                 layer_id,
                 order: cell.site_index as u32,
-                rings: vec![ring(&cell.vertices)],
+                rings: vec![ring(&inset)],
                 fill_rule: FillRule::NonZero,
                 polarity: GeometryPolarity::Positive,
                 transform: AffineTransform::IDENTITY,
             });
-            regions.push(FilledRegion {
-                id: subtractive,
-                layer_id,
-                order: cell.site_index as u32,
-                rings: vec![ring(&cell.vertices), ring(&inset)],
-                fill_rule: FillRule::EvenOdd,
-                polarity: GeometryPolarity::Subtractive,
-                transform: AffineTransform::IDENTITY,
-            });
-            relationships.push(WeightedVoronoiCellRelationship {
+            cell_regions.push(WeightedVoronoiCellRegion {
                 channel: field.channel,
                 site_index: cell.site_index,
-                positive_region: positive,
-                subtractive_boundary_region: subtractive,
+                visible_region,
             });
         }
     }
@@ -197,7 +185,7 @@ pub fn generate_weighted_voronoi_cancellable(
     Ok(WeightedVoronoiGeneratedOutput {
         output,
         cache_metadata: metadata,
-        relationships,
+        cell_regions,
     })
 }
 
@@ -484,23 +472,102 @@ mod tests {
             panic!("Weighted Voronoi must use canonical composite output");
         };
         let regions = composite.regions.as_ref().unwrap();
-        for relationship in &generated.relationships {
-            assert_ne!(
-                relationship.subtractive_boundary_region.0,
-                relationship.positive_region.0
-            );
+        for cell_region in &generated.cell_regions {
             assert!(
                 regions
                     .regions
                     .iter()
-                    .any(|region| region.id == relationship.positive_region)
+                    .any(|region| region.id == cell_region.visible_region)
             );
-            assert!(
-                regions
-                    .regions
-                    .iter()
-                    .any(|region| region.id == relationship.subtractive_boundary_region)
-            );
+        }
+    }
+
+    #[test]
+    fn final_cells_are_positive_boundary_derived_insets_without_construction_masks() {
+        let source = RgbaImage::from_pixel(64, 32, Rgba([255, 255, 255, 255]));
+        let fields = fields(&source);
+        let domain = DomainBounds {
+            width: 64,
+            height: 32,
+        };
+        let mut configured = settings(8);
+        for channel in OutputChannelId::RGB {
+            let channel_settings = configured.channel_settings_mut(channel).unwrap();
+            channel_settings.enabled = channel == OutputChannelId::RgbRed;
+            channel_settings.placement = WeightedVoronoiPlacementMode::Uniform;
+            channel_settings.response_strength = 0.0;
+            channel_settings.boundary_gap = 2.0;
+        }
+
+        let generated = generate_weighted_voronoi_cancellable(
+            domain,
+            &configured,
+            &fields,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        let CanonicalPatternOutput::Composite(composite) = &generated.output else {
+            panic!("Weighted Voronoi must use canonical composite output");
+        };
+        let regions = composite.regions.as_ref().unwrap();
+        assert_eq!(regions.regions.len(), 8);
+        assert_eq!(generated.cell_regions.len(), 8);
+        assert!(
+            regions
+                .regions
+                .iter()
+                .all(|region| region.polarity == GeometryPolarity::Positive)
+        );
+        assert!(
+            regions
+                .regions
+                .iter()
+                .all(|region| { region.fill_rule == FillRule::NonZero && region.rings.len() == 1 })
+        );
+        assert_eq!(
+            generated
+                .cell_regions
+                .iter()
+                .map(|cell_region| (cell_region.channel, cell_region.site_index))
+                .collect::<Vec<_>>(),
+            (0..8)
+                .map(|site_index| (OutputChannelId::RgbRed, site_index))
+                .collect::<Vec<_>>()
+        );
+
+        let field = fields.field(OutputChannelId::RgbRed).unwrap();
+        let channel_settings = configured
+            .channel_settings(OutputChannelId::RgbRed)
+            .unwrap();
+        let distribution =
+            generate_distribution(domain, field, channel_settings, &CancellationToken::new())
+                .unwrap();
+        let diagram = build_voronoi_diagram_cancellable(
+            domain,
+            &distribution.points,
+            GeometryLimits {
+                max_sites: DistributionLimits::default().max_sites,
+            },
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        for cell_region in &generated.cell_regions {
+            let cell = &diagram.cells[cell_region.site_index];
+            let expected_inset = inset_clipped_cell_for_response(
+                domain,
+                cell,
+                distribution.points[cell.site_index],
+                1.0,
+                channel_settings.boundary_gap,
+            )
+            .unwrap();
+            let visible_region = regions
+                .regions
+                .iter()
+                .find(|region| region.id == cell_region.visible_region)
+                .unwrap();
+            assert_eq!(visible_region.rings, vec![ring(&expected_inset)]);
+            assert_ne!(visible_region.rings, vec![ring(&cell.vertices)]);
         }
     }
 
@@ -664,7 +731,8 @@ mod tests {
         assert_eq!(preview, decoded);
         let svg = String::from_utf8(canonical_pattern_svg_bytes(&output, "weighted.png").unwrap())
             .unwrap();
-        assert!(svg.contains("fill-rule=\"evenodd\""));
+        assert!(!svg.contains("fill-rule=\"evenodd\""));
+        assert!(!svg.contains("-subtract\""));
         assert!(!svg.contains("stroke-width=\"0.5\""));
     }
 }
