@@ -1553,7 +1553,18 @@ pub fn render_canonical_pattern_output_cancellable(
             )
         }
         CanonicalPatternOutput::Regions(output) => {
-            render_region_output_cancellable(output, width, height, white_background, token)
+            if let Some(model) = semantic_region_model(output) {
+                render_semantic_region_output_cancellable(
+                    output,
+                    model,
+                    width,
+                    height,
+                    white_background,
+                    token,
+                )
+            } else {
+                render_region_output_cancellable(output, width, height, white_background, token)
+            }
         }
         CanonicalPatternOutput::Network(output) => {
             render_network_output_cancellable(output, width, height, white_background, token)
@@ -1582,6 +1593,187 @@ fn render_region_output_cancellable(
     render_regions_into_pixmap(output, width, height, &mut pixmap, token)?;
     ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, pixmap.take())
         .context("canonical region renderer returned an invalid output buffer")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SemanticRegionModel {
+    Rgb,
+    Cmyk,
+}
+
+struct SemanticChannelCoverage<'a> {
+    layer: &'a CanonicalLayer,
+    pixmap: Pixmap,
+}
+
+/// Semantic region layers describe independent RGB display channels or CMYK
+/// ink channels. Their subtraction must therefore be applied to an isolated
+/// channel coverage surface, never to sibling channels on a shared pixmap.
+fn semantic_region_model(output: &RegionPatternOutput) -> Option<SemanticRegionModel> {
+    let mut model = None;
+    for layer in &output.layers {
+        let channel = layer.channel?;
+        let layer_model = if channel.belongs_to(OutputModel::RgbScreen) {
+            SemanticRegionModel::Rgb
+        } else {
+            SemanticRegionModel::Cmyk
+        };
+        if let Some(existing) = model {
+            if existing != layer_model {
+                return None;
+            }
+        } else {
+            model = Some(layer_model);
+        }
+    }
+    model
+}
+
+fn semantic_channels(model: SemanticRegionModel) -> &'static [OutputChannelId] {
+    match model {
+        SemanticRegionModel::Rgb => &OutputChannelId::RGB,
+        SemanticRegionModel::Cmyk => &OutputChannelId::CMYK,
+    }
+}
+
+fn render_semantic_region_output_cancellable(
+    output: &RegionPatternOutput,
+    model: SemanticRegionModel,
+    width: u32,
+    height: u32,
+    white_background: bool,
+    token: &CancellationToken,
+) -> Result<RgbaImage> {
+    let mut coverages = Vec::new();
+    for &channel in semantic_channels(model) {
+        let mut layers: Vec<_> = output
+            .layers
+            .iter()
+            .filter(|layer| layer.channel == Some(channel))
+            .collect();
+        if layers.is_empty() {
+            continue;
+        }
+        layers.sort_by_key(|layer| (layer.order, layer.id));
+        let mut pixmap = Pixmap::new(width, height).context("output is too large")?;
+        render_region_coverage_into_pixmap(output, &layers, width, height, &mut pixmap, token)?;
+        coverages.push(SemanticChannelCoverage {
+            layer: layers[0],
+            pixmap,
+        });
+    }
+    compose_semantic_channel_coverages(&coverages, model, width, height, white_background)
+}
+
+fn render_region_coverage_into_pixmap(
+    output: &RegionPatternOutput,
+    layers: &[&CanonicalLayer],
+    width: u32,
+    height: u32,
+    pixmap: &mut Pixmap,
+    token: &CancellationToken,
+) -> Result<()> {
+    let scale_x = width as f32 / output.artboard.width as f32;
+    let scale_y = height as f32 / output.artboard.height as f32;
+    for layer in layers {
+        token.checkpoint()?;
+        let mut regions: Vec<_> = output
+            .regions
+            .iter()
+            .filter(|region| region.layer_id == layer.id)
+            .collect();
+        regions.sort_by_key(|region| (region.order, region.id));
+        for (index, region) in regions.into_iter().enumerate() {
+            if index % 256 == 0 {
+                token.checkpoint()?;
+            }
+            let Some(path) = region_path(region, scale_x, scale_y) else {
+                continue;
+            };
+            let mut paint = Paint::default();
+            paint.set_color_rgba8(255, 255, 255, 255);
+            paint.anti_alias = true;
+            if region.polarity == GeometryPolarity::Subtractive {
+                paint.blend_mode = BlendMode::DestinationOut;
+            }
+            pixmap.fill_path(
+                &path,
+                &paint,
+                match region.fill_rule {
+                    CanonicalFillRule::NonZero => FillRule::Winding,
+                    CanonicalFillRule::EvenOdd => FillRule::EvenOdd,
+                },
+                Transform::identity(),
+                None,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn compose_semantic_channel_coverages(
+    coverages: &[SemanticChannelCoverage<'_>],
+    model: SemanticRegionModel,
+    width: u32,
+    height: u32,
+    white_background: bool,
+) -> Result<RgbaImage> {
+    let mut pixels = vec![0u8; width as usize * height as usize * 4];
+    for pixel_index in 0..width as usize * height as usize {
+        let mut alpha = 1.0f32;
+        let mut color = match model {
+            SemanticRegionModel::Rgb => [0.0; 3],
+            SemanticRegionModel::Cmyk => [1.0; 3],
+        };
+        for coverage in coverages {
+            let source_alpha = coverage.pixmap.data()[pixel_index * 4 + 3] as f32 / 255.0;
+            let coverage_alpha = (source_alpha * coverage.layer.opacity).clamp(0.0, 1.0);
+            alpha *= 1.0 - coverage_alpha;
+            for (component, channel_color) in color.iter_mut().zip([
+                coverage.layer.color.red,
+                coverage.layer.color.green,
+                coverage.layer.color.blue,
+            ]) {
+                let ink = channel_color as f32 / 255.0;
+                *component = match model {
+                    SemanticRegionModel::Rgb => {
+                        1.0 - (1.0 - *component) * (1.0 - coverage_alpha * ink)
+                    }
+                    SemanticRegionModel::Cmyk => {
+                        *component * (1.0 - coverage_alpha + coverage_alpha * ink)
+                    }
+                };
+            }
+        }
+        let uncovered = alpha;
+        let (rgb, output_alpha) = match model {
+            SemanticRegionModel::Rgb => {
+                let output_alpha = 1.0 - uncovered;
+                let rgb = if white_background {
+                    color.map(|component| component + uncovered)
+                } else {
+                    color
+                };
+                (rgb, if white_background { 1.0 } else { output_alpha })
+            }
+            SemanticRegionModel::Cmyk => {
+                let output_alpha = 1.0 - uncovered;
+                let rgb = if white_background {
+                    color
+                } else {
+                    color.map(|component| component - uncovered)
+                };
+                (rgb, if white_background { 1.0 } else { output_alpha })
+            }
+        };
+        let destination = &mut pixels[pixel_index * 4..pixel_index * 4 + 4];
+        for (destination, component) in destination[..3].iter_mut().zip(rgb) {
+            *destination = (component.clamp(0.0, 1.0) * 255.0).round() as u8;
+        }
+        destination[3] = (output_alpha * 255.0).round() as u8;
+    }
+    RgbaImage::from_raw(width, height, pixels)
+        .context("semantic region renderer returned an invalid output buffer")
 }
 
 fn render_regions_into_pixmap(
@@ -1719,6 +1911,19 @@ fn render_composite_pattern_output_cancellable(
     white_background: bool,
     token: &CancellationToken,
 ) -> Result<RgbaImage> {
+    if let Some(regions) = &output.regions
+        && output.network.is_none()
+        && let Some(model) = semantic_region_model(regions)
+    {
+        return render_semantic_region_output_cancellable(
+            regions,
+            model,
+            width,
+            height,
+            white_background,
+            token,
+        );
+    }
     let mut pixmap = Pixmap::new(width, height).context("output is too large")?;
     if white_background {
         pixmap.fill(Color::WHITE);
@@ -2006,6 +2211,10 @@ pub fn source_preview(source: &SourceArtwork, max_dimension: u32) -> Result<Dyna
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pattern::{
+        ArtboardSpace, CanonicalColor, CanonicalLayerId, FilledRegion, PolygonRing, RegionId,
+        RingWinding,
+    };
 
     fn test_png() -> Vec<u8> {
         let mut bytes = Cursor::new(Vec::new());
@@ -2039,6 +2248,338 @@ mod tests {
             .flat_map(|y| (left..right).map(move |x| image.get_pixel(x, y).0))
             .filter(|pixel| pixel[3] > 128 && pixel[0] < 80 && pixel[1] < 80 && pixel[2] < 80)
             .count()
+    }
+
+    fn semantic_color(channel: OutputChannelId) -> CanonicalColor {
+        match channel {
+            OutputChannelId::RgbRed => CanonicalColor {
+                red: 255,
+                green: 0,
+                blue: 0,
+            },
+            OutputChannelId::RgbGreen => CanonicalColor {
+                red: 0,
+                green: 255,
+                blue: 0,
+            },
+            OutputChannelId::RgbBlue => CanonicalColor {
+                red: 0,
+                green: 0,
+                blue: 255,
+            },
+            OutputChannelId::CmykCyan => CanonicalColor {
+                red: 0,
+                green: 255,
+                blue: 255,
+            },
+            OutputChannelId::CmykMagenta => CanonicalColor {
+                red: 255,
+                green: 0,
+                blue: 255,
+            },
+            OutputChannelId::CmykYellow => CanonicalColor {
+                red: 255,
+                green: 255,
+                blue: 0,
+            },
+            OutputChannelId::CmykBlack => CanonicalColor {
+                red: 0,
+                green: 0,
+                blue: 0,
+            },
+        }
+    }
+
+    fn rectangle(bounds: [f32; 4]) -> PolygonRing {
+        let [left, top, right, bottom] = bounds;
+        PolygonRing {
+            vertices: vec![
+                CanonicalPoint { x: left, y: top },
+                CanonicalPoint { x: right, y: top },
+                CanonicalPoint {
+                    x: right,
+                    y: bottom,
+                },
+                CanonicalPoint { x: left, y: bottom },
+            ],
+            winding: RingWinding::Clockwise,
+        }
+    }
+
+    fn semantic_region_fixture(
+        entries: &[(OutputChannelId, GeometryPolarity, [f32; 4])],
+    ) -> CanonicalPatternOutput {
+        let mut layers = Vec::new();
+        let mut regions = Vec::new();
+        for (order, (channel, polarity, bounds)) in entries.iter().copied().enumerate() {
+            let layer_id = layers
+                .iter()
+                .find(|layer: &&CanonicalLayer| layer.channel == Some(channel))
+                .map(|layer| layer.id)
+                .unwrap_or_else(|| {
+                    let id = CanonicalLayerId(layers.len() as u32 + 1);
+                    layers.push(CanonicalLayer {
+                        id,
+                        channel: Some(channel),
+                        label: channel.stable_id().into(),
+                        order: order as u32,
+                        color: semantic_color(channel),
+                        opacity: 1.0,
+                        blend_mode: if channel.belongs_to(OutputModel::RgbScreen) {
+                            CanonicalBlendMode::Screen
+                        } else {
+                            CanonicalBlendMode::Multiply
+                        },
+                    });
+                    id
+                });
+            regions.push(FilledRegion {
+                id: RegionId(order as u32 + 1),
+                layer_id,
+                order: order as u32,
+                rings: vec![rectangle(bounds)],
+                fill_rule: CanonicalFillRule::NonZero,
+                polarity,
+                transform: AffineTransform::IDENTITY,
+            });
+        }
+        CanonicalPatternOutput::Regions(RegionPatternOutput {
+            artboard: ArtboardSpace {
+                width: 10,
+                height: 10,
+            },
+            layers,
+            regions,
+        })
+    }
+
+    fn render_semantic_fixture(
+        entries: &[(OutputChannelId, GeometryPolarity, [f32; 4])],
+        white_background: bool,
+    ) -> RgbaImage {
+        render_canonical_pattern_output_cancellable(
+            &semantic_region_fixture(entries),
+            10,
+            10,
+            white_background,
+            None,
+            &CancellationToken::new(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn semantic_rgb_regions_mix_additively_independent_of_layer_order_and_background() {
+        let rect = [2.0, 2.0, 8.0, 8.0];
+        let render = |channels: &[OutputChannelId]| {
+            render_semantic_fixture(
+                &channels
+                    .iter()
+                    .copied()
+                    .map(|channel| (channel, GeometryPolarity::Positive, rect))
+                    .collect::<Vec<_>>(),
+                false,
+            )
+        };
+        assert_eq!(
+            render(&[OutputChannelId::RgbRed, OutputChannelId::RgbGreen])
+                .get_pixel(5, 5)
+                .0,
+            [255, 255, 0, 255]
+        );
+        assert_eq!(
+            render(&[OutputChannelId::RgbRed, OutputChannelId::RgbBlue])
+                .get_pixel(5, 5)
+                .0,
+            [255, 0, 255, 255]
+        );
+        assert_eq!(
+            render(&[OutputChannelId::RgbGreen, OutputChannelId::RgbBlue])
+                .get_pixel(5, 5)
+                .0,
+            [0, 255, 255, 255]
+        );
+        assert_eq!(
+            render(&[
+                OutputChannelId::RgbRed,
+                OutputChannelId::RgbGreen,
+                OutputChannelId::RgbBlue,
+            ])
+            .get_pixel(5, 5)
+            .0,
+            [255, 255, 255, 255]
+        );
+
+        let forward = render_semantic_fixture(
+            &[
+                (OutputChannelId::RgbRed, GeometryPolarity::Positive, rect),
+                (OutputChannelId::RgbGreen, GeometryPolarity::Positive, rect),
+            ],
+            false,
+        );
+        let reversed = render_semantic_fixture(
+            &[
+                (OutputChannelId::RgbGreen, GeometryPolarity::Positive, rect),
+                (OutputChannelId::RgbRed, GeometryPolarity::Positive, rect),
+            ],
+            false,
+        );
+        assert_eq!(forward, reversed);
+
+        let opaque = render_semantic_fixture(
+            &[
+                (OutputChannelId::RgbRed, GeometryPolarity::Positive, rect),
+                (OutputChannelId::RgbGreen, GeometryPolarity::Positive, rect),
+            ],
+            true,
+        );
+        assert_eq!(opaque.get_pixel(5, 5).0, [255, 255, 0, 255]);
+        assert_eq!(opaque.get_pixel(0, 0).0, [255, 255, 255, 255]);
+        assert_eq!(forward.get_pixel(0, 0).0, [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn semantic_cmyk_regions_retain_each_ink_and_keep_subtraction_channel_local() {
+        let rect = [1.0, 1.0, 9.0, 9.0];
+        let cyan_magenta = [
+            (OutputChannelId::CmykCyan, GeometryPolarity::Positive, rect),
+            (
+                OutputChannelId::CmykMagenta,
+                GeometryPolarity::Positive,
+                rect,
+            ),
+        ];
+        let combined = render_semantic_fixture(&cyan_magenta, true);
+        assert_eq!(combined.get_pixel(5, 5).0, [0, 0, 255, 255]);
+        let reversed = render_semantic_fixture(
+            &[
+                (
+                    OutputChannelId::CmykMagenta,
+                    GeometryPolarity::Positive,
+                    rect,
+                ),
+                (OutputChannelId::CmykCyan, GeometryPolarity::Positive, rect),
+            ],
+            true,
+        );
+        assert_eq!(combined, reversed);
+
+        let hole = render_semantic_fixture(
+            &[
+                (OutputChannelId::CmykCyan, GeometryPolarity::Positive, rect),
+                (
+                    OutputChannelId::CmykCyan,
+                    GeometryPolarity::Subtractive,
+                    [4.0, 4.0, 6.0, 6.0],
+                ),
+                (
+                    OutputChannelId::CmykMagenta,
+                    GeometryPolarity::Positive,
+                    rect,
+                ),
+            ],
+            true,
+        );
+        assert_eq!(hole.get_pixel(2, 2).0, [0, 0, 255, 255]);
+        assert_eq!(hole.get_pixel(5, 5).0, [255, 0, 255, 255]);
+    }
+
+    #[test]
+    fn semantic_region_gaps_preserve_visible_antialiasing_without_raw_bisector_coverage() {
+        let nonzero_gap = render_semantic_fixture(
+            &[
+                (
+                    OutputChannelId::RgbRed,
+                    GeometryPolarity::Positive,
+                    [0.0, 0.0, 3.5, 10.0],
+                ),
+                (
+                    OutputChannelId::RgbRed,
+                    GeometryPolarity::Positive,
+                    [6.5, 0.0, 10.0, 10.0],
+                ),
+            ],
+            false,
+        );
+        assert_eq!(nonzero_gap.get_pixel(5, 5)[3], 0);
+        assert!(nonzero_gap.get_pixel(2, 5)[3] > 0);
+        assert!(nonzero_gap.get_pixel(7, 5)[3] > 0);
+
+        let zero_gap = render_semantic_fixture(
+            &[
+                (
+                    OutputChannelId::RgbRed,
+                    GeometryPolarity::Positive,
+                    [0.0, 0.0, 5.0, 10.0],
+                ),
+                (
+                    OutputChannelId::RgbRed,
+                    GeometryPolarity::Positive,
+                    [5.0, 0.0, 10.0, 10.0],
+                ),
+            ],
+            false,
+        );
+        assert!(
+            (0..10).all(|x| zero_gap.get_pixel(x, 5)[3] == 255),
+            "same-channel adjoining cells must not leave a raster seam"
+        );
+    }
+
+    #[test]
+    fn semantic_region_preview_and_png_share_model_aware_pixels_while_generic_subtraction_remains()
+    {
+        let output = semantic_region_fixture(&[
+            (
+                OutputChannelId::RgbRed,
+                GeometryPolarity::Positive,
+                [2.0, 2.0, 8.0, 8.0],
+            ),
+            (
+                OutputChannelId::RgbGreen,
+                GeometryPolarity::Positive,
+                [2.0, 2.0, 8.0, 8.0],
+            ),
+        ]);
+        let preview = render_canonical_pattern_output_cancellable(
+            &output,
+            10,
+            10,
+            false,
+            None,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        let png = crate::canonical_pattern_png_bytes(&output, 10, 10, false, None).unwrap();
+        assert_eq!(preview, image::load_from_memory(&png).unwrap().to_rgba8());
+
+        let mut generic = semantic_region_fixture(&[
+            (
+                OutputChannelId::RgbRed,
+                GeometryPolarity::Positive,
+                [1.0, 1.0, 9.0, 9.0],
+            ),
+            (
+                OutputChannelId::RgbRed,
+                GeometryPolarity::Subtractive,
+                [4.0, 4.0, 6.0, 6.0],
+            ),
+        ]);
+        let CanonicalPatternOutput::Regions(regions) = &mut generic else {
+            unreachable!()
+        };
+        regions.layers[0].channel = None;
+        let generic = render_canonical_pattern_output_cancellable(
+            &generic,
+            10,
+            10,
+            false,
+            None,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(generic.get_pixel(2, 2)[3], 255);
+        assert_eq!(generic.get_pixel(5, 5)[3], 0);
     }
 
     #[test]

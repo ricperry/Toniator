@@ -1,5 +1,5 @@
 use crate::CancellationToken;
-use crate::artwork_pipeline::{ChannelAssignment, LegacyCompatibilityAssignment};
+use crate::artwork_pipeline::{ChannelAssignment, LegacyCompatibilityAssignment, OutputModel};
 use crate::model::{Document, ExportBackground, RenderVariant, Treatment};
 use crate::pattern::{
     CanonicalBlendMode, CanonicalLayer, CanonicalPatternOutput, GeometryPolarity,
@@ -41,8 +41,12 @@ pub fn export_svg_cancellable(
         CanonicalPatternOutput::Regions(_)
         | CanonicalPatternOutput::Network(_)
         | CanonicalPatternOutput::Composite(_) => {
-            let bytes =
-                canonical_pattern_svg_bytes_cancellable(&output, &document.source.name, token)?;
+            let bytes = canonical_pattern_svg_bytes_with_background_cancellable(
+                &output,
+                &document.source.name,
+                document.appearance.export_background,
+                token,
+            )?;
             atomic_write_cancellable(path, &bytes, token)
         }
     }
@@ -242,12 +246,31 @@ pub fn canonical_pattern_svg_bytes(
     output: &CanonicalPatternOutput,
     title: &str,
 ) -> Result<Vec<u8>> {
-    canonical_pattern_svg_bytes_cancellable(output, title, &CancellationToken::new())
+    canonical_pattern_svg_bytes_with_background_cancellable(
+        output,
+        title,
+        ExportBackground::None,
+        &CancellationToken::new(),
+    )
 }
 
 pub fn canonical_pattern_svg_bytes_cancellable(
     output: &CanonicalPatternOutput,
     title: &str,
+    token: &CancellationToken,
+) -> Result<Vec<u8>> {
+    canonical_pattern_svg_bytes_with_background_cancellable(
+        output,
+        title,
+        ExportBackground::None,
+        token,
+    )
+}
+
+fn canonical_pattern_svg_bytes_with_background_cancellable(
+    output: &CanonicalPatternOutput,
+    title: &str,
+    export_background: ExportBackground,
     token: &CancellationToken,
 ) -> Result<Vec<u8>> {
     token.checkpoint()?;
@@ -287,6 +310,7 @@ pub fn canonical_pattern_svg_bytes_cancellable(
         }
     }
     writeln!(svg, "  </defs>")?;
+    write_export_background(&mut svg, export_background)?;
     match output {
         CanonicalPatternOutput::Regions(output) => {
             write_region_layers_svg(&mut svg, output, "", token)?
@@ -313,6 +337,22 @@ fn ordered_layers(layers: &[CanonicalLayer]) -> Vec<&CanonicalLayer> {
     let mut layers: Vec<_> = layers.iter().collect();
     layers.sort_by_key(|layer| (layer.order, layer.id));
     layers
+}
+
+fn is_model_aware_semantic_region_output(output: &RegionPatternOutput) -> bool {
+    let Some(first_channel) = output.layers.first().and_then(|layer| layer.channel) else {
+        return false;
+    };
+    let model = if first_channel.belongs_to(OutputModel::RgbScreen) {
+        OutputModel::RgbScreen
+    } else {
+        OutputModel::CmykPrint
+    };
+    output.layers.iter().all(|layer| {
+        layer
+            .channel
+            .is_some_and(|channel| channel.belongs_to(model))
+    })
 }
 
 fn write_region_svg(
@@ -359,6 +399,7 @@ fn write_region_layers_svg(
     mask_prefix: &str,
     token: &CancellationToken,
 ) -> std::fmt::Result {
+    let compound_semantic_regions = is_model_aware_semantic_region_output(output);
     for layer in ordered_layers(&output.layers) {
         token.checkpoint().map_err(|_| std::fmt::Error)?;
         let has_subtraction = output.regions.iter().any(|region| {
@@ -392,22 +433,53 @@ fn write_region_layers_svg(
             })
             .collect();
         regions.sort_by_key(|region| (region.order, region.id));
-        for region in regions {
-            token.checkpoint().map_err(|_| std::fmt::Error)?;
+        if compound_semantic_regions
+            && let Some(first) = regions.first()
+            && regions.iter().all(|region| {
+                region.fill_rule == first.fill_rule && region.transform == first.transform
+            })
+        {
+            // The artboard clip remains an explicit page/domain boundary for
+            // valid out-of-bounds canonical geometry. This compound path is
+            // the final visible cell geometry; no clipping mask is needed.
+            for _ in &regions {
+                token.checkpoint().map_err(|_| std::fmt::Error)?;
+            }
             writeln!(
                 svg,
-                "    <path id=\"toniator-{}layer-{}-region-{}\" d=\"{}\" fill-rule=\"{}\"{} />",
+                "    <path id=\"toniator-{}layer-{}-regions\" d=\"{}\" fill-rule=\"{}\"{} />",
                 mask_prefix,
                 layer.id.0,
-                region.id.0,
-                region_path_data(region),
-                svg_fill_rule(region.fill_rule),
-                svg_transform(region.transform)
+                compound_region_path_data(&regions),
+                svg_fill_rule(first.fill_rule),
+                svg_transform(first.transform)
             )?;
+        } else {
+            for region in regions {
+                token.checkpoint().map_err(|_| std::fmt::Error)?;
+                writeln!(
+                    svg,
+                    "    <path id=\"toniator-{}layer-{}-region-{}\" d=\"{}\" fill-rule=\"{}\"{} />",
+                    mask_prefix,
+                    layer.id.0,
+                    region.id.0,
+                    region_path_data(region),
+                    svg_fill_rule(region.fill_rule),
+                    svg_transform(region.transform)
+                )?;
+            }
         }
         writeln!(svg, "  </g>")?;
     }
     Ok(())
+}
+
+fn compound_region_path_data(regions: &[&crate::pattern::FilledRegion]) -> String {
+    regions
+        .iter()
+        .map(|region| region_path_data(region))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn write_network_svg(
@@ -744,6 +816,10 @@ fn xml_escape(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artwork_pipeline::{
+        ArtworkPipelineSettings, AutomaticSeparationStrategy, ChannelAssignment, OutputChannelId,
+        OutputModel, SourceAlphaPolicy,
+    };
     use crate::model::{
         DocumentAppearance, DocumentEditor, OutputMode, PreviewSurface, RgbaColor, SourceArtwork,
     };
@@ -823,6 +899,48 @@ mod tests {
         std::fs::read(path).unwrap()
     }
 
+    fn weighted_rgb_document() -> Document {
+        let source = SourceArtwork {
+            name: "weighted.svg-fixture.png".into(),
+            media_type: "image/png".into(),
+            bytes: std::sync::Arc::from({
+                let image = RgbaImage::from_fn(48, 32, |x, y| {
+                    Rgba([(x * 5) as u8, (y * 7) as u8, 255 - (x * 3) as u8, 255])
+                });
+                let mut bytes = Cursor::new(Vec::new());
+                image.write_to(&mut bytes, ImageFormat::Png).unwrap();
+                bytes.into_inner()
+            }),
+        };
+        let mut editor = DocumentEditor::new(Document::new(source));
+        assert!(editor.set_output_mode(OutputMode::RgbScreen));
+        assert!(editor.select_pattern(crate::pattern::PatternId::WEIGHTED_VORONOI_V1));
+        assert!(editor.set_artwork_pipeline(ArtworkPipelineSettings {
+            output_model: OutputModel::RgbScreen,
+            assignment: ChannelAssignment::automatic(
+                AutomaticSeparationStrategy::RgbDirectEncodedComponentsV1,
+            ),
+            alpha_policy: SourceAlphaPolicy::Ignore,
+            active_channel: Some(OutputChannelId::RgbRed),
+            ..ArtworkPipelineSettings::default()
+        }));
+        let mut settings = crate::model::WeightedVoronoiSettings::default();
+        for channel in OutputChannelId::CMYK
+            .into_iter()
+            .chain(OutputChannelId::RGB)
+        {
+            let channel_settings = settings.channel_settings_mut(channel).unwrap();
+            channel_settings.enabled = channel.belongs_to(OutputModel::RgbScreen);
+            channel_settings.cell_count = 6;
+            channel_settings.seed = 17;
+            channel_settings.placement = crate::model::WeightedVoronoiPlacementMode::Uniform;
+            channel_settings.response_strength = 0.0;
+            channel_settings.boundary_gap = 0.5;
+        }
+        assert!(editor.set_weighted_voronoi_settings(settings));
+        editor.document().clone()
+    }
+
     fn rasterize_svg(svg: &[u8], width: u32, height: u32) -> RgbaImage {
         let tree = usvg::Tree::from_data(svg, &usvg::Options::default()).unwrap();
         let mut pixmap = tiny_skia::Pixmap::new(width, height).unwrap();
@@ -896,6 +1014,129 @@ mod tests {
                 },
             ],
         })
+    }
+
+    #[test]
+    fn weighted_svg_uses_one_compound_final_path_per_semantic_channel_without_masks() {
+        let mut document = weighted_rgb_document();
+        let output = crate::render::generate_document_pattern_output(&document).unwrap();
+        let CanonicalPatternOutput::Composite(composite) = &output else {
+            panic!("Weighted Voronoi must use composite canonical output")
+        };
+        let regions = composite.regions.as_ref().unwrap();
+        let enabled_layers: Vec<_> = regions
+            .layers
+            .iter()
+            .filter(|layer| layer.channel.is_some())
+            .collect();
+        assert_eq!(enabled_layers.len(), 3);
+        assert!(
+            regions
+                .regions
+                .iter()
+                .all(|region| region.polarity == GeometryPolarity::Positive)
+        );
+
+        let svg = exported_svg_bytes(&document);
+        assert_eq!(svg, exported_svg_bytes(&document));
+        let text = String::from_utf8(svg.clone()).unwrap();
+        assert_eq!(text.matches("<mask ").count(), 0);
+        assert_eq!(text.matches("<path ").count(), enabled_layers.len());
+        assert!(!text.contains("-region-"));
+        assert!(!text.contains("fill-rule=\"evenodd\""));
+        for layer in &enabled_layers {
+            assert!(text.contains(&format!(
+                "id=\"toniator-regions-layer-{}\" inkscape:groupmode=\"layer\"",
+                layer.id.0
+            )));
+            let path = text
+                .lines()
+                .find(|line| {
+                    line.contains(&format!(
+                        "id=\"toniator-regions-layer-{}-regions\"",
+                        layer.id.0
+                    ))
+                })
+                .unwrap();
+            let visible_cells = regions
+                .regions
+                .iter()
+                .filter(|region| region.layer_id == layer.id)
+                .count();
+            assert_eq!(path.matches("M ").count(), visible_cells);
+            assert!(path.contains("fill-rule=\"nonzero\""));
+        }
+        assert_eq!(text.matches("mix-blend-mode:screen").count(), 3);
+        usvg::Tree::from_data(&svg, &usvg::Options::default()).unwrap();
+
+        let raster = crate::render::render_canonical_pattern_output_cancellable(
+            &output,
+            48,
+            32,
+            false,
+            None,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        let svg_raster = rasterize_svg(&svg, 48, 32);
+        let mean_channel_drift = svg_raster
+            .as_raw()
+            .iter()
+            .zip(raster.as_raw())
+            .map(|(svg, raster)| u64::from(svg.abs_diff(*raster)))
+            .sum::<u64>() as f64
+            / svg_raster.as_raw().len() as f64;
+        assert!(
+            mean_channel_drift <= 2.0,
+            "Weighted SVG/raster mean channel drift {mean_channel_drift}"
+        );
+
+        let transparent_svg = text;
+        assert!(!transparent_svg.contains("toniator-background"));
+        document.appearance.export_background = ExportBackground::Color {
+            color: RgbaColor::opaque(12, 34, 56),
+        };
+        let opaque_svg = String::from_utf8(exported_svg_bytes(&document)).unwrap();
+        assert!(opaque_svg.contains("id=\"toniator-background\""));
+        assert!(opaque_svg.contains("fill=\"#0c2238\""));
+        assert_ne!(opaque_svg, transparent_svg);
+
+        let mut cmyk_editor = DocumentEditor::new(weighted_rgb_document());
+        assert!(cmyk_editor.set_output_mode(OutputMode::CmykInks));
+        assert!(cmyk_editor.select_pattern(crate::pattern::PatternId::WEIGHTED_VORONOI_V1));
+        let mut cmyk_settings = cmyk_editor
+            .document()
+            .pattern_state
+            .weighted_voronoi_settings()
+            .unwrap();
+        for channel in OutputChannelId::CMYK
+            .into_iter()
+            .chain(OutputChannelId::RGB)
+        {
+            cmyk_settings.channel_settings_mut(channel).unwrap().enabled =
+                channel.belongs_to(OutputModel::CmykPrint);
+        }
+        assert!(cmyk_editor.set_weighted_voronoi_settings(cmyk_settings));
+        let cmyk_svg = String::from_utf8(exported_svg_bytes(cmyk_editor.document())).unwrap();
+        assert_eq!(cmyk_svg.matches("<mask ").count(), 0);
+        assert_eq!(cmyk_svg.matches("<path ").count(), 4);
+        assert_eq!(cmyk_svg.matches("mix-blend-mode:multiply").count(), 4);
+        assert!(!cmyk_svg.contains("mix-blend-mode:screen"));
+    }
+
+    #[test]
+    fn genuine_semantic_region_subtraction_retains_a_layer_local_svg_mask() {
+        let mut output = canonical_region_fixture();
+        let CanonicalPatternOutput::Regions(regions) = &mut output else {
+            unreachable!()
+        };
+        regions.layers[0].channel = Some(OutputChannelId::CmykCyan);
+        let text = String::from_utf8(canonical_pattern_svg_bytes(&output, "subtraction").unwrap())
+            .unwrap();
+        assert_eq!(text.matches("<mask ").count(), 1);
+        assert!(text.contains("mask=\"url(#toniator-layer-1-subtract)\""));
+        assert!(text.contains("id=\"toniator-layer-1-regions\""));
+        assert!(text.contains("fill-rule=\"evenodd\""));
     }
 
     #[test]
