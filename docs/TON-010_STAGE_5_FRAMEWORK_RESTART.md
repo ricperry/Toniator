@@ -41,10 +41,13 @@ settings, UI, or rendering.
 
 `src/weighted_voronoi.rs` is an adapter. It validates persisted settings,
 requests each enabled channel's resolved field, maps settings to neutral
-requests, applies response insets, allocates canonical positive/subtractive
-regions, and records explicit region relationships and cache fingerprints.
-Region IDs are deliberately disjoint; relationships, never numeric adjacency,
-identify a positive region's subtractive region.
+requests, applies response insets, and emits each final boundary-derived inset
+polygon as one positive canonical region. Raw clipped cells and raw-to-inset
+boundary rings are construction data only; they are not final Weighted
+Voronoi artwork. `WeightedVoronoiCellRegion` preserves semantic channel/site
+identity without claiming a cell-sizing subtraction. General canonical
+subtraction remains available for genuine holes, knockouts, and other
+semantics that cannot be represented as final positive geometry.
 
 `Document.pattern_state` remains the only persisted pattern authority.
 `RenderVariant::WeightedVoronoiCanonicalV1` is a derived dispatch marker. The
@@ -92,3 +95,16 @@ arrangement policy, strict generator rejection, persistence, undo/redo,
 preset behavior, canonical preview/PNG/SVG parity, and perimeter omission.
 The realized GTK selector/control regression is also covered; human GNOME/
 Wayland pointer and screen-reader acceptance remains unclaimed.
+
+## Correction pass
+
+The 2026-08-01 correctness pass preserves the framework and changes only its
+canonical consumers: semantic region rasterization now renders isolated
+per-channel coverage before deterministic RGB additive or CMYK multiplicative
+composition, so genuine subtraction cannot erase sibling channels. Direct
+Weighted Voronoi inset regions therefore have no cell-sizing subtraction path,
+and semantic SVG exports use one editable compound positive path per channel.
+The artboard clip remains a page/domain constraint because canonical geometry
+may be out of bounds; genuine subtraction masks remain only where genuine
+subtractive regions exist. Preview Surface remains preview-only and
+Export Background is applied at the export presentation stage.

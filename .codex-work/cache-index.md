@@ -16,6 +16,27 @@ The parent thread records read-only-agent updates here after persisting them.
 
 ## Current entries
 
+- `ton-010-stage5-framework-restart-substage-a-parent-review-2026-08-01` —
+  parent-reviewed direct-positive Weighted Voronoi producer correction on
+  dirty HEAD `54a8e37`; final boundary-derived inset polygons are positive
+  canonical regions and cell-sizing subtraction is absent. Valid until the
+  producer, canonical algebra, response-inset geometry, consumers, HEAD, or
+  recorded dirty state changes.
+
+- `ton-010-stage5-framework-restart-substage-b-parent-review-2026-08-01` —
+  parent-reviewed model-aware semantic raster compositor on dirty HEAD
+  `54a8e37`; isolated channel coverage, RGB/CMYK model composition, local
+  subtraction, gap behavior, and preview/PNG parity are covered. Valid until
+  render, canonical region, PNG, Weighted producer, HEAD, or dirty state
+  changes.
+
+- `ton-010-stage5-framework-restart-substage-c-parent-review-2026-08-01` —
+  parent-reviewed compound semantic SVG serializer on dirty HEAD `54a8e37`;
+  Weighted output has one final positive compound path per channel, no
+  cell-sizing masks, and genuine subtraction retains local masks. Valid until
+  SVG, canonical algebra, raster composition, Weighted producer,
+  export-background behavior, HEAD, or dirty state changes.
+
 - `ton-010-stage5-framework-substage-d-2026-07-29` — parent correction and
   focused acceptance evidence for the restarted Stage 5 framework on branch
   `TON-010-Stage5-Framework-Restart`; covers the realized Weighted Voronoi UI

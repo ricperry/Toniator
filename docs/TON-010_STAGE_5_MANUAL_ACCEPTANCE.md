@@ -285,3 +285,24 @@ policy.
    alpha.
 7. Validate preview, PNG, and SVG against the recorded Krita and Inkscape
    references.
+
+## Correction pass result (2026-08-01)
+
+The targeted correction is implemented and covered by focused automated tests.
+Weighted Voronoi now emits only its final boundary-derived inset polygons as
+positive canonical regions. Raster composition isolates each semantic channel
+before applying genuine subtraction and combines RGB channels additively or
+CMYK channels multiplicatively; transparent output preserves uncovered alpha,
+while an opaque canonical background is applied explicitly when requested.
+Semantic SVG layers now contain one compound positive path per channel and no
+Weighted cell-sizing mask. The artboard clip remains as the canonical
+page/domain constraint; genuine subtractive regions still use a layer-local
+mask.
+
+The final code pass reported 168 library tests, 48 binary/UI tests, zero doc
+tests, strict Clippy, a locked release build, explicit Blueprint compilation,
+and the realized GTK regression passing. Automated Weighted SVG/raster parity
+was within the existing mean-channel tolerance. Manual Inkscape Break Apart,
+visual comparison to the supplied Krita RGB/CMYK references, and human
+GNOME/Wayland acceptance remain required before claiming final perceptual
+acceptance.
