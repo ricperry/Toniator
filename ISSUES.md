@@ -861,15 +861,18 @@ Toniator needs a pattern framework rather than another expanding collection of h
 Create a versioned, extensible halftone-pattern framework through which:
 
 * built-in patterns are registered using stable identifiers;
-* the registry contract leaves a common discovery and execution path for
-  future user-defined patterns;
+* the registry contract provides one discovery and execution path for bundled,
+  library, imported, and project-embedded pattern definitions;
 * pattern metadata and parameter definitions drive the interface;
 * mark-based and path-based patterns are both supported;
 * deterministic and stochastic patterns use shared framework services;
 * new patterns can be added without redesigning the document model;
 * supported pattern components can be combined into reusable user recipes;
-* future project-embedded definitions have a defined extension point without
-  implementing the custom-pattern ecosystem in this issue;
+* declarative `.tnpattern` v1 recipes, embedded assets, and their strict
+  resolution boundaries are implemented without allowing untrusted code
+  execution;
+* built-in patterns and user recipes ultimately use the same loader, runtime,
+  parameter inspector, and editor contracts;
 * preview, PNG, and SVG consume the same generated geometry.
 
 The framework must support future expansion toward pattern families such as:
@@ -974,9 +977,14 @@ Renaming a pattern in the interface must not break saved projects.
 
 ## Pattern registry
 
-Built-in patterns must be discoverable through a common registry. The registry
-contract must leave a compatible extension point for future imported and
-user-defined patterns, but TON-010 does not implement their library workflows.
+All pattern definitions must be discoverable through one common registry.
+Bundled definitions, local-library definitions, imported definitions, and
+project-embedded definitions use the same stable-ID lookup and validation
+boundary. Project-embedded content is authoritative for a portable project and
+surfaces any shadowed local-library source/fingerprint as a deterministic
+diagnostic rather than silently substituting it. Bundled content is immutable,
+and same-layer ambiguity fails visibly. Filesystem I/O and user-facing
+management are staged integrations of TON-010, not a separate pattern issue.
 
 The registry must provide:
 
@@ -1477,8 +1485,8 @@ Numeric seeds must be manually editable through an advanced but accessible contr
 * Save and reopen preserve exact seed state.
 * Undo and redo restore exact seed values and generated geometry.
 * Presets preserve seed policy and values where appropriate.
-* Future imported custom patterns must preserve seed configuration when the
-  separate custom-pattern follow-up is implemented.
+* Future imported and project-embedded recipes must preserve seed
+  configuration when recipe library and persistence stages are implemented.
 * Cancelled generation does not advance or replace the saved seed.
 * A stale result cannot replace geometry generated from a newer seed.
 
@@ -1491,22 +1499,16 @@ Custom recipes must declare whether they:
 
 ---
 
-# Follow-up: user-defined patterns
+# Declarative recipe ecosystem
 
-The full custom-pattern editor, local library management, pattern
-import/export, project embedding, and embedded-asset recovery are outside the
-TON-010 core deliverable. Create a separate follow-up issue for that ecosystem.
-TON-010 must leave the registry, authoritative pattern state, versioned
-parameter contract, canonical output algebra, and asset-reference boundary
-capable of supporting it later, but must not implement these workflows unless
-a narrowly required contract test proves they are necessary.
+The declarative recipe ecosystem is part of TON-010. The current accepted
+milestone establishes the strict `.tnpattern` v1 definition, instance,
+resolution, asset, and bounded native-runtime contracts. The remaining recipe
+workflow stages must build on those contracts rather than introduce a second
+pattern system.
 
-## Follow-up scope
-
-The separate custom-pattern follow-up should support declarative pattern recipes
-built from registered and safe pattern components.
-
-It must not initially execute arbitrary:
+Recipes are data-only and may execute only through explicitly registered,
+versioned native operations. They must not execute arbitrary:
 
 * Rust;
 * Python;
@@ -1537,6 +1539,8 @@ Parallel Line Field
 Users must be able to:
 
 * begin from a built-in pattern or an empty supported recipe;
+* use a guided stage editor for ordinary recipe construction and a graph
+  editor for advanced topology and port wiring;
 * select compatible placement, primitive, deformation, and modulation stages;
 * configure exposed parameters;
 * import an SVG mark or motif where supported;
@@ -1769,9 +1773,11 @@ The first implementation may deliver the proofs in separate reviewable stages. A
 
 # Pattern-library direction
 
-After the framework proofs and required Weighted Voronoi are complete,
-additional catalog and custom-pattern work should be tracked as separate issues
-or batches.
+After the framework proofs and required Weighted Voronoi are complete, the
+guided and graph-based recipe editor, local library, import/export, and project
+embedding remain TON-010 work. Additional catalog families beyond the required
+proofs may be tracked as separate issues or batches when they do not change the
+recipe contract.
 
 Likely families include:
 
@@ -1896,9 +1902,10 @@ Switching patterns must not:
 
 Where practical, switching away from a pattern and back should restore its prior parameter values.
 
-## Follow-up only: pattern creation and management
+## Pattern creation and management
 
-The separate custom-pattern follow-up may provide understandable actions for:
+The TON-010 recipe workflow must provide understandable guided and graph-editor
+actions for:
 
 * Duplicate as Custom Pattern;
 * Save Pattern;
@@ -2002,12 +2009,11 @@ Pattern metadata should identify potentially expensive parameters so the interfa
 * Preview, PNG, and SVG use the same seeded geometry.
 * The random-stream version prevents silent output changes after upgrades.
 
-## Follow-up: user-defined patterns
+## Recipe workflow scope
 
-The separate custom-pattern follow-up, not TON-010, owns creation, imported
-motifs, local saving, import/export, embedding, recovery, and recipe UX. TON-010
-only verifies that its authoritative registry and canonical-output contracts
-leave those future workflows possible.
+TON-010 owns creation, imported motifs, local saving, import/export, project
+embedding, recovery, and recipe UX. These capabilities remain staged after the
+accepted declarative contract; they are not a separate replacement issue.
 
 ## User experience
 
@@ -2016,12 +2022,13 @@ leave those future workflows possible.
 * Keyboard focus follows the visible workflow.
 * Hidden controls leave no orphan widgets or help buttons.
 * Disabled controls explain why they are unavailable.
-* Built-in pattern identity and family terminology are clear; custom-pattern
-  distinction is a follow-up concern.
+* Built-in and recipe identity, family terminology, and authoring state are
+  clear; the editor distinguishes provenance without separate semantics.
 * Seed synchronization is understandable without requiring knowledge of pseudorandom generators.
 * The `creative_tester` finds no blocker-level confusion in selecting and
-  adjusting built-in patterns, understanding scope, or regenerating seeded
-  patterns. Custom save/import workflows are follow-up scope.
+  adjusting built-in patterns or recipes, understanding scope, or regenerating
+  seeded patterns. Guided and graph-based save/import workflows are part of the
+  TON-010 review gate.
 
 ---
 
@@ -2054,7 +2061,8 @@ Include deterministic tests and representative visual artifacts for:
 * save and reopen;
 * undo and redo;
 * preset save and load where supported;
-* no custom import/export or embedded-definition workflow (tracked separately);
+* recipe import/export, local-library resolution, and embedded-definition
+  recovery use the strict current contract;
 * wide and tall artwork;
 * rotated and transformed artwork;
 * edge and corner coverage;
@@ -2091,9 +2099,11 @@ corrected order after the Stage 2 pause on 2026-07-28.
 ## Staged execution and pause protocol
 
 TON-010 is executed as nine independently reviewable gates, including the
-inserted Stage 4.5 baseline gate. Stages 1 through 4 are complete. Stage 4.5
-and Stages 5 through 8 remain planned until their preceding gates pass and the
-user has had an opportunity to steer the next one.
+inserted Stage 4.5 baseline gate. Stages 1 through 4 and Stage 4.5 are
+complete. Stage 5 implementation and automated correction are validated, but
+its human acceptance gate remains pending; Stages 6 through 8 remain planned
+until their preceding gates pass and the user has had an opportunity to steer
+the next one.
 
 At the end of every stage, stop. The completion report must identify what
 changed, affected files and architectural boundaries, tests/artifacts/review
@@ -2213,9 +2223,37 @@ Validation covered save/reopen, bundled presets, preset rejection, undo/redo,
 CMYK/RGB transitions, Shapes/Curves transitions, Crosshatch restoration, and
 deliberately contradictory adapter state. The complete test matrix passes (130
 library tests and 46 UI/binary tests), with format, Clippy, all-target check,
-and diff checks clean. At that Stage 2 closeout, Stage 3 had not started; the
-custom-pattern editor, local library,
-import/export, and embedded-asset recovery remain the Stage 7 follow-up issue.
+and diff checks clean. At that Stage 2 closeout, Stage 3 had not started. The
+later declarative recipe contract milestone is recorded below; its
+loader/runtime/editor wiring, library I/O, and project embedding remain staged
+TON-010 work.
+
+### Declarative recipe contract milestone — 2026-08-01
+
+**Status:** Contract milestone complete. The integration status recorded here
+was a historical substage boundary and is superseded by the 2026-08-02
+preservation-checkpoint audit below.
+
+Substages 2A, 2B, 2C1, and 2C2 establish and parent-review the strict
+`.tnpattern` v1 definition, deterministic canonical serialization and SHA-256
+asset identity, layered bundled/user/project resolution, scoped parameter and
+instance validation, and a cancellation-aware bounded native-operation
+executor. Recipes remain data-only and execute only through explicitly
+registered native operations. At this milestone boundary the implementation
+had no filesystem library, bundled recipe resources, production operation
+bodies, renderer dispatch, document/preset embedding, guided editor, or graph
+editor. Subsequent dirty-checkout work added bundled Shapes, Curves, and
+Weighted Voronoi definitions, live canonical dispatch, embedded custom Shapes
+definitions, a Shapes-specific pattern editor, and strict document v9 / preset
+v6 persistence. It did not complete the general editor/library architecture.
+
+Writer validation passed at each substage with 171, 176, 178, and 180 library
+tests respectively plus 48 binary/UI tests; the parent reran focused contract
+tests (3, 5, 5, and 2) and `git diff --check` at the four handoffs. The
+milestone itself was validated against document v8 / preset v5. The later
+integration advanced strictly to document v9 / `.tntr` v6 and rejects obsolete
+definitions without migration or defaulting. Evidence is cached
+under `.codex-work/evidence/ton-010-recipe-contract-substage-*`.
 
 ## Stage 3 — Canonical output algebra and shared geometry services
 
@@ -2297,16 +2335,17 @@ undo/autosave/render refresh paths, and the current document/preset rejection
 tests. No manual GNOME/Wayland click-through or screenshot acceptance is
 claimed.
 
-Weighted Voronoi, the three proof-pattern implementations, and the separate
-custom-pattern editor/library/import/export/embedding/recovery ecosystem have
-not started. Stage 4 remains technically accepted and is neither failed nor
-superseded. The next authorized gate is Stage 4.5A; Stage 5 remains blocked
-until the user explicitly accepts Stage 4.5D.
+Weighted Voronoi and the three proof-pattern implementations remain separate
+Stage 5–6 deliverables. Recipe editor/library/import/export/embedding/recovery
+work remains staged TON-010 integration after the accepted contract milestone.
+Stage 4 remains technically accepted and is neither failed nor superseded.
+Stage 4.5 is recorded below; Stage 5 is automated-validated with human
+acceptance still pending.
 
 ## Stage 4.5 — Baseline restoration and framework demonstrability
 
-**Status:** Planned — inserted after technically accepted Stage 4; Stage 5
-blocked until explicit Stage 4.5D acceptance
+**Status:** Complete — 4.5D parent-reviewed; Stage 5 implementation is
+automated-validated and its human acceptance gate remains pending
 
 Stage 4.5 is not a reimplementation of Stage 4. It addresses a shape-editing
 UI regression introduced during TON-013 and the missing testing presets,
@@ -2389,7 +2428,7 @@ accepted this gate on 2026-07-28 after manual inspection. 4.5C is now active.
 
 ### Stage 4.5C — Testing presets and observable fixtures
 
-**Status:** 4.5D complete — Stage 5 ready and explicitly gated
+**Status:** 4.5D complete — Stage 5 active with automated validation recorded
 
 Create visibly distinct current-format testing presets and fixtures proving
 authoritative pattern state, schema parameters, save/reopen, undo/redo,
@@ -2578,11 +2617,14 @@ discarding valid work or overlapping reassignment. Evidence:
 
 No human GNOME/Wayland click-through or screen-reader acceptance is claimed;
 realized GTK regression coverage and visual artifact inspection are complete.
-Stage 5 remains untouched and requires explicit user approval.
+Stage 5 implementation has since been parent-reviewed for automated
+validation; its GNOME/Wayland, Krita-reference, and Inkscape Break Apart human
+acceptance remains pending.
 
 ## Stage 5 — Weighted Voronoi required deliverable
 
-**Status:** Planned — blocked until explicit acceptance of Stage 4.5D
+**Status:** Implementation and automated correction validated; manual
+GNOME/Wayland, Krita-reference, and Inkscape Break Apart acceptance pending
 
 Implement Weighted Voronoi through the authoritative registry and canonical
 output contract. It must include seeded source-weighted site distribution,
@@ -2594,6 +2636,117 @@ behavior, and visual artifact parity.
 
 Weighted Voronoi is mandatory for TON-010 completion and must not be moved to a
 future catalog issue.
+
+### Stage 5 implementation and correction record — 2026-07-29 through 2026-08-01
+
+The restarted Stage 5 implementation and its parent-reviewed correction pass
+are complete for automated validation. `src/site_distribution.rs` remains the
+authority for bounded deterministic candidate generation, source-weighted
+selection, polarity, arrangement policy, semantic identity, fingerprints, and
+cancellation. `src/voronoi_geometry.rs` remains the pure authority for clipped
+cells, shared interior boundaries, artboard bounds, and response insets.
+`weighted_voronoi.rs` adapts those services into final boundary-derived
+positive canonical regions. Preview, PNG, and SVG consume the shared canonical
+output; Preview Surface remains preview-only and Export Background remains an
+export presentation setting.
+
+The comprehensive automated pass recorded 161 library tests and 48 binary/UI
+tests, six focused Weighted Voronoi tests, five site-distribution tests, four
+Voronoi-geometry tests, one realized GTK selector/control test, strict
+all-target Clippy, a locked release build, formatting, and diff checks. The
+later recipe/editor integration checkpoint raises the current full suite to
+261 library tests and 56 binary/UI tests and wires bundled and embedded recipes
+into the canonical consumers. That larger checkpoint does not constitute
+human acceptance or TON-010 closeout.
+
+Human acceptance is not claimed. The remaining checks are a GNOME/Wayland
+click-through and responsive-layout review, Krita-reference inspection of the
+preserved CMYK/RGB artifacts, and Inkscape **Break Apart** inspection of the
+editable SVG output. The reference images under
+`.codex-work/evidence/ton-010-stage5-manual/` are evidence inputs, not a human
+acceptance record. Stage 6 proof patterns and final TON-010 closeout remain
+open.
+
+### Pattern-engine preservation checkpoint audit — 2026-08-02
+
+**Status:** Incomplete preservation checkpoint. TON-010 remains **Open**.
+
+The current dirty checkout substantially extends the original Weighted
+Voronoi deliverable into a general custom-pattern engine. The live canonical
+route now loads bundled `.tnpattern` definitions for Shapes, Curves, and
+Weighted Voronoi through the strict recipe parser and bounded DAG executor.
+Embedded custom Shapes definitions are persisted in document v9 / `.tntr` v6
+state and are consumed by preview, PNG, and SVG. The main-window Channel
+Settings also projects channel distribution and styling values into selected
+embedded definitions.
+
+This is useful implementation progress, but it is not the promised general
+pattern-authoring system. The current Pattern Editor creates only a modified
+Shapes-compatible graph. `PATTERN_PRESET_LABELS`,
+`apply_named_pattern_preset`, and `pattern_editor_recipe` in `src/ui.rs` encode
+the available pattern names, per-pattern defaults, fixed node IDs, operation
+IDs, and parameter keys. The native `shapes.lattice-placement-editor`
+operation then branches internally among grid, triangular, curve, math, and
+random variants. Adding another creative option currently encourages another
+UI match arm and native special case instead of composing registered
+operations through a stable, user-inspectable contract.
+
+The intended ownership boundary is:
+
+* **Pattern definition:** placement/topology, grid or path construction,
+  structural spacing, curve or math family, dispersion algorithm, jitter
+  algorithm, point/connected-path output, and other reusable construction
+  choices.
+* **Channel instance:** enabled state, channel colour, opacity, coverage,
+  sampling detail/density response, source weighting and influence, random
+  seed, channel and mark rotation, mark shape and scale, and other treatment
+  values that can differ by ink. Per-channel controls belong only in the main
+  window.
+
+The UI partially observes that split, but internal names and synchronization
+still leak across it and need an explicit authority table. In particular,
+`random_size_response` is channel-owned even though several widget/draft names
+still call it a pattern-editor value. Preserve the current runtime tests before
+renaming or moving state; do not infer authority from legacy identifier names.
+
+Additional verified gaps:
+
+* **Save As is write-only in the UI.** It writes a user `.tnpattern`, but there
+  is no library browser, import/open path, or application-level layered
+  registry resolution that can select that saved file later.
+* The general guided and graph editors described by the expanded TON-010 scope
+  do not exist. The present dialog is a Shapes-specific guided form.
+* `RenderVariant`, NativeBasic, Crosshatch compatibility, and typed
+  Shapes/Curves adapters remain in production dispatch, so duplicate execution
+  seams have not been removed.
+* Triangular, math, and random choices exist as custom-editor variants and
+  hard-coded named presets, not as a complete immutable Stage 6 recipe proof
+  catalog. Wave Line Field and Evenly Spaced Pointillism acceptance, including
+  shared/independent arrangements and regeneration, remains open.
+* Manual GNOME/Wayland interaction, Krita RGB/CMYK reference comparison, and
+  Inkscape Break Apart acceptance remain open.
+
+Closeout must proceed without adding more per-pattern branches:
+
+1. Freeze and test the pattern-definition versus channel-instance ownership
+   table; remove or rename leaky draft/widget state without changing output.
+2. Replace numeric preset mutations with immutable bundled `.tnpattern`
+   definitions or declarative templates selected by stable ID.
+3. Make the editor render controls from recipe/schema metadata and compose
+   typed registered operations. Complete the non-lossy graph view promised by
+   the expanded scope.
+4. Wire the user library, import/conflict handling, layered resolution,
+   project/preset embedding, missing-definition errors, and recovery workflow.
+5. Deliver and visually exercise the three Stage 6 proof recipes using the
+   same public operation/editor surface rather than private pattern-specific
+   paths.
+6. Remove compatibility dispatch and duplicate parameter authority after
+   canonical output-equivalence tests pass.
+7. Complete automated parity plus the outstanding human Stage 5 and creative
+   workflow acceptance gates. Only then reconcile TON-010 as Done.
+
+The reusable audit is cached at
+`.codex-work/evidence/ton-010-preservation-checkpoint-audit-2026-08-02.md`.
 
 ## Stage 6 — Framework proof catalog
 
@@ -2610,17 +2763,15 @@ Verify source modulation, transforms, edge coverage, cancellation, persistence
 of current definitions, undo/redo, and preview/PNG/SVG parity. The proofs do
 not replace Weighted Voronoi.
 
-## Stage 7 — Full framework review and follow-up boundary
+## Stage 7 — Full framework review and recipe workflow integration
 
 Perform complete regression, canonical artifact comparison, performance,
 cancellation, memory, creative workflow, accessibility, and current-format
-rejection review. Confirm that the registry contract can support future
-declarative recipes and embedded definitions without implementing their editor,
-library, import/export, or asset-recovery ecosystem.
-
-Create a separate follow-up issue for the full custom-pattern editor, local
-library management, import/export format, project embedding, embedded-asset
-recovery, and recipe UX. Do not count those capabilities as TON-010 work.
+rejection review. Bundled and embedded recipe loading and strict document v9 /
+`.tntr` v6 persistence have landed. Finish the common schema-driven guided and
+graph editor path, local library, import/export, layered resolution, and
+project-embedding/recovery workflow. Continue rejecting obsolete definitions;
+do not add migration or compatibility defaults.
 
 ## Stage 8 — TON-010 closeout
 
@@ -2660,10 +2811,12 @@ Do not mark TON-010 Done when:
 TON-010 is complete only when the common framework, authoritative pattern
 state, expanded canonical output contract, required Weighted Voronoi pattern,
 three framework proofs, stochastic seed behavior, current-definition updates,
-and strict obsolete-schema rejection have all passed their respective review
-gates. The full custom-pattern editor, local library, import/export,
-project-embedding, and embedded-asset recovery workflow belong to a separate
-follow-up issue.
+strict obsolete-schema rejection, and the declarative recipe ecosystem have
+all passed their respective review gates. The recipe ecosystem includes the
+same-loader/runtime/editor path for built-ins and recipes, guided and graph
+editing, local library management, import/export, project embedding, and
+embedded-asset recovery. Human GNOME/Wayland, Krita-reference, and Inkscape
+Break Apart acceptance must also be recorded before closeout.
 
 ---
 
@@ -5205,3 +5358,338 @@ For each issue:
    - follow-up issues discovered.
 9. Do not silently broaden an issue into a general rewrite.
 10. Do not mark an issue complete when only the UI exists but the exported result is still incomplete or inconsistent.
+
+---
+
+## TON-021 — Print-Aesthetic CMYK Composite Preview and sRGB Export
+
+**Status:** Proposed
+**Priority:** Medium
+**Area:** Preview / Export / Color Composition
+**Depends on:** TON-020 background and export controls
+**Pattern impact:** None; this issue must not alter pattern generation, sampling, geometry, or channel masks.
+
+### Summary
+
+Add a configurable **print-aesthetic CMYK compositing model** for previewing and exporting Toniator’s C, M, Y, and K channel output as an sRGB image.
+
+The current idealized multiply model treats cyan, magenta, and yellow as perfect subtractive primaries. As a result:
+
+* `100% C + 100% M + 100% Y` produces mathematically perfect black.
+* `100% K` produces perfect display black.
+* Adding K to CMY does not produce a meaningfully richer black than CMY alone.
+
+This is visually unlike the characteristic appearance of printed CMYK artwork.
+
+Toniator does not need full physical print simulation, ICC soft proofing, or device-specific color management. Instead, it should provide an intentionally simplified design-preview model that gives the composition a believable print aesthetic while still producing an ordinary sRGB preview or export.
+
+### Intended behavior
+
+The CMYK composite should use configurable non-ideal ink responses rather than ideal cyan, magenta, yellow, and black colors.
+
+With the default preset:
+
+* `100% C + 100% M + 100% Y` should produce a very dark muddy brown, warm neutral, or similar print-like composite rather than perfect black.
+* `100% K` should produce a nearly black tone, but not absolute display black.
+* Adding K to a heavy CMY mixture should produce a visibly deeper rich black.
+* A sufficiently heavy CMYK combination may be mapped to true display black as part of the design-preview black-point treatment.
+* Lower channel values and antialiased channel edges should transition smoothly.
+* The result should remain deterministic and consistent between the live preview and exported raster output.
+
+This is a design visualization model, not a claim about the exact output of any specific printer, ink set, garment, paper stock, or print-on-demand provider.
+
+### Scope
+
+Implement the model at the stage where authoritative channel coverage masks are composited into a final color preview or raster export.
+
+The pipeline should remain conceptually:
+
+```text
+Authoritative C/M/Y/K channel masks
+        ↓
+Print-aesthetic CMYK compositing
+        ↓
+Optional background handling
+        ↓
+Final sRGB preview or raster export
+```
+
+The same channel masks and pattern geometry must continue to drive:
+
+* canvas preview
+* PNG export
+* JPEG export, when supported
+* any flattened raster preview used by the application
+
+Vector separation output should remain structurally independent unless a flattened sRGB composite is explicitly requested.
+
+### Proposed compositing model
+
+Use a configurable per-ink response or optical-density model instead of ordinary source-over transparency.
+
+A suitable first approximation is a component-wise reflectance model:
+
+```text
+output =
+    paper
+    × cyan_response ^ cyan_coverage
+    × magenta_response ^ magenta_coverage
+    × yellow_response ^ yellow_coverage
+    × black_response ^ black_coverage
+```
+
+Each value is an RGB triplet in the working sRGB preview model, and multiplication and exponentiation are component-wise.
+
+Equivalent optical-density storage is also acceptable if it produces the same controlled behavior and is clearer in the implementation.
+
+Ordinary alpha transparency should not be the primary mechanism for weakening the inks. Alpha describes source-over compositing, while this feature needs a controllable approximation of ink absorption and density.
+
+### Default first-approximation preset
+
+Use the following normalized values as an initial visual preset, subject to tuning through screenshots and export comparisons:
+
+```text
+Paper:
+R 1.00
+G 0.98
+B 0.95
+
+Cyan solid response:
+R 0.35
+G 0.92
+B 0.95
+
+Magenta solid response:
+R 0.93
+G 0.40
+B 0.90
+
+Yellow solid response:
+R 0.98
+G 0.97
+B 0.30
+
+Black solid response:
+R 0.18
+G 0.16
+B 0.15
+```
+
+These values are intended only as an initial aesthetic baseline. They should be visually evaluated and adjusted if necessary so that:
+
+* full CMY is dark and muddy but not black;
+* full K is near-black;
+* full CMYK is substantially darker than either full CMY or full K;
+* single-ink and two-ink mixtures remain recognizably cyan, magenta, yellow, blue, red, and green.
+
+### User-configurable settings
+
+Add application-level settings for the CMYK print-aesthetic model.
+
+Required settings:
+
+1. **Paper color**
+
+   * RGB color used as the starting substrate for the CMYK composite.
+   * Default should be a slightly warm near-white.
+   * This setting is separate from export transparency.
+   * When exporting transparency, uncovered pixels may remain transparent even though paper color is used internally for opaque preview calculations.
+
+2. **Solid ink responses**
+
+   * Individual RGB response values for:
+
+     * cyan
+     * magenta
+     * yellow
+     * black
+   * These describe the appearance or attenuation of each ink at full coverage.
+
+3. **Ink strength or density**
+
+   * Global ink-strength control.
+   * Per-channel controls may be added if justified by the implementation, but are not required initially.
+   * The setting should alter absorption strength, not merely reduce source opacity.
+
+4. **Black point**
+
+   * Controls how the darkest CMYK combinations are mapped into the final sRGB output.
+   * Must allow rich CMYK mixtures to reach or approach display black while leaving `100% K` slightly above absolute black under the default preset.
+   * The black-point operation must be monotonic and must not introduce banding or abrupt color discontinuities.
+
+### Presets
+
+Provide at least these presets:
+
+* **Print Aesthetic — Default**
+
+  * The default non-ideal CMYK model.
+
+* **Ideal CMYK**
+
+  * Preserves the current mathematical multiply behavior:
+
+    * C, M, and Y behave as ideal subtractive primaries.
+    * CMY can produce perfect black.
+    * K can produce perfect black.
+  * Useful for comparison and compatibility.
+
+Additional coated, uncoated, newsprint, or POD-inspired presets may be added later, but they must not be described as accurate device proofs without profile-based color management.
+
+### UI placement
+
+Place the controls in application settings or a dedicated color-composition section, not inside individual pattern controls.
+
+The normal inspector should expose only the settings necessary for the current document workflow. Detailed solid-response editing may live in an advanced settings dialog.
+
+The UI should make clear that these values affect:
+
+* CMYK composite preview
+* flattened sRGB raster export
+
+They do not affect:
+
+* site placement
+* pattern density
+* mark geometry
+* channel sampling
+* thresholding
+* curve generation
+* Voronoi generation
+* SVG separation geometry
+
+### Document and settings behavior
+
+Determine explicitly which values are:
+
+* application defaults;
+* document-specific overrides;
+* export-time overrides.
+
+Recommended initial behavior:
+
+* Application settings define the default print-aesthetic preset.
+* New documents inherit the active application defaults.
+* Documents save their selected compositing preset and any overrides required to reproduce their appearance.
+* Changing application defaults must not silently change the appearance of an existing saved document.
+* Preview and export must use the same resolved document settings.
+
+Any schema changes must be versioned and migrated safely.
+
+### Preview and export parity
+
+The canvas preview and flattened sRGB raster export must share the same compositing implementation.
+
+The following must not use separate approximations:
+
+* preview
+* PNG export
+* JPEG export
+* thumbnails or cached composite images
+
+Differences caused solely by output resolution and antialiasing are acceptable. Differences in channel mixing, ink response, paper color, density, or black-point mapping are not.
+
+### Color-space handling
+
+The final flattened result must be encoded and tagged as sRGB.
+
+The implementation should clearly document whether the internal arithmetic is performed in encoded sRGB, linear RGB, or another intermediate representation.
+
+The selected method should prioritize:
+
+* stable appearance;
+* agreement between preview and export;
+* predictable interaction with Inkscape, Krita, browsers, and POD upload systems;
+* absence of visible discontinuities.
+
+This issue does not require spectral color calculations or ICC-based conversion.
+
+### Non-goals
+
+This issue does not include:
+
+* ICC soft proofing;
+* printer-specific CMYK profiles;
+* spectral ink modeling;
+* dot gain simulation;
+* physical paper-scattering simulation;
+* trapping simulation;
+* total ink coverage enforcement;
+* under-color removal;
+* gray-component replacement;
+* automatic POD-provider color correction;
+* changes to halftone pattern generation;
+* changes to authoritative channel masks;
+* conversion of Toniator into a native CMYK raster editor.
+
+### Acceptance criteria
+
+1. The default CMYK preview no longer renders full CMY as perfect black.
+
+2. Full K alone renders as a near-black tone under the default preset, not absolute display black.
+
+3. Adding K to a heavy CMY composite creates a visibly deeper rich black.
+
+4. The darkest rich-black combinations can reach or approach display black according to the configured black point.
+
+5. Single-channel and two-channel mixtures remain visually recognizable and stable.
+
+6. Preview and flattened PNG/JPEG export use the same resolved compositing settings and produce matching results.
+
+7. Exported flattened images are valid sRGB images.
+
+8. The model is implemented after channel-mask generation and does not modify pattern geometry, sampling, density, site distribution, or channel coverage data.
+
+9. Application defaults and document overrides are persisted deterministically.
+
+10. Existing documents migrate without losing their previous appearance. Where necessary, migrated documents should select the **Ideal CMYK** compatibility preset.
+
+11. Automated tests cover at minimum:
+
+    * paper only;
+    * 100% C;
+    * 100% M;
+    * 100% Y;
+    * 100% K;
+    * 100% CM;
+    * 100% CY;
+    * 100% MY;
+    * 100% CMY;
+    * 100% CMYK;
+    * partial channel mixtures;
+    * preview/export parity;
+    * preset persistence;
+    * schema migration.
+
+12. Documentation clearly distinguishes:
+
+    * CMYK channel semantics;
+    * print-aesthetic sRGB compositing;
+    * actual device-specific CMYK soft proofing.
+
+### Implementation note
+
+Keep this feature behind a narrow compositing interface.
+
+Pattern and channel-generation code should provide normalized coverage values only. The preview/export compositor should resolve those values through the selected output model.
+
+Conceptually:
+
+```rust
+trait ChannelCompositor {
+    fn composite(
+        &self,
+        coverage: ChannelCoverage,
+        background: BackgroundState,
+        settings: CompositeSettings,
+    ) -> Rgba;
+}
+```
+
+The exact API may differ, but pattern implementations must not directly contain print-aesthetic color equations.
+
+This preserves the TON-010 architectural boundary between:
+
+* pattern generation;
+* canonical channel output;
+* presentation and export composition.

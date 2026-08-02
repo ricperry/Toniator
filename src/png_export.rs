@@ -276,8 +276,8 @@ mod tests {
     }
 
     fn contradictory_adapter_for(pattern: PatternId) -> RenderVariant {
-        match pattern {
-            PatternId::COMPATIBILITY_SHAPES_V1 => RenderVariant::WebCurveV1 {
+        match pattern.as_str() {
+            "compat.shapes.v1" => RenderVariant::WebCurveV1 {
                 settings: Box::new(WebCurveSettings {
                     output_width: 19,
                     output_height: 13,
@@ -286,7 +286,7 @@ mod tests {
                     ..Default::default()
                 }),
             },
-            PatternId::COMPATIBILITY_CURVES_V1 => RenderVariant::WebShapeV1 {
+            "compat.curves.v1" => RenderVariant::WebShapeV1 {
                 settings: Box::new(WebShapeSettings {
                     output_width: 17,
                     output_height: 11,
@@ -296,7 +296,8 @@ mod tests {
                     ..Default::default()
                 }),
             },
-            PatternId::WEIGHTED_VORONOI_V1 => RenderVariant::NativeBasicV1,
+            "weighted-voronoi.v1" => RenderVariant::NativeBasicV1,
+            _ => RenderVariant::NativeBasicV1,
         }
     }
 
@@ -384,7 +385,7 @@ mod tests {
                     .document()
                     .pattern_state
                     .selected_pattern_id(),
-                Some(selected)
+                Some(selected.clone())
             );
             assert!(fixture_editor.set_appearance(DocumentAppearance {
                 preview_surface: PreviewSurface::Color {
@@ -400,7 +401,7 @@ mod tests {
             // incompatible dimensions and parameters. Preview and every PNG
             // route must still derive the same raw pattern from pattern_state.
             let mut contradictory = canonical.clone();
-            contradictory.render = contradictory_adapter_for(selected);
+            contradictory.render = contradictory_adapter_for(selected.clone());
             let before_render = contradictory.clone();
             let raw =
                 render_document_output(&contradictory, options.width, options.height, false, None)
@@ -508,7 +509,7 @@ mod tests {
                 .inactive_cmyk
                 .as_mut()
                 .expect("CMYK treatment is cached while RGB is active")
-                .render = contradictory_adapter_for(selected);
+                .render = contradictory_adapter_for(selected.clone());
             let mut cache_editor = DocumentEditor::new(inactive_contradiction);
             assert!(cache_editor.set_output_mode(crate::model::OutputMode::CmykInks));
             let restored = cache_editor.document().clone();

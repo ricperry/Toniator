@@ -22,6 +22,20 @@ Box aggregate_channel_controls {
     ]
   }
 
+  Box aggregate_random_seed_row {
+    spacing: 8;
+
+    Label aggregate_random_seed_label {
+      hexpand: true;
+      label: "Unified random seed";
+      xalign: 0;
+    }
+
+    SpinButton aggregate_random_seed {
+      numeric: true;
+    }
+  }
+
   Box aggregate_content_host {
     orientation: vertical;
     spacing: 4;

@@ -3,6 +3,9 @@ use crate::artwork_pipeline::{
     LegacyBrightnessKind, LegacyCompatibilityAssignment, OutputChannelId, OutputModel,
 };
 use crate::pattern::{PATTERN_REGISTRY, PatternId, VersionedPatternParameters};
+use crate::pattern_definition::{
+    LiteralValue, PatternDefinition, PatternInstanceParameters, PatternInstanceValue,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Map;
 use std::collections::BTreeMap;
@@ -11,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const DOCUMENT_FORMAT: &str = "toniator-document";
-pub const DOCUMENT_VERSION: u32 = 8;
+pub const DOCUMENT_VERSION: u32 = 9;
 
 /// Determines how source colour is separated into output layers. CMYK is
 /// subtractive ink; RGB is additive light on a transparent screen.
@@ -210,6 +213,18 @@ pub enum WebShape {
     Hexagon,
 }
 
+/// Per-channel placement strategy for Shapes and project-embedded point-grid
+/// recipes. Structural grid geometry remains pattern-definition state; these
+/// values belong to the channel treatment controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum WebShapePointSampler {
+    #[default]
+    Grid,
+    Uniform,
+    Weighted,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ShapePoint {
@@ -301,6 +316,22 @@ pub struct WebShapeChannel {
     /// is used as a backward-compatible fallback.
     #[serde(default)]
     pub custom_shape_path: Option<ClosedShapePath>,
+    /// Per-channel site constructor selected in the main Channel Settings
+    /// panel. Grid uses the pattern lattice; Uniform and Weighted use the
+    /// neutral deterministic site-distribution service.
+    #[serde(default)]
+    pub point_sampler: WebShapePointSampler,
+    /// Per-channel deterministic seed for random sites and jitter.
+    #[serde(default)]
+    pub random_seed: u64,
+    /// Influence exponent for source-weighted site placement.
+    #[serde(default = "one")]
+    pub weight_influence: f64,
+    /// Blend between uniform mark size (0) and source-responsive size (1).
+    /// This is a channel control because each ink can use a different volume
+    /// response while sharing the same placement recipe.
+    #[serde(default = "one")]
+    pub random_size_response: f64,
 }
 
 impl Default for WebShapeChannel {
@@ -324,6 +355,10 @@ impl Default for WebShapeChannel {
             shape: WebShape::Circle,
             polygon_sides: default_polygon_sides(),
             custom_shape_path: None,
+            point_sampler: WebShapePointSampler::Grid,
+            random_seed: 0,
+            weight_influence: 1.0,
+            random_size_response: 1.0,
         }
     }
 }
@@ -1035,9 +1070,10 @@ fn weighted_voronoi_channels() -> impl Iterator<Item = OutputChannelId> {
         .chain(OutputChannelId::RGB)
 }
 
-/// The only persisted pattern authority.  The selected pattern and each
-/// registered compatibility pattern's typed settings live here exactly once;
-/// `RenderVariant` is rebuilt from this state for the legacy renderer.
+/// The only persisted pattern authority. The selected pattern and each
+/// built-in compatibility pattern's typed settings live here exactly once;
+/// embedded custom Shapes recipes are project-owned and `RenderVariant`
+/// remains a derived compatibility adapter only.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PatternSelection {
@@ -1045,11 +1081,21 @@ pub enum PatternSelection {
     Registered(PatternId),
 }
 
+/// A portable project-owned definition and its current value-only instance.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddedPatternDefinition {
+    pub definition: PatternDefinition,
+    pub instance: PatternInstanceParameters,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PatternDocumentState {
     pub selected: PatternSelection,
     pub instances: BTreeMap<PatternId, VersionedPatternParameters>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub embedded_patterns: BTreeMap<PatternId, EmbeddedPatternDefinition>,
 }
 
 impl PatternDocumentState {
@@ -1072,15 +1118,16 @@ impl PatternDocumentState {
         Self {
             selected: PatternSelection::Registered(PatternId::COMPATIBILITY_SHAPES_V1),
             instances,
+            embedded_patterns: BTreeMap::new(),
         }
     }
 
     /// Returns the registered selection from persisted authority, never from
     /// the transient `RenderVariant` execution adapter.
     pub fn selected_pattern_id(&self) -> Option<PatternId> {
-        match self.selected {
+        match &self.selected {
             PatternSelection::NativeBasicV1 => None,
-            PatternSelection::Registered(id) => Some(id),
+            PatternSelection::Registered(id) => Some(id.clone()),
         }
     }
 
@@ -1095,6 +1142,11 @@ impl PatternDocumentState {
     /// through `DocumentEditor`.
     pub fn selected_parameters(&self) -> Option<&VersionedPatternParameters> {
         self.instances.get(&self.selected_pattern_id()?)
+    }
+
+    /// Returns the selected project-embedded custom recipe, if any.
+    pub fn selected_embedded_pattern(&self) -> Option<&EmbeddedPatternDefinition> {
+        self.embedded_patterns.get(&self.selected_pattern_id()?)
     }
 
     pub(crate) fn validate(&self) -> anyhow::Result<()> {
@@ -1112,16 +1164,12 @@ impl PatternDocumentState {
                 record.pattern_id
             );
             record.validate().map_err(anyhow::Error::new)?;
-            match id {
-                PatternId::COMPATIBILITY_SHAPES_V1 => {
-                    let _: WebShapeSettings = pattern_settings_from_parameters(record)?;
-                }
-                PatternId::COMPATIBILITY_CURVES_V1 => {
-                    let _: WebCurveSettings = pattern_settings_from_parameters(record)?;
-                }
-                PatternId::WEIGHTED_VORONOI_V1 => {
-                    unreachable!("core instances exclude optional Weighted Voronoi state")
-                }
+            if id == PatternId::COMPATIBILITY_SHAPES_V1 {
+                let _: WebShapeSettings = pattern_settings_from_parameters(record)?;
+            } else if id == PatternId::COMPATIBILITY_CURVES_V1 {
+                let _: WebCurveSettings = pattern_settings_from_parameters(record)?;
+            } else {
+                unreachable!("core instances exclude optional Weighted Voronoi state");
             }
         }
         anyhow::ensure!(
@@ -1138,10 +1186,31 @@ impl PatternDocumentState {
             record.validate().map_err(anyhow::Error::new)?;
             weighted_voronoi_settings_from_parameters(record)?.validate()?;
         }
+        for (id, embedded) in &self.embedded_patterns {
+            anyhow::ensure!(
+                PATTERN_REGISTRY.get(id.clone()).is_none(),
+                "project-embedded pattern {id} conflicts with a built-in pattern"
+            );
+            anyhow::ensure!(
+                embedded.definition.id == *id,
+                "project-embedded pattern key {id} contradicts definition {}",
+                embedded.definition.id
+            );
+            anyhow::ensure!(
+                embedded.instance.pattern_id == *id,
+                "project-embedded pattern {id} contradicts instance {}",
+                embedded.instance.pattern_id
+            );
+            crate::shapes_native::validate_shapes_definition_instance(
+                &embedded.definition,
+                &embedded.instance,
+            )?;
+            crate::shapes_native::shapes_instance_artboard(&embedded.instance)?;
+        }
         if let Some(id) = self.selected_pattern_id() {
             anyhow::ensure!(
-                self.instances.contains_key(&id),
-                "selected pattern {id} has no authoritative parameter state"
+                self.instances.contains_key(&id) || self.embedded_patterns.contains_key(&id),
+                "selected pattern {id} has no authoritative parameter state or embedded definition"
             );
         }
         Ok(())
@@ -1149,9 +1218,9 @@ impl PatternDocumentState {
 
     pub(crate) fn adapter(&self) -> anyhow::Result<RenderVariant> {
         self.validate()?;
-        match self.selected {
+        match &self.selected {
             PatternSelection::NativeBasicV1 => Ok(RenderVariant::NativeBasicV1),
-            PatternSelection::Registered(PatternId::COMPATIBILITY_SHAPES_V1) => {
+            PatternSelection::Registered(id) if *id == PatternId::COMPATIBILITY_SHAPES_V1 => {
                 Ok(RenderVariant::WebShapeV1 {
                     settings: Box::new(pattern_settings_from_parameters(
                         self.instances
@@ -1160,7 +1229,7 @@ impl PatternDocumentState {
                     )?),
                 })
             }
-            PatternSelection::Registered(PatternId::COMPATIBILITY_CURVES_V1) => {
+            PatternSelection::Registered(id) if *id == PatternId::COMPATIBILITY_CURVES_V1 => {
                 Ok(RenderVariant::WebCurveV1 {
                     settings: Box::new(pattern_settings_from_parameters(
                         self.instances
@@ -1169,9 +1238,22 @@ impl PatternDocumentState {
                     )?),
                 })
             }
-            PatternSelection::Registered(PatternId::WEIGHTED_VORONOI_V1) => {
+            PatternSelection::Registered(id) if *id == PatternId::WEIGHTED_VORONOI_V1 => {
                 Ok(RenderVariant::WeightedVoronoiCanonicalV1)
             }
+            PatternSelection::Registered(id) if self.embedded_patterns.contains_key(id) => {
+                // Custom recipes dispatch before this compatibility facade.
+                // Preserve a derived Shapes adapter for existing cache and
+                // transition seams that still require a RenderVariant.
+                Ok(RenderVariant::WebShapeV1 {
+                    settings: Box::new(pattern_settings_from_parameters(
+                        self.instances
+                            .get(&PatternId::COMPATIBILITY_SHAPES_V1)
+                            .expect("validated Shapes state"),
+                    )?),
+                })
+            }
+            PatternSelection::Registered(id) => anyhow::bail!("unregistered pattern {id}"),
         }
     }
 
@@ -1181,15 +1263,49 @@ impl PatternDocumentState {
         if pattern_id == PatternId::WEIGHTED_VORONOI_V1 && !self.instances.contains_key(&pattern_id)
         {
             self.instances.insert(
-                pattern_id,
-                pattern_parameters_from_settings(pattern_id, &WeightedVoronoiSettings::default()),
+                pattern_id.clone(),
+                pattern_parameters_from_settings(
+                    pattern_id.clone(),
+                    &WeightedVoronoiSettings::default(),
+                ),
             );
         }
         anyhow::ensure!(
-            self.instances.contains_key(&pattern_id),
-            "selected pattern {pattern_id} has no authoritative parameter state"
+            self.instances.contains_key(&pattern_id)
+                || self.embedded_patterns.contains_key(&pattern_id),
+            "selected pattern {pattern_id} has no authoritative parameter state or embedded definition"
         );
         self.selected = PatternSelection::Registered(pattern_id);
+        Ok(())
+    }
+
+    /// Validates and installs a project-owned Shapes recipe before selecting
+    /// it. Callers receive an error before this state changes.
+    pub(crate) fn install_and_select_embedded_pattern(
+        &mut self,
+        definition: PatternDefinition,
+        instance: PatternInstanceParameters,
+    ) -> anyhow::Result<()> {
+        let id = definition.id.clone();
+        anyhow::ensure!(
+            PATTERN_REGISTRY.get(id.clone()).is_none(),
+            "project-embedded pattern {id} conflicts with a built-in pattern"
+        );
+        anyhow::ensure!(
+            instance.pattern_id == id,
+            "project-embedded pattern {id} contradicts instance {}",
+            instance.pattern_id
+        );
+        crate::shapes_native::validate_shapes_definition_instance(&definition, &instance)?;
+        crate::shapes_native::shapes_instance_artboard(&instance)?;
+        self.embedded_patterns.insert(
+            id.clone(),
+            EmbeddedPatternDefinition {
+                definition,
+                instance,
+            },
+        );
+        self.selected = PatternSelection::Registered(id);
         Ok(())
     }
 
@@ -1236,6 +1352,121 @@ impl PatternDocumentState {
         );
     }
 
+    /// Keep the output-channel parameters of a selected project recipe in
+    /// lockstep with the typed Shapes settings edited by the inspector.  The
+    /// built-in Shapes instance remains the compatibility authority, while a
+    /// custom recipe must receive the same channel values because its native
+    /// runtime reads its own validated instance.
+    pub(crate) fn sync_embedded_shapes_from_settings(
+        &mut self,
+        settings: &WebShapeSettings,
+    ) -> anyhow::Result<()> {
+        let Some(pattern_id) = self
+            .selected_pattern_id()
+            .filter(|pattern_id| self.embedded_patterns.contains_key(pattern_id))
+        else {
+            return Ok(());
+        };
+        for channel in OutputChannelId::CMYK
+            .into_iter()
+            .chain(OutputChannelId::RGB)
+        {
+            let values =
+                self.embedded_shape_channel_values(settings.channels.get(channel.to_legacy_ink()));
+            for (key, value) in values {
+                self.set_embedded_output_channel_value(&pattern_id, channel, key, value)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn embedded_shape_channel_values(
+        &self,
+        channel: &WebShapeChannel,
+    ) -> Vec<(&'static str, LiteralValue)> {
+        vec![
+            ("enabled", LiteralValue::Boolean(channel.enabled)),
+            ("color", LiteralValue::Text(channel.color.clone())),
+            ("rotation", LiteralValue::Number(channel.rotation)),
+            ("grid-rotation", LiteralValue::Number(channel.grid_rotation)),
+            ("grid-pivot-x", LiteralValue::Number(channel.grid_pivot_x)),
+            ("grid-pivot-y", LiteralValue::Number(channel.grid_pivot_y)),
+            ("scale", LiteralValue::Number(channel.scale)),
+            ("width-scale", LiteralValue::Number(channel.width_scale)),
+            ("height-scale", LiteralValue::Number(channel.height_scale)),
+            ("threshold", LiteralValue::Number(channel.threshold)),
+            ("max-size", LiteralValue::Number(channel.max_size)),
+            (
+                "resolution-scale",
+                LiteralValue::Number(channel.resolution_scale),
+            ),
+            (
+                "random-size-response",
+                LiteralValue::Number(channel.random_size_response),
+            ),
+            ("offset-x", LiteralValue::Number(channel.offset_x)),
+            ("offset-y", LiteralValue::Number(channel.offset_y)),
+            ("opacity", LiteralValue::Number(channel.opacity)),
+            (
+                "shape",
+                LiteralValue::Choice(
+                    match channel.shape {
+                        WebShape::Circle => "circle",
+                        WebShape::RegularPolygon => "regular-polygon",
+                        WebShape::UserDefined => "user-defined",
+                        WebShape::Rectangle => "rectangle",
+                        WebShape::Triangle => "triangle",
+                        WebShape::Pentagon => "pentagon",
+                        WebShape::Hexagon => "hexagon",
+                    }
+                    .into(),
+                ),
+            ),
+            (
+                "channel-polygon-sides",
+                LiteralValue::Integer(u64::from(channel.polygon_sides)),
+            ),
+        ]
+    }
+
+    fn set_embedded_output_channel_value(
+        &mut self,
+        pattern_id: &PatternId,
+        channel: OutputChannelId,
+        key: &str,
+        value: LiteralValue,
+    ) -> anyhow::Result<()> {
+        let Some(embedded) = self.embedded_patterns.get_mut(pattern_id) else {
+            return Ok(());
+        };
+        if !embedded
+            .definition
+            .parameters
+            .iter()
+            .any(|parameter| parameter.key == key)
+        {
+            return Ok(());
+        }
+        let channel_id = channel.stable_id();
+        let values = embedded
+            .instance
+            .output_channel_values
+            .iter_mut()
+            .find(|values| values.channel == channel_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!("embedded pattern is missing output channel {channel_id}")
+            })?;
+        if let Some(existing) = values.values.iter_mut().find(|entry| entry.key == key) {
+            existing.value = value;
+        } else {
+            values.values.push(PatternInstanceValue {
+                key: key.into(),
+                value,
+            });
+        }
+        Ok(())
+    }
+
     /// Replaces typed Curves parameters while retaining the existing explicit
     /// selection. Callers choose a pattern separately through `select_pattern`.
     pub(crate) fn set_curve_settings(&mut self, settings: WebCurveSettings) {
@@ -1259,18 +1490,18 @@ impl PatternDocumentState {
         // In particular, never infer or mutate selection from a RenderVariant.
         match (&self.selected, render) {
             (PatternSelection::NativeBasicV1, RenderVariant::NativeBasicV1) => {}
-            (
-                PatternSelection::Registered(PatternId::COMPATIBILITY_SHAPES_V1),
-                RenderVariant::WebShapeV1 { settings },
-            ) => self.set_shape_settings((**settings).clone()),
-            (
-                PatternSelection::Registered(PatternId::COMPATIBILITY_CURVES_V1),
-                RenderVariant::WebCurveV1 { settings },
-            ) => self.set_curve_settings((**settings).clone()),
-            (
-                PatternSelection::Registered(PatternId::WEIGHTED_VORONOI_V1),
-                RenderVariant::WeightedVoronoiCanonicalV1,
-            ) => {}
+            (PatternSelection::Registered(id), RenderVariant::WebShapeV1 { settings })
+                if *id == PatternId::COMPATIBILITY_SHAPES_V1 =>
+            {
+                self.set_shape_settings((**settings).clone())
+            }
+            (PatternSelection::Registered(id), RenderVariant::WebCurveV1 { settings })
+                if *id == PatternId::COMPATIBILITY_CURVES_V1 =>
+            {
+                self.set_curve_settings((**settings).clone())
+            }
+            (PatternSelection::Registered(id), RenderVariant::WeightedVoronoiCanonicalV1)
+                if *id == PatternId::WEIGHTED_VORONOI_V1 => {}
             _ => {
                 panic!("select the authoritative pattern explicitly before setting test parameters")
             }
@@ -1294,19 +1525,21 @@ impl PatternDocumentState {
             self.selected == source.selected,
             "cannot restore channels across different pattern selections"
         );
-        match self.selected {
+        match &self.selected {
             PatternSelection::NativeBasicV1 => {}
-            PatternSelection::Registered(PatternId::COMPATIBILITY_SHAPES_V1) => {
+            PatternSelection::Registered(id) if *id == PatternId::COMPATIBILITY_SHAPES_V1 => {
                 let mut settings = self.shape_settings()?;
                 settings.channels = source.shape_settings()?.channels;
                 self.set_shape_settings(settings);
             }
-            PatternSelection::Registered(PatternId::COMPATIBILITY_CURVES_V1) => {
+            PatternSelection::Registered(id) if *id == PatternId::COMPATIBILITY_CURVES_V1 => {
                 let mut settings = self.curve_settings()?;
                 settings.channels = source.curve_settings()?.channels;
                 self.set_curve_settings(settings);
             }
-            PatternSelection::Registered(PatternId::WEIGHTED_VORONOI_V1) => {}
+            PatternSelection::Registered(id) if *id == PatternId::WEIGHTED_VORONOI_V1 => {}
+            PatternSelection::Registered(id) if self.embedded_patterns.contains_key(id) => {}
+            PatternSelection::Registered(id) => anyhow::bail!("unregistered pattern {id}"),
         }
         Ok(())
     }
@@ -1317,7 +1550,7 @@ fn pattern_parameters_from_settings<T: Serialize>(
     settings: &T,
 ) -> VersionedPatternParameters {
     let metadata = PATTERN_REGISTRY
-        .get(pattern_id)
+        .get(pattern_id.clone())
         .expect("built-in compatibility pattern must be registered");
     let mut values = Map::new();
     let mut serialized =
@@ -1906,9 +2139,9 @@ impl Document {
     /// requested long edge is preserved (subject to the document cap), so old
     /// presets retain their intended scale without retaining distortion.
     pub fn normalize_canvas_aspect(&mut self, source_width: u32, source_height: u32) -> bool {
-        let mut changed = match self.pattern_state.selected {
+        let mut changed = match &self.pattern_state.selected {
             PatternSelection::NativeBasicV1 => false,
-            PatternSelection::Registered(PatternId::COMPATIBILITY_SHAPES_V1) => {
+            PatternSelection::Registered(id) if *id == PatternId::COMPATIBILITY_SHAPES_V1 => {
                 let mut settings = self
                     .pattern_state
                     .shape_settings()
@@ -1924,7 +2157,7 @@ impl Document {
                 }
                 changed
             }
-            PatternSelection::Registered(PatternId::COMPATIBILITY_CURVES_V1) => {
+            PatternSelection::Registered(id) if *id == PatternId::COMPATIBILITY_CURVES_V1 => {
                 let mut settings = self
                     .pattern_state
                     .curve_settings()
@@ -1940,7 +2173,8 @@ impl Document {
                 }
                 changed
             }
-            PatternSelection::Registered(PatternId::WEIGHTED_VORONOI_V1) => false,
+            PatternSelection::Registered(id) if *id == PatternId::WEIGHTED_VORONOI_V1 => false,
+            PatternSelection::Registered(_) => false,
         };
         if let Some(settings) = self.saved_web_shape.as_deref_mut() {
             changed |= normalize_canvas_dimensions(
@@ -1973,8 +2207,8 @@ impl Document {
                 LegacyCompatibilityAssignment::CrosshatchProgressiveKcmyV1
             )
         ) && matches!(
-            self.pattern_state.selected,
-            PatternSelection::Registered(PatternId::COMPATIBILITY_SHAPES_V1)
+            &self.pattern_state.selected,
+            PatternSelection::Registered(id) if *id == PatternId::COMPATIBILITY_SHAPES_V1
         );
         if changed {
             let shapes = self
@@ -2102,6 +2336,8 @@ impl Document {
                     base.offset_x,
                     base.offset_y,
                     base.opacity,
+                    base.weight_influence,
+                    base.random_size_response,
                 ]
                 .into_iter()
                 .all(f64::is_finite)
@@ -2112,7 +2348,9 @@ impl Document {
                     && (0.0..=10_000.0).contains(&base.max_size)
                     && base.resolution_scale > 0.0
                     && base.resolution_scale <= 100.0
-                    && (0.0..=1.0).contains(&base.opacity),
+                    && (0.0..=1.0).contains(&base.opacity)
+                    && (0.001..=16.0).contains(&base.weight_influence)
+                    && (0.0..=1.0).contains(&base.random_size_response),
                 "web shape base value is outside the supported range"
             );
             for &ink in self.output_mode.inks() {
@@ -2132,6 +2370,8 @@ impl Document {
                         channel.offset_x,
                         channel.offset_y,
                         channel.opacity,
+                        channel.weight_influence,
+                        channel.random_size_response,
                     ]
                     .into_iter()
                     .all(f64::is_finite),
@@ -2157,7 +2397,9 @@ impl Document {
                         && (0.01..=100.0).contains(&channel.height_scale)
                         && (0.0..=1.0).contains(&channel.threshold)
                         && (0.0..=10_000.0).contains(&channel.max_size)
-                        && (0.0..=1.0).contains(&channel.opacity),
+                        && (0.0..=1.0).contains(&channel.opacity)
+                        && (0.001..=16.0).contains(&channel.weight_influence)
+                        && (0.0..=1.0).contains(&channel.random_size_response),
                     "{} channel value is outside the supported range",
                     ink.label()
                 );
@@ -2579,6 +2821,7 @@ pub enum SettingKey {
     WebThreshold,
     WebOpacity,
     WebDetail,
+    WebShapeSizeResponse,
     WebColor,
     CurveProfile,
     CurveLayout,
@@ -2831,8 +3074,8 @@ impl DocumentEditor {
             // Crosshatch is a legacy transition, but its source treatment is
             // still selected and parameterized only by persisted authority.
             // `render` may be a stale or deliberately contradictory adapter.
-            match self.document.pattern_state.selected {
-                PatternSelection::Registered(PatternId::COMPATIBILITY_SHAPES_V1) => {
+            match &self.document.pattern_state.selected {
+                PatternSelection::Registered(id) if *id == PatternId::COMPATIBILITY_SHAPES_V1 => {
                     let settings = match self.document.pattern_state.shape_settings() {
                         Ok(settings) => settings,
                         Err(_) => return false,
@@ -2857,7 +3100,7 @@ impl DocumentEditor {
                         .select_pattern(PatternId::COMPATIBILITY_CURVES_V1)
                         .expect("registered Curves state");
                 }
-                PatternSelection::Registered(PatternId::COMPATIBILITY_CURVES_V1) => {
+                PatternSelection::Registered(id) if *id == PatternId::COMPATIBILITY_CURVES_V1 => {
                     // Keep the ordinary curve treatment intact so Exit can
                     // restore its geometry, visibility, and color settings.
                     let settings = match self.document.pattern_state.curve_settings() {
@@ -2875,8 +3118,7 @@ impl DocumentEditor {
                         .select_pattern(PatternId::COMPATIBILITY_CURVES_V1)
                         .expect("registered Curves state");
                 }
-                PatternSelection::NativeBasicV1
-                | PatternSelection::Registered(PatternId::WEIGHTED_VORONOI_V1) => return false,
+                PatternSelection::NativeBasicV1 | PatternSelection::Registered(_) => return false,
             }
         }
         if self.document.apply_legacy_mapping_action(mapping).is_err() {
@@ -2949,9 +3191,156 @@ impl DocumentEditor {
         self.set_pattern_state(state)
     }
 
+    /// Atomically validates, installs, and selects one project-embedded custom
+    /// Shapes recipe as an ordinary undoable document edit.
+    pub fn install_and_select_embedded_pattern(
+        &mut self,
+        definition: PatternDefinition,
+        instance: PatternInstanceParameters,
+    ) -> bool {
+        let mut state = self.document.pattern_state.clone();
+        if state
+            .install_and_select_embedded_pattern(definition, instance)
+            .is_err()
+        {
+            return false;
+        }
+        self.set_pattern_state(state)
+    }
+
     pub fn set_shape_settings(&mut self, settings: WebShapeSettings) -> bool {
         let mut state = self.document.pattern_state.clone();
         state.set_shape_settings(settings);
+        self.set_pattern_state(state)
+    }
+
+    /// Atomically updates typed Shapes settings and, when active, the
+    /// selected embedded recipe's output-channel values as one undoable edit.
+    pub fn set_shape_settings_and_sync_embedded(&mut self, settings: WebShapeSettings) -> bool {
+        let mut state = self.document.pattern_state.clone();
+        state.set_shape_settings(settings.clone());
+        if let Err(error) = state.sync_embedded_shapes_from_settings(&settings) {
+            eprintln!(
+                "[toniator] embedded pattern channel update rejected before validation: {error}"
+            );
+            return false;
+        }
+        if let Err(error) = state.validate() {
+            eprintln!(
+                "[toniator] embedded pattern channel update rejected by pattern validation: {error}"
+            );
+            return false;
+        }
+        let applied = self.set_pattern_state(state);
+        if !applied {
+            eprintln!(
+                "[toniator] embedded pattern channel update rejected while committing document state"
+            );
+        }
+        applied
+    }
+
+    /// Updates the per-channel Shapes site constructor settings. These values
+    /// are deliberately owned by the main channel inspector, while a selected
+    /// embedded recipe receives the same typed values in its output-channel
+    /// instance so the production recipe runtime remains authoritative.
+    pub fn set_shape_channel_distribution(
+        &mut self,
+        channel: OutputChannelId,
+        sampler: WebShapePointSampler,
+        random_seed: u64,
+        weight_influence: f64,
+    ) -> bool {
+        if !weight_influence.is_finite() || !(0.001..=16.0).contains(&weight_influence) {
+            return false;
+        }
+        let mut state = self.document.pattern_state.clone();
+        let mut settings = match state.shape_settings() {
+            Ok(settings) => settings,
+            Err(_) => return false,
+        };
+        let channel_settings = settings.channels.get_mut(channel.to_legacy_ink());
+        channel_settings.point_sampler = sampler;
+        channel_settings.random_seed = random_seed;
+        channel_settings.weight_influence = weight_influence;
+        state.set_shape_settings(settings);
+        let embedded_pattern_id = state
+            .selected_pattern_id()
+            .filter(|pattern_id| state.embedded_patterns.contains_key(pattern_id));
+        if let Some(pattern_id) = embedded_pattern_id {
+            let failed = state
+                .set_embedded_output_channel_value(
+                    &pattern_id,
+                    channel,
+                    "point-sampler",
+                    LiteralValue::Choice(
+                        match sampler {
+                            WebShapePointSampler::Grid => "grid",
+                            WebShapePointSampler::Uniform => "uniform",
+                            WebShapePointSampler::Weighted => "weighted",
+                        }
+                        .into(),
+                    ),
+                )
+                .is_err()
+                || state
+                    .set_embedded_output_channel_value(
+                        &pattern_id,
+                        channel,
+                        "channel-seed",
+                        LiteralValue::Integer(random_seed),
+                    )
+                    .is_err()
+                || state
+                    .set_embedded_output_channel_value(
+                        &pattern_id,
+                        channel,
+                        "channel-weight-influence",
+                        LiteralValue::Number(weight_influence),
+                    )
+                    .is_err();
+            if failed {
+                return false;
+            }
+        }
+        self.set_pattern_state(state)
+    }
+
+    /// Applies one deterministic seed to every channel in the active output
+    /// model as one undoable channel-settings edit. Pattern structure remains
+    /// untouched; a selected embedded recipe receives the same output-channel
+    /// values so its runtime remains authoritative.
+    pub fn set_shape_channel_seed_all(&mut self, output_model: OutputModel, seed: u64) -> bool {
+        let mut state = self.document.pattern_state.clone();
+        let mut settings = match state.shape_settings() {
+            Ok(settings) => settings,
+            Err(_) => return false,
+        };
+        for channel in output_model.channels().iter().copied() {
+            settings
+                .channels
+                .get_mut(channel.to_legacy_ink())
+                .random_seed = seed;
+        }
+        state.set_shape_settings(settings);
+        let embedded_pattern_id = state
+            .selected_pattern_id()
+            .filter(|pattern_id| state.embedded_patterns.contains_key(pattern_id));
+        if let Some(pattern_id) = embedded_pattern_id {
+            for channel in output_model.channels().iter().copied() {
+                if state
+                    .set_embedded_output_channel_value(
+                        &pattern_id,
+                        channel,
+                        "channel-seed",
+                        LiteralValue::Integer(seed),
+                    )
+                    .is_err()
+                {
+                    return false;
+                }
+            }
+        }
         self.set_pattern_state(state)
     }
 
@@ -3243,6 +3632,81 @@ mod tests {
         }))
     }
 
+    fn custom_shapes_recipe() -> (PatternDefinition, PatternInstanceParameters) {
+        let mut definition = crate::load_bundled_shapes_definition().unwrap();
+        definition.id = PatternId::new("custom.project-dots.v1").unwrap();
+        definition.display.name = "Project Dots".into();
+        definition.display.summary = "A project-owned Shapes recipe.".into();
+        let instance = definition
+            .default_instance_parameters(
+                OutputChannelId::CMYK
+                    .into_iter()
+                    .chain(OutputChannelId::RGB),
+            )
+            .unwrap();
+        (definition, instance)
+    }
+
+    #[test]
+    fn embedded_custom_recipe_is_authoritative_and_undoable() {
+        let mut editor = editor();
+        let (definition, instance) = custom_shapes_recipe();
+        let id = definition.id.clone();
+
+        assert!(editor.install_and_select_embedded_pattern(definition.clone(), instance.clone()));
+        assert_eq!(
+            editor.document().pattern_state.selected_pattern_id(),
+            Some(id.clone())
+        );
+        assert_eq!(
+            editor
+                .document()
+                .pattern_state
+                .selected_embedded_pattern()
+                .map(|embedded| &embedded.definition),
+            Some(&definition)
+        );
+        assert_eq!(
+            editor
+                .document()
+                .pattern_state
+                .selected_embedded_pattern()
+                .map(|embedded| &embedded.instance),
+            Some(&instance)
+        );
+        assert!(editor.undo());
+        assert!(
+            editor
+                .document()
+                .pattern_state
+                .selected_embedded_pattern()
+                .is_none()
+        );
+        assert!(editor.redo());
+        assert_eq!(
+            editor.document().pattern_state.selected_pattern_id(),
+            Some(id)
+        );
+    }
+
+    #[test]
+    fn custom_selection_without_embedded_definition_fails_validation() {
+        let mut state = PatternDocumentState::new();
+        state.selected = PatternSelection::Registered(PatternId::new("custom.missing.v1").unwrap());
+        assert!(state.validate().is_err());
+    }
+
+    #[test]
+    fn invalid_embedded_recipe_install_is_inert() {
+        let mut editor = editor();
+        let before = editor.document().pattern_state.clone();
+        let (definition, mut instance) = custom_shapes_recipe();
+        instance.pattern_id = PatternId::new("custom.other-id.v1").unwrap();
+        assert!(!editor.install_and_select_embedded_pattern(definition, instance));
+        assert_eq!(editor.document().pattern_state, before);
+        assert!(!editor.can_undo());
+    }
+
     #[test]
     fn new_document_initializes_authoritative_shapes_pattern_state() {
         let document = editor().document().clone();
@@ -3351,14 +3815,14 @@ mod tests {
             document
                 .pattern_state
                 .selected_metadata()
-                .map(|metadata| metadata.id),
+                .map(|metadata| metadata.id.clone()),
             Some(PatternId::COMPATIBILITY_SHAPES_V1)
         );
         assert_eq!(
             document
                 .pattern_state
                 .selected_parameters()
-                .map(|parameters| parameters.pattern_id),
+                .map(|parameters| parameters.pattern_id.clone()),
             Some(PatternId::COMPATIBILITY_SHAPES_V1)
         );
         assert_eq!(document.pattern_state.shape_settings().unwrap(), shapes);
@@ -3986,6 +4450,36 @@ mod tests {
         assert_eq!(cyan.opacity, 0.8);
         assert_eq!(cyan.offset_x, 4.0);
         assert_eq!(cyan.offset_y, -6.0);
+    }
+
+    #[test]
+    fn shape_channel_distribution_is_undoable_and_scoped() {
+        let mut editor = editor();
+        assert!(editor.set_shape_channel_distribution(
+            OutputChannelId::CmykBlack,
+            WebShapePointSampler::Weighted,
+            77,
+            2.5,
+        ));
+        let settings = editor.document().pattern_state.shape_settings().unwrap();
+        assert_eq!(
+            settings.channels.k.point_sampler,
+            WebShapePointSampler::Weighted
+        );
+        assert_eq!(settings.channels.k.random_seed, 77);
+        assert_eq!(settings.channels.k.weight_influence, 2.5);
+        assert_eq!(
+            settings.channels.c.point_sampler,
+            WebShapePointSampler::Grid
+        );
+        assert!(editor.undo());
+        let restored = editor.document().pattern_state.shape_settings().unwrap();
+        assert_eq!(
+            restored.channels.k.point_sampler,
+            WebShapePointSampler::Grid
+        );
+        assert_eq!(restored.channels.k.random_seed, 0);
+        assert_eq!(restored.channels.k.weight_influence, 1.0);
     }
 
     #[test]

@@ -18,7 +18,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 /// The only treatment-preset format accepted by current Toniator builds.
-pub const CURRENT_PRESET_VERSION: u32 = 5;
+pub const CURRENT_PRESET_VERSION: u32 = 6;
 
 const FORMAT: &str = "toniator-preset";
 
@@ -59,7 +59,7 @@ struct PresetHeader {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CurrentPresetV5 {
+struct CurrentPresetV6 {
     format: String,
     version: u32,
     name: String,
@@ -105,8 +105,8 @@ pub fn parse_treatment(bytes: &[u8], source_dimensions: (u32, u32)) -> Result<Pa
         "This preset was created with an unsupported pre-release Toniator format."
     );
     let omitted_active_channel = inject_active_channel_for_current_parse(&mut raw)?;
-    validate_current_v5_nested_fields(&raw)?;
-    let mut preset: CurrentPresetV5 =
+    validate_current_v6_nested_fields(&raw)?;
+    let mut preset: CurrentPresetV6 =
         serde_json::from_value(raw).context("Could not read this current treatment preset")?;
     ensure!(
         !preset.name.trim().is_empty(),
@@ -258,7 +258,7 @@ pub fn document_preset_bytes(
         PresetScope::CompleteWorkflow => Some(channel_from_document(&canonical, true)?),
         _ => None,
     };
-    let preset = CurrentPresetV5 {
+    let preset = CurrentPresetV6 {
         format: FORMAT.to_owned(),
         version: CURRENT_PRESET_VERSION,
         name: name.to_owned(),
@@ -272,7 +272,7 @@ pub fn document_preset_bytes(
     Ok(bytes)
 }
 
-fn validate_scope(preset: &CurrentPresetV5) -> Result<()> {
+fn validate_scope(preset: &CurrentPresetV6) -> Result<()> {
     let expected = match preset.scope {
         PresetScope::Pipeline => (true, false, false),
         PresetScope::Treatment => (false, true, false),
@@ -293,10 +293,10 @@ fn validate_scope(preset: &CurrentPresetV5) -> Result<()> {
             "Crosshatch presets require Complete Workflow scope"
         );
         ensure!(
-            preset.treatment.as_ref().is_some_and(|treatment| matches!(
-                treatment.pattern_state.selected,
-                PatternSelection::Registered(crate::pattern::PatternId::CompatibilityCurvesV1)
-            )),
+            preset.treatment.as_ref().is_some_and(|treatment| {
+                treatment.pattern_state.selected_pattern_id()
+                    == Some(crate::pattern::PatternId::COMPATIBILITY_CURVES_V1)
+            }),
             "Crosshatch presets require a Curves treatment"
         );
         let Some(channel) = preset.channel.as_ref() else {
@@ -324,10 +324,10 @@ fn is_crosshatch_pipeline(pipeline: Option<&ArtworkPipelineSettings>) -> bool {
     })
 }
 
-/// Current v5 parsing rejects unknown pipeline fields before shared DTO serde
+/// Current v6 parsing rejects unknown pipeline fields before shared DTO serde
 /// can discard them. Treatment and channel sections use `deny_unknown_fields`
 /// and the authoritative typed pattern state validates its own payload.
-fn validate_current_v5_nested_fields(raw: &Value) -> Result<()> {
+fn validate_current_v6_nested_fields(raw: &Value) -> Result<()> {
     let object = raw
         .as_object()
         .context("Current preset must be a JSON object")?;
@@ -364,16 +364,13 @@ fn validate_current_v5_nested_fields(raw: &Value) -> Result<()> {
                 .cloned()
                 .context("Channel section is missing pattern ID")?,
         )?;
-        let schema = match pattern_id {
-            crate::pattern::PatternId::CompatibilityShapesV1 => {
-                serde_json::to_value(WebShapeChannel::default())?
-            }
-            crate::pattern::PatternId::CompatibilityCurvesV1 => {
-                serde_json::to_value(WebCurveChannel::default())?
-            }
-            crate::pattern::PatternId::WeightedVoronoiV1 => {
+        let schema = match pattern_id.as_str() {
+            "compat.shapes.v1" => serde_json::to_value(WebShapeChannel::default())?,
+            "compat.curves.v1" => serde_json::to_value(WebCurveChannel::default())?,
+            "weighted-voronoi.v1" => {
                 serde_json::to_value(WeightedVoronoiChannelSettings::default())?
             }
+            _ => anyhow::bail!("Unsupported channel pattern: {pattern_id}"),
         };
         for (id, value) in channel
             .get("channels")
@@ -396,16 +393,11 @@ fn validate_authoritative_pattern_state(pattern_state: &Value) -> Result<()> {
             serde_json::from_value(record.get("pattern_id").cloned().with_context(|| {
                 format!("Authoritative pattern state {key} is missing pattern ID")
             })?)?;
-        let schema = match pattern_id {
-            crate::pattern::PatternId::CompatibilityShapesV1 => {
-                pattern_settings_schema(WebShapeSettings::default())?
-            }
-            crate::pattern::PatternId::CompatibilityCurvesV1 => {
-                pattern_settings_schema(WebCurveSettings::default())?
-            }
-            crate::pattern::PatternId::WeightedVoronoiV1 => {
-                pattern_settings_schema(WeightedVoronoiSettings::default())?
-            }
+        let schema = match pattern_id.as_str() {
+            "compat.shapes.v1" => pattern_settings_schema(WebShapeSettings::default())?,
+            "compat.curves.v1" => pattern_settings_schema(WebCurveSettings::default())?,
+            "weighted-voronoi.v1" => pattern_settings_schema(WeightedVoronoiSettings::default())?,
+            _ => anyhow::bail!("Unsupported authoritative pattern: {pattern_id}"),
         };
         let settings = record
             .get("values")
@@ -419,7 +411,7 @@ fn validate_authoritative_pattern_state(pattern_state: &Value) -> Result<()> {
             &schema,
             &format!("treatment.pattern_state.instances.{key}.values.settings"),
         )?;
-        if pattern_id == crate::pattern::PatternId::WeightedVoronoiV1 {
+        if pattern_id == crate::pattern::PatternId::WEIGHTED_VORONOI_V1 {
             let settings: WeightedVoronoiSettings = serde_json::from_value(settings.clone())
                 .context("Authoritative Weighted Voronoi settings are malformed")?;
             settings.validate()?;
@@ -443,9 +435,11 @@ fn normalize_pattern_state_canvas(
     source_width: u32,
     source_height: u32,
 ) -> Result<bool> {
-    match state.selected {
+    match &state.selected {
         PatternSelection::NativeBasicV1 => Ok(false),
-        PatternSelection::Registered(crate::pattern::PatternId::CompatibilityShapesV1) => {
+        PatternSelection::Registered(id)
+            if *id == crate::pattern::PatternId::COMPATIBILITY_SHAPES_V1 =>
+        {
             let mut settings = state.shape_settings()?;
             let changed = normalize_canvas_dimensions(
                 &mut settings.output_width,
@@ -458,7 +452,9 @@ fn normalize_pattern_state_canvas(
             }
             Ok(changed)
         }
-        PatternSelection::Registered(crate::pattern::PatternId::CompatibilityCurvesV1) => {
+        PatternSelection::Registered(id)
+            if *id == crate::pattern::PatternId::COMPATIBILITY_CURVES_V1 =>
+        {
             let mut settings = state.curve_settings()?;
             let changed = normalize_canvas_dimensions(
                 &mut settings.output_width,
@@ -471,7 +467,12 @@ fn normalize_pattern_state_canvas(
             }
             Ok(changed)
         }
-        PatternSelection::Registered(crate::pattern::PatternId::WeightedVoronoiV1) => Ok(false),
+        PatternSelection::Registered(id)
+            if *id == crate::pattern::PatternId::WEIGHTED_VORONOI_V1 =>
+        {
+            Ok(false)
+        }
+        PatternSelection::Registered(id) => anyhow::bail!("unsupported pattern {id}"),
     }
 }
 
@@ -498,8 +499,8 @@ fn validate_known_fields(value: &Value, schema: &Value, path: &str) -> Result<()
 }
 
 fn channel_from_document(document: &Document, all_channels: bool) -> Result<ChannelSection> {
-    let pattern_id = match document.pattern_state.selected {
-        PatternSelection::Registered(id) => id,
+    let pattern_id = match &document.pattern_state.selected {
+        PatternSelection::Registered(id) => id.clone(),
         PatternSelection::NativeBasicV1 => {
             anyhow::bail!("Native Basic does not have channel-specific treatment state")
         }
@@ -507,7 +508,7 @@ fn channel_from_document(document: &Document, all_channels: bool) -> Result<Chan
     let selected: Vec<_> = if is_crosshatch_pipeline(Some(&document.artwork_pipeline)) {
         OutputChannelId::CMYK.to_vec()
     } else if all_channels {
-        if pattern_id == crate::pattern::PatternId::WeightedVoronoiV1 {
+        if pattern_id == crate::pattern::PatternId::WEIGHTED_VORONOI_V1 {
             OutputChannelId::CMYK
                 .into_iter()
                 .chain(OutputChannelId::RGB)
@@ -563,10 +564,8 @@ fn channel_value(
 fn validate_channel_section(section: &ChannelSection, scope: PresetScope) -> Result<()> {
     ensure!(
         matches!(
-            section.pattern_id,
-            crate::pattern::PatternId::CompatibilityShapesV1
-                | crate::pattern::PatternId::CompatibilityCurvesV1
-                | crate::pattern::PatternId::WeightedVoronoiV1
+            section.pattern_id.as_str(),
+            "compat.shapes.v1" | "compat.curves.v1" | "weighted-voronoi.v1"
         ),
         "Unsupported channel pattern: {}",
         section.pattern_id
@@ -583,19 +582,20 @@ fn validate_channel_section(section: &ChannelSection, scope: PresetScope) -> Res
     }
     for (id, value) in &section.channels {
         let _: OutputChannelId = id.parse().map_err(anyhow::Error::msg)?;
-        match section.pattern_id {
-            crate::pattern::PatternId::CompatibilityShapesV1 => {
+        match section.pattern_id.as_str() {
+            "compat.shapes.v1" => {
                 let _: WebShapeChannel = serde_json::from_value(value.clone())
                     .context("Invalid Shapes channel state")?;
             }
-            crate::pattern::PatternId::CompatibilityCurvesV1 => {
+            "compat.curves.v1" => {
                 let _: WebCurveChannel = serde_json::from_value(value.clone())
                     .context("Invalid Curves channel state")?;
             }
-            crate::pattern::PatternId::WeightedVoronoiV1 => {
+            "weighted-voronoi.v1" => {
                 let _: WeightedVoronoiChannelSettings = serde_json::from_value(value.clone())
                     .context("Invalid Weighted Voronoi channel state")?;
             }
+            _ => anyhow::bail!("Unsupported channel pattern: {}", section.pattern_id),
         }
     }
     Ok(())
@@ -603,12 +603,12 @@ fn validate_channel_section(section: &ChannelSection, scope: PresetScope) -> Res
 
 fn apply_channel_section(document: &mut Document, section: &ChannelSection) -> Result<()> {
     ensure!(
-        document.pattern_state.selected == PatternSelection::Registered(section.pattern_id),
+        document.pattern_state.selected == PatternSelection::Registered(section.pattern_id.clone()),
         "Channel preset pattern does not match the current pattern"
     );
     for (id, value) in &section.channels {
         let channel: OutputChannelId = id.parse().map_err(anyhow::Error::msg)?;
-        if section.pattern_id != crate::pattern::PatternId::WeightedVoronoiV1 {
+        if section.pattern_id != crate::pattern::PatternId::WEIGHTED_VORONOI_V1 {
             ensure!(
                 channel.belongs_to(document.artwork_pipeline.output_model)
                     || (is_crosshatch_pipeline(Some(&document.artwork_pipeline))
@@ -617,20 +617,20 @@ fn apply_channel_section(document: &mut Document, section: &ChannelSection) -> R
             );
         }
         let ink = channel.to_legacy_ink();
-        match section.pattern_id {
-            crate::pattern::PatternId::CompatibilityShapesV1 => {
+        match section.pattern_id.as_str() {
+            "compat.shapes.v1" => {
                 let mut settings = document.pattern_state.shape_settings()?;
                 *settings.channels.get_mut(ink) = serde_json::from_value(value.clone())
                     .context("Invalid Shapes channel state")?;
                 document.pattern_state.set_shape_settings(settings);
             }
-            crate::pattern::PatternId::CompatibilityCurvesV1 => {
+            "compat.curves.v1" => {
                 let mut settings = document.pattern_state.curve_settings()?;
                 *settings.channels.get_mut(ink) = serde_json::from_value(value.clone())
                     .context("Invalid Curves channel state")?;
                 document.pattern_state.set_curve_settings(settings);
             }
-            crate::pattern::PatternId::WeightedVoronoiV1 => {
+            "weighted-voronoi.v1" => {
                 let mut settings = document.pattern_state.weighted_voronoi_settings()?;
                 *settings.channel_settings_mut(channel)? = serde_json::from_value(value.clone())
                     .context("Invalid Weighted Voronoi channel state")?;
@@ -639,6 +639,7 @@ fn apply_channel_section(document: &mut Document, section: &ChannelSection) -> R
                     .pattern_state
                     .set_weighted_voronoi_settings(settings);
             }
+            _ => anyhow::bail!("Unsupported channel pattern: {}", section.pattern_id),
         }
     }
     Ok(())
@@ -865,7 +866,30 @@ mod tests {
     }
 
     #[test]
-    fn current_v5_rejects_unknown_nested_treatment_and_channel_fields() {
+    fn current_v6_rejects_obsolete_and_future_versions_strictly() {
+        let bytes =
+            document_preset_bytes("Version boundary", &document(), PresetScope::Treatment).unwrap();
+        let mut obsolete: Value = serde_json::from_slice(&bytes).unwrap();
+        obsolete["version"] = serde_json::json!(5);
+        assert!(
+            parse_treatment(&serde_json::to_vec(&obsolete).unwrap(), (900, 620))
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported pre-release")
+        );
+
+        let mut future: Value = serde_json::from_slice(&bytes).unwrap();
+        future["version"] = serde_json::json!(7);
+        assert!(
+            parse_treatment(&serde_json::to_vec(&future).unwrap(), (900, 620))
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported pre-release")
+        );
+    }
+
+    #[test]
+    fn current_v6_rejects_unknown_nested_treatment_and_channel_fields() {
         let mut shapes = document();
         let RenderVariant::WebShapeV1 { settings } = &mut shapes.render else {
             unreachable!()

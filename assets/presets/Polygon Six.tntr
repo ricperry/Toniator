@@ -1,6 +1,6 @@
 {
   "format": "toniator-preset",
-  "version": 5,
+  "version": 6,
   "name": "Polygon Six",
   "scope": "complete-workflow",
   "pipeline": {

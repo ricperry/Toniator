@@ -22,6 +22,36 @@ Box channel_controls {
     ]
   }
 
+  Box channel_point_sampler_row {
+    spacing: 8;
+    Label channel_point_sampler_label {
+      hexpand: true;
+      label: "Point sampler";
+      xalign: 0;
+    }
+    DropDown channel_point_sampler {}
+  }
+
+  Box channel_random_seed_row {
+    spacing: 8;
+    Label channel_random_seed_label {
+      hexpand: true;
+      label: "Random seed";
+      xalign: 0;
+    }
+    SpinButton channel_random_seed { numeric: true; }
+  }
+
+  Box channel_weight_influence_row {
+    spacing: 8;
+    Label channel_weight_influence_label {
+      hexpand: true;
+      label: "Weight influence";
+      xalign: 0;
+    }
+    SpinButton channel_weight_influence { numeric: true; }
+  }
+
   Box channel_content_host {
     orientation: vertical;
     spacing: 4;

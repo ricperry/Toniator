@@ -1,6 +1,6 @@
 {
   "format": "toniator-preset",
-  "version": 5,
+  "version": 6,
   "name": "Motif Ladder",
   "scope": "complete-workflow",
   "pipeline": {

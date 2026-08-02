@@ -56,6 +56,33 @@ schema version 3, and generator version 2. The document and preset formats
 were not bumped because their persisted envelopes are unchanged; generator
 version 1 is rejected explicitly.
 
+## Declarative recipe contract boundary — 2026-08-01
+
+The accepted recipe-contract milestone adds strict `.tnpattern` v1 data types
+and validation in `src/pattern_definition.rs`, deterministic layered
+resolution and provenance diagnostics in `src/pattern_definition_registry.rs`,
+and a bounded cancellation-aware native-operation executor. It reuses
+`SiteDistribution`, `DistributionField`, `VoronoiDiagram`, and
+`CanonicalPatternOutput`; recipe data cannot load scripts, plugins, native
+libraries, or arbitrary code.
+
+The original contract-only status is now superseded by the 2026-08-02
+preservation checkpoint. Bundled Shapes, Curves, and Weighted Voronoi resources
+have production native operation bodies and execute through the same strict
+loader and bounded DAG runtime. Embedded custom Shapes definitions are
+persisted and dispatched through the canonical preview/PNG/SVG route. Current
+documents are v9 and `.tntr` presets are v6; obsolete definitions are rejected
+without migration or defaulting.
+
+The integration is incomplete. The user Pattern Editor constructs a
+Shapes-compatible definition by mutating fixed graph nodes and parameters;
+named presets and their defaults are selected by hard-coded UI indices. Save As
+writes a user `.tnpattern`, but no UI library/import/open or application-wide
+layered registry resolution can select it again. The schema-driven guided and
+graph editors, full portability/recovery workflow, and compatibility-dispatch
+removal remain TON-010 work. See `ISSUES.md` and
+`.codex-work/evidence/ton-010-preservation-checkpoint-audit-2026-08-02.md`.
+
 ## Cache boundaries
 
 Resolved channel fields use the existing bounded request-local cache keyed by
@@ -70,18 +97,19 @@ There is no process-global or unbounded pattern cache.
 
 ## Future consumers and intentional deferrals
 
-The neutral services are deliberately small. Future Shapes can consume ordered
-points or structured guide primitives; Curves can consume sampled paths,
-connected paths, or intersections; constructive patterns can consume segments,
-faces, and shared boundaries. Those modes are not silently migrated by this
-stage.
+The neutral services are deliberately small. Weighted Voronoi retains
+`site_distribution.rs` and `voronoi_geometry.rs` as its algorithm authorities.
+Shapes, Curves, and Weighted Voronoi now have bundled recipe adapters and
+registered native operations, while typed compatibility adapters and
+`RenderVariant` branches remain as production seams. The custom editor exposes
+grid, triangular, curve, math, and random variants through a monolithic
+Shapes-specific placement operation; these variants are not substitutes for a
+general composable operation/editor surface.
 
-Weighted Voronoi is the only pattern currently using the new site and geometry
-services. Shapes and Curves still use their established compatibility
-generators through the canonical output adapters. Pointillism, maze, spiral,
-grid, stacked-curve, and traced-curve integration, generic guide editors,
-custom-pattern libraries, mixed-generator documents, and a global cache are
-deferred.
+Pointillism shared/independent arrangements, a declarative Wave Line Field,
+the general guided/graph editor, recipe library/import/export, layered
+resolution, and project embedding/recovery remain open. No global cache is
+introduced.
 
 ## Validation evidence
 
@@ -95,6 +123,9 @@ arrangement policy, strict generator rejection, persistence, undo/redo,
 preset behavior, canonical preview/PNG/SVG parity, and perimeter omission.
 The realized GTK selector/control regression is also covered; human GNOME/
 Wayland pointer and screen-reader acceptance remains unclaimed.
+The remaining Stage 5 manual gate also includes Krita-reference CMYK/RGB
+inspection and Inkscape **Break Apart** inspection of editable SVG output.
+Preserved reference images are evidence inputs only, not human acceptance.
 
 ## Correction pass
 

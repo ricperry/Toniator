@@ -1,14 +1,18 @@
 use crate::CancellationToken;
+#[cfg(test)]
 use crate::artwork_pipeline::{
     ArtworkPipelineSettings, ArtworkSource, AutomaticSeparationStrategy, ChannelAssignment,
-    LegacyBrightnessKind, LegacyCompatibilityAssignment, OutputChannelId, OutputModel,
-    PreparedSource, SourceAlphaPolicy, resolve_channel_fields_cancellable,
+    LegacyBrightnessKind, LegacyCompatibilityAssignment, SourceAlphaPolicy,
+};
+use crate::artwork_pipeline::{
+    OutputChannelId, OutputModel, PreparedSource, resolve_channel_fields_cancellable,
 };
 use crate::model::{
-    Document, DocumentAppearance, ExportBackground, Ink, OutputMode, PreviewSurface, RenderVariant,
-    RgbaColor, Settings, SourceArtwork, Treatment, ValueMode, WebShape, WebShapeChannel,
-    WebShapeSettings, parse_hex_color,
+    Document, DocumentAppearance, ExportBackground, Ink, PreviewSurface, RenderVariant, RgbaColor,
+    Settings, SourceArtwork, Treatment, ValueMode,
 };
+#[cfg(test)]
+use crate::model::{OutputMode, WebShape, WebShapeChannel, WebShapeSettings, parse_hex_color};
 use crate::pattern::{
     AffineTransform, CanonicalBlendMode, CanonicalLayer, CanonicalPatternOutput, CanonicalPoint,
     FillRule as CanonicalFillRule, GeometryPolarity, NetworkPatternOutput, RegionPatternOutput,
@@ -20,6 +24,26 @@ use std::io::Cursor;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use tiny_skia::{BlendMode, Color, FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
+
+#[cfg(test)]
+thread_local! {
+    static RETAINED_SHAPES_GENERATOR_INVOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_retained_shapes_generator() {
+    RETAINED_SHAPES_GENERATOR_INVOCATIONS.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+pub(crate) fn reset_retained_shapes_generator_instrumentation() {
+    RETAINED_SHAPES_GENERATOR_INVOCATIONS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn retained_shapes_generator_instrumentation() -> usize {
+    RETAINED_SHAPES_GENERATOR_INVOCATIONS.with(|count| count.get())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Cmyk {
@@ -519,8 +543,8 @@ pub fn generate_document_marks_cancellable(
 }
 
 /// Produces the one runtime canonical output consumed by preview, PNG, and
-/// SVG. The authoritative document pattern state is projected only into the
-/// retained Shapes/Curves adapter before this function dispatches.
+/// SVG. The authoritative document pattern state is the sole semantic input
+/// for compatibility-family dispatch.
 pub fn generate_document_pattern_output(document: &Document) -> Result<CanonicalPatternOutput> {
     generate_document_pattern_output_cancellable(document, &CancellationToken::new())
 }
@@ -540,79 +564,85 @@ pub fn generate_document_pattern_output_cancellable(
     let source = decode_source(&canonical.source, 2400)?;
     let prepared = PreparedSource::from_rgba_image(&source, 0);
     token.checkpoint()?;
-    let output = match &canonical.render {
-        RenderVariant::NativeBasicV1 => {
-            let marks = if canonical.output_mode == crate::model::OutputMode::RgbScreen {
-                generate_rgb_marks_cancellable(&source, canonical.settings, token)?
-            } else {
-                generate_marks_cancellable(&source, canonical.settings, token)?
-            };
-            CanonicalPatternOutput::Marks(crate::pattern::MarkPatternOutput { geometry: marks })
-        }
-        RenderVariant::WebShapeV1 { settings } => {
-            let marks = generate_web_shape_marks_for_pipeline(
-                &prepared,
-                settings,
-                &canonical.artwork_pipeline,
-                token,
-            )?;
-            crate::pattern::adapt_legacy_shapes(
-                crate::pattern::PatternId::COMPATIBILITY_SHAPES_V1,
-                marks,
-            )
-            .map_err(anyhow::Error::new)?
-        }
-        RenderVariant::WebCurveV1 { settings } => {
-            let geometry = crate::curve_render::generate_curve_geometry_for_pipeline(
-                &prepared,
-                settings,
-                &canonical.artwork_pipeline,
-                token,
-            )?;
-            crate::pattern::adapt_legacy_curves(
-                crate::pattern::PatternId::COMPATIBILITY_CURVES_V1,
-                geometry,
-            )
-            .map_err(anyhow::Error::new)?
-        }
-        RenderVariant::WeightedVoronoiCanonicalV1 => {
-            let domain = crate::site_distribution::DomainBounds {
-                width: source.width(),
-                height: source.height(),
-            };
-            let (columns, rows) =
-                crate::weighted_voronoi::weighted_voronoi_field_dimensions(domain)?;
-            let enabled = canonical.artwork_pipeline.output_model.channels();
-            let fields = resolve_channel_fields_cancellable(
-                &prepared,
-                &canonical.artwork_pipeline,
-                columns,
-                rows,
-                prepared.generation,
-                enabled,
-                token,
-            )?;
-            crate::weighted_voronoi::generate_weighted_voronoi_cancellable(
-                domain,
-                &canonical.pattern_state.weighted_voronoi_settings()?,
-                &fields,
-                token,
-            )?
-            .output
+    // Project-embedded custom patterns are semantic authority. They must
+    // dispatch before the derived legacy RenderVariant facade, which remains
+    // only for built-in compatibility renderers and transition caches.
+    let output = if let Some(embedded) = canonical.pattern_state.selected_embedded_pattern() {
+        let artboard = crate::shapes_native::shapes_instance_artboard(&embedded.instance)?;
+        crate::shapes_native::execute_shapes_definition_cancellable(
+            &prepared,
+            &embedded.definition,
+            &embedded.instance,
+            &canonical.artwork_pipeline,
+            artboard,
+            token,
+        )?
+    } else {
+        match &canonical.render {
+            RenderVariant::NativeBasicV1 => {
+                let marks = if canonical.output_mode == crate::model::OutputMode::RgbScreen {
+                    generate_rgb_marks_cancellable(&source, canonical.settings, token)?
+                } else {
+                    generate_marks_cancellable(&source, canonical.settings, token)?
+                };
+                CanonicalPatternOutput::Marks(crate::pattern::MarkPatternOutput { geometry: marks })
+            }
+            RenderVariant::WebShapeV1 { .. } => {
+                crate::shapes_native::execute_bundled_shapes_recipe_cancellable(
+                    &prepared,
+                    &canonical.pattern_state.shape_settings()?,
+                    &canonical.artwork_pipeline,
+                    token,
+                )?
+            }
+            RenderVariant::WebCurveV1 { .. } => {
+                crate::curves_native::execute_bundled_curves_recipe_cancellable(
+                    &prepared,
+                    &canonical.pattern_state.curve_settings()?,
+                    &canonical.artwork_pipeline,
+                    token,
+                )?
+            }
+            RenderVariant::WeightedVoronoiCanonicalV1 => {
+                let domain = crate::site_distribution::DomainBounds {
+                    width: source.width(),
+                    height: source.height(),
+                };
+                let (columns, rows) =
+                    crate::weighted_voronoi::weighted_voronoi_field_dimensions(domain)?;
+                let enabled = canonical.artwork_pipeline.output_model.channels();
+                let fields = resolve_channel_fields_cancellable(
+                    &prepared,
+                    &canonical.artwork_pipeline,
+                    columns,
+                    rows,
+                    prepared.generation,
+                    enabled,
+                    token,
+                )?;
+                crate::weighted_voronoi::execute_bundled_weighted_voronoi_recipe_cancellable(
+                    domain,
+                    &canonical.pattern_state.weighted_voronoi_settings()?,
+                    &fields,
+                    token,
+                )?
+            }
         }
     };
     output.validate().map_err(anyhow::Error::new)?;
     Ok(output)
 }
 
-pub fn generate_web_shape_marks(source: &RgbaImage, settings: &WebShapeSettings) -> MarkSet {
+#[cfg(test)]
+fn generate_web_shape_marks(source: &RgbaImage, settings: &WebShapeSettings) -> MarkSet {
     generate_web_shape_marks_cancellable(source, settings, &CancellationToken::new())
         .expect("fresh cancellation token cannot cancel")
 }
 
-/// Compatibility adapter for public callers that only have legacy renderer
-/// settings. Document rendering uses `generate_document_marks` instead.
-pub fn generate_web_shape_marks_cancellable(
+/// Retained oracle for focused compatibility tests. Production document
+/// rendering enters the immutable Shapes recipe instead.
+#[cfg(test)]
+fn generate_web_shape_marks_cancellable(
     source: &RgbaImage,
     settings: &WebShapeSettings,
     token: &CancellationToken,
@@ -626,12 +656,14 @@ pub fn generate_web_shape_marks_cancellable(
     generate_web_shape_marks_for_pipeline(&prepared, settings, &pipeline, token)
 }
 
-fn generate_web_shape_marks_for_pipeline(
+#[cfg(test)]
+pub(crate) fn generate_web_shape_marks_for_pipeline(
     prepared: &PreparedSource,
     settings: &WebShapeSettings,
     pipeline: &ArtworkPipelineSettings,
     token: &CancellationToken,
 ) -> Result<MarkSet> {
+    record_retained_shapes_generator();
     let output_channels = if matches!(
         pipeline.assignment,
         ChannelAssignment::LegacyCompatibility(_)
@@ -755,6 +787,7 @@ fn generate_web_shape_marks_for_pipeline(
 
 /// Compatibility adapter for legacy entrypoints; documents carry the
 /// authoritative pipeline and never derive it from these renderer fields.
+#[cfg(test)]
 pub(crate) fn legacy_pipeline_from_facade(
     mode: ValueMode,
     output_mode: OutputMode,
@@ -821,6 +854,7 @@ fn generate_web_shape_marks_for_output_mode(
     generate_web_shape_marks_for_pipeline(&prepared, settings, &pipeline, token)
 }
 
+#[cfg(test)]
 pub(crate) fn cached_resolved_fields<'a>(
     cache: &'a mut HashMap<String, crate::artwork_pipeline::ResolvedChannelFields>,
     prepared: &PreparedSource,
@@ -848,6 +882,7 @@ pub(crate) fn cached_resolved_fields<'a>(
         .expect("resolved field cache entry was inserted"))
 }
 
+#[cfg(test)]
 fn resolved_field_cache_key(
     prepared: &PreparedSource,
     pipeline: &ArtworkPipelineSettings,
@@ -1039,6 +1074,7 @@ pub fn map_web_threshold(value: f64, threshold: f64) -> f64 {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy)]
 struct WebPlacement {
     x: f64,
@@ -1048,6 +1084,7 @@ struct WebPlacement {
     sample_row: u32,
 }
 
+#[cfg(test)]
 fn web_shape_placement(
     col: i32,
     row: i32,
@@ -1093,6 +1130,7 @@ fn web_shape_placement(
     }
 }
 
+#[cfg(test)]
 fn web_grid_ranges(
     settings: &WebShapeSettings,
     channel: &WebShapeChannel,
@@ -1132,6 +1170,7 @@ fn web_grid_ranges(
     )
 }
 
+#[cfg(test)]
 fn max_web_shape_extent(
     settings: &WebShapeSettings,
     channel: &WebShapeChannel,
@@ -1174,6 +1213,7 @@ fn max_web_shape_extent(
         * radius
 }
 
+#[cfg(test)]
 fn rotate_web_point(
     x: f64,
     y: f64,
@@ -1193,6 +1233,7 @@ fn rotate_web_point(
     (pivot_x + dx * cos - dy * sin, pivot_y + dx * sin + dy * cos)
 }
 
+#[cfg(test)]
 fn wrap_signed_grid_offset(offset: f64, spacing: f64) -> f64 {
     if !offset.is_finite() || !spacing.is_finite() || spacing <= 0.0 {
         0.0
@@ -1201,6 +1242,7 @@ fn wrap_signed_grid_offset(offset: f64, spacing: f64) -> f64 {
     }
 }
 
+#[cfg(test)]
 fn positive_modulo(value: f64, modulus: f64) -> f64 {
     ((value % modulus) + modulus) % modulus
 }
@@ -1861,6 +1903,43 @@ fn render_network_into_pixmap(
     layers.sort_by_key(|layer| (layer.order, layer.id));
     for layer in layers {
         token.checkpoint()?;
+        let has_strokes = output
+            .strokes
+            .iter()
+            .any(|stroke| stroke.layer_id == layer.id);
+        let stroke_transform = Transform::from_row(
+            scale_x * output.transform.xx,
+            scale_y * output.transform.yx,
+            scale_x * output.transform.xy,
+            scale_y * output.transform.yy,
+            scale_x * output.transform.dx,
+            scale_y * output.transform.dy,
+        );
+        let mut strokes: Vec<_> = output
+            .strokes
+            .iter()
+            .filter(|stroke| stroke.layer_id == layer.id)
+            .collect();
+        strokes.sort_by_key(|stroke| (stroke.order, stroke.id));
+        for (index, stroke) in strokes.into_iter().enumerate() {
+            if index % 256 == 0 {
+                token.checkpoint()?;
+            }
+            let Some(path) = stroke.outline.to_tiny_skia_path() else {
+                continue;
+            };
+            let mut paint = canonical_layer_paint(layer);
+            if stroke.polarity == GeometryPolarity::Subtractive {
+                paint.set_color_rgba8(255, 255, 255, 255);
+                paint.blend_mode = BlendMode::DestinationOut;
+            }
+            pixmap.fill_path(&path, &paint, FillRule::Winding, stroke_transform, None);
+        }
+        // Native connected outputs retain their topology edges for inspection,
+        // but the smooth contour above is the sole rendered representation.
+        if has_strokes {
+            continue;
+        }
         let mut edges: Vec<_> = output
             .edges
             .iter()
@@ -2092,6 +2171,7 @@ fn web_shape_path(
     path.finish()
 }
 
+#[cfg(test)]
 fn resolve_web_shape(
     shape: WebShape,
     settings: &WebShapeSettings,
@@ -2139,6 +2219,7 @@ fn resolve_web_shape(
     ResolvedWebShape::Polygon(points.into())
 }
 
+#[cfg(test)]
 fn regular_polygon_points(sides: u8) -> Vec<(f32, f32)> {
     let sides = sides.clamp(3, 6);
     let start = -std::f32::consts::FRAC_PI_2
@@ -2222,6 +2303,285 @@ mod tests {
             .write_to(&mut bytes, image::ImageFormat::Png)
             .unwrap();
         bytes.into_inner()
+    }
+
+    #[test]
+    fn embedded_custom_shapes_selection_dispatches_before_legacy_render_adapter() {
+        let mut definition = crate::load_bundled_shapes_definition().unwrap();
+        definition.id = crate::pattern::PatternId::new("custom.render-dots.v1").unwrap();
+        definition.display.name = "Rendered Project Dots".into();
+        definition.display.summary = "A custom Shapes render dispatch test.".into();
+        let instance = definition
+            .default_instance_parameters(
+                crate::OutputChannelId::CMYK
+                    .into_iter()
+                    .chain(crate::OutputChannelId::RGB),
+            )
+            .unwrap();
+        let mut editor = crate::model::DocumentEditor::new(Document::new(SourceArtwork {
+            name: "custom.png".into(),
+            media_type: "image/png".into(),
+            bytes: Arc::from(test_png()),
+        }));
+        assert!(editor.install_and_select_embedded_pattern(definition, instance));
+        let expected = generate_document_pattern_output(editor.document()).unwrap();
+        let CanonicalPatternOutput::Marks(expected) = &expected else {
+            panic!("custom Shapes recipe must produce marks");
+        };
+        assert!(!expected.geometry.marks.is_empty());
+
+        let mut contradictory = editor.document().clone();
+        contradictory.render = RenderVariant::NativeBasicV1;
+        assert_eq!(
+            generate_document_pattern_output(&contradictory).unwrap(),
+            generate_document_pattern_output(editor.document()).unwrap(),
+            "the embedded selection must remain authoritative over RenderVariant"
+        );
+    }
+
+    #[test]
+    fn live_weighted_document_render_enters_recipe_not_test_oracle() {
+        let mut encoded = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(RgbaImage::from_fn(32, 16, |x, y| {
+            Rgba([(x * 7) as u8, (y * 13) as u8, 255 - (x * 5) as u8, 255])
+        }))
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .unwrap();
+        let mut editor = crate::model::DocumentEditor::new(Document::new(SourceArtwork {
+            name: "live-weighted.png".into(),
+            media_type: "image/png".into(),
+            bytes: Arc::from(encoded.into_inner()),
+        }));
+        assert!(editor.set_output_mode(OutputMode::RgbScreen));
+        assert!(editor.select_pattern(crate::pattern::PatternId::WEIGHTED_VORONOI_V1));
+        let mut settings = editor
+            .document()
+            .pattern_state
+            .weighted_voronoi_settings()
+            .unwrap();
+        for channel in OutputChannelId::CMYK
+            .into_iter()
+            .chain(OutputChannelId::RGB)
+        {
+            let channel_settings = settings.channel_settings_mut(channel).unwrap();
+            channel_settings.enabled = channel.belongs_to(OutputModel::RgbScreen);
+            channel_settings.cell_count = 6;
+            channel_settings.seed = 42;
+            channel_settings.boundary_gap = 0.5;
+        }
+        assert!(editor.set_weighted_voronoi_settings(settings));
+
+        crate::weighted_voronoi::reset_weighted_dispatch_instrumentation();
+        let output = generate_document_pattern_output(editor.document()).unwrap();
+        assert!(matches!(output, CanonicalPatternOutput::Composite(_)));
+        assert_eq!(
+            crate::weighted_voronoi::weighted_dispatch_instrumentation(),
+            (1, 0),
+            "the live RenderVariant branch must execute the recipe and never the retained oracle"
+        );
+    }
+
+    #[test]
+    fn live_curves_document_render_enters_recipe_not_retained_oracle() {
+        for (name, output_model, strategy) in [
+            (
+                "CMYK",
+                OutputModel::CmykPrint,
+                AutomaticSeparationStrategy::CmykEncodedRgbMaxBlackV1,
+            ),
+            (
+                "RGB",
+                OutputModel::RgbScreen,
+                AutomaticSeparationStrategy::RgbDirectEncodedComponentsV1,
+            ),
+        ] {
+            let mut editor = crate::model::DocumentEditor::new(Document::new(SourceArtwork {
+                name: format!("live-curves-{name}.png"),
+                media_type: "image/png".into(),
+                bytes: Arc::from(test_png()),
+            }));
+            if editor.document().output_mode != output_model.to_legacy() {
+                assert!(editor.set_output_mode(output_model.to_legacy()));
+            }
+            assert!(editor.select_pattern(crate::pattern::PatternId::COMPATIBILITY_CURVES_V1));
+            assert!(editor.set_artwork_pipeline(ArtworkPipelineSettings {
+                output_model,
+                assignment: ChannelAssignment::automatic(strategy),
+                alpha_policy: SourceAlphaPolicy::LegacyCurrentV1,
+                active_channel: None,
+                ..ArtworkPipelineSettings::default()
+            }));
+            let mut settings = editor.document().pattern_state.curve_settings().unwrap();
+            settings.output_width = 32;
+            settings.output_height = 16;
+            settings.long_edge_cells = 3.0;
+            settings.min_mark = 4.0;
+            settings.max_mark = 45.0;
+            for ink in Ink::ALL {
+                settings.channels.get_mut(ink).enabled = match output_model {
+                    OutputModel::CmykPrint => {
+                        matches!(ink, Ink::Cyan | Ink::Magenta | Ink::Yellow | Ink::Black)
+                    }
+                    OutputModel::RgbScreen => matches!(ink, Ink::Red | Ink::Green | Ink::Blue),
+                };
+            }
+            assert!(editor.set_curve_settings(settings));
+            crate::curve_render::reset_retained_curve_generator_instrumentation();
+            crate::curves_native::reset_curves_recipe_orchestration_instrumentation();
+            let output = generate_document_pattern_output(editor.document()).unwrap();
+            assert!(matches!(output, CanonicalPatternOutput::Paths(_)));
+            assert_eq!(
+                crate::curve_render::retained_curve_generator_invocations(),
+                0,
+                "{name} document dispatch must not enter the retained Curves oracle"
+            );
+            assert_eq!(
+                crate::curves_native::curves_recipe_orchestration_invocations(),
+                1,
+                "{name} document dispatch must execute the Curves recipe once"
+            );
+        }
+    }
+
+    #[test]
+    fn live_curves_document_render_reads_authoritative_pattern_state_not_transient_adapter() {
+        let mut editor = crate::model::DocumentEditor::new(Document::new(SourceArtwork {
+            name: "authoritative-curves.png".into(),
+            media_type: "image/png".into(),
+            bytes: Arc::from(test_png()),
+        }));
+        assert!(editor.select_pattern(crate::pattern::PatternId::COMPATIBILITY_CURVES_V1));
+        let mut settings = editor.document().pattern_state.curve_settings().unwrap();
+        settings.output_width = 48;
+        settings.output_height = 32;
+        settings.long_edge_cells = 4.0;
+        for ink in Ink::ALL {
+            settings.channels.get_mut(ink).enabled = ink == Ink::Black;
+        }
+        assert!(editor.set_curve_settings(settings));
+        let canonical = editor.document().clone();
+        let expected = generate_document_pattern_output(&canonical).unwrap();
+
+        let mut contradictory = canonical.clone();
+        contradictory.render = RenderVariant::WebCurveV1 {
+            settings: Box::new(crate::model::WebCurveSettings {
+                output_width: 17,
+                output_height: 11,
+                long_edge_cells: 2.0,
+                ..Default::default()
+            }),
+        };
+        crate::curve_render::reset_retained_curve_generator_instrumentation();
+        crate::curves_native::reset_curves_recipe_orchestration_instrumentation();
+        assert_eq!(
+            generate_document_pattern_output(&contradictory).unwrap(),
+            expected
+        );
+        assert_eq!(
+            crate::curve_render::retained_curve_generator_invocations(),
+            0
+        );
+        assert_eq!(
+            crate::curves_native::curves_recipe_orchestration_invocations(),
+            1
+        );
+    }
+
+    #[test]
+    fn cancelled_live_curves_render_stops_before_recipe_or_retained_oracle_work() {
+        let mut document = Document::new(SourceArtwork {
+            name: "cancelled-live-curves.png".into(),
+            media_type: "image/png".into(),
+            bytes: Arc::from(test_png()),
+        });
+        document.render = RenderVariant::WebCurveV1 {
+            settings: Box::new(crate::model::WebCurveSettings {
+                output_width: 48,
+                output_height: 32,
+                long_edge_cells: 4.0,
+                ..Default::default()
+            }),
+        };
+        document
+            .pattern_state
+            .select_pattern(crate::pattern::PatternId::COMPATIBILITY_CURVES_V1)
+            .unwrap();
+        document
+            .pattern_state
+            .set_selected_parameters_for_test(&document.render);
+        let token = CancellationToken::new();
+        token.cancel();
+        crate::curve_render::reset_retained_curve_generator_instrumentation();
+        crate::curves_native::reset_curves_recipe_orchestration_instrumentation();
+        assert!(generate_document_pattern_output_cancellable(&document, &token).is_err());
+        assert_eq!(
+            crate::curve_render::retained_curve_generator_invocations(),
+            0
+        );
+        assert_eq!(
+            crate::curves_native::curves_recipe_orchestration_invocations(),
+            0
+        );
+    }
+
+    #[test]
+    fn live_shapes_document_render_enters_recipe_not_retained_oracle() {
+        for (name, output_model, strategy) in [
+            (
+                "CMYK",
+                OutputModel::CmykPrint,
+                AutomaticSeparationStrategy::CmykEncodedRgbMaxBlackV1,
+            ),
+            (
+                "RGB",
+                OutputModel::RgbScreen,
+                AutomaticSeparationStrategy::RgbDirectEncodedComponentsV1,
+            ),
+        ] {
+            let mut editor = crate::model::DocumentEditor::new(Document::new(SourceArtwork {
+                name: format!("live-shapes-{name}.png"),
+                media_type: "image/png".into(),
+                bytes: Arc::from(test_png()),
+            }));
+            if editor.document().output_mode != output_model.to_legacy() {
+                assert!(editor.set_output_mode(output_model.to_legacy()));
+            }
+            assert!(editor.set_artwork_pipeline(ArtworkPipelineSettings {
+                output_model,
+                assignment: ChannelAssignment::automatic(strategy),
+                alpha_policy: SourceAlphaPolicy::LegacyCurrentV1,
+                active_channel: None,
+                ..ArtworkPipelineSettings::default()
+            }));
+            let mut settings = editor.document().pattern_state.shape_settings().unwrap();
+            settings.output_width = 32;
+            settings.output_height = 16;
+            settings.long_edge_cells = 2.0;
+            settings.grid_scale = 100.0;
+            for ink in Ink::ALL {
+                settings.channels.get_mut(ink).enabled = match output_model {
+                    OutputModel::CmykPrint => {
+                        matches!(ink, Ink::Cyan | Ink::Magenta | Ink::Yellow | Ink::Black)
+                    }
+                    OutputModel::RgbScreen => matches!(ink, Ink::Red | Ink::Green | Ink::Blue),
+                };
+            }
+            assert!(editor.set_shape_settings(settings));
+            reset_retained_shapes_generator_instrumentation();
+            crate::shapes_native::reset_shapes_recipe_orchestration_instrumentation();
+            let output = generate_document_pattern_output(editor.document()).unwrap();
+            assert!(matches!(output, CanonicalPatternOutput::Marks(_)));
+            assert_eq!(
+                retained_shapes_generator_instrumentation(),
+                0,
+                "{name} document dispatch must not enter the retained Shapes oracle"
+            );
+            assert_eq!(
+                crate::shapes_native::shapes_recipe_orchestration_invocations(),
+                1,
+                "{name} document dispatch must enter the Shapes recipe exactly once"
+            );
+        }
     }
 
     fn web_settings() -> WebShapeSettings {

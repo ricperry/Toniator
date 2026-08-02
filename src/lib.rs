@@ -1,11 +1,18 @@
 pub mod artwork_pipeline;
+pub mod bundled_pattern_definitions;
 pub mod curve_render;
+pub mod curves_native;
+pub mod curves_recipe;
 pub mod model;
 pub mod pattern;
+pub mod pattern_definition;
+pub mod pattern_definition_registry;
 pub mod persistence;
 pub mod png_export;
 pub mod preset;
 pub mod render;
+pub mod shapes_native;
+pub mod shapes_recipe;
 pub mod site_distribution;
 pub mod svg_export;
 pub mod voronoi_geometry;
@@ -17,7 +24,20 @@ pub use artwork_pipeline::{
     LegacyValueModeProjection, OutputChannelId, OutputModel, PipelineStateError, SourceAlphaPolicy,
     UnknownStableIdError, project_legacy_value_mode,
 };
+pub use bundled_pattern_definitions::{
+    BundledPatternDefinitionError, CURVES_BUNDLED_BYTES, SHAPES_BUNDLED_BYTES,
+    WEIGHTED_VORONOI_BUNDLED_BYTES, load_bundled_curves_definition,
+    load_bundled_pattern_definition_registry, load_bundled_shapes_definition,
+    load_bundled_weighted_voronoi_definition,
+};
 pub use cancel::{CancellationToken, OperationCancelled};
+pub use curves_native::{
+    CURVES_NATIVE_OPERATION_REGISTRY, CURVES_NATIVE_OPERATIONS, CurvesDeformedPaths,
+    CurvesModulatedPaths, CurvesMotif, CurvesPlacement, CurvesSamples,
+};
+pub use curves_recipe::{
+    CurvesRecipeAdaptation, adapt_curves_settings_to_recipe, adapt_document_curves_to_recipe,
+};
 pub use model::{
     AlternateTileTransform, CubicCurveSegment, CurveLayout, CurvePath, CurvePoint, Document,
     DocumentAppearance, DocumentEditor, ExportBackground, Ink, MotifCoverage, OutputMode,
@@ -32,12 +52,35 @@ pub use pattern::{
     CanonicalLayerId, CanonicalOutputError, CanonicalOutputLimits, CanonicalPatternOutput,
     CanonicalPoint, CompositePatternOutput, FillRule, FilledRegion, GeometryPolarity,
     LegacyPatternCompatibility, MarkPatternOutput, NetworkEdgeId, NetworkNode, NetworkNodeId,
-    NetworkPatternOutput, PATTERN_REGISTRY, PathPatternOutput, PatternCompatibility, PatternFamily,
-    PatternId, PatternIdError, PatternInspectorPanel, PatternMetadata, PatternOutputKind,
-    PatternParameterDescriptor, PatternParameterError, PatternParameterScope,
-    PatternParameterVisibility, PatternRegistry, PatternRegistryError, PatternSelectorMetadata,
-    PolygonRing, RegionId, RegionPatternOutput, RingWinding, SharedBoundaryEdge,
-    VersionedPatternParameters, is_valid_dotted_id,
+    NetworkPatternOutput, NetworkStroke, NetworkStrokeId, PATTERN_REGISTRY, PathPatternOutput,
+    PatternCompatibility, PatternFamily, PatternId, PatternIdError, PatternInspectorPanel,
+    PatternMetadata, PatternOutputKind, PatternParameterDescriptor, PatternParameterError,
+    PatternParameterScope, PatternParameterVisibility, PatternRegistry, PatternRegistryError,
+    PatternSelectorMetadata, PolygonRing, RegionId, RegionPatternOutput, RingWinding,
+    SharedBoundaryEdge, VersionedPatternParameters, is_valid_dotted_id,
+};
+pub use pattern_definition::{
+    AuthoringLayout, AuthoringSection, DefinitionParameterScope, EmbeddedSvgAsset, GraphPosition,
+    LiteralValue, MAX_EMBEDDED_SVG_BYTES, MAX_PATTERN_ASSETS, MAX_PATTERN_EDGES,
+    MAX_PATTERN_INSTANCE_OUTPUT_CHANNELS, MAX_PATTERN_INSTANCE_VALUES, MAX_PATTERN_NODES,
+    MAX_PATTERN_PARAMETERS, MAX_TEXT_PARAMETER_BYTES, MAX_TOTAL_EMBEDDED_SVG_BYTES,
+    NativeRecipeOperation, NativeRecipeOperationError, NativeRecipeOperationRegistry,
+    NativeRecipePreflight, OperationParameterDescriptor, OperationPortDescriptor,
+    OperationReference, OperationRegistry, OutputChannelParameterValues, PatternDefinition,
+    PatternDefinitionError, PatternDisplayMetadata, PatternInstanceParameters,
+    PatternInstanceParametersError, PatternInstanceValue, PatternParameterConstraints,
+    PatternParameterDefinition, PortReference, QuickControlDefinition, QuickControlKind,
+    REGISTERED_OPERATIONS, RecipeArgument, RecipeEdge, RecipeExecutionContext,
+    RecipeExecutionError, RecipeGraph, RecipeNode, RecipeOperationInputs,
+    RecipeOperationParameters, RecipePortType, RecipeRuntimeValue, RecipeSourceFieldProvider,
+    RecipeValueType, RecipeVoronoiDiagram, RegisteredNativeRecipeOperation,
+    RegisteredOperationDescriptor, TNPATTERN_FORMAT_VERSION, TNPATTERN_INSTANCE_FORMAT_VERSION,
+    TNPATTERN_RECIPE_VERSION, parse_tnpattern, parse_tnpattern_instance_parameters,
+    serialize_tnpattern, serialize_tnpattern_instance_parameters,
+};
+pub use pattern_definition_registry::{
+    PatternDefinitionFingerprint, PatternDefinitionRegistry, PatternDefinitionRegistryError,
+    PatternDefinitionResolutionDiagnostic, PatternDefinitionSource, ResolvedPatternDefinition,
 };
 pub use persistence::{
     atomic_write_cancellable, load_document, save_document_atomic, save_document_atomic_cancellable,
@@ -51,9 +94,18 @@ pub use render::{
     RenderGate, RenderResult, composite_export_background, composite_preview,
     generate_document_marks, generate_document_marks_cancellable, generate_document_pattern_output,
     generate_document_pattern_output_cancellable, generate_marks_cancellable,
-    generate_web_shape_marks_cancellable, render_canonical_pattern_output_cancellable,
-    render_document_export_cancellable, render_document_output_cancellable,
-    render_document_preview, render_document_preview_cancellable, render_preview,
+    render_canonical_pattern_output_cancellable, render_document_export_cancellable,
+    render_document_output_cancellable, render_document_preview,
+    render_document_preview_cancellable, render_preview,
+};
+pub use shapes_native::{
+    SHAPES_NATIVE_OPERATION_REGISTRY, SHAPES_NATIVE_OPERATIONS, ShapesLattice, ShapesMappedValues,
+    ShapesSamples, ShapesSelectedPrimitive, ShapesTransformedMarks,
+    execute_bundled_shapes_recipe_cancellable, execute_shapes_definition_cancellable,
+    shapes_instance_artboard, validate_shapes_definition_instance,
+};
+pub use shapes_recipe::{
+    ShapesRecipeAdaptation, adapt_document_shapes_to_recipe, adapt_shapes_settings_to_recipe,
 };
 pub use site_distribution::{
     ArrangementPolicy, DistributionField, DistributionFingerprint, DistributionIdentity,
@@ -71,8 +123,9 @@ pub use voronoi_geometry::{
     inset_clipped_cell_for_response,
 };
 pub use weighted_voronoi::{
-    WEIGHTED_VORONOI_MAX_FIELD_EDGE, WeightedVoronoiCacheMetadata, WeightedVoronoiCellRegion,
-    WeightedVoronoiGeneratedOutput, generate_weighted_voronoi_cancellable,
-    weighted_voronoi_field_dimensions,
+    WEIGHTED_VORONOI_MAX_FIELD_EDGE, WEIGHTED_VORONOI_NATIVE_OPERATION_REGISTRY,
+    WEIGHTED_VORONOI_NATIVE_OPERATIONS, execute_bundled_weighted_voronoi_recipe_cancellable,
+    weighted_voronoi_field_dimensions, weighted_voronoi_recipe_instance_from_document,
+    weighted_voronoi_recipe_instance_from_settings,
 };
 pub mod cancel;

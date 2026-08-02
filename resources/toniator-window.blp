@@ -1,6 +1,258 @@
 using Gtk 4.0;
 using Adw 1;
 
+Box pattern_editor_draft {
+  orientation: vertical;
+  spacing: 10;
+  width-request: 420;
+
+  Box pattern_editor_name_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "Pattern name";
+      xalign: 0;
+    }
+    Entry pattern_editor_name {
+      placeholder-text: "Pattern name";
+    }
+  }
+
+  Label pattern_editor_preview_heading {
+    label: "Pattern Preview";
+    xalign: 0;
+    css-classes: ["heading"];
+  }
+
+  DrawingArea pattern_editor_preview {
+    content-width: 380;
+    content-height: 240;
+    width-request: 380;
+    height-request: 240;
+    hexpand: true;
+    focusable: false;
+    css-classes: ["pattern-editor-preview"];
+  }
+
+  Label pattern_editor_preview_note {
+    label: "Structure only — source response, ink styling, and mark shape are edited in Channel Settings.";
+    wrap: true;
+    xalign: 0;
+    css-classes: ["dim-label", "caption"];
+  }
+
+  Label pattern_editor_placement_heading {
+    label: "Placement";
+    xalign: 0;
+    css-classes: ["heading"];
+  }
+
+  Box pattern_editor_placement_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "Placement type";
+      xalign: 0;
+    }
+    DropDown pattern_editor_placement {}
+  }
+
+  Box pattern_editor_density_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "Site density";
+      xalign: 0;
+    }
+    SpinButton pattern_editor_density {
+      numeric: true;
+    }
+  }
+
+  Box pattern_editor_spacing_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "Overall mark scale";
+      xalign: 0;
+    }
+    SpinButton pattern_editor_spacing {
+      numeric: true;
+    }
+  }
+
+  Box pattern_editor_x_grid_mode_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "X grid";
+      xalign: 0;
+    }
+    DropDown pattern_editor_x_grid_mode {}
+  }
+
+  Box pattern_editor_x_grid_curve_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "X grid curve";
+      xalign: 0;
+    }
+    SpinButton pattern_editor_x_grid_curve { numeric: true; }
+  }
+
+  Box pattern_editor_y_grid_mode_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "Y grid";
+      xalign: 0;
+    }
+    DropDown pattern_editor_y_grid_mode {}
+  }
+
+  Box pattern_editor_y_grid_curve_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "Y grid curve";
+      xalign: 0;
+    }
+    SpinButton pattern_editor_y_grid_curve { numeric: true; }
+  }
+
+  Box pattern_editor_curve_function_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "Math function";
+      xalign: 0;
+    }
+    DropDown pattern_editor_curve_function {}
+  }
+
+  Box pattern_editor_x_spacing_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "X grid spacing";
+      xalign: 0;
+    }
+    SpinButton pattern_editor_x_spacing { numeric: true; }
+  }
+
+  Box pattern_editor_y_spacing_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "Y grid spacing";
+      xalign: 0;
+    }
+    SpinButton pattern_editor_y_spacing { numeric: true; }
+  }
+
+  Box pattern_editor_curve_spacing_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "Curve spacing";
+      xalign: 0;
+    }
+    SpinButton pattern_editor_curve_spacing { numeric: true; }
+  }
+
+  Box pattern_editor_random_dispersion_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "Random dispersion";
+      xalign: 0;
+    }
+    DropDown pattern_editor_random_dispersion {}
+  }
+
+  Label pattern_editor_geometry_heading {
+    label: "Geometry";
+    xalign: 0;
+    css-classes: ["heading"];
+  }
+
+  Box pattern_editor_point_definition_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "Geometry / connection";
+      xalign: 0;
+    }
+    DropDown pattern_editor_point_definition {}
+  }
+
+  Box pattern_editor_render_mode_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "Render geometry";
+      xalign: 0;
+    }
+    DropDown pattern_editor_render_mode {}
+  }
+
+  Box pattern_editor_connection_mode_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "Connections";
+      xalign: 0;
+    }
+    DropDown pattern_editor_connection_mode {}
+  }
+
+  Label pattern_editor_curve_heading {
+    label: "Curved Tracks";
+    xalign: 0;
+    css-classes: ["heading"];
+  }
+
+  Label pattern_editor_curve_editor_note {
+    label: "Edit the shared curve shape used by curved tracks. Changes stay in this draft until Apply.";
+    wrap: true;
+    xalign: 0;
+    css-classes: ["dim-label", "caption"];
+  }
+
+  DrawingArea pattern_editor_curve_editor {
+    content-width: 380;
+    content-height: 180;
+    width-request: 380;
+    height-request: 180;
+    hexpand: true;
+    focusable: true;
+    css-classes: ["pattern-editor-curve-editor"];
+  }
+
+  Button pattern_editor_curve_reset {
+    label: "Reset curve";
+    halign: end;
+  }
+
+  Label pattern_editor_variation_heading {
+    label: "Variation";
+    xalign: 0;
+    css-classes: ["heading"];
+  }
+
+  Box pattern_editor_jitter_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "Jitter factor";
+      xalign: 0;
+    }
+    SpinButton pattern_editor_jitter { numeric: true; }
+  }
+
+}
+
 Adw.ApplicationWindow main_window {
   title: "Toniator";
 
@@ -150,7 +402,7 @@ Adw.ApplicationWindow main_window {
               css-classes: ["inspector-shell"];
 
               Label editing_context {
-                label: "Shapes · All inks";
+                label: "Pattern · All inks";
                 xalign: 0;
                 wrap: true;
                 css-classes: ["caption", "editing-context"];
@@ -323,10 +575,12 @@ Adw.ApplicationWindow main_window {
                               }
                           
                               Button crosshatch_action {
+                                visible: false;
                                 label: "Use Legacy Crosshatch";
                               }
                           
                               Label crosshatch_note {
+                                visible: false;
                                 label: "Legacy Crosshatch temporarily switches to Curves. Exit restores ordinary Curves.";
                                 wrap: true;
                                 xalign: 0;
@@ -349,16 +603,16 @@ Adw.ApplicationWindow main_window {
                           orientation: vertical;
                           spacing: 8;
 
-                          Label channel_scope_heading {
-                            label: "Treatment Editing Scope";
+                          Label channel_controls_heading {
+                            label: "Channel Controls";
                             xalign: 0;
                             styles [
                               "heading",
                             ]
                           }
 
-                          Label channel_scope_note {
-                            label: "Choose the inks or channels edited by Shapes and Curves. Output routing remains in Output.";
+                          Label channel_controls_note {
+                            label: "Density, fill, screen rotation, mark rotation, and per-channel sampling are edited here.";
                             wrap: true;
                             xalign: 0;
                             styles [
@@ -367,11 +621,9 @@ Adw.ApplicationWindow main_window {
                             ]
                           }
 
-                          Box channel_scope_host {
+                          Box channel_pattern_controls_host {
                             orientation: vertical;
-                            spacing: 4;
-
-                            DropDown channel_scope {}
+                            spacing: 8;
                           }
 
                           Stack channel_panel_stack {
@@ -453,8 +705,8 @@ Adw.ApplicationWindow main_window {
                       }
 
                       Expander treatment_section {
-                        expanded: false;
-                        label: "Treatment Settings";
+                        expanded: true;
+                        label: "Pattern Settings";
 
                         Box treatment_content_host {
                           margin-top: 10;
@@ -465,7 +717,7 @@ Adw.ApplicationWindow main_window {
                               spacing: 8;
                           
                               Label treatment_title {
-                                label: "Halftone";
+                                label: "Pattern";
                                 xalign: 0;
                           
                                 styles [
@@ -474,7 +726,7 @@ Adw.ApplicationWindow main_window {
                               }
                           
                               Label treatment_caption {
-                                label: "Pattern Type";
+                                label: "Pattern Preset";
                                 xalign: 0;
                           
                                 styles [
@@ -483,6 +735,7 @@ Adw.ApplicationWindow main_window {
                               }
                           
                               Box treatment_pattern_buttons {
+                                visible: false;
                                 spacing: 0;
                           
                                 ToggleButton dots {
@@ -516,6 +769,33 @@ Adw.ApplicationWindow main_window {
                                   "linked",
                                 ]
                               }
+
+                              Box pattern_preset_row {
+                                orientation: vertical;
+                                spacing: 4;
+
+                                Label pattern_preset_label {
+                                  label: "Pattern";
+                                  xalign: 0;
+
+                                  styles [
+                                    "heading",
+                                  ]
+                                }
+
+                                DropDown pattern_preset {}
+
+                                Label pattern_preset_note {
+                                  label: "Choose a construction preset, then use Edit Pattern… for full structural controls.";
+                                  wrap: true;
+                                  xalign: 0;
+
+                                  styles [
+                                    "dim-label",
+                                    "caption",
+                                  ]
+                                }
+                              }
                           
                               Box treatment_preset_actions {
                                 spacing: 0;
@@ -528,6 +808,12 @@ Adw.ApplicationWindow main_window {
                                 Button preset_save {
                                   hexpand: true;
                                   label: "Save Preset…";
+                                }
+
+                                Button pattern_editor {
+                                  hexpand: true;
+                                  label: "Edit Pattern…";
+                                  tooltip-text: "Create a portable project pattern from Shapes";
                                 }
                           
                                 styles [
@@ -736,6 +1022,28 @@ Adw.ApplicationWindow main_window {
                                     "workflow-group",
                                   ]
                                 }
+
+                                Box custom_pattern_panel {
+                                  orientation: vertical;
+                                  spacing: 8;
+
+                                  Label custom_pattern_heading {
+                                    label: "Custom Pattern";
+                                    xalign: 0;
+                                    styles [ "heading" ]
+                                  }
+
+                                  Label custom_pattern_summary {
+                                    label: "This portable pattern is stored in the project.";
+                                    wrap: true;
+                                    xalign: 0;
+                                  }
+
+                                  Button custom_pattern_edit {
+                                    label: "Edit Pattern…";
+                                    halign: start;
+                                  }
+                                }
                           
                                 Box web_panel_host {
                                   orientation: vertical;
@@ -897,6 +1205,22 @@ Adw.ApplicationWindow main_window {
                           
                                     Box web_visible_help_host {}
                                   }
+
+                                  Box channel_scope_host {
+                                    orientation: vertical;
+                                    spacing: 4;
+
+                                    Label channel_scope_label {
+                                      label: "Edit channel / ink";
+                                      xalign: 0;
+
+                                      styles [
+                                        "heading",
+                                      ]
+                                    }
+
+                                    DropDown channel_scope {}
+                                  }
                           
                                   Label web_mixed {
                                     xalign: 0;
@@ -916,7 +1240,7 @@ Adw.ApplicationWindow main_window {
                                       spacing: 4;
                           
                                       Label web_color_heading {
-                                        label: "Ink Color";
+                                        label: "Channel HEX value (Color code)";
                                         xalign: 0;
                           
                                         styles [
@@ -1342,11 +1666,55 @@ Adw.ApplicationWindow main_window {
                                           }
                                         }
                                       }
+
+                                      Box pattern_editor_random_size_response_row {
+                                        orientation: vertical;
+                                        spacing: 4;
+
+                                        Box pattern_editor_random_size_response_heading {
+                                          spacing: 8;
+
+                                          Label pattern_editor_random_size_response_label {
+                                            label: "Shape Size Response";
+                                            xalign: 0;
+
+                                            styles [
+                                              "heading",
+                                            ]
+                                          }
+
+                                          Label pattern_editor_random_size_response_status {
+                                            label: "Uniform — Source responsive";
+                                            xalign: 1;
+                                            hexpand: true;
+
+                                            styles [
+                                              "dim-label",
+                                              "caption",
+                                            ]
+                                          }
+                                        }
+
+                                        Box pattern_editor_random_size_response_control {
+                                          spacing: 8;
+
+                                          Scale pattern_editor_random_size_response {
+                                            orientation: horizontal;
+                                            draw-value: false;
+                                            hexpand: true;
+                                          }
+
+                                          SpinButton pattern_editor_random_size_response_entry {
+                                            numeric: true;
+                                            tooltip-text: "Enter an exact value";
+                                          }
+                                        }
+                                      }
                                     }
                                   }
                                 }
                           
-                                Box curve_panel_host {
+                                  Box curve_panel_host {
                                   orientation: vertical;
                                   spacing: 10;
                           
@@ -1530,29 +1898,6 @@ Adw.ApplicationWindow main_window {
                                     }
                           
                                     Box curve_shared_help_host {}
-                                  }
-                          
-                                  Box curve_target_row {
-                                    orientation: vertical;
-                                    spacing: 4;
-                                    visible: false;
-                          
-                                    Box curve_target_heading {
-                                      spacing: 4;
-                          
-                                      Label curve_target_label {
-                                        label: "Adjust Ink";
-                                        xalign: 0;
-                          
-                                        styles [
-                                          "heading",
-                                        ]
-                                      }
-                          
-                                      Box curve_target_help_host {}
-                                    }
-                          
-                                    DropDown curve_target {}
                                   }
                           
                                   Box motif_controls {
@@ -1881,6 +2226,28 @@ Adw.ApplicationWindow main_window {
                           
                                     Box curve_visible_help_host {}
                                   }
+
+                                  Box curve_target_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+
+                                    Box curve_target_heading {
+                                      spacing: 4;
+
+                                      Label curve_target_label {
+                                        label: "Edit channel / ink";
+                                        xalign: 0;
+
+                                        styles [
+                                          "heading",
+                                        ]
+                                      }
+
+                                      Box curve_target_help_host {}
+                                    }
+
+                                    DropDown curve_target {}
+                                  }
                           
                                   Label curve_mixed {
                                     xalign: 0;
@@ -1897,7 +2264,7 @@ Adw.ApplicationWindow main_window {
                                     spacing: 4;
                           
                                     Label curve_color_heading {
-                                      label: "Ink Color";
+                                      label: "Channel HEX value (Color code)";
                                       xalign: 0;
                           
                                       styles [

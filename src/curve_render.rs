@@ -1,14 +1,18 @@
 use crate::CancellationToken;
+#[cfg(test)]
 use crate::artwork_pipeline::{ArtworkPipelineSettings, OutputChannelId, PreparedSource};
 use crate::model::{
-    AlternateTileTransform, CurveLayout, CurvePath, CurvePoint, Ink, MotifCoverage, OutputMode,
-    WebCurveChannel, WebCurveSettings, parse_hex_color,
+    AlternateTileTransform, CurveLayout, CurvePath, CurvePoint, Ink, MotifCoverage,
+    WebCurveChannel, WebCurveSettings,
 };
-use crate::render::{
-    Channel, InkLayer, calculate_web_grid, legacy_pipeline_from_facade, map_web_threshold,
-};
+#[cfg(test)]
+use crate::model::{OutputMode, parse_hex_color};
+use crate::render::{Channel, InkLayer, map_web_threshold};
+#[cfg(test)]
+use crate::render::{calculate_web_grid, legacy_pipeline_from_facade};
 use anyhow::{Context, Result};
 use image::RgbaImage;
+#[cfg(test)]
 use std::collections::HashMap;
 use tiny_skia::{BlendMode, Color, FillRule, Paint, PathBuilder, Pixmap, Transform};
 
@@ -48,6 +52,116 @@ pub struct CurveGeometry {
     pub layers: Vec<CurveInkLayer>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static RETAINED_WHOLE_GENERATOR_INVOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_retained_whole_generator_invocation() {
+    RETAINED_WHOLE_GENERATOR_INVOCATIONS.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+pub(crate) fn reset_retained_curve_generator_instrumentation() {
+    RETAINED_WHOLE_GENERATOR_INVOCATIONS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn retained_curve_generator_invocations() -> usize {
+    RETAINED_WHOLE_GENERATOR_INVOCATIONS.with(std::cell::Cell::get)
+}
+
+/// Native-recipe-only bounds applied before a deformation stage expands paths.
+/// Retained compatibility rendering supplies no limits and preserves its
+/// existing output semantics.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CurveDeformationLimits {
+    pub max_paths: usize,
+    pub max_points_per_path: usize,
+    pub max_total_points: usize,
+}
+
+/// Borrowed retained inputs for one pre-modulation deformation pass. This is a
+/// helper seam only; it does not introduce persisted or recipe runtime state.
+pub(crate) struct CurveDeformationRequest<'a> {
+    pub path: &'a CurvePath,
+    pub close_ends: bool,
+    pub smooth_join: bool,
+    pub settings: &'a WebCurveSettings,
+    pub channel: &'a WebCurveChannel,
+    pub grid: &'a crate::render::WebGrid,
+}
+
+/// Native-recipe-only bounds for source-width interpolation and outline
+/// emission. Retained compatibility rendering supplies no limits so it keeps
+/// its established output behavior.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CurveModulationLimits {
+    pub max_points_per_path: usize,
+    pub max_total_points: usize,
+    pub max_outlines: usize,
+    pub max_commands: usize,
+}
+
+/// Borrowed inputs for the one retained width/interpolation-to-outline seam.
+/// The scalar callback keeps source-field storage outside this geometry helper.
+pub(crate) struct CurveModulationRequest<'a> {
+    pub paths: &'a [Vec<CurvePoint>],
+    pub closed: bool,
+    pub grid: &'a crate::render::WebGrid,
+    pub settings: &'a WebCurveSettings,
+    pub channel: &'a WebCurveChannel,
+    pub sample_value: &'a dyn Fn(usize) -> f64,
+}
+
+impl CurveDeformationLimits {
+    fn check(&self, paths: usize, points_per_path: usize) -> Result<()> {
+        if paths > self.max_paths {
+            anyhow::bail!("Curves deformation exceeds bounded path count");
+        }
+        if points_per_path > self.max_points_per_path {
+            anyhow::bail!("Curves deformation exceeds bounded points per path");
+        }
+        let total = paths
+            .checked_mul(points_per_path)
+            .ok_or_else(|| anyhow::anyhow!("Curves deformation point count overflow"))?;
+        if total > self.max_total_points {
+            anyhow::bail!("Curves deformation exceeds bounded total point count");
+        }
+        Ok(())
+    }
+}
+
+impl CurveModulationLimits {
+    fn check_input(&self, paths: &[Vec<CurvePoint>]) -> Result<()> {
+        let mut total = 0usize;
+        for path in paths {
+            if path.len() > self.max_points_per_path {
+                anyhow::bail!("Curves width modulation exceeds bounded points per path");
+            }
+            total = total
+                .checked_add(path.len())
+                .ok_or_else(|| anyhow::anyhow!("Curves width modulation point count overflow"))?;
+            if total > self.max_total_points {
+                anyhow::bail!("Curves width modulation exceeds bounded total point count");
+            }
+        }
+        Ok(())
+    }
+
+    fn check_output(&self, outlines: usize, commands: usize) -> Result<()> {
+        if outlines > self.max_outlines {
+            anyhow::bail!("Curves width modulation exceeds bounded outline count");
+        }
+        if commands > self.max_commands {
+            anyhow::bail!("Curves width modulation exceeds bounded command count");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 pub fn generate_curve_geometry(
     source: &RgbaImage,
     settings: &WebCurveSettings,
@@ -55,16 +169,17 @@ pub fn generate_curve_geometry(
     generate_curve_geometry_cancellable(source, settings, &CancellationToken::new())
 }
 
+#[cfg(test)]
 pub fn generate_curve_geometry_cancellable(
     source: &RgbaImage,
     settings: &WebCurveSettings,
     token: &CancellationToken,
 ) -> Result<CurveGeometry> {
-    // Compatibility adapter for callers that still supply the legacy facade.
-    // Document rendering uses `generate_curve_geometry_for_pipeline` instead.
+    // Test-only compatibility adapter for retained-oracle callers.
     generate_curve_geometry_for_output_mode(source, settings, OutputMode::CmykInks, token)
 }
 
+#[cfg(test)]
 pub(crate) fn generate_curve_geometry_for_output_mode(
     source: &RgbaImage,
     settings: &WebCurveSettings,
@@ -77,12 +192,14 @@ pub(crate) fn generate_curve_geometry_for_output_mode(
     generate_curve_geometry_for_pipeline(&prepared, settings, &pipeline, token)
 }
 
+#[cfg(test)]
 pub(crate) fn generate_curve_geometry_for_pipeline(
     prepared: &PreparedSource,
     settings: &WebCurveSettings,
     pipeline: &ArtworkPipelineSettings,
     token: &CancellationToken,
 ) -> Result<CurveGeometry> {
+    record_retained_whole_generator_invocation();
     let output_channels = if matches!(
         pipeline.assignment,
         crate::artwork_pipeline::ChannelAssignment::LegacyCompatibility(_)
@@ -141,63 +258,31 @@ pub(crate) fn generate_curve_geometry_for_pipeline(
         } else {
             channel.smooth_join
         };
-        let repeated = match settings.layout {
-            CurveLayout::FullWidth => {
-                let node_count = ((settings.output_width as f64
-                    / grid.cell_width.min(grid.cell_height).max(1.0)
-                    * channel.output_quality.max(0.1))
-                .ceil() as usize)
-                    .max(2);
-                let local = sample_curve_path(path, node_count, close_ends, smooth_join);
-                let baseline = build_full_curve_baseline(&local, settings, channel);
-                repeat_and_transform_cancellable(&baseline, settings, channel, &grid, token)?
-            }
-            CurveLayout::MotifPattern => {
-                let node_count = (24.0 * channel.output_quality.max(0.1)).ceil() as usize;
-                let local = sample_motif_path(path, node_count.max(4));
-                build_motif_rows_cancellable(&local, settings, channel, &grid, token)?
-            }
-        };
-        let mut outlines = Vec::new();
-        for (repeat_index, points) in repeated.into_iter().enumerate() {
-            if repeat_index % 256 == 0 {
-                token.checkpoint()?;
-            }
-            let mut repeat_commands = Vec::new();
-            let nodes: Vec<VariablePoint> = points
-                .into_iter()
-                .map(|point| VariablePoint {
-                    x: point.x,
-                    y: point.y,
-                    width: curve_width_at_point(point, field, &grid, settings, channel),
-                })
-                .collect();
-            if settings.use_shared_curve && settings.shared_close_ends
-                || !settings.use_shared_curve && channel.close_ends
-            {
-                if nodes.iter().any(|node| node.width > 0.0) {
-                    let simplified = simplify_segment(&nodes, &grid, channel);
-                    if let Some(outline) = outline_from_points(&simplified, true) {
-                        repeat_commands.extend(outline.commands);
-                    }
-                }
-            } else {
-                let margin = max_curve_width(settings, &grid, channel) * 1.5 + 2.0;
-                for active in split_active_segments(&nodes) {
-                    for clipped in clip_segment_to_artboard(&active, settings, margin) {
-                        let simplified = simplify_segment(&clipped, &grid, channel);
-                        if let Some(outline) = outline_from_points(&simplified, false) {
-                            repeat_commands.extend(outline.commands);
-                        }
-                    }
-                }
-            }
-            if !repeat_commands.is_empty() {
-                outlines.push(CurveOutline {
-                    commands: repeat_commands,
-                });
-            }
-        }
+        let repeated = deform_curve_paths_cancellable(
+            CurveDeformationRequest {
+                path,
+                close_ends,
+                smooth_join,
+                settings,
+                channel,
+                grid: &grid,
+            },
+            token,
+            None,
+        )?;
+        let sample_value = |index| field.value_at(index);
+        let outlines = modulate_curve_paths_cancellable(
+            CurveModulationRequest {
+                paths: &repeated,
+                closed: close_ends,
+                grid: &grid,
+                settings,
+                channel,
+                sample_value: &sample_value,
+            },
+            token,
+            None,
+        )?;
         let output_color = if matches!(
             pipeline.assignment,
             crate::artwork_pipeline::ChannelAssignment::LegacyCompatibility(_)
@@ -376,7 +461,75 @@ impl CurveOutline {
     }
 }
 
-fn sample_curve_path(
+/// Generates the retained Curves deformation paths before source-width
+/// modulation. Native recipe execution uses this exact seam; it does not own a
+/// second placement, sampling, repetition, or transform implementation.
+pub(crate) fn deform_curve_paths_cancellable(
+    request: CurveDeformationRequest<'_>,
+    token: &CancellationToken,
+    limits: Option<CurveDeformationLimits>,
+) -> Result<Vec<Vec<CurvePoint>>> {
+    match request.settings.layout {
+        CurveLayout::FullWidth => {
+            let node_count = ((request.settings.output_width as f64
+                / request
+                    .grid
+                    .cell_width
+                    .min(request.grid.cell_height)
+                    .max(1.0)
+                * request.channel.output_quality.max(0.1))
+            .ceil() as usize)
+                .max(2);
+            let spacing = request
+                .grid
+                .cell_width
+                .min(request.grid.cell_height)
+                .max(1.0);
+            let radius = ((request.settings.output_width as f64)
+                .hypot(request.settings.output_height as f64)
+                / spacing)
+                .ceil() as usize
+                + 2;
+            if let Some(limits) = limits {
+                limits.check(
+                    radius
+                        .checked_mul(2)
+                        .and_then(|value| value.checked_add(1))
+                        .ok_or_else(|| anyhow::anyhow!("Curves deformation path count overflow"))?,
+                    node_count,
+                )?;
+            }
+            let local = sample_curve_path(
+                request.path,
+                node_count,
+                request.close_ends,
+                request.smooth_join,
+            );
+            let baseline = build_full_curve_baseline(&local, request.settings, request.channel);
+            repeat_and_transform_cancellable(
+                &baseline,
+                request.settings,
+                request.channel,
+                request.grid,
+                token,
+            )
+        }
+        CurveLayout::MotifPattern => {
+            let node_count = (24.0 * request.channel.output_quality.max(0.1)).ceil() as usize;
+            let local = sample_motif_path(request.path, node_count.max(4));
+            build_motif_rows_cancellable_with_limits(
+                &local,
+                request.settings,
+                request.channel,
+                request.grid,
+                token,
+                limits,
+            )
+        }
+    }
+}
+
+pub(crate) fn sample_curve_path(
     path: &CurvePath,
     count: usize,
     close_ends: bool,
@@ -585,6 +738,17 @@ fn build_motif_rows_cancellable(
     grid: &crate::render::WebGrid,
     token: &CancellationToken,
 ) -> Result<Vec<Vec<CurvePoint>>> {
+    build_motif_rows_cancellable_with_limits(local, settings, channel, grid, token, None)
+}
+
+fn build_motif_rows_cancellable_with_limits(
+    local: &[CurvePoint],
+    settings: &WebCurveSettings,
+    channel: &WebCurveChannel,
+    grid: &crate::render::WebGrid,
+    token: &CancellationToken,
+    limits: Option<CurveDeformationLimits>,
+) -> Result<Vec<Vec<CurvePoint>>> {
     let motif = normalize_motif(local, channel.curve_scale);
     let start = motif.first().copied().unwrap_or_default();
     let end = motif.last().copied().unwrap_or(start);
@@ -613,6 +777,12 @@ fn build_motif_rows_cancellable(
         channel,
         grid,
     );
+    if let Some(limits) = limits {
+        let chained_points = (tile_count as usize)
+            .checked_mul(motif.len())
+            .ok_or_else(|| anyhow::anyhow!("Curves deformation tile point count overflow"))?;
+        limits.check(stack_count as usize, chained_points)?;
+    }
     let tile_origin = (tile_count - 1) as f64 / 2.0;
     let stack_origin = (stack_count - 1) as f64 / 2.0;
     let center = CurvePoint {
@@ -686,6 +856,9 @@ fn build_motif_rows_cancellable(
         let count = ((length / target_spacing).ceil() as usize + 1)
             .max(chained.len())
             .min(20_000);
+        if let Some(limits) = limits {
+            limits.check(stack_count as usize, count)?;
+        }
         if chained.len() >= 2 {
             rows.push(resample_polyline(&chained, count));
         }
@@ -929,10 +1102,79 @@ fn curve_grid_transform(
     }
 }
 
+/// Applies the retained Curves source interpolation, threshold mapping,
+/// segmentation, clipping, simplification, and outline construction in one
+/// place. Native recipe execution calls this seam with its typed field and
+/// bounded output budget; retained rendering calls it without limits.
+pub(crate) fn modulate_curve_paths_cancellable(
+    request: CurveModulationRequest<'_>,
+    token: &CancellationToken,
+    limits: Option<CurveModulationLimits>,
+) -> Result<Vec<CurveOutline>> {
+    if let Some(limits) = limits {
+        limits.check_input(request.paths)?;
+    }
+    let mut outlines = Vec::new();
+    let mut command_count = 0usize;
+    for (repeat_index, points) in request.paths.iter().enumerate() {
+        if repeat_index % 256 == 0 {
+            token.checkpoint()?;
+        }
+        let nodes: Vec<VariablePoint> = points
+            .iter()
+            .copied()
+            .map(|point| VariablePoint {
+                x: point.x,
+                y: point.y,
+                width: curve_width_at_point_with_sampler(
+                    point,
+                    request.sample_value,
+                    request.grid,
+                    request.settings,
+                    request.channel,
+                ),
+            })
+            .collect();
+        let mut repeat_commands = Vec::new();
+        if request.closed {
+            if nodes.iter().any(|node| node.width > 0.0) {
+                let simplified = simplify_segment(&nodes, request.grid, request.channel);
+                if let Some(outline) = outline_from_points(&simplified, true) {
+                    repeat_commands.extend(outline.commands);
+                }
+            }
+        } else {
+            let margin =
+                max_curve_width(request.settings, request.grid, request.channel) * 1.5 + 2.0;
+            for active in split_active_segments(&nodes) {
+                for clipped in clip_segment_to_artboard(&active, request.settings, margin) {
+                    let simplified = simplify_segment(&clipped, request.grid, request.channel);
+                    if let Some(outline) = outline_from_points(&simplified, false) {
+                        repeat_commands.extend(outline.commands);
+                    }
+                }
+            }
+        }
+        if !repeat_commands.is_empty() {
+            command_count = command_count
+                .checked_add(repeat_commands.len())
+                .ok_or_else(|| anyhow::anyhow!("Curves width modulation command count overflow"))?;
+            if let Some(limits) = limits {
+                limits.check_output(outlines.len() + 1, command_count)?;
+            }
+            outlines.push(CurveOutline {
+                commands: repeat_commands,
+            });
+        }
+    }
+    token.checkpoint()?;
+    Ok(outlines)
+}
+
 #[allow(clippy::too_many_arguments)]
-fn curve_width_at_point(
+fn curve_width_at_point_with_sampler(
     point: CurvePoint,
-    field: &crate::artwork_pipeline::ResolvedChannelField,
+    sample_value: &dyn Fn(usize) -> f64,
     grid: &crate::render::WebGrid,
     settings: &WebCurveSettings,
     channel: &WebCurveChannel,
@@ -946,10 +1188,25 @@ fn curve_width_at_point(
     let mut rows = [0.0; 4];
     for row_offset in -1..=2 {
         let values = [
-            raw_value(x0 - 1, y0 + row_offset, field, grid),
-            raw_value(x0, y0 + row_offset, field, grid),
-            raw_value(x0 + 1, y0 + row_offset, field, grid),
-            raw_value(x0 + 2, y0 + row_offset, field, grid),
+            raw_value(
+                x0.saturating_sub(1),
+                y0.saturating_add(row_offset),
+                sample_value,
+                grid,
+            ),
+            raw_value(x0, y0.saturating_add(row_offset), sample_value, grid),
+            raw_value(
+                x0.saturating_add(1),
+                y0.saturating_add(row_offset),
+                sample_value,
+                grid,
+            ),
+            raw_value(
+                x0.saturating_add(2),
+                y0.saturating_add(row_offset),
+                sample_value,
+                grid,
+            ),
         ];
         rows[(row_offset + 1) as usize] = cubic_interpolate(values, tx);
     }
@@ -970,12 +1227,12 @@ fn curve_width_at_point(
 fn raw_value(
     col: i32,
     row: i32,
-    field: &crate::artwork_pipeline::ResolvedChannelField,
+    sample_value: &dyn Fn(usize) -> f64,
     grid: &crate::render::WebGrid,
 ) -> f64 {
     let col = col.clamp(0, grid.cols as i32 - 1) as u32;
     let row = row.clamp(0, grid.rows as i32 - 1) as u32;
-    field.value_at((row * grid.cols + col) as usize)
+    sample_value((row * grid.cols + col) as usize)
 }
 
 fn cubic_interpolate(points: [f64; 4], amount: f64) -> f64 {
@@ -1140,6 +1397,13 @@ fn simplify_range(
         simplify_range(points, start, index, tolerance, keep);
         simplify_range(points, index, end, tolerance, keep);
     }
+}
+
+pub(crate) fn outline_from_variable_points(
+    points: &[VariablePoint],
+    closed: bool,
+) -> Option<CurveOutline> {
+    outline_from_points(points, closed)
 }
 
 fn outline_from_points(points: &[VariablePoint], closed: bool) -> Option<CurveOutline> {

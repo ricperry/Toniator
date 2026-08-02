@@ -16,6 +16,345 @@ The parent thread records read-only-agent updates here after persisting them.
 
 ## Current entries
 
+- `ton-010-preservation-checkpoint-audit-2026-08-02` — authoritative current
+  completion-status audit on dirty base HEAD
+  `262c7e857446ded100d4a90fd23d651e52460665`. Bundled Shapes, Curves, and
+  Weighted Voronoi plus embedded custom Shapes definitions execute through the
+  recipe runtime, with strict document v9 / `.tntr` v6 persistence. TON-010 is
+  not complete: authoring is Shapes-specific and hard-coded by preset index,
+  Save As is write-only in the UI, the layered application registry and graph
+  editor are absent, compatibility dispatch remains, Stage 6 proof recipes are
+  incomplete, and human Stage 5 gates remain open. Earlier 2026-08-01 slice
+  entries are implementation history, not current closeout authority.
+  Evidence:
+  `evidence/ton-010-preservation-checkpoint-audit-2026-08-02.md`. Invalidate
+  after changes to `src/{ui,render,model,pattern_definition,pattern_definition_registry,shapes_native,shapes_recipe,curves_native,curves_recipe,weighted_voronoi}.rs`,
+  bundled pattern assets, persistence versions, or the referenced docs.
+
+- `ton-010-channel-settings-pattern-presets-2026-08-01` — on dirty HEAD
+  `262c7e857446ded100d4a90fd23d651e52460665`, Channel Settings now places the
+  edit-channel selector below Visible Inks, exposes an editable Channel HEX
+  value field, and propagates coverage/detail/color and site-constructor edits
+  into custom embedded recipe instances. The visible pattern selector now
+  installs X/Y, triangular 60-degree, math-function, and random-dispersion
+  recipes; site density changes lattice population and triangular placement is
+  native. Spiral is a dedicated centered Archimedean connected path with curve
+  spacing controlling turn pitch; it extends past the rectangular corners for
+  canonical artboard clipping, ignores channel sampler overrides for its site
+  topology, and splits network paths after thresholded samples instead of
+  bridging gaps. Custom embedded mark/network recipes now project the active
+  RGB/CMYK channel controls and HEX entry; stale deferred GTK syncs are ignored,
+  connected RGB layers use Screen blending, square-wave deformation grows
+  symmetrically around the canvas center, and editor-authored rotated grids wrap
+  sites into the artboard while compatibility geometry keeps its parity seam.
+  Curve and Math Function editor selections now default to connected/full-curve
+  geometry without rewriting saved drafts on reopen.
+  Connected network outputs now carry one smooth variable-width cubic contour
+  per continuation run; raster and SVG share that filled outline, while
+  topology edges remain inspectable and threshold gaps never reconnect.
+  Spiral sites are sampled by deterministic Archimedean arc length in both the
+  production recipe and editor preview, avoiding uniform-radian center
+  oversampling while retaining corner-overflow clipping.
+  Full tests (258 library, 54 binary/UI),
+  export exercises for all math and random presets, strict Clippy/format checks,
+  and a GTK screenshot launch passed. The pattern dialog also releases its
+  AlertDialog extra child on close, allowing repeated editing without parent
+  assertions. Human
+  GNOME/Wayland acceptance remains pending. Evidence:
+  `evidence/ton-010-channel-settings-pattern-presets-2026-08-01.md`.
+
+  Latest random-placement follow-up adds the channel-scoped uniform-to-source
+  mark-size response slider in Channel Settings Advanced, verifies
+  sampling-detail-driven random site counts,
+  preserves weighted clustering by avoiding a second independent offset, and
+  tests uniform versus source-responsive extents. Random placement now maps
+  the neutral Grid sampler to source-weighted sites; explicit Uniform Random
+  remains available per channel. The latest complete suite is
+  261 library tests and 56 binary/UI tests. Revalidate after changes to
+  `src/ui.rs`, `src/model.rs`, `src/pattern_definition.rs`,
+  `src/shapes_recipe.rs`, `src/shapes_native.rs`, the bundled Shapes recipe,
+  or the pattern-editor Blueprint; Sampling Detail now also scales the native
+  triangular-grid population, the reported Random · Gaussian channel edit is
+  covered by a focused regression, and the realized UI regression proves the
+  selected-channel control changes canonical mark count. Human
+  slider/clustering inspection remains pending.
+
+- `ton-010-pattern-editor-placement-controls-2026-08-01` — on dirty HEAD
+  `262c7e857446ded100d4a90fd23d651e52460665`, Pattern Editor now exposes
+  placement, grid/curve/math/random controls, dispersion, point definition,
+  render/connection choices, jitter, and local curve authoring with irrelevant
+  controls disabled. Custom embedded recipes return to the normal channel
+  styling stack so channel fill/opacity/rotation/mark plus sampler and seeds
+  remain reachable after Apply/Save As. Connected Points now emits canonical
+  network nodes/edges through the bounded native operation. Full tests,
+  realized GTK regression, strict Clippy/release/format checks, and a GTK
+  screenshot launch passed; manual GNOME acceptance remains pending. Evidence:
+  `evidence/ton-010-pattern-editor-placement-controls-2026-08-01.md`.
+
+- `ton-010-pattern-editor-ia-preview-2026-08-01` — on dirty HEAD
+  `262c7e857446ded100d4a90fd23d651e52460665`, Pattern Editor no longer exposes
+  mark or channel sampling controls; it now provides a neutral live pattern
+  preview, a Cancel-safe local curve-shape editor, persisted authored curve
+  paths, and truthful curve/mark terminology. Legacy main-window curve
+  authoring is hidden while runtime compatibility remains wired. Full tests,
+  strict Clippy/release/format checks, and a real GTK screenshot launch passed;
+  GNOME/Wayland modal interaction remains pending. Evidence:
+  `evidence/ton-010-pattern-editor-ia-preview-2026-08-01.md`.
+
+- `ton-010-pattern-control-boundary-2026-08-01` — on dirty HEAD
+  `262c7e857446ded100d4a90fd23d651e52460665`, Pattern Settings now presents a
+  single preset selector and structural editor entry point while Channel
+  Settings owns channel scope, unified/per-channel seeds, and channel-targeted treatment panels. Legacy
+  mode buttons are hidden, the output model remains the RGB/CMYK mode selector,
+  and the editor persists a typed Sine/Square/Spiral curve-function parameter.
+  Full tests and a real GTK screenshot launch passed; manual GNOME/Wayland
+  interaction and broader per-channel recipe/site-constructor work remain
+  pending. Evidence:
+  `evidence/ton-010-pattern-control-boundary-2026-08-01.md`.
+
+- `ton-010-pattern-editor-channel-boundary-2026-08-01` — on dirty HEAD
+  `262c7e857446ded100d4a90fd23d651e52460665`, Pattern Editor now owns only
+  structural grid/mark/deformation state while main Channel Settings owns
+  per-channel sampler, random seed, and weighted-site influence. Embedded
+  recipes receive those authoritative channel values; editor numeric defaults
+  and nonzero jitter use continuous bounded validation; editor random sampling
+  reuses the neutral distribution service without the old 8,192 editor cap.
+  Focused/full tests, strict Clippy/release/format checks, and real GTK
+  resource/screenshot launches passed. Manual GNOME modal/channel interaction
+  and canvas-response acceptance remain pending. Evidence:
+  `evidence/ton-010-pattern-editor-channel-boundary-2026-08-01.md`.
+
+- ton-010-pattern-editor-point-modes-rgb-2026-08-01 — corrected native point
+  definition behavior so intersections, curve spacing, and full curves produce
+  distinct bounded deterministic placements; active RGB/CMYK channel labels and
+  sampler/seed reopen persistence are now model-aware. Focused binary tests,
+  full library tests, strict Clippy/release/format checks, and GTK smoke passed;
+  freehand curve editing, continuous full-curve paths, and human modal
+  acceptance remain pending. Evidence:
+  evidence/ton-010-pattern-editor-point-modes-rgb-2026-08-01.md.
+
+- ton-010-pattern-editor-expanded-controls-2026-08-01 — fixed custom draft
+  reopen reset and added persisted X/Y grid controls, per-channel samplers,
+  unified/per-channel seeds, deterministic jitter, and editor lattice
+  operation v1; full tests, Clippy/format, and GTK smoke passed. Numeric curve
+  bends are implemented; freehand curve editing/full continuous paths remain
+  pending. Evidence:
+  evidence/ton-010-pattern-editor-expanded-controls-2026-08-01.md.
+
+- `ton-010-pattern-editor-modal-lifecycle-fix-2026-08-01` — fixed the
+  repeated-entry Adwaita critical by detaching the Blueprint-owned modal draft
+  controls on every response; focused/full tests and GTK startup passed.
+  Human Save As → reopen acceptance remains pending. Evidence:
+  `evidence/ton-010-pattern-editor-modal-lifecycle-fix-2026-08-01.md`.
+
+- `ton-010-pattern-editor-final-runtime-2026-08-01` — final parent runtime
+  gate on dirty HEAD `262c7e8`: full tests, strict lint/format/release checks,
+  and a real GTK `--demo --show-controls --screenshot` launch exposing the
+  `Edit Pattern…` entry point; human modal interaction and accessibility
+  acceptance remain pending. Evidence:
+  `evidence/ton-010-pattern-editor-final-runtime-2026-08-01.md`.
+
+- `ton-010-pattern-editor-substage-4c-parent-review-2026-08-01` —
+  parent-accepted minimum usable Pattern Editor on dirty HEAD `262c7e8`:
+  accessible modal draft, cancel-safe construction, one-edit Apply with
+  production preview/autosave, atomic `.tnpattern` Save As, and a custom
+  summary panel; focused resource/UI/runtime checks and full lib/bin/clippy
+  gates passed. Live draft preview, graph editing, broader library parity, and
+  manual GNOME acceptance remain pending. Evidence:
+  `evidence/ton-010-pattern-editor-substage-4c-parent-review-2026-08-01.md`.
+
+- `ton-010-custom-runtime-substage-4b-parent-review-2026-08-01` —
+  parent-accepted project-embedded custom Shapes runtime on dirty HEAD
+  `262c7e8`: strict embedded definition/instance authority, one-edit install,
+  save/reopen and missing-selection rejection, and live bounded canonical
+  dispatch before the legacy adapter. GTK editor/library and custom consumer
+  parity remain pending. Evidence:
+  `evidence/ton-010-custom-runtime-substage-4b-parent-review-2026-08-01.md`.
+
+- `ton-010-schema-substage-4a-parent-review-2026-08-01` — parent-accepted
+  current-only document/preset version boundary on dirty HEAD `262c7e8`:
+  documents are v9, `.tntr` presets are v6, bundled presets are updated, and
+  obsolete/future headers are rejected before semantic work. Custom
+  definitions/editor remain pending. Evidence:
+  `evidence/ton-010-schema-substage-4a-parent-review-2026-08-01.md`.
+
+- `ton-010-bundled-recipes-substage-3e3b-parent-review-2026-08-01` —
+  parent-accepted live Curves recipe dispatch on dirty HEAD `262c7e8`: the
+  document path reads authoritative pattern state, invokes the bundled
+  orchestrator, preserves cancellation, and keeps retained whole-generation
+  work test-only; focused live, consumer, native, and diff checks passed.
+  Manual GNOME/Wayland and reference-artifact acceptance remain pending.
+  Evidence:
+  `evidence/ton-010-bundled-recipes-substage-3e3b-parent-review-2026-08-01.md`.
+
+- `ton-010-bundled-recipes-substage-3e3a3-parent-review-2026-08-01` —
+  parent-accepted non-dispatched Curves consumer parity on dirty HEAD
+  `262c7e8`: exact preview/PNG/editable-SVG output equality, transparent and
+  opaque background behavior, cancellation/limits, and atomic file-export seam.
+  Live routing remains pending. Evidence:
+  `evidence/ton-010-bundled-recipes-substage-3e3a3-parent-review-2026-08-01.md`.
+
+- `ton-010-bundled-recipes-substage-3e3a2-parent-review-2026-08-01` —
+  parent-accepted exhaustive non-dispatched Curves canonical parity on dirty
+  HEAD `262c7e8`: complete 38-parameter manifest, CMYK/RGB/Crosshatch/layout/
+  alpha matrix, deterministic full-structure equality, no-op proof, and native
+  resource rejection. Consumer/live dispatch remains pending. Evidence:
+  `evidence/ton-010-bundled-recipes-substage-3e3a2-parent-review-2026-08-01.md`.
+
+- `ton-010-bundled-recipes-substage-3e3a1-parent-review-2026-08-01` —
+  parent-accepted non-dispatched Curves multi-channel orchestration on dirty
+  HEAD `262c7e8`: retained-order semantic layers, cache-aware field provider,
+  disabled zero work, external Crosshatch color, cancellation, and
+  representative retained equality. Consumers/live dispatch are not claimed.
+  Evidence:
+  `evidence/ton-010-bundled-recipes-substage-3e3a1-parent-review-2026-08-01.md`.
+
+- `ton-010-bundled-recipes-substage-3e2d-parent-review-2026-08-01` —
+  parent-accepted Curves emit and complete six-body native operation set on
+  dirty HEAD `262c7e8`: canonical semantic single-layer Paths, disabled policy,
+  final limits, and full generic execution pass. Multi-channel orchestration,
+  consumers, and live dispatch are not claimed. Evidence:
+  `evidence/ton-010-bundled-recipes-substage-3e2d-parent-review-2026-08-01.md`.
+
+- `ton-010-bundled-recipes-substage-3e2c-parent-review-2026-08-01` —
+  parent-accepted partial Curves-native width modulation on dirty HEAD
+  `262c7e8`: shared retained/native interpolation-to-outline authority, strict
+  provenance, narrow output, cancellation, and native input/command limits.
+  Emit and live dispatch are not claimed. Evidence:
+  `evidence/ton-010-bundled-recipes-substage-3e2c-parent-review-2026-08-01.md`.
+
+- `ton-010-bundled-recipes-substage-3e2b-parent-review-2026-08-01` —
+  parent-accepted partial Curves-native deformation on dirty HEAD `262c7e8`:
+  shared retained/native helper authority, full layout/coverage/transform
+  fidelity, narrow output, cancellation, and pre-allocation resource limits.
+  Modulation, emission, and live dispatch are not claimed. Evidence:
+  `evidence/ton-010-bundled-recipes-substage-3e2b-parent-review-2026-08-01.md`.
+
+- `ton-010-bundled-recipes-substage-3e2a-parent-review-2026-08-01` —
+  parent-accepted partial Curves-native boundary on dirty HEAD `262c7e8`:
+  narrow placement, semantic source sampling, strict graph-aware motif asset
+  preflight/selection, and typed runtime values. Downstream bodies and live
+  dispatch are not claimed. Evidence:
+  `evidence/ton-010-bundled-recipes-substage-3e2a-parent-review-2026-08-01.md`.
+
+- `ton-010-bundled-recipes-substage-3e1-parent-review-2026-08-01` —
+  parent-accepted Curves declarative contract on dirty HEAD `262c7e8`: strict
+  bundled definition, Curves-only typed graph, authoritative complete adapter,
+  digest-backed editable paths, model-faithful bounds, truthful dual ownership
+  of output quality, and exclusion of two retained no-op fields. Live Curves
+  remains compatibility; native execution and dispatch are not claimed.
+  Evidence:
+  `evidence/ton-010-bundled-recipes-substage-3e1-parent-review-2026-08-01.md`.
+
+- `ton-010-bundled-recipes-substage-3d3b-parent-review-2026-08-01` —
+  parent-reviewed live Shapes recipe dispatch on dirty HEAD `262c7e8`; RGB/CMYK
+  documents execute recipe=1/oracle=0, retained whole-generation code is
+  test-only, and live preview/PNG/editable-SVG consumers stay canonical. Human
+  Stage 5 acceptance remains pending. Evidence:
+  `evidence/ton-010-bundled-recipes-substage-3d3b-parent-review-2026-08-01.md`.
+
+- `ton-010-bundled-recipes-substage-3d3a-complete-parent-review-2026-08-01` —
+  parent-accepted complete non-dispatched Shapes recipe orchestration on dirty
+  HEAD `262c7e8`: exhaustive canonical oracle equality, provider/cache and
+  cancellation behavior, RGB/CMYK preview-PNG parity, and byte-identical
+  editable mark SVG/file export all pass. Evidence:
+  `evidence/ton-010-bundled-recipes-substage-3d3a-complete-parent-review-2026-08-01.md`.
+
+- `ton-010-bundled-recipes-substage-3d3a-canonical-parent-review-2026-08-01` —
+  parent-reviewed exhaustive full-structure Shapes recipe/oracle equivalence,
+  custom cubic projection, assignment behavior, cache/disabled work, and
+  deterministic cancellation on dirty HEAD `262c7e8`. Consumer parity remains
+  before 3D3A acceptance. Evidence:
+  `evidence/ton-010-bundled-recipes-substage-3d3a-canonical-parent-review-2026-08-01.md`.
+
+- `ton-010-bundled-recipes-substage-3d3a-foundation-parent-review-2026-08-01` —
+  parent-reviewed partial, non-dispatched Shapes recipe orchestration on dirty
+  HEAD `262c7e8`; recipe-driven field requests, cache behavior, disabled native
+  work, stable layers, and initial CMYK canonical equality pass. This is not
+  3D3A acceptance; the exhaustive matrix and consumers remain. Evidence:
+  `evidence/ton-010-bundled-recipes-substage-3d3a-foundation-parent-review-2026-08-01.md`.
+
+- `ton-010-bundled-recipes-substage-3d2-parent-review-2026-08-01` —
+  parent-reviewed six bounded native Shapes operations, recipe-driven semantic
+  field requests, exact mapping order, typed family-isolated ports, and generic
+  registry preflight on dirty HEAD `262c7e8`. Live Shapes dispatch remains the
+  compatibility renderer pending 3D3 equivalence. Evidence:
+  `evidence/ton-010-bundled-recipes-substage-3d2-parent-review-2026-08-01.md`.
+
+- `ton-010-bundled-recipes-substage-3d1-parent-review-2026-08-01` —
+  parent-reviewed immutable bundled Shapes definition, corrected six-stage
+  typed descriptor graph, complete guided metadata, and strict one-way custom
+  motif adaptation on dirty HEAD `262c7e8`. Crosshatch remains outside the
+  recipe and live Shapes dispatch remains the compatibility renderer. Evidence:
+  `evidence/ton-010-bundled-recipes-substage-3d1-parent-review-2026-08-01.md`.
+
+- `ton-010-bundled-recipes-substage-3c-parent-review-2026-08-01` —
+  parent-reviewed live Weighted renderer dispatch through the bundled recipe
+  executor on dirty HEAD `262c7e8`; the former generator is test-only oracle
+  code, release builds cannot call it, and focused RGB/CMYK canonical consumer
+  checks pass. Stage 5 human acceptance remains pending. Evidence:
+  `evidence/ton-010-bundled-recipes-substage-3c-parent-review-2026-08-01.md`.
+
+- `ton-010-bundled-recipes-substage-3b-parent-review-2026-08-01` —
+  parent-reviewed six atomic production Weighted recipe operations and exact
+  RGB/CMYK canonical equivalence on dirty HEAD `262c7e8`; disabled channels do
+  zero field/native work and neutral distribution/Voronoi authorities remain
+  unchanged. Live renderer dispatch is still old authority. Evidence:
+  `evidence/ton-010-bundled-recipes-substage-3b-parent-review-2026-08-01.md`.
+
+- `ton-010-bundled-recipes-substage-3a-parent-review-2026-08-01` —
+  parent-reviewed immutable bundled Weighted `.tnpattern` and production typed
+  descriptor graph on dirty HEAD `262c7e8`; common strict loader/registry,
+  deterministic fingerprint, RGB/CMYK defaults, and bundled immutability pass,
+  with no render/persistence integration yet. Evidence:
+  `evidence/ton-010-bundled-recipes-substage-3a-parent-review-2026-08-01.md`.
+
+- `ton-010-recipe-contract-reconciliation-2026-08-01` — documentation
+  reconciliation for the accepted declarative `.tnpattern` v1 contract and
+  automated-validated Stage 5 status on dirty HEAD `262c7e8`; records changed
+  durable docs, stale follow-up claims removed, exact evidence counts, and
+  remaining human/integration gaps. Valid until recipe integration, Stage 5
+  manual acceptance, schema-version changes, HEAD, or dirty-state assumptions
+  change; report is in
+  `agents/documentation-maintainer/ton-010-recipe-contract-reconciliation.md`.
+
+- `ton-010-recipe-contract-substage-2c2-parent-review-2026-08-01` —
+  parent-reviewed deterministic cancellable recipe executor on dirty HEAD
+  `262c7e8`; data-only DAGs call only static registered Rust operations, reuse
+  neutral distribution/Voronoi and canonical geometry types, bind strict scoped
+  instances, and enforce runtime ports plus declared canonical capabilities.
+  Valid until executor/registry/runtime/canonical types, HEAD, or dirty state
+  changes; evidence is in
+  `evidence/ton-010-recipe-contract-substage-2c2-parent-review-2026-08-01.md`.
+
+- `ton-010-recipe-contract-substage-2c1-parent-review-2026-08-01` —
+  parent-reviewed strict creator parameter schema and scoped instance values on
+  dirty HEAD `262c7e8`; covers exact `u64` seeds, numeric/choice/text/asset
+  constraints, duplicate-aware list payloads, semantic channel keys, explicit
+  new-instance defaults, strict parsing, and deterministic serialization.
+  Valid until parameter/instance contracts, channel parsing, asset handling,
+  HEAD, or dirty state changes; evidence is in
+  `evidence/ton-010-recipe-contract-substage-2c1-parent-review-2026-08-01.md`.
+
+- `ton-010-recipe-contract-substage-2b-parent-review-2026-08-01` —
+  parent-reviewed deterministic bundled/user/project definition resolution on
+  dirty HEAD `262c7e8`; bundled definitions are immutable, same-content entries
+  deduplicate, and project-embedded custom content overrides differing local
+  user content with an inspectable typed diagnostic rather than substitution.
+  Valid until definition serialization/fingerprints, precedence/diagnostics,
+  HEAD, or recorded dirty state changes; evidence is in
+  `evidence/ton-010-recipe-contract-substage-2b-parent-review-2026-08-01.md`.
+
+- `ton-010-recipe-contract-substage-2a-parent-review-2026-08-01` —
+  parent-reviewed open stable `PatternId` and strict `.tnpattern` v1 contract
+  on dirty HEAD `262c7e8`; covers deterministic JSON, typed DAG validation,
+  bounded native operation descriptors, scoped parameters/quick controls,
+  authoring layout, SVG safety, and exact-byte SHA-256 asset identity. Runtime
+  execution, bundles, library resolution, schema bumps, and UI remain later
+  substages. Valid until the contract, adapted ID call sites, dependencies,
+  HEAD, or recorded dirty state changes; evidence is in
+  `evidence/ton-010-recipe-contract-substage-2a-parent-review-2026-08-01.md`.
+
 - `ton-010-stage5-framework-restart-substage-a-parent-review-2026-08-01` —
   parent-reviewed direct-positive Weighted Voronoi producer correction on
   dirty HEAD `54a8e37`; final boundary-derived inset polygons are positive

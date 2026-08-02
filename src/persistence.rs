@@ -197,6 +197,24 @@ mod tests {
         source(png.into_inner())
     }
 
+    fn custom_shapes_recipe() -> (
+        crate::pattern_definition::PatternDefinition,
+        crate::pattern_definition::PatternInstanceParameters,
+    ) {
+        let mut definition = crate::load_bundled_shapes_definition().unwrap();
+        definition.id = PatternId::new("custom.persistence-dots.v1").unwrap();
+        definition.display.name = "Persistent Dots".into();
+        definition.display.summary = "A portable project Shapes recipe.".into();
+        let instance = definition
+            .default_instance_parameters(
+                crate::OutputChannelId::CMYK
+                    .into_iter()
+                    .chain(crate::OutputChannelId::RGB),
+            )
+            .unwrap();
+        (definition, instance)
+    }
+
     #[test]
     fn current_project_roundtrips_and_rejects_pre_release_versions() {
         let directory = tempfile::tempdir().unwrap();
@@ -206,6 +224,7 @@ mod tests {
         assert_eq!(load_document(&path).unwrap(), document);
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["version"], crate::model::DOCUMENT_VERSION);
         assert!(saved["pattern_state"].is_object());
         assert!(saved["render"].is_null());
         assert!(saved["saved_web_shape"].is_null());
@@ -233,7 +252,7 @@ mod tests {
 
         let mut value: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        value["version"] = serde_json::json!(6);
+        value["version"] = serde_json::json!(8);
         std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
         assert!(
             load_document(&path)
@@ -244,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn current_v8_rejects_missing_mismatched_or_unsupported_authoritative_patterns() {
+    fn current_v9_rejects_missing_mismatched_or_unsupported_authoritative_patterns() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory
             .path()
@@ -280,6 +299,37 @@ mod tests {
     }
 
     #[test]
+    fn current_v9_roundtrips_embedded_custom_recipe_and_rejects_missing_selection() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("custom.toniator");
+        let mut editor = DocumentEditor::new(Document::new(rendered_source()));
+        let (definition, instance) = custom_shapes_recipe();
+        let id = definition.id.clone();
+        assert!(editor.install_and_select_embedded_pattern(definition, instance));
+        save_document_atomic(&path, editor.document()).unwrap();
+
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(saved["pattern_state"]["embedded_patterns"][id.as_str()].is_object());
+        let reopened = load_document(&path).unwrap();
+        assert_eq!(reopened.pattern_state, editor.document().pattern_state);
+        assert_eq!(
+            reopened.pattern_state.selected_pattern_id(),
+            Some(id.clone())
+        );
+
+        let mut missing = saved;
+        missing["pattern_state"]["embedded_patterns"] = serde_json::json!({});
+        std::fs::write(&path, serde_json::to_vec(&missing).unwrap()).unwrap();
+        assert!(
+            load_document(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("embedded definition")
+        );
+    }
+
+    #[test]
     fn c2a_c1_fixtures_save_reopen_and_undo_redo_authoritative_pattern_edits() {
         let directory = tempfile::tempdir().unwrap();
         for (name, bytes, selected) in [
@@ -302,25 +352,26 @@ mod tests {
             assert!(editor.replace_with_preset_candidate(candidate));
             assert_eq!(
                 editor.document().pattern_state.selected_pattern_id(),
-                Some(selected)
+                Some(selected.clone())
             );
             let fixture_state = editor.document().pattern_state.clone();
 
-            match selected {
-                PatternId::COMPATIBILITY_SHAPES_V1 => {
+            match selected.as_str() {
+                "compat.shapes.v1" => {
                     let mut settings = editor.document().pattern_state.shape_settings().unwrap();
                     settings.polygon_sides = 3;
                     settings.base_channel.rotation = 27.0;
                     assert!(editor.set_shape_settings(settings));
                 }
-                PatternId::COMPATIBILITY_CURVES_V1 => {
+                "compat.curves.v1" => {
                     let mut settings = editor.document().pattern_state.curve_settings().unwrap();
                     settings.base_channel.curve_scale = 52.0;
                     settings.base_channel.tile_count = 6;
                     settings.base_channel.stack_count = 4;
                     assert!(editor.set_curve_settings(settings));
                 }
-                PatternId::WEIGHTED_VORONOI_V1 => unreachable!("compatibility fixture"),
+                "weighted-voronoi.v1" => unreachable!("compatibility fixture"),
+                _ => unreachable!("compatibility fixture"),
             }
 
             let edited_state = editor.document().pattern_state.clone();
@@ -337,20 +388,24 @@ mod tests {
 
             let reopened = load_document(&path).unwrap();
             assert_eq!(reopened.pattern_state, edited_state);
-            assert_eq!(reopened.pattern_state.selected_pattern_id(), Some(selected));
-            match selected {
-                PatternId::COMPATIBILITY_SHAPES_V1 => {
+            assert_eq!(
+                reopened.pattern_state.selected_pattern_id(),
+                Some(selected.clone())
+            );
+            match selected.as_str() {
+                "compat.shapes.v1" => {
                     let settings = reopened.pattern_state.shape_settings().unwrap();
                     assert_eq!(settings.polygon_sides, 3);
                     assert_eq!(settings.base_channel.rotation, 27.0);
                 }
-                PatternId::COMPATIBILITY_CURVES_V1 => {
+                "compat.curves.v1" => {
                     let settings = reopened.pattern_state.curve_settings().unwrap();
                     assert_eq!(settings.base_channel.curve_scale, 52.0);
                     assert_eq!(settings.base_channel.tile_count, 6);
                     assert_eq!(settings.base_channel.stack_count, 4);
                 }
-                PatternId::WEIGHTED_VORONOI_V1 => unreachable!("compatibility fixture"),
+                "weighted-voronoi.v1" => unreachable!("compatibility fixture"),
+                _ => unreachable!("compatibility fixture"),
             }
 
             assert!(editor.undo());
@@ -386,7 +441,7 @@ mod tests {
                     .document()
                     .pattern_state
                     .selected_pattern_id(),
-                Some(selected)
+                Some(selected.clone())
             );
 
             let authoritative_before = fixture_editor.document().pattern_state.clone();
@@ -404,8 +459,8 @@ mod tests {
             // parameter values, while retaining a real production Document,
             // preset candidate, renderer, serializer, and editor history.
             let mut contradictory = fixture_editor.document().clone();
-            contradictory.render = match selected {
-                PatternId::COMPATIBILITY_SHAPES_V1 => RenderVariant::WebCurveV1 {
+            contradictory.render = match selected.as_str() {
+                "compat.shapes.v1" => RenderVariant::WebCurveV1 {
                     settings: Box::new(WebCurveSettings {
                         output_width: 17,
                         output_height: 13,
@@ -414,7 +469,7 @@ mod tests {
                         ..Default::default()
                     }),
                 },
-                PatternId::COMPATIBILITY_CURVES_V1 => RenderVariant::WebShapeV1 {
+                "compat.curves.v1" => RenderVariant::WebShapeV1 {
                     settings: Box::new(WebShapeSettings {
                         output_width: 19,
                         output_height: 11,
@@ -423,17 +478,12 @@ mod tests {
                         ..Default::default()
                     }),
                 },
-                PatternId::WEIGHTED_VORONOI_V1 => unreachable!("compatibility fixture"),
+                "weighted-voronoi.v1" => unreachable!("compatibility fixture"),
+                _ => unreachable!("compatibility fixture"),
             };
             assert!(matches!(
-                (&contradictory.pattern_state.selected, &contradictory.render),
-                (
-                    crate::model::PatternSelection::Registered(PatternId::COMPATIBILITY_SHAPES_V1),
-                    RenderVariant::WebCurveV1 { .. }
-                ) | (
-                    crate::model::PatternSelection::Registered(PatternId::COMPATIBILITY_CURVES_V1),
-                    RenderVariant::WebShapeV1 { .. }
-                )
+                &contradictory.render,
+                RenderVariant::WebCurveV1 { .. } | RenderVariant::WebShapeV1 { .. }
             ));
             assert_eq!(
                 crate::render::render_document_output(&contradictory, 120, 80, false, None)
@@ -443,20 +493,21 @@ mod tests {
             );
 
             let mut editor = DocumentEditor::new(contradictory);
-            match selected {
-                PatternId::COMPATIBILITY_SHAPES_V1 => {
+            match selected.as_str() {
+                "compat.shapes.v1" => {
                     let mut settings = editor.document().pattern_state.shape_settings().unwrap();
                     settings.polygon_sides = 3;
                     settings.base_channel.rotation = 27.0;
                     assert!(editor.set_shape_settings(settings));
                 }
-                PatternId::COMPATIBILITY_CURVES_V1 => {
+                "compat.curves.v1" => {
                     let mut settings = editor.document().pattern_state.curve_settings().unwrap();
                     settings.base_channel.curve_scale = 52.0;
                     settings.base_channel.tile_count = 6;
                     assert!(editor.set_curve_settings(settings));
                 }
-                PatternId::WEIGHTED_VORONOI_V1 => unreachable!("compatibility fixture"),
+                "weighted-voronoi.v1" => unreachable!("compatibility fixture"),
+                _ => unreachable!("compatibility fixture"),
             }
             let authoritative_after = editor.document().pattern_state.clone();
             let rendered_after =
@@ -475,16 +526,17 @@ mod tests {
                 rendered_after,
                 "{name} reopen must render the saved pattern authority"
             );
-            match selected {
-                PatternId::COMPATIBILITY_SHAPES_V1 => assert_eq!(
+            match selected.as_str() {
+                "compat.shapes.v1" => assert_eq!(
                     reopened.pattern_state.shape_settings().unwrap(),
                     authoritative_after.shape_settings().unwrap()
                 ),
-                PatternId::COMPATIBILITY_CURVES_V1 => assert_eq!(
+                "compat.curves.v1" => assert_eq!(
                     reopened.pattern_state.curve_settings().unwrap(),
                     authoritative_after.curve_settings().unwrap()
                 ),
-                PatternId::WEIGHTED_VORONOI_V1 => unreachable!("compatibility fixture"),
+                "weighted-voronoi.v1" => unreachable!("compatibility fixture"),
+                _ => unreachable!("compatibility fixture"),
             }
 
             assert!(editor.undo());
@@ -532,7 +584,7 @@ mod tests {
                     .document()
                     .pattern_state
                     .selected_pattern_id(),
-                Some(selected)
+                Some(selected.clone())
             );
             let cmyk_state = fixture_editor.document().pattern_state.clone();
             let cmyk_preview = crate::model::PreviewSurface::Color {
@@ -559,8 +611,8 @@ mod tests {
             // Begin with the opposite adapter kind and incompatible settings.
             // The transition must snapshot typed authority, not this facade.
             let mut active_contradiction = fixture_editor.document().clone();
-            active_contradiction.render = match selected {
-                PatternId::COMPATIBILITY_SHAPES_V1 => RenderVariant::WebCurveV1 {
+            active_contradiction.render = match selected.as_str() {
+                "compat.shapes.v1" => RenderVariant::WebCurveV1 {
                     settings: Box::new(WebCurveSettings {
                         output_width: 17,
                         output_height: 13,
@@ -569,7 +621,7 @@ mod tests {
                         ..Default::default()
                     }),
                 },
-                PatternId::COMPATIBILITY_CURVES_V1 => RenderVariant::WebShapeV1 {
+                "compat.curves.v1" => RenderVariant::WebShapeV1 {
                     settings: Box::new(WebShapeSettings {
                         output_width: 19,
                         output_height: 11,
@@ -578,7 +630,8 @@ mod tests {
                         ..Default::default()
                     }),
                 },
-                PatternId::WEIGHTED_VORONOI_V1 => unreachable!("compatibility fixture"),
+                "weighted-voronoi.v1" => unreachable!("compatibility fixture"),
+                _ => unreachable!("compatibility fixture"),
             };
             assert_eq!(
                 crate::render::render_document_output(&active_contradiction, 120, 80, false, None)
@@ -611,8 +664,8 @@ mod tests {
                 .inactive_cmyk
                 .as_mut()
                 .expect("CMYK treatment is cached while RGB is active");
-            cmyk_cache.render = match selected {
-                PatternId::COMPATIBILITY_SHAPES_V1 => RenderVariant::WebCurveV1 {
+            cmyk_cache.render = match selected.as_str() {
+                "compat.shapes.v1" => RenderVariant::WebCurveV1 {
                     settings: Box::new(WebCurveSettings {
                         output_width: 23,
                         output_height: 17,
@@ -621,7 +674,7 @@ mod tests {
                         ..Default::default()
                     }),
                 },
-                PatternId::COMPATIBILITY_CURVES_V1 => RenderVariant::WebShapeV1 {
+                "compat.curves.v1" => RenderVariant::WebShapeV1 {
                     settings: Box::new(WebShapeSettings {
                         output_width: 29,
                         output_height: 19,
@@ -630,24 +683,26 @@ mod tests {
                         ..Default::default()
                     }),
                 },
-                PatternId::WEIGHTED_VORONOI_V1 => unreachable!("compatibility fixture"),
+                "weighted-voronoi.v1" => unreachable!("compatibility fixture"),
+                _ => unreachable!("compatibility fixture"),
             };
             let mut editor = DocumentEditor::new(inactive_contradiction);
 
-            match selected {
-                PatternId::COMPATIBILITY_SHAPES_V1 => {
+            match selected.as_str() {
+                "compat.shapes.v1" => {
                     let mut settings = editor.document().pattern_state.shape_settings().unwrap();
                     settings.base_channel.rotation = 37.0;
                     settings.polygon_sides = 3;
                     assert!(editor.set_shape_settings(settings));
                 }
-                PatternId::COMPATIBILITY_CURVES_V1 => {
+                "compat.curves.v1" => {
                     let mut settings = editor.document().pattern_state.curve_settings().unwrap();
                     settings.base_channel.curve_scale = 52.0;
                     settings.base_channel.tile_count = 6;
                     assert!(editor.set_curve_settings(settings));
                 }
-                PatternId::WEIGHTED_VORONOI_V1 => unreachable!("compatibility fixture"),
+                "weighted-voronoi.v1" => unreachable!("compatibility fixture"),
+                _ => unreachable!("compatibility fixture"),
             }
             let rgb_state = editor.document().pattern_state.clone();
             let rgb_rendered =
@@ -718,7 +773,7 @@ mod tests {
     }
 
     #[test]
-    fn current_v8_requires_valid_pipeline_and_cached_pattern_state_everywhere() {
+    fn current_v9_requires_valid_pipeline_and_cached_pattern_state_everywhere() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("strict.toniator");
         let mut editor = DocumentEditor::new(Document::new(source([1])));

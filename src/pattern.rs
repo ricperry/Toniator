@@ -6,9 +6,10 @@
 //! representations. See `docs/TON-010_STAGE_3_CANONICAL_OUTPUT.md` for the
 //! coordinate, ordering, clipping, polarity, and bounded-work contract.
 
-use crate::curve_render::CurveGeometry;
+use crate::curve_render::{CurveGeometry, CurveOutline};
 use crate::render::MarkSet;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fmt;
 use std::str::FromStr;
@@ -17,27 +18,26 @@ use std::str::FromStr;
 ///
 /// Pattern identifiers are serialized as dotted strings so interface labels
 /// can change without affecting saved pattern state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
-pub enum PatternId {
-    #[serde(rename = "compat.shapes.v1")]
-    CompatibilityShapesV1,
-    #[serde(rename = "compat.curves.v1")]
-    CompatibilityCurvesV1,
-    #[serde(rename = "weighted-voronoi.v1")]
-    WeightedVoronoiV1,
-}
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct PatternId(Cow<'static, str>);
 
 impl PatternId {
-    pub const COMPATIBILITY_SHAPES_V1: Self = Self::CompatibilityShapesV1;
-    pub const COMPATIBILITY_CURVES_V1: Self = Self::CompatibilityCurvesV1;
-    pub const WEIGHTED_VORONOI_V1: Self = Self::WeightedVoronoiV1;
+    pub const COMPATIBILITY_SHAPES_V1: Self = Self(Cow::Borrowed("compat.shapes.v1"));
+    pub const COMPATIBILITY_CURVES_V1: Self = Self(Cow::Borrowed("compat.curves.v1"));
+    pub const WEIGHTED_VORONOI_V1: Self = Self(Cow::Borrowed("weighted-voronoi.v1"));
 
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::CompatibilityShapesV1 => "compat.shapes.v1",
-            Self::CompatibilityCurvesV1 => "compat.curves.v1",
-            Self::WeightedVoronoiV1 => "weighted-voronoi.v1",
+    /// Creates a durable ID without requiring it to be a built-in registry
+    /// entry. Registry ownership is validated separately at each boundary.
+    pub fn new(value: impl Into<String>) -> Result<Self, PatternIdError> {
+        let value = value.into();
+        if !is_valid_dotted_id(&value) {
+            return Err(PatternIdError::InvalidFormat(value));
         }
+        Ok(Self(Cow::Owned(value)))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -51,16 +51,26 @@ impl FromStr for PatternId {
     type Err = PatternIdError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        if !is_valid_dotted_id(value) {
-            return Err(PatternIdError::InvalidFormat(value.to_owned()));
-        }
+        Self::new(value)
+    }
+}
 
-        match value {
-            "compat.shapes.v1" => Ok(Self::CompatibilityShapesV1),
-            "compat.curves.v1" => Ok(Self::CompatibilityCurvesV1),
-            "weighted-voronoi.v1" => Ok(Self::WeightedVoronoiV1),
-            _ => Err(PatternIdError::Unknown(value.to_owned())),
-        }
+impl Serialize for PatternId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for PatternId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -78,14 +88,12 @@ pub fn is_valid_dotted_id(value: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PatternIdError {
     InvalidFormat(String),
-    Unknown(String),
 }
 
 impl fmt::Display for PatternIdError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidFormat(value) => write!(formatter, "invalid pattern identifier {value:?}"),
-            Self::Unknown(value) => write!(formatter, "unknown pattern identifier {value:?}"),
         }
     }
 }
@@ -103,7 +111,7 @@ pub enum PatternFamily {
 }
 
 /// Canonical geometry category emitted by a pattern.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PatternOutputKind {
     Marks,
@@ -195,7 +203,7 @@ pub enum PatternCompatibility {
 }
 
 /// Persistable identity and version contract for one registered pattern.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PatternMetadata {
     pub id: PatternId,
     pub family: PatternFamily,
@@ -516,9 +524,9 @@ const WEIGHTED_VORONOI_PARAMETERS: [PatternParameterDescriptor; 8] = [
     },
 ];
 
-const BUILTIN_PATTERN_METADATA: [PatternMetadata; 3] = [
+static BUILTIN_PATTERN_METADATA: [PatternMetadata; 3] = [
     PatternMetadata {
-        id: PatternId::CompatibilityShapesV1,
+        id: PatternId::COMPATIBILITY_SHAPES_V1,
         family: PatternFamily::StructuredFields,
         output_kind: PatternOutputKind::Marks,
         parameter_schema_version: 1,
@@ -534,7 +542,7 @@ const BUILTIN_PATTERN_METADATA: [PatternMetadata; 3] = [
         parameters: &SHAPES_PARAMETERS,
     },
     PatternMetadata {
-        id: PatternId::CompatibilityCurvesV1,
+        id: PatternId::COMPATIBILITY_CURVES_V1,
         family: PatternFamily::ParametricPaths,
         output_kind: PatternOutputKind::Paths,
         parameter_schema_version: 1,
@@ -550,7 +558,7 @@ const BUILTIN_PATTERN_METADATA: [PatternMetadata; 3] = [
         parameters: &CURVES_PARAMETERS,
     },
     PatternMetadata {
-        id: PatternId::WeightedVoronoiV1,
+        id: PatternId::WEIGHTED_VORONOI_V1,
         family: PatternFamily::StochasticDistributions,
         output_kind: PatternOutputKind::Regions,
         parameter_schema_version: 1,
@@ -599,11 +607,11 @@ impl PatternRegistry {
     pub fn validate(&self) -> Result<(), PatternRegistryError> {
         let mut ids = HashSet::with_capacity(self.entries.len());
         for metadata in self.entries {
-            if !ids.insert(metadata.id) {
-                return Err(PatternRegistryError::DuplicateId(metadata.id));
+            if !ids.insert(metadata.id.clone()) {
+                return Err(PatternRegistryError::DuplicateId(metadata.id.clone()));
             }
             if metadata.selector.label.is_empty() || metadata.selector.help.is_empty() {
-                return Err(PatternRegistryError::InvalidSelector(metadata.id));
+                return Err(PatternRegistryError::InvalidSelector(metadata.id.clone()));
             }
             let mut keys = HashSet::with_capacity(metadata.parameters.len());
             let mut controls = HashSet::with_capacity(metadata.parameters.len());
@@ -614,19 +622,19 @@ impl PatternRegistry {
                     || parameter.help.is_empty()
                 {
                     return Err(PatternRegistryError::InvalidParameter {
-                        id: metadata.id,
+                        id: metadata.id.clone(),
                         key: parameter.key,
                     });
                 }
                 if !keys.insert(parameter.key) {
                     return Err(PatternRegistryError::DuplicateParameterKey {
-                        id: metadata.id,
+                        id: metadata.id.clone(),
                         key: parameter.key,
                     });
                 }
                 if !controls.insert(parameter.control_id) {
                     return Err(PatternRegistryError::DuplicateParameterControl {
-                        id: metadata.id,
+                        id: metadata.id.clone(),
                         control_id: parameter.control_id,
                     });
                 }
@@ -697,20 +705,20 @@ pub struct VersionedPatternParameters {
 
 impl VersionedPatternParameters {
     pub fn validate(&self) -> Result<&'static PatternMetadata, PatternParameterError> {
-        let metadata = PATTERN_REGISTRY
-            .get(self.pattern_id)
-            .ok_or(PatternParameterError::UnknownPattern(self.pattern_id))?;
+        let metadata = PATTERN_REGISTRY.get(self.pattern_id.clone()).ok_or(
+            PatternParameterError::UnknownPattern(self.pattern_id.clone()),
+        )?;
 
         if self.schema_version != metadata.parameter_schema_version {
             return Err(PatternParameterError::UnsupportedSchemaVersion {
-                id: self.pattern_id,
+                id: self.pattern_id.clone(),
                 received: self.schema_version,
                 supported: metadata.parameter_schema_version,
             });
         }
         if self.generator_version != metadata.generator_version {
             return Err(PatternParameterError::UnsupportedGeneratorVersion {
-                id: self.pattern_id,
+                id: self.pattern_id.clone(),
                 received: self.generator_version,
                 supported: metadata.generator_version,
             });
@@ -800,6 +808,9 @@ pub struct NetworkNodeId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct NetworkEdgeId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct NetworkStrokeId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct CanonicalLayerId(pub u32);
@@ -942,6 +953,22 @@ pub struct SharedBoundaryEdge {
     pub polarity: GeometryPolarity,
 }
 
+/// A single connected, variable-width contour generated from one centerline
+/// stroke. The node/edge topology remains alongside this geometry for
+/// inspection and editing, while consumers render this filled outline so a
+/// connected pattern never degenerates into thousands of independently
+/// stroked micro-segments.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NetworkStroke {
+    pub id: NetworkStrokeId,
+    pub layer_id: CanonicalLayerId,
+    pub order: u32,
+    pub centerline: Vec<CanonicalPoint>,
+    pub widths: Vec<f32>,
+    pub outline: CurveOutline,
+    pub polarity: GeometryPolarity,
+}
+
 /// Semantically connected boundary topology. Positive edges are strokes;
 /// subtractive edges are destination-out masks with the same geometry.
 #[derive(Debug, Clone, PartialEq)]
@@ -950,6 +977,7 @@ pub struct NetworkPatternOutput {
     pub layers: Vec<CanonicalLayer>,
     pub nodes: Vec<NetworkNode>,
     pub edges: Vec<SharedBoundaryEdge>,
+    pub strokes: Vec<NetworkStroke>,
     pub transform: AffineTransform,
 }
 
@@ -971,6 +999,8 @@ pub struct CanonicalOutputLimits {
     pub max_vertices: usize,
     pub max_nodes: usize,
     pub max_edges: usize,
+    pub max_strokes: usize,
+    pub max_stroke_commands: usize,
 }
 
 impl Default for CanonicalOutputLimits {
@@ -981,6 +1011,8 @@ impl Default for CanonicalOutputLimits {
             max_vertices: 1_000_000,
             max_nodes: 1_000_000,
             max_edges: 1_000_000,
+            max_strokes: 1_000_000,
+            max_stroke_commands: 4_000_000,
         }
     }
 }
@@ -997,6 +1029,7 @@ pub enum CanonicalOutputError {
     MissingLayer(CanonicalLayerId),
     MissingNode(NetworkNodeId),
     InvalidEdge,
+    InvalidStroke,
     EmptyComposite,
     MismatchedArtboard,
     LimitExceeded(&'static str),
@@ -1030,6 +1063,9 @@ impl fmt::Display for CanonicalOutputError {
             }
             Self::InvalidEdge => formatter
                 .write_str("canonical edge must have positive finite width and distinct endpoints"),
+            Self::InvalidStroke => formatter.write_str(
+                "canonical network stroke must have a finite variable-width outline and centerline",
+            ),
             Self::EmptyComposite => formatter
                 .write_str("canonical composite must contain a region or network component"),
             Self::MismatchedArtboard => {
@@ -1203,6 +1239,9 @@ fn validate_network(
     if output.edges.len() > limits.max_edges {
         return Err(CanonicalOutputError::LimitExceeded("edge"));
     }
+    if output.strokes.len() > limits.max_strokes {
+        return Err(CanonicalOutputError::LimitExceeded("stroke"));
+    }
     if !output.transform.validate() {
         return Err(CanonicalOutputError::InvalidTransform);
     }
@@ -1232,6 +1271,56 @@ fn validate_network(
         }
         if edge.start == edge.end || !edge.width.is_finite() || edge.width <= 0.0 {
             return Err(CanonicalOutputError::InvalidEdge);
+        }
+    }
+    let mut stroke_ids = HashSet::new();
+    let mut stroke_commands = 0usize;
+    for stroke in &output.strokes {
+        if !stroke_ids.insert(stroke.id) {
+            return Err(CanonicalOutputError::DuplicateIdentity);
+        }
+        if !layers.contains(&stroke.layer_id)
+            || stroke.centerline.len() < 2
+            || stroke.centerline.len() != stroke.widths.len()
+            || stroke.outline.commands.is_empty()
+        {
+            return Err(CanonicalOutputError::InvalidStroke);
+        }
+        for point in &stroke.centerline {
+            if !point.x.is_finite() || !point.y.is_finite() {
+                return Err(CanonicalOutputError::InvalidStroke);
+            }
+        }
+        if stroke
+            .widths
+            .iter()
+            .any(|width| !width.is_finite() || *width <= 0.0)
+        {
+            return Err(CanonicalOutputError::InvalidStroke);
+        }
+        stroke_commands = stroke_commands
+            .checked_add(stroke.outline.commands.len())
+            .ok_or(CanonicalOutputError::LimitExceeded("stroke command"))?;
+        if stroke_commands > limits.max_stroke_commands {
+            return Err(CanonicalOutputError::LimitExceeded("stroke command"));
+        }
+        for command in &stroke.outline.commands {
+            let finite = match command {
+                crate::curve_render::CurveCommand::Move(point) => {
+                    point.x.is_finite() && point.y.is_finite()
+                }
+                crate::curve_render::CurveCommand::Cubic {
+                    control_1,
+                    control_2,
+                    end,
+                } => [control_1, control_2, end]
+                    .into_iter()
+                    .all(|point| point.x.is_finite() && point.y.is_finite()),
+                crate::curve_render::CurveCommand::Close => true,
+            };
+            if !finite {
+                return Err(CanonicalOutputError::InvalidStroke);
+            }
         }
     }
     Ok(())
@@ -1288,8 +1377,8 @@ fn legacy_adapter_metadata(
     expected_output_kind: PatternOutputKind,
 ) -> Result<&'static PatternMetadata, LegacyPatternAdapterError> {
     let metadata = PATTERN_REGISTRY
-        .get(id)
-        .ok_or(LegacyPatternAdapterError::UnregisteredPattern(id))?;
+        .get(id.clone())
+        .ok_or(LegacyPatternAdapterError::UnregisteredPattern(id.clone()))?;
     let PatternCompatibility::Legacy {
         legacy_render_variant: actual_legacy_render,
     } = metadata.compatibility
@@ -1366,14 +1455,11 @@ mod tests {
             PatternId::COMPATIBILITY_SHAPES_V1,
             PatternId::COMPATIBILITY_CURVES_V1,
         ] {
-            assert_eq!(id.to_string().parse::<PatternId>(), Ok(id));
+            assert_eq!(id.to_string().parse::<PatternId>(), Ok(id.clone()));
             let serialized = serde_json::to_string(&id).unwrap();
             assert_eq!(serde_json::from_str::<PatternId>(&serialized).unwrap(), id);
         }
-        assert!(matches!(
-            "compat.shapes".parse::<PatternId>(),
-            Err(PatternIdError::Unknown(_))
-        ));
+        assert!("compat.shapes".parse::<PatternId>().is_ok());
         assert!(matches!(
             "Compat.shapes.v1".parse::<PatternId>(),
             Err(PatternIdError::InvalidFormat(_))
@@ -1480,14 +1566,18 @@ mod tests {
     }
 
     #[test]
-    fn parameter_payload_rejects_unknown_pattern_ids() {
+    fn parameter_payload_defers_unknown_pattern_ids_to_registry_validation() {
         let payload = r#"{
             "pattern_id": "compat.new-pattern.v1",
             "schema_version": 1,
             "generator_version": 1,
             "values": {}
         }"#;
-        assert!(serde_json::from_str::<VersionedPatternParameters>(payload).is_err());
+        let parsed = serde_json::from_str::<VersionedPatternParameters>(payload).unwrap();
+        assert!(matches!(
+            parsed.validate(),
+            Err(PatternParameterError::UnknownPattern(_))
+        ));
     }
 
     #[test]
@@ -1762,6 +1852,7 @@ mod tests {
                     polarity: GeometryPolarity::Positive,
                 },
             ],
+            strokes: Vec::new(),
             transform: AffineTransform::IDENTITY,
         });
         output.validate().unwrap();

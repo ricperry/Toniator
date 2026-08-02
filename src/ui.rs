@@ -8,6 +8,7 @@ use image::RgbaImage;
 use libadwaita as adw;
 use libadwaita::prelude::*;
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,10 +21,15 @@ use toniator::artwork_pipeline::{
     LegacyCompatibilityAssignment, OutputChannelId, OutputModel, SourceAlphaPolicy,
 };
 use toniator::model::{
-    ClosedShapePath, SettingKey, ShapeAnchor, ShapePoint, SourceArtwork,
-    WeightedVoronoiArrangementPolicy, WeightedVoronoiPlacementMode, WeightedVoronoiSettings,
+    ClosedShapePath, SettingKey, ShapeAnchor, ShapePoint, SourceArtwork, WebShapeChannel,
+    WebShapePointSampler, WeightedVoronoiArrangementPolicy, WeightedVoronoiPlacementMode,
+    WeightedVoronoiSettings,
 };
-use toniator::pattern::{PATTERN_REGISTRY, PatternId, PatternInspectorPanel};
+use toniator::pattern::{PATTERN_REGISTRY, PatternId, PatternInspectorPanel, PatternOutputKind};
+use toniator::pattern_definition::{
+    DefinitionParameterScope, LiteralValue, PatternInstanceValue, PatternParameterConstraints,
+    PatternParameterDefinition, RecipeValueType,
+};
 use toniator::persistence::{clear_recovery_if_matches, recovery_path};
 #[cfg(test)]
 use toniator::render_document_preview;
@@ -131,6 +137,1023 @@ fn native_user_preset_dir() -> PathBuf {
         std::env::var_os("XDG_DATA_HOME").as_deref().map(Path::new),
         std::env::var_os("HOME").as_deref().map(Path::new),
     )
+}
+
+fn user_pattern_dir(data_home: Option<&Path>, home: Option<&Path>) -> PathBuf {
+    data_home
+        .map(Path::to_path_buf)
+        .or_else(|| home.map(|path| path.join(".local/share")))
+        .unwrap_or_else(|| PathBuf::from(".local/share"))
+        .join("toniator/patterns")
+}
+
+fn native_user_pattern_dir() -> PathBuf {
+    user_pattern_dir(
+        std::env::var_os("XDG_DATA_HOME").as_deref().map(Path::new),
+        std::env::var_os("HOME").as_deref().map(Path::new),
+    )
+}
+
+fn normalized_pattern_path(path: &Path) -> PathBuf {
+    if path
+        .extension()
+        .is_some_and(|value| value.eq_ignore_ascii_case("tnpattern"))
+    {
+        path.to_path_buf()
+    } else {
+        let mut value = path.as_os_str().to_owned();
+        value.push(".tnpattern");
+        PathBuf::from(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PatternEditorDraft {
+    name: String,
+    placement: PatternPlacement,
+    density: f64,
+    spacing: f64,
+    x_grid_mode: PatternGridMode,
+    y_grid_mode: PatternGridMode,
+    x_grid_curve: f64,
+    y_grid_curve: f64,
+    curve_function: PatternCurveFunction,
+    x_spacing: f64,
+    y_spacing: f64,
+    curve_spacing: f64,
+    random_dispersion: PatternRandomDispersion,
+    /// Blend between a uniform mark size (0) and the source-responsive
+    /// size mapping (1) for random point patterns.
+    random_size_response: f64,
+    point_definition: PatternPointDefinition,
+    render_mode: PatternRenderMode,
+    connection_mode: PatternConnectionMode,
+    jitter_factor: f64,
+    curve_path: CurvePath,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PatternPlacement {
+    Grid,
+    TriangularGrid,
+    Curve,
+    Random,
+    MathFunction,
+}
+
+impl PatternPlacement {
+    fn id(self) -> &'static str {
+        match self {
+            Self::Grid => "grid",
+            Self::TriangularGrid => "triangular-grid",
+            Self::Curve => "curve",
+            Self::Random => "random",
+            Self::MathFunction => "math-function",
+        }
+    }
+
+    fn from_dropdown(index: u32) -> Self {
+        match index {
+            1 => Self::TriangularGrid,
+            2 => Self::Curve,
+            3 => Self::Random,
+            4 => Self::MathFunction,
+            _ => Self::Grid,
+        }
+    }
+
+    fn dropdown_index(self) -> u32 {
+        match self {
+            Self::Grid => 0,
+            Self::TriangularGrid => 1,
+            Self::Curve => 2,
+            Self::Random => 3,
+            Self::MathFunction => 4,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PatternGridMode {
+    Straight,
+    Curve,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PatternCurveFunction {
+    Sine,
+    Square,
+    Spiral,
+    Sawtooth,
+}
+
+impl PatternCurveFunction {
+    fn id(self) -> &'static str {
+        match self {
+            Self::Sine => "sine",
+            Self::Square => "square",
+            Self::Spiral => "spiral",
+            Self::Sawtooth => "sawtooth",
+        }
+    }
+
+    fn from_dropdown(index: u32) -> Self {
+        match index {
+            1 => Self::Square,
+            2 => Self::Spiral,
+            3 => Self::Sawtooth,
+            _ => Self::Sine,
+        }
+    }
+
+    fn dropdown_index(self) -> u32 {
+        match self {
+            Self::Sine => 0,
+            Self::Square => 1,
+            Self::Spiral => 2,
+            Self::Sawtooth => 3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PatternRandomDispersion {
+    Uniform,
+    Gaussian,
+    BlueNoise,
+    PinkNoise,
+    Poisson,
+}
+
+impl PatternRandomDispersion {
+    fn id(self) -> &'static str {
+        match self {
+            Self::Uniform => "uniform",
+            Self::Gaussian => "gaussian",
+            Self::BlueNoise => "blue-noise",
+            Self::PinkNoise => "pink-noise",
+            Self::Poisson => "poisson",
+        }
+    }
+
+    fn from_dropdown(index: u32) -> Self {
+        match index {
+            1 => Self::Gaussian,
+            2 => Self::BlueNoise,
+            3 => Self::PinkNoise,
+            4 => Self::Poisson,
+            _ => Self::Uniform,
+        }
+    }
+
+    fn dropdown_index(self) -> u32 {
+        match self {
+            Self::Uniform => 0,
+            Self::Gaussian => 1,
+            Self::BlueNoise => 2,
+            Self::PinkNoise => 3,
+            Self::Poisson => 4,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PatternRenderMode {
+    Points,
+    ConnectedPoints,
+}
+
+impl PatternRenderMode {
+    fn id(self) -> &'static str {
+        match self {
+            Self::Points => "points",
+            Self::ConnectedPoints => "connected-points",
+        }
+    }
+
+    fn from_dropdown(index: u32) -> Self {
+        if index == 1 {
+            Self::ConnectedPoints
+        } else {
+            Self::Points
+        }
+    }
+
+    fn dropdown_index(self) -> u32 {
+        match self {
+            Self::Points => 0,
+            Self::ConnectedPoints => 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PatternConnectionMode {
+    Linear,
+    Maze,
+}
+
+impl PatternConnectionMode {
+    fn id(self) -> &'static str {
+        match self {
+            Self::Linear => "linear",
+            Self::Maze => "maze",
+        }
+    }
+
+    fn from_dropdown(index: u32) -> Self {
+        if index == 1 { Self::Maze } else { Self::Linear }
+    }
+
+    fn dropdown_index(self) -> u32 {
+        match self {
+            Self::Linear => 0,
+            Self::Maze => 1,
+        }
+    }
+}
+
+impl PatternGridMode {
+    fn id(self) -> &'static str {
+        match self {
+            Self::Straight => "straight",
+            Self::Curve => "curve",
+        }
+    }
+
+    fn from_dropdown(index: u32) -> Self {
+        if index == 1 {
+            Self::Curve
+        } else {
+            Self::Straight
+        }
+    }
+
+    fn dropdown_index(self) -> u32 {
+        match self {
+            Self::Straight => 0,
+            Self::Curve => 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PatternPointDefinition {
+    Intersections,
+    CurveSpacing,
+    FullCurves,
+}
+
+impl PatternPointDefinition {
+    fn id(self) -> &'static str {
+        match self {
+            Self::Intersections => "intersections",
+            Self::CurveSpacing => "curve-spacing",
+            Self::FullCurves => "full-curves",
+        }
+    }
+
+    fn from_dropdown(index: u32) -> Self {
+        match index {
+            1 => Self::CurveSpacing,
+            2 => Self::FullCurves,
+            _ => Self::Intersections,
+        }
+    }
+
+    fn dropdown_index(self) -> u32 {
+        match self {
+            Self::Intersections => 0,
+            Self::CurveSpacing => 1,
+            Self::FullCurves => 2,
+        }
+    }
+}
+
+fn pattern_id_component(name: &str) -> String {
+    let mut result = String::new();
+    let mut pending_dash = false;
+    for character in name.trim().to_ascii_lowercase().chars() {
+        if character.is_ascii_lowercase() || character.is_ascii_digit() {
+            if pending_dash && !result.is_empty() {
+                result.push('-');
+            }
+            pending_dash = false;
+            result.push(character);
+        } else {
+            pending_dash = true;
+        }
+    }
+    if result.is_empty() {
+        "pattern".into()
+    } else {
+        result
+    }
+}
+
+fn curve_path_bend(path: &CurvePath) -> f64 {
+    path.points()
+        .map(|point| point.y)
+        .filter(|value| value.is_finite())
+        .fold(0.0f64, |maximum, value| maximum.max(value.abs()))
+        * 100.0
+}
+
+fn set_instance_value(
+    instance: &mut toniator::PatternInstanceParameters,
+    key: &str,
+    value: LiteralValue,
+) {
+    let entry = instance
+        .pattern_values
+        .iter_mut()
+        .find(|entry| entry.key == key)
+        .expect("bundled Shapes definition must provide the draft parameter");
+    entry.value = value;
+}
+
+fn push_instance_value(
+    instance: &mut toniator::PatternInstanceParameters,
+    key: &str,
+    value: LiteralValue,
+) {
+    instance.pattern_values.push(PatternInstanceValue {
+        key: key.into(),
+        value,
+    });
+}
+
+fn set_or_push_instance_value(
+    instance: &mut toniator::PatternInstanceParameters,
+    key: &str,
+    value: LiteralValue,
+) {
+    if let Some(existing) = instance
+        .pattern_values
+        .iter_mut()
+        .find(|entry| entry.key == key)
+    {
+        existing.value = value;
+    } else {
+        push_instance_value(instance, key, value);
+    }
+}
+
+fn push_channel_value(
+    instance: &mut toniator::PatternInstanceParameters,
+    channel: &str,
+    key: &str,
+    value: LiteralValue,
+) {
+    if let Some(values) = instance
+        .output_channel_values
+        .iter_mut()
+        .find(|values| values.channel == channel)
+    {
+        if let Some(existing) = values.values.iter_mut().find(|entry| entry.key == key) {
+            existing.value = value;
+        } else {
+            values.values.push(PatternInstanceValue {
+                key: key.into(),
+                value,
+            });
+        }
+    }
+}
+
+fn editor_number_parameter(
+    key: &str,
+    label: &str,
+    help: &str,
+    default: f64,
+    minimum: f64,
+    maximum: f64,
+    scope: DefinitionParameterScope,
+) -> PatternParameterDefinition {
+    PatternParameterDefinition {
+        key: key.into(),
+        label: label.into(),
+        help: help.into(),
+        scope,
+        value_type: RecipeValueType::Number,
+        default: LiteralValue::Number(default),
+        // Editor-authored numeric values are continuous within their declared
+        // bounds. The GTK increment is a presentation hint; rejecting a
+        // valid ratio such as an artboard width divided by cell count makes
+        // the editor unable to round-trip its own defaults.
+        constraints: PatternParameterConstraints::Number {
+            minimum,
+            maximum,
+            step: 1.0e-9,
+        },
+        choices: Vec::new(),
+    }
+}
+
+fn editor_integer_parameter(
+    key: &str,
+    label: &str,
+    help: &str,
+    default: u64,
+    scope: DefinitionParameterScope,
+) -> PatternParameterDefinition {
+    PatternParameterDefinition {
+        key: key.into(),
+        label: label.into(),
+        help: help.into(),
+        scope,
+        value_type: RecipeValueType::Integer,
+        default: LiteralValue::Integer(default),
+        constraints: PatternParameterConstraints::Integer {
+            minimum: 0,
+            maximum: u64::MAX,
+            step: 1,
+        },
+        choices: Vec::new(),
+    }
+}
+
+fn editor_text_parameter(
+    key: &str,
+    label: &str,
+    help: &str,
+    default: &str,
+    maximum: usize,
+    scope: DefinitionParameterScope,
+) -> PatternParameterDefinition {
+    PatternParameterDefinition {
+        key: key.into(),
+        label: label.into(),
+        help: help.into(),
+        scope,
+        value_type: RecipeValueType::Text,
+        default: LiteralValue::Text(default.into()),
+        constraints: PatternParameterConstraints::Text {
+            max_length: maximum,
+        },
+        choices: Vec::new(),
+    }
+}
+
+fn editor_choice_parameter(
+    key: &str,
+    label: &str,
+    help: &str,
+    default: &str,
+    choices: &[&str],
+    scope: DefinitionParameterScope,
+) -> PatternParameterDefinition {
+    PatternParameterDefinition {
+        key: key.into(),
+        label: label.into(),
+        help: help.into(),
+        scope,
+        value_type: RecipeValueType::Choice,
+        default: LiteralValue::Choice(default.into()),
+        constraints: PatternParameterConstraints::Choice,
+        choices: choices.iter().map(|choice| (*choice).into()).collect(),
+    }
+}
+
+fn pattern_instance_value<'a>(
+    instance: &'a toniator::PatternInstanceParameters,
+    key: &str,
+) -> Option<&'a LiteralValue> {
+    instance
+        .pattern_values
+        .iter()
+        .find(|value| value.key == key)
+        .map(|value| &value.value)
+}
+
+#[cfg(test)]
+fn channel_instance_value<'a>(
+    instance: &'a toniator::PatternInstanceParameters,
+    channel: &str,
+    key: &str,
+) -> Option<&'a LiteralValue> {
+    instance
+        .output_channel_values
+        .iter()
+        .find(|values| values.channel == channel)
+        .and_then(|values| values.values.iter().find(|value| value.key == key))
+        .map(|value| &value.value)
+}
+
+fn number_value(value: Option<&LiteralValue>, fallback: f64) -> f64 {
+    match value {
+        Some(LiteralValue::Number(value)) if value.is_finite() => *value,
+        _ => fallback,
+    }
+}
+
+#[cfg(test)]
+fn integer_value(value: Option<&LiteralValue>, fallback: u64) -> u64 {
+    match value {
+        Some(LiteralValue::Integer(value)) => *value,
+        _ => fallback,
+    }
+}
+
+fn choice_value(value: Option<&LiteralValue>, fallback: &str) -> String {
+    match value {
+        Some(LiteralValue::Choice(value)) => value.clone(),
+        _ => fallback.into(),
+    }
+}
+
+fn text_value(value: &LiteralValue) -> Option<&str> {
+    match value {
+        LiteralValue::Text(value) => Some(value.as_str()),
+        _ => None,
+    }
+}
+
+fn pattern_editor_recipe(
+    document: &Document,
+    draft: &PatternEditorDraft,
+) -> anyhow::Result<(
+    toniator::PatternDefinition,
+    toniator::PatternInstanceParameters,
+)> {
+    let name = draft.name.trim();
+    anyhow::ensure!(!name.is_empty(), "Pattern name is required");
+    anyhow::ensure!(
+        draft.density.is_finite() && (2.0..=10_000.0).contains(&draft.density),
+        "Grid density is outside the supported range"
+    );
+    anyhow::ensure!(
+        draft.spacing.is_finite() && (0.01..=100.0).contains(&draft.spacing),
+        "Grid spacing is outside the supported range"
+    );
+    let settings = document.pattern_state.shape_settings()?;
+    let mut adapted = toniator::adapt_shapes_settings_to_recipe(&settings)?;
+    let id = PatternId::new(format!("custom.{}.v1", pattern_id_component(name)))?;
+    adapted.definition.id = id.clone();
+    adapted.definition.display.name = name.into();
+    adapted.definition.display.summary = format!("Custom point-grid pattern: {name}.");
+    adapted.instance.pattern_id = id;
+    set_instance_value(
+        &mut adapted.instance,
+        "long-edge-cells",
+        LiteralValue::Number(draft.density),
+    );
+    set_instance_value(
+        &mut adapted.instance,
+        "grid-scale",
+        LiteralValue::Number(draft.spacing),
+    );
+    let pattern_scope = DefinitionParameterScope::Pattern;
+    let output_scope = DefinitionParameterScope::OutputChannel;
+    let curve_path_json = serde_json::to_string(&draft.curve_path)
+        .map_err(|error| anyhow::anyhow!("Could not encode curve draft: {error}"))?;
+    let editor_parameters = vec![
+        editor_text_parameter(
+            "curve-path",
+            "Curve Path",
+            "Serialized shared curve handles authored in the pattern editor.",
+            &curve_path_json,
+            4_096,
+            pattern_scope,
+        ),
+        editor_choice_parameter(
+            "placement-strategy",
+            "Placement",
+            "Choose grid, one curve, random dispersion, or mathematical-function placement.",
+            draft.placement.id(),
+            &[
+                "grid",
+                "triangular-grid",
+                "curve",
+                "random",
+                "math-function",
+            ],
+            pattern_scope,
+        ),
+        editor_number_parameter(
+            "x-grid-spacing",
+            "X Grid Spacing",
+            "Distance between X-grid samples in artboard pixels.",
+            draft.x_spacing,
+            0.0,
+            100_000.0,
+            pattern_scope,
+        ),
+        editor_number_parameter(
+            "y-grid-spacing",
+            "Y Grid Spacing",
+            "Distance between Y-grid samples in artboard pixels.",
+            draft.y_spacing,
+            0.0,
+            100_000.0,
+            pattern_scope,
+        ),
+        editor_choice_parameter(
+            "x-grid-mode",
+            "X Grid",
+            "Use straight or curved X-grid tracks.",
+            draft.x_grid_mode.id(),
+            &["straight", "curve"],
+            pattern_scope,
+        ),
+        editor_choice_parameter(
+            "y-grid-mode",
+            "Y Grid",
+            "Use straight or curved Y-grid tracks.",
+            draft.y_grid_mode.id(),
+            &["straight", "curve"],
+            pattern_scope,
+        ),
+        editor_number_parameter(
+            "x-grid-curve",
+            "X Grid Curve",
+            "Signed bend amount for the X-grid tracks.",
+            draft.x_grid_curve,
+            -100_000.0,
+            100_000.0,
+            pattern_scope,
+        ),
+        editor_number_parameter(
+            "y-grid-curve",
+            "Y Grid Curve",
+            "Signed bend amount for the Y-grid tracks.",
+            draft.y_grid_curve,
+            -100_000.0,
+            100_000.0,
+            pattern_scope,
+        ),
+        editor_choice_parameter(
+            "curve-function",
+            "Curve Function",
+            "Mathematical function used by curved grid tracks.",
+            draft.curve_function.id(),
+            &["sine", "square", "spiral", "sawtooth"],
+            pattern_scope,
+        ),
+        editor_number_parameter(
+            "curve-spacing",
+            "Curve Spacing",
+            "Distance between repeated curve tracks or successive spiral turns.",
+            draft.curve_spacing,
+            0.01,
+            100_000.0,
+            pattern_scope,
+        ),
+        editor_choice_parameter(
+            "random-dispersion",
+            "Random Dispersion",
+            "Distribution family used when placement is Random.",
+            draft.random_dispersion.id(),
+            &["uniform", "gaussian", "blue-noise", "pink-noise", "poisson"],
+            pattern_scope,
+        ),
+        editor_choice_parameter(
+            "point-definition",
+            "Point Definition",
+            "Choose intersections, spacing along curves, or full curve sampling.",
+            draft.point_definition.id(),
+            &["intersections", "curve-spacing", "full-curves"],
+            pattern_scope,
+        ),
+        editor_choice_parameter(
+            "render-mode",
+            "Render Geometry",
+            "Render discrete points or connected point geometry.",
+            draft.render_mode.id(),
+            &["points", "connected-points"],
+            pattern_scope,
+        ),
+        editor_choice_parameter(
+            "connection-mode",
+            "Connection Mode",
+            "Connect points linearly or with a deterministic maze-like routing.",
+            draft.connection_mode.id(),
+            &["linear", "maze"],
+            pattern_scope,
+        ),
+        editor_number_parameter(
+            "jitter-factor",
+            "Jitter Factor",
+            "Maximum offset from each baseline point as a fraction of its cell.",
+            draft.jitter_factor,
+            0.0,
+            1.0,
+            pattern_scope,
+        ),
+        editor_choice_parameter(
+            "point-sampler",
+            "Point Sampler",
+            "Per-channel grid, uniform random, or source-weighted random points.",
+            "grid",
+            &["grid", "uniform", "weighted"],
+            output_scope,
+        ),
+        editor_integer_parameter(
+            "channel-seed",
+            "Channel Seed",
+            "Deterministic per-channel random seed.",
+            0,
+            output_scope,
+        ),
+        editor_number_parameter(
+            "channel-weight-influence",
+            "Weight Influence",
+            "Exponent controlling how strongly source values attract weighted sites.",
+            1.0,
+            0.001,
+            16.0,
+            output_scope,
+        ),
+    ];
+    for parameter in editor_parameters {
+        if !adapted
+            .definition
+            .parameters
+            .iter()
+            .any(|existing| existing.key == parameter.key)
+        {
+            adapted.definition.parameters.push(parameter);
+        }
+    }
+    set_or_push_instance_value(
+        &mut adapted.instance,
+        "x-grid-spacing",
+        LiteralValue::Number(draft.x_spacing),
+    );
+    set_or_push_instance_value(
+        &mut adapted.instance,
+        "curve-path",
+        LiteralValue::Text(curve_path_json),
+    );
+    set_or_push_instance_value(
+        &mut adapted.instance,
+        "placement-strategy",
+        LiteralValue::Choice(draft.placement.id().into()),
+    );
+    set_or_push_instance_value(
+        &mut adapted.instance,
+        "y-grid-spacing",
+        LiteralValue::Number(draft.y_spacing),
+    );
+    set_or_push_instance_value(
+        &mut adapted.instance,
+        "x-grid-mode",
+        LiteralValue::Choice(draft.x_grid_mode.id().into()),
+    );
+    set_or_push_instance_value(
+        &mut adapted.instance,
+        "y-grid-mode",
+        LiteralValue::Choice(draft.y_grid_mode.id().into()),
+    );
+    set_or_push_instance_value(
+        &mut adapted.instance,
+        "x-grid-curve",
+        LiteralValue::Number(draft.x_grid_curve),
+    );
+    set_or_push_instance_value(
+        &mut adapted.instance,
+        "y-grid-curve",
+        LiteralValue::Number(draft.y_grid_curve),
+    );
+    set_or_push_instance_value(
+        &mut adapted.instance,
+        "curve-function",
+        LiteralValue::Choice(draft.curve_function.id().into()),
+    );
+    set_or_push_instance_value(
+        &mut adapted.instance,
+        "curve-spacing",
+        LiteralValue::Number(draft.curve_spacing),
+    );
+    set_or_push_instance_value(
+        &mut adapted.instance,
+        "random-dispersion",
+        LiteralValue::Choice(draft.random_dispersion.id().into()),
+    );
+    set_or_push_instance_value(
+        &mut adapted.instance,
+        "point-definition",
+        LiteralValue::Choice(draft.point_definition.id().into()),
+    );
+    set_or_push_instance_value(
+        &mut adapted.instance,
+        "render-mode",
+        LiteralValue::Choice(draft.render_mode.id().into()),
+    );
+    set_or_push_instance_value(
+        &mut adapted.instance,
+        "connection-mode",
+        LiteralValue::Choice(draft.connection_mode.id().into()),
+    );
+    set_or_push_instance_value(
+        &mut adapted.instance,
+        "jitter-factor",
+        LiteralValue::Number(draft.jitter_factor),
+    );
+    for channel in OutputChannelId::CMYK
+        .into_iter()
+        .chain(OutputChannelId::RGB)
+    {
+        let shape = settings.channels.get(channel.to_legacy_ink());
+        push_channel_value(
+            &mut adapted.instance,
+            channel.stable_id(),
+            "point-sampler",
+            LiteralValue::Choice(
+                match shape.point_sampler {
+                    WebShapePointSampler::Grid => "grid",
+                    WebShapePointSampler::Uniform => "uniform",
+                    WebShapePointSampler::Weighted => "weighted",
+                }
+                .into(),
+            ),
+        );
+        push_channel_value(
+            &mut adapted.instance,
+            channel.stable_id(),
+            "channel-seed",
+            LiteralValue::Integer(shape.random_seed),
+        );
+        push_channel_value(
+            &mut adapted.instance,
+            channel.stable_id(),
+            "channel-weight-influence",
+            LiteralValue::Number(shape.weight_influence),
+        );
+        push_channel_value(
+            &mut adapted.instance,
+            channel.stable_id(),
+            "random-size-response",
+            LiteralValue::Number(shape.random_size_response),
+        );
+    }
+
+    let connected_output = draft.render_mode == PatternRenderMode::ConnectedPoints;
+    adapted.definition.outputs = if connected_output {
+        vec![toniator::PatternOutputKind::Networks]
+    } else {
+        vec![toniator::PatternOutputKind::Marks]
+    };
+    if let Some(node) = adapted
+        .definition
+        .recipe
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "lattice")
+    {
+        node.operation.id = "shapes.lattice-placement-editor".into();
+        node.operation.version = 2;
+    }
+    if let Some(node) = adapted
+        .definition
+        .recipe
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "emit")
+    {
+        node.operation.id = if connected_output {
+            "shapes.emit-network"
+        } else {
+            "shapes.emit-marks"
+        }
+        .into();
+        node.operation.version = 1;
+        let mut parameters = BTreeMap::from([
+            (
+                "enabled".into(),
+                toniator::RecipeArgument::Parameter("enabled".into()),
+            ),
+            (
+                "color".into(),
+                toniator::RecipeArgument::Parameter("color".into()),
+            ),
+            (
+                "opacity".into(),
+                toniator::RecipeArgument::Parameter("opacity".into()),
+            ),
+        ]);
+        if connected_output {
+            parameters.insert(
+                "connection-mode".into(),
+                toniator::RecipeArgument::Parameter("connection-mode".into()),
+            );
+        }
+        node.parameters = parameters;
+    }
+    if let Some(node) = adapted
+        .definition
+        .recipe
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "lattice")
+    {
+        node.parameters = BTreeMap::from([
+            (
+                "output-width".into(),
+                toniator::RecipeArgument::Parameter("output-width".into()),
+            ),
+            (
+                "output-height".into(),
+                toniator::RecipeArgument::Parameter("output-height".into()),
+            ),
+            (
+                "long-edge-cells".into(),
+                toniator::RecipeArgument::Parameter("long-edge-cells".into()),
+            ),
+            (
+                "resolution-scale".into(),
+                toniator::RecipeArgument::Parameter("resolution-scale".into()),
+            ),
+            (
+                "grid-rotation".into(),
+                toniator::RecipeArgument::Parameter("grid-rotation".into()),
+            ),
+            (
+                "grid-pivot-x".into(),
+                toniator::RecipeArgument::Parameter("grid-pivot-x".into()),
+            ),
+            (
+                "grid-pivot-y".into(),
+                toniator::RecipeArgument::Parameter("grid-pivot-y".into()),
+            ),
+            (
+                "offset-x".into(),
+                toniator::RecipeArgument::Parameter("offset-x".into()),
+            ),
+            (
+                "offset-y".into(),
+                toniator::RecipeArgument::Parameter("offset-y".into()),
+            ),
+            (
+                "x-grid-spacing".into(),
+                toniator::RecipeArgument::Parameter("x-grid-spacing".into()),
+            ),
+            (
+                "y-grid-spacing".into(),
+                toniator::RecipeArgument::Parameter("y-grid-spacing".into()),
+            ),
+            (
+                "x-grid-mode".into(),
+                toniator::RecipeArgument::Parameter("x-grid-mode".into()),
+            ),
+            (
+                "y-grid-mode".into(),
+                toniator::RecipeArgument::Parameter("y-grid-mode".into()),
+            ),
+            (
+                "x-grid-curve".into(),
+                toniator::RecipeArgument::Parameter("x-grid-curve".into()),
+            ),
+            (
+                "y-grid-curve".into(),
+                toniator::RecipeArgument::Parameter("y-grid-curve".into()),
+            ),
+            (
+                "curve-function".into(),
+                toniator::RecipeArgument::Parameter("curve-function".into()),
+            ),
+            (
+                "placement-strategy".into(),
+                toniator::RecipeArgument::Parameter("placement-strategy".into()),
+            ),
+            (
+                "curve-spacing".into(),
+                toniator::RecipeArgument::Parameter("curve-spacing".into()),
+            ),
+            (
+                "random-dispersion".into(),
+                toniator::RecipeArgument::Parameter("random-dispersion".into()),
+            ),
+            (
+                "random-size-response".into(),
+                toniator::RecipeArgument::Parameter("random-size-response".into()),
+            ),
+            (
+                "point-definition".into(),
+                toniator::RecipeArgument::Parameter("point-definition".into()),
+            ),
+            (
+                "jitter-factor".into(),
+                toniator::RecipeArgument::Parameter("jitter-factor".into()),
+            ),
+            (
+                "point-sampler".into(),
+                toniator::RecipeArgument::Parameter("point-sampler".into()),
+            ),
+            (
+                "channel-seed".into(),
+                toniator::RecipeArgument::Parameter("channel-seed".into()),
+            ),
+            (
+                "channel-weight-influence".into(),
+                toniator::RecipeArgument::Parameter("channel-weight-influence".into()),
+            ),
+        ]);
+    }
+    adapted
+        .definition
+        .validate_instance_parameters(&adapted.instance)?;
+    Ok((adapted.definition, adapted.instance))
 }
 
 fn normalized_preset_path(path: &Path) -> PathBuf {
@@ -352,6 +1375,22 @@ fn connect_shape_editor_click(
 
 const PREVIEW_DEFAULT_MAX: u32 = 1400;
 const PREVIEW_REFINEMENT_MAX: u32 = 4096;
+const PATTERN_PRESET_LABELS: [&str; 14] = [
+    "X/Y Grid",
+    "Triangular Grid (60°)",
+    "Sine Wave",
+    "Square Wave",
+    "Spiral",
+    "Sawtooth",
+    "Random · Uniform",
+    "Random · Gaussian",
+    "Random · Blue Noise",
+    "Random · Pink Noise",
+    "Random · Poisson",
+    "Curves",
+    "Weighted Voronoi",
+    "Custom Pattern",
+];
 const INSPECTOR_DEFAULT_WIDTH: i32 = 400;
 const INSPECTOR_MIN_WIDTH: i32 = 340;
 const INSPECTOR_MAX_WIDTH: i32 = 640;
@@ -518,18 +1557,24 @@ fn reset_crosshatch_curve_path(settings: &mut WebCurveSettings, inks: &[Ink]) {
 }
 
 fn document_artboard_size(document: &Document) -> (u32, u32) {
-    match document.pattern_state.selected_pattern_id() {
-        Some(PatternId::COMPATIBILITY_SHAPES_V1) => document
+    match document
+        .pattern_state
+        .selected_pattern_id()
+        .as_ref()
+        .map(PatternId::as_str)
+    {
+        Some("compat.shapes.v1") => document
             .pattern_state
             .shape_settings()
             .map(|settings| (settings.output_width, settings.output_height))
             .unwrap_or((900, 620)),
-        Some(PatternId::COMPATIBILITY_CURVES_V1) => document
+        Some("compat.curves.v1") => document
             .pattern_state
             .curve_settings()
             .map(|settings| (settings.output_width, settings.output_height))
             .unwrap_or((900, 620)),
-        Some(PatternId::WEIGHTED_VORONOI_V1) => (900, 620),
+        Some("weighted-voronoi.v1") => (900, 620),
+        Some(_) => (900, 620),
         None => (900, 620),
     }
 }
@@ -1639,6 +2684,7 @@ pub struct AppUi {
     curves: gtk::ToggleButton,
     weighted_voronoi: gtk::ToggleButton,
     legacy: gtk::ToggleButton,
+    pattern_preset: gtk::DropDown,
     treatment_modes: gtk::Stack,
     weighted_voronoi_channel: gtk::DropDown,
     weighted_voronoi_cell_count: gtk::Scale,
@@ -1651,6 +2697,32 @@ pub struct AppUi {
     weighted_voronoi_seed: gtk::Entry,
     preset_import: gtk::Button,
     preset_save: gtk::Button,
+    pattern_editor: gtk::Button,
+    custom_pattern_edit: gtk::Button,
+    custom_pattern_summary: gtk::Label,
+    pattern_editor_draft: gtk::Box,
+    pattern_editor_name: gtk::Entry,
+    pattern_editor_preview: gtk::DrawingArea,
+    pattern_editor_placement: gtk::DropDown,
+    pattern_editor_density: gtk::SpinButton,
+    pattern_editor_spacing: gtk::SpinButton,
+    pattern_editor_x_grid_mode: gtk::DropDown,
+    pattern_editor_x_grid_curve: gtk::SpinButton,
+    pattern_editor_y_grid_mode: gtk::DropDown,
+    pattern_editor_y_grid_curve: gtk::SpinButton,
+    pattern_editor_curve_function: gtk::DropDown,
+    pattern_editor_x_spacing: gtk::SpinButton,
+    pattern_editor_y_spacing: gtk::SpinButton,
+    pattern_editor_curve_spacing: gtk::SpinButton,
+    pattern_editor_random_dispersion: gtk::DropDown,
+    pattern_editor_random_size_response: gtk::Scale,
+    pattern_editor_random_size_response_status: gtk::Label,
+    pattern_editor_point_definition: gtk::DropDown,
+    pattern_editor_render_mode: gtk::DropDown,
+    pattern_editor_connection_mode: gtk::DropDown,
+    pattern_editor_jitter: gtk::SpinButton,
+    pattern_editor_curve_editor: gtk::DrawingArea,
+    pattern_editor_curve_reset: gtk::Button,
     source_section: gtk::Expander,
     output_section: gtk::Expander,
     channel_settings_section: gtk::Expander,
@@ -1770,6 +2842,9 @@ pub struct AppUi {
     motif_drag: Cell<Option<MotifDrag>>,
     curve_selected_handle: Cell<i32>,
     curve_drag_start: Cell<Option<CurvePoint>>,
+    pattern_editor_curve_path: RefCell<CurvePath>,
+    pattern_editor_curve_selected_handle: Cell<i32>,
+    pattern_editor_curve_drag_start: Cell<Option<CurvePoint>>,
     compare: gtk::ToggleButton,
     fit: gtk::ToggleButton,
     zoom: gtk::Scale,
@@ -1854,6 +2929,9 @@ struct ChannelControlWidgets {
     root: gtk::Box,
     heading: gtk::Label,
     inclusion_status: gtk::Label,
+    point_sampler: gtk::DropDown,
+    random_seed: gtk::SpinButton,
+    weight_influence: gtk::SpinButton,
 }
 
 #[derive(Clone)]
@@ -1861,6 +2939,7 @@ struct AggregateChannelControlWidgets {
     root: gtk::Box,
     heading: gtk::Label,
     mixed_message: gtk::Label,
+    random_seed: gtk::SpinButton,
 }
 
 fn build_top_level_shell(
@@ -1950,6 +3029,28 @@ fn build_channel_controls(channel: OutputChannelId) -> ChannelControlWidgets {
     let inclusion_status = builder
         .object::<gtk::Label>("channel_inclusion_status")
         .expect("toniator-channel-controls.blp must define channel_inclusion_status");
+    let point_sampler = builder
+        .object::<gtk::DropDown>("channel_point_sampler")
+        .expect("toniator-channel-controls.blp must define channel_point_sampler");
+    sync_dropdown_strings(
+        &point_sampler,
+        &["Grid", "Uniform Random", "Weighted Random"],
+    );
+    point_sampler.update_property(&[gtk::accessible::Property::Label("Point sampler")]);
+    let random_seed = builder
+        .object::<gtk::SpinButton>("channel_random_seed")
+        .expect("toniator-channel-controls.blp must define channel_random_seed");
+    random_seed.set_range(0.0, u64::MAX as f64);
+    random_seed.set_increments(1.0, 10.0);
+    random_seed.set_digits(0);
+    random_seed.update_property(&[gtk::accessible::Property::Label("Random seed")]);
+    let weight_influence = builder
+        .object::<gtk::SpinButton>("channel_weight_influence")
+        .expect("toniator-channel-controls.blp must define channel_weight_influence");
+    weight_influence.set_range(0.001, 16.0);
+    weight_influence.set_increments(0.01, 1.0);
+    weight_influence.set_digits(2);
+    weight_influence.update_property(&[gtk::accessible::Property::Label("Weight influence")]);
     let content_host = builder
         .object::<gtk::Box>("channel_content_host")
         .expect("toniator-channel-controls.blp must define channel_content_host");
@@ -1967,6 +3068,9 @@ fn build_channel_controls(channel: OutputChannelId) -> ChannelControlWidgets {
         root,
         heading,
         inclusion_status,
+        point_sampler,
+        random_seed,
+        weight_influence,
     }
 }
 
@@ -1981,6 +3085,16 @@ fn build_aggregate_channel_controls() -> AggregateChannelControlWidgets {
     let mixed_message = builder
         .object::<gtk::Label>("aggregate_mixed_message")
         .expect("toniator-aggregate-channel-controls.blp must define aggregate_mixed_message");
+    let random_seed = builder
+        .object::<gtk::SpinButton>("aggregate_random_seed")
+        .expect("toniator-aggregate-channel-controls.blp must define aggregate_random_seed");
+    random_seed.set_range(0.0, u64::MAX as f64);
+    random_seed.set_increments(1.0, 10.0);
+    random_seed.set_digits(0);
+    random_seed.update_property(&[gtk::accessible::Property::Label("Unified random seed")]);
+    random_seed.set_tooltip_text(Some(
+        "Set one deterministic seed for every included channel; individual channel seeds are below.",
+    ));
     let content_host = builder
         .object::<gtk::Box>("aggregate_content_host")
         .expect("toniator-aggregate-channel-controls.blp must define aggregate_content_host");
@@ -1996,6 +3110,7 @@ fn build_aggregate_channel_controls() -> AggregateChannelControlWidgets {
         root,
         heading,
         mixed_message,
+        random_seed,
     }
 }
 
@@ -2234,6 +3349,7 @@ impl AppUi {
             curves: editor_view.curves.clone(),
             weighted_voronoi: editor_view.weighted_voronoi.clone(),
             legacy: editor_view.legacy.clone(),
+            pattern_preset: editor_view.pattern_preset.clone(),
             treatment_modes: editor_view.treatment_modes.clone(),
             weighted_voronoi_channel: editor_view.weighted_voronoi_channel.clone(),
             weighted_voronoi_cell_count: editor_view.weighted_voronoi_cell_count.clone(),
@@ -2250,6 +3366,36 @@ impl AppUi {
             weighted_voronoi_seed: editor_view.weighted_voronoi_seed.clone(),
             preset_import: editor_view.preset_import.clone(),
             preset_save: editor_view.preset_save.clone(),
+            pattern_editor: editor_view.pattern_editor.clone(),
+            custom_pattern_edit: editor_view.custom_pattern_edit.clone(),
+            custom_pattern_summary: editor_view.custom_pattern_summary.clone(),
+            pattern_editor_draft: editor_view.pattern_editor_draft.clone(),
+            pattern_editor_name: editor_view.pattern_editor_name.clone(),
+            pattern_editor_preview: editor_view.pattern_editor_preview.clone(),
+            pattern_editor_placement: editor_view.pattern_editor_placement.clone(),
+            pattern_editor_density: editor_view.pattern_editor_density.clone(),
+            pattern_editor_spacing: editor_view.pattern_editor_spacing.clone(),
+            pattern_editor_x_grid_mode: editor_view.pattern_editor_x_grid_mode.clone(),
+            pattern_editor_x_grid_curve: editor_view.pattern_editor_x_grid_curve.clone(),
+            pattern_editor_y_grid_mode: editor_view.pattern_editor_y_grid_mode.clone(),
+            pattern_editor_y_grid_curve: editor_view.pattern_editor_y_grid_curve.clone(),
+            pattern_editor_curve_function: editor_view.pattern_editor_curve_function.clone(),
+            pattern_editor_x_spacing: editor_view.pattern_editor_x_spacing.clone(),
+            pattern_editor_y_spacing: editor_view.pattern_editor_y_spacing.clone(),
+            pattern_editor_curve_spacing: editor_view.pattern_editor_curve_spacing.clone(),
+            pattern_editor_random_dispersion: editor_view.pattern_editor_random_dispersion.clone(),
+            pattern_editor_random_size_response: editor_view
+                .pattern_editor_random_size_response
+                .clone(),
+            pattern_editor_random_size_response_status: editor_view
+                .pattern_editor_random_size_response_status
+                .clone(),
+            pattern_editor_point_definition: editor_view.pattern_editor_point_definition.clone(),
+            pattern_editor_render_mode: editor_view.pattern_editor_render_mode.clone(),
+            pattern_editor_connection_mode: editor_view.pattern_editor_connection_mode.clone(),
+            pattern_editor_jitter: editor_view.pattern_editor_jitter.clone(),
+            pattern_editor_curve_editor: editor_view.pattern_editor_curve_editor.clone(),
+            pattern_editor_curve_reset: editor_view.pattern_editor_curve_reset.clone(),
             source_section: editor_view.source_section.clone(),
             output_section: editor_view.output_section.clone(),
             channel_settings_section: editor_view.channel_settings_section.clone(),
@@ -2369,6 +3515,9 @@ impl AppUi {
             motif_drag: Cell::new(None),
             curve_selected_handle: Cell::new(-1),
             curve_drag_start: Cell::new(None),
+            pattern_editor_curve_path: RefCell::new(CurvePath::soft_wave()),
+            pattern_editor_curve_selected_handle: Cell::new(-1),
+            pattern_editor_curve_drag_start: Cell::new(None),
             compare,
             fit,
             zoom,
@@ -2626,6 +3775,26 @@ impl AppUi {
                 }
             }
         ));
+        self.pattern_preset.connect_selected_notify(glib::clone!(
+            #[weak(rename_to = ui)]
+            self,
+            move |control| {
+                if ui.state.borrow().syncing_controls {
+                    return;
+                }
+                match control.selected() {
+                    0..=10 => ui.apply_named_pattern_preset(control.selected()),
+                    11 => ui.activate_curve_treatment(),
+                    12 => ui.activate_weighted_voronoi_treatment(),
+                    // Selecting the custom entry is an explicit shortcut to
+                    // the same editor used by the Edit Pattern button.  It
+                    // must not silently do nothing or leave the user in an
+                    // unexplained half-selected state.
+                    13 => ui.open_pattern_editor(),
+                    _ => {}
+                }
+            }
+        ));
         self.weighted_voronoi_channel
             .connect_selected_notify(glib::clone!(
                 #[weak(rename_to = ui)]
@@ -2779,6 +3948,11 @@ impl AppUi {
             move |button| ui.open_preset_dialog(button.upcast_ref())
         ));
         connect_clicked(&self.preset_save, self, |ui| ui.save_treatment_dialog());
+        connect_clicked(&self.pattern_editor, self, |ui| ui.open_pattern_editor());
+        connect_clicked(&self.custom_pattern_edit, self, |ui| {
+            ui.open_pattern_editor()
+        });
+        self.connect_pattern_editor_draft();
         self.preview_surface.connect_selected_notify(glib::clone!(
             #[weak(rename_to = ui)]
             self,
@@ -3014,6 +4188,78 @@ impl AppUi {
                 ui.sync_controls();
             }
         ));
+        for controls in &self.channel_controls {
+            let channel = controls.channel;
+            controls.point_sampler.connect_selected_notify(glib::clone!(
+                #[weak(rename_to = ui)]
+                self,
+                move |control| {
+                    if ui.state.borrow().syncing_controls {
+                        return;
+                    }
+                    let sampler = match control.selected() {
+                        1 => WebShapePointSampler::Uniform,
+                        2 => WebShapePointSampler::Weighted,
+                        _ => WebShapePointSampler::Grid,
+                    };
+                    ui.change_shape_channel_distribution(channel, move |settings| {
+                        settings.point_sampler = sampler;
+                    });
+                }
+            ));
+            controls.random_seed.connect_value_changed(glib::clone!(
+                #[weak(rename_to = ui)]
+                self,
+                move |control| {
+                    if ui.state.borrow().syncing_controls {
+                        return;
+                    }
+                    let seed = control.value().max(0.0).round() as u64;
+                    ui.change_shape_channel_distribution(channel, move |settings| {
+                        settings.random_seed = seed;
+                    });
+                }
+            ));
+            controls
+                .weight_influence
+                .connect_value_changed(glib::clone!(
+                    #[weak(rename_to = ui)]
+                    self,
+                    move |control| {
+                        if ui.state.borrow().syncing_controls {
+                            return;
+                        }
+                        let influence = control.value();
+                        ui.change_shape_channel_distribution(channel, move |settings| {
+                            settings.weight_influence = influence;
+                        });
+                    }
+                ));
+        }
+        self.aggregate_channel_controls
+            .random_seed
+            .connect_value_changed(glib::clone!(
+                #[weak(rename_to = ui)]
+                self,
+                move |control| {
+                    if ui.state.borrow().syncing_controls {
+                        return;
+                    }
+                    let seed = control.value().max(0.0).round() as u64;
+                    let document = {
+                        let mut state = ui.state.borrow_mut();
+                        let Some(editor) = state.editor.as_mut() else {
+                            return;
+                        };
+                        let output_model = editor.document().artwork_pipeline.output_model;
+                        if !editor.set_shape_channel_seed_all(output_model, seed) {
+                            return;
+                        }
+                        editor.document().clone()
+                    };
+                    ui.after_treatment_edit(document);
+                }
+            ));
         connect_clicked(&self.crosshatch_action, self, |ui| {
             let document = {
                 let mut state = ui.state.borrow_mut();
@@ -3189,9 +4435,36 @@ impl AppUi {
                     return;
                 }
                 let color = entry.text().to_string();
-                if toniator::model::parse_hex_color(&color).is_none() {
+                if color.trim().is_empty() {
+                    entry.remove_css_class("error");
                     return;
                 }
+                if toniator::model::parse_hex_color(&color).is_none() {
+                    entry.add_css_class("error");
+                    ui.web_color_status.set_text("Enter #RRGGBB");
+                    eprintln!("[toniator] invalid channel HEX value: {color:?}");
+                    return;
+                }
+                entry.remove_css_class("error");
+                ui.change_web_treatment(move |settings, inks| {
+                    for ink in inks {
+                        settings.channels.get_mut(ink).color.clone_from(&color);
+                    }
+                });
+            }
+        ));
+        self.web_color.connect_activate(glib::clone!(
+            #[weak(rename_to = ui)]
+            self,
+            move |entry| {
+                let color = entry.text().to_string();
+                if toniator::model::parse_hex_color(&color).is_none() {
+                    entry.add_css_class("error");
+                    eprintln!("[toniator] rejected channel HEX value on activate: {color:?}");
+                    ui.show_error(web_color_validation_message(ui.web_uses_channel_copy()));
+                    return;
+                }
+                entry.remove_css_class("error");
                 ui.change_web_treatment(move |settings, inks| {
                     for ink in inks {
                         settings.channels.get_mut(ink).color.clone_from(&color);
@@ -3608,6 +4881,12 @@ impl AppUi {
             |channel| channel.resolution_scale,
             |channel, value| channel.resolution_scale = value,
         );
+        self.connect_web_scale(
+            &self.pattern_editor_random_size_response,
+            SettingKey::WebShapeSizeResponse,
+            |channel| channel.random_size_response,
+            |channel, value| channel.random_size_response = value,
+        );
 
         let drop_target = gtk::DropTarget::new(gio::File::static_type(), gdk::DragAction::COPY);
         drop_target.connect_drop(glib::clone!(
@@ -3780,6 +5059,12 @@ impl AppUi {
                 }
                 let value = scale.value();
                 let all = ui.web_target.selected() == 0;
+                eprintln!(
+                    "[toniator] web control {:?} changed to {:.4} (target={})",
+                    key,
+                    value,
+                    ui.web_target.selected()
+                );
                 ui.change_web_treatment(|settings, inks| {
                     if all {
                         let delta = value - getter(&settings.base_channel);
@@ -4016,6 +5301,352 @@ impl AppUi {
             }
         ));
         self.curve_editor.add_controller(keys);
+    }
+
+    /// Wire the pattern draft's neutral preview and local curve editor.  The
+    /// controls deliberately mutate only draft-owned state: Apply creates the
+    /// one document edit, while Cancel simply drops this local state.
+    fn connect_pattern_editor_draft(self: &Rc<Self>) {
+        self.pattern_editor_preview.set_draw_func(glib::clone!(
+            #[weak(rename_to = ui)]
+            self,
+            move |_, context, width, height| {
+                let path = ui.pattern_editor_curve_path.borrow();
+                draw_pattern_editor_preview(
+                    context,
+                    width,
+                    height,
+                    PatternPlacement::from_dropdown(ui.pattern_editor_placement.selected()),
+                    ui.pattern_editor_density.value(),
+                    ui.pattern_editor_x_spacing.value(),
+                    ui.pattern_editor_y_spacing.value(),
+                    ui.pattern_editor_curve_spacing.value(),
+                    PatternGridMode::from_dropdown(ui.pattern_editor_x_grid_mode.selected()),
+                    PatternGridMode::from_dropdown(ui.pattern_editor_y_grid_mode.selected()),
+                    ui.pattern_editor_x_grid_curve.value(),
+                    ui.pattern_editor_y_grid_curve.value(),
+                    PatternCurveFunction::from_dropdown(
+                        ui.pattern_editor_curve_function.selected(),
+                    ),
+                    PatternPointDefinition::from_dropdown(
+                        ui.pattern_editor_point_definition.selected(),
+                    ),
+                    PatternRandomDispersion::from_dropdown(
+                        ui.pattern_editor_random_dispersion.selected(),
+                    ),
+                    PatternRenderMode::from_dropdown(ui.pattern_editor_render_mode.selected()),
+                    PatternConnectionMode::from_dropdown(
+                        ui.pattern_editor_connection_mode.selected(),
+                    ),
+                    ui.pattern_editor_jitter.value(),
+                    &path,
+                );
+            }
+        ));
+        for spin in [
+            self.pattern_editor_density.clone(),
+            self.pattern_editor_spacing.clone(),
+            self.pattern_editor_x_grid_curve.clone(),
+            self.pattern_editor_y_grid_curve.clone(),
+            self.pattern_editor_x_spacing.clone(),
+            self.pattern_editor_y_spacing.clone(),
+            self.pattern_editor_curve_spacing.clone(),
+            self.pattern_editor_jitter.clone(),
+        ] {
+            let preview = self.pattern_editor_preview.clone();
+            spin.connect_value_changed(move |_| preview.queue_draw());
+        }
+        {
+            let preview = self.pattern_editor_preview.clone();
+            self.pattern_editor_random_size_response
+                .connect_value_changed(move |_| preview.queue_draw());
+        }
+        for dropdown in [
+            self.pattern_editor_x_grid_mode.clone(),
+            self.pattern_editor_y_grid_mode.clone(),
+            self.pattern_editor_curve_function.clone(),
+            self.pattern_editor_placement.clone(),
+            self.pattern_editor_random_dispersion.clone(),
+            self.pattern_editor_point_definition.clone(),
+            self.pattern_editor_render_mode.clone(),
+            self.pattern_editor_connection_mode.clone(),
+        ] {
+            let preview = self.pattern_editor_preview.clone();
+            let ui = Rc::downgrade(self);
+            dropdown.connect_selected_notify(move |_| {
+                preview.queue_draw();
+                if let Some(ui) = ui.upgrade() {
+                    ui.sync_pattern_editor_option_sensitivity();
+                }
+            });
+        }
+        for dropdown in [
+            self.pattern_editor_placement.clone(),
+            self.pattern_editor_curve_function.clone(),
+        ] {
+            let ui = Rc::downgrade(self);
+            dropdown.connect_selected_notify(move |_| {
+                let Some(ui) = ui.upgrade() else {
+                    return;
+                };
+                if ui.state.borrow().syncing_controls {
+                    return;
+                }
+                let placement =
+                    PatternPlacement::from_dropdown(ui.pattern_editor_placement.selected());
+                if matches!(
+                    placement,
+                    PatternPlacement::Curve | PatternPlacement::MathFunction
+                ) {
+                    // Curves and mathematical fields are path constructions
+                    // by default. The user can still switch Render Geometry
+                    // back to discrete points after this default is applied.
+                    ui.pattern_editor_render_mode.set_selected(1);
+                    ui.pattern_editor_point_definition.set_selected(2);
+                }
+            });
+        }
+
+        self.pattern_editor_curve_editor.set_draw_func(glib::clone!(
+            #[weak(rename_to = ui)]
+            self,
+            move |_, context, width, height| {
+                let path = ui.pattern_editor_curve_path.borrow();
+                draw_curve_editor(
+                    context,
+                    width,
+                    height,
+                    Some(&path),
+                    ui.pattern_editor_curve_selected_handle.get(),
+                    (0.35, 0.75, 1.0),
+                );
+            }
+        ));
+        let drag = gtk::GestureDrag::new();
+        drag.connect_drag_begin(glib::clone!(
+            #[weak(rename_to = ui)]
+            self,
+            move |_, x, y| {
+                let path = ui.pattern_editor_curve_path.borrow();
+                let handle = nearest_curve_handle(
+                    &path,
+                    x,
+                    y,
+                    ui.pattern_editor_curve_editor.width(),
+                    ui.pattern_editor_curve_editor.height(),
+                );
+                ui.pattern_editor_curve_selected_handle.set(handle);
+                ui.pattern_editor_curve_drag_start
+                    .set((handle >= 0).then(|| curve_handle_points(&path)[handle as usize]));
+                ui.pattern_editor_curve_editor.queue_draw();
+            }
+        ));
+        drag.connect_drag_update(glib::clone!(
+            #[weak(rename_to = ui)]
+            self,
+            move |_, offset_x, offset_y| {
+                let handle = ui.pattern_editor_curve_selected_handle.get();
+                let Some(start) = ui.pattern_editor_curve_drag_start.get() else {
+                    return;
+                };
+                let scale = curve_editor_scale(
+                    ui.pattern_editor_curve_editor.width(),
+                    ui.pattern_editor_curve_editor.height(),
+                );
+                let point = CurvePoint {
+                    x: (start.x + offset_x / scale).clamp(-1.5, 1.5),
+                    y: (start.y - offset_y / scale).clamp(-1.5, 1.5),
+                };
+                set_curve_handle(
+                    &mut ui.pattern_editor_curve_path.borrow_mut(),
+                    handle as usize,
+                    point,
+                );
+                ui.pattern_editor_curve_editor.queue_draw();
+                ui.pattern_editor_preview.queue_draw();
+            }
+        ));
+        drag.connect_drag_end(glib::clone!(
+            #[weak(rename_to = ui)]
+            self,
+            move |_, _, _| ui.pattern_editor_curve_drag_start.set(None)
+        ));
+        self.pattern_editor_curve_editor.add_controller(drag);
+
+        let click = gtk::GestureClick::new();
+        click.connect_pressed(glib::clone!(
+            #[weak(rename_to = ui)]
+            self,
+            move |_, presses, x, y| {
+                if presses == 2 {
+                    let point = editor_to_curve_point(
+                        x,
+                        y,
+                        ui.pattern_editor_curve_editor.width(),
+                        ui.pattern_editor_curve_editor.height(),
+                    );
+                    let (segment, amount) = {
+                        let path = ui.pattern_editor_curve_path.borrow();
+                        nearest_curve_segment(&path, point)
+                    };
+                    split_curve_segment(
+                        &mut ui.pattern_editor_curve_path.borrow_mut(),
+                        segment,
+                        amount,
+                    );
+                    ui.pattern_editor_curve_editor.queue_draw();
+                    ui.pattern_editor_preview.queue_draw();
+                } else {
+                    let path = ui.pattern_editor_curve_path.borrow();
+                    ui.pattern_editor_curve_selected_handle
+                        .set(nearest_curve_handle(
+                            &path,
+                            x,
+                            y,
+                            ui.pattern_editor_curve_editor.width(),
+                            ui.pattern_editor_curve_editor.height(),
+                        ));
+                    ui.pattern_editor_curve_editor.grab_focus();
+                    ui.pattern_editor_curve_editor.queue_draw();
+                }
+            }
+        ));
+        self.pattern_editor_curve_editor.add_controller(click);
+
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed(glib::clone!(
+            #[weak(rename_to = ui)]
+            self,
+            #[upgrade_or]
+            glib::Propagation::Proceed,
+            move |_, key, _, _| {
+                let handle = ui.pattern_editor_curve_selected_handle.get();
+                let delta = match key {
+                    gdk::Key::Left => Some((-0.005, 0.0)),
+                    gdk::Key::Right => Some((0.005, 0.0)),
+                    gdk::Key::Up => Some((0.0, 0.005)),
+                    gdk::Key::Down => Some((0.0, -0.005)),
+                    _ => None,
+                };
+                if let Some((dx, dy)) = delta
+                    && handle >= 0
+                {
+                    let start = {
+                        let path = ui.pattern_editor_curve_path.borrow();
+                        curve_handle_points(&path).get(handle as usize).copied()
+                    };
+                    if let Some(start) = start {
+                        set_curve_handle(
+                            &mut ui.pattern_editor_curve_path.borrow_mut(),
+                            handle as usize,
+                            CurvePoint {
+                                x: start.x + dx,
+                                y: start.y + dy,
+                            },
+                        );
+                        ui.pattern_editor_curve_editor.queue_draw();
+                        ui.pattern_editor_preview.queue_draw();
+                    }
+                    return glib::Propagation::Stop;
+                }
+                if matches!(key, gdk::Key::Delete | gdk::Key::BackSpace)
+                    && handle >= 0
+                    && handle % 3 == 0
+                {
+                    delete_curve_anchor(
+                        &mut ui.pattern_editor_curve_path.borrow_mut(),
+                        handle as usize,
+                    );
+                    ui.pattern_editor_curve_selected_handle.set(-1);
+                    ui.pattern_editor_curve_editor.queue_draw();
+                    ui.pattern_editor_preview.queue_draw();
+                    return glib::Propagation::Stop;
+                }
+                glib::Propagation::Proceed
+            }
+        ));
+        self.pattern_editor_curve_editor.add_controller(keys);
+        self.pattern_editor_curve_reset
+            .connect_clicked(glib::clone!(
+                #[weak(rename_to = ui)]
+                self,
+                move |_| {
+                    ui.pattern_editor_curve_path.replace(CurvePath::soft_wave());
+                    ui.pattern_editor_curve_selected_handle.set(-1);
+                    ui.pattern_editor_curve_editor.queue_draw();
+                    ui.pattern_editor_preview.queue_draw();
+                }
+            ));
+    }
+
+    /// Keep the pattern editor honest about which parameters affect the
+    /// selected construction mode.  The controls remain present so a user
+    /// can discover the full recipe vocabulary, but irrelevant values are
+    /// visibly disabled instead of appearing to change the result.
+    fn sync_pattern_editor_option_sensitivity(&self) {
+        let placement = PatternPlacement::from_dropdown(self.pattern_editor_placement.selected());
+        let x_mode = PatternGridMode::from_dropdown(self.pattern_editor_x_grid_mode.selected());
+        let y_mode = PatternGridMode::from_dropdown(self.pattern_editor_y_grid_mode.selected());
+        let render_mode =
+            PatternRenderMode::from_dropdown(self.pattern_editor_render_mode.selected());
+        let grid = matches!(
+            placement,
+            PatternPlacement::Grid | PatternPlacement::TriangularGrid
+        );
+        let triangular = placement == PatternPlacement::TriangularGrid;
+        let curve = placement == PatternPlacement::Curve;
+        let random = placement == PatternPlacement::Random;
+        let math = placement == PatternPlacement::MathFunction;
+        let spiral = math
+            && PatternCurveFunction::from_dropdown(self.pattern_editor_curve_function.selected())
+                == PatternCurveFunction::Spiral;
+
+        self.pattern_editor_x_grid_mode
+            .set_sensitive(grid && !triangular);
+        self.pattern_editor_y_grid_mode
+            .set_sensitive(grid && !triangular);
+        self.pattern_editor_x_spacing
+            .set_sensitive((grid || math) && !spiral);
+        // Triangular placement derives its vertical step from the authored
+        // horizontal spacing (the 60-degree lattice relationship), so a
+        // separate Y spacing value would be misleading and is disabled.
+        self.pattern_editor_y_spacing
+            .set_sensitive(((grid && !triangular) || math) && !spiral);
+        self.pattern_editor_x_grid_curve.set_sensitive(
+            !spiral && (curve || math || (grid && !triangular && x_mode == PatternGridMode::Curve)),
+        );
+        self.pattern_editor_y_grid_curve.set_sensitive(
+            !spiral && (math || (grid && !triangular && y_mode == PatternGridMode::Curve)),
+        );
+        self.pattern_editor_curve_function.set_sensitive(
+            curve
+                || math
+                || (grid
+                    && !triangular
+                    && (x_mode == PatternGridMode::Curve || y_mode == PatternGridMode::Curve)),
+        );
+        self.pattern_editor_curve_spacing
+            .set_sensitive(curve || spiral);
+        self.pattern_editor_random_dispersion.set_sensitive(random);
+        self.pattern_editor_point_definition
+            .set_sensitive(!random && !curve && !triangular && !spiral);
+        self.pattern_editor_connection_mode
+            .set_sensitive(render_mode == PatternRenderMode::ConnectedPoints);
+        self.pattern_editor_curve_editor.set_sensitive(
+            !spiral
+                && (curve
+                    || math
+                    || (grid
+                        && !triangular
+                        && (x_mode == PatternGridMode::Curve || y_mode == PatternGridMode::Curve))),
+        );
+        self.pattern_editor_curve_reset.set_sensitive(
+            !spiral
+                && (curve
+                    || math
+                    || (grid
+                        && (x_mode == PatternGridMode::Curve || y_mode == PatternGridMode::Curve))),
+        );
     }
 
     fn connect_motif_overlay(self: &Rc<Self>) {
@@ -4550,6 +6181,424 @@ impl AppUi {
         popover.popup();
     }
 
+    fn pattern_editor_draft(&self) -> Option<PatternEditorDraft> {
+        let state = self.state.borrow();
+        let document = state.editor.as_ref()?.document();
+        let settings = document.pattern_state.shape_settings().ok()?;
+        let custom = document.pattern_state.selected_embedded_pattern();
+        let custom_instance = custom.map(|embedded| &embedded.instance);
+        let default_x_spacing = {
+            let aspect = settings.output_width as f64 / settings.output_height.max(1) as f64;
+            let cols = if aspect >= 1.0 {
+                settings.long_edge_cells.round().max(2.0)
+            } else {
+                (settings.long_edge_cells * aspect).round().max(1.0)
+            };
+            settings.output_width as f64 / cols
+        };
+        let default_y_spacing = {
+            let aspect = settings.output_width as f64 / settings.output_height.max(1) as f64;
+            let rows = if aspect >= 1.0 {
+                (settings.long_edge_cells / aspect).round().max(1.0)
+            } else {
+                settings.long_edge_cells.round().max(2.0)
+            };
+            settings.output_height as f64 / rows
+        };
+        let custom_value =
+            |key: &str| custom_instance.and_then(|instance| pattern_instance_value(instance, key));
+        let custom_choice = |key: &str, fallback: &str| choice_value(custom_value(key), fallback);
+        let curve_path = custom_value("curve-path")
+            .and_then(text_value)
+            .and_then(|value| serde_json::from_str::<CurvePath>(value).ok())
+            .or_else(|| {
+                document
+                    .pattern_state
+                    .curve_settings()
+                    .ok()
+                    .map(|settings| settings.shared_path)
+            })
+            .unwrap_or_else(CurvePath::soft_wave);
+        Some(PatternEditorDraft {
+            name: custom
+                .map(|embedded| embedded.definition.display.name.clone())
+                .unwrap_or_else(|| "My Pattern".into()),
+            placement: match custom_choice("placement-strategy", "grid").as_str() {
+                "triangular-grid" => PatternPlacement::TriangularGrid,
+                "curve" => PatternPlacement::Curve,
+                "random" => PatternPlacement::Random,
+                "math-function" => PatternPlacement::MathFunction,
+                _ => PatternPlacement::Grid,
+            },
+            density: number_value(custom_value("long-edge-cells"), settings.long_edge_cells),
+            spacing: number_value(custom_value("grid-scale"), settings.grid_scale),
+            x_grid_mode: match custom_choice("x-grid-mode", "straight").as_str() {
+                "curve" => PatternGridMode::Curve,
+                _ => PatternGridMode::Straight,
+            },
+            y_grid_mode: match custom_choice("y-grid-mode", "straight").as_str() {
+                "curve" => PatternGridMode::Curve,
+                _ => PatternGridMode::Straight,
+            },
+            x_grid_curve: number_value(custom_value("x-grid-curve"), 0.0),
+            y_grid_curve: number_value(custom_value("y-grid-curve"), 0.0),
+            curve_function: match custom_choice("curve-function", "sine").as_str() {
+                "square" => PatternCurveFunction::Square,
+                "spiral" => PatternCurveFunction::Spiral,
+                "sawtooth" => PatternCurveFunction::Sawtooth,
+                _ => PatternCurveFunction::Sine,
+            },
+            x_spacing: number_value(custom_value("x-grid-spacing"), default_x_spacing),
+            y_spacing: number_value(custom_value("y-grid-spacing"), default_y_spacing),
+            curve_spacing: number_value(
+                custom_value("curve-spacing"),
+                default_x_spacing.min(default_y_spacing),
+            ),
+            random_dispersion: match custom_choice("random-dispersion", "uniform").as_str() {
+                "gaussian" => PatternRandomDispersion::Gaussian,
+                "blue-noise" => PatternRandomDispersion::BlueNoise,
+                "pink-noise" => PatternRandomDispersion::PinkNoise,
+                "poisson" => PatternRandomDispersion::Poisson,
+                _ => PatternRandomDispersion::Uniform,
+            },
+            random_size_response: settings.base_channel.random_size_response,
+            point_definition: match custom_choice("point-definition", "intersections").as_str() {
+                "curve-spacing" => PatternPointDefinition::CurveSpacing,
+                "full-curves" => PatternPointDefinition::FullCurves,
+                _ => PatternPointDefinition::Intersections,
+            },
+            render_mode: match custom_choice("render-mode", "points").as_str() {
+                "connected-points" => PatternRenderMode::ConnectedPoints,
+                _ => PatternRenderMode::Points,
+            },
+            connection_mode: match custom_choice("connection-mode", "linear").as_str() {
+                "maze" => PatternConnectionMode::Maze,
+                _ => PatternConnectionMode::Linear,
+            },
+            jitter_factor: number_value(custom_value("jitter-factor"), 0.0),
+            curve_path,
+        })
+    }
+
+    /// Apply one of the construction presets through the same editable recipe
+    /// path used by the Pattern Editor. This keeps math and random functions
+    /// real production patterns rather than preview-only illustrations.
+    fn apply_named_pattern_preset(&self, index: u32) {
+        let Some(mut draft) = self.pattern_editor_draft() else {
+            return;
+        };
+        let Some(name) = PATTERN_PRESET_LABELS.get(index as usize) else {
+            return;
+        };
+        draft.name = (*name).into();
+        // Lattices and random distributions are mark-oriented by default;
+        // curve and mathematical constructions are authored as one
+        // connected path so they do not silently degrade into a grid of
+        // disconnected samples.
+        draft.render_mode = if (2..=5).contains(&index) {
+            PatternRenderMode::ConnectedPoints
+        } else {
+            PatternRenderMode::Points
+        };
+        draft.point_definition = if (2..=5).contains(&index) {
+            PatternPointDefinition::FullCurves
+        } else {
+            PatternPointDefinition::Intersections
+        };
+        draft.connection_mode = PatternConnectionMode::Linear;
+        match index {
+            0 => draft.placement = PatternPlacement::Grid,
+            1 => draft.placement = PatternPlacement::TriangularGrid,
+            2..=5 => {
+                draft.placement = PatternPlacement::MathFunction;
+                draft.curve_function = match index {
+                    2 => PatternCurveFunction::Sine,
+                    3 => PatternCurveFunction::Square,
+                    4 => PatternCurveFunction::Spiral,
+                    _ => PatternCurveFunction::Sawtooth,
+                };
+                if index == 4 {
+                    // Spiral is a path construction, not a warped lattice:
+                    // force one ordered, connected curve and let curve
+                    // spacing control the distance between turns.
+                    draft.x_grid_curve = 0.0;
+                    draft.y_grid_curve = 0.0;
+                    draft.point_definition = PatternPointDefinition::FullCurves;
+                    draft.render_mode = PatternRenderMode::ConnectedPoints;
+                    draft.connection_mode = PatternConnectionMode::Linear;
+                } else {
+                    // The remaining function presets visibly deform a grid
+                    // even when they start from neutral editor defaults.
+                    if draft.x_grid_curve.abs() < f64::EPSILON {
+                        draft.x_grid_curve = 24.0;
+                    }
+                    if draft.y_grid_curve.abs() < f64::EPSILON {
+                        draft.y_grid_curve = 24.0;
+                    }
+                }
+            }
+            6..=10 => {
+                draft.placement = PatternPlacement::Random;
+                draft.random_dispersion = match index {
+                    6 => PatternRandomDispersion::Uniform,
+                    7 => PatternRandomDispersion::Gaussian,
+                    8 => PatternRandomDispersion::BlueNoise,
+                    9 => PatternRandomDispersion::PinkNoise,
+                    _ => PatternRandomDispersion::Poisson,
+                };
+            }
+            _ => return,
+        }
+        eprintln!(
+            "[toniator] applying pattern preset: {} ({})",
+            name,
+            draft.placement.id()
+        );
+        let _ = self.apply_pattern_draft(draft, None);
+    }
+
+    fn open_pattern_editor(self: &Rc<Self>) {
+        let Some(draft) = self.pattern_editor_draft() else {
+            return;
+        };
+        let dialog = adw::AlertDialog::builder()
+            .heading("Edit Pattern")
+            .body("Create a portable pattern stored with this project.")
+            .build();
+        dialog.add_responses(&[
+            ("cancel", "Cancel"),
+            ("save-as", "Save As…"),
+            ("apply", "Apply"),
+        ]);
+        dialog.set_close_response("cancel");
+        dialog.set_default_response(Some("apply"));
+        dialog.set_response_appearance("apply", adw::ResponseAppearance::Suggested);
+        // Widget notifications are presentation-only while the persisted
+        // draft is copied into the modal. This also prevents the curve/math
+        // defaults from rewriting an existing custom recipe on reopen.
+        self.state.borrow_mut().syncing_controls = true;
+        self.pattern_editor_name.set_text(&draft.name);
+        self.pattern_editor_placement
+            .set_selected(draft.placement.dropdown_index());
+        self.pattern_editor_density.set_value(draft.density);
+        self.pattern_editor_spacing.set_value(draft.spacing);
+        self.pattern_editor_x_grid_mode
+            .set_selected(draft.x_grid_mode.dropdown_index());
+        self.pattern_editor_x_grid_curve
+            .set_value(draft.x_grid_curve);
+        self.pattern_editor_y_grid_mode
+            .set_selected(draft.y_grid_mode.dropdown_index());
+        self.pattern_editor_y_grid_curve
+            .set_value(draft.y_grid_curve);
+        self.pattern_editor_curve_function
+            .set_selected(draft.curve_function.dropdown_index());
+        self.pattern_editor_x_spacing.set_value(draft.x_spacing);
+        self.pattern_editor_y_spacing.set_value(draft.y_spacing);
+        self.pattern_editor_curve_spacing
+            .set_value(draft.curve_spacing);
+        self.pattern_editor_random_dispersion
+            .set_selected(draft.random_dispersion.dropdown_index());
+        self.pattern_editor_point_definition
+            .set_selected(draft.point_definition.dropdown_index());
+        self.pattern_editor_render_mode
+            .set_selected(draft.render_mode.dropdown_index());
+        self.pattern_editor_connection_mode
+            .set_selected(draft.connection_mode.dropdown_index());
+        self.pattern_editor_jitter.set_value(draft.jitter_factor);
+        self.pattern_editor_curve_path
+            .replace(draft.curve_path.clone());
+        self.pattern_editor_curve_selected_handle.set(-1);
+        self.state.borrow_mut().syncing_controls = false;
+        self.sync_pattern_editor_option_sensitivity();
+        self.pattern_editor_curve_editor.queue_draw();
+        if self.pattern_editor_draft.parent().is_some() {
+            self.pattern_editor_draft.unparent();
+        }
+        dialog.set_extra_child(Some(&self.pattern_editor_draft));
+        // Keep a weak handle so the response can explicitly release the
+        // AlertDialog's extra-child slot before detaching the Blueprint-owned
+        // editor.  AlertDialog retains the child until that slot is cleared;
+        // merely unparenting it races the next invocation and produces
+        // `adw_alert_dialog_set_extra_child` parent assertions.
+        let dialog_weak = dialog.downgrade();
+        let pattern_editor_draft = self.pattern_editor_draft.clone();
+        dialog.choose(
+            Some(&self.window),
+            None::<&gio::Cancellable>,
+            glib::clone!(
+                #[weak(rename_to = ui)]
+                self,
+                move |response| {
+                    // AlertDialog takes ownership of the extra child while it
+                    // is presented. Clear the slot before detaching it so a
+                    // later editor invocation can attach the same
+                    // Blueprint-owned controls without a GTK parent warning.
+                    if let Some(dialog) = dialog_weak.upgrade() {
+                        dialog.set_extra_child(None::<&gtk::Widget>);
+                    }
+                    if pattern_editor_draft.parent().is_some() {
+                        pattern_editor_draft.unparent();
+                    }
+                    let curve_path = ui.pattern_editor_curve_path.borrow().clone();
+                    let mut draft = PatternEditorDraft {
+                        name: ui.pattern_editor_name.text().into(),
+                        placement: PatternPlacement::from_dropdown(
+                            ui.pattern_editor_placement.selected(),
+                        ),
+                        density: ui.pattern_editor_density.value(),
+                        spacing: ui.pattern_editor_spacing.value(),
+                        x_grid_mode: PatternGridMode::from_dropdown(
+                            ui.pattern_editor_x_grid_mode.selected(),
+                        ),
+                        x_grid_curve: ui.pattern_editor_x_grid_curve.value(),
+                        y_grid_mode: PatternGridMode::from_dropdown(
+                            ui.pattern_editor_y_grid_mode.selected(),
+                        ),
+                        y_grid_curve: ui.pattern_editor_y_grid_curve.value(),
+                        curve_function: PatternCurveFunction::from_dropdown(
+                            ui.pattern_editor_curve_function.selected(),
+                        ),
+                        x_spacing: ui.pattern_editor_x_spacing.value(),
+                        y_spacing: ui.pattern_editor_y_spacing.value(),
+                        curve_spacing: ui.pattern_editor_curve_spacing.value(),
+                        random_dispersion: PatternRandomDispersion::from_dropdown(
+                            ui.pattern_editor_random_dispersion.selected(),
+                        ),
+                        random_size_response: ui.pattern_editor_random_size_response.value(),
+                        point_definition: PatternPointDefinition::from_dropdown(
+                            ui.pattern_editor_point_definition.selected(),
+                        ),
+                        render_mode: PatternRenderMode::from_dropdown(
+                            ui.pattern_editor_render_mode.selected(),
+                        ),
+                        connection_mode: PatternConnectionMode::from_dropdown(
+                            ui.pattern_editor_connection_mode.selected(),
+                        ),
+                        jitter_factor: ui.pattern_editor_jitter.value(),
+                        curve_path,
+                    };
+                    // The native Shapes operation consumes bounded numeric
+                    // bend parameters.  The local Bézier authoring surface
+                    // therefore feeds those parameters at Apply time while
+                    // retaining the authored path for the draft preview.
+                    let authored_bend = curve_path_bend(&draft.curve_path);
+                    if draft.x_grid_mode == PatternGridMode::Curve {
+                        draft.x_grid_curve = authored_bend;
+                    }
+                    if draft.y_grid_mode == PatternGridMode::Curve {
+                        draft.y_grid_curve = authored_bend;
+                    }
+                    match response.as_str() {
+                        "apply" => {
+                            ui.apply_pattern_draft(draft, None);
+                        }
+                        "save-as" => {
+                            ui.save_pattern_draft_as(draft);
+                        }
+                        _ => {}
+                    }
+                }
+            ),
+        );
+    }
+
+    fn save_pattern_draft_as(self: &Rc<Self>, draft: PatternEditorDraft) {
+        let directory = native_user_pattern_dir();
+        if let Err(error) = std::fs::create_dir_all(&directory) {
+            self.show_error(&format!("Could not create pattern folder: {error}"));
+            return;
+        }
+        let dialog = gtk::FileDialog::builder()
+            .title("Save Custom Pattern")
+            .modal(true)
+            .initial_folder(&gio::File::for_path(directory))
+            .initial_name(format!("{}.tnpattern", pattern_id_component(&draft.name)))
+            .build();
+        let filters = gio::ListStore::new::<gtk::FileFilter>();
+        let patterns = gtk::FileFilter::new();
+        patterns.set_name(Some("Toniator Pattern Definition (.tnpattern)"));
+        patterns.add_pattern("*.tnpattern");
+        filters.append(&patterns);
+        dialog.set_filters(Some(&filters));
+        dialog.set_default_filter(Some(&patterns));
+        dialog.save(
+            Some(&self.window),
+            None::<&gio::Cancellable>,
+            glib::clone!(
+                #[weak(rename_to = ui)]
+                self,
+                move |result| {
+                    if let Ok(file) = result
+                        && let Some(path) = file.path()
+                    {
+                        let _ = ui.apply_pattern_draft(
+                            draft.clone(),
+                            Some(normalized_pattern_path(&path)),
+                        );
+                    }
+                }
+            ),
+        );
+    }
+
+    fn apply_pattern_draft(&self, draft: PatternEditorDraft, save_path: Option<PathBuf>) -> bool {
+        let (definition, instance) = {
+            let state = self.state.borrow();
+            let Some(editor) = state.editor.as_ref() else {
+                return false;
+            };
+            match pattern_editor_recipe(editor.document(), &draft) {
+                Ok(recipe) => recipe,
+                Err(error) => {
+                    eprintln!("[toniator] custom pattern validation failed: {error:#}");
+                    self.show_error(&format!("Could not build custom pattern: {error:#}"));
+                    return false;
+                }
+            }
+        };
+        if let Some(path) = save_path {
+            let bytes = match toniator::serialize_tnpattern(&definition) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    self.show_error(&format!("Could not serialize custom pattern: {error}"));
+                    return false;
+                }
+            };
+            if let Err(error) = toniator::persistence::atomic_write(&path, &bytes) {
+                self.show_error(&format!(
+                    "Could not save custom pattern {}: {error:#}",
+                    path.display()
+                ));
+                return false;
+            }
+        }
+        let document = {
+            let mut state = self.state.borrow_mut();
+            let Some(editor) = state.editor.as_mut() else {
+                return false;
+            };
+            if !editor.install_and_select_embedded_pattern(definition, instance) {
+                self.show_error("Could not install this custom pattern.");
+                return false;
+            }
+            editor.document().clone()
+        };
+        eprintln!(
+            "[toniator] custom pattern applied: id={} placement={} density={:.2} jitter={:.3} render={:?}",
+            document
+                .pattern_state
+                .selected_pattern_id()
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "none".into()),
+            draft.placement.id(),
+            draft.density,
+            draft.jitter_factor,
+            draft.render_mode
+        );
+        self.after_treatment_edit(document);
+        true
+    }
+
     fn browse_preset_dialog(self: &Rc<Self>) {
         let dialog = gtk::FileDialog::builder()
             .title("Load Halftone Preset")
@@ -4632,10 +6681,16 @@ impl AppUi {
             };
             editor.document().clone()
         };
-        let initial_name = match document.pattern_state.selected_pattern_id() {
-            Some(PatternId::COMPATIBILITY_CURVES_V1) => "Curves Preset.tntr",
-            Some(PatternId::WEIGHTED_VORONOI_V1) => "Weighted Voronoi Preset.tntr",
-            Some(PatternId::COMPATIBILITY_SHAPES_V1) | None => "Shapes Preset.tntr",
+        let initial_name = match document
+            .pattern_state
+            .selected_pattern_id()
+            .as_ref()
+            .map(PatternId::as_str)
+        {
+            Some("compat.curves.v1") => "Curves Preset.tntr",
+            Some("weighted-voronoi.v1") => "Weighted Voronoi Preset.tntr",
+            Some("compat.shapes.v1") | None => "Shapes Preset.tntr",
+            Some(_) => "Pattern Preset.tntr",
         };
         let directory = native_user_preset_dir();
         if let Err(error) = std::fs::create_dir_all(&directory) {
@@ -5658,10 +7713,28 @@ impl AppUi {
     }
 
     fn sync_controls_when_idle(self: &Rc<Self>) {
+        let expected = self.state.borrow().editor.as_ref().map(|editor| {
+            (
+                editor.document().document_id.clone(),
+                editor.document().artwork_pipeline.output_model,
+            )
+        });
         glib::idle_add_local_once(glib::clone!(
             #[weak(rename_to = ui)]
             self,
-            move || ui.sync_controls()
+            move || {
+                let still_current = expected
+                    .as_ref()
+                    .is_some_and(|(document_id, output_model)| {
+                        ui.state.borrow().editor.as_ref().is_some_and(|editor| {
+                            editor.document().document_id == *document_id
+                                && editor.document().artwork_pipeline.output_model == *output_model
+                        })
+                    });
+                if still_current {
+                    ui.sync_controls();
+                }
+            }
         ));
     }
 
@@ -5741,16 +7814,29 @@ impl AppUi {
                 return;
             };
             let output_mode = editor.document().output_mode;
-            if editor.document().pattern_state.selected_pattern_id()
-                != Some(PatternId::COMPATIBILITY_SHAPES_V1)
-            {
+            let selected_is_shapes = editor
+                .document()
+                .pattern_state
+                .selected_pattern_id()
+                .is_some_and(|id| {
+                    id == PatternId::COMPATIBILITY_SHAPES_V1
+                        || editor
+                            .document()
+                            .pattern_state
+                            .selected_embedded_pattern()
+                            .is_some()
+                });
+            if !selected_is_shapes {
                 return;
             }
             let Ok(mut settings) = editor.document().pattern_state.shape_settings() else {
                 return;
             };
             update(&mut settings, inks);
-            if !editor.set_shape_settings(settings) {
+            if !editor.set_shape_settings_and_sync_embedded(settings) {
+                eprintln!(
+                    "[toniator] channel edit rejected: embedded pattern channel parameters could not be updated"
+                );
                 return;
             }
             (
@@ -5761,8 +7847,69 @@ impl AppUi {
         if output_changed {
             self.after_output_mode_edit(document);
         } else {
+            eprintln!(
+                "[toniator] channel control applied: pattern={} target={}",
+                document
+                    .pattern_state
+                    .selected_pattern_id()
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| "native".into()),
+                self.web_target.selected()
+            );
             self.after_treatment_edit(document);
         }
+    }
+
+    fn change_shape_channel_distribution(
+        self: &Rc<Self>,
+        channel: OutputChannelId,
+        update: impl FnOnce(&mut WebShapeChannel),
+    ) {
+        let document = {
+            let mut state = self.state.borrow_mut();
+            let Some(editor) = state.editor.as_mut() else {
+                return;
+            };
+            let Ok(settings) = editor.document().pattern_state.shape_settings() else {
+                return;
+            };
+            let mut channel_settings = settings.channels.get(channel.to_legacy_ink()).clone();
+            update(&mut channel_settings);
+            if !editor.set_shape_channel_distribution(
+                channel,
+                channel_settings.point_sampler,
+                channel_settings.random_seed,
+                channel_settings.weight_influence,
+            ) {
+                return;
+            }
+            editor.document().clone()
+        };
+        eprintln!(
+            "[toniator] site constructor changed: channel={} sampler={:?} seed={} weight-influence={:.4}",
+            channel.stable_id(),
+            document
+                .pattern_state
+                .shape_settings()
+                .ok()
+                .map(|settings| settings.channels.get(channel.to_legacy_ink()).point_sampler),
+            document
+                .pattern_state
+                .shape_settings()
+                .ok()
+                .map(|settings| settings.channels.get(channel.to_legacy_ink()).random_seed)
+                .unwrap_or_default(),
+            document
+                .pattern_state
+                .shape_settings()
+                .ok()
+                .map(|settings| settings
+                    .channels
+                    .get(channel.to_legacy_ink())
+                    .weight_influence)
+                .unwrap_or_default()
+        );
+        self.after_treatment_edit(document);
     }
 
     fn enable_shared_shape(self: &Rc<Self>) {
@@ -5774,9 +7921,19 @@ impl AppUi {
             let Some(editor) = state.editor.as_ref() else {
                 return;
             };
-            if editor.document().pattern_state.selected_pattern_id()
-                != Some(PatternId::COMPATIBILITY_SHAPES_V1)
-            {
+            let selected_is_shapes = editor
+                .document()
+                .pattern_state
+                .selected_pattern_id()
+                .is_some_and(|id| {
+                    id == PatternId::COMPATIBILITY_SHAPES_V1
+                        || editor
+                            .document()
+                            .pattern_state
+                            .selected_embedded_pattern()
+                            .is_some()
+                });
+            if !selected_is_shapes {
                 return;
             }
             let Ok(settings) = editor.document().pattern_state.shape_settings() else {
@@ -6145,6 +8302,7 @@ impl AppUi {
         &self,
         selected_pattern: Option<PatternId>,
         selected_panel: Option<PatternInspectorPanel>,
+        custom_summary: Option<String>,
         native_treatment: Treatment,
     ) {
         let shapes = PATTERN_REGISTRY
@@ -6169,37 +8327,58 @@ impl AppUi {
             ]);
         }
 
-        let shapes_selected = matches!(
-            (selected_pattern, selected_panel),
-            (
-                Some(PatternId::COMPATIBILITY_SHAPES_V1),
-                Some(PatternInspectorPanel::Shapes)
-            )
-        );
-        let curves_selected = matches!(
-            (selected_pattern, selected_panel),
-            (
-                Some(PatternId::COMPATIBILITY_CURVES_V1),
-                Some(PatternInspectorPanel::Curves)
-            )
-        );
-        let weighted_voronoi_selected = matches!(
-            (selected_pattern, selected_panel),
-            (
-                Some(PatternId::WEIGHTED_VORONOI_V1),
-                Some(PatternInspectorPanel::WeightedVoronoi)
-            )
-        );
+        let shapes_selected = selected_pattern
+            .as_ref()
+            .is_some_and(|id| id == &PatternId::COMPATIBILITY_SHAPES_V1)
+            && selected_panel == Some(PatternInspectorPanel::Shapes);
+        let curves_selected = selected_pattern
+            .as_ref()
+            .is_some_and(|id| id == &PatternId::COMPATIBILITY_CURVES_V1)
+            && selected_panel == Some(PatternInspectorPanel::Curves);
+        let weighted_voronoi_selected = selected_pattern
+            .as_ref()
+            .is_some_and(|id| id == &PatternId::WEIGHTED_VORONOI_V1)
+            && selected_panel == Some(PatternInspectorPanel::WeightedVoronoi);
+        let custom_selected = custom_summary.is_some();
 
         self.dots.set_active(shapes_selected);
         self.curves.set_active(curves_selected);
         self.weighted_voronoi.set_active(weighted_voronoi_selected);
+        sync_dropdown_strings(&self.pattern_preset, &PATTERN_PRESET_LABELS);
+        let custom_name = self
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .and_then(|editor| editor.document().pattern_state.selected_embedded_pattern())
+            .map(|embedded| embedded.definition.display.name.clone());
+        let selected_preset = if shapes_selected {
+            0
+        } else if curves_selected {
+            11
+        } else if weighted_voronoi_selected {
+            12
+        } else if custom_selected {
+            custom_name
+                .as_deref()
+                .and_then(|name| {
+                    PATTERN_PRESET_LABELS
+                        .iter()
+                        .position(|label| *label == name)
+                })
+                .unwrap_or(13)
+        } else {
+            0
+        };
+        self.pattern_preset.set_selected(selected_preset as u32);
         self.squares.set_active(false);
         self.lines.set_active(false);
-        self.legacy
-            .set_visible(!shapes_selected && !curves_selected && !weighted_voronoi_selected);
-        self.legacy
-            .set_active(!shapes_selected && !curves_selected && !weighted_voronoi_selected);
+        self.legacy.set_visible(
+            !shapes_selected && !curves_selected && !weighted_voronoi_selected && !custom_selected,
+        );
+        self.legacy.set_active(
+            !shapes_selected && !curves_selected && !weighted_voronoi_selected && !custom_selected,
+        );
 
         if shapes_selected {
             self.treatment_modes.set_visible_child_name("web");
@@ -6208,6 +8387,13 @@ impl AppUi {
         } else if weighted_voronoi_selected {
             self.treatment_modes
                 .set_visible_child_name("weighted-voronoi");
+        } else if let Some(summary) = custom_summary {
+            self.custom_pattern_summary.set_text(&summary);
+            // A custom recipe still uses the same channel styling surface as
+            // the built-in mark pattern.  The recipe's structure is edited in
+            // Pattern Editor; density/fill/rotation/opacity/mark controls and
+            // channel sampling remain available here.
+            self.treatment_modes.set_visible_child_name("web");
         } else {
             self.legacy.set_label(match native_treatment {
                 Treatment::Dots => "Legacy Dots",
@@ -6229,6 +8415,7 @@ impl AppUi {
             shape_settings,
             curve_settings,
             weighted_voronoi_settings,
+            custom_summary,
         )) = self.state.borrow().editor.as_ref().map(|editor| {
             let document = editor.document();
             (
@@ -6242,7 +8429,18 @@ impl AppUi {
                     .selected_metadata()
                     .map(|metadata| metadata.selector.inspector_panel),
                 (document.pattern_state.selected_pattern_id()
-                    == Some(PatternId::COMPATIBILITY_SHAPES_V1))
+                    == Some(PatternId::COMPATIBILITY_SHAPES_V1)
+                    || document
+                        .pattern_state
+                        .selected_embedded_pattern()
+                        .is_some_and(|embedded| {
+                            embedded.definition.outputs.iter().any(|output| {
+                                matches!(
+                                    output,
+                                    PatternOutputKind::Marks | PatternOutputKind::Networks
+                                )
+                            })
+                        }))
                 .then(|| document.pattern_state.shape_settings())
                 .transpose()
                 .ok()
@@ -6259,6 +8457,17 @@ impl AppUi {
                 .transpose()
                 .ok()
                 .flatten(),
+                document
+                    .pattern_state
+                    .selected_embedded_pattern()
+                    .map(|embedded| {
+                        format!(
+                            "{}\n{}\n{}",
+                            embedded.definition.display.name,
+                            embedded.definition.display.summary,
+                            embedded.definition.id
+                        )
+                    }),
             )
         })
         else {
@@ -6382,7 +8591,12 @@ impl AppUi {
         self.coverage.set_value(settings.coverage as f64);
         self.contrast.set_value(settings.contrast as f64);
         self.angle.set_value(settings.angle as f64);
-        self.sync_pattern_selector(selected_pattern, selected_panel, settings.treatment);
+        self.sync_pattern_selector(
+            selected_pattern,
+            selected_panel,
+            custom_summary,
+            settings.treatment,
+        );
         if let Some(settings) = weighted_voronoi_settings.as_ref() {
             self.sync_weighted_voronoi_controls(settings, output_model);
         }
@@ -6458,17 +8672,27 @@ impl AppUi {
                     ],
                 );
             }
-            let selected_target = self.web_target.selected();
-            let Some(inks) = web_inks_for_target(
+            let mut selected_target = self.web_target.selected();
+            let inks = web_inks_for_target(
                 selected_target,
                 output_mode == OutputMode::RgbScreen,
                 crosshatch,
-            ) else {
-                // GTK briefly reports INVALID_LIST_POSITION while its model is
-                // being replaced. Leave the current shape controls untouched.
-                self.state.borrow_mut().syncing_controls = false;
-                return;
-            };
+            )
+            .or_else(|| {
+                // GTK can expose INVALID_LIST_POSITION for one main-context
+                // turn while the model changes between CMYK and RGB. Clamp
+                // that transient state explicitly so stale CMYK labels,
+                // enabled checkbuttons, and a blank/insensitive HEX field are
+                // never left on the RGB surface.
+                selected_target = 0;
+                self.web_target.set_selected(selected_target);
+                web_inks_for_target(
+                    selected_target,
+                    output_mode == OutputMode::RgbScreen,
+                    crosshatch,
+                )
+            })
+            .expect("channel target was clamped to a valid selection");
             let all_target = selected_target == 0;
             let channel_order =
                 output_channel_order(output_mode == OutputMode::RgbScreen, crosshatch);
@@ -6604,7 +8828,7 @@ impl AppUi {
                     .any(|ink| (value(settings.channels.get(*ink)) - value(first)).abs() > 1e-9)
             };
             let mixed_fields = if all_inks {
-                [false; 8]
+                [false; 9]
             } else {
                 [
                     differs(|c| c.scale),
@@ -6615,6 +8839,7 @@ impl AppUi {
                     differs(|c| c.threshold),
                     differs(|c| c.opacity),
                     differs(|c| c.resolution_scale),
+                    differs(|c| c.random_size_response),
                 ]
             };
             self.web_mixed
@@ -6721,6 +8946,14 @@ impl AppUi {
                 first.resolution_scale,
                 mixed_fields[7],
                 "Sample density",
+                mixed_target,
+            );
+            sync_web_scale(
+                &self.pattern_editor_random_size_response,
+                &self.pattern_editor_random_size_response_status,
+                first.random_size_response,
+                mixed_fields[8],
+                "Uniform — Source responsive",
                 mixed_target,
             );
         }
@@ -6830,15 +9063,16 @@ impl AppUi {
                 }));
                 button.set_active(settings.channels.get(ink).enabled);
             }
-            let Some(inks) = self.selected_curve_inks() else {
-                // Do not turn GTK's transient invalid selection into the
-                // all-inks target while controls are being synchronized.
-                self.source_label.set_text(&source_text);
-                self.state.borrow_mut().syncing_controls = false;
-                self.sync_motif_overlay();
-                self.update_editing_context();
-                return;
-            };
+            if self.selected_curve_inks().is_none() {
+                // Keep the curve panel in lockstep with the shape panel when
+                // GTK briefly exposes an invalid selection during a model
+                // replacement; this presentation clamp is not a document
+                // edit.
+                self.curve_target.set_selected(0);
+            }
+            let inks = self
+                .selected_curve_inks()
+                .expect("curve target was clamped to a valid selection");
             let all_inks = self.curve_target.selected() == 0;
             let first = if all_inks {
                 &settings.base_channel
@@ -7109,6 +9343,17 @@ impl AppUi {
 
     fn sync_channel_scope_panels(&self, pipeline: &ArtworkPipelineSettings, crosshatch: bool) {
         let output_model = pipeline.output_model;
+        let shape_settings = self
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .and_then(|editor| editor.document().pattern_state.shape_settings().ok());
+        let shape_pattern = self.state.borrow().editor.as_ref().is_some_and(|editor| {
+            let state = &editor.document().pattern_state;
+            state.selected_pattern_id() == Some(PatternId::COMPATIBILITY_SHAPES_V1)
+                || state.selected_embedded_pattern().is_some()
+        });
         sync_dropdown_strings(
             &self.channel_scope,
             &channel_scope_labels(output_model, crosshatch),
@@ -7129,6 +9374,39 @@ impl AppUi {
             } else {
                 "Retained for this document and unavailable in the current output model."
             });
+            if let Some(settings) = &shape_settings {
+                let channel = settings.channels.get(controls.channel.to_legacy_ink());
+                controls
+                    .point_sampler
+                    .set_selected(match channel.point_sampler {
+                        WebShapePointSampler::Grid => 0,
+                        WebShapePointSampler::Uniform => 1,
+                        WebShapePointSampler::Weighted => 2,
+                    });
+                controls.random_seed.set_value(channel.random_seed as f64);
+                controls
+                    .weight_influence
+                    .set_value(channel.weight_influence);
+            }
+            let sensitive =
+                shape_pattern && controls.channel.belongs_to(output_model) && !crosshatch;
+            controls.point_sampler.set_sensitive(sensitive);
+            controls.random_seed.set_sensitive(sensitive);
+            controls.weight_influence.set_sensitive(sensitive);
+        }
+
+        let aggregate_seed_sensitive = shape_pattern && !crosshatch;
+        self.aggregate_channel_controls
+            .random_seed
+            .set_sensitive(aggregate_seed_sensitive);
+        if let Some(settings) = &shape_settings {
+            let channels = output_model.channels();
+            if let Some(first) = channels.first() {
+                let seed = settings.channels.get(first.to_legacy_ink()).random_seed;
+                self.aggregate_channel_controls
+                    .random_seed
+                    .set_value(seed as f64);
+            }
         }
 
         let (aggregate_heading, mixed_message, panel_name) = if crosshatch {
@@ -8613,6 +10891,8 @@ impl AppUi {
         self.save.set_sensitive(has_document);
         self.preset_import.set_sensitive(has_document);
         self.preset_save.set_sensitive(has_document);
+        self.pattern_editor.set_sensitive(has_document);
+        self.custom_pattern_edit.set_sensitive(has_document);
         self.export
             .set_sensitive(has_document && !self.export_running.get());
         self.undo
@@ -8697,9 +10977,9 @@ impl AppUi {
                     let visibility = rgb_visibility_summary(&settings)
                         .map(|summary| format!(" · {summary}"))
                         .unwrap_or_default();
-                    format!("Shapes · RGB Screen · {layer}{visibility}")
+                    format!("Grid Pattern · RGB Screen · {layer}{visibility}")
                 } else {
-                    format!("Shapes · {layer}")
+                    format!("Grid Pattern · {layer}")
                 }
             }
         } else if document.pattern_state.selected_pattern_id()
@@ -8729,13 +11009,15 @@ impl AppUi {
                     }
                 };
                 if document.artwork_pipeline.output_model == OutputModel::RgbScreen {
-                    format!("Curves · RGB Screen · {layer}")
+                    format!("Curve Pattern · RGB Screen · {layer}")
                 } else {
-                    format!("Curves · {layer}")
+                    format!("Curve Pattern · {layer}")
                 }
             }
+        } else if let Some(embedded) = document.pattern_state.selected_embedded_pattern() {
+            format!("Custom Pattern · {}", embedded.definition.display.name)
         } else {
-            "Shapes · Basic treatment".into()
+            "Pattern · Basic treatment".into()
         };
         let operation = if self.motif_drag.get().is_some() {
             " · Adjusting motif on canvas"
@@ -9057,6 +11339,7 @@ struct EditorWidgets {
     curves: gtk::ToggleButton,
     weighted_voronoi: gtk::ToggleButton,
     legacy: gtk::ToggleButton,
+    pattern_preset: gtk::DropDown,
     treatment_modes: gtk::Stack,
     weighted_voronoi_channel: gtk::DropDown,
     weighted_voronoi_cell_count: gtk::Scale,
@@ -9069,6 +11352,32 @@ struct EditorWidgets {
     weighted_voronoi_seed: gtk::Entry,
     preset_import: gtk::Button,
     preset_save: gtk::Button,
+    pattern_editor: gtk::Button,
+    custom_pattern_edit: gtk::Button,
+    custom_pattern_summary: gtk::Label,
+    pattern_editor_draft: gtk::Box,
+    pattern_editor_name: gtk::Entry,
+    pattern_editor_preview: gtk::DrawingArea,
+    pattern_editor_placement: gtk::DropDown,
+    pattern_editor_density: gtk::SpinButton,
+    pattern_editor_spacing: gtk::SpinButton,
+    pattern_editor_x_grid_mode: gtk::DropDown,
+    pattern_editor_x_grid_curve: gtk::SpinButton,
+    pattern_editor_y_grid_mode: gtk::DropDown,
+    pattern_editor_y_grid_curve: gtk::SpinButton,
+    pattern_editor_curve_function: gtk::DropDown,
+    pattern_editor_x_spacing: gtk::SpinButton,
+    pattern_editor_y_spacing: gtk::SpinButton,
+    pattern_editor_curve_spacing: gtk::SpinButton,
+    pattern_editor_random_dispersion: gtk::DropDown,
+    pattern_editor_random_size_response: gtk::Scale,
+    pattern_editor_random_size_response_status: gtk::Label,
+    pattern_editor_point_definition: gtk::DropDown,
+    pattern_editor_render_mode: gtk::DropDown,
+    pattern_editor_connection_mode: gtk::DropDown,
+    pattern_editor_jitter: gtk::SpinButton,
+    pattern_editor_curve_editor: gtk::DrawingArea,
+    pattern_editor_curve_reset: gtk::Button,
     source_section: gtk::Expander,
     output_section: gtk::Expander,
     channel_settings_section: gtk::Expander,
@@ -9380,6 +11689,22 @@ fn build_editor_view(
     let legacy = treatment_builder
         .object::<gtk::ToggleButton>("legacy")
         .expect("ToniatorEditorControls.ui must define legacy");
+    let weighted_voronoi_button = treatment_builder
+        .object::<gtk::ToggleButton>("weighted_voronoi")
+        .expect("ToniatorEditorControls.ui must define weighted_voronoi");
+    // Pattern selection is one semantic dropdown.  The historical toggle
+    // buttons remain in the tracked Blueprint for resource compatibility but
+    // are no longer presented as separate treatment modes.
+    for button in [
+        &dots,
+        &squares,
+        &lines,
+        &curves,
+        &weighted_voronoi_button,
+        &legacy,
+    ] {
+        button.set_visible(false);
+    }
     squares.set_group(Some(&dots));
     lines.set_group(Some(&dots));
     curves.set_group(Some(&dots));
@@ -9390,11 +11715,22 @@ fn build_editor_view(
     squares.set_visible(false);
     lines.set_visible(false);
     curves.set_hexpand(true);
+    let pattern_preset = treatment_builder
+        .object::<gtk::DropDown>("pattern_preset")
+        .expect("ToniatorEditorControls.ui must define pattern_preset");
+    let pattern_preset_label = treatment_builder
+        .object::<gtk::Label>("pattern_preset_label")
+        .expect("ToniatorEditorControls.ui must define pattern_preset_label");
+    configure_dropdown_accessibility(&pattern_preset, &pattern_preset_label, "Pattern Preset");
+    sync_dropdown_strings(&pattern_preset, &PATTERN_PRESET_LABELS);
+    pattern_preset.set_tooltip_text(Some(
+        "Choose a bundled or project pattern preset. Pattern structure is edited with Edit Pattern.",
+    ));
     for (button, label) in [
-        (&dots, "Shapes pattern"),
-        (&squares, "Squares treatment"),
-        (&lines, "Lines treatment"),
-        (&curves, "Curves pattern"),
+        (&dots, "Grid pattern preset"),
+        (&squares, "Squares pattern preset"),
+        (&lines, "Lines pattern preset"),
+        (&curves, "Curves pattern preset"),
     ] {
         button.update_property(&[gtk::accessible::Property::Label(label)]);
     }
@@ -9416,6 +11752,204 @@ fn build_editor_view(
         preset_save.set_tooltip_text(Some(spec.summary));
         preset_save.update_property(&[gtk::accessible::Property::Description(spec.summary)]);
     }
+    let pattern_editor = treatment_builder
+        .object::<gtk::Button>("pattern_editor")
+        .expect("toniator-window.blp must define pattern_editor");
+    pattern_editor.update_property(&[
+        gtk::accessible::Property::Label("Edit Pattern"),
+        gtk::accessible::Property::Description(
+            "Create and edit a portable project-embedded pattern",
+        ),
+    ]);
+    let custom_pattern_edit = treatment_builder
+        .object::<gtk::Button>("custom_pattern_edit")
+        .expect("toniator-window.blp must define custom_pattern_edit");
+    let custom_pattern_summary = treatment_builder
+        .object::<gtk::Label>("custom_pattern_summary")
+        .expect("toniator-window.blp must define custom_pattern_summary");
+    let pattern_editor_draft = treatment_builder
+        .object::<gtk::Box>("pattern_editor_draft")
+        .expect("toniator-window.blp must define pattern_editor_draft");
+    let pattern_editor_name = treatment_builder
+        .object::<gtk::Entry>("pattern_editor_name")
+        .expect("toniator-window.blp must define pattern_editor_name");
+    pattern_editor_name.update_property(&[gtk::accessible::Property::Label("Pattern name")]);
+    let pattern_editor_preview = treatment_builder
+        .object::<gtk::DrawingArea>("pattern_editor_preview")
+        .expect("toniator-window.blp must define pattern_editor_preview");
+    pattern_editor_preview.update_property(&[
+        gtk::accessible::Property::Label("Pattern Preview"),
+        gtk::accessible::Property::Description(
+            "Neutral preview of pattern structure only; source response and channel styling are excluded",
+        ),
+    ]);
+    let pattern_editor_placement = treatment_builder
+        .object::<gtk::DropDown>("pattern_editor_placement")
+        .expect("toniator-window.blp must define pattern_editor_placement");
+    sync_dropdown_strings(
+        &pattern_editor_placement,
+        &[
+            "X/Y Grid",
+            "Triangular Grid (60°)",
+            "Curve",
+            "Random",
+            "Math Function",
+        ],
+    );
+    pattern_editor_placement.update_property(&[gtk::accessible::Property::Label("Placement type")]);
+    let pattern_editor_density = treatment_builder
+        .object::<gtk::SpinButton>("pattern_editor_density")
+        .expect("toniator-window.blp must define pattern_editor_density");
+    pattern_editor_density.set_range(2.0, 10_000.0);
+    pattern_editor_density.set_increments(1.0, 10.0);
+    pattern_editor_density.set_digits(0);
+    pattern_editor_density.update_property(&[gtk::accessible::Property::Label("Site density")]);
+    let pattern_editor_spacing = treatment_builder
+        .object::<gtk::SpinButton>("pattern_editor_spacing")
+        .expect("toniator-window.blp must define pattern_editor_spacing");
+    pattern_editor_spacing.set_range(0.01, 100.0);
+    pattern_editor_spacing.set_increments(0.25, 2.0);
+    pattern_editor_spacing.set_digits(2);
+    pattern_editor_spacing
+        .update_property(&[gtk::accessible::Property::Label("Overall mark scale")]);
+    let pattern_editor_x_grid_mode = treatment_builder
+        .object::<gtk::DropDown>("pattern_editor_x_grid_mode")
+        .expect("toniator-window.blp must define pattern_editor_x_grid_mode");
+    sync_dropdown_strings(&pattern_editor_x_grid_mode, &["Straight", "Curved Track"]);
+    pattern_editor_x_grid_mode.update_property(&[gtk::accessible::Property::Label("X grid mode")]);
+    let pattern_editor_y_grid_mode = treatment_builder
+        .object::<gtk::DropDown>("pattern_editor_y_grid_mode")
+        .expect("toniator-window.blp must define pattern_editor_y_grid_mode");
+    sync_dropdown_strings(&pattern_editor_y_grid_mode, &["Straight", "Curved Track"]);
+    pattern_editor_y_grid_mode.update_property(&[gtk::accessible::Property::Label("Y grid mode")]);
+    let pattern_editor_curve_function = treatment_builder
+        .object::<gtk::DropDown>("pattern_editor_curve_function")
+        .expect("toniator-window.blp must define pattern_editor_curve_function");
+    sync_dropdown_strings(
+        &pattern_editor_curve_function,
+        &["Sine", "Square Wave", "Spiral", "Sawtooth Wave"],
+    );
+    pattern_editor_curve_function
+        .update_property(&[gtk::accessible::Property::Label("Math function")]);
+    let pattern_editor_random_dispersion = treatment_builder
+        .object::<gtk::DropDown>("pattern_editor_random_dispersion")
+        .expect("toniator-window.blp must define pattern_editor_random_dispersion");
+    sync_dropdown_strings(
+        &pattern_editor_random_dispersion,
+        &["Uniform", "Gaussian", "Blue Noise", "Pink Noise", "Poisson"],
+    );
+    pattern_editor_random_dispersion
+        .update_property(&[gtk::accessible::Property::Label("Random dispersion")]);
+    let pattern_editor_point_definition = treatment_builder
+        .object::<gtk::DropDown>("pattern_editor_point_definition")
+        .expect("toniator-window.blp must define pattern_editor_point_definition");
+    sync_dropdown_strings(
+        &pattern_editor_point_definition,
+        &[
+            "Grid Intersections · Marks",
+            "Spacing Along Curves · Marks",
+            "Full Curve Sampling · Marks",
+        ],
+    );
+    pattern_editor_point_definition
+        .update_property(&[gtk::accessible::Property::Label("Point definition")]);
+    let pattern_editor_render_mode = treatment_builder
+        .object::<gtk::DropDown>("pattern_editor_render_mode")
+        .expect("toniator-window.blp must define pattern_editor_render_mode");
+    sync_dropdown_strings(&pattern_editor_render_mode, &["Points", "Connected points"]);
+    pattern_editor_render_mode
+        .update_property(&[gtk::accessible::Property::Label("Render geometry")]);
+    let pattern_editor_connection_mode = treatment_builder
+        .object::<gtk::DropDown>("pattern_editor_connection_mode")
+        .expect("toniator-window.blp must define pattern_editor_connection_mode");
+    sync_dropdown_strings(&pattern_editor_connection_mode, &["Linear", "Maze"]);
+    pattern_editor_connection_mode
+        .update_property(&[gtk::accessible::Property::Label("Connections")]);
+    let configure_editor_spin =
+        |id: &str, label: &'static str, minimum: f64, maximum: f64, digits: u32| {
+            let spin = treatment_builder
+                .object::<gtk::SpinButton>(id)
+                .unwrap_or_else(|| panic!("toniator-window.blp must define {id}"));
+            spin.set_range(minimum, maximum);
+            spin.set_increments(
+                if digits == 0 { 1.0 } else { 0.01 },
+                if digits == 0 { 10.0 } else { 1.0 },
+            );
+            spin.set_digits(digits);
+            spin.update_property(&[gtk::accessible::Property::Label(label)]);
+            spin
+        };
+    let pattern_editor_x_grid_curve = configure_editor_spin(
+        "pattern_editor_x_grid_curve",
+        "X grid curve",
+        -100_000.0,
+        100_000.0,
+        2,
+    );
+    let pattern_editor_y_grid_curve = configure_editor_spin(
+        "pattern_editor_y_grid_curve",
+        "Y grid curve",
+        -100_000.0,
+        100_000.0,
+        2,
+    );
+    let pattern_editor_x_spacing = configure_editor_spin(
+        "pattern_editor_x_spacing",
+        "X grid spacing",
+        0.0,
+        100_000.0,
+        2,
+    );
+    let pattern_editor_y_spacing = configure_editor_spin(
+        "pattern_editor_y_spacing",
+        "Y grid spacing",
+        0.0,
+        100_000.0,
+        2,
+    );
+    let pattern_editor_curve_spacing = configure_editor_spin(
+        "pattern_editor_curve_spacing",
+        "Curve spacing",
+        0.01,
+        100_000.0,
+        2,
+    );
+    let pattern_editor_jitter =
+        configure_editor_spin("pattern_editor_jitter", "Jitter factor", 0.0, 1.0, 3);
+    let pattern_editor_random_size_response = builder_control_scale(
+        &treatment_builder,
+        BuilderScaleSpec {
+            scale_id: "pattern_editor_random_size_response",
+            control_id: "pattern_editor_random_size_response_control",
+            label_id: "pattern_editor_random_size_response_label",
+            accessible_name: "Shape Size Response",
+            minimum: 0.0,
+            maximum: 1.0,
+            step: 0.01,
+        },
+    );
+    pattern_editor_random_size_response.update_property(&[gtk::accessible::Property::Description(
+        "Blend from uniform mark size at zero to source-responsive size at one",
+    )]);
+    let pattern_editor_random_size_response_status = treatment_builder
+        .object::<gtk::Label>("pattern_editor_random_size_response_status")
+        .expect("toniator-window.blp must define pattern_editor_random_size_response_status");
+    let pattern_editor_curve_editor = treatment_builder
+        .object::<gtk::DrawingArea>("pattern_editor_curve_editor")
+        .expect("toniator-window.blp must define pattern_editor_curve_editor");
+    pattern_editor_curve_editor.update_property(&[
+        gtk::accessible::Property::Label("Curved track shape editor"),
+        gtk::accessible::Property::Description(
+            "Drag curve handles; edits remain in the pattern draft until Apply",
+        ),
+    ]);
+    let pattern_editor_curve_reset = treatment_builder
+        .object::<gtk::Button>("pattern_editor_curve_reset")
+        .expect("toniator-window.blp must define pattern_editor_curve_reset");
+    pattern_editor_curve_reset.update_property(&[
+        gtk::accessible::Property::Label("Reset curve"),
+        gtk::accessible::Property::Description("Reset the draft curve to a soft wave"),
+    ]);
 
     let native_panel = treatment_builder
         .object::<gtk::Box>("native_panel")
@@ -9584,7 +12118,11 @@ fn build_editor_view(
     let web_color = treatment_builder
         .object::<gtk::Entry>("web_color")
         .expect("ToniatorEditorControls.ui must define web_color");
-    web_color.set_tooltip_text(Some("Hex ink color; valid colors apply automatically"));
+    web_color.set_editable(true);
+    web_color.set_can_focus(true);
+    web_color.set_tooltip_text(Some(
+        "Enter a six-digit channel or ink HEX value, such as #00AEEF",
+    ));
     let web_color_row = treatment_builder
         .object::<gtk::Box>("web_color_row")
         .expect("ToniatorEditorControls.ui must define web_color_row")
@@ -9595,7 +12133,7 @@ fn build_editor_view(
     let web_color_status = treatment_builder
         .object::<gtk::Label>("web_color_status")
         .expect("ToniatorEditorControls.ui must define web_color_status");
-    let web_color_help = help_handle(help_for("Ink Color").unwrap());
+    let web_color_help = help_handle(help_for("Channel HEX value (Color code)").unwrap());
     treatment_builder
         .object::<gtk::Box>("web_color_help_host")
         .expect("ToniatorEditorControls.ui must define web_color_help_host")
@@ -9741,6 +12279,22 @@ fn build_editor_view(
     let web_detail_status = treatment_builder
         .object::<gtk::Label>("web_detail_status")
         .expect("ToniatorEditorControls.ui must define web_detail_status");
+    // Width and height are structural mark-shape tuning, so keep them in the
+    // advanced expander. Cutoff, opacity, and sampling detail remain in the
+    // always-visible basic channel controls.
+    let web_advanced_content = treatment_builder
+        .object::<gtk::Box>("web_advanced_content")
+        .expect("ToniatorEditorControls.ui must define web_advanced_content");
+    let web_width_scale_row = treatment_builder
+        .object::<gtk::Box>("web_width_scale_row")
+        .expect("ToniatorEditorControls.ui must define web_width_scale_row");
+    let web_height_scale_row = treatment_builder
+        .object::<gtk::Box>("web_height_scale_row")
+        .expect("ToniatorEditorControls.ui must define web_height_scale_row");
+    web_width_scale_row.unparent();
+    web_height_scale_row.unparent();
+    web_advanced_content.append(&web_width_scale_row);
+    web_advanced_content.append(&web_height_scale_row);
 
     let curve_panel_host = treatment_builder
         .object::<gtk::Box>("curve_panel_host")
@@ -9784,6 +12338,12 @@ fn build_editor_view(
         .object::<gtk::Label>("curve_profile_label")
         .expect("ToniatorEditorControls.ui must define curve_profile_label");
     configure_dropdown_accessibility(&curve_profile, &curve_profile_label, "Line Shape");
+    // Curve shape authoring now lives in the pattern editor draft.  Keep the
+    // legacy treatment widgets wired for loaded documents, but remove them
+    // from the main channel-controls surface so structural pattern choices do
+    // not look like per-channel styling controls.
+    curve_profile.set_visible(false);
+    curve_profile_label.set_visible(false);
     sync_dropdown_strings(
         &curve_profile,
         &[
@@ -9797,6 +12357,15 @@ fn build_editor_view(
     let curve_editor_label = treatment_builder
         .object::<gtk::Label>("curve_editor_label")
         .expect("ToniatorEditorControls.ui must define curve_editor_label");
+    let curve_editor_host = treatment_builder
+        .object::<gtk::Box>("curve_editor_host")
+        .expect("toniator-window.blp must define curve_editor_host");
+    let curve_instructions = treatment_builder
+        .object::<gtk::Label>("curve_instructions")
+        .expect("toniator-window.blp must define curve_instructions");
+    curve_editor_label.set_visible(false);
+    curve_editor_host.set_visible(false);
+    curve_instructions.set_visible(false);
     let curve_editor = treatment_builder
         .object::<gtk::DrawingArea>("curve_editor")
         .expect("toniator-window.blp must define curve_editor");
@@ -9836,7 +12405,7 @@ fn build_editor_view(
         .object::<gtk::Box>("curve_target_row")
         .expect("ToniatorEditorControls.ui must define curve_target_row")
         .upcast();
-    curve_target_row.set_visible(false);
+    curve_target_row.set_visible(true);
     let curve_target_help = help_for("Adjust Ink").map(|spec| {
         let handle = help_handle(spec);
         treatment_builder
@@ -9972,7 +12541,11 @@ fn build_editor_view(
     let curve_color = treatment_builder
         .object::<gtk::Entry>("curve_color")
         .expect("ToniatorEditorControls.ui must define curve_color");
-    curve_color.set_tooltip_text(Some("Hex ink color; valid colors apply automatically"));
+    curve_color.set_editable(true);
+    curve_color.set_can_focus(true);
+    curve_color.set_tooltip_text(Some(
+        "Enter a six-digit channel or ink HEX value, such as #00AEEF",
+    ));
     let curve_color_row = treatment_builder
         .object::<gtk::Box>("curve_color_row")
         .expect("ToniatorEditorControls.ui must define curve_color_row")
@@ -10192,8 +12765,32 @@ fn build_editor_view(
     treatment_modes
         .page(&weighted_voronoi_panel)
         .set_name("weighted-voronoi");
+    let custom_pattern_panel = treatment_builder
+        .object::<gtk::Box>("custom_pattern_panel")
+        .expect("toniator-window.blp must define custom_pattern_panel");
+    treatment_modes
+        .page(&custom_pattern_panel)
+        .set_name("custom-pattern");
     treatment_modes.set_visible_child_name("native");
+    let channel_pattern_controls_host = builder
+        .object::<gtk::Box>("channel_pattern_controls_host")
+        .expect("toniator-window.blp must define channel_pattern_controls_host");
+    if treatment_modes.parent().is_some() {
+        treatment_modes.unparent();
+    }
+    channel_pattern_controls_host.append(&treatment_modes);
     let hierarchy = build_inspector_hierarchy(builder);
+    hierarchy.channel_settings_section.set_expanded(true);
+    let inspector_hierarchy = builder
+        .object::<gtk::Box>("editor_inspector_hierarchy")
+        .expect("toniator-window.blp must define editor_inspector_hierarchy");
+    let treatment_section = builder
+        .object::<gtk::Expander>("treatment_section")
+        .expect("toniator-window.blp must define treatment_section");
+    if treatment_section.parent().is_some() {
+        treatment_section.unparent();
+    }
+    inspector_hierarchy.insert_child_after(&treatment_section, Some(&hierarchy.output_section));
     let controls_builder = builder;
     let artwork_source = controls_builder
         .object::<gtk::DropDown>("artwork_source")
@@ -10278,9 +12875,9 @@ fn build_editor_view(
         .object::<gtk::DropDown>("channel_scope")
         .expect("toniator-window.blp must define channel_scope");
     channel_scope.set_tooltip_text(Some(
-        "Choose which included inks or channels Shapes and Curves will edit.",
+        "Choose which included inks or channels receive the channel controls below.",
     ));
-    channel_scope.update_property(&[gtk::accessible::Property::Label("Treatment Editing Scope")]);
+    channel_scope.update_property(&[gtk::accessible::Property::Label("Edit channel / ink")]);
     let aggregate_channel_controls = build_aggregate_channel_controls();
     hierarchy
         .channel_panel_stack
@@ -10344,6 +12941,7 @@ fn build_editor_view(
             .object::<gtk::ToggleButton>("weighted_voronoi")
             .expect("toniator-window.blp must define weighted_voronoi"),
         legacy,
+        pattern_preset,
         treatment_modes,
         weighted_voronoi_channel,
         weighted_voronoi_cell_count,
@@ -10356,6 +12954,32 @@ fn build_editor_view(
         weighted_voronoi_seed,
         preset_import,
         preset_save,
+        pattern_editor,
+        custom_pattern_edit,
+        custom_pattern_summary,
+        pattern_editor_draft,
+        pattern_editor_name,
+        pattern_editor_preview,
+        pattern_editor_placement,
+        pattern_editor_density,
+        pattern_editor_spacing,
+        pattern_editor_x_grid_mode,
+        pattern_editor_x_grid_curve,
+        pattern_editor_y_grid_mode,
+        pattern_editor_y_grid_curve,
+        pattern_editor_curve_function,
+        pattern_editor_x_spacing,
+        pattern_editor_y_spacing,
+        pattern_editor_curve_spacing,
+        pattern_editor_random_dispersion,
+        pattern_editor_random_size_response,
+        pattern_editor_random_size_response_status,
+        pattern_editor_point_definition,
+        pattern_editor_render_mode,
+        pattern_editor_connection_mode,
+        pattern_editor_jitter,
+        pattern_editor_curve_editor,
+        pattern_editor_curve_reset,
         source_section: hierarchy.source_section,
         output_section: hierarchy.output_section,
         channel_settings_section: hierarchy.channel_settings_section,
@@ -10593,6 +13217,12 @@ const HELP_SPECS: &[HelpSpec] = &[
         heading: "Channel Opacity",
         summary: "Change how solid each RGB channel appears.",
         body: "Increase for a more solid RGB channel or decrease for more transparency. This changes both preview and export.",
+    },
+    HelpSpec {
+        control: "Channel HEX value (Color code)",
+        heading: "Channel HEX value (Color code)",
+        summary: "Set the displayed color for the selected channel or ink.",
+        body: "Enter a six-digit HEX value such as #00AEEF. The value is applied when valid and changes both preview and export.",
     },
     HelpSpec {
         control: "Ink Color",
@@ -11299,15 +13929,15 @@ struct WebColorCopy {
 fn web_color_copy(channel_copy: bool) -> WebColorCopy {
     if channel_copy {
         WebColorCopy {
-            color_heading: "Channel Color",
-            color_tooltip: "Set the displayed color for the selected RGB channel.",
+            color_heading: "Channel HEX value (Color code)",
+            color_tooltip: "Set the displayed HEX color for the selected RGB channel.",
             opacity_heading: "Channel Opacity",
             opacity_tooltip: "Change how solid each RGB channel appears.",
         }
     } else {
         WebColorCopy {
-            color_heading: "Ink Color",
-            color_tooltip: "Set the displayed color for the selected ink.",
+            color_heading: "Channel HEX value (Color code)",
+            color_tooltip: "Set the displayed HEX color for the selected ink.",
             opacity_heading: "Ink Opacity",
             opacity_tooltip: "Change how solid each ink appears.",
         }
@@ -11629,6 +14259,377 @@ fn draw_curve_editor(
         }
         let _ = context.fill();
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_pattern_editor_preview(
+    context: &gtk::cairo::Context,
+    width: i32,
+    height: i32,
+    placement: PatternPlacement,
+    density: f64,
+    x_spacing: f64,
+    y_spacing: f64,
+    curve_spacing: f64,
+    x_mode: PatternGridMode,
+    y_mode: PatternGridMode,
+    x_curve: f64,
+    y_curve: f64,
+    function: PatternCurveFunction,
+    definition: PatternPointDefinition,
+    dispersion: PatternRandomDispersion,
+    render_mode: PatternRenderMode,
+    connection_mode: PatternConnectionMode,
+    jitter: f64,
+    curve_path: &CurvePath,
+) {
+    let width = width.max(1) as f64;
+    let height = height.max(1) as f64;
+    context.set_source_rgb(0.08, 0.09, 0.11);
+    let _ = context.paint();
+    let left = 18.0;
+    let top = 16.0;
+    let right = width - 18.0;
+    let bottom = height - 16.0;
+    let inner_w = (right - left).max(1.0);
+    let inner_h = (bottom - top).max(1.0);
+    context.set_source_rgba(1.0, 1.0, 1.0, 0.08);
+    context.rectangle(left, top, inner_w, inner_h);
+    let _ = context.stroke();
+
+    let x_count = (inner_w / x_spacing.max(12.0)).round().clamp(3.0, 18.0) as usize;
+    let y_count = (inner_h
+        / if placement == PatternPlacement::Curve {
+            curve_spacing.max(12.0)
+        } else {
+            y_spacing.max(12.0)
+        })
+    .round()
+    .clamp(3.0, 14.0) as usize;
+    let samples = (density / 45.0).round().clamp(8.0, 36.0) as usize;
+    let amplitude_x = (x_curve.abs() / 100.0).clamp(0.0, 1.0);
+    let amplitude_y = (y_curve.abs() / 100.0).clamp(0.0, 1.0);
+    let sign_x = if x_curve.is_sign_negative() {
+        -1.0
+    } else {
+        1.0
+    };
+    let sign_y = if y_curve.is_sign_negative() {
+        -1.0
+    } else {
+        1.0
+    };
+    let curve_value = |t: f64| -> f64 {
+        match function {
+            PatternCurveFunction::Sine => (t * std::f64::consts::TAU).sin(),
+            PatternCurveFunction::Square => {
+                if (t * 4.0).fract() < 0.5 {
+                    1.0
+                } else {
+                    -1.0
+                }
+            }
+            PatternCurveFunction::Spiral => (t * std::f64::consts::TAU * 1.5).sin() * t,
+            PatternCurveFunction::Sawtooth => (t * 2.0).fract() * 2.0 - 1.0,
+        }
+    };
+    let local_curve = |t: f64| -> f64 {
+        let start = curve_path.start;
+        let Some(segment) = curve_path.segments.first().copied() else {
+            return 0.0;
+        };
+        cubic_editor_point(start, segment, t).y
+    };
+    let jitter_offset = |index: usize| -> (f64, f64) {
+        let value = (index as f64 * 12.9898 + 78.233).sin() * 43_758.545_3;
+        let base_x = value.fract() * 2.0 - 1.0;
+        let base_y = (value * 1.37).fract() * 2.0 - 1.0;
+        let (scale_x, scale_y) = match dispersion {
+            PatternRandomDispersion::Uniform => (1.0, 1.0),
+            PatternRandomDispersion::Gaussian => (0.55, 0.55),
+            PatternRandomDispersion::BlueNoise => (0.35, 0.35),
+            PatternRandomDispersion::PinkNoise => (0.8, 0.65),
+            PatternRandomDispersion::Poisson => (0.2, 0.2),
+        };
+        let x = base_x * jitter * 0.45 * scale_x;
+        let y = base_y * jitter * 0.45 * scale_y;
+        (x, y)
+    };
+    let map_point = |x: f64, y: f64| (left + x * inner_w, top + y * inner_h);
+
+    if placement == PatternPlacement::MathFunction && function == PatternCurveFunction::Spiral {
+        // Spiral is a single ordered path from the preview's center origin;
+        // do not render it as the generic X/Y function grid.
+        // Let the authored spiral reach the rectangular preview corners;
+        // the artboard clip, not the construction geometry, defines the
+        // visible boundary.
+        let pitch = curve_spacing.max(0.01);
+        let corner_radius = (inner_w * 0.5).hypot(inner_h * 0.5);
+        let radius = corner_radius + pitch;
+        let turns = (corner_radius / pitch).clamp(1.0, 64.0);
+        let theta_max = std::f64::consts::TAU * turns;
+        let step = (inner_w / x_count.saturating_sub(1).max(1) as f64 * 0.85).max(1.0);
+        let radial_scale = radius / theta_max.max(f64::EPSILON);
+        let total_length = preview_archimedean_spiral_arc_length(radial_scale, theta_max);
+        let samples = (total_length / step).ceil().clamp(16.0, 2_000.0) as usize;
+        let mut points = Vec::with_capacity(samples + 1);
+        for index in 0..=samples {
+            let target_length = total_length * index as f64 / samples as f64;
+            let angle =
+                preview_archimedean_spiral_theta_at_length(radial_scale, target_length, theta_max);
+            let r = radial_scale * angle;
+            let x = 0.5 + (r * angle.cos()) / inner_w;
+            let y = 0.5 + (r * angle.sin()) / inner_h;
+            let (jx, jy) = jitter_offset(index);
+            points.push(map_point(x, y));
+            if jitter > 0.0 {
+                let last = points.last_mut().expect("spiral point was just pushed");
+                last.0 += jx * inner_w;
+                last.1 += jy * inner_h;
+            }
+        }
+        if render_mode == PatternRenderMode::ConnectedPoints
+            || definition == PatternPointDefinition::FullCurves
+        {
+            context.set_source_rgba(0.35, 0.85, 1.0, 0.9);
+            context.set_line_width(1.75);
+            context.move_to(points[0].0, points[0].1);
+            for point in points.iter().skip(1) {
+                context.line_to(point.0, point.1);
+            }
+            let _ = context.stroke();
+        } else {
+            context.set_source_rgba(0.55, 0.84, 1.0, 0.9);
+            for point in points {
+                context.arc(point.0, point.1, 2.5, 0.0, std::f64::consts::TAU);
+                let _ = context.fill();
+            }
+        }
+        return;
+    }
+
+    if placement == PatternPlacement::TriangularGrid {
+        // Keep the preview's row vector in the same 60-degree geometry as
+        // the production triangular lattice.  Y spacing is derived from X
+        // spacing; it is not an independent rectangular-grid control.
+        let tri_x_step = inner_w / x_count.saturating_sub(1).max(1) as f64;
+        let tri_y_step = tri_x_step * (3.0_f64.sqrt() * 0.5);
+        let tri_y_count =
+            ((inner_h / tri_y_step.max(f64::EPSILON)).floor() as usize + 1).clamp(3, 24);
+        let mut points = Vec::with_capacity(x_count.saturating_mul(tri_y_count));
+        for row in 0..tri_y_count {
+            let y = (row as f64 * tri_y_step / inner_h).clamp(0.0, 1.0);
+            let offset = if row % 2 == 1 { 0.5 * tri_x_step } else { 0.0 };
+            for column in 0..x_count {
+                let x = ((column as f64 * tri_x_step + offset) / inner_w).clamp(0.0, 1.0);
+                points.push(map_point(x, y));
+            }
+        }
+        context.set_source_rgba(0.55, 0.84, 1.0, 0.9);
+        for (index, point) in points.iter().enumerate() {
+            let (jx, jy) = jitter_offset(index);
+            context.arc(
+                point.0 + jx * inner_w,
+                point.1 + jy * inner_h,
+                2.6,
+                0.0,
+                std::f64::consts::TAU,
+            );
+            let _ = context.fill();
+        }
+        if render_mode == PatternRenderMode::ConnectedPoints {
+            context.set_source_rgba(0.45, 0.95, 0.7, 0.65);
+            context.set_line_width(if connection_mode == PatternConnectionMode::Maze {
+                2.0
+            } else {
+                1.0
+            });
+            for row in 0..tri_y_count {
+                for column in 0..x_count {
+                    let index = row * x_count + column;
+                    if column + 1 < x_count {
+                        context.move_to(points[index].0, points[index].1);
+                        let next = points[index + 1];
+                        context.line_to(next.0, next.1);
+                    }
+                    if row + 1 < tri_y_count {
+                        let next_row = (row + 1) * x_count;
+                        let next_column = if row % 2 == 0 {
+                            column.min(x_count.saturating_sub(1))
+                        } else {
+                            (column + 1).min(x_count.saturating_sub(1))
+                        };
+                        context.move_to(points[index].0, points[index].1);
+                        let next = points[next_row + next_column];
+                        context.line_to(next.0, next.1);
+                    }
+                }
+            }
+            let _ = context.stroke();
+        }
+        return;
+    }
+
+    let effective_y_count = match placement {
+        PatternPlacement::Curve => 1,
+        PatternPlacement::Random => 0,
+        _ => y_count,
+    };
+    let effective_x_count = match placement {
+        PatternPlacement::Curve => 1,
+        PatternPlacement::Random => 0,
+        _ => x_count,
+    };
+    context.set_line_width(1.25);
+    let mut all_points = Vec::new();
+    for row in 0..effective_y_count {
+        let base_y = row as f64 / (y_count.saturating_sub(1).max(1)) as f64;
+        let mut points = Vec::with_capacity(samples + 1);
+        for step in 0..=samples {
+            let t = step as f64 / samples as f64;
+            let wave = curve_value(t) * amplitude_y * 0.22 * sign_y;
+            let authored = local_curve(t) * amplitude_y * 0.35 * sign_y;
+            let y_base = if y_mode == PatternGridMode::Curve
+                || placement == PatternPlacement::Curve
+                || placement == PatternPlacement::MathFunction
+            {
+                if function == PatternCurveFunction::Square {
+                    // Square waves change the span of the grid around its
+                    // centre; they do not translate every track together.
+                    0.5 + (base_y - 0.5) * (1.0 + curve_value(t) * amplitude_y * 0.44 * sign_y)
+                } else {
+                    base_y + wave
+                }
+            } else {
+                base_y
+            };
+            let y = (y_base + authored).clamp(0.0, 1.0);
+            points.push(map_point(t, y));
+        }
+        all_points.extend(points.iter().copied());
+        if render_mode == PatternRenderMode::ConnectedPoints
+            || definition == PatternPointDefinition::FullCurves
+        {
+            context.set_source_rgba(0.35, 0.75, 1.0, 0.8);
+            let first = points[0];
+            context.move_to(first.0, first.1);
+            for point in points.iter().skip(1) {
+                context.line_to(point.0, point.1);
+            }
+            let _ = context.stroke();
+        } else {
+            for (step, point) in points.iter().enumerate() {
+                if definition == PatternPointDefinition::CurveSpacing && step % 2 == 1 {
+                    continue;
+                }
+                let (jx, jy) = jitter_offset(row * (samples + 1) + step);
+                let radius = 2.4 + (density / 10_000.0).clamp(0.0, 1.0) * 1.7;
+                context.set_source_rgba(0.55, 0.84, 1.0, 0.9);
+                context.arc(
+                    point.0 + jx * inner_w,
+                    point.1 + jy * inner_h,
+                    radius,
+                    0.0,
+                    std::f64::consts::TAU,
+                );
+                let _ = context.fill();
+            }
+        }
+    }
+
+    for column in 0..effective_x_count {
+        let base_x = column as f64 / (x_count.saturating_sub(1).max(1)) as f64;
+        let mut points = Vec::with_capacity(samples + 1);
+        for step in 0..=samples {
+            let t = step as f64 / samples as f64;
+            let wave = curve_value(t) * amplitude_x * 0.22 * sign_x;
+            let x_base = if x_mode == PatternGridMode::Curve
+                || placement == PatternPlacement::MathFunction
+            {
+                if function == PatternCurveFunction::Square {
+                    0.5 + (base_x - 0.5) * (1.0 + curve_value(t) * amplitude_x * 0.44 * sign_x)
+                } else {
+                    base_x + wave
+                }
+            } else {
+                base_x
+            };
+            let x = x_base.clamp(0.0, 1.0);
+            points.push(map_point(x, t));
+        }
+        all_points.extend(points.iter().copied());
+        if render_mode == PatternRenderMode::ConnectedPoints
+            || definition == PatternPointDefinition::FullCurves
+        {
+            context.set_source_rgba(0.45, 0.95, 0.7, 0.45);
+            let first = points[0];
+            context.move_to(first.0, first.1);
+            for point in points.iter().skip(1) {
+                context.line_to(point.0, point.1);
+            }
+            let _ = context.stroke();
+        }
+    }
+    if placement == PatternPlacement::Random {
+        // Site density is the requested random-site count.  Do not hide a
+        // second, preview-only cap that makes the editor disagree with the
+        // production recipe.
+        let random_count = density.round().max(2.0) as usize;
+        context.set_source_rgba(0.55, 0.84, 1.0, 0.9);
+        for index in 0..random_count {
+            let (jx, jy) = jitter_offset(index + 10_000);
+            let x = (0.5 + jx * 1.8).clamp(0.0, 1.0);
+            let y = (0.5 + jy * 1.8).clamp(0.0, 1.0);
+            all_points.push(map_point(x, y));
+        }
+    }
+    if render_mode == PatternRenderMode::ConnectedPoints && all_points.len() > 1 {
+        context.set_source_rgba(0.45, 0.95, 0.7, 0.65);
+        context.set_line_width(if connection_mode == PatternConnectionMode::Maze {
+            2.0
+        } else {
+            1.0
+        });
+        context.move_to(all_points[0].0, all_points[0].1);
+        for (index, point) in all_points.iter().enumerate().skip(1) {
+            if connection_mode == PatternConnectionMode::Maze && index % 3 == 0 {
+                let previous = all_points[index - 1];
+                context.line_to(point.0, previous.1);
+            }
+            context.line_to(point.0, point.1);
+        }
+        let _ = context.stroke();
+    }
+}
+
+fn preview_archimedean_spiral_arc_length(radial_scale: f64, theta: f64) -> f64 {
+    let theta = theta.max(0.0);
+    0.5 * radial_scale * (theta * (1.0 + theta * theta).sqrt() + theta.asinh())
+}
+
+fn preview_archimedean_spiral_theta_at_length(
+    radial_scale: f64,
+    target_length: f64,
+    theta_max: f64,
+) -> f64 {
+    if target_length <= 0.0 {
+        return 0.0;
+    }
+    let total_length = preview_archimedean_spiral_arc_length(radial_scale, theta_max);
+    if target_length >= total_length {
+        return theta_max;
+    }
+    let mut low = 0.0;
+    let mut high = theta_max;
+    for _ in 0..48 {
+        let mid = (low + high) * 0.5;
+        if preview_archimedean_spiral_arc_length(radial_scale, mid) < target_length {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    (low + high) * 0.5
 }
 
 fn nearest_curve_segment(path: &CurvePath, point: CurvePoint) -> (usize, f64) {
@@ -12002,7 +15003,9 @@ mod tests {
             "output_content_host",
             "channel_settings_section",
             "channel_scope_host",
-            "channel_scope_note",
+            "channel_controls_heading",
+            "channel_controls_note",
+            "channel_pattern_controls_host",
             "channel_panel_stack",
             "appearance_section",
             "treatment_section",
@@ -12016,14 +15019,14 @@ mod tests {
         let output = WINDOW_BLP.find("output_section").unwrap();
         let channels = WINDOW_BLP.find("channel_settings_section").unwrap();
         assert!(source < output && output < channels);
-        assert!(WINDOW_BLP.contains("Treatment Editing Scope"));
-        assert!(WINDOW_BLP.contains(
-            "Choose the inks or channels edited by Shapes and Curves. Output routing remains in Output."
-        ));
+        assert!(WINDOW_BLP.contains("Edit channel / ink"));
         for id in [
             "channel_controls",
             "channel_heading",
             "channel_inclusion_status",
+            "channel_point_sampler",
+            "channel_random_seed",
+            "channel_weight_influence",
             "channel_content_host",
         ] {
             assert!(
@@ -12036,6 +15039,7 @@ mod tests {
             "aggregate_channel_controls",
             "aggregate_heading",
             "aggregate_mixed_message",
+            "aggregate_random_seed",
             "aggregate_content_host",
         ] {
             assert!(
@@ -12071,8 +15075,38 @@ mod tests {
             "export_color",
             "treatment_chrome",
             "treatment_pattern_buttons",
+            "pattern_preset_row",
+            "pattern_preset_label",
+            "pattern_preset",
             "treatment_preset_actions",
+            "pattern_editor",
+            "pattern_editor_draft",
+            "pattern_editor_name",
+            "pattern_editor_preview",
+            "pattern_editor_preview_heading",
+            "pattern_editor_preview_note",
+            "pattern_editor_placement",
+            "pattern_editor_density",
+            "pattern_editor_spacing",
+            "pattern_editor_x_grid_mode",
+            "pattern_editor_x_grid_curve",
+            "pattern_editor_y_grid_mode",
+            "pattern_editor_y_grid_curve",
+            "pattern_editor_curve_function",
+            "pattern_editor_x_spacing",
+            "pattern_editor_y_spacing",
+            "pattern_editor_curve_spacing",
+            "pattern_editor_random_dispersion",
+            "pattern_editor_point_definition",
+            "pattern_editor_render_mode",
+            "pattern_editor_connection_mode",
+            "pattern_editor_jitter",
+            "pattern_editor_curve_editor",
+            "pattern_editor_curve_reset",
             "treatment_modes",
+            "custom_pattern_panel",
+            "custom_pattern_summary",
+            "custom_pattern_edit",
             "native_panel",
             "native_sampling_detail_row",
             "native_sampling_detail_control",
@@ -12249,6 +15283,21 @@ mod tests {
                 "missing Builder precision entry {entry_id}"
             );
         }
+        assert!(
+            builder
+                .object::<gtk::Label>("pattern_editor_random_size_response_status")
+                .is_some()
+        );
+        assert!(
+            builder
+                .object::<gtk::Scale>("pattern_editor_random_size_response")
+                .is_some()
+        );
+        assert!(
+            builder
+                .object::<gtk::SpinButton>("pattern_editor_random_size_response_entry")
+                .is_some()
+        );
         for id in [
             "web_shape",
             "web_mixed_shape_apply",
@@ -12275,7 +15324,39 @@ mod tests {
         }
         let stack = builder.object::<gtk::Stack>("treatment_modes").unwrap();
         assert_eq!(stack.transition_type(), gtk::StackTransitionType::Crossfade);
-        assert_eq!(stack.observe_children().n_items(), 4);
+        assert_eq!(stack.observe_children().n_items(), 5);
+        for id in [
+            "pattern_editor",
+            "pattern_editor_draft",
+            "pattern_editor_name",
+            "pattern_editor_preview",
+            "pattern_editor_preview_heading",
+            "pattern_editor_preview_note",
+            "pattern_editor_placement",
+            "pattern_editor_density",
+            "pattern_editor_spacing",
+            "pattern_editor_x_grid_mode",
+            "pattern_editor_x_grid_curve",
+            "pattern_editor_y_grid_mode",
+            "pattern_editor_y_grid_curve",
+            "pattern_editor_curve_function",
+            "pattern_editor_x_spacing",
+            "pattern_editor_y_spacing",
+            "pattern_editor_curve_spacing",
+            "pattern_editor_random_dispersion",
+            "pattern_editor_random_size_response",
+            "pattern_editor_point_definition",
+            "pattern_editor_render_mode",
+            "pattern_editor_connection_mode",
+            "pattern_editor_jitter",
+            "pattern_editor_curve_editor",
+            "pattern_editor_curve_reset",
+            "custom_pattern_panel",
+            "custom_pattern_summary",
+            "custom_pattern_edit",
+        ] {
+            assert!(builder.object::<gtk::Widget>(id).is_some(), "missing {id}");
+        }
         for id in [
             "weighted_voronoi",
             "weighted_voronoi_panel",
@@ -12445,7 +15526,7 @@ mod tests {
     #[test]
     fn rgb_shapes_use_channel_color_copy_without_changing_ink_or_curve_copy() {
         let channel = web_color_copy(true);
-        assert_eq!(channel.color_heading, "Channel Color");
+        assert_eq!(channel.color_heading, "Channel HEX value (Color code)");
         assert_eq!(channel.opacity_heading, "Channel Opacity");
         assert!(channel.color_tooltip.contains("RGB channel"));
         assert_eq!(
@@ -12453,7 +15534,7 @@ mod tests {
             "Use a six-digit hex channel color such as #111111"
         );
         let ink = web_color_copy(false);
-        assert_eq!(ink.color_heading, "Ink Color");
+        assert_eq!(ink.color_heading, "Channel HEX value (Color code)");
         assert_eq!(ink.opacity_heading, "Ink Opacity");
         assert_eq!(
             web_color_validation_message(false),
@@ -12696,6 +15777,692 @@ mod tests {
             let fitted_aspect = fitted.0 as f64 / fitted.1 as f64;
             assert!((source_aspect - fitted_aspect).abs() <= 0.01);
         }
+    }
+
+    #[test]
+    fn pattern_editor_draft_is_nonmutating_until_one_install_edit() {
+        let source = SourceArtwork {
+            name: "pattern-editor.svg".into(),
+            media_type: "image/svg+xml".into(),
+            bytes: Arc::from(EXAMPLE_SVG.as_bytes()),
+        };
+        let document = Document::new_with_artboard(source, 960, 680);
+        let before = document.clone();
+        let draft = PatternEditorDraft {
+            name: "Triangle Grid".into(),
+            placement: PatternPlacement::Grid,
+            density: 64.0,
+            spacing: 72.0,
+            x_grid_mode: PatternGridMode::Straight,
+            y_grid_mode: PatternGridMode::Straight,
+            x_grid_curve: 0.0,
+            y_grid_curve: 0.0,
+            curve_function: PatternCurveFunction::Sine,
+            x_spacing: 15.0,
+            y_spacing: 15.0,
+            curve_spacing: 15.0,
+            random_dispersion: PatternRandomDispersion::Uniform,
+            random_size_response: 1.0,
+            point_definition: PatternPointDefinition::Intersections,
+            render_mode: PatternRenderMode::Points,
+            connection_mode: PatternConnectionMode::Linear,
+            jitter_factor: 0.0,
+            curve_path: CurvePath::soft_wave(),
+        };
+        let (definition, instance) = pattern_editor_recipe(&document, &draft).unwrap();
+        assert_eq!(document, before, "draft construction is cancel-safe");
+        assert_eq!(definition.display.name, "Triangle Grid");
+        assert_eq!(definition.id.as_str(), "custom.triangle-grid.v1");
+        let mut editor = DocumentEditor::new(document);
+        assert!(editor.install_and_select_embedded_pattern(definition, instance));
+        assert!(editor.can_undo());
+        let output = toniator::generate_document_pattern_output(editor.document()).unwrap();
+        let toniator::CanonicalPatternOutput::Marks(output) = output else {
+            panic!("draft-based Shapes pattern must render marks")
+        };
+        assert!(!output.geometry.marks.is_empty());
+        assert!(editor.undo());
+        assert!(!editor.can_undo());
+    }
+
+    #[test]
+    fn pattern_editor_extended_recipe_persists_and_renders_deterministically() {
+        let source = SourceArtwork {
+            name: "pattern-editor-random.svg".into(),
+            media_type: "image/svg+xml".into(),
+            bytes: Arc::from(EXAMPLE_SVG.as_bytes()),
+        };
+        let document = Document::new_with_artboard(source, 320, 220);
+        let settings = {
+            let document = &document;
+            let mut settings = document.pattern_state.shape_settings().unwrap();
+            settings.channels.k.point_sampler = WebShapePointSampler::Weighted;
+            settings.channels.k.random_seed = 44;
+            settings
+        };
+        let mut settings_editor = DocumentEditor::new(document);
+        assert!(settings_editor.set_shape_settings(settings));
+        let document = settings_editor.document().clone();
+        let draft = PatternEditorDraft {
+            name: "Weighted Curved Grid".into(),
+            placement: PatternPlacement::Grid,
+            density: 24.0,
+            spacing: 72.0,
+            x_grid_mode: PatternGridMode::Curve,
+            y_grid_mode: PatternGridMode::Curve,
+            x_grid_curve: 18.0,
+            y_grid_curve: -12.0,
+            curve_function: PatternCurveFunction::Square,
+            x_spacing: 24.0,
+            y_spacing: 20.0,
+            curve_spacing: 20.0,
+            random_dispersion: PatternRandomDispersion::Uniform,
+            random_size_response: 1.0,
+            point_definition: PatternPointDefinition::CurveSpacing,
+            render_mode: PatternRenderMode::Points,
+            connection_mode: PatternConnectionMode::Linear,
+            jitter_factor: 0.35,
+            curve_path: CurvePath::soft_wave(),
+        };
+        let (definition, instance) = pattern_editor_recipe(&document, &draft).unwrap();
+        assert_eq!(
+            choice_value(pattern_instance_value(&instance, "x-grid-mode"), "straight"),
+            "curve"
+        );
+        assert_eq!(
+            choice_value(pattern_instance_value(&instance, "curve-function"), "sine"),
+            "square"
+        );
+        let lattice_node = definition
+            .recipe
+            .nodes
+            .iter()
+            .find(|node| node.id == "lattice")
+            .unwrap();
+        for key in [
+            "placement-strategy",
+            "curve-spacing",
+            "random-dispersion",
+            "random-size-response",
+        ] {
+            assert!(
+                lattice_node.parameters.contains_key(key),
+                "editor lattice must receive {key}"
+            );
+        }
+        assert_eq!(
+            number_value(
+                channel_instance_value(&instance, "channel.cmyk.black", "random-size-response"),
+                -1.0
+            ),
+            document
+                .pattern_state
+                .shape_settings()
+                .unwrap()
+                .channels
+                .k
+                .random_size_response
+        );
+        let stored_curve: CurvePath = serde_json::from_str(
+            text_value(pattern_instance_value(&instance, "curve-path").unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(stored_curve, draft.curve_path);
+        assert_eq!(
+            integer_value(
+                channel_instance_value(&instance, "channel.cmyk.black", "channel-seed"),
+                0
+            ),
+            44
+        );
+        let mut editor = DocumentEditor::new(document);
+        assert!(editor.install_and_select_embedded_pattern(definition, instance));
+        assert!(editor.set_shape_channel_distribution(
+            OutputChannelId::CmykBlack,
+            WebShapePointSampler::Uniform,
+            55,
+            2.5,
+        ));
+        let embedded = editor
+            .document()
+            .pattern_state
+            .selected_embedded_pattern()
+            .unwrap();
+        assert_eq!(
+            choice_value(
+                channel_instance_value(&embedded.instance, "channel.cmyk.black", "point-sampler"),
+                "grid"
+            ),
+            "uniform"
+        );
+        assert_eq!(
+            integer_value(
+                channel_instance_value(&embedded.instance, "channel.cmyk.black", "channel-seed"),
+                0
+            ),
+            55
+        );
+        let first = toniator::generate_document_pattern_output(editor.document()).unwrap();
+        let second = toniator::generate_document_pattern_output(editor.document()).unwrap();
+        assert_eq!(first, second);
+        let baseline_mark_count = match &first {
+            toniator::CanonicalPatternOutput::Marks(output) => output.geometry.marks.len(),
+            _ => panic!("weighted custom recipe must emit marks"),
+        };
+        let mut channel_edit = DocumentEditor::new(editor.document().clone());
+        let mut channel_settings = channel_edit
+            .document()
+            .pattern_state
+            .shape_settings()
+            .unwrap();
+        channel_settings.channels.k.scale = 0.42;
+        channel_settings.channels.k.resolution_scale = 2.5;
+        assert!(channel_edit.set_shape_settings_and_sync_embedded(channel_settings));
+        let synced = channel_edit
+            .document()
+            .pattern_state
+            .selected_embedded_pattern()
+            .unwrap();
+        assert_eq!(
+            number_value(
+                channel_instance_value(&synced.instance, "channel.cmyk.black", "scale"),
+                0.0
+            ),
+            0.42
+        );
+        assert_eq!(
+            number_value(
+                channel_instance_value(&synced.instance, "channel.cmyk.black", "resolution-scale"),
+                0.0
+            ),
+            2.5
+        );
+        let detail_only =
+            toniator::generate_document_pattern_output(channel_edit.document()).unwrap();
+        let detail_mark_count = match &detail_only {
+            toniator::CanonicalPatternOutput::Marks(output) => output.geometry.marks.len(),
+            _ => panic!("weighted custom recipe must emit marks"),
+        };
+        assert_ne!(
+            baseline_mark_count, detail_mark_count,
+            "sampling detail must change the rendered site population"
+        );
+        assert_ne!(
+            first, detail_only,
+            "coverage and sampling detail must reach the custom recipe runtime"
+        );
+        let mut triangular_draft = draft.clone();
+        triangular_draft.name = "Triangular 60 Degree Grid".into();
+        triangular_draft.placement = PatternPlacement::TriangularGrid;
+        let (triangular_definition, triangular_instance) =
+            pattern_editor_recipe(editor.document(), &triangular_draft).unwrap();
+        assert_eq!(
+            choice_value(
+                pattern_instance_value(&triangular_instance, "placement-strategy"),
+                "grid"
+            ),
+            "triangular-grid"
+        );
+        let mut triangular_editor = DocumentEditor::new(editor.document().clone());
+        assert!(
+            triangular_editor
+                .install_and_select_embedded_pattern(triangular_definition, triangular_instance)
+        );
+        assert_ne!(
+            first,
+            toniator::generate_document_pattern_output(triangular_editor.document()).unwrap(),
+            "triangular placement must affect the canonical canvas"
+        );
+        let mut random_draft = draft.clone();
+        random_draft.placement = PatternPlacement::Random;
+        random_draft.random_dispersion = PatternRandomDispersion::Poisson;
+        let (random_definition, random_instance) =
+            pattern_editor_recipe(editor.document(), &random_draft).unwrap();
+        let mut random_editor = DocumentEditor::new(editor.document().clone());
+        assert!(
+            random_editor.install_and_select_embedded_pattern(random_definition, random_instance)
+        );
+        let random_output =
+            toniator::generate_document_pattern_output(random_editor.document()).unwrap();
+        assert_ne!(
+            first, random_output,
+            "random placement must affect the canvas"
+        );
+        let mut connected_draft = draft.clone();
+        connected_draft.render_mode = PatternRenderMode::ConnectedPoints;
+        connected_draft.connection_mode = PatternConnectionMode::Maze;
+        let (connected_definition, connected_instance) =
+            pattern_editor_recipe(editor.document(), &connected_draft).unwrap();
+        assert_eq!(
+            connected_definition.outputs,
+            vec![toniator::PatternOutputKind::Networks]
+        );
+        let mut connected_editor = DocumentEditor::new(editor.document().clone());
+        assert!(
+            connected_editor
+                .install_and_select_embedded_pattern(connected_definition, connected_instance)
+        );
+        let connected_output =
+            toniator::generate_document_pattern_output(connected_editor.document()).unwrap();
+        let toniator::CanonicalPatternOutput::Network(network) = connected_output else {
+            panic!("connected pattern editor recipe must emit a canonical network")
+        };
+        assert!(!network.edges.is_empty());
+        let connected_preview = render_document_preview(connected_editor.document(), 640, 1)
+            .expect("connected custom recipe must render on the canvas");
+        assert!(!connected_preview.image.is_empty());
+
+        let mut spiral_draft = draft.clone();
+        spiral_draft.name = "Spiral Path".into();
+        spiral_draft.placement = PatternPlacement::MathFunction;
+        spiral_draft.curve_function = PatternCurveFunction::Spiral;
+        spiral_draft.x_grid_curve = 0.0;
+        spiral_draft.y_grid_curve = 0.0;
+        spiral_draft.curve_spacing = 20.0;
+        spiral_draft.point_definition = PatternPointDefinition::FullCurves;
+        spiral_draft.render_mode = PatternRenderMode::ConnectedPoints;
+        spiral_draft.connection_mode = PatternConnectionMode::Linear;
+        let (spiral_definition, spiral_instance) =
+            pattern_editor_recipe(editor.document(), &spiral_draft).unwrap();
+        let mut spiral_editor = DocumentEditor::new(editor.document().clone());
+        assert!(
+            spiral_editor.install_and_select_embedded_pattern(spiral_definition, spiral_instance)
+        );
+        let toniator::CanonicalPatternOutput::Network(spiral_network) =
+            toniator::generate_document_pattern_output(spiral_editor.document()).unwrap()
+        else {
+            panic!("spiral connected preset must emit a canonical network")
+        };
+        assert!(spiral_network.edges.len() > 100);
+        assert!(spiral_network.nodes.windows(2).all(|pair| {
+            (pair[1].point.x - pair[0].point.x).hypot(pair[1].point.y - pair[0].point.y) > 0.0
+        }));
+        assert!(!spiral_network.strokes.is_empty());
+        let mut measured_segments = 0;
+        for stroke in &spiral_network.strokes {
+            let stroke_distances: Vec<f32> = stroke
+                .centerline
+                .windows(2)
+                .map(|pair| (pair[1].x - pair[0].x).hypot(pair[1].y - pair[0].y))
+                .collect();
+            assert!(stroke_distances.iter().all(|distance| *distance > 0.0));
+            measured_segments += stroke_distances.len();
+        }
+        assert!(measured_segments > 32);
+        assert!(spiral_network.strokes.iter().all(|stroke| {
+            stroke.outline.commands.iter().all(|command| {
+                matches!(
+                    command,
+                    toniator::curve_render::CurveCommand::Move(_)
+                        | toniator::curve_render::CurveCommand::Cubic { .. }
+                        | toniator::curve_render::CurveCommand::Close
+                )
+            })
+        }));
+
+        let mut edited_draft = draft.clone();
+        edited_draft.jitter_factor = 0.36;
+        let reapplied = pattern_editor_recipe(editor.document(), &edited_draft).unwrap();
+        let mut reopened = DocumentEditor::new(editor.document().clone());
+        assert!(reopened.install_and_select_embedded_pattern(reapplied.0, reapplied.1));
+        let toniator::CanonicalPatternOutput::Marks(output) = first else {
+            panic!("extended Shapes editor recipe must emit marks")
+        };
+        assert!(!output.geometry.marks.is_empty());
+    }
+
+    #[test]
+    fn random_preset_sampling_detail_updates_embedded_channel_without_rejection() {
+        let source = SourceArtwork {
+            name: "random-gaussian-channel-edit.svg".into(),
+            media_type: "image/svg+xml".into(),
+            bytes: Arc::from(EXAMPLE_SVG.as_bytes()),
+        };
+        let document = Document::new_with_artboard(source, 320, 220);
+        let draft = PatternEditorDraft {
+            name: "Random · Gaussian".into(),
+            placement: PatternPlacement::Random,
+            density: 92.0,
+            spacing: 72.0,
+            x_grid_mode: PatternGridMode::Straight,
+            y_grid_mode: PatternGridMode::Straight,
+            x_grid_curve: 0.0,
+            y_grid_curve: 0.0,
+            curve_function: PatternCurveFunction::Sine,
+            x_spacing: 20.0,
+            y_spacing: 20.0,
+            curve_spacing: 20.0,
+            random_dispersion: PatternRandomDispersion::Gaussian,
+            random_size_response: 1.0,
+            point_definition: PatternPointDefinition::Intersections,
+            render_mode: PatternRenderMode::Points,
+            connection_mode: PatternConnectionMode::Linear,
+            jitter_factor: 0.0,
+            curve_path: CurvePath::soft_wave(),
+        };
+        let (definition, instance) = pattern_editor_recipe(&document, &draft).unwrap();
+        let mut editor = DocumentEditor::new(document);
+        assert!(editor.install_and_select_embedded_pattern(definition, instance));
+        let mut settings = editor.document().pattern_state.shape_settings().unwrap();
+        settings.channels.k.resolution_scale = 0.9734;
+        assert!(editor.set_shape_settings_and_sync_embedded(settings));
+        let embedded = editor
+            .document()
+            .pattern_state
+            .selected_embedded_pattern()
+            .unwrap();
+        assert_eq!(
+            number_value(
+                channel_instance_value(
+                    &embedded.instance,
+                    "channel.cmyk.black",
+                    "resolution-scale"
+                ),
+                0.0
+            ),
+            0.9734
+        );
+    }
+
+    #[test]
+    fn pattern_editor_rgb_channel_controls_are_written_independently() {
+        let source = SourceArtwork {
+            name: "pattern-editor-rgb.svg".into(),
+            media_type: "image/svg+xml".into(),
+            bytes: Arc::from(EXAMPLE_SVG.as_bytes()),
+        };
+        let document = Document::new_with_artboard(source, 320, 220);
+        let mut settings = document.pattern_state.shape_settings().unwrap();
+        settings.channels.r.point_sampler = WebShapePointSampler::Uniform;
+        settings.channels.r.random_seed = 101;
+        settings.channels.g.point_sampler = WebShapePointSampler::Weighted;
+        settings.channels.g.random_seed = 202;
+        settings.channels.b.random_seed = 303;
+        let mut settings_editor = DocumentEditor::new(document);
+        assert!(settings_editor.set_output_mode(OutputMode::RgbScreen));
+        assert!(settings_editor.set_shape_settings(settings));
+        let document = settings_editor.document().clone();
+        let draft = PatternEditorDraft {
+            name: "RGB Sampler Grid".into(),
+            placement: PatternPlacement::Grid,
+            density: 24.0,
+            spacing: 72.0,
+            x_grid_mode: PatternGridMode::Straight,
+            y_grid_mode: PatternGridMode::Straight,
+            x_grid_curve: 0.0,
+            y_grid_curve: 0.0,
+            curve_function: PatternCurveFunction::Spiral,
+            x_spacing: 24.0,
+            y_spacing: 20.0,
+            curve_spacing: 20.0,
+            random_dispersion: PatternRandomDispersion::Uniform,
+            random_size_response: 1.0,
+            point_definition: PatternPointDefinition::Intersections,
+            render_mode: PatternRenderMode::Points,
+            connection_mode: PatternConnectionMode::Linear,
+            jitter_factor: 0.2,
+            curve_path: CurvePath::soft_wave(),
+        };
+        let (_, instance) = pattern_editor_recipe(&document, &draft).unwrap();
+        assert_eq!(
+            choice_value(
+                channel_instance_value(&instance, "channel.rgb.red", "point-sampler"),
+                "grid"
+            ),
+            "uniform"
+        );
+        assert_eq!(
+            choice_value(
+                channel_instance_value(&instance, "channel.rgb.green", "point-sampler"),
+                "grid"
+            ),
+            "weighted"
+        );
+        assert_eq!(
+            integer_value(
+                channel_instance_value(&instance, "channel.rgb.blue", "channel-seed"),
+                0
+            ),
+            303
+        );
+    }
+
+    #[test]
+    fn random_pattern_sites_use_the_selected_channel_source_weight() {
+        let source = SourceArtwork {
+            name: "pattern-editor-weighted-random.svg".into(),
+            media_type: "image/svg+xml".into(),
+            bytes: Arc::from(EXAMPLE_SVG.as_bytes()),
+        };
+        let document = Document::new_with_artboard(source, 320, 220);
+        let draft = PatternEditorDraft {
+            name: "Weighted Random Sites".into(),
+            placement: PatternPlacement::Random,
+            density: 48.0,
+            spacing: 72.0,
+            x_grid_mode: PatternGridMode::Straight,
+            y_grid_mode: PatternGridMode::Straight,
+            x_grid_curve: 0.0,
+            y_grid_curve: 0.0,
+            curve_function: PatternCurveFunction::Sine,
+            x_spacing: 20.0,
+            y_spacing: 20.0,
+            curve_spacing: 20.0,
+            random_dispersion: PatternRandomDispersion::Uniform,
+            random_size_response: 0.0,
+            point_definition: PatternPointDefinition::Intersections,
+            render_mode: PatternRenderMode::Points,
+            connection_mode: PatternConnectionMode::Linear,
+            jitter_factor: 0.0,
+            curve_path: CurvePath::soft_wave(),
+        };
+        let black_centroid = |sampler: WebShapePointSampler| {
+            let mut settings = document.pattern_state.shape_settings().unwrap();
+            settings.channels.c.enabled = false;
+            settings.channels.m.enabled = false;
+            settings.channels.y.enabled = false;
+            settings.channels.k.enabled = true;
+            settings.channels.k.point_sampler = sampler;
+            settings.channels.k.random_seed = 77;
+            settings.channels.k.weight_influence = 8.0;
+            let mut settings_editor = DocumentEditor::new(document.clone());
+            assert!(settings_editor.set_shape_settings(settings));
+            let (definition, instance) =
+                pattern_editor_recipe(settings_editor.document(), &draft).unwrap();
+            assert!(settings_editor.install_and_select_embedded_pattern(definition, instance));
+            let toniator::CanonicalPatternOutput::Marks(output) =
+                toniator::generate_document_pattern_output(settings_editor.document()).unwrap()
+            else {
+                panic!("random point recipe must emit marks")
+            };
+            let marks: Vec<_> = output
+                .geometry
+                .marks
+                .iter()
+                .filter(|mark| mark.channel == toniator::render::Channel::Black)
+                .collect();
+            assert!(!marks.is_empty());
+            marks.iter().map(|mark| f64::from(mark.x)).sum::<f64>() / marks.len() as f64
+        };
+        let uniform = black_centroid(WebShapePointSampler::Uniform);
+        let weighted = black_centroid(WebShapePointSampler::Weighted);
+        assert!(
+            weighted > uniform + 8.0,
+            "weighted random sites should move toward high-volume channel areas: uniform={uniform:.2} weighted={weighted:.2}"
+        );
+    }
+
+    #[test]
+    fn math_and_random_presets_render_to_png_and_editable_svg() {
+        let source = SourceArtwork {
+            name: "pattern-preset-export.svg".into(),
+            media_type: "image/svg+xml".into(),
+            bytes: Arc::from(EXAMPLE_SVG.as_bytes()),
+        };
+        let document = Document::new_with_artboard(source, 320, 220);
+        let base = PatternEditorDraft {
+            name: "Preset Export".into(),
+            placement: PatternPlacement::MathFunction,
+            density: 28.0,
+            spacing: 72.0,
+            x_grid_mode: PatternGridMode::Straight,
+            y_grid_mode: PatternGridMode::Straight,
+            x_grid_curve: 24.0,
+            y_grid_curve: 24.0,
+            curve_function: PatternCurveFunction::Sine,
+            x_spacing: 24.0,
+            y_spacing: 20.0,
+            curve_spacing: 20.0,
+            random_dispersion: PatternRandomDispersion::Uniform,
+            random_size_response: 1.0,
+            point_definition: PatternPointDefinition::Intersections,
+            render_mode: PatternRenderMode::Points,
+            connection_mode: PatternConnectionMode::Linear,
+            jitter_factor: 0.1,
+            curve_path: CurvePath::soft_wave(),
+        };
+        let cases = [
+            (
+                "sine",
+                PatternPlacement::MathFunction,
+                PatternCurveFunction::Sine,
+                PatternRandomDispersion::Uniform,
+            ),
+            (
+                "square",
+                PatternPlacement::MathFunction,
+                PatternCurveFunction::Square,
+                PatternRandomDispersion::Uniform,
+            ),
+            (
+                "spiral",
+                PatternPlacement::MathFunction,
+                PatternCurveFunction::Spiral,
+                PatternRandomDispersion::Uniform,
+            ),
+            (
+                "sawtooth",
+                PatternPlacement::MathFunction,
+                PatternCurveFunction::Sawtooth,
+                PatternRandomDispersion::Uniform,
+            ),
+            (
+                "uniform",
+                PatternPlacement::Random,
+                PatternCurveFunction::Sine,
+                PatternRandomDispersion::Uniform,
+            ),
+            (
+                "gaussian",
+                PatternPlacement::Random,
+                PatternCurveFunction::Sine,
+                PatternRandomDispersion::Gaussian,
+            ),
+            (
+                "blue-noise",
+                PatternPlacement::Random,
+                PatternCurveFunction::Sine,
+                PatternRandomDispersion::BlueNoise,
+            ),
+            (
+                "pink-noise",
+                PatternPlacement::Random,
+                PatternCurveFunction::Sine,
+                PatternRandomDispersion::PinkNoise,
+            ),
+            (
+                "poisson",
+                PatternPlacement::Random,
+                PatternCurveFunction::Sine,
+                PatternRandomDispersion::Poisson,
+            ),
+        ];
+        for (name, placement, curve_function, dispersion) in cases {
+            let mut draft = base.clone();
+            draft.name = format!("Preset {name}");
+            draft.placement = placement;
+            draft.curve_function = curve_function;
+            draft.random_dispersion = dispersion;
+            let (definition, instance) = pattern_editor_recipe(&document, &draft).unwrap();
+            let mut editor = DocumentEditor::new(document.clone());
+            assert!(editor.install_and_select_embedded_pattern(definition, instance));
+            let preview = render_document_preview(editor.document(), 320, 1).unwrap();
+            assert!(
+                !preview.image.is_empty(),
+                "{name} preview must contain pixels"
+            );
+            let stem = format!("toniator-ton010-{name}-{}", std::process::id());
+            let png = std::env::temp_dir().join(format!("{stem}.png"));
+            let svg = std::env::temp_dir().join(format!("{stem}.svg"));
+            toniator::export_png(
+                &png,
+                editor.document(),
+                toniator::PngExportOptions::document_size(editor.document()).unwrap(),
+            )
+            .unwrap();
+            toniator::export_svg(&svg, editor.document()).unwrap();
+            assert!(
+                std::fs::metadata(&png).unwrap().len() > 128,
+                "{name} PNG export is empty"
+            );
+            assert!(
+                std::fs::read_to_string(&svg).unwrap().contains("<svg"),
+                "{name} SVG export is invalid"
+            );
+            let _ = std::fs::remove_file(png);
+            let _ = std::fs::remove_file(svg);
+        }
+    }
+
+    #[test]
+    fn pattern_editor_accepts_common_nonzero_jitter_values() {
+        let source = SourceArtwork {
+            name: "pattern-editor-jitter.svg".into(),
+            media_type: "image/svg+xml".into(),
+            bytes: Arc::from(EXAMPLE_SVG.as_bytes()),
+        };
+        let document = Document::new_with_artboard(source, 320, 220);
+        for jitter_factor in [0.001, 0.01, 0.1, 0.123, 0.333, 0.5, 0.999, 1.0] {
+            let draft = PatternEditorDraft {
+                name: format!("Jitter {jitter_factor}"),
+                placement: PatternPlacement::Grid,
+                density: 24.0,
+                spacing: 72.0,
+                x_grid_mode: PatternGridMode::Straight,
+                y_grid_mode: PatternGridMode::Straight,
+                x_grid_curve: 0.0,
+                y_grid_curve: 0.0,
+                curve_function: PatternCurveFunction::Sine,
+                x_spacing: 3.4782608695652172,
+                y_spacing: 11.0,
+                curve_spacing: 11.0,
+                random_dispersion: PatternRandomDispersion::Uniform,
+                random_size_response: 1.0,
+                point_definition: PatternPointDefinition::Intersections,
+                render_mode: PatternRenderMode::Points,
+                connection_mode: PatternConnectionMode::Linear,
+                jitter_factor,
+                curve_path: CurvePath::soft_wave(),
+            };
+            pattern_editor_recipe(&document, &draft)
+                .unwrap_or_else(|error| panic!("jitter {jitter_factor} rejected: {error:#}"));
+        }
+    }
+
+    #[test]
+    fn custom_pattern_paths_follow_xdg_data_home_and_tnpattern_extension() {
+        assert_eq!(
+            user_pattern_dir(Some(Path::new("/data")), Some(Path::new("/home/me"))),
+            PathBuf::from("/data/toniator/patterns")
+        );
+        assert_eq!(
+            user_pattern_dir(None, Some(Path::new("/home/me"))),
+            PathBuf::from("/home/me/.local/share/toniator/patterns")
+        );
+        assert_eq!(
+            normalized_pattern_path(Path::new("/data/dots")),
+            PathBuf::from("/data/dots.tnpattern")
+        );
     }
 
     #[test]
@@ -15087,6 +18854,26 @@ mod tests {
             .shape_settings()
             .unwrap();
         assert!((edited_settings.base_channel.scale - 0.8).abs() < 1e-9);
+        ui.channel_scope.set_selected(1); // Cyan only; color is now editable.
+        drain_ui_callbacks();
+        assert!(ui.web_color.is_sensitive());
+        assert!(ui.web_color.is_editable());
+        ui.web_color.set_text("#123456");
+        ui.web_color.activate();
+        drain_ui_callbacks();
+        let colored_settings = ui
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .unwrap()
+            .document()
+            .pattern_state
+            .shape_settings()
+            .unwrap();
+        assert_eq!(colored_settings.channels.c.color, "#123456");
+        ui.channel_scope.set_selected(0);
+        drain_ui_callbacks();
 
         let source = ui
             .state
@@ -15203,7 +18990,7 @@ mod tests {
             .unwrap();
         assert_eq!(profiled_curve_settings.shared_path, CurvePath::soft_wave());
         ui.update_editing_context();
-        assert_eq!(ui.editing_context.text(), "Curves · Cyan");
+        assert_eq!(ui.editing_context.text(), "Curve Pattern · Cyan");
 
         ui.dots.set_active(true);
         drain_ui_callbacks();
@@ -15328,12 +19115,155 @@ mod tests {
         drain_ui_callbacks();
         assert_eq!(ui.web_target.model().unwrap(), target_model);
         assert!(!ui.state.borrow().syncing_controls);
+
+        // A project-embedded pattern must return to the ordinary channel
+        // styling surface after it is installed.  This guards the regression
+        // where the summary-only custom page hid the channel controls and
+        // made the per-channel seed/sampler settings unreachable.
+        let source = ui
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .unwrap()
+            .document()
+            .source
+            .clone();
+        let pattern_document = Document::new_with_artboard(source, 320, 220);
+        let custom_draft = PatternEditorDraft {
+            name: "Channel Controls Regression".into(),
+            placement: PatternPlacement::Grid,
+            density: 24.0,
+            spacing: 72.0,
+            x_grid_mode: PatternGridMode::Straight,
+            y_grid_mode: PatternGridMode::Straight,
+            x_grid_curve: 0.0,
+            y_grid_curve: 0.0,
+            curve_function: PatternCurveFunction::Sine,
+            x_spacing: 24.0,
+            y_spacing: 20.0,
+            curve_spacing: 20.0,
+            random_dispersion: PatternRandomDispersion::Uniform,
+            random_size_response: 1.0,
+            point_definition: PatternPointDefinition::Intersections,
+            render_mode: PatternRenderMode::Points,
+            connection_mode: PatternConnectionMode::Linear,
+            jitter_factor: 0.0,
+            curve_path: CurvePath::soft_wave(),
+        };
+        let (definition, instance) =
+            pattern_editor_recipe(&pattern_document, &custom_draft).unwrap();
+        let mut custom = DocumentEditor::new(pattern_document);
+        assert!(custom.install_and_select_embedded_pattern(definition, instance));
+        ui.state.borrow_mut().editor = Some(custom);
+        ui.sync_controls();
+        drain_ui_callbacks();
+        assert_eq!(
+            ui.treatment_modes.visible_child_name().as_deref(),
+            Some("web")
+        );
+        ui.channel_scope.set_selected(1);
+        drain_ui_callbacks();
+        assert_eq!(
+            ui.channel_panel_stack.visible_child_name().as_deref(),
+            Some(OutputChannelId::CmykCyan.stable_id())
+        );
+        assert!(ui.web_coverage.is_sensitive());
+        assert!(ui.channel_controls[0].point_sampler.is_sensitive());
+        // Sampling Detail is a per-channel control in the ordinary channel
+        // styling surface.  Exercise the production Scale callback after a
+        // custom recipe is selected; the value must reach both the typed
+        // channel settings and the embedded recipe instance used by render.
+        ui.channel_scope.set_selected(4); // Black only; projects to web target.
+        drain_ui_callbacks();
+        let before_detail = {
+            let state = ui.state.borrow();
+            let document = state.editor.as_ref().unwrap().document();
+            let settings = document.pattern_state.shape_settings().unwrap();
+            let output = toniator::generate_document_pattern_output(document).unwrap();
+            let marks = match output {
+                toniator::CanonicalPatternOutput::Marks(output) => output.geometry.marks.len(),
+                _ => panic!("custom channel-control recipe must emit marks"),
+            };
+            (settings.channels.k.resolution_scale, marks)
+        };
+        ui.web_detail.set_value(2.0);
+        drain_ui_callbacks();
+        let after_detail = {
+            let state = ui.state.borrow();
+            let document = state.editor.as_ref().unwrap().document();
+            let settings = document.pattern_state.shape_settings().unwrap();
+            let embedded = document
+                .pattern_state
+                .selected_embedded_pattern()
+                .expect("custom pattern remains selected after channel edit");
+            let output = toniator::generate_document_pattern_output(document).unwrap();
+            let marks = match output {
+                toniator::CanonicalPatternOutput::Marks(output) => output.geometry.marks.len(),
+                _ => panic!("custom channel-control recipe must emit marks"),
+            };
+            let embedded_value = number_value(
+                channel_instance_value(
+                    &embedded.instance,
+                    "channel.cmyk.black",
+                    "resolution-scale",
+                ),
+                0.0,
+            );
+            (settings.channels.k.resolution_scale, embedded_value, marks)
+        };
+        assert_eq!(before_detail.0, 1.0);
+        assert_eq!(after_detail.0, 2.0);
+        assert_eq!(after_detail.1, 2.0);
+        assert_ne!(before_detail.1, after_detail.2);
+        let custom_rgb = ui
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .unwrap()
+            .document()
+            .clone();
+        let mut custom_rgb_editor = DocumentEditor::new(custom_rgb.clone());
+        assert!(custom_rgb_editor.set_output_mode(OutputMode::RgbScreen));
+        ui.state.borrow_mut().editor = Some(custom_rgb_editor);
+        ui.sync_controls();
+        drain_ui_callbacks();
+        assert_eq!(ui.web_visible[0].label().as_deref(), Some("Red"));
+        assert_eq!(ui.web_visible[1].label().as_deref(), Some("Green"));
+        assert_eq!(ui.web_visible[2].label().as_deref(), Some("Blue"));
+        assert!(!ui.web_visible[3].is_visible());
+        ui.channel_scope.set_selected(1);
+        drain_ui_callbacks();
+        assert!(ui.web_color.is_editable());
+        assert!(ui.web_color.is_sensitive());
+        ui.web_color.set_text("#102030");
+        ui.web_color.activate();
+        drain_ui_callbacks();
+        let custom_rgb_document = ui
+            .state
+            .borrow()
+            .editor
+            .as_ref()
+            .unwrap()
+            .document()
+            .clone();
+        assert_eq!(
+            custom_rgb_document
+                .pattern_state
+                .shape_settings()
+                .unwrap()
+                .channels
+                .r
+                .color,
+            "#102030"
+        );
         ui.window.close();
     }
 
     fn contradictory_adapter_for(pattern: PatternId) -> RenderVariant {
-        match pattern {
-            PatternId::COMPATIBILITY_SHAPES_V1 => RenderVariant::WebCurveV1 {
+        match pattern.as_str() {
+            "compat.shapes.v1" => RenderVariant::WebCurveV1 {
                 settings: Box::new(WebCurveSettings {
                     output_width: 19,
                     output_height: 13,
@@ -15342,7 +19272,7 @@ mod tests {
                     ..Default::default()
                 }),
             },
-            PatternId::COMPATIBILITY_CURVES_V1 => RenderVariant::WebShapeV1 {
+            "compat.curves.v1" => RenderVariant::WebShapeV1 {
                 settings: Box::new(WebShapeSettings {
                     output_width: 17,
                     output_height: 11,
@@ -15352,7 +19282,8 @@ mod tests {
                     ..Default::default()
                 }),
             },
-            PatternId::WEIGHTED_VORONOI_V1 => RenderVariant::NativeBasicV1,
+            "weighted-voronoi.v1" => RenderVariant::NativeBasicV1,
+            _ => RenderVariant::NativeBasicV1,
         }
     }
 
@@ -15361,10 +19292,13 @@ mod tests {
         document: &Document,
         selected: PatternId,
     ) {
-        assert_eq!(document.pattern_state.selected_pattern_id(), Some(selected));
+        assert_eq!(
+            document.pattern_state.selected_pattern_id(),
+            Some(selected.clone())
+        );
         assert!(!ui.state.borrow().syncing_controls);
-        match selected {
-            PatternId::COMPATIBILITY_SHAPES_V1 => {
+        match selected.as_str() {
+            "compat.shapes.v1" => {
                 let settings = document.pattern_state.shape_settings().unwrap();
                 assert!(ui.dots.is_active());
                 assert!(!ui.curves.is_active());
@@ -15378,7 +19312,7 @@ mod tests {
                 );
                 assert!((ui.web_coverage.value() - settings.base_channel.scale).abs() < 1e-9);
             }
-            PatternId::COMPATIBILITY_CURVES_V1 => {
+            "compat.curves.v1" => {
                 let settings = document.pattern_state.curve_settings().unwrap();
                 assert!(!ui.dots.is_active());
                 assert!(ui.curves.is_active());
@@ -15390,7 +19324,8 @@ mod tests {
                 assert!((ui.curve_coverage.value() - settings.base_channel.scale).abs() < 1e-9);
                 assert!(ui.motif_controls.is_visible());
             }
-            PatternId::WEIGHTED_VORONOI_V1 => unreachable!("compatibility fixture"),
+            "weighted-voronoi.v1" => unreachable!("compatibility fixture"),
+            _ => unreachable!("compatibility fixture"),
         }
     }
 
@@ -15459,7 +19394,7 @@ mod tests {
             }
             let cmyk_authority = editor.document().pattern_state.clone();
             let mut contradictory = editor.document().clone();
-            contradictory.render = contradictory_adapter_for(selected);
+            contradictory.render = contradictory_adapter_for(selected.clone());
             ui.state.borrow_mut().editor = Some(DocumentEditor::new(contradictory));
             ui.sync_controls();
             drain_ui_callbacks();
@@ -15472,7 +19407,7 @@ mod tests {
                 .unwrap()
                 .document()
                 .clone();
-            assert_realized_output_fixture_authority(&ui, &cmyk_document, selected);
+            assert_realized_output_fixture_authority(&ui, &cmyk_document, selected.clone());
             assert_eq!(ui.output_mode.selected(), 0);
             assert_eq!(ui.preview_surface.selected(), 1);
             assert_eq!(
@@ -15509,13 +19444,33 @@ mod tests {
                 OutputModel::RgbScreen
             );
             assert_eq!(rgb_document.pattern_state, cmyk_authority);
-            assert_realized_output_fixture_authority(&ui, &rgb_document, selected);
+            assert_realized_output_fixture_authority(&ui, &rgb_document, selected.clone());
             assert_eq!(ui.output_mode.selected(), 1);
             assert_eq!(ui.preview_surface.selected(), 1);
             assert_eq!(
                 rgba_color(ui.preview_color.rgba()),
                 RgbaColor::opaque(0, 0, 0)
             );
+            assert_eq!(ui.channel_scope.model().unwrap().n_items(), 4);
+            if selected == PatternId::COMPATIBILITY_SHAPES_V1 {
+                assert_eq!(ui.web_target.model().unwrap().n_items(), 4);
+                assert_eq!(ui.web_visible[0].label().as_deref(), Some("Red"));
+                assert_eq!(ui.web_visible[1].label().as_deref(), Some("Green"));
+                assert_eq!(ui.web_visible[2].label().as_deref(), Some("Blue"));
+                assert!(!ui.web_visible[3].is_visible());
+                ui.channel_scope.set_selected(1);
+                drain_ui_callbacks();
+                assert!(ui.web_color.is_editable());
+                assert!(ui.web_color.is_sensitive());
+                ui.channel_scope.set_selected(0);
+                drain_ui_callbacks();
+            } else {
+                assert_eq!(ui.curve_target.model().unwrap().n_items(), 4);
+                assert_eq!(ui.curve_visible[0].label().as_deref(), Some("Red"));
+                assert_eq!(ui.curve_visible[1].label().as_deref(), Some("Green"));
+                assert_eq!(ui.curve_visible[2].label().as_deref(), Some("Blue"));
+                assert!(!ui.curve_visible[3].is_visible());
+            }
             assert_eq!(rgb_document.appearance.export_background, export_background);
             assert_eq!(ui.export_background.selected(), 1);
             assert_eq!(
@@ -15530,7 +19485,7 @@ mod tests {
                 .inactive_cmyk
                 .as_mut()
                 .expect("CMYK state is cached while RGB is active")
-                .render = contradictory_adapter_for(selected);
+                .render = contradictory_adapter_for(selected.clone());
             ui.state.borrow_mut().editor = Some(DocumentEditor::new(inactive_contradiction));
             ui.sync_controls();
             drain_ui_callbacks();
@@ -15542,12 +19497,13 @@ mod tests {
                 .unwrap()
                 .document()
                 .clone();
-            assert_realized_output_fixture_authority(&ui, &active_rgb_document, selected);
+            assert_realized_output_fixture_authority(&ui, &active_rgb_document, selected.clone());
 
-            match selected {
-                PatternId::COMPATIBILITY_SHAPES_V1 => ui.web_polygon_sides.set_value(3.0),
-                PatternId::COMPATIBILITY_CURVES_V1 => ui.curve_weight.set_value(61.0),
-                PatternId::WEIGHTED_VORONOI_V1 => unreachable!("compatibility fixture"),
+            match selected.as_str() {
+                "compat.shapes.v1" => ui.web_polygon_sides.set_value(3.0),
+                "compat.curves.v1" => ui.curve_weight.set_value(61.0),
+                "weighted-voronoi.v1" => unreachable!("compatibility fixture"),
+                _ => unreachable!("compatibility fixture"),
             }
             drain_ui_callbacks();
             let edited_rgb_document = ui
@@ -15558,8 +19514,8 @@ mod tests {
                 .unwrap()
                 .document()
                 .clone();
-            match selected {
-                PatternId::COMPATIBILITY_SHAPES_V1 => assert_eq!(
+            match selected.as_str() {
+                "compat.shapes.v1" => assert_eq!(
                     edited_rgb_document
                         .pattern_state
                         .shape_settings()
@@ -15567,7 +19523,7 @@ mod tests {
                         .polygon_sides,
                     3
                 ),
-                PatternId::COMPATIBILITY_CURVES_V1 => assert!(
+                "compat.curves.v1" => assert!(
                     (edited_rgb_document
                         .pattern_state
                         .curve_settings()
@@ -15577,9 +19533,10 @@ mod tests {
                         .abs()
                         < 1e-9
                 ),
-                PatternId::WEIGHTED_VORONOI_V1 => unreachable!("compatibility fixture"),
+                "weighted-voronoi.v1" => unreachable!("compatibility fixture"),
+                _ => unreachable!("compatibility fixture"),
             }
-            assert_realized_output_fixture_authority(&ui, &edited_rgb_document, selected);
+            assert_realized_output_fixture_authority(&ui, &edited_rgb_document, selected.clone());
 
             ui.output_mode.set_selected(0);
             drain_ui_callbacks();
@@ -15598,7 +19555,11 @@ mod tests {
                 OutputModel::CmykPrint
             );
             assert_eq!(restored_cmyk_document.pattern_state, cmyk_authority);
-            assert_realized_output_fixture_authority(&ui, &restored_cmyk_document, selected);
+            assert_realized_output_fixture_authority(
+                &ui,
+                &restored_cmyk_document,
+                selected.clone(),
+            );
             assert_eq!(
                 restored_cmyk_document.appearance.preview_surface,
                 cmyk_preview
@@ -15634,7 +19595,7 @@ mod tests {
                 undone_rgb_document.pattern_state,
                 edited_rgb_document.pattern_state
             );
-            assert_realized_output_fixture_authority(&ui, &undone_rgb_document, selected);
+            assert_realized_output_fixture_authority(&ui, &undone_rgb_document, selected.clone());
             ui.redo();
             drain_ui_callbacks();
             let redone_cmyk_document = ui
@@ -15646,7 +19607,7 @@ mod tests {
                 .document()
                 .clone();
             assert_eq!(redone_cmyk_document.pattern_state, cmyk_authority);
-            assert_realized_output_fixture_authority(&ui, &redone_cmyk_document, selected);
+            assert_realized_output_fixture_authority(&ui, &redone_cmyk_document, selected.clone());
             assert_eq!(ui.output_mode.model().unwrap(), output_model);
         }
 
