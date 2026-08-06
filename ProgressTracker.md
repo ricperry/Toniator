@@ -57,7 +57,7 @@ source sampling, and GTK remain unimplemented. See the contract in
 
 ### Stages 4–5 — first complete vertical slice
 
-**Stage 4 — Accepted awaiting checkpoint.** It adds byte-boundary PNG/SVG source
+**Stage 4 — Complete at commit `9d4f49b`.** It adds byte-boundary PNG/SVG source
 decoding, deterministic straight-sRGB source fields with independent alpha and
 linear-light Rec.709 luminance, clamped `StretchToCanvas` sampling, canonical
 circular-mark realization from immutable Stage 3 sites, and headless compact
