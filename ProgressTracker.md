@@ -44,7 +44,8 @@ stages must use both without modifying them; derived artifacts belong under
 
 ### Stage 3 — straight-guide family output
 
-**Planned; not authorized or started.** See the bounded contract in
+**Accepted awaiting checkpoint.** Parent review and user acceptance are
+complete; the bounded implementation is awaiting its local checkpoint. See the contract in
 [the Stage 3 plan](docs/GREENFIELD_REWRITE_PLAN.md#stage-3--straight-guide-family-output-next-bounded-stage).
 
 ### Stages 4–5 — first complete vertical slice

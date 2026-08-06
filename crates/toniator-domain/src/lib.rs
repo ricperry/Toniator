@@ -12,6 +12,10 @@ pub struct DocumentId(pub u64);
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PatternDefinitionId(pub u64);
 
+/// A stable identifier for one structural guide dimension.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GuideDimensionId(pub u64);
+
 /// A stable identifier for a channel owned by a document.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ChannelId(pub u64);

@@ -7,6 +7,14 @@ use std::{error::Error, fmt};
 use toniator_domain::{
     ChannelId, CommandResult, Document, DocumentCommand, Revision, ValidationError,
 };
+use toniator_patterns::{GridFamilyOutput, evaluate_straight_grid};
+
+pub use toniator_patterns::{GridError, GridInspectRequest};
+
+/// Runs the bounded Stage 3 family evaluation through the shared headless boundary.
+pub fn inspect_straight_grid(request: &GridInspectRequest) -> Result<GridFamilyOutput, GridError> {
+    evaluate_straight_grid(request)
+}
 
 /// An immutable evaluation identity bound to one document revision and channel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

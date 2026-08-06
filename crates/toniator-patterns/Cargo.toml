@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+serde.workspace = true
 toniator-domain = { path = "../toniator-domain" }
 toniator-geometry = { path = "../toniator-geometry" }
 toniator-sampling = { path = "../toniator-sampling" }
