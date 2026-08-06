@@ -11,3 +11,5 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+toniator-domain = { path = "../toniator-domain" }
+toniator-engine = { path = "../toniator-engine" }
