@@ -6,10 +6,11 @@ use std::{error::Error, fmt};
 
 use serde::Serialize;
 use toniator_domain::{CanvasSpec, DensityMetric2D, GuideDimensionId};
-use toniator_geometry::{
-    AffineTransform2D, Bounds, GuideInstanceId, GuideIntersectionProvenance, IntersectionSite,
-    Point2, SiteId, SiteScope, StraightGuide, Vector2, projection_range,
+pub use toniator_geometry::{
+    AffineTransform2D, Bounds, CanonicalCircleMark, GuideInstanceId, GuideIntersectionProvenance,
+    IntersectionSite, Point2, SiteId, SiteScope, StraightGuide, Vector2, projection_range,
 };
+use toniator_sampling::{SamplingError, SourceComponent, SourceField, SourcePlacement};
 
 /// The finite antialiasing envelope included in every Stage 3 generation plan.
 pub const ANTIALIAS_MARGIN: f64 = 1.0;
@@ -54,6 +55,362 @@ pub struct GridFamilyOutput {
     pub coverage: [GuideCoverage; 2],
     pub guides: Vec<StraightGuide>,
     pub sites: Vec<IntersectionSite>,
+}
+
+/// Immutable, renderer-independent circular realization of an existing family.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CircularMarkRealization {
+    pub family_fingerprint: String,
+    pub realization_fingerprint: String,
+    pub source_identity: toniator_sampling::SourceIdentity,
+    pub source_component: SourceComponent,
+    pub placement: SourcePlacement,
+    pub response: MarkResponse,
+    pub marks: Vec<CanonicalCircleMark>,
+}
+
+impl CircularMarkRealization {
+    pub fn has_only_finite_marks(&self) -> bool {
+        self.marks
+            .iter()
+            .all(|mark| mark.center.is_finite() && mark.radius.is_finite())
+    }
+}
+
+/// The bounded diameter response used to realize canonical radii.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct MarkResponse {
+    pub minimum_size: f64,
+    pub maximum_size: f64,
+}
+
+/// A realization-boundary failure. Family generation errors remain `GridError`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RealizationError {
+    path: &'static str,
+    message: &'static str,
+}
+
+impl RealizationError {
+    pub const fn new(path: &'static str, message: &'static str) -> Self {
+        Self { path, message }
+    }
+
+    pub const fn path(&self) -> &'static str {
+        self.path
+    }
+
+    pub const fn message(&self) -> &'static str {
+        self.message
+    }
+}
+
+impl fmt::Display for RealizationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}: {}", self.path, self.message)
+    }
+}
+
+impl Error for RealizationError {}
+
+impl From<SamplingError> for RealizationError {
+    fn from(error: SamplingError) -> Self {
+        Self::new(error.path(), error.message())
+    }
+}
+
+/// Realizes every supplied family site in its existing stable order.
+///
+/// This function deliberately receives `GridFamilyOutput` rather than a grid
+/// request so a size change cannot recreate guides, sites, or provenance.
+pub fn realize_circular_marks(
+    family: &GridFamilyOutput,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    placement: SourcePlacement,
+    component: SourceComponent,
+    response: MarkResponse,
+) -> Result<CircularMarkRealization, RealizationError> {
+    validate_response(response)?;
+    if !family.has_only_finite_geometry() {
+        return Err(RealizationError::new(
+            "realization.family",
+            "family geometry must be finite",
+        ));
+    }
+    let mut marks = Vec::with_capacity(family.sites.len());
+    for site in &family.sites {
+        let sample = source.sample(site.position, canvas, placement, component)?;
+        if !sample.is_finite() {
+            return Err(RealizationError::new(
+                "realization.sample",
+                "sample must be finite",
+            ));
+        }
+        let ink = (1.0 - sample).clamp(0.0, 1.0);
+        let diameter =
+            response.minimum_size + ink * (response.maximum_size - response.minimum_size);
+        let radius = diameter / 2.0;
+        let mark = CanonicalCircleMark::new(
+            site.id,
+            site.position,
+            radius,
+            site.scope,
+            site.provenance.clone(),
+        )
+        .ok_or(RealizationError::new(
+            "realization.mark",
+            "mark geometry must be finite",
+        ))?;
+        marks.push(mark);
+    }
+    let output = CircularMarkRealization {
+        family_fingerprint: family.family_fingerprint.clone(),
+        realization_fingerprint: realization_fingerprint(
+            family, source, placement, component, response,
+        ),
+        source_identity: source.identity().clone(),
+        source_component: component,
+        placement,
+        response,
+        marks,
+    };
+    output
+        .has_only_finite_marks()
+        .then_some(output)
+        .ok_or(RealizationError::new(
+            "realization.mark",
+            "realization produced non-finite marks",
+        ))
+}
+
+/// Maps a normalized sampled luminance to radius using the authored diameter.
+pub fn radius_from_luminance(
+    luminance: f64,
+    response: MarkResponse,
+) -> Result<f64, RealizationError> {
+    validate_response(response)?;
+    if !luminance.is_finite() {
+        return Err(RealizationError::new(
+            "realization.luminance",
+            "value must be finite",
+        ));
+    }
+    let ink = (1.0 - luminance).clamp(0.0, 1.0);
+    Ok((response.minimum_size + ink * (response.maximum_size - response.minimum_size)) / 2.0)
+}
+
+fn validate_response(response: MarkResponse) -> Result<(), RealizationError> {
+    if !response.minimum_size.is_finite() || !response.maximum_size.is_finite() {
+        return Err(RealizationError::new(
+            "realization.response",
+            "diameters must be finite",
+        ));
+    }
+    if response.minimum_size < 2.0
+        || response.maximum_size > 9.0
+        || response.minimum_size > response.maximum_size
+    {
+        return Err(RealizationError::new(
+            "realization.response",
+            "diameters must satisfy 2.0 <= minimum <= maximum <= 9.0",
+        ));
+    }
+    Ok(())
+}
+
+fn realization_fingerprint(
+    family: &GridFamilyOutput,
+    source: &SourceField,
+    placement: SourcePlacement,
+    component: SourceComponent,
+    response: MarkResponse,
+) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    let placement = match placement {
+        SourcePlacement::StretchToCanvas => 1_u8,
+    };
+    let component = match component {
+        SourceComponent::Luminance => 1_u8,
+        SourceComponent::Alpha => 2_u8,
+    };
+    let format = match source.identity().format {
+        toniator_sampling::SourceFormat::Png => 1_u8,
+        toniator_sampling::SourceFormat::Svg => 2_u8,
+    };
+    for byte in b"toniator-stage-4-circular-realization-v1"
+        .iter()
+        .copied()
+        .chain(family.family_fingerprint.bytes())
+        .chain(source.identity().content_hash.bytes())
+        .chain(source.identity().decoded_pixel_hash.bytes())
+        .chain([format, placement, component])
+        .chain(source.identity().width.to_le_bytes())
+        .chain(source.identity().height.to_le_bytes())
+        .chain(response.minimum_size.to_bits().to_le_bytes())
+        .chain(response.maximum_size.to_bits().to_le_bytes())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("fnv1a64:{hash:016x}")
+}
+
+#[cfg(test)]
+mod realization_tests {
+    use super::*;
+    use toniator_sampling::{SourceFormatHint, decode_source};
+
+    fn family() -> GridFamilyOutput {
+        evaluate_straight_grid(&GridInspectRequest {
+            canvas: CanvasSpec {
+                width: 90.0,
+                height: 60.0,
+            },
+            density: DensityMetric2D {
+                across_x: 9.0,
+                across_y: 6.0,
+                aspect_locked: true,
+            },
+            rotation_degrees: 17.0,
+            translation_x: 3.25,
+            translation_y: -4.5,
+            guard_steps: 2,
+            support_radius: 4.5,
+        })
+        .unwrap()
+    }
+
+    fn field() -> SourceField {
+        let bytes = std::fs::read(format!(
+            "{}/../../assets/raster-sample.png",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        decode_source(&bytes, SourceFormatHint::Png).unwrap()
+    }
+
+    #[test]
+    fn diameter_response_uses_luminance_and_stores_radius() {
+        let response = MarkResponse {
+            minimum_size: 2.0,
+            maximum_size: 9.0,
+        };
+        assert_eq!(radius_from_luminance(0.0, response).unwrap(), 4.5);
+        assert_eq!(radius_from_luminance(0.5, response).unwrap(), 2.75);
+        assert_eq!(radius_from_luminance(1.0, response).unwrap(), 1.0);
+        assert!(radius_from_luminance(f64::NAN, response).is_err());
+        assert!(
+            radius_from_luminance(
+                0.5,
+                MarkResponse {
+                    minimum_size: 1.0,
+                    maximum_size: 9.0
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn size_changes_reuse_every_site_and_keep_guards_without_clipping() {
+        let family = family();
+        let canvas = CanvasSpec {
+            width: 90.0,
+            height: 60.0,
+        };
+        let first = realize_circular_marks(
+            &family,
+            &field(),
+            &canvas,
+            SourcePlacement::StretchToCanvas,
+            SourceComponent::Luminance,
+            MarkResponse {
+                minimum_size: 2.0,
+                maximum_size: 9.0,
+            },
+        )
+        .unwrap();
+        let second = realize_circular_marks(
+            &family,
+            &field(),
+            &canvas,
+            SourcePlacement::StretchToCanvas,
+            SourceComponent::Luminance,
+            MarkResponse {
+                minimum_size: 3.0,
+                maximum_size: 8.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(first.family_fingerprint, family.family_fingerprint);
+        assert_eq!(first.marks.len(), family.sites.len());
+        assert!(
+            first
+                .marks
+                .iter()
+                .any(|mark| mark.scope == SiteScope::Guard)
+        );
+        for ((mark_a, mark_b), site) in first.marks.iter().zip(&second.marks).zip(&family.sites) {
+            assert_eq!(mark_a.source_site_id, site.id);
+            assert_eq!(mark_a.center, site.position);
+            assert_eq!(mark_a.scope, site.scope);
+            assert_eq!(mark_a.provenance, site.provenance);
+            assert_eq!(mark_a.source_site_id, mark_b.source_site_id);
+            assert_eq!(mark_a.center, mark_b.center);
+        }
+        assert!(
+            first
+                .marks
+                .iter()
+                .zip(&second.marks)
+                .any(|(left, right)| left.radius != right.radius)
+        );
+        assert_ne!(
+            first.realization_fingerprint,
+            second.realization_fingerprint
+        );
+    }
+
+    #[test]
+    fn canonical_marks_and_fingerprint_are_presentation_independent() {
+        let family = family();
+        let canvas = CanvasSpec {
+            width: 90.0,
+            height: 60.0,
+        };
+        let left = realize_circular_marks(
+            &family,
+            &field(),
+            &canvas,
+            SourcePlacement::StretchToCanvas,
+            SourceComponent::Luminance,
+            MarkResponse {
+                minimum_size: 2.0,
+                maximum_size: 9.0,
+            },
+        )
+        .unwrap();
+        // Color, opacity, and visibility have no realization inputs by design.
+        let right = realize_circular_marks(
+            &family,
+            &field(),
+            &canvas,
+            SourcePlacement::StretchToCanvas,
+            SourceComponent::Luminance,
+            MarkResponse {
+                minimum_size: 2.0,
+                maximum_size: 9.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&left.marks).unwrap(),
+            serde_json::to_vec(&right.marks).unwrap()
+        );
+        assert_eq!(left.realization_fingerprint, right.realization_fingerprint);
+        assert!(left.has_only_finite_marks());
+    }
 }
 
 impl GridFamilyOutput {

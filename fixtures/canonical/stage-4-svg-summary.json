@@ -1,0 +1,150 @@
+{
+    "family_fingerprint": "fnv1a64:993b978fba833a8c",
+    "fingerprint_proof": {
+        "excludes_color_opacity_visibility": true,
+        "statement": "canonical marks and realization fingerprint are computed before presentation"
+    },
+    "marks": {
+        "canvas": 5402,
+        "guard": 4902,
+        "nonfinite": 0,
+        "total": 10304
+    },
+    "presentation": {
+        "color": "#00b7ff",
+        "opacity": 0.72,
+        "visible": true
+    },
+    "radius": {
+        "maximum": 4.460236,
+        "mean": 3.660861,
+        "minimum": 1.0
+    },
+    "realization_fingerprint": "fnv1a64:48a31c173e2293d0",
+    "representative_marks": [
+        {
+            "center": {
+                "x": 49.2866037859317,
+                "y": -298.56529482809856
+            },
+            "id": {
+                "first_dimension_id": 1,
+                "first_index": -11,
+                "second_dimension_id": 2,
+                "second_index": -15
+            },
+            "radius": 2.3864701241813178,
+            "scope": "guard"
+        },
+        {
+            "center": {
+                "x": 46.36288673870433,
+                "y": -289.0022472684682
+            },
+            "id": {
+                "first_dimension_id": 1,
+                "first_index": -11,
+                "second_dimension_id": 2,
+                "second_index": -14
+            },
+            "radius": 2.3756328692911266,
+            "scope": "guard"
+        },
+        {
+            "center": {
+                "x": 43.43916969147696,
+                "y": -279.4391997088378
+            },
+            "id": {
+                "first_dimension_id": 1,
+                "first_index": -11,
+                "second_dimension_id": 2,
+                "second_index": -13
+            },
+            "radius": 2.3707326556183306,
+            "scope": "guard"
+        },
+        {
+            "center": {
+                "x": 352.6242772714413,
+                "y": -59.42881529308835
+            },
+            "id": {
+                "first_dimension_id": 1,
+                "first_index": 25,
+                "second_dimension_id": 2,
+                "second_index": -1
+            },
+            "radius": 3.2966529603038497,
+            "scope": "guard"
+        },
+        {
+            "center": {
+                "x": 504.29311401419614,
+                "y": 60.13942447441676
+            },
+            "id": {
+                "first_dimension_id": 1,
+                "first_index": 43,
+                "second_dimension_id": 2,
+                "second_index": 6
+            },
+            "radius": 3.6689962149255497,
+            "scope": "canvas"
+        },
+        {
+            "center": {
+                "x": 707.2489333957126,
+                "y": 80.36157518044268
+            },
+            "id": {
+                "first_dimension_id": 1,
+                "first_index": 63,
+                "second_dimension_id": 2,
+                "second_index": 2
+            },
+            "radius": 3.8011073649307017,
+            "scope": "canvas"
+        },
+        {
+            "center": {
+                "x": 847.650348654438,
+                "y": 886.6415777808711
+            },
+            "id": {
+                "first_dimension_id": 1,
+                "first_index": 100,
+                "second_dimension_id": 2,
+                "second_index": 75
+            },
+            "radius": 4.1192189477229455,
+            "scope": "guard"
+        },
+        {
+            "center": {
+                "x": 844.7266316072105,
+                "y": 896.2046253405015
+            },
+            "id": {
+                "first_dimension_id": 1,
+                "first_index": 100,
+                "second_dimension_id": 2,
+                "second_index": 76
+            },
+            "radius": 4.1190256081064955,
+            "scope": "guard"
+        }
+    ],
+    "source": {
+        "content_hash": "sha256:42eb5e23111a5dbad66f2b1802a7cc06391c7ede829b99eb28aeb1ac91596e2e",
+        "decoded_pixel_hash": "sha256:cf28b0ab640991969d9a5936be85dfd552867125950362495c69b1ab99f94fb7",
+        "format": "svg",
+        "height": 620,
+        "svg_text": {
+            "font_policy": "system sans-serif fallback required",
+            "has_live_text_node": true,
+            "rendered_glyph_coverage": true
+        },
+        "width": 900
+    }
+}

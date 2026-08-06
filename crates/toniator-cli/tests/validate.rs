@@ -109,3 +109,136 @@ fn inspect_grid_accepts_negative_offsets_and_emits_deterministic_json() {
     );
     fs::remove_file(output_path).expect("remove temporary artifact");
 }
+
+#[test]
+fn inspect_marks_compact_summaries_match_both_canonical_fixtures() {
+    for (source, fixture) in [
+        (
+            "../../assets/raster-sample.png",
+            "../../fixtures/canonical/stage-4-raster-summary.json",
+        ),
+        (
+            "../../assets/vector-sample.svg",
+            "../../fixtures/canonical/stage-4-svg-summary.json",
+        ),
+    ] {
+        let output_path = std::env::temp_dir().join(format!(
+            "toniator-stage-4-{}.json",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let output = Command::new(env!("CARGO_BIN_EXE_toniator"))
+            .args([
+                "inspect",
+                "marks",
+                "--source",
+                source,
+                "--output",
+                output_path.to_str().unwrap(),
+                "--canvas",
+                "900x600",
+                "--density-x",
+                "90.0",
+                "--density-y",
+                "60.0",
+                "--rotation",
+                "17.0",
+                "--offset-x",
+                "3.25",
+                "--offset-y",
+                "-4.5",
+                "--guard-steps",
+                "2",
+                "--support-radius",
+                "4.5",
+                "--source-component",
+                "luminance",
+                "--size-min",
+                "2.0",
+                "--size-max",
+                "9.0",
+                "--color",
+                "#00b7ff",
+                "--opacity",
+                "0.72",
+                "--summary",
+                "--format",
+                "json",
+            ])
+            .output()
+            .expect("CLI runs");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let actual: serde_json::Value =
+            serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
+        let expected: serde_json::Value =
+            serde_json::from_slice(&fs::read(fixture).unwrap()).unwrap();
+        assert_eq!(actual, expected);
+        fs::remove_file(output_path).unwrap();
+    }
+}
+
+#[test]
+fn inspect_marks_presentation_changes_leave_geometry_summary_identical() {
+    let mut summaries = Vec::new();
+    for (color, opacity) in [("#00b7ff", "0.72"), ("#ff5500", "0.19")] {
+        let output = Command::new(env!("CARGO_BIN_EXE_toniator"))
+            .args([
+                "inspect",
+                "marks",
+                "--source",
+                "../../assets/raster-sample.png",
+                "--canvas",
+                "900x600",
+                "--density-x",
+                "90.0",
+                "--density-y",
+                "60.0",
+                "--rotation",
+                "17.0",
+                "--offset-x",
+                "3.25",
+                "--offset-y",
+                "-4.5",
+                "--guard-steps",
+                "2",
+                "--support-radius",
+                "4.5",
+                "--source-component",
+                "luminance",
+                "--size-min",
+                "2.0",
+                "--size-max",
+                "9.0",
+                "--color",
+                color,
+                "--opacity",
+                opacity,
+                "--summary",
+                "--format",
+                "json",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        summaries.push(serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap());
+    }
+    let [mut first, mut second] = summaries.try_into().unwrap();
+    let presentation_a = first
+        .as_object_mut()
+        .unwrap()
+        .remove("presentation")
+        .unwrap();
+    let presentation_b = second
+        .as_object_mut()
+        .unwrap()
+        .remove("presentation")
+        .unwrap();
+    assert_ne!(presentation_a, presentation_b);
+    assert_eq!(first, second);
+}

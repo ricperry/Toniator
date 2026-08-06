@@ -234,6 +234,37 @@ pub struct IntersectionSite {
     pub provenance: GuideIntersectionProvenance,
 }
 
+/// A renderer-independent circular primitive realized from a family site.
+///
+/// The retained source identity, scope, and provenance make it possible to
+/// diagnose realization without allowing realization to regenerate sites.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CanonicalCircleMark {
+    pub source_site_id: SiteId,
+    pub center: Point2,
+    pub radius: f64,
+    pub scope: SiteScope,
+    pub provenance: GuideIntersectionProvenance,
+}
+
+impl CanonicalCircleMark {
+    pub fn new(
+        source_site_id: SiteId,
+        center: Point2,
+        radius: f64,
+        scope: SiteScope,
+        provenance: GuideIntersectionProvenance,
+    ) -> Option<Self> {
+        (center.is_finite() && radius.is_finite() && radius >= 0.0).then_some(Self {
+            source_site_id,
+            center,
+            radius,
+            scope,
+            provenance,
+        })
+    }
+}
+
 /// Project a collection of points onto a unit direction.
 pub fn projection_range(
     points: impl IntoIterator<Item = Point2>,

@@ -1,6 +1,6 @@
 # Toniator Progress Tracker
 
-Last updated: **2026-08-05**. The durable execution contract is
+Last updated: **2026-08-06**. The durable execution contract is
 [GREENFIELD_REWRITE_PLAN.md](docs/GREENFIELD_REWRITE_PLAN.md). Normative
 architecture remains in the five protected [Project Specification files](Project%20Specification/Addendum.md).
 
@@ -57,10 +57,16 @@ source sampling, and GTK remain unimplemented. See the contract in
 
 ### Stages 4–5 — first complete vertical slice
 
-**Planned.** Stage 4 covers source sampling, circular mark realization, and
-canonical marks without a renderer. Stage 5 covers shared RenderScene,
+**Stage 4 — Accepted awaiting checkpoint.** It adds byte-boundary PNG/SVG source
+decoding, deterministic straight-sRGB source fields with independent alpha and
+linear-light Rec.709 luminance, clamped `StretchToCanvas` sampling, canonical
+circular-mark realization from immutable Stage 3 sites, and headless compact
+`inspect marks` JSON summaries. Both baseline assets, their documented hashes,
+SVG live-text/font-policy diagnostics, guard-mark preservation, realization
+reuse, and presentation independence are covered by focused and workspace
+validation. No renderer or clipping is present. Stage 5 remains **Planned** and covers shared RenderScene,
 headless raster/SVG consumers, CLI render, final clipping, and artifact/golden
-inspection. Details and non-goals are in the plan; neither is started.
+inspection. Details and non-goals are in the plan; Stage 5 is not started.
 
 ### Stages 6–9+
 
