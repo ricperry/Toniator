@@ -58,6 +58,22 @@ The intended flow is `domain → geometry/sampling → patterns → render/io �
 engine → app or cli`; engine is the shared orchestration boundary, not a
 second state authority.
 
+## Baseline test artwork
+
+The tracked files `assets/raster-sample.png` and `assets/vector-sample.svg`
+are the project-wide source-artwork baselines. Relevant source loading,
+sampling, rendering, preview, and export stages must exercise both files in
+addition to any smaller synthetic fixtures. The PNG is a 1024×1024 RGBA image
+with nontrivial alpha. The 900×620 SVG contains gradients, transparency, a
+stroked path, and a live `<text>` element.
+
+Keep these inputs byte-stable and write derived output under
+`target/validation/`. Their verified properties and SHA-256 values are
+recorded in `assets/README.md`. Replacing either baseline requires explicit
+approval and synchronized plan, fixture-integrity, and test updates. SVG tests
+must verify live-text handling, but must not use font-dependent exact raster
+pixels as portable goldens until the test provides a deterministic font.
+
 ## Working method and Git gates
 
 Work one short stage at a time. The parent names the exact allowed files and
@@ -226,14 +242,17 @@ start marks, rendering, or Stage 4.
 Add deterministic source sampling and circular mark realization plus canonical
 mark geometry; do not add a renderer. Ink amount is `1 - luminance`; authored
 diameter is linear `2.0..9.0`; store canonical radius. Color and opacity remain
-presentation. Prove shape-size changes reuse the same Stage 3 sites.
+presentation. Prove shape-size changes reuse the same Stage 3 sites. Exercise
+both tracked baseline inputs through the shared source-field boundary: verify
+PNG alpha semantics and SVG live-text handling under an explicit font policy.
 
 ### Stage 5 — RenderScene and preview/export consumers
 
 Consume the same `RenderScene` from a shared headless `RasterSurface` (for
 future preview and PNG) and SVG writer. Add CLI render with output-extension
 selection, RGB PNG black background, CMYK PNG white background, and an explicit
-transparent option. Clip only at final output.
+transparent option. Clip only at final output. Use both baseline inputs for
+cross-consumer parity checks and keep generated artifacts outside `assets/`.
 
 Use this fixed reference: 900×600, 90×60, rotation 17°, offsets 3.25/−4.5,
 channel color `#00b7ff`, opacity `0.72`. Inspect artifacts with `identify`,

@@ -25,5 +25,9 @@
   accepted/complete transitions and checkpoint hashes; evidence cannot
   substitute for user acceptance or a commit. Plan or roadmap changes require
   explicit user approval.
+- Treat `assets/raster-sample.png` and `assets/vector-sample.svg` as immutable
+  project-wide test inputs. Relevant source/sampling/render/export work must
+  exercise both; write derived artifacts under `target/validation/` and follow
+  the semantic text/font caveat in `assets/README.md`.
 - Do not commit, push, publish, deploy, delete implementations, or overwrite
   unrelated work without explicit authorization.

@@ -16,6 +16,10 @@ scope/status inputs, and validate the tracker against HEAD and the worktree.
 Evidence may explain a transition but cannot advance tracker status or replace
 parent review, user acceptance, or a checkpoint.
 
+For source, sampling, rendering, preview, or export evidence, record which
+baseline files from `assets/` were exercised and verify their documented
+SHA-256 values. Derived artifacts never replace the baseline inputs.
+
 Greenfield entries must state `generation: greenfield-rewrite`. Evidence from
 the legacy tree is invalid by default for greenfield decisions, even if an
 algorithm or workflow has a similar name. Do not write evidence under

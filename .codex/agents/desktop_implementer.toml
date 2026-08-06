@@ -14,6 +14,10 @@ updates. Do not request a separate reviewer when these checks are sufficient.
 Read `docs/GREENFIELD_REWRITE_PLAN.md` and `ProgressTracker.md` before work.
 Report a proposed tracker transition, but never mark a stage accepted or
 complete; edit the tracker only when the parent explicitly grants that path.
+For source, sampling, rendering, preview, or export work, exercise both
+project-wide inputs documented in `assets/README.md`. Never edit them; write
+derived artifacts under `target/validation/` and avoid font-dependent exact
+SVG text raster goldens unless the test supplies a deterministic font.
 Do not broaden product or architecture decisions, commit, push, publish, deploy, or delete existing implementations.
 If another writing agent is active, stop and report the conflict to the parent.
 

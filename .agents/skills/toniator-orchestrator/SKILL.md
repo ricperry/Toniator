@@ -15,6 +15,11 @@ acceptance, and commit. Routine tracker maintenance does not require the
 documentation maintainer; roadmap or plan changes require explicit user
 approval and synchronized plan/tracker updates.
 
+When a stage exercises source loading, sampling, rendering, preview, or
+export, include both project-wide inputs from `assets/` in its acceptance
+scope. Preserve their bytes, keep derived output under `target/validation/`,
+and apply the SVG live-text/font rule in `assets/README.md`.
+
 Use one writer for one short bounded stage. The parent settles the stage
 decision, grants exact paths and acceptance checks, then reviews the writer's
 report and evidence before handing off any later stage. A report is evidence,

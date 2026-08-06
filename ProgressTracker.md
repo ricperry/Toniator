@@ -34,6 +34,14 @@ recorded in the Stage 2 checkpoint. Verified summary:
   format/check/clippy/tests and architecture/CLI validation. No geometry,
   rendering, persistence, source decoding, async evaluation, or GTK.
 
+### Cross-stage baseline artwork fixtures
+
+**Accepted awaiting checkpoint.** `assets/raster-sample.png` is the canonical
+RGBA/alpha source fixture and `assets/vector-sample.svg` is the canonical SVG
+fixture with live text. Relevant source, sampling, render, preview, and export
+stages must use both without modifying them; derived artifacts belong under
+`target/validation/`.
+
 ### Stage 3 — straight-guide family output
 
 **Planned; not authorized or started.** See the bounded contract in
