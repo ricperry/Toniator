@@ -123,10 +123,18 @@ format/check/clippy/tests, architecture validation, valid and invalid CLI
 paths, and protected-spec/Legacy diffs. Stage 2 intentionally has no geometry,
 rendering, persistence, source decoding, async evaluation, or GTK.
 
-## Stage 3 — straight-guide family output (next bounded stage)
+## Stage 3 — straight-guide family output
 
-**Status: Planned; not authorized or started.** Implement only the bounded
-family-output slice below. Do not begin marks or rendering in this stage.
+**Status: Complete at `f60eb65`.** The accepted bounded family-output slice is
+implemented and checkpointed. It provides deterministic headless output for
+two rotated/translated straight-guide dimensions, analytical off-canvas guard
+coverage, intersection-site provenance/fingerprint, and the `inspect grid`
+JSON path. Verification passed the focused and workspace tests, strict
+Clippy/checks, architecture validation, and canonical JSON comparison. User
+acceptance is recorded, but point-site correctness was not visually confirmed
+on a plotted canvas because no visible-output stage exists yet. Marks,
+rendering, and Stage 4 remain unimplemented. The historical contract below
+remains the bounded scope; do not begin marks or rendering from it.
 
 ### Objective and invariant
 

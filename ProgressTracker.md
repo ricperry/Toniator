@@ -44,9 +44,16 @@ stages must use both without modifying them; derived artifacts belong under
 
 ### Stage 3 — straight-guide family output
 
-**Accepted awaiting checkpoint.** Parent review and user acceptance are
-complete; the bounded implementation is awaiting its local checkpoint. See the contract in
-[the Stage 3 plan](docs/GREENFIELD_REWRITE_PLAN.md#stage-3--straight-guide-family-output-next-bounded-stage).
+**Complete at commit `f60eb65`.** The accepted bounded implementation provides
+deterministic headless straight-guide family output: two rotated/translated
+guide dimensions, analytical off-canvas guard coverage, intersection sites
+with stable provenance/fingerprint, and canonical sorted JSON inspection.
+Focused crate and workspace tests, strict Clippy/checks, architecture
+validation, and the canonical JSON comparison passed. User acceptance is
+recorded, but point-site correctness was not visually confirmed on a plotted
+canvas because this stage has no visible-output path. Marks, rendering,
+source sampling, and GTK remain unimplemented. See the contract in
+[the Stage 3 plan](docs/GREENFIELD_REWRITE_PLAN.md#stage-3--straight-guide-family-output).
 
 ### Stages 4–5 — first complete vertical slice
 
