@@ -36,10 +36,12 @@ recorded in the Stage 2 checkpoint. Verified summary:
 
 ### Cross-stage baseline artwork fixtures
 
-**Complete at `8f3b759`.** `assets/raster-sample.png` is the canonical
-RGBA/alpha source fixture and `assets/vector-sample.svg` is the canonical SVG
-fixture with live text. Relevant source, sampling, render, preview, and export
-stages must use both without modifying them; derived artifacts belong under
+**Complete at `8f3b759`, extended at `8f4925d`.**
+`assets/raster-sample.png` is the canonical RGBA/alpha source fixture,
+`assets/vector-sample.svg` is the canonical SVG fixture with live text, and
+`assets/video-sample0001-0010.mp4` is reserved for future multiframe and
+animation validation. Relevant approved stages must use their applicable
+baselines without modifying them; derived artifacts belong under
 `target/validation/`.
 
 ### Stage 3 — straight-guide family output
@@ -80,9 +82,9 @@ out of scope. Details and non-goals are in the plan.
 
 ### Stages 6–9+
 
-**Stage 6 — Accepted awaiting checkpoint.** Authoritative document evaluation
-and the bounded Stage 3 family-output correction have passed parent review and
-user visual acceptance. Async
+**Stage 6 — Complete at commit `d8d1dc3`.** Authoritative document evaluation
+and the bounded Stage 3 family-output correction passed parent review, user
+visual acceptance, and the implementation checkpoint gate. Async
 scheduling/cancellation/caches; view-only
 GTK preview; command bindings/undo-redo/current persistence/editors; then
 newly scoped generalized families, connected/region output, multiframe, and
