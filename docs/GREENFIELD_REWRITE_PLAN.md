@@ -267,18 +267,357 @@ channel color `#00b7ff`, opacity `0.72`. Inspect artifacts with `identify`,
 `xmllint`, Inkscape SVG rasterization, ImageMagick RMSE `<= 0.02`, and visual
 side-by-side inspection before accepting goldens.
 
+Historical note: Stages 4 and 5 share implementation checkpoint `31f4cc9`.
+Stage 5 visual review prompted the accepted Stage 4 alpha-associated luminance
+correction. The accepted outputs remain derived validation artifacts under
+`target/validation/`, not committed binary goldens.
+
 The slice excludes curves, random, maze, Voronoi, regions/offset, video,
 animation UI, plugins, and legacy import. GTK editing remains a later stage.
 
-## Later roadmap (high level only)
+## Stage 6 — authoritative document evaluation
 
-- Stage 6: asynchronous scheduling, cancellation, caches, and revision safety.
-- Stage 7: view-only GTK preview.
-- Stage 8: command bindings, undo/redo, current persistence, and editors.
-- Stage 9+: generalized families, connected output, regions, multiframe
-  evaluation, and simple transitions. Each item receives a newly scoped and
-  approved short-stage contract before implementation; these are not settled
-  implementation specifications.
+**Status: Planned.** Replace the Stage 5 CLI's ad hoc render DTO as the primary
+pipeline entry with synchronous evaluation derived from one immutable
+authoritative document snapshot.
+
+### Stage 6 public contracts
+
+- Add an assigned `SourceReferenceId`, retaining `Unassigned`.
+- Extend `PatternDefinition` with the supported structural straight-grid
+  definition and circular-mark output declaration.
+- Add channel source mapping for `Luminance` or `Alpha` with
+  `StretchToCanvas`.
+- Constrain the supported circular-mark diameter to `2.0..=9.0` at the domain
+  boundary.
+- Add `DocumentSession::evaluation_snapshot(channel_id)`, atomically pairing a
+  document clone with its revision token.
+- Add an engine request containing that snapshot and matching resolved source
+  bytes.
+- Derive guard depth from the pattern definition and support radius from the
+  channel's maximum mark diameter.
+- Return the token, decoded source identity, immutable `RenderScene`, and
+  raster preview.
+- Route CLI `render` through this boundary. Add `-i`/`--input`, retaining
+  `--source` as an alias.
+
+### Stage 6 scope
+
+Allowed: domain, sampling type relocation/re-export, patterns, engine, CLI,
+focused tests, Cargo manifests, architecture validation, future plan/tracker
+text, and derived Stage 6 artifacts.
+
+Forbidden: async work, caches, GTK, persistence, undo, multiple-channel
+composition, new families or outputs, presets, Legacy, or specification edits.
+
+### Stage 6 tests and acceptance
+
+- Snapshot and token cannot be mismatched.
+- Missing channel/definition, unassigned or mismatched source, invalid mapping,
+  invalid size, and unsupported structure fail at stable boundary paths.
+- Commands continue to report the correct invalidation layer.
+- Both baseline assets preserve accepted Stage 5 geometry and visually
+  equivalent PNG/SVG output.
+- No accepted renderer semantics regress.
+
+Focused commands:
+
+```bash
+cargo test -p toniator-domain -p toniator-sampling -p toniator-patterns -p toniator-engine -p toniator-cli
+
+cargo run --bin toniator -- render \
+  -i assets/raster-sample.png \
+  -o target/validation/stage-6/raster.png \
+  --mode rgb --transparent \
+  --canvas 900x600 \
+  --density-x 90.0 --density-y 60.0 \
+  --rotation 17.0 --offset-x 3.25 --offset-y -4.5 \
+  --guard-steps 2 --source-component luminance \
+  --size-min 2.0 --size-max 9.0 \
+  --color '#00b7ff' --opacity 0.72
+
+cargo run --bin toniator -- render \
+  -i assets/vector-sample.svg \
+  -o target/validation/stage-6/vector.svg \
+  --mode rgb \
+  --canvas 900x600 \
+  --density-x 90.0 --density-y 60.0 \
+  --rotation 17.0 --offset-x 3.25 --offset-y -4.5 \
+  --guard-steps 2 --source-component luminance \
+  --size-min 2.0 --size-max 9.0 \
+  --color '#00b7ff' --opacity 0.72
+
+identify -verbose target/validation/stage-6/raster.png
+xmllint --noout target/validation/stage-6/vector.svg
+```
+
+**Stop condition:** Report document-derived identity parity and artifact
+inspection; do not start Stage 7.
+
+## Stage 7 — asynchronous scheduling and stale-result safety
+
+**Status: Planned.** Evaluate immutable Stage 6 requests off the frontend
+thread while ensuring superseded work cannot replace current output.
+
+### Stage 7 implementation contract
+
+- Use one engine-owned background worker and standard-library channels; no
+  async runtime.
+- Each submission owns its document snapshot, shares immutable source bytes,
+  and receives a monotonically increasing ticket.
+- A newer request cancels the active ticket and coalesces queued work to the
+  newest request.
+- Check cancellation before and after decode, family generation, realization,
+  scene construction, and rasterization.
+- Canceled work returns no partial output.
+- Callers must validate completion tokens against the current
+  `DocumentSession`.
+- Shutdown and `Drop` terminate and join the worker cleanly.
+
+Allowed: engine and tests, narrowly necessary domain token changes, Cargo
+manifests, and plan/tracker status.
+
+Forbidden: caches, GTK, UI callbacks, Tokio, worker pools, quality tiers,
+persistence, undo, or algorithm changes.
+
+### Stage 7 tests
+
+- Current completions are accepted; stale revisions are rejected.
+- Rapid N/N+1/N+2 submission exposes only N+2 as presentable.
+- Cancellation returns no partial geometry.
+- Errors retain their ticket and revision.
+- Scheduling does not change identities or pixels.
+- Shutdown does not leak or hang.
+- Both baseline sources complete through the scheduler.
+
+**Stop condition:** Report automated concurrency evidence; do not begin GTK or
+Stage 8 work.
+
+## Stage 8 — invalidation-aware derived caches
+
+**Status: Planned.** Reuse the highest valid pipeline layer without allowing
+caches to become authority.
+
+### Stage 8 implementation contract
+
+- Keep one bounded last-successful cache slot per active-channel layer: decoded
+  source, family output, realization, scene, and raster preview.
+- Typed keys include every relevant authoritative input.
+- Source keys include content, format, and decoder-contract identity.
+- Downstream keys include decoded-pixel identity so SVG font resolution remains
+  represented.
+- Cache entries are committed only after successful, uncanceled, current
+  evaluation.
+- Return read-only hit/miss diagnostics.
+- Never persist caches or expose mutable cached values.
+
+### Stage 8 tests
+
+- Exact repeat reuses every layer.
+- Presentation edits reuse source, family, and realization.
+- Mark-size edits reuse source and family.
+- Density, rotation, and translation reuse decoded source only.
+- Source edits reuse no downstream layer.
+- Failed, canceled, and stale evaluations do not replace cache entries.
+- Cached and uncached results are identical for both baseline assets.
+
+**Stop condition:** Report the reuse matrix and unchanged outputs; do not begin
+GTK.
+
+## Stage 9 — view-only GTK preview
+
+**Status: Planned.** Provide the first native GTK/libadwaita frontend over the
+Stage 6–8 engine pipeline.
+
+### Stage 9 implementation contract
+
+- Add GTK4/libadwaita dependencies only to `toniator-app`.
+- Use tracked Blueprint sources and GResource; generated `.ui` files remain in
+  Cargo `OUT_DIR`.
+- Create an `AdwApplicationWindow` with header bar, Open action, empty state,
+  loading state, error display, and fit-to-window canvas.
+- Support a normal file chooser and `toniator-app [PATH]`.
+- Opening artwork commits a new authoritative source reference and schedules
+  evaluation.
+- Display only a completion accepted by the current document revision.
+- Wrap the exact straight-sRGBA `RasterSurface` in a GDK memory texture.
+- Do not PNG-encode, flatten, checkerboard, or alter pixels for preview.
+- Treat the widget background explicitly as viewer presentation, not file
+  content.
+- Surface SVG live-text/system-font diagnostics.
+
+Allowed: `toniator-app`, Blueprint/GResource/build files, workspace dependency
+declarations, architecture validation, future plan/tracker text, and Stage 9
+validation artifacts.
+
+Forbidden: pattern/channel editing, undo, save, export UI, recent files,
+drag-and-drop, zoom tools, GTK geometry, or alternate rendering.
+
+### Stage 9 validation
+
+```bash
+cargo test -p toniator-app
+cargo check -p toniator-app --all-targets
+GDK_BACKEND=wayland cargo run --bin toniator-app -- assets/raster-sample.png
+GDK_BACKEND=wayland cargo run --bin toniator-app -- assets/vector-sample.svg
+```
+
+Manually inspect both sources for rotation, translation, mark response, edge
+clipping, alpha behavior, resize fitting, SVG text diagnostics, and
+stale-preview rejection during rapid source changes.
+
+**Stop condition:** User visual acceptance is required. Do not begin Stage 10
+automatically.
+
+## Stage 10 — headless undo and redo
+
+**Status: Planned.** Make authoritative commands reversible independently of
+GTK widget state.
+
+### Stage 10 public contract
+
+- Add `DocumentHistory` around `DocumentSession`.
+- Successful commands record authoritative before/after states and invalidation
+  results.
+- `undo()` and `redo()` each advance the current revision exactly once; old
+  revision numbers are never restored.
+- Undo/redo report the same affected channels and invalidation level as the
+  original transition.
+- Failed commands create no history.
+- A new successful command after undo clears redo.
+- Command coalescing is deferred.
+
+### Stage 10 tests
+
+- Round-trip every supported command, including source assignment and mapping.
+- Restore exact values and pattern-definition references.
+- Verify monotonic revisions and stale-token rejection.
+- Verify empty undo/redo and failed commands are no-ops.
+- Verify branching clears redo.
+- Render both baselines after state restoration.
+
+Forbidden: GTK bindings, persistence, serialized history, coalescing, or editor
+controls.
+
+**Stop condition:** Accept the headless history contract before persistence
+begins.
+
+## Stage 11 — portable `.toniator` container
+
+**Status: Planned.** Save the complete supported document and its exact source
+artwork in one portable file, then load and render it through the shared engine.
+
+### Stage 11 container format
+
+`.toniator` is a deterministic ZIP container, not plain JSON. Required entries
+are:
+
+```text
+document.json
+sources/<source-id>.png
+```
+
+or:
+
+```text
+document.json
+sources/<source-id>.svg
+```
+
+Rules:
+
+- `document.json` is versioned UTF-8 JSON with discrete `u32` schema versions.
+- Source entries contain the exact original PNG or SVG bytes without decoding
+  or recompression.
+- The manifest records source ID, entry name, format, byte length, SHA-256, and
+  optional non-authoritative display name.
+- Source paths on the original filesystem are not persisted or used during
+  loading.
+- Entries use a stable order and normalized timestamps.
+- Store entries without archive compression in version 1 for deterministic,
+  lossless byte preservation.
+- Reject duplicate required entries, missing entries, unsupported formats,
+  invalid paths, hash/length mismatches, oversized entries, and malformed
+  archives.
+- Read named entries directly; never extract archive paths to the filesystem.
+- Limit version-1 source and archive sizes to a documented safe boundary.
+- Unknown container or document versions fail clearly; migrations are not
+  implemented yet.
+
+### Stage 11 IO and CLI behavior
+
+- `toniator-io` owns ZIP layout, JSON DTO conversion, validation, and atomic
+  saving.
+- Loading returns a validated `Document` plus immutable embedded source bytes
+  matched to its `SourceReferenceId`.
+- Saving writes to a same-directory temporary file, flushes it, and atomically
+  renames it.
+- Add `toniator document create`.
+- Add `toniator validate -i file.toniator`.
+- Add `toniator render -i file.toniator -o output.png` and
+  `toniator render -i file.toniator -o output.svg`.
+- Document rendering uses saved state. CLI document overrides remain deferred.
+
+### Stage 11 tests
+
+- Exact round-trip of IDs, canvas, pattern definition, density, transform,
+  source mapping, size response, appearance, and source bytes.
+- Embedded PNG bytes exactly match `assets/raster-sample.png`.
+- Embedded SVG bytes exactly match `assets/vector-sample.svg`, including live
+  text.
+- Move the `.toniator` file to another directory and render successfully.
+- Create a document from a temporary source, remove that temporary external
+  source, and prove the container still renders.
+- Detect missing source entry, duplicate entry, changed bytes, hash mismatch,
+  malformed JSON, malformed ZIP, unsafe entry name, oversized entry, and
+  unknown version.
+- Save failure leaves an existing document intact.
+- Container-based and direct-source evaluation produce identical canonical
+  identities and rendered output.
+- SVG font-dependent decoded pixels remain environment-sensitive, but the
+  embedded original SVG bytes remain exact.
+
+Forbidden: external source references, GTK Open/Save integration, presets,
+migrations, recovery/recent files, legacy import, arbitrary attachments, or
+broad compatibility.
+
+**Stop condition:** User inspects both `.toniator` containers and their
+rendered PNG/SVG outputs. GTK document actions and editors require a separately
+approved Stage 12 plan.
+
+## Stage 12+ — GTK document actions and command-bound editors
+
+Stage 12 and later work is deliberately deferred. GTK Open/Save integration,
+document actions, command-bound pattern and channel editors, generalized
+families, connected and region output, multiframe evaluation, and simple
+transitions require separately scoped and approved short-stage contracts.
+
+## Common validation and Git gates
+
+Every stage ends with:
+
+```bash
+cargo fmt --all -- --check
+cargo check --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
+bash scripts/validate_architecture.sh
+git diff --check
+git status --short --branch
+sha256sum assets/raster-sample.png assets/vector-sample.svg
+```
+
+At each transition:
+
+1. Mark only the approved stage **In progress**.
+2. One writer implements only its allowlist.
+3. Record **Implemented awaiting review**.
+4. Obtain automated and, where applicable, visual acceptance.
+5. Mark **Accepted awaiting checkpoint**.
+6. Commit only after explicit authorization.
+7. Record the implementation SHA in a documentation closeout commit.
+8. Push only after explicit authorization and verify the upstream commit.
+9. Stop before the next stage.
 
 ## Legacy quarry procedure
 

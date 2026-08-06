@@ -603,6 +603,15 @@ pub fn evaluate_straight_grid(request: &GridInspectRequest) -> Result<GridFamily
                 second_index as f64 * dimensions[1].spacing,
             );
             let position = transform.apply_point(local);
+            // Coverage enumeration intentionally remains conservative in
+            // inverse-local space. Publish only intersections whose world-space
+            // Euclidean distance to the axis-aligned canvas is within the same
+            // support/AA/guard envelope used to plan that enumeration. This
+            // keeps required corner coverage while excluding Cartesian-product
+            // corners that cannot affect final marks or clipping.
+            if distance_to_canvas(position, document_canvas) > planning_margin {
+                continue;
+            }
             let first = GuideInstanceId::new(FIRST_DIMENSION_ID, first_index);
             let second = GuideInstanceId::new(SECOND_DIMENSION_ID, second_index);
             sites.push(IntersectionSite {
@@ -809,6 +818,24 @@ pub fn directional_spacing(
     Ok(frequency.recip())
 }
 
+fn distance_to_canvas(point: Point2, canvas: Bounds) -> f64 {
+    let dx = if point.x < canvas.min.x {
+        canvas.min.x - point.x
+    } else if point.x > canvas.max.x {
+        point.x - canvas.max.x
+    } else {
+        0.0
+    };
+    let dy = if point.y < canvas.min.y {
+        canvas.min.y - point.y
+    } else if point.y > canvas.max.y {
+        point.y - canvas.max.y
+    } else {
+        0.0
+    };
+    dx.hypot(dy)
+}
+
 fn fingerprint(request: &GridInspectRequest, spacing_x: f64, spacing_y: f64) -> String {
     let values = [
         request.canvas.width,
@@ -823,7 +850,7 @@ fn fingerprint(request: &GridInspectRequest, spacing_x: f64, spacing_y: f64) -> 
         spacing_y,
     ];
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for byte in b"toniator-stage-3-straight-grid-v1"
+    for byte in b"toniator-stage-3-straight-grid-v2-world-support-envelope"
         .iter()
         .copied()
         .chain(request.guard_steps.to_le_bytes())

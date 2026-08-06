@@ -80,7 +80,10 @@ out of scope. Details and non-goals are in the plan.
 
 ### Stages 6–9+
 
-**Planned, high level only.** Async scheduling/cancellation/caches; view-only
+**Stage 6 — Accepted awaiting checkpoint.** Authoritative document evaluation
+and the bounded Stage 3 family-output correction have passed parent review and
+user visual acceptance. Async
+scheduling/cancellation/caches; view-only
 GTK preview; command bindings/undo-redo/current persistence/editors; then
 newly scoped generalized families, connected/region output, multiframe, and
 simple transitions. Each later stage requires explicit approval.

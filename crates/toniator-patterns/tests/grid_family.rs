@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use toniator_domain::{CanvasSpec, DensityMetric2D};
-use toniator_geometry::Vector2;
+use toniator_geometry::{SiteId, Vector2};
 use toniator_patterns::{
     ANTIALIAS_MARGIN, GridInspectRequest, directional_spacing, evaluate_straight_grid,
 };
@@ -36,7 +36,6 @@ fn resolves_reference_spacing_and_inclusive_guide_ranges() {
     assert_eq!(output.coverage[1].first_index, -3);
     assert_eq!(output.coverage[1].last_index, 63);
     assert_eq!(output.guides.len(), 164);
-    assert_eq!(output.sites.len(), 6_499);
     assert_eq!(output.antialias_margin, ANTIALIAS_MARGIN);
 }
 
@@ -105,34 +104,115 @@ fn sites_have_stable_ids_ordering_provenance_and_fingerprint() {
 }
 
 #[test]
-fn independently_broader_lattice_contains_every_support_intersecting_site() {
-    let input = request(137.0, -6.75, 8.25);
-    let output = evaluate_straight_grid(&input).expect("valid family");
-    let emitted: BTreeSet<_> = output.sites.iter().map(|site| site.id).collect();
-    let radians = input.rotation_degrees.to_radians();
-    let (cosine, sine) = (radians.cos(), radians.sin());
+fn support_envelope_is_complete_and_bounded_across_rotation_translation_and_anisotropy() {
+    let mut anisotropic = request(45.0, -6.75, 8.25);
+    anisotropic.density = DensityMetric2D {
+        across_x: 180.0,
+        across_y: 40.0,
+        aspect_locked: false,
+    };
+    for input in [
+        request(0.0, 0.0, 0.0),
+        request(17.0, 3.25, -4.5),
+        request(45.0, 23.25, -24.5),
+        request(89.5, -6.75, 8.25),
+        anisotropic,
+    ] {
+        let output = evaluate_straight_grid(&input).expect("valid family");
+        let emitted: BTreeSet<_> = output.sites.iter().map(|site| site.id).collect();
+        let spacing_x = input.canvas.width / input.density.across_x;
+        let spacing_y = input.canvas.height / input.density.across_y;
+        let envelope = planning_envelope(&input, spacing_x, spacing_y);
 
-    for first_index in -160_i64..=160 {
-        for second_index in -160_i64..=160 {
-            let local_x = first_index as f64 * 10.0 - 450.0;
-            let local_y = second_index as f64 * 10.0 - 300.0;
-            let x = 450.0 + cosine * local_x - sine * local_y + input.translation_x;
-            let y = 300.0 + sine * local_x + cosine * local_y + input.translation_y;
-            if distance_to_canvas(x, y, input.canvas.width, input.canvas.height)
-                <= input.support_radius
-            {
-                assert!(
-                    emitted.contains(&toniator_geometry::SiteId {
-                        first_dimension_id: 1,
-                        first_index,
-                        second_dimension_id: 2,
-                        second_index,
-                    }),
-                    "missing support-intersecting site ({first_index}, {second_index})"
-                );
+        assert!(output.sites.iter().all(|site| {
+            distance_to_canvas(
+                site.position.x,
+                site.position.y,
+                input.canvas.width,
+                input.canvas.height,
+            ) <= envelope + 1e-10
+        }));
+        for first_index in -220_i64..=220 {
+            for second_index in -220_i64..=220 {
+                let (x, y) =
+                    candidate_position(&input, spacing_x, spacing_y, first_index, second_index);
+                if distance_to_canvas(x, y, input.canvas.width, input.canvas.height)
+                    <= envelope + 1e-10
+                {
+                    assert!(
+                        emitted.contains(&SiteId {
+                            first_dimension_id: 1,
+                            first_index,
+                            second_dimension_id: 2,
+                            second_index,
+                        }),
+                        "missing envelope site ({first_index}, {second_index})"
+                    );
+                }
             }
         }
     }
+}
+
+#[test]
+fn rotated_coverage_rectangle_omits_all_four_dead_cartesian_corners() {
+    let input = request(17.0, 3.25, -4.5);
+    let output = evaluate_straight_grid(&input).unwrap();
+    let ids: BTreeSet<_> = output.sites.iter().map(|site| site.id).collect();
+    let spacing_x = output.coverage[0].spacing;
+    let spacing_y = output.coverage[1].spacing;
+    let envelope = planning_envelope(&input, spacing_x, spacing_y);
+    for first_index in [
+        output.coverage[0].first_index,
+        output.coverage[0].last_index,
+    ] {
+        for second_index in [
+            output.coverage[1].first_index,
+            output.coverage[1].last_index,
+        ] {
+            let (x, y) =
+                candidate_position(&input, spacing_x, spacing_y, first_index, second_index);
+            assert!(
+                distance_to_canvas(x, y, input.canvas.width, input.canvas.height) > envelope,
+                "coverage corner ({first_index}, {second_index}) must lie outside the rounded envelope"
+            );
+            assert!(
+                !ids.contains(&SiteId {
+                    first_dimension_id: 1,
+                    first_index,
+                    second_dimension_id: 2,
+                    second_index,
+                }),
+                "coverage corner ({first_index}, {second_index}) must not be published"
+            );
+        }
+    }
+}
+
+#[test]
+fn support_envelope_retains_required_edge_sites_and_scopes_them_as_guards() {
+    let output = evaluate_straight_grid(&request(0.0, 0.0, 0.0)).unwrap();
+    let retained = output
+        .sites
+        .iter()
+        .find(|site| {
+            site.id
+                == SiteId {
+                    first_dimension_id: 1,
+                    first_index: -2,
+                    second_dimension_id: 2,
+                    second_index: 30,
+                }
+        })
+        .unwrap();
+    assert_eq!(retained.scope, toniator_patterns::SiteScope::Guard);
+    assert!(!output.sites.iter().any(|site| site.id
+        == SiteId {
+            first_dimension_id: 1,
+            first_index: -3,
+            second_dimension_id: 2,
+            second_index: 30,
+        }));
 }
 
 #[test]
@@ -196,4 +276,27 @@ fn distance_to_canvas(x: f64, y: f64, width: f64, height: f64) -> f64 {
         0.0
     };
     dx.hypot(dy)
+}
+
+fn planning_envelope(input: &GridInspectRequest, spacing_x: f64, spacing_y: f64) -> f64 {
+    input.support_radius
+        + ANTIALIAS_MARGIN
+        + f64::from(input.guard_steps) * spacing_x.max(spacing_y)
+}
+
+fn candidate_position(
+    input: &GridInspectRequest,
+    spacing_x: f64,
+    spacing_y: f64,
+    first_index: i64,
+    second_index: i64,
+) -> (f64, f64) {
+    let radians = input.rotation_degrees.to_radians();
+    let (cosine, sine) = (radians.cos(), radians.sin());
+    let local_x = first_index as f64 * spacing_x - input.canvas.width / 2.0;
+    let local_y = second_index as f64 * spacing_y - input.canvas.height / 2.0;
+    (
+        input.canvas.width / 2.0 + cosine * local_x - sine * local_y + input.translation_x,
+        input.canvas.height / 2.0 + sine * local_x + cosine * local_y + input.translation_y,
+    )
 }

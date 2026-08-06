@@ -9,6 +9,7 @@ use resvg::{tiny_skia, usvg};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use toniator_domain::CanvasSpec;
+pub use toniator_domain::{SourceComponent, SourcePlacement};
 use toniator_geometry::Point2;
 
 const MAX_SOURCE_PIXELS: u64 = 64 * 1024 * 1024;
@@ -27,22 +28,6 @@ pub enum SourceFormatHint {
     Png,
     Svg,
     Unsupported,
-}
-
-/// The independently selectable source field used by realization.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SourceComponent {
-    Luminance,
-    Alpha,
-}
-
-/// The one explicit document-to-source mapping in this stage.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SourcePlacement {
-    #[default]
-    StretchToCanvas,
 }
 
 /// Decoded straight-sRGB color and independent normalized alpha.

@@ -98,7 +98,7 @@ fn inspect_grid_accepts_negative_offsets_and_emits_deterministic_json() {
         serde_json::from_slice(&fs::read(&output_path).expect("output")).expect("valid JSON");
     assert_eq!(json["coverage"][0]["first_index"], -11);
     assert_eq!(json["coverage"][1]["last_index"], 76);
-    assert!(json["sites"].as_array().expect("sites array").len() > 10_000);
+    assert_eq!(json["sites"].as_array().expect("sites array").len(), 6_185);
     let fixture: serde_json::Value = serde_json::from_slice(
         &fs::read("../../fixtures/canonical/stage-3-sites.sorted.json").expect("fixture"),
     )
@@ -255,10 +255,11 @@ fn render_infers_png_and_svg_and_rejects_invalid_output_extensions() {
     fs::create_dir(&directory).unwrap();
     for extension in ["png", "svg"] {
         let output_path = directory.join(format!("output.{extension}"));
+        let input_flag = if extension == "png" { "-i" } else { "--source" };
         let output = Command::new(env!("CARGO_BIN_EXE_toniator"))
             .args([
                 "render",
-                "--source",
+                input_flag,
                 "../../assets/raster-sample.png",
                 "--output",
                 output_path.to_str().unwrap(),
@@ -278,8 +279,6 @@ fn render_infers_png_and_svg_and_rejects_invalid_output_extensions() {
                 "-4.5",
                 "--guard-steps",
                 "2",
-                "--support-radius",
-                "4.5",
                 "--source-component",
                 "luminance",
                 "--size-min",
@@ -308,10 +307,50 @@ fn render_infers_png_and_svg_and_rejects_invalid_output_extensions() {
     let invalid = Command::new(env!("CARGO_BIN_EXE_toniator"))
         .args([
             "render",
-            "--source",
+            "-i",
             "../../assets/raster-sample.png",
             "--output",
             directory.join("output.txt").to_str().unwrap(),
+            "--mode",
+            "rgb",
+            "--canvas",
+            "900x600",
+            "--density-x",
+            "90",
+            "--density-y",
+            "60",
+            "--rotation",
+            "0",
+            "--offset-x",
+            "0",
+            "--offset-y",
+            "0",
+            "--guard-steps",
+            "2",
+            "--source-component",
+            "luminance",
+            "--size-min",
+            "2",
+            "--size-max",
+            "9",
+            "--color",
+            "#00b7ff",
+            "--opacity",
+            "0.72",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&invalid.stderr).contains("output extension must be .png or .svg")
+    );
+    let deprecated = Command::new(env!("CARGO_BIN_EXE_toniator"))
+        .args([
+            "render",
+            "-i",
+            "../../assets/raster-sample.png",
+            "--output",
+            directory.join("deprecated.png").to_str().unwrap(),
             "--mode",
             "rgb",
             "--canvas",
@@ -343,10 +382,8 @@ fn render_infers_png_and_svg_and_rejects_invalid_output_extensions() {
         ])
         .output()
         .unwrap();
-    assert_eq!(invalid.status.code(), Some(2));
-    assert!(
-        String::from_utf8_lossy(&invalid.stderr).contains("output extension must be .png or .svg")
-    );
+    assert_eq!(deprecated.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&deprecated.stderr).contains("--support-radius"));
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -399,8 +436,6 @@ fn render_rejects_missing_extension_and_invalid_presentation_options() {
                 "0",
                 "--guard-steps",
                 "2",
-                "--support-radius",
-                "4.5",
                 "--source-component",
                 "luminance",
                 "--size-min",

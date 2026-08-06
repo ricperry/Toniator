@@ -5,7 +5,8 @@
 use std::{error::Error, fmt};
 
 use toniator_domain::{
-    ChannelId, CommandResult, Document, DocumentCommand, Revision, ValidationError,
+    CanvasSpec, ChannelId, EvaluationSnapshot, EvaluationToken, PatternOutput, PatternStructure,
+    SourceComponent, SourcePlacement, SourceReference, SourceReferenceId,
 };
 pub use toniator_patterns::{
     CanonicalCircleMark, CircularMarkRealization, MarkResponse, Point2, RealizationError, SiteId,
@@ -18,8 +19,7 @@ pub use toniator_render::{
 };
 use toniator_sampling::decode_source;
 pub use toniator_sampling::{
-    SourceComponent, SourceField, SourceFormat, SourceFormatHint, SourcePlacement,
-    SvgTextDiagnostic,
+    SourceField, SourceFormat, SourceFormatHint, SourceIdentity, SvgTextDiagnostic,
 };
 
 pub use toniator_patterns::{GridError, GridInspectRequest};
@@ -57,38 +57,209 @@ pub fn inspect_circular_marks(
     )?)
 }
 
-/// Presentation attached after Stage 4 realization, before renderer selection.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ScenePresentation {
-    pub channel_id: toniator_domain::ChannelId,
-    pub visible: bool,
-    pub color: toniator_domain::ColorValue,
-    pub opacity: f64,
+/// Immutable source bytes resolved outside the domain. The ID and decoding
+/// hint travel with the bytes so the engine can reject authority mismatches
+/// before it decodes or evaluates geometry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedSource {
+    reference_id: SourceReferenceId,
+    bytes: Box<[u8]>,
+    format: SourceFormatHint,
 }
 
-/// The Stage 5 shared source-to-scene request. The engine evaluates the family
-/// and realization once, then constructs one renderer-independent scene.
-#[derive(Clone, Debug, PartialEq)]
-pub struct RenderSceneRequest<'a> {
-    pub marks: MarksInspectRequest<'a>,
-    pub presentation: ScenePresentation,
+impl ResolvedSource {
+    pub fn new(
+        reference_id: SourceReferenceId,
+        bytes: impl Into<Box<[u8]>>,
+        format: SourceFormatHint,
+    ) -> Result<Self, EvaluationError> {
+        let bytes = bytes.into();
+        if bytes.is_empty() {
+            return Err(EvaluationError::new(
+                "source.bytes",
+                "source must not be empty",
+            ));
+        }
+        if matches!(format, SourceFormatHint::Unsupported) {
+            return Err(EvaluationError::new(
+                "source.format",
+                "only PNG and SVG source formats are supported",
+            ));
+        }
+        Ok(Self {
+            reference_id,
+            bytes,
+            format,
+        })
+    }
+
+    pub fn reference_id(&self) -> &SourceReferenceId {
+        &self.reference_id
+    }
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+    pub fn format(&self) -> SourceFormatHint {
+        self.format
+    }
 }
 
-pub fn render_scene(request: &RenderSceneRequest<'_>) -> Result<RenderScene, RenderSceneError> {
-    let realization = inspect_circular_marks(&request.marks)?;
-    RenderScene::new(
-        request.marks.grid.canvas.clone(),
-        realization.family_fingerprint,
-        realization.realization_fingerprint,
-        vec![RenderLayer::new(
-            request.presentation.channel_id,
-            request.presentation.visible,
-            request.presentation.color.clone(),
-            request.presentation.opacity,
-            GeometryOutput::CircularMarks(realization.marks),
-        )?],
+/// The sole public Stage 6 evaluation entry. Its fields are private so a
+/// snapshot cannot be mixed with another token or resolved source after it is
+/// validated.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EvaluationRequest {
+    snapshot: EvaluationSnapshot,
+    source: ResolvedSource,
+}
+
+impl EvaluationRequest {
+    pub fn new(snapshot: EvaluationSnapshot, source: ResolvedSource) -> Self {
+        Self { snapshot, source }
+    }
+}
+
+/// Immutable result from evaluating one authoritative snapshot.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EvaluationResult {
+    token: EvaluationToken,
+    source_identity: SourceIdentity,
+    scene: RenderScene,
+    raster: RasterSurface,
+}
+
+impl EvaluationResult {
+    pub fn token(&self) -> EvaluationToken {
+        self.token
+    }
+    pub fn source_identity(&self) -> &SourceIdentity {
+        &self.source_identity
+    }
+    pub fn scene(&self) -> &RenderScene {
+        &self.scene
+    }
+    pub fn raster(&self) -> &RasterSurface {
+        &self.raster
+    }
+}
+
+/// Evaluates exactly the Stage 3 -> Stage 4 -> Stage 5 chain represented by
+/// the immutable snapshot. It performs no document mutation or source lookup.
+pub fn evaluate(request: EvaluationRequest) -> Result<EvaluationResult, EvaluationError> {
+    let document = request.snapshot.document();
+    let channel_id = request.snapshot.token().channel_id();
+    let channel = document.channel(channel_id).ok_or(EvaluationError::new(
+        "evaluation.channel_id",
+        "evaluation targets a missing channel",
+    ))?;
+    let source_id = match document.source() {
+        SourceReference::Assigned(id) => id,
+        SourceReference::Unassigned => {
+            return Err(EvaluationError::new(
+                "evaluation.source_reference",
+                "evaluation requires an assigned source reference",
+            ));
+        }
+    };
+    if source_id != request.source.reference_id() {
+        return Err(EvaluationError::new(
+            "evaluation.source_reference",
+            "resolved source reference does not match the document snapshot",
+        ));
+    }
+    let definition = document
+        .pattern_definitions()
+        .iter()
+        .find(|definition| definition.id == channel.pattern_definition_id)
+        .ok_or(EvaluationError::new(
+            "evaluation.pattern_definition",
+            "channel references a missing pattern definition",
+        ))?;
+    if definition.structure != PatternStructure::StraightGrid {
+        return Err(EvaluationError::new(
+            "evaluation.pattern_definition.structure",
+            "unsupported pattern structure",
+        ));
+    }
+    if definition.output != PatternOutput::CircularMarks {
+        return Err(EvaluationError::new(
+            "evaluation.pattern_definition.output",
+            "unsupported pattern output",
+        ));
+    }
+    let response = MarkResponse {
+        minimum_size: channel.mark_geometry_response.minimum_size,
+        maximum_size: channel.mark_geometry_response.maximum_size,
+    };
+    let grid = GridInspectRequest {
+        canvas: document.canvas().clone(),
+        density: channel.layout.density.clone(),
+        rotation_degrees: channel.layout.rotation_degrees,
+        translation_x: channel.layout.translation_x,
+        translation_y: channel.layout.translation_y,
+        guard_steps: definition.guard_steps,
+        support_radius: response.maximum_size / 2.0,
+    };
+    let family = inspect_straight_grid(&grid).map_err(EvaluationError::from_grid)?;
+    let source = decode_source(request.source.bytes(), request.source.format())
+        .map_err(EvaluationError::from_sampling)?;
+    let realization = realize_from_existing_family(
+        &family,
+        &source,
+        document.canvas(),
+        channel.source_mapping.placement,
+        channel.source_mapping.component,
+        response,
     )
-    .map_err(RenderSceneError::Render)
+    .map_err(EvaluationError::from_realization)?;
+    let scene = build_scene(SceneBuild {
+        canvas: document.canvas().clone(),
+        channel_id,
+        visible: channel.appearance.visible,
+        color: channel.appearance.color.clone(),
+        opacity: channel.appearance.opacity,
+        family_fingerprint: realization.family_fingerprint,
+        realization_fingerprint: realization.realization_fingerprint,
+        marks: realization.marks,
+    })?;
+    let raster =
+        rasterize(&scene, RasterBackground::Transparent).map_err(EvaluationError::from_render)?;
+    Ok(EvaluationResult {
+        token: request.snapshot.token(),
+        source_identity: source.identity().clone(),
+        scene,
+        raster,
+    })
+}
+
+struct SceneBuild {
+    canvas: CanvasSpec,
+    channel_id: ChannelId,
+    visible: bool,
+    color: toniator_domain::ColorValue,
+    opacity: f64,
+    family_fingerprint: String,
+    realization_fingerprint: String,
+    marks: Vec<CanonicalCircleMark>,
+}
+
+fn build_scene(input: SceneBuild) -> Result<RenderScene, EvaluationError> {
+    RenderScene::new(
+        input.canvas,
+        input.family_fingerprint,
+        input.realization_fingerprint,
+        vec![
+            RenderLayer::new(
+                input.channel_id,
+                input.visible,
+                input.color,
+                input.opacity,
+                GeometryOutput::CircularMarks(input.marks),
+            )
+            .map_err(EvaluationError::from_render)?,
+        ],
+    )
+    .map_err(EvaluationError::from_render)
 }
 
 /// Exposes realization from an already evaluated family so callers can prove
@@ -112,34 +283,44 @@ pub enum MarksInspectError {
     Realization(RealizationError),
 }
 
+/// Stable failures at the authoritative document-evaluation boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RenderSceneError {
-    Marks(MarksInspectError),
-    Render(toniator_render::RenderError),
+pub struct EvaluationError {
+    path: &'static str,
+    message: &'static str,
 }
 
-impl From<MarksInspectError> for RenderSceneError {
-    fn from(error: MarksInspectError) -> Self {
-        Self::Marks(error)
+impl EvaluationError {
+    pub const fn new(path: &'static str, message: &'static str) -> Self {
+        Self { path, message }
+    }
+    pub const fn path(&self) -> &'static str {
+        self.path
+    }
+    pub const fn message(&self) -> &'static str {
+        self.message
+    }
+    fn from_grid(error: GridError) -> Self {
+        Self::new(error.path(), error.message())
+    }
+    fn from_sampling(error: toniator_sampling::SamplingError) -> Self {
+        Self::new(error.path(), error.message())
+    }
+    fn from_realization(error: RealizationError) -> Self {
+        Self::new(error.path(), error.message())
+    }
+    fn from_render(error: toniator_render::RenderError) -> Self {
+        Self::new(error.path(), error.message())
     }
 }
 
-impl From<toniator_render::RenderError> for RenderSceneError {
-    fn from(error: toniator_render::RenderError) -> Self {
-        Self::Render(error)
-    }
-}
-
-impl fmt::Display for RenderSceneError {
+impl fmt::Display for EvaluationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Marks(error) => error.fmt(formatter),
-            Self::Render(error) => error.fmt(formatter),
-        }
+        write!(formatter, "{}: {}", self.path, self.message)
     }
 }
 
-impl Error for RenderSceneError {}
+impl Error for EvaluationError {}
 
 impl From<GridError> for MarksInspectError {
     fn from(error: GridError) -> Self {
@@ -170,105 +351,3 @@ impl fmt::Display for MarksInspectError {
 }
 
 impl Error for MarksInspectError {}
-
-/// An immutable evaluation identity bound to one document revision and channel.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct EvaluationToken {
-    pub revision: Revision,
-    pub channel_id: ChannelId,
-}
-
-/// The exclusive owner of mutable authoritative document state.
-#[derive(Clone, Debug)]
-pub struct DocumentSession {
-    document: Document,
-    revision: Revision,
-}
-
-impl DocumentSession {
-    /// Validates a document before it becomes the session authority.
-    pub fn new(document: Document) -> Result<Self, ValidationError> {
-        document.validate()?;
-        Ok(Self {
-            document,
-            revision: Revision(0),
-        })
-    }
-
-    /// Exposes the current document immutably.
-    pub fn document(&self) -> &Document {
-        &self.document
-    }
-
-    /// Returns an immutable snapshot suitable for external evaluation.
-    pub fn snapshot(&self) -> Document {
-        self.document.clone()
-    }
-
-    pub fn revision(&self) -> Revision {
-        self.revision
-    }
-
-    /// Applies a command atomically, advancing the revision exactly once.
-    pub fn apply(
-        &mut self,
-        command: &DocumentCommand,
-    ) -> Result<CommandResult, DocumentSessionError> {
-        let next_revision = self
-            .revision
-            .0
-            .checked_add(1)
-            .map(Revision)
-            .ok_or(DocumentSessionError::RevisionExhausted)?;
-        let (candidate, result) = self.document.apply_command(command)?;
-        self.document = candidate;
-        self.revision = next_revision;
-        Ok(result)
-    }
-
-    /// Creates an evaluation token for a currently owned channel.
-    pub fn evaluation_token(
-        &self,
-        channel_id: ChannelId,
-    ) -> Result<EvaluationToken, ValidationError> {
-        if self.document.channel(channel_id).is_none() {
-            return Err(ValidationError::new(
-                "evaluation.channel_id",
-                "evaluation targets a missing channel",
-            ));
-        }
-        Ok(EvaluationToken {
-            revision: self.revision,
-            channel_id,
-        })
-    }
-
-    /// Returns true only for a result produced against the current revision.
-    pub fn accepts_evaluation(&self, token: EvaluationToken) -> bool {
-        token.revision == self.revision
-    }
-}
-
-/// Errors at the session boundary.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DocumentSessionError {
-    Validation(ValidationError),
-    RevisionExhausted,
-}
-
-impl From<ValidationError> for DocumentSessionError {
-    fn from(error: ValidationError) -> Self {
-        Self::Validation(error)
-    }
-}
-
-impl fmt::Display for DocumentSessionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Validation(error) => error.fmt(formatter),
-            Self::RevisionExhausted => formatter.write_str("document revision is exhausted"),
-        }
-    }
-}
-
-impl Error for DocumentSessionError {}

@@ -1,7 +1,9 @@
 use toniator_domain::{
-    CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternLayout, ChannelState, ColorValue,
-    DensityMetric2D, Document, DocumentCommand, DocumentId, InvalidationLevel,
-    MarkGeometryResponse, PatternDefinition, PatternDefinitionId,
+    CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternLayout, ChannelSourceMapping,
+    ChannelState, ColorValue, DensityMetric2D, Document, DocumentCommand, DocumentId,
+    DocumentSession, InvalidationLevel, MarkGeometryResponse, PatternDefinition,
+    PatternDefinitionId, PatternOutput, PatternStructure, SourceComponent, SourcePlacement,
+    SourceReference, SourceReferenceId,
 };
 
 const CHANNEL_ID: ChannelId = ChannelId(7);
@@ -39,8 +41,12 @@ fn channel() -> ChannelState {
             opacity: 0.75,
         },
         mark_geometry_response: MarkGeometryResponse {
-            minimum_size: 0.0,
-            maximum_size: 1.0,
+            minimum_size: 2.0,
+            maximum_size: 9.0,
+        },
+        source_mapping: ChannelSourceMapping {
+            component: SourceComponent::Luminance,
+            placement: SourcePlacement::StretchToCanvas,
         },
     }
 }
@@ -49,6 +55,9 @@ fn definition() -> PatternDefinition {
     PatternDefinition {
         id: PATTERN_ID,
         name: "minimal".to_owned(),
+        structure: PatternStructure::StraightGrid,
+        output: PatternOutput::CircularMarks,
+        guard_steps: 2,
     }
 }
 
@@ -280,7 +289,8 @@ fn rejects_every_stage_two_document_validation_rule() {
         (
             {
                 let mut value = channel();
-                value.mark_geometry_response.minimum_size = 2.0;
+                value.mark_geometry_response.minimum_size = 9.0;
+                value.mark_geometry_response.maximum_size = 2.0;
                 value
             },
             "channel.pattern.mark_geometry_response",
@@ -341,8 +351,18 @@ fn commands_return_the_required_invalidation_and_affected_channel() {
             DocumentCommand::SetMarkGeometryResponse {
                 channel_id: CHANNEL_ID,
                 response: MarkGeometryResponse {
-                    minimum_size: 0.2,
-                    maximum_size: 1.5,
+                    minimum_size: 2.0,
+                    maximum_size: 8.5,
+                },
+            },
+            InvalidationLevel::Realization,
+        ),
+        (
+            DocumentCommand::SetSourceMapping {
+                channel_id: CHANNEL_ID,
+                mapping: ChannelSourceMapping {
+                    component: SourceComponent::Alpha,
+                    placement: SourcePlacement::StretchToCanvas,
                 },
             },
             InvalidationLevel::Realization,
@@ -390,6 +410,67 @@ fn commands_return_the_required_invalidation_and_affected_channel() {
             "each command must change its candidate"
         );
     }
+}
+
+#[test]
+fn stage_six_source_reference_snapshot_and_diameter_contracts_are_authoritative() {
+    assert_eq!(
+        SourceReferenceId::new("")
+            .expect_err("empty IDs fail")
+            .path(),
+        "source.reference_id"
+    );
+    assert_eq!(
+        SourceReferenceId::new("/tmp/source.png")
+            .expect_err("paths are not IDs")
+            .path(),
+        "source.reference_id"
+    );
+
+    let source_id = SourceReferenceId::new("stage6-input").unwrap();
+    let mut session = DocumentSession::new(valid_document()).unwrap();
+    let result = session
+        .apply(&DocumentCommand::SetSourceReference {
+            source: SourceReference::Assigned(source_id.clone()),
+        })
+        .unwrap();
+    assert_eq!(result.invalidation, InvalidationLevel::Source);
+    assert_eq!(result.affected_channels, vec![CHANNEL_ID]);
+
+    let snapshot = session.evaluation_snapshot(CHANNEL_ID).unwrap();
+    assert_eq!(snapshot.token().channel_id(), CHANNEL_ID);
+    assert_eq!(snapshot.token().revision(), session.revision());
+    assert_eq!(
+        snapshot.document().source(),
+        &SourceReference::Assigned(source_id)
+    );
+    assert_eq!(
+        session
+            .evaluation_snapshot(ChannelId(999))
+            .expect_err("missing channel fails at snapshot boundary")
+            .path(),
+        "evaluation.channel_id"
+    );
+
+    let mut too_small = channel();
+    too_small.mark_geometry_response.minimum_size = 1.99;
+    assert_path(
+        document_with(canvas(), vec![definition()], vec![too_small]),
+        "channel.pattern.mark_geometry_response.minimum_size",
+    );
+    let mut too_large = channel();
+    too_large.mark_geometry_response.maximum_size = 9.01;
+    assert_path(
+        document_with(canvas(), vec![definition()], vec![too_large]),
+        "channel.pattern.mark_geometry_response.maximum_size",
+    );
+
+    let mut unsupported = definition();
+    unsupported.structure = PatternStructure::Unsupported;
+    assert_path(
+        document_with(canvas(), vec![unsupported], vec![channel()]),
+        "pattern_definitions.structure",
+    );
 }
 
 #[test]

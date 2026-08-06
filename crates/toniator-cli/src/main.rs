@@ -5,16 +5,17 @@ use std::{error::Error, fmt, path::PathBuf, process::ExitCode};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use toniator_domain::{
-    CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternLayout, ChannelState, ColorValue,
-    DensityMetric2D, Document, DocumentId, MarkGeometryResponse, PatternDefinition,
-    PatternDefinitionId, ValidationError,
+    CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternLayout, ChannelSourceMapping,
+    ChannelState, ColorValue, DensityMetric2D, Document, DocumentCommand, DocumentId,
+    DocumentSession, MarkGeometryResponse, PatternDefinition, PatternDefinitionId, PatternOutput,
+    PatternStructure, SourceComponent, SourcePlacement, SourceReference, SourceReferenceId,
+    ValidationError,
 };
 use toniator_engine::{
-    CanonicalCircleMark, DocumentSession, GridError, GridInspectRequest, MarkResponse,
-    MarksInspectError, MarksInspectRequest, Point2, RasterBackground, RenderSceneRequest,
-    ScenePresentation, SiteId, SiteScope, SourceComponent, SourceFormat, SourceFormatHint,
-    SourcePlacement, SvgTextDiagnostic, encode_png, inspect_circular_marks, inspect_straight_grid,
-    rasterize, render_scene, srgb_to_linear, write_svg,
+    CanonicalCircleMark, EvaluationRequest, GridError, GridInspectRequest, MarkResponse,
+    MarksInspectError, MarksInspectRequest, Point2, RasterBackground, ResolvedSource, SiteId,
+    SiteScope, SourceFormat, SourceFormatHint, SvgTextDiagnostic, encode_png, evaluate,
+    inspect_circular_marks, inspect_straight_grid, srgb_to_linear, write_svg,
 };
 
 /// Headless Toniator command-line frontend.
@@ -127,9 +128,9 @@ struct MarksArgs {
 
 #[derive(Debug, clap::Args)]
 struct RenderArgs {
-    #[arg(long)]
-    source: PathBuf,
-    #[arg(long)]
+    #[arg(short = 'i', long, visible_alias = "source")]
+    input: PathBuf,
+    #[arg(short, long)]
     output: PathBuf,
     #[arg(long, value_enum)]
     mode: OutputMode,
@@ -147,8 +148,6 @@ struct RenderArgs {
     offset_y: f64,
     #[arg(long)]
     guard_steps: u32,
-    #[arg(long)]
-    support_radius: f64,
     #[arg(long, value_enum)]
     source_component: CliSourceComponent,
     #[arg(long)]
@@ -270,13 +269,25 @@ fn render(arguments: RenderArgs) -> Result<(), CliError> {
             "opacity must be within 0.0..=1.0",
         ));
     }
-    let source_format = source_hint(&arguments.source)?;
-    let source_bytes = std::fs::read(&arguments.source)
+    let source_format = source_hint(&arguments.input)?;
+    let source_bytes = std::fs::read(&arguments.input)
         .map_err(|_| CliError::new("source", "could not read source file"))?;
-    let scene = render_scene(&RenderSceneRequest {
-        marks: MarksInspectRequest {
-            grid: GridInspectRequest {
-                canvas: parse_canvas(&arguments.canvas)?,
+    let source_reference = SourceReferenceId::new("cli-input-1")?;
+    let channel_id = ChannelId(1);
+    let document = Document::new(
+        DocumentId(1),
+        parse_canvas(&arguments.canvas)?,
+        vec![PatternDefinition {
+            id: PatternDefinitionId(1),
+            name: "straight-grid".to_owned(),
+            structure: PatternStructure::StraightGrid,
+            output: PatternOutput::CircularMarks,
+            guard_steps: arguments.guard_steps,
+        }],
+        vec![ChannelState {
+            id: channel_id,
+            pattern_definition_id: PatternDefinitionId(1),
+            layout: ChannelPatternLayout {
                 density: DensityMetric2D {
                     across_x: arguments.density_x,
                     across_y: arguments.density_y,
@@ -285,25 +296,30 @@ fn render(arguments: RenderArgs) -> Result<(), CliError> {
                 rotation_degrees: arguments.rotation,
                 translation_x: arguments.offset_x,
                 translation_y: arguments.offset_y,
-                guard_steps: arguments.guard_steps,
-                support_radius: arguments.support_radius,
             },
-            source_bytes: &source_bytes,
-            source_format,
-            source_component: arguments.source_component.into(),
-            placement: SourcePlacement::StretchToCanvas,
-            response: MarkResponse {
+            appearance: ChannelAppearance {
+                visible: true,
+                color,
+                opacity: arguments.opacity,
+            },
+            mark_geometry_response: MarkGeometryResponse {
                 minimum_size: arguments.size_min,
                 maximum_size: arguments.size_max,
             },
-        },
-        presentation: ScenePresentation {
-            channel_id: ChannelId(1),
-            visible: true,
-            color,
-            opacity: arguments.opacity,
-        },
+            source_mapping: ChannelSourceMapping {
+                component: arguments.source_component.into(),
+                placement: SourcePlacement::StretchToCanvas,
+            },
+        }],
+    )?;
+    let mut session = DocumentSession::new(document)?;
+    session.apply(&DocumentCommand::SetSourceReference {
+        source: SourceReference::Assigned(source_reference.clone()),
     })?;
+    let result = evaluate(EvaluationRequest::new(
+        session.evaluation_snapshot(channel_id)?,
+        ResolvedSource::new(source_reference, source_bytes, source_format)?,
+    ))?;
     match format {
         OutputFormat::Png => {
             let background = if arguments.transparent {
@@ -314,14 +330,18 @@ fn render(arguments: RenderArgs) -> Result<(), CliError> {
                     OutputMode::Cmyk => RasterBackground::OpaqueWhite,
                 }
             };
-            let png = encode_png(&rasterize(&scene, background).map_err(render_error)?)
-                .map_err(render_error)?;
+            let raster = if matches!(background, RasterBackground::Transparent) {
+                result.raster().clone()
+            } else {
+                toniator_engine::rasterize(result.scene(), background).map_err(render_error)?
+            };
+            let png = encode_png(&raster).map_err(render_error)?;
             std::fs::write(&arguments.output, png)
                 .map_err(|_| CliError::new("output", "could not write PNG output"))?;
         }
         OutputFormat::Svg => {
             // SVG has no mode background; --transparent is intentionally a no-op.
-            std::fs::write(&arguments.output, write_svg(&scene))
+            std::fs::write(&arguments.output, write_svg(result.scene()))
                 .map_err(|_| CliError::new("output", "could not write SVG output"))?;
         }
     }
@@ -576,6 +596,9 @@ fn validate(arguments: ValidateArgs) -> Result<(), ValidationError> {
         vec![PatternDefinition {
             id: PatternDefinitionId(1),
             name: "minimal".to_owned(),
+            structure: PatternStructure::StraightGrid,
+            output: PatternOutput::CircularMarks,
+            guard_steps: 2,
         }],
         vec![ChannelState {
             id: ChannelId(1),
@@ -601,8 +624,12 @@ fn validate(arguments: ValidateArgs) -> Result<(), ValidationError> {
                 opacity: arguments.opacity,
             },
             mark_geometry_response: MarkGeometryResponse {
-                minimum_size: 0.0,
-                maximum_size: 1.0,
+                minimum_size: 2.0,
+                maximum_size: 9.0,
+            },
+            source_mapping: ChannelSourceMapping {
+                component: SourceComponent::Luminance,
+                placement: SourcePlacement::StretchToCanvas,
             },
         }],
     )?;
@@ -667,12 +694,20 @@ impl From<MarksInspectError> for CliError {
     }
 }
 
-impl From<toniator_engine::RenderSceneError> for CliError {
-    fn from(error: toniator_engine::RenderSceneError) -> Self {
+impl From<toniator_domain::DocumentSessionError> for CliError {
+    fn from(error: toniator_domain::DocumentSessionError) -> Self {
         match error {
-            toniator_engine::RenderSceneError::Marks(error) => Self::from(error),
-            toniator_engine::RenderSceneError::Render(error) => render_error(error),
+            toniator_domain::DocumentSessionError::Validation(error) => Self::from(error),
+            toniator_domain::DocumentSessionError::RevisionExhausted => {
+                Self::new("document.revision", "document revision is exhausted")
+            }
         }
+    }
+}
+
+impl From<toniator_engine::EvaluationError> for CliError {
+    fn from(error: toniator_engine::EvaluationError) -> Self {
+        Self::new(error.path(), error.message())
     }
 }
 

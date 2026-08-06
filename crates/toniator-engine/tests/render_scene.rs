@@ -1,18 +1,35 @@
-use toniator_domain::{CanvasSpec, ChannelId, ColorValue, DensityMetric2D};
+use toniator_domain::{
+    CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternLayout, ChannelSourceMapping,
+    ChannelState, ColorValue, DensityMetric2D, Document, DocumentId, DocumentSession,
+    MarkGeometryResponse, PatternDefinition, PatternDefinitionId, PatternOutput, PatternStructure,
+    SourceComponent, SourcePlacement, SourceReference, SourceReferenceId,
+};
 use toniator_engine::{
-    GeometryOutput, GridInspectRequest, MarkResponse, MarksInspectRequest, RasterBackground,
-    RenderSceneRequest, ScenePresentation, SourceComponent, SourceFormatHint, SourcePlacement,
-    inspect_circular_marks, rasterize, render_scene, write_svg,
+    EvaluationRequest, GeometryOutput, ResolvedSource, SourceFormatHint, evaluate, write_svg,
 };
 
-fn request<'a>(bytes: &'a [u8], source_format: SourceFormatHint) -> RenderSceneRequest<'a> {
-    RenderSceneRequest {
-        marks: MarksInspectRequest {
-            grid: GridInspectRequest {
-                canvas: CanvasSpec {
-                    width: 900.0,
-                    height: 600.0,
-                },
+const CHANNEL_ID: ChannelId = ChannelId(1);
+
+fn request(bytes: Vec<u8>, format: SourceFormatHint) -> EvaluationRequest {
+    let source_id = SourceReferenceId::new("baseline-source").unwrap();
+    let document = Document::with_source(
+        DocumentId(1),
+        CanvasSpec {
+            width: 900.0,
+            height: 600.0,
+        },
+        SourceReference::Assigned(source_id.clone()),
+        vec![PatternDefinition {
+            id: PatternDefinitionId(1),
+            name: "straight-grid".to_owned(),
+            structure: PatternStructure::StraightGrid,
+            output: PatternOutput::CircularMarks,
+            guard_steps: 2,
+        }],
+        vec![ChannelState {
+            id: CHANNEL_ID,
+            pattern_definition_id: PatternDefinitionId(1),
+            layout: ChannelPatternLayout {
                 density: DensityMetric2D {
                     across_x: 90.0,
                     across_y: 60.0,
@@ -21,154 +38,206 @@ fn request<'a>(bytes: &'a [u8], source_format: SourceFormatHint) -> RenderSceneR
                 rotation_degrees: 17.0,
                 translation_x: 3.25,
                 translation_y: -4.5,
-                guard_steps: 2,
-                support_radius: 4.5,
             },
-            source_bytes: bytes,
-            source_format,
-            source_component: SourceComponent::Luminance,
-            placement: SourcePlacement::StretchToCanvas,
-            response: MarkResponse {
+            appearance: ChannelAppearance {
+                visible: true,
+                color: ColorValue {
+                    red: 0.0,
+                    green: toniator_engine::srgb_to_linear(183.0 / 255.0),
+                    blue: 1.0,
+                    alpha: 1.0,
+                },
+                opacity: 0.72,
+            },
+            mark_geometry_response: MarkGeometryResponse {
                 minimum_size: 2.0,
                 maximum_size: 9.0,
             },
-        },
-        presentation: ScenePresentation {
-            channel_id: ChannelId(1),
-            visible: true,
-            color: ColorValue {
-                red: 0.0,
-                green: toniator_engine::srgb_to_linear(183.0 / 255.0),
-                blue: 1.0,
-                alpha: 1.0,
+            source_mapping: ChannelSourceMapping {
+                component: SourceComponent::Luminance,
+                placement: SourcePlacement::StretchToCanvas,
             },
-            opacity: 0.72,
-        },
-    }
+        }],
+    )
+    .unwrap();
+    let session = DocumentSession::new(document).unwrap();
+    EvaluationRequest::new(
+        session.evaluation_snapshot(CHANNEL_ID).unwrap(),
+        ResolvedSource::new(source_id, bytes, format).unwrap(),
+    )
 }
 
 #[test]
-fn scene_copies_every_stage_4_mark_without_rebuilding_the_realization() {
-    let bytes = std::fs::read("../../assets/raster-sample.png").unwrap();
-    let request = request(&bytes, SourceFormatHint::Png);
-    let realization = inspect_circular_marks(&request.marks).unwrap();
-    let scene = render_scene(&request).unwrap();
-    let GeometryOutput::CircularMarks(scene_marks) = scene.layers()[0].geometry();
-    assert_eq!(scene_marks, &realization.marks);
-    assert_eq!(
-        scene.identity().family_fingerprint(),
-        realization.family_fingerprint
-    );
-    assert_eq!(
-        scene.identity().realization_fingerprint(),
-        realization.realization_fingerprint
-    );
-    assert_eq!(
-        scene_marks
-            .iter()
-            .map(|mark| (
-                &mark.source_site_id,
-                mark.center,
-                mark.radius,
-                mark.scope,
-                &mark.provenance
-            ))
-            .collect::<Vec<_>>(),
-        realization
-            .marks
-            .iter()
-            .map(|mark| (
-                &mark.source_site_id,
-                mark.center,
-                mark.radius,
-                mark.scope,
-                &mark.provenance
-            ))
-            .collect::<Vec<_>>()
-    );
-}
-
-#[test]
-fn both_baselines_build_one_scene_consumed_by_raster_and_svg_without_mark_loss() {
-    for (path, format) in [
-        ("../../assets/raster-sample.png", SourceFormatHint::Png),
-        ("../../assets/vector-sample.svg", SourceFormatHint::Svg),
+fn document_derived_evaluation_matches_accepted_stage_five_identities_and_geometry() {
+    for (path, format, realization, scene, decoded) in [
+        (
+            "../../assets/raster-sample.png",
+            SourceFormatHint::Png,
+            "fnv1a64:9db8b05a88a2c727",
+            "fnv1a64:79d8d6ed11625502",
+            "sha256:2840ac64a71451469ed2b90b797b284f57ceace284cd986a46e66b6ef82b6ee8",
+        ),
+        (
+            "../../assets/vector-sample.svg",
+            SourceFormatHint::Svg,
+            "fnv1a64:d59cc5d53352afd5",
+            "fnv1a64:c78b9c3d56c8d8cd",
+            "sha256:cf28b0ab640991969d9a5936be85dfd552867125950362495c69b1ab99f94fb7",
+        ),
     ] {
-        let bytes = std::fs::read(path).unwrap();
-        let scene = render_scene(&request(&bytes, format)).unwrap();
-        let GeometryOutput::CircularMarks(marks) = scene.layers()[0].geometry();
-        assert_eq!(marks.len(), 10_304);
+        let result = evaluate(request(std::fs::read(path).unwrap(), format)).unwrap();
+        assert_eq!(
+            result.scene().identity().family_fingerprint(),
+            "fnv1a64:87a8b213740ed5b9"
+        );
+        assert_eq!(
+            result.scene().identity().realization_fingerprint(),
+            realization
+        );
+        assert_eq!(result.scene().identity().scene_fingerprint(), scene);
+        assert_eq!(result.source_identity().decoded_pixel_hash, decoded);
+        let GeometryOutput::CircularMarks(marks) = result.scene().layers()[0].geometry();
+        assert_eq!(marks.len(), 6_185);
         assert_eq!(
             marks
                 .iter()
-                .filter(|mark| matches!(mark.scope, toniator_engine::SiteScope::Guard))
+                .filter(|mark| mark.scope == toniator_engine::SiteScope::Guard)
                 .count(),
-            4_902
+            783
         );
         assert!(
             marks
-                .iter()
-                .all(|mark| mark.center.is_finite() && mark.radius.is_finite())
+                .windows(2)
+                .all(|pair| pair[0].source_site_id != pair[1].source_site_id)
         );
-        let raster = rasterize(&scene, RasterBackground::Transparent).unwrap();
-        let svg = write_svg(&scene);
-        assert_eq!((raster.width(), raster.height()), (900, 600));
-        assert_eq!(svg.matches("<circle ").count(), marks.len());
-        assert!(svg.contains(scene.identity().family_fingerprint()));
-        assert!(svg.contains(scene.identity().realization_fingerprint()));
-        assert!(svg.contains(scene.identity().scene_fingerprint()));
+        assert_eq!(
+            (result.raster().width(), result.raster().height()),
+            (900, 600)
+        );
+        assert!(write_svg(result.scene()).contains("<circle "));
     }
 }
 
 #[test]
-fn component_response_changes_realization_and_scene_not_stage_3_geometry() {
-    let bytes = std::fs::read("../../assets/raster-sample.png").unwrap();
-    let luminance_request = request(&bytes, SourceFormatHint::Png);
-    let mut alpha_request = luminance_request.clone();
-    alpha_request.marks.source_component = SourceComponent::Alpha;
+fn source_mismatch_is_rejected_before_decode_or_geometry() {
+    let source_id = SourceReferenceId::new("snapshot-source").unwrap();
+    let other_id = SourceReferenceId::new("different-source").unwrap();
+    let document = Document::with_source(
+        DocumentId(1),
+        CanvasSpec {
+            width: 900.0,
+            height: 600.0,
+        },
+        SourceReference::Assigned(source_id),
+        vec![PatternDefinition {
+            id: PatternDefinitionId(1),
+            name: "straight-grid".into(),
+            structure: PatternStructure::StraightGrid,
+            output: PatternOutput::CircularMarks,
+            guard_steps: 2,
+        }],
+        vec![ChannelState {
+            id: CHANNEL_ID,
+            pattern_definition_id: PatternDefinitionId(1),
+            layout: ChannelPatternLayout {
+                density: DensityMetric2D {
+                    across_x: 90.0,
+                    across_y: 60.0,
+                    aspect_locked: true,
+                },
+                rotation_degrees: 0.0,
+                translation_x: 0.0,
+                translation_y: 0.0,
+            },
+            appearance: ChannelAppearance {
+                visible: true,
+                color: ColorValue {
+                    red: 0.0,
+                    green: 0.0,
+                    blue: 0.0,
+                    alpha: 1.0,
+                },
+                opacity: 1.0,
+            },
+            mark_geometry_response: MarkGeometryResponse {
+                minimum_size: 2.0,
+                maximum_size: 9.0,
+            },
+            source_mapping: ChannelSourceMapping {
+                component: SourceComponent::Luminance,
+                placement: SourcePlacement::StretchToCanvas,
+            },
+        }],
+    )
+    .unwrap();
+    let session = DocumentSession::new(document).unwrap();
+    let error = evaluate(EvaluationRequest::new(
+        session.evaluation_snapshot(CHANNEL_ID).unwrap(),
+        ResolvedSource::new(other_id, vec![1_u8], SourceFormatHint::Png).unwrap(),
+    ))
+    .expect_err("mismatched reference fails before invalid PNG decode");
+    assert_eq!(error.path(), "evaluation.source_reference");
+}
 
-    let luminance_realization = inspect_circular_marks(&luminance_request.marks).unwrap();
-    let alpha_realization = inspect_circular_marks(&alpha_request.marks).unwrap();
-    assert_eq!(
-        luminance_realization.family_fingerprint,
-        alpha_realization.family_fingerprint
-    );
-    assert_ne!(
-        luminance_realization.realization_fingerprint,
-        alpha_realization.realization_fingerprint
-    );
-    assert_eq!(luminance_realization.marks.len(), 10_304);
-    assert_eq!(alpha_realization.marks.len(), 10_304);
-    for (luminance, alpha) in luminance_realization
-        .marks
-        .iter()
-        .zip(&alpha_realization.marks)
-    {
-        assert_eq!(luminance.source_site_id, alpha.source_site_id);
-        assert_eq!(luminance.center, alpha.center);
-        assert_eq!(luminance.scope, alpha.scope);
-        assert_eq!(luminance.provenance, alpha.provenance);
-    }
-    assert!(
-        luminance_realization
-            .marks
-            .iter()
-            .zip(&alpha_realization.marks)
-            .any(|(luminance, alpha)| luminance.radius != alpha.radius)
-    );
-
-    let luminance_scene = render_scene(&luminance_request).unwrap();
-    let alpha_scene = render_scene(&alpha_request).unwrap();
-    assert_eq!(
-        luminance_scene.identity().family_fingerprint(),
-        alpha_scene.identity().family_fingerprint()
-    );
-    assert_ne!(
-        luminance_scene.identity().realization_fingerprint(),
-        alpha_scene.identity().realization_fingerprint()
-    );
-    assert_ne!(
-        luminance_scene.identity().scene_fingerprint(),
-        alpha_scene.identity().scene_fingerprint()
-    );
+#[test]
+fn unassigned_source_reference_fails_at_the_authoritative_boundary() {
+    let document = Document::new(
+        DocumentId(1),
+        CanvasSpec {
+            width: 900.0,
+            height: 600.0,
+        },
+        vec![PatternDefinition {
+            id: PatternDefinitionId(1),
+            name: "straight-grid".into(),
+            structure: PatternStructure::StraightGrid,
+            output: PatternOutput::CircularMarks,
+            guard_steps: 2,
+        }],
+        vec![ChannelState {
+            id: CHANNEL_ID,
+            pattern_definition_id: PatternDefinitionId(1),
+            layout: ChannelPatternLayout {
+                density: DensityMetric2D {
+                    across_x: 90.0,
+                    across_y: 60.0,
+                    aspect_locked: true,
+                },
+                rotation_degrees: 0.0,
+                translation_x: 0.0,
+                translation_y: 0.0,
+            },
+            appearance: ChannelAppearance {
+                visible: true,
+                color: ColorValue {
+                    red: 0.0,
+                    green: 0.0,
+                    blue: 0.0,
+                    alpha: 1.0,
+                },
+                opacity: 1.0,
+            },
+            mark_geometry_response: MarkGeometryResponse {
+                minimum_size: 2.0,
+                maximum_size: 9.0,
+            },
+            source_mapping: ChannelSourceMapping {
+                component: SourceComponent::Alpha,
+                placement: SourcePlacement::StretchToCanvas,
+            },
+        }],
+    )
+    .unwrap();
+    let session = DocumentSession::new(document).unwrap();
+    let error = evaluate(EvaluationRequest::new(
+        session.evaluation_snapshot(CHANNEL_ID).unwrap(),
+        ResolvedSource::new(
+            SourceReferenceId::new("resolved").unwrap(),
+            vec![1_u8],
+            SourceFormatHint::Png,
+        )
+        .unwrap(),
+    ))
+    .expect_err("unassigned source fails before decode");
+    assert_eq!(error.path(), "evaluation.source_reference");
 }

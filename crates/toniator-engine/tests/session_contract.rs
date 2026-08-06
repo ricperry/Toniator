@@ -1,9 +1,10 @@
 use toniator_domain::{
-    CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternLayout, ChannelState, ColorValue,
-    DensityMetric2D, Document, DocumentCommand, DocumentId, InvalidationLevel,
-    MarkGeometryResponse, PatternDefinition, PatternDefinitionId, Revision,
+    CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternLayout, ChannelSourceMapping,
+    ChannelState, ColorValue, DensityMetric2D, Document, DocumentCommand, DocumentId,
+    DocumentSession, InvalidationLevel, MarkGeometryResponse, PatternDefinition,
+    PatternDefinitionId, PatternOutput, PatternStructure, Revision, SourceComponent,
+    SourcePlacement,
 };
-use toniator_engine::DocumentSession;
 
 const CHANNEL_ID: ChannelId = ChannelId(1);
 
@@ -17,6 +18,9 @@ fn session() -> DocumentSession {
         vec![PatternDefinition {
             id: PatternDefinitionId(1),
             name: "minimal".to_owned(),
+            structure: PatternStructure::StraightGrid,
+            output: PatternOutput::CircularMarks,
+            guard_steps: 2,
         }],
         vec![ChannelState {
             id: CHANNEL_ID,
@@ -42,8 +46,12 @@ fn session() -> DocumentSession {
                 opacity: 0.75,
             },
             mark_geometry_response: MarkGeometryResponse {
-                minimum_size: 0.0,
-                maximum_size: 1.0,
+                minimum_size: 2.0,
+                maximum_size: 9.0,
+            },
+            source_mapping: ChannelSourceMapping {
+                component: SourceComponent::Luminance,
+                placement: SourcePlacement::StretchToCanvas,
             },
         }],
     )
@@ -85,8 +93,8 @@ fn successful_commands_mutate_once_and_advance_revision_once() {
             DocumentCommand::SetMarkGeometryResponse {
                 channel_id: CHANNEL_ID,
                 response: MarkGeometryResponse {
-                    minimum_size: 0.2,
-                    maximum_size: 1.2,
+                    minimum_size: 2.0,
+                    maximum_size: 8.5,
                 },
             },
             InvalidationLevel::Realization,
@@ -133,7 +141,7 @@ fn successful_commands_mutate_once_and_advance_revision_once() {
     assert_eq!(channel.layout.density.across_x, 70.0);
     assert_eq!(channel.layout.rotation_degrees, 20.0);
     assert_eq!(channel.layout.translation_y, -4.0);
-    assert_eq!(channel.mark_geometry_response.maximum_size, 1.2);
+    assert_eq!(channel.mark_geometry_response.maximum_size, 8.5);
     assert_eq!(channel.appearance.color.blue, 0.6);
     assert_eq!(channel.appearance.opacity, 0.4);
     assert!(!channel.appearance.visible);
@@ -167,7 +175,7 @@ fn failed_commands_preserve_exact_document_and_revision() {
             channel_id: CHANNEL_ID,
             response: MarkGeometryResponse {
                 minimum_size: -1.0,
-                maximum_size: 1.0,
+                maximum_size: 2.0,
             },
         },
         DocumentCommand::SetColor {
