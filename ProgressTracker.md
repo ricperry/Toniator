@@ -49,15 +49,17 @@ deterministic headless straight-guide family output: two rotated/translated
 guide dimensions, analytical off-canvas guard coverage, intersection sites
 with stable provenance/fingerprint, and canonical sorted JSON inspection.
 Focused crate and workspace tests, strict Clippy/checks, architecture
-validation, and the canonical JSON comparison passed. User acceptance is
-recorded, but point-site correctness was not visually confirmed on a plotted
-canvas because this stage has no visible-output path. Marks, rendering,
-source sampling, and GTK remain unimplemented. See the contract in
+validation, and the canonical JSON comparison passed. During Stage 3,
+point-site correctness was not visually confirmable on a plotted canvas because
+no visible-output path existed; that deferred coordinate-level visual
+verification was later resolved through the user-accepted Stage 5 artifacts.
+Marks, rendering, source sampling, and GTK remained unimplemented in Stage 3.
+See the contract in
 [the Stage 3 plan](docs/GREENFIELD_REWRITE_PLAN.md#stage-3--straight-guide-family-output).
 
 ### Stages 4–5 — first complete vertical slice
 
-**Stage 4 — Accepted awaiting checkpoint (alpha-associated correction accepted).** It adds byte-boundary PNG/SVG source
+**Stage 4 — Complete at commit `31f4cc9` (alpha-associated correction accepted).** It adds byte-boundary PNG/SVG source
 decoding, deterministic straight-sRGB source fields with independent alpha and
 linear-light Rec.709 luminance, clamped `StretchToCanvas` sampling, canonical
 circular-mark realization from immutable Stage 3 sites, and headless compact
@@ -66,7 +68,7 @@ SVG live-text/font-policy diagnostics, guard-mark preservation, realization
 reuse, and presentation independence are covered by focused and workspace
 validation. The accepted alpha-associated correction was discovered during
 Stage 5 visual validation. No renderer or clipping is present in Stage 4.
-**Stage 5 — Accepted awaiting checkpoint at the RenderScene/renderer boundary.** It now provides one immutable renderer-owned `RenderScene`
+**Stage 5 — Complete at commit `31f4cc9` at the RenderScene/renderer boundary.** It now provides one immutable renderer-owned `RenderScene`
 from the Stage 4 realization, a headless straight-sRGBA `RasterSurface` and
 PNG encoder, deterministic SVG circles with a canvas clip path, and headless
 `toniator render` extension selection. Both immutable sources have inspectable
