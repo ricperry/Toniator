@@ -79,8 +79,7 @@ Use these statuses exactly:
 
 Tracker transitions must never claim accepted or complete before actual user
 acceptance and (for complete) the checkpoint hash. Baseline is `11c2c8e`;
-Stage 1 is committed at `567d307`; Stage 2 is accepted but remains
-uncommitted in the current worktree until its checkpoint is made.
+Stage 1 is committed at `567d307`; Stage 2 is complete at `e842a8a`.
 
 ## Completed stages
 
@@ -98,9 +97,8 @@ exports were shipped in this checkpoint.
 
 ### Stage 2 — authoritative document and invalidation boundary
 
-**Accepted awaiting checkpoint (implemented in the dirty worktree; not
-committed).** Added validated authoritative in-memory domain state, stable IDs,
-continuous `f64` layout/appearance values, validated commands and invalidation
+**Complete at `e842a8a`.** Added validated authoritative in-memory domain
+state, stable IDs, continuous `f64` layout/appearance values, validated commands and invalidation
 levels (`Presentation`, `Realization`, `Family`, `Source`), immutable
 `Document::apply_command`, `DocumentSession` revision ownership, and stale
 evaluation-token rejection. Added headless `toniator validate` and nine

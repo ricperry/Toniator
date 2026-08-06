@@ -19,9 +19,8 @@ persistence, source decoding, GTK resources, or exports exist yet.
 
 ### Stage 2 — authoritative document and invalidation boundary
 
-**Accepted awaiting checkpoint (not committed).** The shared worktree contains
-the reviewed and user-accepted implementation, but `HEAD` remains
-`567d307` until the parent creates the explicit checkpoint. Verified summary:
+**Complete at `e842a8a`.** The reviewed and user-accepted implementation is
+recorded in the Stage 2 checkpoint. Verified summary:
 
 - Authoritative `Document` and `DocumentSession` with stable IDs and discrete
   revisions; immutable validated transitions and stale evaluation-token
