@@ -36,7 +36,7 @@ recorded in the Stage 2 checkpoint. Verified summary:
 
 ### Cross-stage baseline artwork fixtures
 
-**Accepted awaiting checkpoint.** `assets/raster-sample.png` is the canonical
+**Complete at `8f3b759`.** `assets/raster-sample.png` is the canonical
 RGBA/alpha source fixture and `assets/vector-sample.svg` is the canonical SVG
 fixture with live text. Relevant source, sampling, render, preview, and export
 stages must use both without modifying them; derived artifacts belong under
