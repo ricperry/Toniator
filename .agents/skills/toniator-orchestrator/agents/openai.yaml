@@ -1,0 +1,4 @@
+interface:
+  display_name: "Toniator Orchestrator"
+  short_description: "Coordinate focused Toniator agent workflows"
+  default_prompt: "Use $toniator-orchestrator to coordinate this Toniator task with only the warranted specialist agents."

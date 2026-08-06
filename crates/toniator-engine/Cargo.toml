@@ -1,0 +1,16 @@
+[package]
+name = "toniator-engine"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+toniator-domain = { path = "../toniator-domain" }
+toniator-sampling = { path = "../toniator-sampling" }
+toniator-patterns = { path = "../toniator-patterns" }
+toniator-render = { path = "../toniator-render" }
+toniator-io = { path = "../toniator-io" }
+
+[lib]
+path = "src/lib.rs"

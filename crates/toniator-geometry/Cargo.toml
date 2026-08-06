@@ -1,0 +1,12 @@
+[package]
+name = "toniator-geometry"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+toniator-domain = { path = "../toniator-domain" }
+
+[lib]
+path = "src/lib.rs"

@@ -1,8 +1,21 @@
 # Toniator Codex guidance
 
-- Toniator uses quota-conscious delegation: `desktop_implementer` is the normal writer, while specialist agents require a specific justification.
-- Use `.agents/skills/toniator-evidence-cache/SKILL.md` and `.codex-work/` evidence to avoid repeated exploration; read-only `CACHE_UPDATE` results are persisted directly by the parent.
-- Sol is for narrow unresolved escalation, not routine work. Documentation reconciliation is milestone-triggered, not automatic; use `.agents/skills/toniator-milestone-documentation/SKILL.md`.
-- Toniator does not maintain backwards compatibility for obsolete document or preset definitions. When a current definition changes, update the current preset/fixture definition and reject the old format; do not add migration, defaulting, or compatibility code solely to preserve it.
-- For the remaining TON-010 stages, split substantial delegated work into independently verifiable substages with explicit deliverables and acceptance checks. The same writing subagent must report at each safe substage boundary; the parent must preserve the report in `.codex-work/` evidence/cache, review it, and explicitly hand off the next substage. Treat elapsed time without an error as ongoing work: check status and wait rather than interrupting, replacing, or duplicating a progressing agent. If a subagent is genuinely blocked, preserve its completed work and report the specific blocker before narrowing or reassigning anything. The parent remains responsible for integration, conflict resolution, and full-stage verification; subagent reports are evidence, not acceptance.
-- TON-010 Stage 4.5 is a separate four-gate baseline-restoration review between accepted Stage 4 and blocked Stage 5. Each 4.5A–D gate requires its own parent review and explicit user approval; no substage or Weighted Voronoi work starts automatically.
+- `Project Specification/Addendum.md` is normative and supersedes conflicts in
+  the other specification documents. Keep the five files under `Project
+  Specification/` as protected normative inputs unless the parent explicitly
+  authorizes a specification revision.
+- Treat `ToniatorLegacy/` as a read-only legacy reference. Do not build, test,
+  format, or write there. Consult it only for an explicitly named quarry task.
+- Work in short, bounded stages with one writer. Stop at each parent-defined
+  approval gate; do not begin a later stage from an earlier-stage handoff.
+- Preserve hard boundaries: headless core crates never depend on a frontend or
+  GTK/libadwaita; `toniator-cli` is headless; GTK/libadwaita belongs only in
+  `toniator-app`; canonical geometry remains the shared preview/PNG/SVG
+  boundary; authoritative commands report the correct invalidation level.
+- Do not add broad legacy compatibility, hidden adapters, or preset-specific
+  behavior. Current schemas and explicit porting decisions are authoritative.
+- Read applicable `.codex-work/` evidence before broad exploration, then
+  validate it against the current checkout. Evidence is not durable product
+  documentation.
+- Do not commit, push, publish, deploy, delete implementations, or overwrite
+  unrelated work without explicit authorization.
