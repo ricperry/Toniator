@@ -84,11 +84,16 @@ out of scope. Details and non-goals are in the plan.
 
 **Stage 6 — Complete at commit `d8d1dc3`.** Authoritative document evaluation
 and the bounded Stage 3 family-output correction passed parent review, user
-visual acceptance, and the implementation checkpoint gate. Async
-scheduling/cancellation/caches; view-only
-GTK preview; command bindings/undo-redo/current persistence/editors; then
-newly scoped generalized families, connected/region output, multiframe, and
-simple transitions. Each later stage requires explicit approval.
+visual acceptance, and the implementation checkpoint gate.
+
+**Stage 7 — Complete at commit `ed2183f`.** The bounded engine-only scheduler
+uses one standard-library worker, checked monotonic tickets, queued-work
+coalescing, pipeline-boundary cancellation, latest-only completion polling,
+and clean shutdown/Drop joining. Scheduled results for both immutable sources
+match synchronous Stage 6 identities and pixels. Caches; view-only GTK
+preview; command bindings/undo-redo/current persistence/editors; then newly
+scoped generalized families, connected/region output, multiframe, and simple
+transitions remain planned. Each later stage requires explicit approval.
 
 ## Maintenance rules
 
