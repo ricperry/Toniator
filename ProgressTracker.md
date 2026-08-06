@@ -57,16 +57,24 @@ source sampling, and GTK remain unimplemented. See the contract in
 
 ### Stages 4–5 — first complete vertical slice
 
-**Stage 4 — Complete at commit `9d4f49b`.** It adds byte-boundary PNG/SVG source
+**Stage 4 — Accepted awaiting checkpoint (alpha-associated correction accepted).** It adds byte-boundary PNG/SVG source
 decoding, deterministic straight-sRGB source fields with independent alpha and
 linear-light Rec.709 luminance, clamped `StretchToCanvas` sampling, canonical
 circular-mark realization from immutable Stage 3 sites, and headless compact
 `inspect marks` JSON summaries. Both baseline assets, their documented hashes,
 SVG live-text/font-policy diagnostics, guard-mark preservation, realization
 reuse, and presentation independence are covered by focused and workspace
-validation. No renderer or clipping is present. Stage 5 remains **Planned** and covers shared RenderScene,
-headless raster/SVG consumers, CLI render, final clipping, and artifact/golden
-inspection. Details and non-goals are in the plan; Stage 5 is not started.
+validation. The accepted alpha-associated correction was discovered during
+Stage 5 visual validation. No renderer or clipping is present in Stage 4.
+**Stage 5 — Accepted awaiting checkpoint at the RenderScene/renderer boundary.** It now provides one immutable renderer-owned `RenderScene`
+from the Stage 4 realization, a headless straight-sRGBA `RasterSurface` and
+PNG encoder, deterministic SVG circles with a canvas clip path, and headless
+`toniator render` extension selection. Both immutable sources have inspectable
+PNG/SVG artifacts under `target/validation/stage-5/`, which received user visual
+acceptance. The alpha-aware carried condition is satisfied, and deferred Stage
+3/4 coordinate-level visual verification is resolved. No binary goldens were
+committed or accepted. Stage 6 is not started and remains planned; GTK remains
+out of scope. Details and non-goals are in the plan.
 
 ### Stages 6–9+
 

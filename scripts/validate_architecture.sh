@@ -66,6 +66,15 @@ if rg -n -i --glob '*.rs' --glob 'Cargo.toml' --glob '!crates/toniator-app/**' \
     fail 'GTK/libadwaita is restricted to toniator-app'
 fi
 
+if rg -n -i --glob '*.rs' --glob 'Cargo.toml' \
+    '(toniator_sampling|toniator_patterns|resvg|usvg|tiny_skia|gtk4?|libadwaita)' crates/toniator-render; then
+    fail 'toniator-render must consume canonical geometry without sampling, patterns, or GTK'
+fi
+
+if rg -n --glob '*.rs' '(DocumentSession|apply_command|DocumentCommand|&mut[[:space:]]+Document)' crates/toniator-render; then
+    fail 'toniator-render must not own writable document state'
+fi
+
 if rg -n -i 'TON-010|Stage[[:space:]]*4\.5|4\.5[A-D]' \
     AGENTS.md .codex/agents .agents/skills; then
     fail 'obsolete TON-010 or Stage 4.5 workflow remains active'

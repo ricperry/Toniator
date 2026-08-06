@@ -12,6 +12,10 @@ pub use toniator_patterns::{
     SiteScope,
 };
 use toniator_patterns::{GridFamilyOutput, evaluate_straight_grid, realize_circular_marks};
+pub use toniator_render::{
+    GeometryOutput, RasterBackground, RasterSurface, RenderError, RenderLayer, RenderScene,
+    SceneIdentity, encode_png, linear_to_srgb, rasterize, srgb_to_linear, write_svg,
+};
 use toniator_sampling::decode_source;
 pub use toniator_sampling::{
     SourceComponent, SourceField, SourceFormat, SourceFormatHint, SourcePlacement,
@@ -53,6 +57,40 @@ pub fn inspect_circular_marks(
     )?)
 }
 
+/// Presentation attached after Stage 4 realization, before renderer selection.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScenePresentation {
+    pub channel_id: toniator_domain::ChannelId,
+    pub visible: bool,
+    pub color: toniator_domain::ColorValue,
+    pub opacity: f64,
+}
+
+/// The Stage 5 shared source-to-scene request. The engine evaluates the family
+/// and realization once, then constructs one renderer-independent scene.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RenderSceneRequest<'a> {
+    pub marks: MarksInspectRequest<'a>,
+    pub presentation: ScenePresentation,
+}
+
+pub fn render_scene(request: &RenderSceneRequest<'_>) -> Result<RenderScene, RenderSceneError> {
+    let realization = inspect_circular_marks(&request.marks)?;
+    RenderScene::new(
+        request.marks.grid.canvas.clone(),
+        realization.family_fingerprint,
+        realization.realization_fingerprint,
+        vec![RenderLayer::new(
+            request.presentation.channel_id,
+            request.presentation.visible,
+            request.presentation.color.clone(),
+            request.presentation.opacity,
+            GeometryOutput::CircularMarks(realization.marks),
+        )?],
+    )
+    .map_err(RenderSceneError::Render)
+}
+
 /// Exposes realization from an already evaluated family so callers can prove
 /// exact Stage 3 reuse while varying only the realization response.
 pub fn realize_from_existing_family(
@@ -73,6 +111,35 @@ pub enum MarksInspectError {
     Sampling(toniator_sampling::SamplingError),
     Realization(RealizationError),
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RenderSceneError {
+    Marks(MarksInspectError),
+    Render(toniator_render::RenderError),
+}
+
+impl From<MarksInspectError> for RenderSceneError {
+    fn from(error: MarksInspectError) -> Self {
+        Self::Marks(error)
+    }
+}
+
+impl From<toniator_render::RenderError> for RenderSceneError {
+    fn from(error: toniator_render::RenderError) -> Self {
+        Self::Render(error)
+    }
+}
+
+impl fmt::Display for RenderSceneError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Marks(error) => error.fmt(formatter),
+            Self::Render(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for RenderSceneError {}
 
 impl From<GridError> for MarksInspectError {
     fn from(error: GridError) -> Self {

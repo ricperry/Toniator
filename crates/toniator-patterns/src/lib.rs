@@ -140,17 +140,14 @@ pub fn realize_circular_marks(
     }
     let mut marks = Vec::with_capacity(family.sites.len());
     for site in &family.sites {
-        let sample = source.sample(site.position, canvas, placement, component)?;
-        if !sample.is_finite() {
+        let ink = source.sample_mark_ink(site.position, canvas, placement, component)?;
+        if !ink.is_finite() {
             return Err(RealizationError::new(
                 "realization.sample",
-                "sample must be finite",
+                "effective mark ink must be finite",
             ));
         }
-        let ink = (1.0 - sample).clamp(0.0, 1.0);
-        let diameter =
-            response.minimum_size + ink * (response.maximum_size - response.minimum_size);
-        let radius = diameter / 2.0;
+        let radius = radius_from_ink(ink, response)?;
         let mark = CanonicalCircleMark::new(
             site.id,
             site.position,
@@ -184,19 +181,17 @@ pub fn realize_circular_marks(
         ))
 }
 
-/// Maps a normalized sampled luminance to radius using the authored diameter.
-pub fn radius_from_luminance(
-    luminance: f64,
-    response: MarkResponse,
-) -> Result<f64, RealizationError> {
+/// Maps an effective mark-ink response linearly to radius using the authored
+/// diameter bounds. Source sampling owns component polarity and alpha handling.
+pub fn radius_from_ink(ink: f64, response: MarkResponse) -> Result<f64, RealizationError> {
     validate_response(response)?;
-    if !luminance.is_finite() {
+    if !ink.is_finite() {
         return Err(RealizationError::new(
-            "realization.luminance",
-            "value must be finite",
+            "realization.ink",
+            "effective mark ink must be finite",
         ));
     }
-    let ink = (1.0 - luminance).clamp(0.0, 1.0);
+    let ink = ink.clamp(0.0, 1.0);
     Ok((response.minimum_size + ink * (response.maximum_size - response.minimum_size)) / 2.0)
 }
 
@@ -238,7 +233,7 @@ fn realization_fingerprint(
         toniator_sampling::SourceFormat::Png => 1_u8,
         toniator_sampling::SourceFormat::Svg => 2_u8,
     };
-    for byte in b"toniator-stage-4-circular-realization-v1"
+    for byte in b"toniator-stage-4-circular-realization-v2-alpha-associated"
         .iter()
         .copied()
         .chain(family.family_fingerprint.bytes())
@@ -291,17 +286,104 @@ mod realization_tests {
     }
 
     #[test]
-    fn diameter_response_uses_luminance_and_stores_radius() {
+    fn png_alpha_associated_ink_reaches_canonical_radii_without_hidden_rgb_fringes() {
+        let image = image::RgbaImage::from_raw(
+            8,
+            1,
+            vec![
+                0, 0, 0, 0, // transparent black
+                255, 255, 255, 0, // transparent white
+                255, 0, 0, 0, // transparent saturated red
+                0, 0, 0, 255, // opaque black
+                255, 255, 255, 255, // opaque white
+                0, 0, 0, 0, // same black RGB, alpha 0
+                0, 0, 0, 128, // same black RGB, alpha about 0.5
+                0, 0, 0, 255, // same black RGB, alpha 1
+            ],
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        let source = decode_source(&bytes, SourceFormatHint::Png).unwrap();
+        let mut grid = family();
+        let prototype = grid.sites[0].clone();
+        grid.sites = (0..8)
+            .map(|x| {
+                let mut site = prototype.clone();
+                site.position = Point2::new(f64::from(x), 0.0);
+                site
+            })
+            .collect();
+        let canvas = CanvasSpec {
+            width: 7.0,
+            height: 1.0,
+        };
         let response = MarkResponse {
             minimum_size: 2.0,
             maximum_size: 9.0,
         };
-        assert_eq!(radius_from_luminance(0.0, response).unwrap(), 4.5);
-        assert_eq!(radius_from_luminance(0.5, response).unwrap(), 2.75);
-        assert_eq!(radius_from_luminance(1.0, response).unwrap(), 1.0);
-        assert!(radius_from_luminance(f64::NAN, response).is_err());
+        let luminance = realize_circular_marks(
+            &grid,
+            &source,
+            &canvas,
+            SourcePlacement::StretchToCanvas,
+            SourceComponent::Luminance,
+            response,
+        )
+        .unwrap();
+        let alpha = realize_circular_marks(
+            &grid,
+            &source,
+            &canvas,
+            SourcePlacement::StretchToCanvas,
+            SourceComponent::Alpha,
+            response,
+        )
+        .unwrap();
+        assert_eq!(
+            luminance.marks[0].radius, 1.0,
+            "transparent black is the minimum mark radius"
+        );
         assert!(
-            radius_from_luminance(
+            [1, 2, 5]
+                .into_iter()
+                .all(|index| luminance.marks[index].radius == luminance.marks[0].radius),
+            "all zero-alpha hidden RGB variants map to minimum radius"
+        );
+        assert_eq!(luminance.marks[3].radius, 4.5);
+        assert_eq!(luminance.marks[4].radius, 1.0);
+        let half_alpha_radius = (2.0 + (128.0 / 255.0) * 7.0) / 2.0;
+        assert!((luminance.marks[6].radius - half_alpha_radius).abs() < 1e-12);
+        assert_eq!(luminance.marks[7].radius, 4.5);
+        assert!(
+            alpha.marks[5].radius > alpha.marks[6].radius
+                && alpha.marks[6].radius > alpha.marks[7].radius,
+            "Alpha response has one decreasing alpha polarity, without squaring"
+        );
+        assert!((alpha.marks[6].radius - (2.0 + (127.0 / 255.0) * 7.0) / 2.0).abs() < 1e-12);
+        assert_ne!(
+            luminance.realization_fingerprint,
+            alpha.realization_fingerprint
+        );
+    }
+
+    #[test]
+    fn diameter_response_uses_effective_ink_and_stores_radius() {
+        let response = MarkResponse {
+            minimum_size: 2.0,
+            maximum_size: 9.0,
+        };
+        assert_eq!(radius_from_ink(0.0, response).unwrap(), 1.0);
+        assert_eq!(radius_from_ink(0.5, response).unwrap(), 2.75);
+        assert_eq!(radius_from_ink(1.0, response).unwrap(), 4.5);
+        assert!(radius_from_ink(f64::NAN, response).is_err());
+        assert!(
+            radius_from_ink(
                 0.5,
                 MarkResponse {
                     minimum_size: 1.0,

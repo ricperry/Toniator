@@ -11,9 +11,10 @@ use toniator_domain::{
 };
 use toniator_engine::{
     CanonicalCircleMark, DocumentSession, GridError, GridInspectRequest, MarkResponse,
-    MarksInspectError, MarksInspectRequest, Point2, SiteId, SiteScope, SourceComponent,
-    SourceFormat, SourceFormatHint, SourcePlacement, SvgTextDiagnostic, inspect_circular_marks,
-    inspect_straight_grid,
+    MarksInspectError, MarksInspectRequest, Point2, RasterBackground, RenderSceneRequest,
+    ScenePresentation, SiteId, SiteScope, SourceComponent, SourceFormat, SourceFormatHint,
+    SourcePlacement, SvgTextDiagnostic, encode_png, inspect_circular_marks, inspect_straight_grid,
+    rasterize, render_scene, srgb_to_linear, write_svg,
 };
 
 /// Headless Toniator command-line frontend.
@@ -30,6 +31,8 @@ enum Command {
     Validate(ValidateArgs),
     /// Inspect deterministic family output without realizing marks or rendering.
     Inspect(InspectArgs),
+    /// Render canonical Stage 4 circles to PNG or SVG through one RenderScene.
+    Render(RenderArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -122,6 +125,44 @@ struct MarksArgs {
     format: InspectFormat,
 }
 
+#[derive(Debug, clap::Args)]
+struct RenderArgs {
+    #[arg(long)]
+    source: PathBuf,
+    #[arg(long)]
+    output: PathBuf,
+    #[arg(long, value_enum)]
+    mode: OutputMode,
+    #[arg(long)]
+    canvas: String,
+    #[arg(long)]
+    density_x: f64,
+    #[arg(long)]
+    density_y: f64,
+    #[arg(long, allow_hyphen_values = true)]
+    rotation: f64,
+    #[arg(long, allow_hyphen_values = true)]
+    offset_x: f64,
+    #[arg(long, allow_hyphen_values = true)]
+    offset_y: f64,
+    #[arg(long)]
+    guard_steps: u32,
+    #[arg(long)]
+    support_radius: f64,
+    #[arg(long, value_enum)]
+    source_component: CliSourceComponent,
+    #[arg(long)]
+    size_min: f64,
+    #[arg(long)]
+    size_max: f64,
+    #[arg(long)]
+    color: String,
+    #[arg(long)]
+    opacity: f64,
+    #[arg(long)]
+    transparent: bool,
+}
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum InspectFormat {
     Json,
@@ -131,6 +172,12 @@ enum InspectFormat {
 enum CliSourceComponent {
     Luminance,
     Alpha,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum OutputMode {
+    Rgb,
+    Cmyk,
 }
 
 impl From<CliSourceComponent> for SourceComponent {
@@ -209,8 +256,76 @@ fn run(cli: Cli) -> Result<(), CliError> {
     match cli.command {
         Some(Command::Validate(arguments)) => validate(arguments).map_err(CliError::from),
         Some(Command::Inspect(arguments)) => inspect(arguments),
+        Some(Command::Render(arguments)) => render(arguments),
         None => Ok(()),
     }
+}
+
+fn render(arguments: RenderArgs) -> Result<(), CliError> {
+    let format = output_format(&arguments.output)?;
+    let color = parse_color_value(&arguments.color)?;
+    if !arguments.opacity.is_finite() || !(0.0..=1.0).contains(&arguments.opacity) {
+        return Err(CliError::new(
+            "presentation.opacity",
+            "opacity must be within 0.0..=1.0",
+        ));
+    }
+    let source_format = source_hint(&arguments.source)?;
+    let source_bytes = std::fs::read(&arguments.source)
+        .map_err(|_| CliError::new("source", "could not read source file"))?;
+    let scene = render_scene(&RenderSceneRequest {
+        marks: MarksInspectRequest {
+            grid: GridInspectRequest {
+                canvas: parse_canvas(&arguments.canvas)?,
+                density: DensityMetric2D {
+                    across_x: arguments.density_x,
+                    across_y: arguments.density_y,
+                    aspect_locked: true,
+                },
+                rotation_degrees: arguments.rotation,
+                translation_x: arguments.offset_x,
+                translation_y: arguments.offset_y,
+                guard_steps: arguments.guard_steps,
+                support_radius: arguments.support_radius,
+            },
+            source_bytes: &source_bytes,
+            source_format,
+            source_component: arguments.source_component.into(),
+            placement: SourcePlacement::StretchToCanvas,
+            response: MarkResponse {
+                minimum_size: arguments.size_min,
+                maximum_size: arguments.size_max,
+            },
+        },
+        presentation: ScenePresentation {
+            channel_id: ChannelId(1),
+            visible: true,
+            color,
+            opacity: arguments.opacity,
+        },
+    })?;
+    match format {
+        OutputFormat::Png => {
+            let background = if arguments.transparent {
+                RasterBackground::Transparent
+            } else {
+                match arguments.mode {
+                    OutputMode::Rgb => RasterBackground::OpaqueBlack,
+                    OutputMode::Cmyk => RasterBackground::OpaqueWhite,
+                }
+            };
+            let png = encode_png(&rasterize(&scene, background).map_err(render_error)?)
+                .map_err(render_error)?;
+            std::fs::write(&arguments.output, png)
+                .map_err(|_| CliError::new("output", "could not write PNG output"))?;
+        }
+        OutputFormat::Svg => {
+            // SVG has no mode background; --transparent is intentionally a no-op.
+            std::fs::write(&arguments.output, write_svg(&scene))
+                .map_err(|_| CliError::new("output", "could not write SVG output"))?;
+        }
+    }
+    Ok(())
 }
 
 fn inspect(arguments: InspectArgs) -> Result<(), CliError> {
@@ -384,6 +499,47 @@ fn parse_color(value: &str) -> Result<String, CliError> {
     Ok(format!("#{}", hex.to_ascii_lowercase()))
 }
 
+fn parse_color_value(value: &str) -> Result<ColorValue, CliError> {
+    let normalized = parse_color(value)?;
+    let parse_component = |range: std::ops::Range<usize>| {
+        u8::from_str_radix(&normalized[range], 16)
+            .map(|component| srgb_to_linear(f64::from(component) / 255.0))
+            .map_err(|_| CliError::new("presentation.color", "expected #RRGGBB"))
+    };
+    Ok(ColorValue {
+        red: parse_component(1..3)?,
+        green: parse_component(3..5)?,
+        blue: parse_component(5..7)?,
+        alpha: 1.0,
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+enum OutputFormat {
+    Png,
+    Svg,
+}
+
+fn output_format(path: &std::path::Path) -> Result<OutputFormat, CliError> {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("png") => Ok(OutputFormat::Png),
+        Some("svg") => Ok(OutputFormat::Svg),
+        _ => Err(CliError::new(
+            "output.format",
+            "output extension must be .png or .svg",
+        )),
+    }
+}
+
+fn render_error(error: toniator_engine::RenderError) -> CliError {
+    CliError::new(error.path(), error.message())
+}
+
 fn inspect_grid(arguments: GridArgs) -> Result<(), CliError> {
     let request = GridInspectRequest {
         canvas: parse_canvas(&arguments.canvas)?,
@@ -507,6 +663,15 @@ impl From<MarksInspectError> for CliError {
             MarksInspectError::Grid(error) => Self::new(error.path(), error.message()),
             MarksInspectError::Sampling(error) => Self::new(error.path(), error.message()),
             MarksInspectError::Realization(error) => Self::new(error.path(), error.message()),
+        }
+    }
+}
+
+impl From<toniator_engine::RenderSceneError> for CliError {
+    fn from(error: toniator_engine::RenderSceneError) -> Self {
+        match error {
+            toniator_engine::RenderSceneError::Marks(error) => Self::from(error),
+            toniator_engine::RenderSceneError::Render(error) => render_error(error),
         }
     }
 }

@@ -1094,3 +1094,24 @@ Add:
 13. CLI and GTK use the same core pipeline.
 14. Still images, multi-frame images, image sequences, and video use one frame-source abstraction.
 15. Headless rendering is sufficient for automated development and testing.
+
+---
+
+## 15. Source-alpha interpretation
+
+Decoded source pixels retain their raw straight (unassociated) sRGBA values,
+including hidden RGB where alpha is zero. Realization derives its mark response
+at the sampling boundary, before bilinear interpolation:
+
+- For the color-derived Luminance component, `L` is Rec.709 luminance of linear
+  RGB, opaque ink is `1 - L`, and effective ink is `alpha * (1 - L)` per source
+  sample. These effective-ink values are bilinearly interpolated, so hidden RGB
+  at alpha zero cannot create a fringe.
+- For the independent Alpha component, alpha itself is bilinearly interpolated
+  and the existing Alpha response is applied once: mark ink is `1 - alpha`.
+  It is not multiplied by alpha a second time.
+
+SVG decoder output must be unpremultiplied to retain straight RGBA; the normal
+precision and zero-alpha caveats of that conversion remain applicable. Raw
+hidden RGB remains available for source inspection, but does not affect the
+alpha-associated color-derived mark response.

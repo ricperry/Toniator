@@ -91,7 +91,11 @@ impl SourceField {
             .then(|| self.pixels[y as usize * self.identity.width as usize + x as usize])
     }
 
-    /// Bilinearly samples a normalized component with edge clamping.
+    /// Bilinearly samples a raw normalized component with edge clamping.
+    ///
+    /// This retains the independently inspectable source-component contract.
+    /// Realization must instead call [`Self::sample_mark_ink`] so color-derived
+    /// response is associated with alpha before interpolation.
     pub fn sample(
         &self,
         point: Point2,
@@ -104,16 +108,41 @@ impl SourceField {
             return Err(SamplingError::new("sampling.point", "point must be finite"));
         }
         match placement {
-            SourcePlacement::StretchToCanvas => self.sample_stretch(point, canvas, component),
+            SourcePlacement::StretchToCanvas => {
+                self.sample_stretch_with(point, canvas, |pixel| component_value(pixel, component))
+            }
         }
     }
 
-    fn sample_stretch(
+    /// Bilinearly samples the effective mark-ink response used by canonical
+    /// circle realization. Color-derived ink is alpha-associated per source
+    /// sample before interpolation; Alpha remains an independent response.
+    pub fn sample_mark_ink(
         &self,
         point: Point2,
         canvas: &CanvasSpec,
+        placement: SourcePlacement,
         component: SourceComponent,
     ) -> Result<f64, SamplingError> {
+        validate_canvas(canvas)?;
+        if !point.is_finite() {
+            return Err(SamplingError::new("sampling.point", "point must be finite"));
+        }
+        match placement {
+            SourcePlacement::StretchToCanvas => self
+                .sample_stretch_with(point, canvas, |pixel| effective_mark_ink(pixel, component)),
+        }
+    }
+
+    fn sample_stretch_with<F>(
+        &self,
+        point: Point2,
+        canvas: &CanvasSpec,
+        value: F,
+    ) -> Result<f64, SamplingError>
+    where
+        F: Fn(SourcePixel) -> f64,
+    {
         let x = map_axis(point.x, canvas.width, self.identity.width);
         let y = map_axis(point.y, canvas.height, self.identity.height);
         let x0 = x.floor() as u32;
@@ -122,9 +151,9 @@ impl SourceField {
         let y1 = (y0 + 1).min(self.identity.height - 1);
         let tx = x - f64::from(x0);
         let ty = y - f64::from(y0);
-        let value = |x, y| component_value(self.pixel(x, y).expect("mapped pixel"), component);
-        let top = value(x0, y0).mul_add(1.0 - tx, value(x1, y0) * tx);
-        let bottom = value(x0, y1).mul_add(1.0 - tx, value(x1, y1) * tx);
+        let sampled_value = |x, y| value(self.pixel(x, y).expect("mapped pixel"));
+        let top = sampled_value(x0, y0).mul_add(1.0 - tx, sampled_value(x1, y0) * tx);
+        let bottom = sampled_value(x0, y1).mul_add(1.0 - tx, sampled_value(x1, y1) * tx);
         let sampled = top.mul_add(1.0 - ty, bottom * ty);
         if sampled.is_finite() {
             Ok(sampled.clamp(0.0, 1.0))
@@ -365,6 +394,19 @@ fn component_value(pixel: SourcePixel, component: SourceComponent) -> f64 {
     }
 }
 
+/// Converts one raw source pixel into the realization's normalized mark-ink
+/// response. This happens before bilinear interpolation.
+pub fn effective_mark_ink(pixel: SourcePixel, component: SourceComponent) -> f64 {
+    match component {
+        SourceComponent::Luminance => (pixel.alpha
+            * (1.0 - rec709_luminance(pixel.red, pixel.green, pixel.blue)))
+        .clamp(0.0, 1.0),
+        // Alpha is its own source component. Keep its existing "low alpha is
+        // high ink" polarity and never multiply this response by alpha again.
+        SourceComponent::Alpha => (1.0 - pixel.alpha).clamp(0.0, 1.0),
+    }
+}
+
 /// Converts one straight-sRGB component to linear light.
 pub fn srgb_to_linear(value: f64) -> f64 {
     if value <= 0.04045 {
@@ -495,6 +537,8 @@ mod tests {
         };
         assert!((component_value(red, SourceComponent::Luminance) - 0.2126).abs() < 1e-12);
         assert_eq!(component_value(red, SourceComponent::Alpha), 0.25);
+        assert!((effective_mark_ink(red, SourceComponent::Luminance) - 0.19685).abs() < 1e-12);
+        assert_eq!(effective_mark_ink(red, SourceComponent::Alpha), 0.75);
         assert!((srgb_to_linear(0.5) - 0.21404114048223255).abs() < 1e-12);
     }
 
@@ -652,6 +696,150 @@ mod tests {
         bytes.extend([8, 6, 0, 0, 0]);
         bytes.extend(crc32(&bytes[12..]).to_be_bytes());
         bytes
+    }
+
+    #[test]
+    fn decoded_png_keeps_hidden_rgb_and_alpha_as_independent_fields_and_clamps_guards() {
+        let image = image::RgbaImage::from_raw(
+            4,
+            1,
+            vec![
+                0, 0, 0, 0, // transparent black
+                255, 0, 0, 0, // transparent saturated red
+                255, 255, 255, 128, // partial white
+                255, 255, 255, 255, // opaque white
+            ],
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        let field = decode_source(&bytes, SourceFormatHint::Png).unwrap();
+        let canvas = CanvasSpec {
+            width: 3.0,
+            height: 1.0,
+        };
+        let luminance = |x| {
+            field
+                .sample(
+                    Point2::new(x, 0.0),
+                    &canvas,
+                    SourcePlacement::StretchToCanvas,
+                    SourceComponent::Luminance,
+                )
+                .unwrap()
+        };
+        let alpha = |x| {
+            field
+                .sample(
+                    Point2::new(x, 0.0),
+                    &canvas,
+                    SourcePlacement::StretchToCanvas,
+                    SourceComponent::Alpha,
+                )
+                .unwrap()
+        };
+        assert_eq!(alpha(0.0), 0.0);
+        assert_eq!(alpha(1.0), 0.0);
+        assert!((alpha(2.0) - 128.0 / 255.0).abs() < 1e-12);
+        assert_eq!(alpha(3.0), 1.0);
+        assert_ne!(
+            luminance(0.0),
+            luminance(1.0),
+            "hidden RGB remains straight RGBA at alpha zero"
+        );
+        assert_eq!(
+            luminance(2.0),
+            luminance(3.0),
+            "same RGB has alpha-independent luminance"
+        );
+        assert_eq!(luminance(-10.0), luminance(0.0));
+        assert_eq!(luminance(10.0), luminance(3.0));
+    }
+
+    #[test]
+    fn decoded_png_associates_luminance_ink_before_bilinear_interpolation() {
+        let image = image::RgbaImage::from_raw(
+            8,
+            1,
+            vec![
+                0, 0, 0, 0, // transparent black
+                255, 255, 255, 0, // transparent white
+                255, 0, 0, 0, // transparent red
+                0, 0, 0, 255, // opaque black
+                255, 255, 255, 255, // opaque white
+                0, 0, 0, 0, // black alpha 0
+                0, 0, 0, 128, // black alpha about 0.5
+                0, 0, 0, 255, // black alpha 1
+            ],
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        let field = decode_source(&bytes, SourceFormatHint::Png).unwrap();
+        assert_eq!(field.pixel(1, 0).unwrap().red, 1.0);
+        assert_eq!(field.pixel(2, 0).unwrap().red, 1.0);
+        assert_eq!(field.pixel(2, 0).unwrap().green, 0.0);
+        let canvas = CanvasSpec {
+            width: 7.0,
+            height: 1.0,
+        };
+        let ink = |x, component| {
+            field
+                .sample_mark_ink(
+                    Point2::new(x, 0.0),
+                    &canvas,
+                    SourcePlacement::StretchToCanvas,
+                    component,
+                )
+                .unwrap()
+        };
+        for x in [0.0, 1.0, 2.0, 5.0] {
+            assert_eq!(ink(x, SourceComponent::Luminance), 0.0);
+        }
+        assert_eq!(ink(3.0, SourceComponent::Luminance), 1.0);
+        assert_eq!(ink(4.0, SourceComponent::Luminance), 0.0);
+        assert!((ink(6.0, SourceComponent::Luminance) - 128.0 / 255.0).abs() < 1e-12);
+        assert_eq!(ink(7.0, SourceComponent::Luminance), 1.0);
+        assert_eq!(ink(5.0, SourceComponent::Alpha), 1.0);
+        assert!((ink(6.0, SourceComponent::Alpha) - 127.0 / 255.0).abs() < 1e-12);
+        assert_eq!(ink(7.0, SourceComponent::Alpha), 0.0);
+
+        let edge = image::RgbaImage::from_raw(2, 1, vec![0, 0, 0, 255, 255, 255, 255, 0]).unwrap();
+        let mut edge_bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(edge)
+            .write_to(
+                &mut std::io::Cursor::new(&mut edge_bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        let edge_field = decode_source(&edge_bytes, SourceFormatHint::Png).unwrap();
+        let edge_canvas = CanvasSpec {
+            width: 1.0,
+            height: 1.0,
+        };
+        assert!(
+            (edge_field
+                .sample_mark_ink(
+                    Point2::new(0.5, 0.0),
+                    &edge_canvas,
+                    SourcePlacement::StretchToCanvas,
+                    SourceComponent::Luminance,
+                )
+                .unwrap()
+                - 0.5)
+                .abs()
+                < 1e-12
+        );
     }
 
     fn crc32(bytes: &[u8]) -> u32 {

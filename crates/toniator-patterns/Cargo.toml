@@ -15,4 +15,5 @@ toniator-sampling = { path = "../toniator-sampling" }
 path = "src/lib.rs"
 
 [dev-dependencies]
+image.workspace = true
 serde_json.workspace = true

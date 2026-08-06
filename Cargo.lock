@@ -752,6 +752,7 @@ dependencies = [
 name = "toniator-patterns"
 version = "0.1.0"
 dependencies = [
+ "image",
  "serde",
  "serde_json",
  "toniator-domain",
@@ -763,6 +764,7 @@ dependencies = [
 name = "toniator-render"
 version = "0.1.0"
 dependencies = [
+ "image",
  "toniator-domain",
  "toniator-geometry",
 ]

@@ -242,3 +242,180 @@ fn inspect_marks_presentation_changes_leave_geometry_summary_identical() {
     assert_ne!(presentation_a, presentation_b);
     assert_eq!(first, second);
 }
+
+#[test]
+fn render_infers_png_and_svg_and_rejects_invalid_output_extensions() {
+    let directory = std::env::temp_dir().join(format!(
+        "toniator-stage-5-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir(&directory).unwrap();
+    for extension in ["png", "svg"] {
+        let output_path = directory.join(format!("output.{extension}"));
+        let output = Command::new(env!("CARGO_BIN_EXE_toniator"))
+            .args([
+                "render",
+                "--source",
+                "../../assets/raster-sample.png",
+                "--output",
+                output_path.to_str().unwrap(),
+                "--mode",
+                "rgb",
+                "--canvas",
+                "900x600",
+                "--density-x",
+                "90.0",
+                "--density-y",
+                "60.0",
+                "--rotation",
+                "17.0",
+                "--offset-x",
+                "3.25",
+                "--offset-y",
+                "-4.5",
+                "--guard-steps",
+                "2",
+                "--support-radius",
+                "4.5",
+                "--source-component",
+                "luminance",
+                "--size-min",
+                "2.0",
+                "--size-max",
+                "9.0",
+                "--color",
+                "#00b7ff",
+                "--opacity",
+                "0.72",
+                "--transparent",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let bytes = fs::read(&output_path).unwrap();
+        assert!(!bytes.is_empty());
+        if extension == "svg" {
+            assert!(String::from_utf8(bytes).unwrap().contains("<circle "));
+        }
+    }
+    let invalid = Command::new(env!("CARGO_BIN_EXE_toniator"))
+        .args([
+            "render",
+            "--source",
+            "../../assets/raster-sample.png",
+            "--output",
+            directory.join("output.txt").to_str().unwrap(),
+            "--mode",
+            "rgb",
+            "--canvas",
+            "900x600",
+            "--density-x",
+            "90",
+            "--density-y",
+            "60",
+            "--rotation",
+            "0",
+            "--offset-x",
+            "0",
+            "--offset-y",
+            "0",
+            "--guard-steps",
+            "2",
+            "--support-radius",
+            "4.5",
+            "--source-component",
+            "luminance",
+            "--size-min",
+            "2",
+            "--size-max",
+            "9",
+            "--color",
+            "#00b7ff",
+            "--opacity",
+            "0.72",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&invalid.stderr).contains("output extension must be .png or .svg")
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn render_rejects_missing_extension_and_invalid_presentation_options() {
+    let directory = std::env::temp_dir().join(format!(
+        "toniator-stage-5-errors-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir(&directory).unwrap();
+    for (output_name, color, opacity, expected) in [
+        (
+            "missing-extension",
+            "#00b7ff",
+            "0.72",
+            "output extension must be .png or .svg",
+        ),
+        (
+            "invalid-opacity.png",
+            "#00b7ff",
+            "1.1",
+            "opacity must be within 0.0..=1.0",
+        ),
+        ("invalid-color.png", "00b7ff", "0.72", "expected #RRGGBB"),
+    ] {
+        let output_path = directory.join(output_name);
+        let output = Command::new(env!("CARGO_BIN_EXE_toniator"))
+            .args([
+                "render",
+                "--source",
+                "../../assets/raster-sample.png",
+                "--output",
+                output_path.to_str().unwrap(),
+                "--mode",
+                "rgb",
+                "--canvas",
+                "900x600",
+                "--density-x",
+                "90",
+                "--density-y",
+                "60",
+                "--rotation",
+                "0",
+                "--offset-x",
+                "0",
+                "--offset-y",
+                "0",
+                "--guard-steps",
+                "2",
+                "--support-radius",
+                "4.5",
+                "--source-component",
+                "luminance",
+                "--size-min",
+                "2",
+                "--size-max",
+                "9",
+                "--color",
+                color,
+                "--opacity",
+                opacity,
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&output.stderr).contains(expected));
+    }
+    fs::remove_dir_all(directory).unwrap();
+}

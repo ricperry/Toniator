@@ -17,10 +17,10 @@
     },
     "radius": {
         "maximum": 4.5,
-        "mean": 3.682485,
-        "minimum": 1.918614
+        "mean": 3.203933,
+        "minimum": 1.0
     },
-    "realization_fingerprint": "fnv1a64:02b6f1ae814df5ba",
+    "realization_fingerprint": "fnv1a64:c26adc228dec69f1",
     "representative_marks": [
         {
             "center": {
@@ -33,7 +33,7 @@
                 "second_dimension_id": 2,
                 "second_index": -15
             },
-            "radius": 4.5,
+            "radius": 1.0,
             "scope": "guard"
         },
         {
@@ -47,7 +47,7 @@
                 "second_dimension_id": 2,
                 "second_index": -14
             },
-            "radius": 4.5,
+            "radius": 1.0,
             "scope": "guard"
         },
         {
@@ -61,7 +61,7 @@
                 "second_dimension_id": 2,
                 "second_index": -13
             },
-            "radius": 4.5,
+            "radius": 1.0,
             "scope": "guard"
         },
         {
@@ -75,7 +75,7 @@
                 "second_dimension_id": 2,
                 "second_index": -1
             },
-            "radius": 2.6472327548559136,
+            "radius": 1.709373315785312,
             "scope": "guard"
         },
         {
@@ -89,7 +89,7 @@
                 "second_dimension_id": 2,
                 "second_index": 6
             },
-            "radius": 3.0954205916489426,
+            "radius": 2.5037724245951236,
             "scope": "canvas"
         },
         {
@@ -103,7 +103,7 @@
                 "second_dimension_id": 2,
                 "second_index": 2
             },
-            "radius": 2.67391415509811,
+            "radius": 2.562319878091569,
             "scope": "canvas"
         },
         {

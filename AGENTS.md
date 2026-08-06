@@ -29,5 +29,12 @@
   project-wide test inputs. Relevant source/sampling/render/export work must
   exercise both; write derived artifacts under `target/validation/` and follow
   the semantic text/font caveat in `assets/README.md`.
+- Visual-review convention (non-normative): primary review artifacts are the
+  exact app/CLI files. Preserve native RGBA unchanged; do not default to a
+  flatten, checkerboard, or background composite, and do not confuse a
+  viewer's background with file content. Inspect RGB and alpha separately,
+  distinguishing visible color, coverage, and hidden RGB. Alpha statistics and
+  native viewers are allowed. A clearly labeled composited derivative is
+  permitted only on explicit user request and never substitutes for raw output.
 - Do not commit, push, publish, deploy, delete implementations, or overwrite
   unrelated work without explicit authorization.
