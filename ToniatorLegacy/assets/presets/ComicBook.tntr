@@ -1,0 +1,901 @@
+{
+  "format": "toniator-preset",
+  "version": 6,
+  "name": "ComicBook",
+  "scope": "complete-workflow",
+  "pipeline": {
+    "alpha_policy": "source_alpha.legacy_current_v1",
+    "assignment": "assignment.automatic",
+    "assignment_payload": "separation.cmyk.encoded_rgb_max_black_v1",
+    "output_model": "output.cmyk_print",
+    "source": "source.full_color"
+  },
+  "treatment": {
+    "settings": {
+      "angle": 0.0,
+      "contrast": 108.0,
+      "coverage": 92.0,
+      "detail": 52.0,
+      "treatment": "dots"
+    },
+    "pattern_state": {
+      "selected": {
+        "registered": "compat.shapes.v1"
+      },
+      "instances": {
+        "compat.shapes.v1": {
+          "pattern_id": "compat.shapes.v1",
+          "schema_version": 1,
+          "generator_version": 1,
+          "values": {
+            "settings": {
+              "base_channel": {
+                "color": "#111111",
+                "custom_shape_path": null,
+                "enabled": true,
+                "grid_pivot_x": 0.0,
+                "grid_pivot_y": 0.0,
+                "grid_rotation": 0.0,
+                "height_scale": 1.0,
+                "max_size": 100.0,
+                "offset_x": 0.0,
+                "offset_y": 0.0,
+                "opacity": 1.0,
+                "polygon_sides": 4,
+                "resolution_scale": 1.0,
+                "rotation": 0.0,
+                "scale": 1.0,
+                "shape": "circle",
+                "threshold": 0.0,
+                "width_scale": 1.0
+              },
+              "channels": {
+                "b": {
+                  "color": "#0000ff",
+                  "custom_shape_path": null,
+                  "enabled": true,
+                  "grid_pivot_x": 0.0,
+                  "grid_pivot_y": 0.0,
+                  "grid_rotation": 0.0,
+                  "height_scale": 1.0,
+                  "max_size": 100.0,
+                  "offset_x": 0.0,
+                  "offset_y": 0.0,
+                  "opacity": 1.0,
+                  "polygon_sides": 4,
+                  "resolution_scale": 1.0,
+                  "rotation": 0.0,
+                  "scale": 1.0,
+                  "shape": "circle",
+                  "threshold": 0.0,
+                  "width_scale": 1.0
+                },
+                "c": {
+                  "color": "#00aeef",
+                  "custom_shape_path": null,
+                  "enabled": true,
+                  "grid_pivot_x": -145.52,
+                  "grid_pivot_y": -60.53,
+                  "grid_rotation": 15.0,
+                  "height_scale": 1.0,
+                  "max_size": 300.0,
+                  "offset_x": -68.0,
+                  "offset_y": -48.09,
+                  "opacity": 0.95,
+                  "polygon_sides": 4,
+                  "resolution_scale": 2.0,
+                  "rotation": 0.0,
+                  "scale": 0.95,
+                  "shape": "circle",
+                  "threshold": 0.04,
+                  "width_scale": 1.0
+                },
+                "g": {
+                  "color": "#00ff00",
+                  "custom_shape_path": null,
+                  "enabled": true,
+                  "grid_pivot_x": 0.0,
+                  "grid_pivot_y": 0.0,
+                  "grid_rotation": 0.0,
+                  "height_scale": 1.0,
+                  "max_size": 100.0,
+                  "offset_x": 0.0,
+                  "offset_y": 0.0,
+                  "opacity": 1.0,
+                  "polygon_sides": 4,
+                  "resolution_scale": 1.0,
+                  "rotation": 0.0,
+                  "scale": 1.0,
+                  "shape": "circle",
+                  "threshold": 0.0,
+                  "width_scale": 1.0
+                },
+                "k": {
+                  "color": "#111111",
+                  "custom_shape_path": null,
+                  "enabled": true,
+                  "grid_pivot_x": -163.28,
+                  "grid_pivot_y": -61.39,
+                  "grid_rotation": 45.0,
+                  "height_scale": 1.0,
+                  "max_size": 300.0,
+                  "offset_x": -188.83,
+                  "offset_y": 26.86,
+                  "opacity": 0.95,
+                  "polygon_sides": 4,
+                  "resolution_scale": 2.0,
+                  "rotation": 0.0,
+                  "scale": 1.0,
+                  "shape": "circle",
+                  "threshold": 0.04,
+                  "width_scale": 1.0
+                },
+                "m": {
+                  "color": "#ec008c",
+                  "custom_shape_path": null,
+                  "enabled": true,
+                  "grid_pivot_x": -155.49,
+                  "grid_pivot_y": -46.67,
+                  "grid_rotation": 75.0,
+                  "height_scale": 1.0,
+                  "max_size": 300.0,
+                  "offset_x": -221.75,
+                  "offset_y": -19.49,
+                  "opacity": 0.95,
+                  "polygon_sides": 4,
+                  "resolution_scale": 2.0,
+                  "rotation": 0.0,
+                  "scale": 0.95,
+                  "shape": "circle",
+                  "threshold": 0.04,
+                  "width_scale": 1.0
+                },
+                "r": {
+                  "color": "#ff0000",
+                  "custom_shape_path": null,
+                  "enabled": true,
+                  "grid_pivot_x": 0.0,
+                  "grid_pivot_y": 0.0,
+                  "grid_rotation": 0.0,
+                  "height_scale": 1.0,
+                  "max_size": 100.0,
+                  "offset_x": 0.0,
+                  "offset_y": 0.0,
+                  "opacity": 1.0,
+                  "polygon_sides": 4,
+                  "resolution_scale": 1.0,
+                  "rotation": 0.0,
+                  "scale": 1.0,
+                  "shape": "circle",
+                  "threshold": 0.0,
+                  "width_scale": 1.0
+                },
+                "y": {
+                  "color": "#ffd400",
+                  "custom_shape_path": null,
+                  "enabled": true,
+                  "grid_pivot_x": -152.02,
+                  "grid_pivot_y": -75.69,
+                  "grid_rotation": -10.0,
+                  "height_scale": 1.0,
+                  "max_size": 300.0,
+                  "offset_x": -147.26,
+                  "offset_y": -109.58,
+                  "opacity": 0.95,
+                  "polygon_sides": 4,
+                  "resolution_scale": 2.0,
+                  "rotation": 0.0,
+                  "scale": 0.9,
+                  "shape": "circle",
+                  "threshold": 0.04,
+                  "width_scale": 1.0
+                }
+              },
+              "crosshatch_color": "#111111",
+              "custom_nodes": [
+                {
+                  "x": -0.45,
+                  "y": -0.45
+                },
+                {
+                  "x": 0.45,
+                  "y": -0.45
+                },
+                {
+                  "x": 0.45,
+                  "y": 0.45
+                },
+                {
+                  "x": -0.45,
+                  "y": 0.45
+                }
+              ],
+              "custom_shape_path": null,
+              "grid_scale": 76.0,
+              "long_edge_cells": 92.0,
+              "max_mark": 90.0,
+              "min_mark": 4.0,
+              "output_height": 620,
+              "output_width": 900,
+              "polygon_sides": 4,
+              "shared_shape": "circle",
+              "use_shared_mark": true
+            }
+          }
+        },
+        "compat.curves.v1": {
+          "pattern_id": "compat.curves.v1",
+          "schema_version": 1,
+          "generator_version": 1,
+          "values": {
+            "settings": {
+              "base_channel": {
+                "alternate_stack_offset": 0.0,
+                "alternate_tile_transform": "none",
+                "close_ends": false,
+                "color": "#111111",
+                "curve_scale": 32.0,
+                "enabled": true,
+                "grid_pivot_x": 0.0,
+                "grid_pivot_y": 0.0,
+                "grid_rotation": 0.0,
+                "max_size": 100.0,
+                "motif_bleed": 2.0,
+                "motif_coverage": "auto",
+                "offset_x": 0.0,
+                "offset_y": 0.0,
+                "opacity": 0.92,
+                "output_quality": 1.0,
+                "path": {
+                  "segments": [
+                    {
+                      "control_1": {
+                        "x": -0.32,
+                        "y": -0.12
+                      },
+                      "control_2": {
+                        "x": -0.18,
+                        "y": -0.12
+                      },
+                      "end": {
+                        "x": 0.0,
+                        "y": 0.0
+                      }
+                    },
+                    {
+                      "control_1": {
+                        "x": 0.18,
+                        "y": 0.12
+                      },
+                      "control_2": {
+                        "x": 0.32,
+                        "y": 0.12
+                      },
+                      "end": {
+                        "x": 0.5,
+                        "y": 0.0
+                      }
+                    }
+                  ],
+                  "start": {
+                    "x": -0.5,
+                    "y": 0.0
+                  }
+                },
+                "resolution_scale": 1.0,
+                "scale": 1.0,
+                "smooth_join": false,
+                "stack_angle": 0.0,
+                "stack_count": 2,
+                "stack_offset": 0.0,
+                "stack_spacing": 36.0,
+                "threshold": 0.04,
+                "tile_angle": 0.0,
+                "tile_count": 2,
+                "tile_offset": 0.0,
+                "tile_spacing": 0.0
+              },
+              "channels": {
+                "b": {
+                  "alternate_stack_offset": 0.0,
+                  "alternate_tile_transform": "none",
+                  "close_ends": false,
+                  "color": "#0000ff",
+                  "curve_scale": 32.0,
+                  "enabled": true,
+                  "grid_pivot_x": 0.0,
+                  "grid_pivot_y": 0.0,
+                  "grid_rotation": 0.0,
+                  "max_size": 100.0,
+                  "motif_bleed": 2.0,
+                  "motif_coverage": "auto",
+                  "offset_x": 0.0,
+                  "offset_y": 0.0,
+                  "opacity": 0.92,
+                  "output_quality": 1.0,
+                  "path": {
+                    "segments": [
+                      {
+                        "control_1": {
+                          "x": -0.32,
+                          "y": -0.12
+                        },
+                        "control_2": {
+                          "x": -0.18,
+                          "y": -0.12
+                        },
+                        "end": {
+                          "x": 0.0,
+                          "y": 0.0
+                        }
+                      },
+                      {
+                        "control_1": {
+                          "x": 0.18,
+                          "y": 0.12
+                        },
+                        "control_2": {
+                          "x": 0.32,
+                          "y": 0.12
+                        },
+                        "end": {
+                          "x": 0.5,
+                          "y": 0.0
+                        }
+                      }
+                    ],
+                    "start": {
+                      "x": -0.5,
+                      "y": 0.0
+                    }
+                  },
+                  "resolution_scale": 1.0,
+                  "scale": 1.0,
+                  "smooth_join": false,
+                  "stack_angle": 0.0,
+                  "stack_count": 2,
+                  "stack_offset": 0.0,
+                  "stack_spacing": 36.0,
+                  "threshold": 0.04,
+                  "tile_angle": 0.0,
+                  "tile_count": 2,
+                  "tile_offset": 0.0,
+                  "tile_spacing": 0.0
+                },
+                "c": {
+                  "alternate_stack_offset": 0.0,
+                  "alternate_tile_transform": "none",
+                  "close_ends": false,
+                  "color": "#00aeef",
+                  "curve_scale": 32.0,
+                  "enabled": true,
+                  "grid_pivot_x": 0.0,
+                  "grid_pivot_y": 0.0,
+                  "grid_rotation": 15.0,
+                  "max_size": 100.0,
+                  "motif_bleed": 2.0,
+                  "motif_coverage": "auto",
+                  "offset_x": 0.0,
+                  "offset_y": 0.0,
+                  "opacity": 0.92,
+                  "output_quality": 1.0,
+                  "path": {
+                    "segments": [
+                      {
+                        "control_1": {
+                          "x": -0.32,
+                          "y": -0.12
+                        },
+                        "control_2": {
+                          "x": -0.18,
+                          "y": -0.12
+                        },
+                        "end": {
+                          "x": 0.0,
+                          "y": 0.0
+                        }
+                      },
+                      {
+                        "control_1": {
+                          "x": 0.18,
+                          "y": 0.12
+                        },
+                        "control_2": {
+                          "x": 0.32,
+                          "y": 0.12
+                        },
+                        "end": {
+                          "x": 0.5,
+                          "y": 0.0
+                        }
+                      }
+                    ],
+                    "start": {
+                      "x": -0.5,
+                      "y": 0.0
+                    }
+                  },
+                  "resolution_scale": 1.0,
+                  "scale": 1.0,
+                  "smooth_join": false,
+                  "stack_angle": 0.0,
+                  "stack_count": 2,
+                  "stack_offset": 0.0,
+                  "stack_spacing": 36.0,
+                  "threshold": 0.04,
+                  "tile_angle": 0.0,
+                  "tile_count": 2,
+                  "tile_offset": 0.0,
+                  "tile_spacing": 0.0
+                },
+                "g": {
+                  "alternate_stack_offset": 0.0,
+                  "alternate_tile_transform": "none",
+                  "close_ends": false,
+                  "color": "#00ff00",
+                  "curve_scale": 32.0,
+                  "enabled": true,
+                  "grid_pivot_x": 0.0,
+                  "grid_pivot_y": 0.0,
+                  "grid_rotation": 0.0,
+                  "max_size": 100.0,
+                  "motif_bleed": 2.0,
+                  "motif_coverage": "auto",
+                  "offset_x": 0.0,
+                  "offset_y": 0.0,
+                  "opacity": 0.92,
+                  "output_quality": 1.0,
+                  "path": {
+                    "segments": [
+                      {
+                        "control_1": {
+                          "x": -0.32,
+                          "y": -0.12
+                        },
+                        "control_2": {
+                          "x": -0.18,
+                          "y": -0.12
+                        },
+                        "end": {
+                          "x": 0.0,
+                          "y": 0.0
+                        }
+                      },
+                      {
+                        "control_1": {
+                          "x": 0.18,
+                          "y": 0.12
+                        },
+                        "control_2": {
+                          "x": 0.32,
+                          "y": 0.12
+                        },
+                        "end": {
+                          "x": 0.5,
+                          "y": 0.0
+                        }
+                      }
+                    ],
+                    "start": {
+                      "x": -0.5,
+                      "y": 0.0
+                    }
+                  },
+                  "resolution_scale": 1.0,
+                  "scale": 1.0,
+                  "smooth_join": false,
+                  "stack_angle": 0.0,
+                  "stack_count": 2,
+                  "stack_offset": 0.0,
+                  "stack_spacing": 36.0,
+                  "threshold": 0.04,
+                  "tile_angle": 0.0,
+                  "tile_count": 2,
+                  "tile_offset": 0.0,
+                  "tile_spacing": 0.0
+                },
+                "k": {
+                  "alternate_stack_offset": 0.0,
+                  "alternate_tile_transform": "none",
+                  "close_ends": false,
+                  "color": "#111111",
+                  "curve_scale": 32.0,
+                  "enabled": true,
+                  "grid_pivot_x": 0.0,
+                  "grid_pivot_y": 0.0,
+                  "grid_rotation": 45.0,
+                  "max_size": 100.0,
+                  "motif_bleed": 2.0,
+                  "motif_coverage": "auto",
+                  "offset_x": 0.0,
+                  "offset_y": 0.0,
+                  "opacity": 0.92,
+                  "output_quality": 1.0,
+                  "path": {
+                    "segments": [
+                      {
+                        "control_1": {
+                          "x": -0.32,
+                          "y": -0.12
+                        },
+                        "control_2": {
+                          "x": -0.18,
+                          "y": -0.12
+                        },
+                        "end": {
+                          "x": 0.0,
+                          "y": 0.0
+                        }
+                      },
+                      {
+                        "control_1": {
+                          "x": 0.18,
+                          "y": 0.12
+                        },
+                        "control_2": {
+                          "x": 0.32,
+                          "y": 0.12
+                        },
+                        "end": {
+                          "x": 0.5,
+                          "y": 0.0
+                        }
+                      }
+                    ],
+                    "start": {
+                      "x": -0.5,
+                      "y": 0.0
+                    }
+                  },
+                  "resolution_scale": 1.0,
+                  "scale": 1.0,
+                  "smooth_join": false,
+                  "stack_angle": 0.0,
+                  "stack_count": 2,
+                  "stack_offset": 0.0,
+                  "stack_spacing": 36.0,
+                  "threshold": 0.04,
+                  "tile_angle": 0.0,
+                  "tile_count": 2,
+                  "tile_offset": 0.0,
+                  "tile_spacing": 0.0
+                },
+                "m": {
+                  "alternate_stack_offset": 0.0,
+                  "alternate_tile_transform": "none",
+                  "close_ends": false,
+                  "color": "#ec008c",
+                  "curve_scale": 32.0,
+                  "enabled": true,
+                  "grid_pivot_x": 0.0,
+                  "grid_pivot_y": 0.0,
+                  "grid_rotation": 75.0,
+                  "max_size": 100.0,
+                  "motif_bleed": 2.0,
+                  "motif_coverage": "auto",
+                  "offset_x": 0.0,
+                  "offset_y": 0.0,
+                  "opacity": 0.92,
+                  "output_quality": 1.0,
+                  "path": {
+                    "segments": [
+                      {
+                        "control_1": {
+                          "x": -0.32,
+                          "y": -0.12
+                        },
+                        "control_2": {
+                          "x": -0.18,
+                          "y": -0.12
+                        },
+                        "end": {
+                          "x": 0.0,
+                          "y": 0.0
+                        }
+                      },
+                      {
+                        "control_1": {
+                          "x": 0.18,
+                          "y": 0.12
+                        },
+                        "control_2": {
+                          "x": 0.32,
+                          "y": 0.12
+                        },
+                        "end": {
+                          "x": 0.5,
+                          "y": 0.0
+                        }
+                      }
+                    ],
+                    "start": {
+                      "x": -0.5,
+                      "y": 0.0
+                    }
+                  },
+                  "resolution_scale": 1.0,
+                  "scale": 1.0,
+                  "smooth_join": false,
+                  "stack_angle": 0.0,
+                  "stack_count": 2,
+                  "stack_offset": 0.0,
+                  "stack_spacing": 36.0,
+                  "threshold": 0.04,
+                  "tile_angle": 0.0,
+                  "tile_count": 2,
+                  "tile_offset": 0.0,
+                  "tile_spacing": 0.0
+                },
+                "r": {
+                  "alternate_stack_offset": 0.0,
+                  "alternate_tile_transform": "none",
+                  "close_ends": false,
+                  "color": "#ff0000",
+                  "curve_scale": 32.0,
+                  "enabled": true,
+                  "grid_pivot_x": 0.0,
+                  "grid_pivot_y": 0.0,
+                  "grid_rotation": 0.0,
+                  "max_size": 100.0,
+                  "motif_bleed": 2.0,
+                  "motif_coverage": "auto",
+                  "offset_x": 0.0,
+                  "offset_y": 0.0,
+                  "opacity": 0.92,
+                  "output_quality": 1.0,
+                  "path": {
+                    "segments": [
+                      {
+                        "control_1": {
+                          "x": -0.32,
+                          "y": -0.12
+                        },
+                        "control_2": {
+                          "x": -0.18,
+                          "y": -0.12
+                        },
+                        "end": {
+                          "x": 0.0,
+                          "y": 0.0
+                        }
+                      },
+                      {
+                        "control_1": {
+                          "x": 0.18,
+                          "y": 0.12
+                        },
+                        "control_2": {
+                          "x": 0.32,
+                          "y": 0.12
+                        },
+                        "end": {
+                          "x": 0.5,
+                          "y": 0.0
+                        }
+                      }
+                    ],
+                    "start": {
+                      "x": -0.5,
+                      "y": 0.0
+                    }
+                  },
+                  "resolution_scale": 1.0,
+                  "scale": 1.0,
+                  "smooth_join": false,
+                  "stack_angle": 0.0,
+                  "stack_count": 2,
+                  "stack_offset": 0.0,
+                  "stack_spacing": 36.0,
+                  "threshold": 0.04,
+                  "tile_angle": 0.0,
+                  "tile_count": 2,
+                  "tile_offset": 0.0,
+                  "tile_spacing": 0.0
+                },
+                "y": {
+                  "alternate_stack_offset": 0.0,
+                  "alternate_tile_transform": "none",
+                  "close_ends": false,
+                  "color": "#ffd400",
+                  "curve_scale": 32.0,
+                  "enabled": true,
+                  "grid_pivot_x": 0.0,
+                  "grid_pivot_y": 0.0,
+                  "grid_rotation": 0.0,
+                  "max_size": 100.0,
+                  "motif_bleed": 2.0,
+                  "motif_coverage": "auto",
+                  "offset_x": 0.0,
+                  "offset_y": 0.0,
+                  "opacity": 0.92,
+                  "output_quality": 1.0,
+                  "path": {
+                    "segments": [
+                      {
+                        "control_1": {
+                          "x": -0.32,
+                          "y": -0.12
+                        },
+                        "control_2": {
+                          "x": -0.18,
+                          "y": -0.12
+                        },
+                        "end": {
+                          "x": 0.0,
+                          "y": 0.0
+                        }
+                      },
+                      {
+                        "control_1": {
+                          "x": 0.18,
+                          "y": 0.12
+                        },
+                        "control_2": {
+                          "x": 0.32,
+                          "y": 0.12
+                        },
+                        "end": {
+                          "x": 0.5,
+                          "y": 0.0
+                        }
+                      }
+                    ],
+                    "start": {
+                      "x": -0.5,
+                      "y": 0.0
+                    }
+                  },
+                  "resolution_scale": 1.0,
+                  "scale": 1.0,
+                  "smooth_join": false,
+                  "stack_angle": 0.0,
+                  "stack_count": 2,
+                  "stack_offset": 0.0,
+                  "stack_spacing": 36.0,
+                  "threshold": 0.04,
+                  "tile_angle": 0.0,
+                  "tile_count": 2,
+                  "tile_offset": 0.0,
+                  "tile_spacing": 0.0
+                }
+              },
+              "crosshatch_color": "#111111",
+              "layout": "full-width",
+              "long_edge_cells": 90.0,
+              "max_mark": 85.0,
+              "min_mark": 0.0,
+              "output_height": 620,
+              "output_width": 900,
+              "shared_close_ends": false,
+              "shared_path": {
+                "segments": [
+                  {
+                    "control_1": {
+                      "x": -0.32,
+                      "y": -0.12
+                    },
+                    "control_2": {
+                      "x": -0.18,
+                      "y": -0.12
+                    },
+                    "end": {
+                      "x": 0.0,
+                      "y": 0.0
+                    }
+                  },
+                  {
+                    "control_1": {
+                      "x": 0.18,
+                      "y": 0.12
+                    },
+                    "control_2": {
+                      "x": 0.32,
+                      "y": 0.12
+                    },
+                    "end": {
+                      "x": 0.5,
+                      "y": 0.0
+                    }
+                  }
+                ],
+                "start": {
+                  "x": -0.5,
+                  "y": 0.0
+                }
+              },
+              "shared_smooth_join": false,
+              "show_background": true,
+              "use_shared_curve": true
+            }
+          }
+        }
+      },
+      "bundled_definition_instances": {}
+    }
+  },
+  "channel": {
+    "pattern_id": "compat.shapes.v1",
+    "channels": {
+      "channel.cmyk.cyan": {
+        "color": "#00aeef",
+        "custom_shape_path": null,
+        "enabled": true,
+        "grid_pivot_x": -145.52,
+        "grid_pivot_y": -60.53,
+        "grid_rotation": 15.0,
+        "height_scale": 1.0,
+        "max_size": 300.0,
+        "offset_x": -68.0,
+        "offset_y": -48.09,
+        "opacity": 0.95,
+        "polygon_sides": 4,
+        "resolution_scale": 2.0,
+        "rotation": 0.0,
+        "scale": 0.95,
+        "shape": "circle",
+        "threshold": 0.04,
+        "width_scale": 1.0
+      },
+      "channel.cmyk.magenta": {
+        "color": "#ec008c",
+        "custom_shape_path": null,
+        "enabled": true,
+        "grid_pivot_x": -155.49,
+        "grid_pivot_y": -46.67,
+        "grid_rotation": 75.0,
+        "height_scale": 1.0,
+        "max_size": 300.0,
+        "offset_x": -221.75,
+        "offset_y": -19.49,
+        "opacity": 0.95,
+        "polygon_sides": 4,
+        "resolution_scale": 2.0,
+        "rotation": 0.0,
+        "scale": 0.95,
+        "shape": "circle",
+        "threshold": 0.04,
+        "width_scale": 1.0
+      },
+      "channel.cmyk.yellow": {
+        "color": "#ffd400",
+        "custom_shape_path": null,
+        "enabled": true,
+        "grid_pivot_x": -152.02,
+        "grid_pivot_y": -75.69,
+        "grid_rotation": -10.0,
+        "height_scale": 1.0,
+        "max_size": 300.0,
+        "offset_x": -147.26,
+        "offset_y": -109.58,
+        "opacity": 0.95,
+        "polygon_sides": 4,
+        "resolution_scale": 2.0,
+        "rotation": 0.0,
+        "scale": 0.9,
+        "shape": "circle",
+        "threshold": 0.04,
+        "width_scale": 1.0
+      },
+      "channel.cmyk.black": {
+        "color": "#111111",
+        "custom_shape_path": null,
+        "enabled": true,
+        "grid_pivot_x": -163.28,
+        "grid_pivot_y": -61.39,
+        "grid_rotation": 45.0,
+        "height_scale": 1.0,
+        "max_size": 300.0,
+        "offset_x": -188.83,
+        "offset_y": 26.86,
+        "opacity": 0.95,
+        "polygon_sides": 4,
+        "resolution_scale": 2.0,
+        "rotation": 0.0,
+        "scale": 1.0,
+        "shape": "circle",
+        "threshold": 0.04,
+        "width_scale": 1.0
+      }
+    }
+  }
+}

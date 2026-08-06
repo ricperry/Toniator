@@ -1,0 +1,81 @@
+{
+  "format": "toniator-preset",
+  "version": 6,
+  "name": "Polygon Six",
+  "scope": "complete-workflow",
+  "pipeline": {
+    "alpha_policy": "source_alpha.legacy_current_v1",
+    "assignment": "assignment.automatic",
+    "assignment_payload": "separation.cmyk.encoded_rgb_max_black_v1",
+    "output_model": "output.cmyk_print",
+    "source": "source.full_color"
+  },
+  "treatment": {
+    "settings": {
+      "treatment": "dots",
+      "detail": 48.0,
+      "coverage": 88.0,
+      "contrast": 112.0,
+      "angle": 15.0
+    },
+    "pattern_state": {
+      "selected": {
+        "registered": "compat.shapes.v1"
+      },
+      "instances": {
+        "compat.shapes.v1": {
+          "pattern_id": "compat.shapes.v1",
+          "schema_version": 1,
+          "generator_version": 1,
+          "values": {
+            "settings": {
+              "long_edge_cells": 58.0,
+              "grid_scale": 58.0,
+              "min_mark": 6.0,
+              "max_mark": 76.0,
+              "use_shared_mark": true,
+              "shared_shape": "regularpolygon",
+              "polygon_sides": 6,
+              "base_channel": {
+                "rotation": 15.0,
+                "scale": 0.82,
+                "threshold": 0.16,
+                "max_size": 78.0
+              }
+            }
+          }
+        },
+        "compat.curves.v1": {
+          "pattern_id": "compat.curves.v1",
+          "schema_version": 1,
+          "generator_version": 1,
+          "values": {
+            "settings": {}
+          }
+        }
+      },
+      "bundled_definition_instances": {}
+    }
+  },
+  "channel": {
+    "pattern_id": "compat.shapes.v1",
+    "channels": {
+      "channel.cmyk.cyan": {
+        "color": "#00aeef",
+        "grid_rotation": 15.0
+      },
+      "channel.cmyk.magenta": {
+        "color": "#ec008c",
+        "grid_rotation": 45.0
+      },
+      "channel.cmyk.yellow": {
+        "color": "#ffd400",
+        "grid_rotation": 75.0
+      },
+      "channel.cmyk.black": {
+        "color": "#111111",
+        "grid_rotation": 105.0
+      }
+    }
+  }
+}

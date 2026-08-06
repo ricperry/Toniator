@@ -1,0 +1,50 @@
+{
+  "format_version":1,"recipe_version":2,"id":"weighted-voronoi.v1",
+  "display":{"name":"Weighted Voronoi","summary":"Deterministic source-responsive Voronoi cell regions."},
+  "family":"stochastic-distributions","outputs":["regions"],
+  "parameters":[
+    {"key":"enabled","label":"Enabled","help":"Include this semantic output channel.","scope":"output-channel","value_type":"boolean","default":{"kind":"boolean","value":true},"constraints":{"kind":"boolean"},"choices":[],"authoring":{"kind":"creator","category":"boolean","unit":"none","increment":{"kind":"none"},"precision":0,"group":"distribution","display_order":0,"ownership":"channel-instance","required":true,"applicability":{"kind":"always"},"validation":"strict","serialization":"always","invalidation":"geometry","two_dimensional":null}},
+    {"key":"arrangement","label":"Arrangement","help":"Share candidate sites across channels or make them independent.","scope":"output-channel","value_type":"choice","default":{"kind":"choice","value":"shared"},"constraints":{"kind":"choice"},"choices":["shared","independent"],"authoring":{"kind":"creator","category":"enumeration","unit":"none","increment":{"kind":"none"},"precision":0,"group":"distribution","display_order":1,"ownership":"pattern-definition","required":true,"applicability":{"kind":"always"},"validation":"strict","serialization":"always","invalidation":"source-sampling","two_dimensional":null}},
+    {"key":"cell-count","label":"Cell Count","help":"Exact bounded cell count for this output channel.","scope":"output-channel","value_type":"integer","default":{"kind":"integer","value":256},"constraints":{"kind":"integer","minimum":2,"maximum":8192,"step":1},"choices":[],"authoring":{"kind":"creator","category":"integer-count","unit":"count","increment":{"kind":"integer","value":1},"precision":0,"group":"distribution","display_order":2,"ownership":"pattern-definition","required":true,"applicability":{"kind":"always"},"validation":"strict","serialization":"always","invalidation":"source-sampling","two_dimensional":null}},
+    {"key":"seed","label":"Seed","help":"Exact deterministic unsigned distribution seed.","scope":"output-channel","value_type":"integer","default":{"kind":"integer","value":0},"constraints":{"kind":"integer","minimum":0,"maximum":18446744073709551615,"step":1},"choices":[],"authoring":{"kind":"creator","category":"integer-value","unit":"none","increment":{"kind":"integer","value":1},"precision":0,"group":"distribution","display_order":3,"ownership":"channel-instance","required":true,"applicability":{"kind":"always"},"validation":"strict","serialization":"always","invalidation":"source-sampling","two_dimensional":null}},
+    {"key":"boundary-gap","label":"Boundary Gap","help":"Visible inset gap at the cell boundary.","scope":"output-channel","value_type":"number","default":{"kind":"number","value":1.0},"constraints":{"kind":"number","minimum":0.0,"maximum":64.0,"step":0.25},"choices":[],"authoring":{"kind":"creator","category":"document-relative-distance","unit":"document-relative-distance","increment":{"kind":"number","value":0.25},"precision":2,"group":"response","display_order":2,"ownership":"pattern-definition","required":true,"applicability":{"kind":"always"},"validation":"strict","serialization":"always","invalidation":"geometry","two_dimensional":null}},
+    {"key":"placement","label":"Placement","help":"Choose uniform or source-weighted site placement.","scope":"output-channel","value_type":"choice","default":{"kind":"choice","value":"source-weighted"},"constraints":{"kind":"choice"},"choices":["source-weighted","uniform"],"authoring":{"kind":"creator","category":"enumeration","unit":"none","increment":{"kind":"none"},"precision":0,"group":"distribution","display_order":4,"ownership":"pattern-definition","required":true,"applicability":{"kind":"always"},"validation":"strict","serialization":"always","invalidation":"source-sampling","two_dimensional":null}},
+    {"key":"density-polarity","label":"Density Polarity","help":"Choose whether darker or lighter source values attract sites.","scope":"output-channel","value_type":"choice","default":{"kind":"choice","value":"darker-more-dense"},"constraints":{"kind":"choice"},"choices":["darker-more-dense","lighter-more-dense"],"authoring":{"kind":"creator","category":"enumeration","unit":"none","increment":{"kind":"none"},"precision":0,"group":"distribution","display_order":5,"ownership":"pattern-definition","required":true,"applicability":{"kind":"always"},"validation":"strict","serialization":"always","invalidation":"source-sampling","two_dimensional":null}},
+    {"key":"density-strength","label":"Density Strength","help":"Strength of source-weighted site placement.","scope":"output-channel","value_type":"number","default":{"kind":"number","value":1.0},"constraints":{"kind":"number","minimum":0.001,"maximum":16.0,"step":0.001},"choices":[],"authoring":{"kind":"creator","category":"response-exponent","unit":"unitless","increment":{"kind":"number","value":0.001},"precision":3,"group":"distribution","display_order":6,"ownership":"channel-instance","required":true,"applicability":{"kind":"always"},"validation":"strict","serialization":"always","invalidation":"source-sampling","two_dimensional":null}},
+    {"key":"response-strength","label":"Interior Response","help":"Strength of source-responsive cell interior inset.","scope":"output-channel","value_type":"number","default":{"kind":"number","value":1.0},"constraints":{"kind":"number","minimum":0.0,"maximum":16.0,"step":0.05},"choices":[],"authoring":{"kind":"creator","category":"response-exponent","unit":"unitless","increment":{"kind":"number","value":0.05},"precision":2,"group":"response","display_order":0,"ownership":"channel-instance","required":true,"applicability":{"kind":"always"},"validation":"strict","serialization":"always","invalidation":"geometry","two_dimensional":null}},
+    {"key":"minimum-cell-scale","label":"Minimum Cell Scale","help":"Lower bound for source-responsive cell scale.","scope":"output-channel","value_type":"number","default":{"kind":"number","value":0.0},"constraints":{"kind":"number","minimum":0.0,"maximum":1.0,"step":0.01},"choices":[],"authoring":{"kind":"creator","category":"percentage","unit":"percent","increment":{"kind":"number","value":0.01},"precision":0,"group":"response","display_order":1,"ownership":"pattern-definition","required":true,"applicability":{"kind":"always"},"validation":"strict","serialization":"always","invalidation":"geometry","two_dimensional":null}}
+  ],
+  "quick_controls":[
+    {"id":"enabled","parameter":"enabled","scope":"output-channel","kind":"toggle","label":"Enabled"},
+    {"id":"arrangement","parameter":"arrangement","scope":"output-channel","kind":"choice","label":"Arrangement"},
+    {"id":"cell-count","parameter":"cell-count","scope":"output-channel","kind":"slider","label":"Cell Count"},
+    {"id":"placement","parameter":"placement","scope":"output-channel","kind":"choice","label":"Placement"},
+    {"id":"density-polarity","parameter":"density-polarity","scope":"output-channel","kind":"choice","label":"Density Polarity"},
+    {"id":"density-strength","parameter":"density-strength","scope":"output-channel","kind":"slider","label":"Density Strength"},
+    {"id":"response-strength","parameter":"response-strength","scope":"output-channel","kind":"slider","label":"Interior Response"},
+    {"id":"minimum-cell-scale","parameter":"minimum-cell-scale","scope":"output-channel","kind":"slider","label":"Minimum Cell Scale"},
+    {"id":"boundary-gap","parameter":"boundary-gap","scope":"output-channel","kind":"slider","label":"Boundary Gap"}
+  ],
+  "layout":{"sections":[
+    {"id":"distribution","label":"Distribution","parameters":["enabled","arrangement","cell-count","seed","placement","density-polarity","density-strength"]},
+    {"id":"response","label":"Response","parameters":["response-strength","minimum-cell-scale","boundary-gap"]}
+  ],"node_positions":{"sample":{"x":0.0,"y":0.0},"map":{"x":180.0,"y":0.0},"sites":{"x":360.0,"y":0.0},"voronoi":{"x":540.0,"y":0.0},"inset":{"x":720.0,"y":0.0},"emit":{"x":900.0,"y":0.0}}},
+  "recipe":{"nodes":[
+    {"id":"sample","operation":{"id":"weighted-voronoi.source-sample","version":1},"parameters":{}},
+    {"id":"map","operation":{"id":"weighted-voronoi.response-map","version":1},"parameters":{}},
+    {"id":"sites","operation":{"id":"weighted-voronoi.site-distribution","version":1},"parameters":{"arrangement":{"source":"parameter","value":"arrangement"},"cell-count":{"source":"parameter","value":"cell-count"},"density-polarity":{"source":"parameter","value":"density-polarity"},"density-strength":{"source":"parameter","value":"density-strength"},"placement":{"source":"parameter","value":"placement"},"seed":{"source":"parameter","value":"seed"}}},
+    {"id":"voronoi","operation":{"id":"weighted-voronoi.construct-voronoi","version":1},"parameters":{}},
+    {"id":"inset","operation":{"id":"weighted-voronoi.response-inset","version":1},"parameters":{"boundary-gap":{"source":"parameter","value":"boundary-gap"},"minimum-cell-scale":{"source":"parameter","value":"minimum-cell-scale"},"response-strength":{"source":"parameter","value":"response-strength"}}},
+    {"id":"emit","operation":{"id":"weighted-voronoi.emit-regions","version":1},"parameters":{"enabled":{"source":"parameter","value":"enabled"}}}
+  ],"edges":[
+    {"from":{"node":"sample","port":"samples"},"to":{"node":"map","port":"samples"}},
+    {"from":{"node":"map","port":"response-field"},"to":{"node":"sites","port":"response-field"}},
+    {"from":{"node":"sites","port":"sites"},"to":{"node":"voronoi","port":"sites"}},
+    {"from":{"node":"voronoi","port":"diagram"},"to":{"node":"inset","port":"diagram"}},
+    {"from":{"node":"map","port":"response-field"},"to":{"node":"inset","port":"response-field"}},
+    {"from":{"node":"inset","port":"response-insets"},"to":{"node":"emit","port":"response-insets"}}
+  ],"output":{"node":"emit","port":"geometry"}},
+  "assets":[
+
+  ]
+}

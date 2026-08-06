@@ -1,0 +1,3001 @@
+using Gtk 4.0;
+using Adw 1;
+
+Box pattern_editor_draft {
+  orientation: vertical;
+  spacing: 10;
+  width-request: 420;
+
+  Box pattern_editor_name_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "Pattern name";
+      xalign: 0;
+    }
+    Entry pattern_editor_name {
+      placeholder-text: "Pattern name";
+    }
+  }
+
+  Label pattern_editor_preview_heading {
+    label: "Pattern Preview";
+    xalign: 0;
+    css-classes: ["heading"];
+  }
+
+  DrawingArea pattern_editor_preview {
+    content-width: 380;
+    content-height: 240;
+    width-request: 380;
+    height-request: 240;
+    hexpand: true;
+    focusable: false;
+    css-classes: ["pattern-editor-preview"];
+  }
+
+  Label pattern_editor_preview_note {
+    label: "Structure only — source response, ink styling, and mark shape are edited in Channel Settings.";
+    wrap: true;
+    xalign: 0;
+    css-classes: ["dim-label", "caption"];
+  }
+
+  Label pattern_editor_placement_heading {
+    label: "Placement";
+    xalign: 0;
+    css-classes: ["heading"];
+  }
+
+  Box pattern_editor_placement_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "Placement type";
+      xalign: 0;
+    }
+    DropDown pattern_editor_placement {}
+  }
+
+  Box pattern_editor_density_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "Site density";
+      xalign: 0;
+    }
+    SpinButton pattern_editor_density {
+      numeric: true;
+    }
+  }
+
+  Box pattern_editor_spacing_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "Overall mark scale";
+      xalign: 0;
+    }
+    SpinButton pattern_editor_spacing {
+      numeric: true;
+    }
+  }
+
+  Box pattern_editor_x_grid_mode_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "X grid";
+      xalign: 0;
+    }
+    DropDown pattern_editor_x_grid_mode {}
+  }
+
+  Box pattern_editor_x_grid_curve_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "X grid curve";
+      xalign: 0;
+    }
+    SpinButton pattern_editor_x_grid_curve { numeric: true; }
+  }
+
+  Box pattern_editor_y_grid_mode_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "Y grid";
+      xalign: 0;
+    }
+    DropDown pattern_editor_y_grid_mode {}
+  }
+
+  Box pattern_editor_y_grid_curve_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "Y grid curve";
+      xalign: 0;
+    }
+    SpinButton pattern_editor_y_grid_curve { numeric: true; }
+  }
+
+  Box pattern_editor_curve_function_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "Math function";
+      xalign: 0;
+    }
+    DropDown pattern_editor_curve_function {}
+  }
+
+  Box pattern_editor_x_spacing_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "X grid spacing";
+      xalign: 0;
+    }
+    SpinButton pattern_editor_x_spacing { numeric: true; }
+  }
+
+  Box pattern_editor_y_spacing_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "Y grid spacing";
+      xalign: 0;
+    }
+    SpinButton pattern_editor_y_spacing { numeric: true; }
+  }
+
+  Box pattern_editor_curve_spacing_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "Curve spacing";
+      xalign: 0;
+    }
+    SpinButton pattern_editor_curve_spacing { numeric: true; }
+  }
+
+  Box pattern_editor_random_dispersion_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "Random dispersion";
+      xalign: 0;
+    }
+    DropDown pattern_editor_random_dispersion {}
+  }
+
+  Label pattern_editor_geometry_heading {
+    label: "Geometry";
+    xalign: 0;
+    css-classes: ["heading"];
+  }
+
+  Box pattern_editor_point_definition_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "Geometry / connection";
+      xalign: 0;
+    }
+    DropDown pattern_editor_point_definition {}
+  }
+
+  Box pattern_editor_render_mode_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "Render geometry";
+      xalign: 0;
+    }
+    DropDown pattern_editor_render_mode {}
+  }
+
+  Box pattern_editor_connection_mode_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "Connections";
+      xalign: 0;
+    }
+    DropDown pattern_editor_connection_mode {}
+  }
+
+  Label pattern_editor_curve_heading {
+    label: "Curved Tracks";
+    xalign: 0;
+    css-classes: ["heading"];
+  }
+
+  Label pattern_editor_curve_editor_note {
+    label: "Edit the shared curve shape used by curved tracks. Changes stay in this draft until Apply.";
+    wrap: true;
+    xalign: 0;
+    css-classes: ["dim-label", "caption"];
+  }
+
+  DrawingArea pattern_editor_curve_editor {
+    content-width: 380;
+    content-height: 180;
+    width-request: 380;
+    height-request: 180;
+    hexpand: true;
+    focusable: true;
+    css-classes: ["pattern-editor-curve-editor"];
+  }
+
+  Button pattern_editor_curve_reset {
+    label: "Reset curve";
+    halign: end;
+  }
+
+  Label pattern_editor_variation_heading {
+    label: "Variation";
+    xalign: 0;
+    css-classes: ["heading"];
+  }
+
+  Box pattern_editor_jitter_row {
+    spacing: 12;
+    Label {
+      hexpand: true;
+      label: "Jitter factor";
+      xalign: 0;
+    }
+    SpinButton pattern_editor_jitter { numeric: true; }
+  }
+
+}
+
+Adw.ApplicationWindow main_window {
+  title: "Toniator";
+
+  Adw.ToolbarView main_toolbar_view {
+    [top]
+    Adw.HeaderBar main_header_bar {
+      [title]
+      Adw.WindowTitle window_title {
+        subtitle: "Start a project";
+        title: "Toniator";
+      }
+
+      [start]
+      Button new_project_button {
+        label: "New";
+        tooltip-text: "Start a new project";
+      }
+
+      [start]
+      Button open_button {
+        label: "Open";
+        tooltip-text: "Open artwork or document";
+      }
+
+      [start]
+      Button save_button {
+        label: "Save";
+        tooltip-text: "Save Toniator document";
+      }
+
+      [start]
+      Button undo_button {
+        icon-name: "edit-undo-symbolic";
+        tooltip-text: "Undo";
+      }
+
+      [start]
+      Button redo_button {
+        icon-name: "edit-redo-symbolic";
+        tooltip-text: "Redo";
+      }
+
+      [start]
+      ToggleButton controls_toggle {
+        active: true;
+        label: "Controls";
+        tooltip-text: "Hide Controls";
+      }
+
+      [end]
+      Button export_button {
+        label: "Export…";
+        tooltip-text: "Export editable SVG or PNG image";
+      }
+    }
+
+    Adw.ToastOverlay toast_overlay {
+      Stack main_stack {
+        transition-duration: 180;
+        transition-type: crossfade;
+
+        ScrolledWindow start_page {
+          hscrollbar-policy: never;
+          vscrollbar-policy: automatic;
+
+          Box start_content {
+            orientation: vertical;
+            spacing: 18;
+            halign: center;
+            valign: center;
+            margin-start: 32;
+            margin-end: 32;
+
+            Box start_hero_frame {
+              width-request: 520;
+              height-request: 240;
+              halign: center;
+              valign: start;
+              hexpand: false;
+              vexpand: false;
+              overflow: hidden;
+
+              Picture start_hero {
+                content-fit: contain;
+                can-shrink: true;
+                hexpand: true;
+                vexpand: true;
+              }
+            }
+
+            Label start_title {
+              label: "Turn artwork into print-ready halftones";
+              css-classes: ["title-1"];
+              wrap: true;
+              justify: center;
+            }
+
+            Label start_subtitle {
+              label: "Start with a useful result, then shape the halftone to fit your work.";
+              css-classes: ["dim-label", "title-4"];
+              wrap: true;
+              justify: center;
+            }
+
+            Box start_actions {
+              spacing: 10;
+              halign: center;
+
+              Button open_artwork {
+                label: "Open Artwork";
+                css-classes: ["suggested-action", "pill"];
+              }
+
+              Button open_document {
+                label: "Open Toniator Document";
+                css-classes: ["pill"];
+              }
+            }
+
+            Button try_example {
+              label: "Try Example";
+              css-classes: ["flat"];
+            }
+
+            Box start_recovery_host {
+              orientation: vertical;
+              spacing: 8;
+              halign: center;
+            }
+          }
+        }
+
+        Box editor_page {
+          Adw.OverlaySplitView editor_split_view {
+            sidebar-position: start;
+            collapsed: false;
+            show-sidebar: true;
+            sidebar-width-unit: px;
+            sidebar-width-fraction: 0.4;
+            min-sidebar-width: 340;
+            max-sidebar-width: 640;
+
+            [sidebar]
+            Box inspector_shell {
+              orientation: vertical;
+              vexpand: true;
+              css-classes: ["inspector-shell"];
+
+              Label editing_context {
+                label: "Pattern · All inks";
+                xalign: 0;
+                wrap: true;
+                css-classes: ["caption", "editing-context"];
+              }
+
+              ScrolledWindow inspector_scroll {
+                vexpand: true;
+                hscrollbar-policy: never;
+                vscrollbar-policy: automatic;
+                min-content-width: 340;
+                css-classes: ["inspector-pane"];
+
+                Box inspector_content {
+                  orientation: vertical;
+                  spacing: 14;
+                  margin-top: 18;
+                  margin-bottom: 18;
+                  margin-start: 18;
+                  margin-end: 18;
+                  css-classes: ["inspector"];
+
+                  Box editor_controls {
+                    orientation: vertical;
+                    spacing: 8;
+
+                    Box editor_inspector_hierarchy {
+                      orientation: vertical;
+                      spacing: 8;
+
+                      Expander source_section {
+                        expanded: true;
+                        label: "Source";
+
+                        Box source_content_host {
+                          margin-top: 10;
+                          orientation: vertical;
+                          spacing: 6;
+  Box source_controls {
+                              orientation: vertical;
+                              spacing: 6;
+                          
+                          Box source_dynamic_host {
+                            orientation: vertical;
+                            spacing: 4;
+
+                            Label source_label {
+                              xalign: 0;
+                              ellipsize: middle;
+                            }
+
+                            Label autosave_status {
+                              xalign: 0;
+                              wrap: true;
+                              styles [
+                                "dim-label",
+                                "caption",
+                              ]
+                            }
+                          }
+                          
+                              Label artwork_source_label {
+                                label: "Artwork Source";
+                                xalign: 0;
+                          
+                                styles [
+                                  "heading",
+                                ]
+                              }
+                          
+                              DropDown artwork_source {}
+                          
+                              Label artwork_source_note {
+                                wrap: true;
+                                xalign: 0;
+                          
+                                styles [
+                                  "dim-label",
+                                  "caption",
+                                ]
+                              }
+                          
+                              Box source_alpha_row {
+                                orientation: vertical;
+                                spacing: 4;
+                          
+                                Label source_alpha_label {
+                                  label: "Source Alpha";
+                                  xalign: 0;
+                          
+                                  styles [
+                                    "heading",
+                                  ]
+                                }
+                          
+                                DropDown source_alpha {}
+                              }
+                          
+                              Label source_alpha_note {
+                                label: "Alpha is the source; source alpha is not applied again.";
+                                wrap: true;
+                                xalign: 0;
+                          
+                                styles [
+                                  "dim-label",
+                                  "caption",
+                                ]
+                              }
+                            }
+                        }
+                      }
+
+                      Expander output_section {
+                        expanded: true;
+                        label: "Output";
+
+                        Box output_content_host {
+                          margin-top: 10;
+                          orientation: vertical;
+                          spacing: 6;
+  Box output_controls {
+                              orientation: vertical;
+                              spacing: 6;
+                          
+                              Label output_mode_label {
+                                label: "Output Model";
+                                xalign: 0;
+                          
+                                styles [
+                                  "heading",
+                                ]
+                              }
+                          
+                              DropDown output_mode {}
+                          
+                              Label channel_assignment_label {
+                                label: "Channel Assignment";
+                                xalign: 0;
+                          
+                                styles [
+                                  "heading",
+                                ]
+                              }
+                          
+                              DropDown channel_assignment {}
+                          
+                              Label channel_assignment_note {
+                                wrap: true;
+                                xalign: 0;
+                          
+                                styles [
+                                  "dim-label",
+                                  "caption",
+                                ]
+                              }
+                          
+                              Box active_channel_row {
+                                orientation: vertical;
+                                spacing: 4;
+                          
+                                Label active_channel_label {
+                                  label: "Active Channel";
+                                  xalign: 0;
+                          
+                                  styles [
+                                    "heading",
+                                  ]
+                                }
+                          
+                                DropDown active_channel {}
+                              }
+                          
+                              Button crosshatch_action {
+                                visible: false;
+                                label: "Use Legacy Crosshatch";
+                              }
+                          
+                              Label crosshatch_note {
+                                visible: false;
+                                label: "Legacy Crosshatch temporarily switches to Curves. Exit restores ordinary Curves.";
+                                wrap: true;
+                                xalign: 0;
+                          
+                                styles [
+                                  "dim-label",
+                                  "caption",
+                                ]
+                              }
+                            }
+                        }
+                      }
+
+                      Expander channel_settings_section {
+                        expanded: false;
+                        label: "Channel Settings";
+
+                        Box channel_settings_content_host {
+                          margin-top: 10;
+                          orientation: vertical;
+                          spacing: 8;
+
+                          Label channel_controls_heading {
+                            label: "Channel Controls";
+                            xalign: 0;
+                            styles [
+                              "heading",
+                            ]
+                          }
+
+                          Label channel_controls_note {
+                            label: "Density, fill, screen rotation, mark rotation, and per-channel sampling are edited here.";
+                            wrap: true;
+                            xalign: 0;
+                            styles [
+                              "dim-label",
+                              "caption",
+                            ]
+                          }
+
+                          Box channel_pattern_controls_host {
+                            orientation: vertical;
+                            spacing: 8;
+                          }
+
+                          Stack channel_panel_stack {
+                            transition-duration: 120;
+                            transition-type: crossfade;
+                          }
+                        }
+                      }
+
+                      Expander appearance_section {
+                        expanded: false;
+                        label: "Appearance / Canvas & Export";
+                        overflow: hidden;
+
+                        Box appearance_content_host {
+                          margin-top: 10;
+                          orientation: vertical;
+                          spacing: 8;
+  Box appearance_controls {
+                              orientation: vertical;
+                              spacing: 8;
+                          
+                              Box preview_section {
+                                orientation: vertical;
+                                spacing: 4;
+                          
+                                Box preview_heading {
+                                  orientation: horizontal;
+                                  spacing: 4;
+                          
+                                  Label preview_surface_label {
+                                    hexpand: true;
+                                    label: "Preview Surface — Canvas only · not exported";
+                                    xalign: 0;
+                                  }
+                          
+                                  Box preview_help_host {}
+                                }
+                          
+                                DropDown preview_surface {}
+                          
+                                ColorDialogButton preview_color {}
+                              }
+                          
+                              Box export_section {
+                                orientation: vertical;
+                                spacing: 4;
+                          
+                                Box export_heading {
+                                  orientation: horizontal;
+                                  spacing: 4;
+                          
+                                  Label export_background_label {
+                                    hexpand: true;
+                                    label: "Export Background — Used for SVG and by default for PNG";
+                                    xalign: 0;
+                                  }
+                          
+                                  Box export_help_host {}
+                                }
+                          
+                                DropDown export_background {}
+                          
+                                Box export_color_row {
+                                  orientation: horizontal;
+                                  spacing: 8;
+
+                                  Label export_color_label {
+                                    hexpand: true;
+                                    label: "Background Color · None (transparent)";
+                                    xalign: 0;
+                                  }
+
+                                  ColorDialogButton export_color {}
+                                }
+                              }
+                            }
+                        }
+                      }
+
+                      Expander treatment_section {
+                        expanded: true;
+                        label: "Pattern Settings";
+
+                        Box treatment_content_host {
+                          margin-top: 10;
+                          orientation: vertical;
+                          spacing: 8;
+  Box treatment_chrome {
+                              orientation: vertical;
+                              spacing: 8;
+                          
+                              Label treatment_title {
+                                label: "Pattern";
+                                xalign: 0;
+                          
+                                styles [
+                                  "title-2",
+                                ]
+                              }
+                          
+                              Label treatment_caption {
+                                label: "Pattern Preset";
+                                xalign: 0;
+                          
+                                styles [
+                                  "heading",
+                                ]
+                              }
+                          
+                              Box treatment_pattern_buttons {
+                                visible: false;
+                                spacing: 0;
+                          
+                                ToggleButton dots {
+                                  hexpand: true;
+                                  label: "Shapes";
+                                }
+                          
+                                ToggleButton squares {
+                                  label: "Squares";
+                                }
+                          
+                                ToggleButton lines {
+                                  label: "Lines";
+                                }
+                          
+                                ToggleButton curves {
+                                  hexpand: true;
+                                  label: "Curves";
+                                }
+
+                                ToggleButton weighted_voronoi {
+                                  hexpand: true;
+                                  label: "Weighted Voronoi";
+                                }
+                          
+                                ToggleButton legacy {
+                                  label: "Legacy";
+                                }
+                          
+                                styles [
+                                  "linked",
+                                ]
+                              }
+
+                              Box pattern_preset_row {
+                                orientation: vertical;
+                                spacing: 4;
+
+                                Label pattern_preset_label {
+                                  label: "Pattern";
+                                  xalign: 0;
+
+                                  styles [
+                                    "heading",
+                                  ]
+                                }
+
+                                DropDown pattern_preset {}
+
+                                Label pattern_preset_note {
+                                  label: "Choose a construction preset, then use Edit Pattern… for full structural controls.";
+                                  wrap: true;
+                                  xalign: 0;
+
+                                  styles [
+                                    "dim-label",
+                                    "caption",
+                                  ]
+                                }
+                              }
+                          
+                              Box treatment_preset_actions {
+                                spacing: 0;
+                          
+                                Button preset_import {
+                                  hexpand: true;
+                                  label: "Load Preset…";
+                                }
+                          
+                                Button preset_save {
+                                  hexpand: true;
+                                  label: "Save Preset…";
+                                }
+
+                                Button pattern_editor {
+                                  hexpand: true;
+                                  label: "Edit Pattern…";
+                                  tooltip-text: "Create a portable project pattern from Shapes";
+                                }
+
+                                Button guided_definition_catalog {
+                                  hexpand: true;
+                                  label: "Guided Patterns…";
+                                  tooltip-text: "Browse immutable bundled definitions and preview their schema-guided controls";
+                                }
+                          
+                                styles [
+                                  "linked",
+                                ]
+                              }
+                          
+                              Stack treatment_modes {
+                                transition-duration: 120;
+                                transition-type: crossfade;
+                          
+                                Box native_panel {
+                                  orientation: vertical;
+                                  spacing: 12;
+                          
+                                  Label native_channel_copy {
+                                    label: "Automatic CMYK separation";
+                                    xalign: 0;
+                          
+                                    styles [
+                                      "heading",
+                                    ]
+                                  }
+                          
+                                  Box native_sampling_detail_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+                          
+                                    Box native_sampling_detail_heading {
+                                      spacing: 8;
+                          
+                                      Label native_sampling_detail_label {
+                                        label: "Sampling Detail";
+                                        xalign: 0;
+                          
+                                        styles [
+                                          "heading",
+                                        ]
+                                      }
+                          
+                                      Label native_sampling_detail_subtitle {
+                                        ellipsize: end;
+                                        hexpand: true;
+                                        label: "Coarse — Fine";
+                                        xalign: 1;
+                          
+                                        styles [
+                                          "dim-label",
+                                          "caption",
+                                        ]
+                                      }
+                                    }
+                          
+                                    Box native_sampling_detail_control {
+                                      spacing: 8;
+                          
+                                      Scale native_sampling_detail_scale {
+                                        draw-value: false;
+                                        hexpand: true;
+                                        orientation: horizontal;
+                                      }
+                          
+                                      SpinButton native_sampling_detail_entry {
+                                        numeric: true;
+                                        tooltip-text: "Enter an exact value";
+                                      }
+                                    }
+                                  }
+                          
+                                  Box native_coverage_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+                          
+                                    Box native_coverage_heading {
+                                      spacing: 8;
+                          
+                                      Label native_coverage_label {
+                                        label: "Coverage";
+                                        xalign: 0;
+                          
+                                        styles [
+                                          "heading",
+                                        ]
+                                      }
+                          
+                                      Label native_coverage_subtitle {
+                                        ellipsize: end;
+                                        hexpand: true;
+                                        label: "How much ink fills the page";
+                                        xalign: 1;
+                          
+                                        styles [
+                                          "dim-label",
+                                          "caption",
+                                        ]
+                                      }
+                                    }
+                          
+                                    Box native_coverage_control {
+                                      spacing: 8;
+                          
+                                      Scale native_coverage_scale {
+                                        draw-value: false;
+                                        hexpand: true;
+                                        orientation: horizontal;
+                                      }
+                          
+                                      SpinButton native_coverage_entry {
+                                        numeric: true;
+                                        tooltip-text: "Enter an exact value";
+                                      }
+                                    }
+                                  }
+                          
+                                  Box native_contrast_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+                          
+                                    Box native_contrast_heading {
+                                      spacing: 8;
+                          
+                                      Label native_contrast_label {
+                                        label: "Contrast";
+                                        xalign: 0;
+                          
+                                        styles [
+                                          "heading",
+                                        ]
+                                      }
+                          
+                                      Label native_contrast_subtitle {
+                                        ellipsize: end;
+                                        hexpand: true;
+                                        label: "Separate light and dark areas";
+                                        xalign: 1;
+                          
+                                        styles [
+                                          "dim-label",
+                                          "caption",
+                                        ]
+                                      }
+                                    }
+                          
+                                    Box native_contrast_control {
+                                      spacing: 8;
+                          
+                                      Scale native_contrast_scale {
+                                        draw-value: false;
+                                        hexpand: true;
+                                        orientation: horizontal;
+                                      }
+                          
+                                      SpinButton native_contrast_entry {
+                                        numeric: true;
+                                        tooltip-text: "Enter an exact value";
+                                      }
+                                    }
+                                  }
+                          
+                                  Box native_screen_angle_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+                          
+                                    Box native_screen_angle_heading {
+                                      spacing: 8;
+                          
+                                      Label native_screen_angle_label {
+                                        label: "Screen Angle";
+                                        xalign: 0;
+                          
+                                        styles [
+                                          "heading",
+                                        ]
+                                      }
+                          
+                                      Label native_screen_angle_subtitle {
+                                        ellipsize: end;
+                                        hexpand: true;
+                                        label: "Rotate square and line screens";
+                                        xalign: 1;
+                          
+                                        styles [
+                                          "dim-label",
+                                          "caption",
+                                        ]
+                                      }
+                                    }
+                          
+                                    Box native_screen_angle_control {
+                                      spacing: 8;
+                          
+                                      Scale native_screen_angle_scale {
+                                        draw-value: false;
+                                        hexpand: true;
+                                        orientation: horizontal;
+                                      }
+                          
+                                      SpinButton native_screen_angle_entry {
+                                        numeric: true;
+                                        tooltip-text: "Enter an exact value";
+                                      }
+                                    }
+                                  }
+                          
+                                  styles [
+                                    "workflow-group",
+                                  ]
+                                }
+
+                                Box custom_pattern_panel {
+                                  orientation: vertical;
+                                  spacing: 8;
+
+                                  Label custom_pattern_heading {
+                                    label: "Custom Pattern";
+                                    xalign: 0;
+                                    styles [ "heading" ]
+                                  }
+
+                                  Label custom_pattern_summary {
+                                    label: "This portable pattern is stored in the project.";
+                                    wrap: true;
+                                    xalign: 0;
+                                  }
+
+                                  Button custom_pattern_edit {
+                                    label: "Edit Pattern…";
+                                    halign: start;
+                                  }
+
+                                  Button definition_library {
+                                    label: "Pattern Library…";
+                                    halign: start;
+                                    tooltip-text: "Browse bundled, user-library, and project pattern definitions";
+                                  }
+                                }
+                          
+                                Box web_panel_host {
+                                  orientation: vertical;
+                                  spacing: 10;
+                          
+                                  styles [
+                                    "workflow-group",
+                                  ]
+                          
+                                  Box web_shared_row {
+                                    spacing: 4;
+                          
+                                    CheckButton web_shared {
+                                      label: "Share Mark Shape Across Inks";
+                                      active: true;
+                                    }
+                          
+                                    Box web_shared_help_host {}
+                                  }
+                          
+                                  Box web_shape_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+                          
+                                    Label web_shape_label {
+                                      label: "Mark";
+                                      xalign: 0;
+                          
+                                      styles [
+                                        "heading",
+                                      ]
+                                    }
+                          
+                                    DropDown web_shape {}
+                                  }
+                          
+                                  Label web_mixed_shape_label {
+                                    label: "Mark: Mixed shapes";
+                                    xalign: 0;
+                                    visible: false;
+                          
+                                    styles [
+                                      "heading",
+                                    ]
+                                  }
+                          
+                                  Box web_mixed_shape_apply_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+                                    visible: false;
+                          
+                                    Label web_mixed_shape_apply_label {
+                                      label: "Apply Mark to All";
+                                      xalign: 0;
+                          
+                                      styles [
+                                        "heading",
+                                      ]
+                                    }
+                          
+                                    DropDown web_mixed_shape_apply {}
+                                  }
+                          
+                                  Box web_polygon_sides_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+                          
+                                    Box web_polygon_sides_heading {
+                                      spacing: 4;
+                          
+                                      Label web_polygon_sides_label {
+                                        label: "Polygon Sides (3–6)";
+                                        xalign: 0;
+                          
+                                        styles [
+                                          "heading",
+                                        ]
+                                      }
+                          
+                                      Box web_polygon_sides_help_host {}
+                                    }
+                          
+                                    SpinButton web_polygon_sides {
+                                      numeric: true;
+                                      value: 4;
+                                    }
+                                  }
+                          
+                                  Box web_edit_shape_row {
+                                    spacing: 4;
+                          
+                                    Button web_edit_shape {
+                                      label: "Edit User-Defined Mark…";
+                                    }
+                          
+                                    Box web_edit_shape_help_host {}
+                                  }
+                          
+                                  Label web_geometry_note {
+                                    xalign: 0;
+                                    wrap: true;
+                          
+                                    styles [
+                                      "dim-label",
+                                      "caption",
+                                    ]
+                                  }
+                          
+                                  Box web_target_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+                                    visible: false;
+                          
+                                    Box web_target_heading {
+                                      spacing: 4;
+                          
+                                      Label web_target_label {
+                                        label: "Adjust Ink";
+                                        xalign: 0;
+                          
+                                        styles [
+                                          "heading",
+                                        ]
+                                      }
+                          
+                                      Box web_target_help_host {}
+                                    }
+                          
+                                    DropDown web_target {}
+                                  }
+                          
+                                  Label web_visible_label {
+                                    label: "Visible Inks";
+                                    xalign: 0;
+                          
+                                    styles [
+                                      "heading",
+                                    ]
+                                  }
+                          
+                                  Box web_visible_row {
+                                    spacing: 4;
+                          
+                                    CheckButton web_visible_c {
+                                      label: "C";
+                                    }
+                          
+                                    CheckButton web_visible_m {
+                                      label: "M";
+                                    }
+                          
+                                    CheckButton web_visible_y {
+                                      label: "Y";
+                                    }
+                          
+                                    CheckButton web_visible_k {
+                                      label: "K";
+                                    }
+                          
+                                    Box web_visible_help_host {}
+                                  }
+
+                                  Box channel_scope_host {
+                                    orientation: vertical;
+                                    spacing: 4;
+
+                                    Label channel_scope_label {
+                                      label: "Edit channel / ink";
+                                      xalign: 0;
+
+                                      styles [
+                                        "heading",
+                                      ]
+                                    }
+
+                                    DropDown channel_scope {}
+                                  }
+                          
+                                  Label web_mixed {
+                                    xalign: 0;
+                                    wrap: true;
+                          
+                                    styles [
+                                      "dim-label",
+                                      "caption",
+                                    ]
+                                  }
+                          
+                                  Box web_color_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+                          
+                                    Box web_color_heading_row {
+                                      spacing: 4;
+                          
+                                      Label web_color_heading {
+                                        label: "Channel HEX value (Color code)";
+                                        xalign: 0;
+                          
+                                        styles [
+                                          "heading",
+                                        ]
+                                      }
+                          
+                                      Box web_color_help_host {}
+                                    }
+                          
+                                    Box web_color_control {
+                                      spacing: 8;
+                          
+                                      Entry web_color {
+                                        placeholder-text: "#RRGGBB";
+                                      }
+                          
+                                      Label web_color_status {
+                                        label: "Hex color";
+                                        xalign: 1;
+                                        hexpand: true;
+                          
+                                        styles [
+                                          "dim-label",
+                                          "caption",
+                                        ]
+                                      }
+                                    }
+                                  }
+                          
+                                  Box web_crosshatch_color_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+                                    visible: false;
+                          
+                                    Label web_crosshatch_color_label {
+                                      label: "Crosshatch Color";
+                                      xalign: 0;
+                          
+                                      styles [
+                                        "heading",
+                                      ]
+                                    }
+                          
+                                    Box web_crosshatch_color_control {
+                                      spacing: 8;
+                          
+                                      Entry web_crosshatch_color {
+                                        placeholder-text: "#111111";
+                                      }
+                          
+                                      Label web_crosshatch_color_status {
+                                        label: "Hex color";
+                                        xalign: 1;
+                                        hexpand: true;
+                          
+                                        styles [
+                                          "dim-label",
+                                          "caption",
+                                        ]
+                                      }
+                                    }
+                                  }
+                          
+                                  Box web_coverage_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+                          
+                                    Box web_coverage_heading {
+                                      spacing: 8;
+                          
+                                      Label web_coverage_label {
+                                        label: "Coverage";
+                                        xalign: 0;
+                          
+                                        styles [
+                                          "heading",
+                                        ]
+                                      }
+                          
+                                      Label web_coverage_status {
+                                        label: "Mark size";
+                                        xalign: 1;
+                                        hexpand: true;
+                          
+                                        styles [
+                                          "dim-label",
+                                          "caption",
+                                        ]
+                                      }
+                                    }
+                          
+                                    Box web_coverage_control {
+                                      spacing: 8;
+                          
+                                      Scale web_coverage_scale {
+                                        orientation: horizontal;
+                                        draw-value: false;
+                                        hexpand: true;
+                                      }
+                          
+                                      SpinButton web_coverage_entry {
+                                        numeric: true;
+                                        tooltip-text: "Enter an exact value";
+                                      }
+                                    }
+                                  }
+                          
+                                  Box web_angle_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+                          
+                                    Box web_angle_heading {
+                                      spacing: 8;
+                          
+                                      Label web_angle_label {
+                                        label: "Screen Angle";
+                                        xalign: 0;
+                          
+                                        styles [
+                                          "heading",
+                                        ]
+                                      }
+                          
+                                      Label web_angle_status {
+                                        label: "Rotate sampling grid";
+                                        xalign: 1;
+                                        hexpand: true;
+                          
+                                        styles [
+                                          "dim-label",
+                                          "caption",
+                                        ]
+                                      }
+                                    }
+                          
+                                    Box web_angle_control {
+                                      spacing: 8;
+                          
+                                      Scale web_angle_scale {
+                                        orientation: horizontal;
+                                        draw-value: false;
+                                        hexpand: true;
+                                      }
+                          
+                                      SpinButton web_angle_entry {
+                                        numeric: true;
+                                        tooltip-text: "Enter an exact value";
+                                      }
+                                    }
+                                  }
+                          
+                                  Box web_mark_angle_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+                          
+                                    Box web_mark_angle_heading {
+                                      spacing: 8;
+                          
+                                      Label web_mark_angle_label {
+                                        label: "Mark Rotation";
+                                        xalign: 0;
+                          
+                                        styles [
+                                          "heading",
+                                        ]
+                                      }
+                          
+                                      Label web_mark_angle_status {
+                                        label: "Rotate marks within the grid";
+                                        xalign: 1;
+                                        hexpand: true;
+                          
+                                        styles [
+                                          "dim-label",
+                                          "caption",
+                                        ]
+                                      }
+                                    }
+                          
+                                    Box web_mark_angle_control {
+                                      spacing: 8;
+                          
+                                      Scale web_mark_angle_scale {
+                                        orientation: horizontal;
+                                        draw-value: false;
+                                        hexpand: true;
+                                      }
+                          
+                                      SpinButton web_mark_angle_entry {
+                                        numeric: true;
+                                        tooltip-text: "Enter an exact value";
+                                      }
+                                    }
+                                  }
+                          
+                                  Box web_width_scale_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+                          
+                                    Box web_width_scale_heading {
+                                      spacing: 8;
+                          
+                                      Label web_width_scale_label {
+                                        label: "Mark Width";
+                                        xalign: 0;
+                          
+                                        styles [
+                                          "heading",
+                                        ]
+                                      }
+                          
+                                      Label web_width_scale_status {
+                                        label: "Horizontal mark scale";
+                                        xalign: 1;
+                                        hexpand: true;
+                          
+                                        styles [
+                                          "dim-label",
+                                          "caption",
+                                        ]
+                                      }
+                                    }
+                          
+                                    Box web_width_scale_control {
+                                      spacing: 8;
+                          
+                                      Scale web_width_scale {
+                                        orientation: horizontal;
+                                        draw-value: false;
+                                        hexpand: true;
+                                      }
+                          
+                                      SpinButton web_width_entry {
+                                        numeric: true;
+                                        tooltip-text: "Enter an exact value";
+                                      }
+                                    }
+                                  }
+                          
+                                  Box web_height_scale_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+                          
+                                    Box web_height_scale_heading {
+                                      spacing: 8;
+                          
+                                      Label web_height_scale_label {
+                                        label: "Mark Height";
+                                        xalign: 0;
+                          
+                                        styles [
+                                          "heading",
+                                        ]
+                                      }
+                          
+                                      Label web_height_scale_status {
+                                        label: "Vertical mark scale";
+                                        xalign: 1;
+                                        hexpand: true;
+                          
+                                        styles [
+                                          "dim-label",
+                                          "caption",
+                                        ]
+                                      }
+                                    }
+                          
+                                    Box web_height_scale_control {
+                                      spacing: 8;
+                          
+                                      Scale web_height_scale {
+                                        orientation: horizontal;
+                                        draw-value: false;
+                                        hexpand: true;
+                                      }
+                          
+                                      SpinButton web_height_entry {
+                                        numeric: true;
+                                        tooltip-text: "Enter an exact value";
+                                      }
+                                    }
+                                  }
+                          
+                                  Expander web_advanced {
+                                    label: "Advanced";
+                                    expanded: false;
+                          
+                                    Box web_advanced_content {
+                                      orientation: vertical;
+                                      spacing: 8;
+                          
+                                      Box web_threshold_row {
+                                        orientation: vertical;
+                                        spacing: 4;
+                          
+                                        Box web_threshold_heading {
+                                          spacing: 8;
+                          
+                                          Label web_threshold_label {
+                                            label: "Light-Tone Cutoff";
+                                            xalign: 0;
+                          
+                                            styles [
+                                              "heading",
+                                            ]
+                                          }
+                          
+                                          Label web_threshold_status {
+                                            label: "Hide light marks";
+                                            xalign: 1;
+                                            hexpand: true;
+                          
+                                            styles [
+                                              "dim-label",
+                                              "caption",
+                                            ]
+                                          }
+                                        }
+                          
+                                        Box web_threshold_control {
+                                          spacing: 8;
+                          
+                                          Scale web_threshold_scale {
+                                            orientation: horizontal;
+                                            draw-value: false;
+                                            hexpand: true;
+                                          }
+                          
+                                          SpinButton web_threshold_entry {
+                                            numeric: true;
+                                            tooltip-text: "Enter an exact value";
+                                          }
+                                        }
+                                      }
+                          
+                                      Box web_opacity_row {
+                                        orientation: vertical;
+                                        spacing: 4;
+                          
+                                        Box web_opacity_heading {
+                                          spacing: 4;
+                          
+                                          Label web_opacity_label {
+                                            label: "Ink Opacity";
+                                            xalign: 0;
+                          
+                                            styles [
+                                              "heading",
+                                            ]
+                                          }
+                          
+                                          Box web_opacity_help_host {}
+                          
+                                          Label web_opacity_status {
+                                            label: "Transparent — Solid";
+                                            xalign: 1;
+                                            hexpand: true;
+                          
+                                            styles [
+                                              "dim-label",
+                                              "caption",
+                                            ]
+                                          }
+                                        }
+                          
+                                        Box web_opacity_control {
+                                          spacing: 8;
+                          
+                                          Scale web_opacity_scale {
+                                            orientation: horizontal;
+                                            draw-value: false;
+                                            hexpand: true;
+                                          }
+                          
+                                          SpinButton web_opacity_entry {
+                                            numeric: true;
+                                            tooltip-text: "Enter an exact value";
+                                          }
+                                        }
+                                      }
+                          
+                                      Box web_detail_row {
+                                        orientation: vertical;
+                                        spacing: 4;
+                          
+                                        Box web_detail_heading {
+                                          spacing: 8;
+                          
+                                          Label web_detail_label {
+                                            label: "Sampling Detail";
+                                            xalign: 0;
+                          
+                                            styles [
+                                              "heading",
+                                            ]
+                                          }
+                          
+                                          Label web_detail_status {
+                                            label: "Sample density";
+                                            xalign: 1;
+                                            hexpand: true;
+                          
+                                            styles [
+                                              "dim-label",
+                                              "caption",
+                                            ]
+                                          }
+                                        }
+                          
+                                        Box web_detail_control {
+                                          spacing: 8;
+                          
+                                          Scale web_detail_scale {
+                                            orientation: horizontal;
+                                            draw-value: false;
+                                            hexpand: true;
+                                          }
+                          
+                                          SpinButton web_detail_entry {
+                                            numeric: true;
+                                            tooltip-text: "Enter an exact value";
+                                          }
+                                        }
+                                      }
+
+                                      Box channel_random_size_response_row {
+                                        orientation: vertical;
+                                        spacing: 4;
+
+                                        Box channel_random_size_response_heading {
+                                          spacing: 8;
+
+                                          Label channel_random_size_response_label {
+                                            label: "Shape Size Response";
+                                            xalign: 0;
+
+                                            styles [
+                                              "heading",
+                                            ]
+                                          }
+
+                                          Label channel_random_size_response_status {
+                                            label: "Uniform — Source responsive";
+                                            xalign: 1;
+                                            hexpand: true;
+
+                                            styles [
+                                              "dim-label",
+                                              "caption",
+                                            ]
+                                          }
+                                        }
+
+                                        Box channel_random_size_response_control {
+                                          spacing: 8;
+
+                                          Scale channel_random_size_response {
+                                            orientation: horizontal;
+                                            draw-value: false;
+                                            hexpand: true;
+                                          }
+
+                                          SpinButton channel_random_size_response_entry {
+                                            numeric: true;
+                                            tooltip-text: "Enter an exact value";
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                          
+                                  Box curve_panel_host {
+                                  orientation: vertical;
+                                  spacing: 10;
+                          
+                                  styles [
+                                    "workflow-group",
+                                  ]
+                          
+                                  Box curve_layout_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+                          
+                                    Label curve_layout_label {
+                                      label: "Layout";
+                                      xalign: 0;
+                          
+                                      styles [
+                                        "heading",
+                                      ]
+                                    }
+                          
+                                    DropDown curve_layout {}
+                                  }
+                          
+                                  Box curve_weight_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+                          
+                                    Box curve_weight_heading {
+                                      spacing: 8;
+                          
+                                      Label curve_weight_label {
+                                        label: "Line Weight";
+                                        xalign: 0;
+                          
+                                        styles [
+                                          "heading",
+                                        ]
+                                      }
+                          
+                                      Label curve_weight_subtitle {
+                                        label: "Global curve thickness";
+                                        xalign: 1;
+                                        hexpand: true;
+                          
+                                        styles [
+                                          "dim-label",
+                                          "caption",
+                                        ]
+                                      }
+                                    }
+                          
+                                    Box curve_weight_control {
+                                      spacing: 8;
+                          
+                                      Scale curve_weight_scale {
+                                        orientation: horizontal;
+                                        draw-value: false;
+                                        hexpand: true;
+                                      }
+                          
+                                      SpinButton curve_weight_entry {
+                                        numeric: true;
+                                        tooltip-text: "Enter an exact value";
+                                      }
+                                    }
+                                  }
+                          
+                                  Box curve_spacing_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+                          
+                                    Box curve_spacing_heading {
+                                      spacing: 8;
+                          
+                                      Label curve_spacing_label {
+                                        label: "Line Spacing";
+                                        xalign: 0;
+                          
+                                        styles [
+                                          "heading",
+                                        ]
+                                      }
+                          
+                                      Label curve_spacing_subtitle {
+                                        label: "Global distance between curves";
+                                        xalign: 1;
+                                        hexpand: true;
+                          
+                                        styles [
+                                          "dim-label",
+                                          "caption",
+                                        ]
+                                      }
+                                    }
+                          
+                                    Box curve_spacing_control {
+                                      spacing: 8;
+                          
+                                      Scale curve_spacing_scale {
+                                        orientation: horizontal;
+                                        draw-value: false;
+                                        hexpand: true;
+                                      }
+                          
+                                      SpinButton curve_spacing_entry {
+                                        numeric: true;
+                                        tooltip-text: "Enter an exact value";
+                                      }
+                                    }
+                                  }
+                          
+                                  Box curve_profile_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+                          
+                                    Label curve_profile_label {
+                                      label: "Line Shape";
+                                      xalign: 0;
+                          
+                                      styles [
+                                        "heading",
+                                      ]
+                                    }
+                          
+                                    DropDown curve_profile {}
+                                  }
+                          
+                                  Label curve_editor_label {
+                                    label: "All Inks Curve";
+                                    xalign: 0;
+                          
+                                    styles [
+                                      "heading",
+                                    ]
+                                  }
+                          
+                                  Box curve_editor_host {
+                                    hexpand: true;
+
+                                    DrawingArea curve_editor {
+                                      content-width: 300;
+                                      content-height: 220;
+                                      hexpand: true;
+                                      focusable: true;
+                                      can-target: true;
+                                      styles [
+                                        "curve-editor",
+                                      ]
+                                    }
+                                  }
+                          
+                                  Label curve_instructions {
+                                    label: "Drag white points to shape the curve; blue points adjust bends. Double-click the line to add a point; Delete removes the selected point.";
+                                    wrap: true;
+                                    xalign: 0;
+                          
+                                    styles [
+                                      "dim-label",
+                                      "caption",
+                                    ]
+                                  }
+                          
+                                  Box curve_actions {
+                                    spacing: 6;
+                          
+                                    Button curve_reset {
+                                      label: "Reset to Soft Wave";
+                          
+                                      styles [
+                                        "flat",
+                                      ]
+                                    }
+                                  }
+                          
+                                  Box curve_shared_row {
+                                    spacing: 4;
+                          
+                                    CheckButton curve_shared {
+                                      label: "Share Line Shape Across Inks";
+                                      active: true;
+                                    }
+                          
+                                    Box curve_shared_help_host {}
+                                  }
+                          
+                                  Box motif_controls {
+                                    orientation: vertical;
+                                    spacing: 8;
+                                    visible: false;
+                          
+                                    Label motif_title {
+                                      label: "Repeated Motif";
+                                      xalign: 0;
+                          
+                                      styles [
+                                        "heading",
+                                      ]
+                                    }
+                          
+                                    Box motif_coverage_row {
+                                      orientation: vertical;
+                                      spacing: 4;
+                          
+                                      Label motif_coverage_label {
+                                        label: "Artwork Coverage";
+                                        xalign: 0;
+                          
+                                        styles [
+                                          "heading",
+                                        ]
+                                      }
+                          
+                                      DropDown motif_coverage {}
+                                    }
+                          
+                                    Box motif_size_row {
+                                      orientation: vertical;
+                                      spacing: 4;
+                          
+                                      Box motif_size_heading {
+                                        spacing: 8;
+                          
+                                        Label motif_size_label {
+                                          label: "Motif Size";
+                                          xalign: 0;
+                          
+                                          styles [
+                                            "heading",
+                                          ]
+                                        }
+                          
+                                        Label motif_size_status {
+                                          label: "Repeated curve width";
+                                          xalign: 1;
+                                          hexpand: true;
+                          
+                                          styles [
+                                            "dim-label",
+                                            "caption",
+                                          ]
+                                        }
+                                      }
+                          
+                                      Box motif_size_control {
+                                        spacing: 8;
+                          
+                                        Scale motif_size_scale {
+                                          orientation: horizontal;
+                                          draw-value: false;
+                                          hexpand: true;
+                                        }
+                          
+                                        SpinButton motif_size_entry {
+                                          numeric: true;
+                                          tooltip-text: "Enter an exact value";
+                                        }
+                                      }
+                                    }
+                          
+                                    Box motif_columns_row {
+                                      orientation: vertical;
+                                      spacing: 4;
+                          
+                                      Box motif_columns_heading {
+                                        spacing: 8;
+                          
+                                        Label motif_columns_label {
+                                          label: "Columns";
+                                          xalign: 0;
+                          
+                                          styles [
+                                            "heading",
+                                          ]
+                                        }
+                          
+                                        Label motif_columns_status {
+                                          label: "Copies across";
+                                          xalign: 1;
+                                          hexpand: true;
+                          
+                                          styles [
+                                            "dim-label",
+                                            "caption",
+                                          ]
+                                        }
+                                      }
+                          
+                                      Box motif_columns_control {
+                                        spacing: 8;
+                          
+                                        Scale motif_columns_scale {
+                                          orientation: horizontal;
+                                          draw-value: false;
+                                          hexpand: true;
+                                        }
+                          
+                                        SpinButton motif_columns_entry {
+                                          numeric: true;
+                                          tooltip-text: "Enter an exact value";
+                                        }
+                                      }
+                                    }
+                          
+                                    Box motif_rows_row {
+                                      orientation: vertical;
+                                      spacing: 4;
+                          
+                                      Box motif_rows_heading {
+                                        spacing: 8;
+                          
+                                        Label motif_rows_label {
+                                          label: "Rows";
+                                          xalign: 0;
+                          
+                                          styles [
+                                            "heading",
+                                          ]
+                                        }
+                          
+                                        Label motif_rows_status {
+                                          label: "Layered rows";
+                                          xalign: 1;
+                                          hexpand: true;
+                          
+                                          styles [
+                                            "dim-label",
+                                            "caption",
+                                          ]
+                                        }
+                                      }
+                          
+                                      Box motif_rows_control {
+                                        spacing: 8;
+                          
+                                        Scale motif_rows_scale {
+                                          orientation: horizontal;
+                                          draw-value: false;
+                                          hexpand: true;
+                                        }
+                          
+                                        SpinButton motif_rows_entry {
+                                          numeric: true;
+                                          tooltip-text: "Enter an exact value";
+                                        }
+                                      }
+                                    }
+                          
+                                    Box motif_row_spacing_row {
+                                      orientation: vertical;
+                                      spacing: 4;
+                          
+                                      Box motif_row_spacing_heading {
+                                        spacing: 8;
+                          
+                                        Label motif_row_spacing_label {
+                                          label: "Row Spacing";
+                                          xalign: 0;
+                          
+                                          styles [
+                                            "heading",
+                                          ]
+                                        }
+                          
+                                        Label motif_row_spacing_status {
+                                          label: "Distance between rows";
+                                          xalign: 1;
+                                          hexpand: true;
+                          
+                                          styles [
+                                            "dim-label",
+                                            "caption",
+                                          ]
+                                        }
+                                      }
+                          
+                                      Box motif_row_spacing_control {
+                                        spacing: 8;
+                          
+                                        Scale motif_row_spacing_scale {
+                                          orientation: horizontal;
+                                          draw-value: false;
+                                          hexpand: true;
+                                        }
+                          
+                                        SpinButton motif_row_spacing_entry {
+                                          numeric: true;
+                                          tooltip-text: "Enter an exact value";
+                                        }
+                                      }
+                                    }
+                          
+                                    Box motif_stagger_row {
+                                      orientation: vertical;
+                                      spacing: 4;
+                          
+                                      Box motif_stagger_heading {
+                                        spacing: 8;
+                          
+                                        Label motif_stagger_label {
+                                          label: "Alternate Row Offset";
+                                          xalign: 0;
+                          
+                                          styles [
+                                            "heading",
+                                          ]
+                                        }
+                          
+                                        Label motif_stagger_status {
+                                          label: "Alternate row shift";
+                                          xalign: 1;
+                                          hexpand: true;
+                          
+                                          styles [
+                                            "dim-label",
+                                            "caption",
+                                          ]
+                                        }
+                                      }
+                          
+                                      Box motif_stagger_control {
+                                        spacing: 8;
+                          
+                                        Scale motif_stagger_scale {
+                                          orientation: horizontal;
+                                          draw-value: false;
+                                          hexpand: true;
+                                        }
+                          
+                                        SpinButton motif_stagger_entry {
+                                          numeric: true;
+                                          tooltip-text: "Enter an exact value";
+                                        }
+                                      }
+                                    }
+                          
+                                    Box motif_alternate_row {
+                                      orientation: vertical;
+                                      spacing: 4;
+                          
+                                      Label motif_alternate_label {
+                                        label: "Alternate Copies";
+                                        xalign: 0;
+                          
+                                        styles [
+                                          "heading",
+                                        ]
+                                      }
+                          
+                                      DropDown motif_alternate {}
+                                    }
+                          
+                                    Box motif_arrange_row {
+                                      spacing: 4;
+                          
+                                      CheckButton motif_arrange {
+                                        label: "Adjust Layout on Artwork";
+                                      }
+                                    }
+                          
+                                    Label motif_mixed {
+                                      xalign: 0;
+                                      wrap: true;
+                          
+                                      styles [
+                                        "dim-label",
+                                        "caption",
+                                      ]
+                                    }
+                          
+                                    Label motif_instructions {
+                                      label: "Drag the center to move, R to rotate, and S to separate rows. Esc cancels the drag.";
+                                      xalign: 0;
+                                      wrap: true;
+                          
+                                      styles [
+                                        "dim-label",
+                                        "caption",
+                                      ]
+                                    }
+                                  }
+                          
+                                  Label curve_visible_label {
+                                    label: "Visible Inks";
+                                    xalign: 0;
+                          
+                                    styles [
+                                      "heading",
+                                    ]
+                                  }
+                          
+                                  Box curve_visible_row {
+                                    spacing: 4;
+                          
+                                    CheckButton curve_visible_c {
+                                      label: "C";
+                                    }
+                          
+                                    CheckButton curve_visible_m {
+                                      label: "M";
+                                    }
+                          
+                                    CheckButton curve_visible_y {
+                                      label: "Y";
+                                    }
+                          
+                                    CheckButton curve_visible_k {
+                                      label: "K";
+                                    }
+                          
+                                    Box curve_visible_help_host {}
+                                  }
+
+                                  Box curve_target_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+
+                                    Box curve_target_heading {
+                                      spacing: 4;
+
+                                      Label curve_target_label {
+                                        label: "Edit channel / ink";
+                                        xalign: 0;
+
+                                        styles [
+                                          "heading",
+                                        ]
+                                      }
+
+                                      Box curve_target_help_host {}
+                                    }
+
+                                    DropDown curve_target {}
+                                  }
+                          
+                                  Label curve_mixed {
+                                    xalign: 0;
+                                    wrap: true;
+                          
+                                    styles [
+                                      "dim-label",
+                                      "caption",
+                                    ]
+                                  }
+                          
+                                  Box curve_color_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+                          
+                                    Label curve_color_heading {
+                                      label: "Channel HEX value (Color code)";
+                                      xalign: 0;
+                          
+                                      styles [
+                                        "heading",
+                                      ]
+                                    }
+                          
+                                    Box curve_color_control {
+                                      spacing: 8;
+                          
+                                      Entry curve_color {
+                                        placeholder-text: "#RRGGBB";
+                                      }
+                          
+                                      Label curve_color_status {
+                                        label: "Hex color";
+                                        xalign: 1;
+                                        hexpand: true;
+                          
+                                        styles [
+                                          "dim-label",
+                                          "caption",
+                                        ]
+                                      }
+                                    }
+                                  }
+                          
+                                  Box curve_crosshatch_color_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+                                    visible: false;
+                          
+                                    Label curve_crosshatch_color_label {
+                                      label: "Crosshatch Color";
+                                      xalign: 0;
+                          
+                                      styles [
+                                        "heading",
+                                      ]
+                                    }
+                          
+                                    Box curve_crosshatch_color_control {
+                                      spacing: 8;
+                          
+                                      Entry curve_crosshatch_color {
+                                        placeholder-text: "#111111";
+                                      }
+                          
+                                      Label curve_crosshatch_color_status {
+                                        label: "Hex color";
+                                        xalign: 1;
+                                        hexpand: true;
+                          
+                                        styles [
+                                          "dim-label",
+                                          "caption",
+                                        ]
+                                      }
+                                    }
+                                  }
+                          
+                                  Box curve_coverage_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+                          
+                                    Box curve_coverage_heading {
+                                      spacing: 8;
+                          
+                                      Label curve_coverage_label {
+                                        label: "Line Coverage";
+                                        xalign: 0;
+                          
+                                        styles [
+                                          "heading",
+                                        ]
+                                      }
+                          
+                                      Label curve_coverage_status {
+                                        label: "Curve scale";
+                                        xalign: 1;
+                                        hexpand: true;
+                          
+                                        styles [
+                                          "dim-label",
+                                          "caption",
+                                        ]
+                                      }
+                                    }
+                          
+                                    Box curve_coverage_control {
+                                      spacing: 8;
+                          
+                                      Scale curve_coverage_scale {
+                                        orientation: horizontal;
+                                        draw-value: false;
+                                        hexpand: true;
+                                      }
+                          
+                                      SpinButton curve_coverage_entry {
+                                        numeric: true;
+                                        tooltip-text: "Enter an exact value";
+                                      }
+                                    }
+                                  }
+                          
+                                  Box curve_angle_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+                          
+                                    Box curve_angle_heading {
+                                      spacing: 8;
+                          
+                                      Label curve_angle_label {
+                                        label: "Screen Angle";
+                                        xalign: 0;
+                          
+                                        styles [
+                                          "heading",
+                                        ]
+                                      }
+                          
+                                      Label curve_angle_status {
+                                        label: "Rotate ink screen";
+                                        xalign: 1;
+                                        hexpand: true;
+                          
+                                        styles [
+                                          "dim-label",
+                                          "caption",
+                                        ]
+                                      }
+                                    }
+                          
+                                    Box curve_angle_control {
+                                      spacing: 8;
+                          
+                                      Scale curve_angle_scale {
+                                        orientation: horizontal;
+                                        draw-value: false;
+                                        hexpand: true;
+                                      }
+                          
+                                      SpinButton curve_angle_entry {
+                                        numeric: true;
+                                        tooltip-text: "Enter an exact value";
+                                      }
+                                    }
+                                  }
+                          
+                                  Box curve_position_x_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+                          
+                                    Box curve_position_x_heading {
+                                      spacing: 8;
+                          
+                                      Label curve_position_x_label {
+                                        label: "Position X";
+                                        xalign: 0;
+                          
+                                        styles [
+                                          "heading",
+                                        ]
+                                      }
+                          
+                                      Label curve_position_x_status {
+                                        label: "Move across";
+                                        xalign: 1;
+                                        hexpand: true;
+                          
+                                        styles [
+                                          "dim-label",
+                                          "caption",
+                                        ]
+                                      }
+                                    }
+                          
+                                    Box curve_position_x_control {
+                                      spacing: 8;
+                          
+                                      Scale curve_position_x_scale {
+                                        orientation: horizontal;
+                                        draw-value: false;
+                                        hexpand: true;
+                                      }
+                          
+                                      SpinButton curve_position_x_entry {
+                                        numeric: true;
+                                        tooltip-text: "Enter an exact value";
+                                      }
+                                    }
+                                  }
+                          
+                                  Box curve_position_y_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+                          
+                                    Box curve_position_y_heading {
+                                      spacing: 8;
+                          
+                                      Label curve_position_y_label {
+                                        label: "Position Y";
+                                        xalign: 0;
+                          
+                                        styles [
+                                          "heading",
+                                        ]
+                                      }
+                          
+                                      Label curve_position_y_status {
+                                        label: "Move vertically";
+                                        xalign: 1;
+                                        hexpand: true;
+                          
+                                        styles [
+                                          "dim-label",
+                                          "caption",
+                                        ]
+                                      }
+                                    }
+                          
+                                    Box curve_position_y_control {
+                                      spacing: 8;
+                          
+                                      Scale curve_position_y_scale {
+                                        orientation: horizontal;
+                                        draw-value: false;
+                                        hexpand: true;
+                                      }
+                          
+                                      SpinButton curve_position_y_entry {
+                                        numeric: true;
+                                        tooltip-text: "Enter an exact value";
+                                      }
+                                    }
+                                  }
+                          
+                                  Box curve_opacity_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+                          
+                                    Box curve_opacity_heading {
+                                      spacing: 8;
+                          
+                                      Label curve_opacity_label {
+                                        label: "Ink Opacity";
+                                        xalign: 0;
+                          
+                                        styles [
+                                          "heading",
+                                        ]
+                                      }
+                          
+                                      Label curve_opacity_status {
+                                        label: "Transparent — Solid";
+                                        xalign: 1;
+                                        hexpand: true;
+                          
+                                        styles [
+                                          "dim-label",
+                                          "caption",
+                                        ]
+                                      }
+                                    }
+                          
+                                    Box curve_opacity_control {
+                                      spacing: 8;
+                          
+                                      Scale curve_opacity_scale {
+                                        orientation: horizontal;
+                                        draw-value: false;
+                                        hexpand: true;
+                                      }
+                          
+                                      SpinButton curve_opacity_entry {
+                                        numeric: true;
+                                        tooltip-text: "Enter an exact value";
+                                      }
+                                    }
+                                  }
+                          
+                                  Expander curve_advanced {
+                                    label: "Advanced";
+                                    expanded: false;
+                          
+                                    Box curve_advanced_content {
+                                      orientation: vertical;
+                                      spacing: 8;
+                          
+                                      Box curve_threshold_row {
+                                        orientation: vertical;
+                                        spacing: 4;
+                          
+                                        Box curve_threshold_heading {
+                                          spacing: 8;
+                          
+                                          Label curve_threshold_label {
+                                            label: "Light-Tone Cutoff";
+                                            xalign: 0;
+                          
+                                            styles [
+                                              "heading",
+                                            ]
+                                          }
+                          
+                                          Label curve_threshold_status {
+                                            label: "Hide light lines";
+                                            xalign: 1;
+                                            hexpand: true;
+                          
+                                            styles [
+                                              "dim-label",
+                                              "caption",
+                                            ]
+                                          }
+                                        }
+                          
+                                        Box curve_threshold_control {
+                                          spacing: 8;
+                          
+                                          Scale curve_threshold_scale {
+                                            orientation: horizontal;
+                                            draw-value: false;
+                                            hexpand: true;
+                                          }
+                          
+                                          SpinButton curve_threshold_entry {
+                                            numeric: true;
+                                            tooltip-text: "Enter an exact value";
+                                          }
+                                        }
+                                      }
+                          
+                                      Box curve_detail_row {
+                                        orientation: vertical;
+                                        spacing: 4;
+                          
+                                        Box curve_detail_heading {
+                                          spacing: 8;
+                          
+                                          Label curve_detail_label {
+                                            label: "Sampling Detail";
+                                            xalign: 0;
+                          
+                                            styles [
+                                              "heading",
+                                            ]
+                                          }
+                          
+                                          Label curve_detail_status {
+                                            label: "Sample density";
+                                            xalign: 1;
+                                            hexpand: true;
+                          
+                                            styles [
+                                              "dim-label",
+                                              "caption",
+                                            ]
+                                          }
+                                        }
+                          
+                                        Box curve_detail_control {
+                                          spacing: 8;
+                          
+                                          Scale curve_detail_scale {
+                                            orientation: horizontal;
+                                            draw-value: false;
+                                            hexpand: true;
+                                          }
+                          
+                                          SpinButton curve_detail_entry {
+                                            numeric: true;
+                                            tooltip-text: "Enter an exact value";
+                                          }
+                                        }
+                                      }
+                          
+                                      Box curve_close_ends_row {
+                                        spacing: 4;
+                          
+                                        CheckButton curve_close_ends {
+                                          label: "Close Ends";
+                                        }
+                                      }
+                          
+                                      Box curve_smooth_join_row {
+                                        spacing: 4;
+                          
+                                        CheckButton curve_smooth_join {
+                                          label: "Smooth Join";
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+
+                                Box weighted_voronoi_panel {
+                                  orientation: vertical;
+                                  spacing: 10;
+
+                                  styles [
+                                    "workflow-group",
+                                  ]
+
+                                  Label weighted_voronoi_note {
+                                    label: "Source-responsive cells use the same canonical geometry for preview, PNG, and SVG.";
+                                    xalign: 0;
+                                    wrap: true;
+
+                                    styles [
+                                      "dim-label",
+                                      "caption",
+                                    ]
+                                  }
+
+                                  Box weighted_voronoi_channel_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+
+                                    Label weighted_voronoi_channel_label {
+                                      label: "Edit Channel";
+                                      xalign: 0;
+
+                                      styles [
+                                        "heading",
+                                      ]
+                                    }
+
+                                    DropDown weighted_voronoi_channel {}
+                                  }
+
+                                  Box weighted_voronoi_cell_count_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+
+                                    Label weighted_voronoi_cell_count_label {
+                                      label: "Cell Count";
+                                      xalign: 0;
+
+                                      styles [
+                                        "heading",
+                                      ]
+                                    }
+
+                                    Scale weighted_voronoi_cell_count {
+                                      orientation: horizontal;
+                                      draw-value: true;
+                                    }
+                                  }
+
+                                  Label weighted_voronoi_visible_label {
+                                    label: "Enabled Semantic Channels";
+                                    xalign: 0;
+
+                                    styles [
+                                      "heading",
+                                    ]
+                                  }
+
+                                  Box weighted_voronoi_visible_row {
+                                    spacing: 4;
+
+                                    CheckButton weighted_voronoi_visible_0 { label: "C"; }
+                                    CheckButton weighted_voronoi_visible_1 { label: "M"; }
+                                    CheckButton weighted_voronoi_visible_2 { label: "Y"; }
+                                    CheckButton weighted_voronoi_visible_3 { label: "K"; }
+                                  }
+
+                                  Box weighted_voronoi_arrangement_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+
+                                    Label weighted_voronoi_arrangement_label {
+                                      label: "Arrangement";
+                                      xalign: 0;
+
+                                      styles [
+                                        "heading",
+                                      ]
+                                    }
+
+                                    DropDown weighted_voronoi_arrangement {}
+                                  }
+
+                                  Box weighted_voronoi_placement_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+
+                                    Label weighted_voronoi_placement_label {
+                                      label: "Placement";
+                                      xalign: 0;
+
+                                      styles [
+                                        "heading",
+                                      ]
+                                    }
+
+                                    DropDown weighted_voronoi_placement {}
+                                  }
+
+                                  Box weighted_voronoi_density_strength_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+
+                                    Label weighted_voronoi_density_strength_label {
+                                      label: "Density Strength";
+                                      xalign: 0;
+
+                                      styles [
+                                        "heading",
+                                      ]
+                                    }
+
+                                    Scale weighted_voronoi_density_strength {
+                                      orientation: horizontal;
+                                      draw-value: true;
+                                    }
+                                  }
+
+                                  Box weighted_voronoi_response_strength_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+
+                                    Label weighted_voronoi_response_strength_label {
+                                      label: "Interior Response";
+                                      xalign: 0;
+
+                                      styles [
+                                        "heading",
+                                      ]
+                                    }
+
+                                    Scale weighted_voronoi_response_strength {
+                                      orientation: horizontal;
+                                      draw-value: true;
+                                    }
+                                  }
+
+                                  Box weighted_voronoi_boundary_gap_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+
+                                    Label weighted_voronoi_boundary_gap_label {
+                                      label: "Boundary Gap";
+                                      xalign: 0;
+
+                                      styles [
+                                        "heading",
+                                      ]
+                                    }
+
+                                    Scale weighted_voronoi_boundary_gap {
+                                      orientation: horizontal;
+                                      draw-value: true;
+                                    }
+                                  }
+
+                                  Box weighted_voronoi_seed_row {
+                                    orientation: vertical;
+                                    spacing: 4;
+
+                                    Label weighted_voronoi_seed_label {
+                                      label: "Seed";
+                                      xalign: 0;
+
+                                      styles [
+                                        "heading",
+                                      ]
+                                    }
+
+                                    Entry weighted_voronoi_seed {
+                                      input-purpose: digits;
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+
+            [content]
+            Box canvas_box {
+              orientation: vertical;
+              hexpand: true;
+              vexpand: true;
+
+              ScrolledWindow canvas {
+                hexpand: true;
+                vexpand: true;
+                hscrollbar-policy: automatic;
+                vscrollbar-policy: automatic;
+                css-classes: ["canvas"];
+
+                Box canvas_stage_host {
+                  hexpand: true;
+                  vexpand: true;
+
+                  Overlay canvas_content {
+                    halign: center;
+                    valign: center;
+
+                    Picture picture {
+                      content-fit: contain;
+                      can-shrink: true;
+                      hexpand: true;
+                      vexpand: true;
+                      css-classes: ["artboard"];
+                    }
+
+                    [overlay]
+                    DrawingArea motif_overlay {
+                      hexpand: true;
+                      vexpand: true;
+                      focusable: true;
+                      can-target: true;
+                      visible: false;
+                    }
+                  }
+                }
+
+              }
+
+              Box status_row {
+                spacing: 6;
+                margin-start: 12;
+                margin-end: 12;
+
+                Label workspace_status {
+                  label: "Preview will appear here";
+                  xalign: 0;
+                  ellipsize: end;
+                  hexpand: true;
+                  css-classes: ["caption", "dim-label", "workspace-status"];
+                }
+
+                Button cancel_preview {
+                  label: "Cancel Preview";
+                  visible: false;
+                }
+
+                Button cancel_export {
+                  label: "Cancel Export";
+                  visible: false;
+                }
+              }
+
+              Box canvas_controls {
+                spacing: 8;
+                margin-top: 8;
+                margin-bottom: 8;
+                margin-start: 12;
+                margin-end: 12;
+
+                ToggleButton fit {
+                  label: "Fit";
+                  css-classes: ["flat"];
+                }
+
+                Button zoom_out {
+                  icon-name: "zoom-out-symbolic";
+                  tooltip-text: "Zoom out 25 percentage points";
+                }
+
+                Scale zoom {
+                  orientation: horizontal;
+                  draw-value: false;
+                  hexpand: true;
+                  width-request: 80;
+                }
+
+                Entry zoom_entry {
+                  text: "100";
+                  width-chars: 4;
+                  max-width-chars: 5;
+                  width-request: 7;
+                }
+
+                Label zoom_percent {
+                  label: "%";
+                }
+
+                Button zoom_in {
+                  icon-name: "zoom-in-symbolic";
+                  tooltip-text: "Zoom in 25 percentage points";
+                }
+
+                Separator zoom_separator {
+                  orientation: vertical;
+                }
+
+                Box view_switch {
+                  spacing: 0;
+                  css-classes: ["linked"];
+
+                  ToggleButton rendered_view {
+                    label: "Halftone";
+                    active: true;
+                  }
+
+                  ToggleButton compare {
+                    label: "Source";
+                  }
+                }
+
+                Box canvas_controls_spacer {
+                  hexpand: true;
+                }
+
+                Box preview_indicator_host {}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

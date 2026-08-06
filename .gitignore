@@ -1,12 +1,31 @@
 /target/
 /dist/
-/archive/webapp/node_modules/
-/archive/webapp/dist/
-/archive/webapp/test-artifacts/screenshots/
 .DS_Store
 *.log
-.agents/
-.codex/
-resume_hydration.txt
-nextPrompt.txt
-test-artifacts/
+/test-artifacts/
+
+# Machine-local Codex state. Project agents and skills are versioned.
+/.codex/*
+!/.codex/agents/
+!/.codex/agents/**
+/.agents/*
+!/.agents/skills/
+!/.agents/skills/**
+/.codex-work/
+
+# Local planning and credential material.
+/getStartedPrompt.md
+/Toniator Project Key sk.txt
+/resume_hydration.txt
+/nextPrompt.txt
+
+# Read-only legacy reference: retain source and authored assets, not outputs.
+/ToniatorLegacy/target/
+/ToniatorLegacy/dist/
+/ToniatorLegacy/test-artifacts/
+/ToniatorLegacy/.codex-work/
+/ToniatorLegacy/archive/webapp/node_modules/
+/ToniatorLegacy/archive/webapp/dist/
+/ToniatorLegacy/archive/webapp/test-artifacts/
+/ToniatorLegacy/BuildScriptLog.txt
+/ToniatorLegacy/nextprompt.md
