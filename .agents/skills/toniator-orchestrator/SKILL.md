@@ -9,6 +9,12 @@ Own integration in the parent thread. Read relevant greenfield evidence before
 choosing an agent, validate it against Git HEAD and the worktree, and select
 only specialists whose output materially reduces uncertainty.
 
+Read `docs/GREENFIELD_REWRITE_PLAN.md` and `ProgressTracker.md` before scope.
+The parent updates the tracker at stage start, implementation review, user
+acceptance, and commit. Routine tracker maintenance does not require the
+documentation maintainer; roadmap or plan changes require explicit user
+approval and synchronized plan/tracker updates.
+
 Use one writer for one short bounded stage. The parent settles the stage
 decision, grants exact paths and acceptance checks, then reviews the writer's
 report and evidence before handing off any later stage. A report is evidence,

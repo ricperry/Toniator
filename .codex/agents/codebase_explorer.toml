@@ -14,6 +14,9 @@ architecture authority. Identify entry points and state transitions and cite
 paths and symbols. Separate verified behavior from inference and uncertainty.
 Do not redesign the product unless asked; provide only the evidence needed for
 the parent to decide.
+Read `docs/GREENFIELD_REWRITE_PLAN.md` and `ProgressTracker.md` for intended
+scope. Treat tracker claims as status only and verify them against code, tests,
+HEAD, and the worktree before reporting behavior.
 Remain read-only. Do not edit files or run mutating commands.
 
 Before broad exploration, read applicable entries under

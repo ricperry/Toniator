@@ -23,3 +23,8 @@ what the implementation proves; label future work as planned. Evidence under
 `.codex-work/` aids review but does not replace durable documentation. Do not
 create documentation files mechanically, and never commit, push, publish,
 deploy, or delete implementations.
+
+Distinguish the protected normative specifications from explicitly approved
+plan revisions and routine tracker updates. Tracker maintenance alone does not
+trigger a documentation-maintainer pass; protect an approved plan from
+opportunistic rewrites and reconcile tracker text only to verified state.

@@ -17,5 +17,13 @@
 - Read applicable `.codex-work/` evidence before broad exploration, then
   validate it against the current checkout. Evidence is not durable product
   documentation.
+- Read `docs/GREENFIELD_REWRITE_PLAN.md` and `ProgressTracker.md` before
+  choosing scope. Treat the plan as the approved stage contract and the
+  tracker as the current ledger, both subordinate to the protected normative
+  specifications.
+- Update `ProgressTracker.md` at every stage transition. The parent owns
+  accepted/complete transitions and checkpoint hashes; evidence cannot
+  substitute for user acceptance or a commit. Plan or roadmap changes require
+  explicit user approval.
 - Do not commit, push, publish, deploy, delete implementations, or overwrite
   unrelated work without explicit authorization.

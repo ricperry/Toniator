@@ -11,6 +11,11 @@ broad exploration. Reuse an entry only when its rewrite generation, subsystem,
 Git HEAD, relevant files, and working-tree assumptions still match the task.
 Validate those conditions against the current repository before relying on it.
 
+Read `docs/GREENFIELD_REWRITE_PLAN.md` and `ProgressTracker.md` as durable
+scope/status inputs, and validate the tracker against HEAD and the worktree.
+Evidence may explain a transition but cannot advance tracker status or replace
+parent review, user acceptance, or a checkpoint.
+
 Greenfield entries must state `generation: greenfield-rewrite`. Evidence from
 the legacy tree is invalid by default for greenfield decisions, even if an
 algorithm or workflow has a similar name. Do not write evidence under

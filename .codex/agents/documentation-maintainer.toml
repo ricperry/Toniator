@@ -12,6 +12,9 @@ documentation structure before creating files, then update durable
 documentation to describe only the current verified implementation. Correct or
 remove stale documentation while preserving important design rationale; do not
 document planned behavior as shipped.
+Protect the approved greenfield plan from opportunistic rewrites. Reconcile
+`ProgressTracker.md` only to verified implementation state and never mark user
+acceptance or checkpoint completion.
 
 Never modify Toniator application source code and never change implementation
 merely to agree with existing documentation. Report contradictions between

@@ -1,17 +1,20 @@
 # Toniator
 
-Toniator is a GPL-3.0-only native Linux creative tool in greenfield rewrite
-Stage 1. This checkout currently provides only a Rust workspace boundary:
-nine empty crates, a placeholder app binary, and a headless CLI that exposes
-standard help and version output. It does not yet implement document state,
-pattern generation, rendering, persistence, GTK resources, or exports.
+Toniator is a GPL-3.0-only native Linux creative tool in a greenfield rewrite.
+The foundation is committed at Stage 1 (`567d307`); Stage 2's authoritative
+document, validation, invalidation, revision, stale-token, and headless
+`validate` contracts are implemented and accepted, awaiting their checkpoint
+commit in the current worktree. Geometry, rendering/export, persistence,
+source decoding, and GTK behavior are not implemented yet.
 
+The approved execution roadmap is [GREENFIELD_REWRITE_PLAN.md](docs/GREENFIELD_REWRITE_PLAN.md),
+and the current checkpoint ledger is [ProgressTracker.md](ProgressTracker.md).
 The normative design is in [Architecture Schema](Project%20Specification/ArchitectureSchema.md),
 [Pattern Schema](Project%20Specification/PatternSchema.md),
 [Channel Schema](Project%20Specification/ChannelSchema.md),
 [Module Structure](Project%20Specification/ModuleStructure.md), and the
 precedence-setting [Addendum](Project%20Specification/Addendum.md).
 
-Planned stages will implement the shared engine pipeline and frontends. The
-headless CLI and the future GTK app are separate frontends; neither is a
-dependency of the core crates.
+The future headless CLI and GTK app are separate peer frontends over the
+shared `toniator-engine` boundary; neither frontend owns document or pattern
+state, and no geometry or render path is shipped at this checkpoint.
