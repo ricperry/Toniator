@@ -2,7 +2,18 @@
 
 //! The shared mutable-document boundary for headless Toniator frontends.
 
-use std::{error::Error, fmt};
+use std::{
+    error::Error,
+    fmt,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
+
+mod scheduler;
+
+pub use scheduler::{EvaluationCompletion, EvaluationScheduler, EvaluationTicket, SchedulerError};
 
 use toniator_domain::{
     CanvasSpec, ChannelId, EvaluationSnapshot, EvaluationToken, PatternOutput, PatternStructure,
@@ -63,14 +74,14 @@ pub fn inspect_circular_marks(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedSource {
     reference_id: SourceReferenceId,
-    bytes: Box<[u8]>,
+    bytes: Arc<[u8]>,
     format: SourceFormatHint,
 }
 
 impl ResolvedSource {
     pub fn new(
         reference_id: SourceReferenceId,
-        bytes: impl Into<Box<[u8]>>,
+        bytes: impl Into<Arc<[u8]>>,
         format: SourceFormatHint,
     ) -> Result<Self, EvaluationError> {
         let bytes = bytes.into();
@@ -117,6 +128,10 @@ impl EvaluationRequest {
     pub fn new(snapshot: EvaluationSnapshot, source: ResolvedSource) -> Self {
         Self { snapshot, source }
     }
+
+    pub(crate) fn token(&self) -> EvaluationToken {
+        self.snapshot.token()
+    }
 }
 
 /// Immutable result from evaluating one authoritative snapshot.
@@ -146,6 +161,195 @@ impl EvaluationResult {
 /// Evaluates exactly the Stage 3 -> Stage 4 -> Stage 5 chain represented by
 /// the immutable snapshot. It performs no document mutation or source lookup.
 pub fn evaluate(request: EvaluationRequest) -> Result<EvaluationResult, EvaluationError> {
+    match evaluate_with_cancellation(request, &NeverCancelled) {
+        Ok(result) => Ok(result),
+        Err(EvaluationRunError::Evaluation(error)) => Err(error),
+        Err(EvaluationRunError::Cancelled) => unreachable!("synchronous evaluation never cancels"),
+    }
+}
+
+pub(crate) fn evaluate_cancellable(
+    request: EvaluationRequest,
+    cancelled: &AtomicBool,
+) -> Result<EvaluationResult, EvaluationRunError> {
+    evaluate_with_cancellation(request, &AtomicCancellation(cancelled))
+}
+
+#[cfg(test)]
+pub(crate) fn evaluate_cancellable_with_gate(
+    request: EvaluationRequest,
+    cancelled: &AtomicBool,
+    gate: &EvaluationStageGate,
+) -> Result<EvaluationResult, EvaluationRunError> {
+    evaluate_with_cancellation(request, &ObservedCancellation { cancelled, gate })
+}
+
+trait CancellationProbe {
+    fn is_cancelled(&self) -> bool;
+
+    #[cfg(test)]
+    fn observe_stage(&self, _stage: EvaluationStage, _checkpoint: EvaluationCheckpoint) {}
+}
+
+struct NeverCancelled;
+
+impl CancellationProbe for NeverCancelled {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+}
+
+struct AtomicCancellation<'a>(&'a AtomicBool);
+
+impl CancellationProbe for AtomicCancellation<'_> {
+    fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+#[cfg(test)]
+struct ObservedCancellation<'a> {
+    cancelled: &'a AtomicBool,
+    gate: &'a EvaluationStageGate,
+}
+
+#[cfg(test)]
+impl CancellationProbe for ObservedCancellation<'_> {
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    fn observe_stage(&self, stage: EvaluationStage, checkpoint: EvaluationCheckpoint) {
+        self.gate.wait(stage, checkpoint);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EvaluationStage {
+    Family,
+    Decode,
+    Realization,
+    Scene,
+    Raster,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EvaluationCheckpoint {
+    Before,
+    After,
+}
+
+#[cfg(test)]
+struct EvaluationStageGateState {
+    entered: bool,
+    released: bool,
+}
+
+#[cfg(test)]
+pub(crate) struct EvaluationStageGate {
+    stage: EvaluationStage,
+    checkpoint: EvaluationCheckpoint,
+    entered: std::sync::mpsc::Sender<()>,
+    state: std::sync::Mutex<EvaluationStageGateState>,
+    wake: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl EvaluationStageGate {
+    pub(crate) fn new(
+        stage: EvaluationStage,
+        checkpoint: EvaluationCheckpoint,
+    ) -> (std::sync::Arc<Self>, std::sync::mpsc::Receiver<()>) {
+        let (entered, receiver) = std::sync::mpsc::channel();
+        (
+            std::sync::Arc::new(Self {
+                stage,
+                checkpoint,
+                entered,
+                state: std::sync::Mutex::new(EvaluationStageGateState {
+                    entered: false,
+                    released: false,
+                }),
+                wake: std::sync::Condvar::new(),
+            }),
+            receiver,
+        )
+    }
+
+    pub(crate) fn release(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("evaluation stage gate lock poisoned");
+        state.released = true;
+        self.wake.notify_all();
+    }
+
+    fn wait(&self, stage: EvaluationStage, checkpoint: EvaluationCheckpoint) {
+        if stage != self.stage || checkpoint != self.checkpoint {
+            return;
+        }
+        let mut state = self
+            .state
+            .lock()
+            .expect("evaluation stage gate lock poisoned");
+        if state.entered {
+            return;
+        }
+        state.entered = true;
+        let _ = self.entered.send(());
+        while !state.released {
+            state = self
+                .wake
+                .wait(state)
+                .expect("evaluation stage gate lock poisoned");
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum EvaluationRunError {
+    Cancelled,
+    Evaluation(EvaluationError),
+}
+
+impl From<EvaluationError> for EvaluationRunError {
+    fn from(error: EvaluationError) -> Self {
+        Self::Evaluation(error)
+    }
+}
+
+fn evaluate_stage<T>(
+    stage: EvaluationStage,
+    cancellation: &dyn CancellationProbe,
+    evaluate: impl FnOnce() -> Result<T, EvaluationError>,
+) -> Result<T, EvaluationRunError> {
+    #[cfg(not(test))]
+    let _ = stage;
+    if cancellation.is_cancelled() {
+        return Err(EvaluationRunError::Cancelled);
+    }
+    #[cfg(test)]
+    cancellation.observe_stage(stage, EvaluationCheckpoint::Before);
+    if cancellation.is_cancelled() {
+        return Err(EvaluationRunError::Cancelled);
+    }
+    let result = evaluate();
+    #[cfg(test)]
+    cancellation.observe_stage(stage, EvaluationCheckpoint::After);
+    if cancellation.is_cancelled() {
+        return Err(EvaluationRunError::Cancelled);
+    }
+    result.map_err(EvaluationRunError::Evaluation)
+}
+
+/// Evaluates the same ordered Stage 3 -> Stage 4 -> Stage 5 path as
+/// [`evaluate`], checking cancellation only between existing pipeline stages.
+fn evaluate_with_cancellation(
+    request: EvaluationRequest,
+    cancellation: &dyn CancellationProbe,
+) -> Result<EvaluationResult, EvaluationRunError> {
     let document = request.snapshot.document();
     let channel_id = request.snapshot.token().channel_id();
     let channel = document.channel(channel_id).ok_or(EvaluationError::new(
@@ -158,14 +362,16 @@ pub fn evaluate(request: EvaluationRequest) -> Result<EvaluationResult, Evaluati
             return Err(EvaluationError::new(
                 "evaluation.source_reference",
                 "evaluation requires an assigned source reference",
-            ));
+            )
+            .into());
         }
     };
     if source_id != request.source.reference_id() {
         return Err(EvaluationError::new(
             "evaluation.source_reference",
             "resolved source reference does not match the document snapshot",
-        ));
+        )
+        .into());
     }
     let definition = document
         .pattern_definitions()
@@ -179,13 +385,15 @@ pub fn evaluate(request: EvaluationRequest) -> Result<EvaluationResult, Evaluati
         return Err(EvaluationError::new(
             "evaluation.pattern_definition.structure",
             "unsupported pattern structure",
-        ));
+        )
+        .into());
     }
     if definition.output != PatternOutput::CircularMarks {
         return Err(EvaluationError::new(
             "evaluation.pattern_definition.output",
             "unsupported pattern output",
-        ));
+        )
+        .into());
     }
     let response = MarkResponse {
         minimum_size: channel.mark_geometry_response.minimum_size,
@@ -200,30 +408,39 @@ pub fn evaluate(request: EvaluationRequest) -> Result<EvaluationResult, Evaluati
         guard_steps: definition.guard_steps,
         support_radius: response.maximum_size / 2.0,
     };
-    let family = inspect_straight_grid(&grid).map_err(EvaluationError::from_grid)?;
-    let source = decode_source(request.source.bytes(), request.source.format())
-        .map_err(EvaluationError::from_sampling)?;
-    let realization = realize_from_existing_family(
-        &family,
-        &source,
-        document.canvas(),
-        channel.source_mapping.placement,
-        channel.source_mapping.component,
-        response,
-    )
-    .map_err(EvaluationError::from_realization)?;
-    let scene = build_scene(SceneBuild {
-        canvas: document.canvas().clone(),
-        channel_id,
-        visible: channel.appearance.visible,
-        color: channel.appearance.color.clone(),
-        opacity: channel.appearance.opacity,
-        family_fingerprint: realization.family_fingerprint,
-        realization_fingerprint: realization.realization_fingerprint,
-        marks: realization.marks,
+    let family = evaluate_stage(EvaluationStage::Family, cancellation, || {
+        inspect_straight_grid(&grid).map_err(EvaluationError::from_grid)
     })?;
-    let raster =
-        rasterize(&scene, RasterBackground::Transparent).map_err(EvaluationError::from_render)?;
+    let source = evaluate_stage(EvaluationStage::Decode, cancellation, || {
+        decode_source(request.source.bytes(), request.source.format())
+            .map_err(EvaluationError::from_sampling)
+    })?;
+    let realization = evaluate_stage(EvaluationStage::Realization, cancellation, || {
+        realize_from_existing_family(
+            &family,
+            &source,
+            document.canvas(),
+            channel.source_mapping.placement,
+            channel.source_mapping.component,
+            response,
+        )
+        .map_err(EvaluationError::from_realization)
+    })?;
+    let scene = evaluate_stage(EvaluationStage::Scene, cancellation, || {
+        build_scene(SceneBuild {
+            canvas: document.canvas().clone(),
+            channel_id,
+            visible: channel.appearance.visible,
+            color: channel.appearance.color.clone(),
+            opacity: channel.appearance.opacity,
+            family_fingerprint: realization.family_fingerprint,
+            realization_fingerprint: realization.realization_fingerprint,
+            marks: realization.marks,
+        })
+    })?;
+    let raster = evaluate_stage(EvaluationStage::Raster, cancellation, || {
+        rasterize(&scene, RasterBackground::Transparent).map_err(EvaluationError::from_render)
+    })?;
     Ok(EvaluationResult {
         token: request.snapshot.token(),
         source_identity: source.identity().clone(),
@@ -351,3 +568,155 @@ impl fmt::Display for MarksInspectError {
 }
 
 impl Error for MarksInspectError {}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::{
+        sync::{Arc, atomic::AtomicBool, mpsc},
+        thread,
+        time::Duration,
+    };
+
+    use toniator_domain::{
+        CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternLayout, ChannelSourceMapping,
+        ChannelState, ColorValue, DensityMetric2D, Document, DocumentId, DocumentSession,
+        MarkGeometryResponse, PatternDefinition, PatternDefinitionId, PatternOutput,
+        PatternStructure, SourceComponent, SourcePlacement, SourceReference, SourceReferenceId,
+    };
+
+    use super::*;
+
+    const GUARD: Duration = Duration::from_secs(15);
+    const CHANNEL_ID: ChannelId = ChannelId(1);
+
+    pub(crate) fn request() -> EvaluationRequest {
+        request_with_bytes(Arc::<[u8]>::from(
+            std::fs::read(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/raster-sample.png"
+            ))
+            .unwrap(),
+        ))
+    }
+
+    fn request_with_bytes(bytes: Arc<[u8]>) -> EvaluationRequest {
+        let source_id = SourceReferenceId::new("cancellation-test-source").unwrap();
+        let document = Document::with_source(
+            DocumentId(1),
+            CanvasSpec {
+                width: 900.0,
+                height: 600.0,
+            },
+            SourceReference::Assigned(source_id.clone()),
+            vec![PatternDefinition {
+                id: PatternDefinitionId(1),
+                name: "straight-grid".to_owned(),
+                structure: PatternStructure::StraightGrid,
+                output: PatternOutput::CircularMarks,
+                guard_steps: 2,
+            }],
+            vec![ChannelState {
+                id: CHANNEL_ID,
+                pattern_definition_id: PatternDefinitionId(1),
+                layout: ChannelPatternLayout {
+                    density: DensityMetric2D {
+                        across_x: 90.0,
+                        across_y: 60.0,
+                        aspect_locked: true,
+                    },
+                    rotation_degrees: 17.0,
+                    translation_x: 3.25,
+                    translation_y: -4.5,
+                },
+                appearance: ChannelAppearance {
+                    visible: true,
+                    color: ColorValue {
+                        red: 0.0,
+                        green: srgb_to_linear(183.0 / 255.0),
+                        blue: 1.0,
+                        alpha: 1.0,
+                    },
+                    opacity: 0.72,
+                },
+                mark_geometry_response: MarkGeometryResponse {
+                    minimum_size: 2.0,
+                    maximum_size: 9.0,
+                },
+                source_mapping: ChannelSourceMapping {
+                    component: SourceComponent::Luminance,
+                    placement: SourcePlacement::StretchToCanvas,
+                },
+            }],
+        )
+        .unwrap();
+        let session = DocumentSession::new(document).unwrap();
+        EvaluationRequest::new(
+            session.evaluation_snapshot(CHANNEL_ID).unwrap(),
+            ResolvedSource::new(source_id, bytes, SourceFormatHint::Png).unwrap(),
+        )
+    }
+
+    #[test]
+    fn actual_pipeline_cancels_at_each_named_before_and_after_checkpoint() {
+        for checkpoint in [EvaluationCheckpoint::Before, EvaluationCheckpoint::After] {
+            for stage in [
+                EvaluationStage::Family,
+                EvaluationStage::Decode,
+                EvaluationStage::Realization,
+                EvaluationStage::Scene,
+                EvaluationStage::Raster,
+            ] {
+                let (gate, entered) = EvaluationStageGate::new(stage, checkpoint);
+                let cancelled = Arc::new(AtomicBool::new(false));
+                let worker_gate = Arc::clone(&gate);
+                let worker_cancelled = Arc::clone(&cancelled);
+                let (result_sender, result_receiver) = mpsc::channel();
+                let worker = thread::spawn(move || {
+                    result_sender
+                        .send(evaluate_cancellable_with_gate(
+                            request(),
+                            &worker_cancelled,
+                            &worker_gate,
+                        ))
+                        .unwrap();
+                });
+                entered.recv_timeout(GUARD).unwrap();
+                cancelled.store(true, Ordering::Release);
+                gate.release();
+                assert_eq!(
+                    result_receiver.recv_timeout(GUARD).unwrap(),
+                    Err(EvaluationRunError::Cancelled),
+                    "{stage:?} {checkpoint:?}"
+                );
+                worker.join().unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn cancellation_after_a_real_decode_error_suppresses_the_failure() {
+        let (gate, entered) =
+            EvaluationStageGate::new(EvaluationStage::Decode, EvaluationCheckpoint::After);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_gate = Arc::clone(&gate);
+        let worker_cancelled = Arc::clone(&cancelled);
+        let (result_sender, result_receiver) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            result_sender
+                .send(evaluate_cancellable_with_gate(
+                    request_with_bytes(Arc::<[u8]>::from(vec![1_u8, 2, 3])),
+                    &worker_cancelled,
+                    &worker_gate,
+                ))
+                .unwrap();
+        });
+        entered.recv_timeout(GUARD).unwrap();
+        cancelled.store(true, Ordering::Release);
+        gate.release();
+        assert_eq!(
+            result_receiver.recv_timeout(GUARD).unwrap(),
+            Err(EvaluationRunError::Cancelled)
+        );
+        worker.join().unwrap();
+    }
+}
