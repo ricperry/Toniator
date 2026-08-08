@@ -1,6 +1,6 @@
 # Toniator Progress Tracker
 
-Last updated: **2026-08-06**. The durable execution contract is
+Last updated: **2026-08-08**. The durable execution contract is
 [GREENFIELD_REWRITE_PLAN.md](docs/GREENFIELD_REWRITE_PLAN.md). Normative
 architecture remains in the five protected [Project Specification files](Project%20Specification/Addendum.md).
 
@@ -90,10 +90,20 @@ visual acceptance, and the implementation checkpoint gate.
 uses one standard-library worker, checked monotonic tickets, queued-work
 coalescing, pipeline-boundary cancellation, latest-only completion polling,
 and clean shutdown/Drop joining. Scheduled results for both immutable sources
-match synchronous Stage 6 identities and pixels. Caches; view-only GTK
-preview; command bindings/undo-redo/current persistence/editors; then newly
-scoped generalized families, connected/region output, multiframe, and simple
-transitions remain planned. Each later stage requires explicit approval.
+match synchronous Stage 6 identities and pixels.
+
+**Stage 8 — Complete at commit `67503ae`.** Add bounded, invalidation-aware
+last-successful caches for decoded source, family output, realization, scene,
+and raster preview.
+The approved contract includes transactional acceptance by the current
+scheduler ticket/document token, immutable hit/miss diagnostics, declared
+pattern support capability instead of the temporary global 2.0–9.0 diameter
+restriction, and a configurable checked family-candidate safety limit.
+Implementation, the automated final gate, user review, and the implementation
+checkpoint are complete. View-only GTK preview;
+command bindings/undo-redo/current persistence/editors; then newly scoped
+generalized families, connected/region output, multiframe, and simple
+transitions remain planned.
 
 ## Maintenance rules
 

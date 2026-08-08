@@ -398,31 +398,118 @@ Stage 8 work.
 **Status: Planned.** Reuse the highest valid pipeline layer without allowing
 caches to become authority.
 
-### Stage 8 implementation contract
+### Capability and resource contracts
 
-- Keep one bounded last-successful cache slot per active-channel layer: decoded
-  source, family output, realization, scene, and raster preview.
-- Typed keys include every relevant authoritative input.
-- Source keys include content, format, and decoder-contract identity.
-- Downstream keys include decoded-pixel identity so SVG font resolution remains
-  represented.
-- Cache entries are committed only after successful, uncanceled, current
-  evaluation.
-- Return read-only hit/miss diagnostics.
-- Never persist caches or expose mutable cached values.
+- Replace the temporary global `2.0..=9.0` circular-mark diameter restriction
+  with `PatternDefinition::maximum_support_radius`, a finite, nonnegative
+  structural capability. A mark response is valid when both diameters are
+  finite and nonnegative, minimum is no greater than maximum, and
+  `maximum_diameter / 2.0` does not exceed the selected definition's declared
+  capability. Direct realization must enforce the same capability boundary.
+- Preserve the accepted baseline by declaring support radius `4.5` and using
+  the existing `2.0..=9.0` response in the transient CLI definition. Values
+  below 2.0 or above 9.0 are supported when the definition declares enough
+  capability; `4.5` is not a physical pixel-size limit.
+- Add immutable `EvaluationLimits` with nonzero
+  `max_family_candidates`, defaulting to `1_048_576`. Compute the guide-range
+  Cartesian product with checked arithmetic and reject an over-limit request
+  at stable path `coverage.candidate_limit` before allocating candidates.
+  Include the limit in the family key so a cached family cannot bypass a
+  stricter policy.
 
-### Stage 8 tests
+### Cache and acceptance contract
 
-- Exact repeat reuses every layer.
-- Presentation edits reuse source, family, and realization.
-- Mark-size edits reuse source and family.
-- Density, rotation, and translation reuse decoded source only.
-- Source edits reuse no downstream layer.
-- Failed, canceled, and stale evaluations do not replace cache entries.
-- Cached and uncached results are identical for both baseline assets.
+- Keep a private engine `DerivedCache` with one last-successful slot for each
+  active-channel layer: decoded source, family output, realization, scene, and
+  transparent raster preview. Cached values are immutable and may use `Arc`
+  internally; caches are neither persisted nor exposed as writable state.
+- Evaluation reads a cache snapshot and stages misses in a private transaction.
+  The worker never mutates the accepted cache. A new submission supersedes any
+  unaccepted transaction for an older ticket.
+- Preserve nonblocking, latest-only `try_receive_latest()`. Add
+  `EvaluationScheduler::accept_completion(&completion, &DocumentSession)`;
+  it validates both the latest ticket and current document token. Return
+  `true` for a current success or current failure, `false` for a stale
+  completion, and commit the staged cache transaction only for a current
+  successful completion. Repeated acceptance is safe and does not recommit.
+- Failed, canceled, stale, superseded, and successfully completed but
+  unaccepted evaluations never replace last-successful cache entries.
+- Add immutable `CacheDisposition::{Hit, Miss}` and `CacheDiagnostics` with
+  decoded-source, family, realization, scene, and raster dispositions.
+  `EvaluationCompletion::cache_diagnostics()` returns diagnostics only for a
+  successful completion; failure reporting remains unchanged.
 
-**Stop condition:** Report the reuse matrix and unchanged outputs; do not begin
-GTK.
+### Public evaluation interfaces
+
+- Existing `evaluate()` and `EvaluationScheduler::new()` use default limits.
+  Add `evaluate_with_limits(...)` and
+  `EvaluationScheduler::new_with_limits(...)` for deliberate caller policy.
+- Extend the existing grid, marks, and render CLI commands with
+  `--max-family-candidates`; omitted values use the default.
+- Cache policy is scheduler-owned and does not change authoritative
+  `Document`, `DocumentSession`, canonical geometry, identities, pixels, or
+  SVG output.
+
+### Typed cache keys and pipeline order
+
+- Decode before the family-cache lookup while retaining authoritative preflight
+  validation first. Successful uncached outputs remain byte- and
+  identity-equivalent to the accepted Stage 6/7 pipeline.
+- The source key contains the logical source reference ID, exact immutable
+  source bytes, `SourceFormatHint`, and a sampling-owned versioned decoder
+  contract ID.
+- The family key contains the source key and decoded-pixel identity, canvas,
+  density, rotation, translation, guard depth, pattern structure/output,
+  declared maximum support radius, and evaluation candidate limit.
+- The realization key contains the family key, decoded identity, canvas,
+  source component/placement, and mark response. The scene key adds channel
+  ID, visibility, color, and opacity. The raster key adds the transparent
+  rasterization contract.
+- Source reference, byte-content, format, or decoder-contract edits miss all
+  layers. The decoded-pixel identity remains in downstream keys because SVG
+  system-font resolution can change decoded pixels without changing source
+  bytes.
+
+### Required reuse matrix
+
+| Request relative to accepted cache | Source | Family | Realization | Scene | Raster |
+| --- | --- | --- | --- | --- | --- |
+| First evaluation | Miss | Miss | Miss | Miss | Miss |
+| Exact repeat | Hit | Hit | Hit | Hit | Hit |
+| Color, opacity, or visibility edit | Hit | Hit | Hit | Miss | Miss |
+| Mark-size or source-mapping edit | Hit | Hit | Miss | Miss | Miss |
+| Density, rotation, translation, canvas, or support-capability edit | Hit | Miss | Miss | Miss | Miss |
+| Source reference, bytes, format, or decoder-contract edit | Miss | Miss | Miss | Miss | Miss |
+
+### Stage 8 scope and verification
+
+Allowed: `toniator-domain`, `toniator-sampling`, `toniator-patterns`,
+`toniator-engine`, `toniator-cli`, their focused tests and narrowly necessary
+Cargo manifests, architecture validation, tracker status, and checkout-aware
+Stage 8 evidence.
+
+Forbidden: GTK/app work, geometry or render-algorithm changes, new families or
+outputs, multiple-channel composition, persistence, undo, presets, Legacy,
+baseline-asset changes, normative specification edits, or Stage 9 work.
+
+Tests must prove the reuse matrix; default and custom candidate limits without
+oversized allocation; valid mark sizes below 2.0 and above 9.0 when within the
+declared capability; direct-realization rejection beyond that capability; and
+unchanged Stage 7 cancellation, coalescing, polling, error, and shutdown
+behavior. Successful-unaccepted, document-stale, ticket-stale, canceled, and
+failed evaluations must not replace the prior cache, demonstrated by a later
+accepted request. For both immutable PNG and SVG baselines, cached and
+uncached `EvaluationResult`, scene identities, raster bytes, and SVG bytes must
+be identical; SVG downstream keys must include decoded-pixel identity.
+
+Run focused domain/sampling/patterns/engine/CLI tests while iterating, then one
+complete final workspace format/check/strict-Clippy/test and architecture
+gate, baseline hashes, protected-tree checks, and final diff review. Stage 8
+makes no graphical or GTK acceptance claim because it must not change pixels.
+
+**Stop condition:** Report the reuse matrix, transactional acceptance evidence,
+resource-limit evidence, and unchanged outputs; propose **Implemented awaiting
+review**, leave the work uncommitted, and do not begin GTK or Stage 9.
 
 ## Stage 9 — view-only GTK preview
 
