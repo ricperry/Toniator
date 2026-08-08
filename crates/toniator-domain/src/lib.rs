@@ -1309,6 +1309,53 @@ impl EvaluationSnapshot {
     }
 }
 
+/// An immutable revision token for complete-document evaluation. Its fields
+/// are private so only a `DocumentSession` can mint a document/revision pair.
+/// The token remains cheaply carryable by evaluators and schedulers.
+///
+/// ```compile_fail
+/// use toniator_domain::{DocumentEvaluationToken, DocumentId, Revision};
+///
+/// let _forged = DocumentEvaluationToken {
+///     document_id: DocumentId(1),
+///     revision: Revision(0),
+/// };
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DocumentEvaluationToken {
+    document_id: DocumentId,
+    revision: Revision,
+}
+
+impl DocumentEvaluationToken {
+    pub fn document_id(&self) -> DocumentId {
+        self.document_id
+    }
+
+    pub fn revision(&self) -> Revision {
+        self.revision
+    }
+}
+
+/// One atomic read of the complete document authority. A snapshot owns both
+/// the document clone and its exact document-level token and has no public
+/// constructor.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DocumentEvaluationSnapshot {
+    document: Document,
+    token: DocumentEvaluationToken,
+}
+
+impl DocumentEvaluationSnapshot {
+    pub fn document(&self) -> &Document {
+        &self.document
+    }
+
+    pub fn token(&self) -> DocumentEvaluationToken {
+        self.token
+    }
+}
+
 /// The exclusive owner of mutable authoritative document state.
 #[derive(Clone, Debug)]
 pub struct DocumentSession {
@@ -1381,8 +1428,32 @@ impl DocumentSession {
     ) -> Result<EvaluationToken, ValidationError> {
         Ok(self.evaluation_snapshot(channel_id)?.token())
     }
+
+    /// Atomically captures the complete authoritative document with its
+    /// session-minted revision token. Unlike the retained channel diagnostic
+    /// snapshot, this supports both legacy and modeled document topologies.
+    pub fn document_evaluation_snapshot(&self) -> DocumentEvaluationSnapshot {
+        DocumentEvaluationSnapshot {
+            document: self.document.clone(),
+            token: self.document_evaluation_token(),
+        }
+    }
+
+    pub fn document_evaluation_token(&self) -> DocumentEvaluationToken {
+        DocumentEvaluationToken {
+            document_id: self.document.id,
+            revision: self.revision,
+        }
+    }
+
     pub fn accepts_evaluation(&self, token: EvaluationToken) -> bool {
         token.revision == self.revision
+    }
+
+    /// Returns whether `token` was minted by this document session for its
+    /// still-current document revision.
+    pub fn accepts_document_evaluation(&self, token: DocumentEvaluationToken) -> bool {
+        token.document_id == self.document.id && token.revision == self.revision
     }
 }
 

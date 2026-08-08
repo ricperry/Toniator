@@ -1,10 +1,11 @@
 use toniator_domain::{
     CanvasSpec, ChannelAppearance, ChannelId, ChannelPaint, ChannelPatternLayout,
     ChannelSourceMapping, ChannelState, ChannelTopology, ChannelTopologyTemplate, ColorValue,
-    DensityMetric2D, Document, DocumentCommand, DocumentId, DocumentSession, HalftoneChannelModel,
-    HalftoneChannelRole, InvalidationLevel, MarkGeometryResponse, ModeledChannelState,
-    PatternDefinition, PatternDefinitionId, PatternOutput, PatternStructure, SourceComponent,
-    SourceMapping, SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId,
+    DensityMetric2D, Document, DocumentCommand, DocumentEvaluationToken, DocumentId,
+    DocumentSession, HalftoneChannelModel, HalftoneChannelRole, InvalidationLevel,
+    MarkGeometryResponse, ModeledChannelState, PatternDefinition, PatternDefinitionId,
+    PatternOutput, PatternStructure, SourceComponent, SourceMapping, SourceMappingComponent,
+    SourcePlacement, SourceReference, SourceReferenceId,
 };
 
 const CHANNEL_ID: ChannelId = ChannelId(7);
@@ -588,6 +589,35 @@ fn stage_six_source_reference_snapshot_and_diameter_contracts_are_authoritative(
 }
 
 #[test]
+fn retained_legacy_channel_snapshot_and_token_stay_current_then_stale_after_mutation() {
+    let mut session = DocumentSession::new(valid_document()).expect("valid session");
+    let snapshot = session
+        .evaluation_snapshot(CHANNEL_ID)
+        .expect("legacy channel snapshot");
+    let token = snapshot.token();
+
+    assert_eq!(snapshot.document(), session.document());
+    assert_eq!(token.channel_id(), CHANNEL_ID);
+    assert_eq!(token.revision(), session.revision());
+    assert!(session.accepts_evaluation(token));
+
+    session
+        .apply(&DocumentCommand::SetVisibility {
+            channel_id: CHANNEL_ID,
+            visible: false,
+        })
+        .expect("valid legacy mutation");
+
+    assert!(!session.accepts_evaluation(token));
+    let current = session
+        .evaluation_snapshot(CHANNEL_ID)
+        .expect("current legacy snapshot");
+    assert_eq!(current.token().channel_id(), CHANNEL_ID);
+    assert_eq!(current.token().revision(), session.revision());
+    assert!(session.accepts_evaluation(current.token()));
+}
+
+#[test]
 fn commands_reject_missing_channels_and_nonfinite_transforms_before_mutation() {
     let document = valid_document();
     let original = document.clone();
@@ -934,6 +964,91 @@ fn modeled_replacement_reports_old_then_new_ids_and_refuses_legacy_evaluation_ac
             .path(),
         "evaluation.channel_topology"
     );
+}
+
+#[test]
+fn complete_document_snapshots_support_every_modeled_topology() {
+    for model in [
+        HalftoneChannelModel::Rgb,
+        HalftoneChannelModel::Cmyk,
+        HalftoneChannelModel::SourceColorAlpha,
+    ] {
+        let mut session = DocumentSession::new(valid_document()).expect("valid session");
+        let topology = session
+            .document()
+            .canonical_channel_topology(model, topology_template())
+            .expect("valid canonical topology");
+        session
+            .apply(&DocumentCommand::ReplaceChannelTopology { model, topology })
+            .expect("valid modeled replacement");
+
+        let snapshot = session.document_evaluation_snapshot();
+        assert_eq!(snapshot.document(), session.document());
+        assert_eq!(snapshot.document().channel_model(), Some(model));
+        assert_eq!(snapshot.token().document_id(), session.document().id());
+        assert_eq!(snapshot.token().revision(), session.revision());
+        assert!(session.accepts_document_evaluation(snapshot.token()));
+    }
+}
+
+#[test]
+fn complete_document_snapshot_atomically_retains_document_and_revision() {
+    let mut session = DocumentSession::new(valid_document()).expect("valid session");
+    let topology = session
+        .document()
+        .canonical_channel_topology(HalftoneChannelModel::Rgb, topology_template())
+        .expect("valid canonical topology");
+    session
+        .apply(&DocumentCommand::ReplaceChannelTopology {
+            model: HalftoneChannelModel::Rgb,
+            topology,
+        })
+        .expect("valid modeled replacement");
+
+    let snapshot = session.document_evaluation_snapshot();
+    let token = snapshot.token();
+    let captured_document = session.snapshot();
+    assert_eq!(snapshot.document(), &captured_document);
+    assert_eq!(token.revision(), session.revision());
+
+    session
+        .apply(&DocumentCommand::SetVisibility {
+            channel_id: ChannelId(1),
+            visible: false,
+        })
+        .expect("valid modeled mutation");
+
+    assert_eq!(snapshot.document(), &captured_document);
+    assert!(!session.accepts_document_evaluation(token));
+    let current = session.document_evaluation_snapshot();
+    assert_eq!(current.document(), session.document());
+    assert_eq!(current.token().revision(), session.revision());
+    assert!(session.accepts_document_evaluation(current.token()));
+}
+
+#[test]
+fn complete_document_tokens_are_carryable_but_only_sessions_mint_current_tokens() {
+    fn carry(_: DocumentEvaluationToken) {}
+    fn assert_copy<T: Copy>() {}
+
+    let session = DocumentSession::new(valid_document()).expect("valid session");
+    let token = session.document_evaluation_token();
+    assert_copy::<DocumentEvaluationToken>();
+    carry(token);
+    assert!(session.accepts_document_evaluation(token));
+
+    let other_document =
+        Document::new(DocumentId(2), canvas(), vec![definition()], vec![channel()])
+            .expect("valid distinct document");
+    let other_session = DocumentSession::new(other_document).expect("valid session");
+    assert!(
+        !other_session.accepts_document_evaluation(token),
+        "a same-revision token from another document must not be accepted"
+    );
+
+    // `DocumentEvaluationToken` has no public constructor or fields. This
+    // integration test can verify its externally carryable API shape; Rust
+    // privacy prevents a downstream test crate from forging its contents.
 }
 
 #[test]
