@@ -135,7 +135,7 @@ correspondence.
 single-channel engine and CLI path to explicit channel-diagnostic APIs so the
 unprefixed engine namespace can become complete-document authority in Stage 9D.
 
-**Stage 9D — Implemented awaiting review.** Add complete-document ordered multi-channel engine
+**Stage 9D — Complete at commit `0d73d88`.** Add complete-document ordered multi-channel engine
 evaluation, strict aggregate/per-channel identities, accepted-cache reuse,
 transactional scheduler behavior, and ordered diagnostics.
 
