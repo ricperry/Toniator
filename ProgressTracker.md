@@ -105,14 +105,14 @@ then view-only GTK preview, undo/redo, portable persistence, command-bound
 editors, generalized families, connected/region output, multiframe, and simple
 transitions remain planned.
 
-**Stage 9 — Planned.** The complete bounded headless authoritative
+**Stage 9 — In progress.** The complete bounded headless authoritative
 multi-channel document-evaluation path is split into five separately reviewed
 and locally checkpointed substages. Every substage starts only after the
 previous substage is user-accepted and its implementation plus tracker closeout
 are committed locally. Push remains optional and requires a separate user
 decision.
 
-**Stage 9A — Planned.** Add authoritative channel models, canonical and
+**Stage 9A — Complete at commit `c821568`.** Add authoritative channel models, canonical and
 explicit ordered topologies, stable IDs, source mappings, paint compatibility,
 atomic model/topology replacement, revision behavior, affected-channel
 reporting, and `ChannelTopology` invalidation in the domain layer.
