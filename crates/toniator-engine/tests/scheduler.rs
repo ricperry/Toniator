@@ -11,8 +11,9 @@ use toniator_domain::{
     PatternStructure, SourceComponent, SourcePlacement, SourceReference, SourceReferenceId,
 };
 use toniator_engine::{
-    CacheDiagnostics, CacheDisposition, EvaluationCompletion, EvaluationRequest,
-    EvaluationScheduler, ResolvedSource, SourceFormatHint, evaluate, srgb_to_linear,
+    CacheDiagnostics, CacheDisposition, ChannelDiagnosticCompletion, ChannelDiagnosticRequest,
+    ChannelDiagnosticScheduler, ResolvedSource, SourceFormatHint, evaluate_channel_diagnostic,
+    srgb_to_linear,
 };
 
 const CHANNEL_ID: ChannelId = ChannelId(1);
@@ -78,8 +79,8 @@ fn request(
     session: &DocumentSession,
     bytes: Arc<[u8]>,
     format: SourceFormatHint,
-) -> EvaluationRequest {
-    EvaluationRequest::new(
+) -> ChannelDiagnosticRequest {
+    ChannelDiagnosticRequest::new(
         session.evaluation_snapshot(CHANNEL_ID).unwrap(),
         ResolvedSource::new(
             SourceReferenceId::new("scheduler-source").unwrap(),
@@ -90,7 +91,7 @@ fn request(
     )
 }
 
-fn wait_for_latest(scheduler: &EvaluationScheduler) -> EvaluationCompletion {
+fn wait_for_latest(scheduler: &ChannelDiagnosticScheduler) -> ChannelDiagnosticCompletion {
     let deadline = Instant::now() + COMPLETION_GUARD;
     loop {
         match scheduler.try_receive_latest().unwrap() {
@@ -101,16 +102,16 @@ fn wait_for_latest(scheduler: &EvaluationScheduler) -> EvaluationCompletion {
     }
 }
 
-fn assert_diagnostics(completion: &EvaluationCompletion, expected: CacheDiagnostics) {
+fn assert_diagnostics(completion: &ChannelDiagnosticCompletion, expected: CacheDiagnostics) {
     assert_eq!(completion.cache_diagnostics(), Some(&expected));
     assert_eq!(*completion.cache_diagnostics().unwrap(), expected);
 }
 
 fn submit_and_accept(
-    scheduler: &EvaluationScheduler,
+    scheduler: &ChannelDiagnosticScheduler,
     session: &DocumentSession,
-    request: EvaluationRequest,
-) -> EvaluationCompletion {
+    request: ChannelDiagnosticRequest,
+) -> ChannelDiagnosticCompletion {
     let ticket = scheduler.submit(request).unwrap();
     let completion = wait_for_latest(scheduler);
     assert_eq!(completion.ticket(), ticket);
@@ -134,18 +135,19 @@ fn scheduled_raster_and_svg_baselines_match_synchronous_results_exactly() {
     ] {
         let bytes: Arc<[u8]> = std::fs::read(path).unwrap().into();
         let session = session();
-        let synchronous = evaluate(request(&session, Arc::clone(&bytes), format)).unwrap();
+        let synchronous =
+            evaluate_channel_diagnostic(request(&session, Arc::clone(&bytes), format)).unwrap();
         assert_eq!(
             synchronous.source_identity().content_hash,
             format!("sha256:{source_hash}")
         );
-        let scheduler = EvaluationScheduler::new().unwrap();
+        let scheduler = ChannelDiagnosticScheduler::new().unwrap();
         let completion = submit_and_accept(
             &scheduler,
             &session,
             request(&session, Arc::clone(&bytes), format),
         );
-        let EvaluationCompletion::Completed { result, .. } = completion else {
+        let ChannelDiagnosticCompletion::Completed { result, .. } = completion else {
             panic!("valid baseline must complete")
         };
         assert_eq!(*result, synchronous);
@@ -183,7 +185,7 @@ fn accepted_cache_obeys_the_complete_reuse_matrix_and_keeps_outputs_exact() {
         .unwrap()
         .into();
     let mut session = session();
-    let scheduler = EvaluationScheduler::new().unwrap();
+    let scheduler = ChannelDiagnosticScheduler::new().unwrap();
     let miss = CacheDiagnostics {
         decoded_source: CacheDisposition::Miss,
         family: CacheDisposition::Miss,
@@ -330,7 +332,7 @@ fn accepted_cache_obeys_the_complete_reuse_matrix_and_keeps_outputs_exact() {
     let source_change = submit_and_accept(
         &scheduler,
         &session,
-        EvaluationRequest::new(
+        ChannelDiagnosticRequest::new(
             session.evaluation_snapshot(CHANNEL_ID).unwrap(),
             ResolvedSource::new(replacement_id, Arc::clone(&bytes), SourceFormatHint::Png).unwrap(),
         ),
@@ -345,7 +347,7 @@ fn unaccepted_stale_cancelled_and_failed_work_never_replaces_accepted_cache() {
         .unwrap()
         .into();
     let mut session = session();
-    let scheduler = EvaluationScheduler::new().unwrap();
+    let scheduler = ChannelDiagnosticScheduler::new().unwrap();
     let accepted = submit_and_accept(
         &scheduler,
         &session,
@@ -500,7 +502,7 @@ fn only_the_newest_of_rapid_submissions_is_retrievable() {
         .unwrap()
         .into();
     let session = session();
-    let scheduler = EvaluationScheduler::new().unwrap();
+    let scheduler = ChannelDiagnosticScheduler::new().unwrap();
     let first = scheduler
         .submit(request(&session, Arc::clone(&bytes), SourceFormatHint::Png))
         .unwrap();
@@ -524,7 +526,7 @@ fn superseded_failures_are_silent_but_the_newest_failure_keeps_its_ticket_and_to
         .unwrap()
         .into();
     let session = session();
-    let scheduler = EvaluationScheduler::new().unwrap();
+    let scheduler = ChannelDiagnosticScheduler::new().unwrap();
     let stale = scheduler
         .submit(request(
             &session,
@@ -541,7 +543,7 @@ fn superseded_failures_are_silent_but_the_newest_failure_keeps_its_ticket_and_to
     assert!(completion.result().is_some());
     scheduler.shutdown().unwrap();
 
-    let scheduler = EvaluationScheduler::new().unwrap();
+    let scheduler = ChannelDiagnosticScheduler::new().unwrap();
     let ticket = scheduler
         .submit(request(
             &session,
@@ -565,7 +567,7 @@ fn presentation_requires_both_scheduler_and_document_revision_gates() {
         .unwrap()
         .into();
     let mut session = session();
-    let scheduler = EvaluationScheduler::new().unwrap();
+    let scheduler = ChannelDiagnosticScheduler::new().unwrap();
     let ticket = scheduler
         .submit(request(&session, bytes, SourceFormatHint::Png))
         .unwrap();
@@ -587,6 +589,9 @@ fn presentation_requires_both_scheduler_and_document_revision_gates() {
 
 #[test]
 fn explicit_shutdown_and_drop_join_the_worker_without_a_hang() {
-    EvaluationScheduler::new().unwrap().shutdown().unwrap();
-    drop(EvaluationScheduler::new().unwrap());
+    ChannelDiagnosticScheduler::new()
+        .unwrap()
+        .shutdown()
+        .unwrap();
+    drop(ChannelDiagnosticScheduler::new().unwrap());
 }

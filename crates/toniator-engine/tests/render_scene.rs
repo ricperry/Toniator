@@ -5,13 +5,13 @@ use toniator_domain::{
     SourceComponent, SourcePlacement, SourceReference, SourceReferenceId,
 };
 use toniator_engine::{
-    EvaluationLimits, EvaluationRequest, GeometryOutput, ResolvedSource, SourceFormatHint,
-    evaluate, evaluate_with_limits, write_svg,
+    ChannelDiagnosticRequest, EvaluationLimits, GeometryOutput, ResolvedSource, SourceFormatHint,
+    evaluate_channel_diagnostic, evaluate_channel_diagnostic_with_limits, write_svg,
 };
 
 const CHANNEL_ID: ChannelId = ChannelId(1);
 
-fn request(bytes: Vec<u8>, format: SourceFormatHint) -> EvaluationRequest {
+fn request(bytes: Vec<u8>, format: SourceFormatHint) -> ChannelDiagnosticRequest {
     let source_id = SourceReferenceId::new("baseline-source").unwrap();
     let document = Document::with_source(
         DocumentId(1),
@@ -63,7 +63,7 @@ fn request(bytes: Vec<u8>, format: SourceFormatHint) -> EvaluationRequest {
     )
     .unwrap();
     let session = DocumentSession::new(document).unwrap();
-    EvaluationRequest::new(
+    ChannelDiagnosticRequest::new(
         session.evaluation_snapshot(CHANNEL_ID).unwrap(),
         ResolvedSource::new(source_id, bytes, format).unwrap(),
     )
@@ -87,7 +87,8 @@ fn document_derived_evaluation_matches_accepted_stage_five_identities_and_geomet
             "sha256:cf28b0ab640991969d9a5936be85dfd552867125950362495c69b1ab99f94fb7",
         ),
     ] {
-        let result = evaluate(request(std::fs::read(path).unwrap(), format)).unwrap();
+        let result =
+            evaluate_channel_diagnostic(request(std::fs::read(path).unwrap(), format)).unwrap();
         assert_eq!(
             result.scene().identity().family_fingerprint(),
             "fnv1a64:87a8b213740ed5b9"
@@ -174,7 +175,7 @@ fn source_mismatch_is_rejected_before_decode_or_geometry() {
     )
     .unwrap();
     let session = DocumentSession::new(document).unwrap();
-    let error = evaluate(EvaluationRequest::new(
+    let error = evaluate_channel_diagnostic(ChannelDiagnosticRequest::new(
         session.evaluation_snapshot(CHANNEL_ID).unwrap(),
         ResolvedSource::new(other_id, vec![1_u8], SourceFormatHint::Png).unwrap(),
     ))
@@ -233,7 +234,7 @@ fn unassigned_source_reference_fails_at_the_authoritative_boundary() {
     )
     .unwrap();
     let session = DocumentSession::new(document).unwrap();
-    let error = evaluate(EvaluationRequest::new(
+    let error = evaluate_channel_diagnostic(ChannelDiagnosticRequest::new(
         session.evaluation_snapshot(CHANNEL_ID).unwrap(),
         ResolvedSource::new(
             SourceReferenceId::new("resolved").unwrap(),
@@ -259,14 +260,14 @@ fn default_and_custom_candidate_limits_fail_before_oversized_family_allocation()
         "coverage.candidate_limit"
     );
     let bytes = std::fs::read("../../assets/raster-sample.png").unwrap();
-    let error = evaluate_with_limits(
+    let error = evaluate_channel_diagnostic_with_limits(
         request(bytes.clone(), SourceFormatHint::Png),
         EvaluationLimits::new(1).unwrap(),
     )
     .expect_err("one candidate cannot cover the requested grid");
     assert_eq!(error.path(), "coverage.candidate_limit");
     assert!(
-        evaluate_with_limits(
+        evaluate_channel_diagnostic_with_limits(
             request(bytes, SourceFormatHint::Png),
             EvaluationLimits::new(100_000).unwrap(),
         )

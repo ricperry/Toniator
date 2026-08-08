@@ -12,10 +12,11 @@ use toniator_domain::{
     ValidationError,
 };
 use toniator_engine::{
-    CanonicalCircleMark, EvaluationLimits, EvaluationRequest, GridError, GridInspectRequest,
+    CanonicalCircleMark, ChannelDiagnosticRequest, EvaluationLimits, GridError, GridInspectRequest,
     MarkResponse, MarksInspectError, MarksInspectRequest, Point2, RasterBackground, ResolvedSource,
     SiteId, SiteScope, SourceFormat, SourceFormatHint, SvgTextDiagnostic, encode_png,
-    evaluate_with_limits, inspect_circular_marks, inspect_straight_grid, srgb_to_linear, write_svg,
+    evaluate_channel_diagnostic_with_limits, inspect_circular_marks, inspect_straight_grid,
+    srgb_to_linear, write_svg,
 };
 
 /// Headless Toniator command-line frontend.
@@ -323,8 +324,8 @@ fn render(arguments: RenderArgs) -> Result<(), CliError> {
     session.apply(&DocumentCommand::SetSourceReference {
         source: SourceReference::Assigned(source_reference.clone()),
     })?;
-    let result = evaluate_with_limits(
-        EvaluationRequest::new(
+    let result = evaluate_channel_diagnostic_with_limits(
+        ChannelDiagnosticRequest::new(
             session.evaluation_snapshot(channel_id)?,
             ResolvedSource::new(source_reference, source_bytes, source_format)?,
         ),

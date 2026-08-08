@@ -12,18 +12,18 @@ use std::{
 use toniator_domain::{DocumentSession, EvaluationToken};
 
 use crate::{
-    CacheDiagnostics, CacheTransaction, DerivedCache, DerivedCacheSnapshot, EvaluationError,
-    EvaluationLimits, EvaluationRequest, EvaluationResult, EvaluationRunError,
-    evaluate_cancellable_cached,
+    CacheDiagnostics, CacheTransaction, ChannelDiagnosticRequest, ChannelDiagnosticResult,
+    DerivedCache, DerivedCacheSnapshot, EvaluationError, EvaluationLimits, EvaluationRunError,
+    evaluate_channel_diagnostic_cancellable_cached,
 };
 #[cfg(test)]
-use crate::{EvaluationStageGate, evaluate_cancellable_with_gate};
+use crate::{EvaluationStageGate, evaluate_channel_diagnostic_cancellable_with_gate};
 
 /// A monotonically increasing, checked identifier for one submitted evaluation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct EvaluationTicket(u64);
+pub struct ChannelDiagnosticTicket(u64);
 
-impl EvaluationTicket {
+impl ChannelDiagnosticTicket {
     /// The nonzero numeric value assigned by the scheduler.
     pub const fn value(self) -> u64 {
         self.0
@@ -32,21 +32,21 @@ impl EvaluationTicket {
 
 /// The only terminal outcomes made visible for the most recent evaluation.
 #[derive(Clone, Debug, PartialEq)]
-pub enum EvaluationCompletion {
+pub enum ChannelDiagnosticCompletion {
     Completed {
-        ticket: EvaluationTicket,
-        result: Box<EvaluationResult>,
+        ticket: ChannelDiagnosticTicket,
+        result: Box<ChannelDiagnosticResult>,
         cache_diagnostics: CacheDiagnostics,
     },
     Failed {
-        ticket: EvaluationTicket,
+        ticket: ChannelDiagnosticTicket,
         token: EvaluationToken,
         error: EvaluationError,
     },
 }
 
-impl EvaluationCompletion {
-    pub const fn ticket(&self) -> EvaluationTicket {
+impl ChannelDiagnosticCompletion {
+    pub const fn ticket(&self) -> ChannelDiagnosticTicket {
         match self {
             Self::Completed { ticket, .. } | Self::Failed { ticket, .. } => *ticket,
         }
@@ -59,7 +59,7 @@ impl EvaluationCompletion {
         }
     }
 
-    pub fn result(&self) -> Option<&EvaluationResult> {
+    pub fn result(&self) -> Option<&ChannelDiagnosticResult> {
         match self {
             Self::Completed { result, .. } => Some(result),
             Self::Failed { .. } => None,
@@ -110,14 +110,14 @@ impl fmt::Display for SchedulerError {
 impl Error for SchedulerError {}
 
 struct Job {
-    ticket: EvaluationTicket,
-    request: EvaluationRequest,
+    ticket: ChannelDiagnosticTicket,
+    request: ChannelDiagnosticRequest,
     cancelled: Arc<AtomicBool>,
     cache: DerivedCacheSnapshot,
 }
 
 struct WorkerCompletion {
-    completion: EvaluationCompletion,
+    completion: ChannelDiagnosticCompletion,
     transaction: Option<CacheTransaction>,
 }
 
@@ -128,14 +128,14 @@ struct SchedulerState {
     sender: Option<Sender<Job>>,
     worker: Option<JoinHandle<()>>,
     latest_cancellation: Option<Arc<AtomicBool>>,
-    latest_ticket: Option<EvaluationTicket>,
+    latest_ticket: Option<ChannelDiagnosticTicket>,
     cache: DerivedCache,
-    pending_transaction: Option<(EvaluationTicket, CacheTransaction)>,
-    accepted_ticket: Option<EvaluationTicket>,
+    pending_transaction: Option<(ChannelDiagnosticTicket, CacheTransaction)>,
+    accepted_ticket: Option<ChannelDiagnosticTicket>,
 }
 
 /// An engine-owned, latest-only evaluator with exactly one worker thread.
-pub struct EvaluationScheduler {
+pub struct ChannelDiagnosticScheduler {
     state: Mutex<SchedulerState>,
     latest_ticket: Arc<AtomicU64>,
     shutdown: Arc<AtomicBool>,
@@ -144,7 +144,7 @@ pub struct EvaluationScheduler {
     shutdown_notifier: Option<Sender<()>>,
 }
 
-impl EvaluationScheduler {
+impl ChannelDiagnosticScheduler {
     /// Starts the scheduler's one engine-owned worker.
     pub fn new() -> Result<Self, SchedulerError> {
         Self::new_with_limits(EvaluationLimits::default())
@@ -217,8 +217,8 @@ impl EvaluationScheduler {
                     worker_shutdown,
                     EvaluationLimits::default(),
                     |request, cancelled, _cache, _limits| {
-                        evaluate_cancellable_with_gate(request, cancelled, &gate).map(|result| {
-                            crate::CachedEvaluation {
+                        evaluate_channel_diagnostic_cancellable_with_gate(request, cancelled, &gate)
+                            .map(|result| crate::CachedEvaluation {
                                 result,
                                 diagnostics: CacheDiagnostics {
                                     decoded_source: crate::CacheDisposition::Miss,
@@ -228,8 +228,7 @@ impl EvaluationScheduler {
                                     raster: crate::CacheDisposition::Miss,
                                 },
                                 transaction: CacheTransaction::default(),
-                            }
-                        })
+                            })
                     },
                 )
             })
@@ -253,7 +252,10 @@ impl EvaluationScheduler {
     }
 
     /// Queues immutable work and returns its checked monotonic ticket.
-    pub fn submit(&self, request: EvaluationRequest) -> Result<EvaluationTicket, SchedulerError> {
+    pub fn submit(
+        &self,
+        request: ChannelDiagnosticRequest,
+    ) -> Result<ChannelDiagnosticTicket, SchedulerError> {
         let mut state = self
             .state
             .lock()
@@ -291,7 +293,9 @@ impl EvaluationScheduler {
     }
 
     /// Returns the newest still-current terminal completion without blocking.
-    pub fn try_receive_latest(&self) -> Result<Option<EvaluationCompletion>, SchedulerError> {
+    pub fn try_receive_latest(
+        &self,
+    ) -> Result<Option<ChannelDiagnosticCompletion>, SchedulerError> {
         let receiver = self
             .completions
             .lock()
@@ -327,7 +331,7 @@ impl EvaluationScheduler {
     }
 
     /// Whether this ticket remains the scheduler's newest submission.
-    pub fn is_latest(&self, ticket: EvaluationTicket) -> bool {
+    pub fn is_latest(&self, ticket: ChannelDiagnosticTicket) -> bool {
         !self.shutdown.load(Ordering::Acquire)
             && self
                 .state
@@ -342,7 +346,7 @@ impl EvaluationScheduler {
     /// are accepted as terminal reporting without changing the cache.
     pub fn accept_completion(
         &self,
-        completion: &EvaluationCompletion,
+        completion: &ChannelDiagnosticCompletion,
         session: &DocumentSession,
     ) -> Result<bool, SchedulerError> {
         let mut state = self
@@ -397,7 +401,7 @@ impl EvaluationScheduler {
     }
 }
 
-impl Drop for EvaluationScheduler {
+impl Drop for ChannelDiagnosticScheduler {
     fn drop(&mut self) {
         let _ = self.stop_worker();
     }
@@ -416,7 +420,7 @@ fn worker_loop(
         latest_ticket,
         shutdown,
         limits,
-        evaluate_cancellable_cached,
+        evaluate_channel_diagnostic_cancellable_cached,
     );
 }
 
@@ -429,7 +433,7 @@ fn worker_loop_with<F>(
     mut evaluate: F,
 ) where
     F: FnMut(
-        EvaluationRequest,
+        ChannelDiagnosticRequest,
         &AtomicBool,
         DerivedCacheSnapshot,
         EvaluationLimits,
@@ -449,7 +453,7 @@ fn worker_loop_with<F>(
         let cancelled = Arc::clone(&job.cancelled);
         let completion = match evaluate(job.request, &cancelled, job.cache, limits) {
             Ok(result) => WorkerCompletion {
-                completion: EvaluationCompletion::Completed {
+                completion: ChannelDiagnosticCompletion::Completed {
                     ticket,
                     result: Box::new(result.result),
                     cache_diagnostics: result.diagnostics,
@@ -457,7 +461,7 @@ fn worker_loop_with<F>(
                 transaction: Some(result.transaction),
             },
             Err(EvaluationRunError::Evaluation(error)) => WorkerCompletion {
-                completion: EvaluationCompletion::Failed {
+                completion: ChannelDiagnosticCompletion::Failed {
                     ticket,
                     token,
                     error,
@@ -473,7 +477,7 @@ fn worker_loop_with<F>(
 }
 
 fn is_current(
-    ticket: EvaluationTicket,
+    ticket: ChannelDiagnosticTicket,
     cancelled: &AtomicBool,
     latest_ticket: &AtomicU64,
     shutdown: &AtomicBool,
@@ -483,10 +487,12 @@ fn is_current(
         && latest_ticket.load(Ordering::Acquire) == ticket.value()
 }
 
-fn take_next_ticket(next_ticket: &mut Option<u64>) -> Result<EvaluationTicket, SchedulerError> {
+fn take_next_ticket(
+    next_ticket: &mut Option<u64>,
+) -> Result<ChannelDiagnosticTicket, SchedulerError> {
     let value = next_ticket.take().ok_or(SchedulerError::TicketExhausted)?;
     *next_ticket = value.checked_add(1);
-    Ok(EvaluationTicket(value))
+    Ok(ChannelDiagnosticTicket(value))
 }
 
 fn drain_latest<T>(receiver: &Receiver<T>, mut newest: T) -> T {
@@ -509,7 +515,7 @@ mod tests {
 
     const GUARD: Duration = Duration::from_secs(15);
 
-    fn wait_for_latest(scheduler: &EvaluationScheduler) -> EvaluationCompletion {
+    fn wait_for_latest(scheduler: &ChannelDiagnosticScheduler) -> ChannelDiagnosticCompletion {
         let deadline = Instant::now() + GUARD;
         loop {
             match scheduler.try_receive_latest().unwrap() {
@@ -573,7 +579,8 @@ mod tests {
             EvaluationStageGate::new(EvaluationStage::Family, EvaluationCheckpoint::Before);
         let (shutdown_sender, _shutdown_receiver) = mpsc::channel();
         let scheduler =
-            EvaluationScheduler::new_with_stage_gate(Arc::clone(&gate), shutdown_sender).unwrap();
+            ChannelDiagnosticScheduler::new_with_stage_gate(Arc::clone(&gate), shutdown_sender)
+                .unwrap();
         let first = scheduler.submit(test_support::request()).unwrap();
         entered.recv_timeout(GUARD).unwrap();
         let second = scheduler.submit(test_support::request()).unwrap();
@@ -593,7 +600,8 @@ mod tests {
             EvaluationStageGate::new(EvaluationStage::Family, EvaluationCheckpoint::Before);
         let (shutdown_sender, shutdown_receiver) = mpsc::channel();
         let scheduler =
-            EvaluationScheduler::new_with_stage_gate(Arc::clone(&gate), shutdown_sender).unwrap();
+            ChannelDiagnosticScheduler::new_with_stage_gate(Arc::clone(&gate), shutdown_sender)
+                .unwrap();
         scheduler.submit(test_support::request()).unwrap();
         entered.recv_timeout(GUARD).unwrap();
 
@@ -610,7 +618,8 @@ mod tests {
             EvaluationStageGate::new(EvaluationStage::Family, EvaluationCheckpoint::Before);
         let (shutdown_sender, shutdown_receiver) = mpsc::channel();
         let scheduler =
-            EvaluationScheduler::new_with_stage_gate(Arc::clone(&gate), shutdown_sender).unwrap();
+            ChannelDiagnosticScheduler::new_with_stage_gate(Arc::clone(&gate), shutdown_sender)
+                .unwrap();
         scheduler.submit(test_support::request()).unwrap();
         entered.recv_timeout(GUARD).unwrap();
 

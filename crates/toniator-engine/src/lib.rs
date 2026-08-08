@@ -13,7 +13,10 @@ use std::{
 
 mod scheduler;
 
-pub use scheduler::{EvaluationCompletion, EvaluationScheduler, EvaluationTicket, SchedulerError};
+pub use scheduler::{
+    ChannelDiagnosticCompletion, ChannelDiagnosticScheduler, ChannelDiagnosticTicket,
+    SchedulerError,
+};
 
 use toniator_domain::{
     CanvasSpec, ChannelId, EvaluationSnapshot, EvaluationToken, PatternOutput, PatternStructure,
@@ -120,7 +123,7 @@ impl ResolvedSource {
 /// snapshot cannot be mixed with another token or resolved source after it is
 /// validated.
 #[derive(Clone, Debug, PartialEq)]
-pub struct EvaluationRequest {
+pub struct ChannelDiagnosticRequest {
     snapshot: EvaluationSnapshot,
     source: ResolvedSource,
 }
@@ -176,7 +179,7 @@ pub struct CacheDiagnostics {
     pub raster: CacheDisposition,
 }
 
-impl EvaluationRequest {
+impl ChannelDiagnosticRequest {
     pub fn new(snapshot: EvaluationSnapshot, source: ResolvedSource) -> Self {
         Self { snapshot, source }
     }
@@ -188,14 +191,14 @@ impl EvaluationRequest {
 
 /// Immutable result from evaluating one authoritative snapshot.
 #[derive(Clone, Debug, PartialEq)]
-pub struct EvaluationResult {
+pub struct ChannelDiagnosticResult {
     token: EvaluationToken,
     source_identity: SourceIdentity,
     scene: RenderScene,
     raster: RasterSurface,
 }
 
-impl EvaluationResult {
+impl ChannelDiagnosticResult {
     pub fn token(&self) -> EvaluationToken {
         self.token
     }
@@ -334,24 +337,26 @@ pub(crate) struct CacheTransaction {
 }
 
 pub(crate) struct CachedEvaluation {
-    pub(crate) result: EvaluationResult,
+    pub(crate) result: ChannelDiagnosticResult,
     pub(crate) diagnostics: CacheDiagnostics,
     pub(crate) transaction: CacheTransaction,
 }
 
 /// Evaluates exactly the Stage 3 -> Stage 4 -> Stage 5 chain represented by
 /// the immutable snapshot. It performs no document mutation or source lookup.
-pub fn evaluate(request: EvaluationRequest) -> Result<EvaluationResult, EvaluationError> {
-    evaluate_with_limits(request, EvaluationLimits::default())
+pub fn evaluate_channel_diagnostic(
+    request: ChannelDiagnosticRequest,
+) -> Result<ChannelDiagnosticResult, EvaluationError> {
+    evaluate_channel_diagnostic_with_limits(request, EvaluationLimits::default())
 }
 
 /// Evaluates one immutable request under a caller-selected family candidate
 /// policy. This synchronous entry is intentionally uncached.
-pub fn evaluate_with_limits(
-    request: EvaluationRequest,
+pub fn evaluate_channel_diagnostic_with_limits(
+    request: ChannelDiagnosticRequest,
     limits: EvaluationLimits,
-) -> Result<EvaluationResult, EvaluationError> {
-    match evaluate_cached_with_cancellation(
+) -> Result<ChannelDiagnosticResult, EvaluationError> {
+    match evaluate_channel_diagnostic_cached_with_cancellation(
         request,
         &NeverCancelled,
         DerivedCacheSnapshot::empty(),
@@ -363,22 +368,27 @@ pub fn evaluate_with_limits(
     }
 }
 
-pub(crate) fn evaluate_cancellable_cached(
-    request: EvaluationRequest,
+pub(crate) fn evaluate_channel_diagnostic_cancellable_cached(
+    request: ChannelDiagnosticRequest,
     cancelled: &AtomicBool,
     cache: DerivedCacheSnapshot,
     limits: EvaluationLimits,
 ) -> Result<CachedEvaluation, EvaluationRunError> {
-    evaluate_cached_with_cancellation(request, &AtomicCancellation(cancelled), cache, limits)
+    evaluate_channel_diagnostic_cached_with_cancellation(
+        request,
+        &AtomicCancellation(cancelled),
+        cache,
+        limits,
+    )
 }
 
 #[cfg(test)]
-pub(crate) fn evaluate_cancellable_with_gate(
-    request: EvaluationRequest,
+pub(crate) fn evaluate_channel_diagnostic_cancellable_with_gate(
+    request: ChannelDiagnosticRequest,
     cancelled: &AtomicBool,
     gate: &EvaluationStageGate,
-) -> Result<EvaluationResult, EvaluationRunError> {
-    evaluate_cached_with_cancellation(
+) -> Result<ChannelDiagnosticResult, EvaluationRunError> {
+    evaluate_channel_diagnostic_cached_with_cancellation(
         request,
         &ObservedCancellation { cancelled, gate },
         DerivedCacheSnapshot::empty(),
@@ -548,9 +558,10 @@ fn evaluate_stage<T>(
 }
 
 /// Evaluates the same ordered Stage 3 -> Stage 4 -> Stage 5 path as
-/// [`evaluate`], checking cancellation only between existing pipeline stages.
-fn evaluate_cached_with_cancellation(
-    request: EvaluationRequest,
+/// [`evaluate_channel_diagnostic`], checking cancellation only between
+/// existing pipeline stages.
+fn evaluate_channel_diagnostic_cached_with_cancellation(
+    request: ChannelDiagnosticRequest,
     cancellation: &dyn CancellationProbe,
     cache: DerivedCacheSnapshot,
     limits: EvaluationLimits,
@@ -755,7 +766,7 @@ fn evaluate_cached_with_cancellation(
             .then(|| (raster_key, raster.clone())),
     };
     Ok(CachedEvaluation {
-        result: EvaluationResult {
+        result: ChannelDiagnosticResult {
             token: request.snapshot.token(),
             source_identity: source.identity().clone(),
             scene: (*scene).clone(),
@@ -946,7 +957,7 @@ pub(crate) mod test_support {
     const GUARD: Duration = Duration::from_secs(15);
     const CHANNEL_ID: ChannelId = ChannelId(1);
 
-    pub(crate) fn request() -> EvaluationRequest {
+    pub(crate) fn request() -> ChannelDiagnosticRequest {
         request_with_bytes(Arc::<[u8]>::from(
             std::fs::read(concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -956,7 +967,7 @@ pub(crate) mod test_support {
         ))
     }
 
-    fn request_with_bytes(bytes: Arc<[u8]>) -> EvaluationRequest {
+    fn request_with_bytes(bytes: Arc<[u8]>) -> ChannelDiagnosticRequest {
         let source_id = SourceReferenceId::new("cancellation-test-source").unwrap();
         let document = Document::with_source(
             DocumentId(1),
@@ -1008,7 +1019,7 @@ pub(crate) mod test_support {
         )
         .unwrap();
         let session = DocumentSession::new(document).unwrap();
-        EvaluationRequest::new(
+        ChannelDiagnosticRequest::new(
             session.evaluation_snapshot(CHANNEL_ID).unwrap(),
             ResolvedSource::new(source_id, bytes, SourceFormatHint::Png).unwrap(),
         )
@@ -1031,7 +1042,7 @@ pub(crate) mod test_support {
                 let (result_sender, result_receiver) = mpsc::channel();
                 let worker = thread::spawn(move || {
                     result_sender
-                        .send(evaluate_cancellable_with_gate(
+                        .send(evaluate_channel_diagnostic_cancellable_with_gate(
                             request(),
                             &worker_cancelled,
                             &worker_gate,
@@ -1061,7 +1072,7 @@ pub(crate) mod test_support {
         let (result_sender, result_receiver) = mpsc::channel();
         let worker = thread::spawn(move || {
             result_sender
-                .send(evaluate_cancellable_with_gate(
+                .send(evaluate_channel_diagnostic_cancellable_with_gate(
                     request_with_bytes(Arc::<[u8]>::from(vec![1_u8, 2, 3])),
                     &worker_cancelled,
                     &worker_gate,
