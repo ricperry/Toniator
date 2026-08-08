@@ -1,9 +1,10 @@
 use toniator_domain::{
-    CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternLayout, ChannelSourceMapping,
-    ChannelState, ColorValue, DensityMetric2D, Document, DocumentCommand, DocumentId,
-    DocumentSession, InvalidationLevel, MarkGeometryResponse, PatternDefinition,
-    PatternDefinitionId, PatternOutput, PatternStructure, SourceComponent, SourcePlacement,
-    SourceReference, SourceReferenceId,
+    CanvasSpec, ChannelAppearance, ChannelId, ChannelPaint, ChannelPatternLayout,
+    ChannelSourceMapping, ChannelState, ChannelTopology, ChannelTopologyTemplate, ColorValue,
+    DensityMetric2D, Document, DocumentCommand, DocumentId, DocumentSession, HalftoneChannelModel,
+    HalftoneChannelRole, InvalidationLevel, MarkGeometryResponse, ModeledChannelState,
+    PatternDefinition, PatternDefinitionId, PatternOutput, PatternStructure, SourceComponent,
+    SourceMapping, SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId,
 };
 
 const CHANNEL_ID: ChannelId = ChannelId(7);
@@ -74,6 +75,95 @@ fn valid_document() -> Document {
     document_with(canvas(), vec![definition()], vec![channel()]).expect("valid fixture")
 }
 
+fn topology_template() -> ChannelTopologyTemplate {
+    ChannelTopologyTemplate {
+        pattern_definition_id: PATTERN_ID,
+        layout: channel().layout,
+        mark_geometry_response: channel().mark_geometry_response,
+    }
+}
+
+fn modeled_channel(
+    role: HalftoneChannelRole,
+    id: ChannelId,
+    mapping: SourceMapping,
+    paint: ChannelPaint,
+) -> ModeledChannelState {
+    let template = topology_template();
+    ModeledChannelState {
+        role,
+        id,
+        pattern_definition_id: template.pattern_definition_id,
+        layout: template.layout,
+        mark_geometry_response: template.mark_geometry_response,
+        mapping,
+        paint,
+        visible: true,
+        opacity: 1.0,
+    }
+}
+
+fn solid(red: f64, green: f64, blue: f64) -> ChannelPaint {
+    ChannelPaint::Solid(ColorValue {
+        red,
+        green,
+        blue,
+        alpha: 1.0,
+    })
+}
+
+fn explicit_rgb(ids: [ChannelId; 3]) -> ChannelTopology {
+    ChannelTopology::new(vec![
+        modeled_channel(
+            HalftoneChannelRole::Red,
+            ids[0],
+            SourceMapping::canonical(SourceMappingComponent::Red),
+            solid(1.0, 0.0, 0.0),
+        ),
+        modeled_channel(
+            HalftoneChannelRole::Green,
+            ids[1],
+            SourceMapping::canonical(SourceMappingComponent::Green),
+            solid(0.0, 1.0, 0.0),
+        ),
+        modeled_channel(
+            HalftoneChannelRole::Blue,
+            ids[2],
+            SourceMapping::canonical(SourceMappingComponent::Blue),
+            solid(0.0, 0.0, 1.0),
+        ),
+    ])
+}
+
+fn explicit_cmyk(ids: [ChannelId; 4]) -> ChannelTopology {
+    ChannelTopology::new(vec![
+        modeled_channel(
+            HalftoneChannelRole::Cyan,
+            ids[0],
+            SourceMapping::canonical(SourceMappingComponent::Cyan),
+            solid(0.0, 1.0, 1.0),
+        ),
+        modeled_channel(
+            HalftoneChannelRole::Magenta,
+            ids[1],
+            SourceMapping::canonical(SourceMappingComponent::Magenta),
+            solid(1.0, 0.0, 1.0),
+        ),
+        modeled_channel(
+            HalftoneChannelRole::Yellow,
+            ids[2],
+            SourceMapping::canonical(SourceMappingComponent::Yellow),
+            solid(1.0, 1.0, 0.0),
+        ),
+        modeled_channel(
+            HalftoneChannelRole::Black,
+            ids[3],
+            SourceMapping::canonical(SourceMappingComponent::Black),
+            solid(0.0, 0.0, 0.0),
+        ),
+    ])
+}
+
 fn assert_path(result: Result<Document, toniator_domain::ValidationError>, expected_path: &str) {
     assert_eq!(result.expect_err("must be invalid").path(), expected_path);
 }
@@ -84,8 +174,20 @@ fn accepts_the_required_900_by_600_density_document() {
 
     assert_eq!(document.canvas().width, 900.0);
     assert_eq!(document.canvas().height, 600.0);
-    assert_eq!(document.channels()[0].layout.density.across_x, 90.0);
-    assert_eq!(document.channels()[0].layout.density.across_y, 60.0);
+    assert_eq!(
+        document.channels().expect("legacy channels")[0]
+            .layout
+            .density
+            .across_x,
+        90.0
+    );
+    assert_eq!(
+        document.channels().expect("legacy channels")[0]
+            .layout
+            .density
+            .across_y,
+        60.0
+    );
 }
 
 #[test]
@@ -514,4 +616,560 @@ fn commands_reject_missing_channels_and_nonfinite_transforms_before_mutation() {
         assert!(document.apply_command(&command).is_err());
         assert_eq!(document, original);
     }
+}
+
+#[test]
+fn canonical_topologies_have_exact_roles_ids_mappings_paints_and_cloned_templates() {
+    let document = valid_document();
+    let template = topology_template();
+    let cases = [
+        (
+            HalftoneChannelModel::Rgb,
+            vec![
+                (
+                    HalftoneChannelRole::Red,
+                    ChannelId(1),
+                    SourceMappingComponent::Red,
+                    solid(1.0, 0.0, 0.0),
+                ),
+                (
+                    HalftoneChannelRole::Green,
+                    ChannelId(2),
+                    SourceMappingComponent::Green,
+                    solid(0.0, 1.0, 0.0),
+                ),
+                (
+                    HalftoneChannelRole::Blue,
+                    ChannelId(3),
+                    SourceMappingComponent::Blue,
+                    solid(0.0, 0.0, 1.0),
+                ),
+            ],
+        ),
+        (
+            HalftoneChannelModel::Cmyk,
+            vec![
+                (
+                    HalftoneChannelRole::Cyan,
+                    ChannelId(4),
+                    SourceMappingComponent::Cyan,
+                    solid(0.0, 1.0, 1.0),
+                ),
+                (
+                    HalftoneChannelRole::Magenta,
+                    ChannelId(5),
+                    SourceMappingComponent::Magenta,
+                    solid(1.0, 0.0, 1.0),
+                ),
+                (
+                    HalftoneChannelRole::Yellow,
+                    ChannelId(6),
+                    SourceMappingComponent::Yellow,
+                    solid(1.0, 1.0, 0.0),
+                ),
+                (
+                    HalftoneChannelRole::Black,
+                    ChannelId(7),
+                    SourceMappingComponent::Black,
+                    solid(0.0, 0.0, 0.0),
+                ),
+            ],
+        ),
+        (
+            HalftoneChannelModel::SourceColorAlpha,
+            vec![(
+                HalftoneChannelRole::SourceColor,
+                ChannelId(8),
+                SourceMappingComponent::Alpha,
+                ChannelPaint::SampledSource,
+            )],
+        ),
+    ];
+
+    for (model, expected) in cases {
+        let topology = document
+            .canonical_channel_topology(model, template.clone())
+            .expect("valid canonical topology");
+        assert_eq!(topology.channels().len(), expected.len());
+        for (channel, (role, id, component, paint)) in topology.channels().iter().zip(expected) {
+            assert_eq!(channel.role, role);
+            assert_eq!(channel.id, id);
+            assert_eq!(channel.mapping, SourceMapping::canonical(component));
+            assert_eq!(channel.paint, paint);
+            assert_eq!(
+                channel.pattern_definition_id,
+                template.pattern_definition_id
+            );
+            assert_eq!(channel.layout, template.layout);
+            assert_eq!(
+                channel.mark_geometry_response,
+                template.mark_geometry_response
+            );
+            assert!(channel.visible);
+            assert_eq!(channel.opacity, 1.0);
+        }
+    }
+}
+
+#[test]
+fn explicit_topology_accepts_arbitrary_ids_and_installs_the_actual_document_channels() {
+    let mut session = DocumentSession::new(valid_document()).expect("valid session");
+    let topology = explicit_rgb([ChannelId(41), CHANNEL_ID, ChannelId(99)]);
+    let result = session
+        .apply(&DocumentCommand::ReplaceChannelTopology {
+            model: HalftoneChannelModel::Rgb,
+            topology: topology.clone(),
+        })
+        .expect("valid replacement");
+
+    assert_eq!(result.invalidation, InvalidationLevel::ChannelTopology);
+    assert_eq!(
+        result.affected_channels,
+        vec![CHANNEL_ID, ChannelId(41), ChannelId(99)]
+    );
+    assert_eq!(session.revision(), toniator_domain::Revision(1));
+    assert_eq!(
+        session.document().channel_model(),
+        Some(HalftoneChannelModel::Rgb)
+    );
+    assert_eq!(session.document().channel_topology(), Some(&topology));
+    assert!(session.document().channels().is_none());
+    assert_eq!(
+        session
+            .document()
+            .channel_topology()
+            .expect("modeled topology")
+            .channels()
+            .iter()
+            .map(|channel| channel.id)
+            .collect::<Vec<_>>(),
+        vec![ChannelId(41), CHANNEL_ID, ChannelId(99)]
+    );
+}
+
+#[test]
+fn topology_validation_rejects_missing_duplicate_extraneous_out_of_order_and_duplicate_ids() {
+    let invalid_topologies = [
+        ChannelTopology::new(
+            explicit_rgb([ChannelId(1), ChannelId(2), ChannelId(3)]).channels()[..2].to_vec(),
+        ),
+        ChannelTopology::new(vec![
+            modeled_channel(
+                HalftoneChannelRole::Red,
+                ChannelId(1),
+                SourceMapping::canonical(SourceMappingComponent::Red),
+                solid(1.0, 0.0, 0.0),
+            ),
+            modeled_channel(
+                HalftoneChannelRole::Red,
+                ChannelId(2),
+                SourceMapping::canonical(SourceMappingComponent::Red),
+                solid(1.0, 0.0, 0.0),
+            ),
+            modeled_channel(
+                HalftoneChannelRole::Blue,
+                ChannelId(3),
+                SourceMapping::canonical(SourceMappingComponent::Blue),
+                solid(0.0, 0.0, 1.0),
+            ),
+        ]),
+        ChannelTopology::new(vec![
+            modeled_channel(
+                HalftoneChannelRole::Red,
+                ChannelId(1),
+                SourceMapping::canonical(SourceMappingComponent::Red),
+                solid(1.0, 0.0, 0.0),
+            ),
+            modeled_channel(
+                HalftoneChannelRole::Cyan,
+                ChannelId(2),
+                SourceMapping::canonical(SourceMappingComponent::Cyan),
+                solid(0.0, 1.0, 1.0),
+            ),
+            modeled_channel(
+                HalftoneChannelRole::Blue,
+                ChannelId(3),
+                SourceMapping::canonical(SourceMappingComponent::Blue),
+                solid(0.0, 0.0, 1.0),
+            ),
+        ]),
+        ChannelTopology::new(vec![
+            modeled_channel(
+                HalftoneChannelRole::Green,
+                ChannelId(1),
+                SourceMapping::canonical(SourceMappingComponent::Green),
+                solid(0.0, 1.0, 0.0),
+            ),
+            modeled_channel(
+                HalftoneChannelRole::Red,
+                ChannelId(2),
+                SourceMapping::canonical(SourceMappingComponent::Red),
+                solid(1.0, 0.0, 0.0),
+            ),
+            modeled_channel(
+                HalftoneChannelRole::Blue,
+                ChannelId(3),
+                SourceMapping::canonical(SourceMappingComponent::Blue),
+                solid(0.0, 0.0, 1.0),
+            ),
+        ]),
+        explicit_rgb([ChannelId(1), ChannelId(1), ChannelId(3)]),
+    ];
+
+    for topology in invalid_topologies {
+        let mut session = DocumentSession::new(valid_document()).expect("valid session");
+        let before = session.snapshot();
+        assert!(
+            session
+                .apply(&DocumentCommand::ReplaceChannelTopology {
+                    model: HalftoneChannelModel::Rgb,
+                    topology,
+                })
+                .is_err()
+        );
+        assert_eq!(session.snapshot(), before);
+        assert_eq!(session.revision(), toniator_domain::Revision(0));
+    }
+}
+
+#[test]
+fn atomic_replacement_rejects_every_invalid_modeled_state_without_mutation() {
+    let mut invalid_cases = Vec::new();
+
+    let mut channels = explicit_rgb([ChannelId(10), ChannelId(11), ChannelId(12)])
+        .channels()
+        .to_vec();
+    channels[0].pattern_definition_id = PatternDefinitionId(999);
+    invalid_cases.push(ChannelTopology::new(channels));
+
+    let mut channels = explicit_rgb([ChannelId(10), ChannelId(11), ChannelId(12)])
+        .channels()
+        .to_vec();
+    channels[0].layout.density.across_x = 0.0;
+    invalid_cases.push(ChannelTopology::new(channels));
+
+    let mut channels = explicit_rgb([ChannelId(10), ChannelId(11), ChannelId(12)])
+        .channels()
+        .to_vec();
+    channels[0].mark_geometry_response.maximum_size = 9.1;
+    invalid_cases.push(ChannelTopology::new(channels));
+
+    let mut channels = explicit_rgb([ChannelId(10), ChannelId(11), ChannelId(12)])
+        .channels()
+        .to_vec();
+    channels[0].opacity = 1.1;
+    invalid_cases.push(ChannelTopology::new(channels));
+
+    let mut channels = explicit_rgb([ChannelId(10), ChannelId(11), ChannelId(12)])
+        .channels()
+        .to_vec();
+    channels[0].paint = solid(1.1, 0.0, 0.0);
+    invalid_cases.push(ChannelTopology::new(channels));
+
+    let mut channels = explicit_rgb([ChannelId(10), ChannelId(11), ChannelId(12)])
+        .channels()
+        .to_vec();
+    channels[0].mapping.gain = -0.1;
+    invalid_cases.push(ChannelTopology::new(channels));
+
+    let mut channels = explicit_rgb([ChannelId(10), ChannelId(11), ChannelId(12)])
+        .channels()
+        .to_vec();
+    channels[0].mapping.bias = f64::NAN;
+    invalid_cases.push(ChannelTopology::new(channels));
+
+    let mut channels = explicit_rgb([ChannelId(10), ChannelId(11), ChannelId(12)])
+        .channels()
+        .to_vec();
+    channels[0].paint = ChannelPaint::SampledSource;
+    invalid_cases.push(ChannelTopology::new(channels));
+
+    for topology in invalid_cases {
+        let mut session = DocumentSession::new(valid_document()).expect("valid session");
+        let before = session.snapshot();
+        assert!(
+            session
+                .apply(&DocumentCommand::ReplaceChannelTopology {
+                    model: HalftoneChannelModel::Rgb,
+                    topology,
+                })
+                .is_err()
+        );
+        assert_eq!(session.snapshot(), before);
+        assert_eq!(session.revision(), toniator_domain::Revision(0));
+    }
+}
+
+#[test]
+fn modeled_replacement_reports_old_then_new_ids_and_refuses_legacy_evaluation_access() {
+    let mut session = DocumentSession::new(valid_document()).expect("valid session");
+    session
+        .apply(&DocumentCommand::ReplaceChannelTopology {
+            model: HalftoneChannelModel::Rgb,
+            topology: explicit_rgb([ChannelId(30), ChannelId(20), ChannelId(10)]),
+        })
+        .expect("first modeled topology");
+    let result = session
+        .apply(&DocumentCommand::ReplaceChannelTopology {
+            model: HalftoneChannelModel::Cmyk,
+            topology: explicit_cmyk([ChannelId(20), ChannelId(40), ChannelId(10), ChannelId(60)]),
+        })
+        .expect("second modeled topology");
+    assert_eq!(
+        result.affected_channels,
+        vec![
+            ChannelId(30),
+            ChannelId(20),
+            ChannelId(10),
+            ChannelId(40),
+            ChannelId(60)
+        ]
+    );
+    assert!(session.document().channels().is_none());
+    assert!(session.document().channel(ChannelId(20)).is_none());
+    assert_eq!(
+        session
+            .evaluation_snapshot(ChannelId(20))
+            .expect_err("Stage 9A must not offer modeled legacy evaluation")
+            .path(),
+        "evaluation.channel_topology"
+    );
+}
+
+#[test]
+fn complete_mapping_validates_numeric_fields_and_uses_the_authoritative_transform() {
+    let valid = SourceMapping {
+        component: SourceMappingComponent::Luminance,
+        placement: SourcePlacement::StretchToCanvas,
+        inverted: true,
+        gain: 1.5,
+        bias: -0.25,
+    };
+    assert_eq!(valid.transform(0.0), 1.0);
+    assert_eq!(valid.transform(0.5), 0.5);
+    assert_eq!(valid.transform(1.0), 0.0);
+
+    let mut session = DocumentSession::new(valid_document()).expect("valid session");
+    session
+        .apply(&DocumentCommand::ReplaceChannelTopology {
+            model: HalftoneChannelModel::Rgb,
+            topology: explicit_rgb([ChannelId(10), ChannelId(11), ChannelId(12)]),
+        })
+        .expect("valid replacement");
+    for component in [
+        SourceMappingComponent::Red,
+        SourceMappingComponent::Green,
+        SourceMappingComponent::Blue,
+        SourceMappingComponent::Cyan,
+        SourceMappingComponent::Magenta,
+        SourceMappingComponent::Yellow,
+        SourceMappingComponent::Black,
+        SourceMappingComponent::Alpha,
+        SourceMappingComponent::Luminance,
+    ] {
+        session
+            .apply(&DocumentCommand::SetTopologySourceMapping {
+                channel_id: ChannelId(10),
+                mapping: SourceMapping::canonical(component),
+            })
+            .expect("closed component and placement are supported");
+        let mapping = session
+            .document()
+            .modeled_channel(ChannelId(10))
+            .expect("modeled channel")
+            .mapping;
+        assert_eq!(mapping.component, component);
+        assert_eq!(mapping.placement, SourcePlacement::StretchToCanvas);
+    }
+
+    for mapping in [
+        SourceMapping {
+            gain: -0.1,
+            ..valid
+        },
+        SourceMapping {
+            gain: f64::NAN,
+            ..valid
+        },
+        SourceMapping {
+            bias: f64::INFINITY,
+            ..valid
+        },
+    ] {
+        let mut session = DocumentSession::new(valid_document()).expect("valid session");
+        let topology = explicit_rgb([ChannelId(10), ChannelId(11), ChannelId(12)]);
+        session
+            .apply(&DocumentCommand::ReplaceChannelTopology {
+                model: HalftoneChannelModel::Rgb,
+                topology,
+            })
+            .expect("valid replacement");
+        assert!(
+            session
+                .apply(&DocumentCommand::SetTopologySourceMapping {
+                    channel_id: ChannelId(10),
+                    mapping,
+                })
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn paint_model_compatibility_and_per_channel_invalidation_are_enforced() {
+    let mut session = DocumentSession::new(valid_document()).expect("valid session");
+    session
+        .apply(&DocumentCommand::ReplaceChannelTopology {
+            model: HalftoneChannelModel::Rgb,
+            topology: explicit_rgb([ChannelId(10), ChannelId(11), ChannelId(12)]),
+        })
+        .expect("valid replacement");
+
+    assert!(
+        session
+            .apply(&DocumentCommand::SetChannelPaint {
+                channel_id: ChannelId(10),
+                paint: ChannelPaint::SampledSource,
+            })
+            .is_err()
+    );
+    assert_eq!(
+        session
+            .apply(&DocumentCommand::SetDensity {
+                channel_id: ChannelId(10),
+                density: DensityMetric2D {
+                    across_x: 80.0,
+                    across_y: 50.0,
+                    aspect_locked: false,
+                },
+            })
+            .expect("modeled layout edit")
+            .invalidation,
+        InvalidationLevel::Family
+    );
+    assert_eq!(
+        session
+            .apply(&DocumentCommand::SetTranslation {
+                channel_id: ChannelId(10),
+                translation_x: 3.0,
+                translation_y: -2.0,
+            })
+            .expect("modeled layout edit")
+            .invalidation,
+        InvalidationLevel::Family
+    );
+    let layout = &session
+        .document()
+        .modeled_channel(ChannelId(10))
+        .expect("modeled channel")
+        .layout;
+    assert_eq!(layout.density.across_x, 80.0);
+    assert_eq!((layout.translation_x, layout.translation_y), (3.0, -2.0));
+    assert_eq!(
+        session
+            .apply(&DocumentCommand::SetTopologySourceMapping {
+                channel_id: ChannelId(10),
+                mapping: SourceMapping::canonical(SourceMappingComponent::Alpha),
+            })
+            .expect("valid full mapping")
+            .invalidation,
+        InvalidationLevel::Realization
+    );
+    let mapped_channel = &session
+        .document()
+        .channel_topology()
+        .expect("topology remains authoritative")
+        .channels()[0];
+    assert_eq!(
+        mapped_channel.mapping.component,
+        SourceMappingComponent::Alpha
+    );
+    assert_eq!(
+        session
+            .document()
+            .modeled_channel(ChannelId(10))
+            .expect("actual modeled topology channel")
+            .mapping
+            .component,
+        SourceMappingComponent::Alpha
+    );
+    assert_eq!(
+        session
+            .apply(&DocumentCommand::SetMarkGeometryResponse {
+                channel_id: ChannelId(10),
+                response: MarkGeometryResponse {
+                    minimum_size: 2.0,
+                    maximum_size: 8.0
+                },
+            })
+            .expect("valid response")
+            .invalidation,
+        InvalidationLevel::Realization
+    );
+    assert_eq!(
+        session
+            .document()
+            .channel_topology()
+            .expect("topology remains authoritative")
+            .channels()[0]
+            .mark_geometry_response
+            .maximum_size,
+        8.0
+    );
+    for command in [
+        DocumentCommand::SetChannelPaint {
+            channel_id: ChannelId(10),
+            paint: solid(0.2, 0.3, 0.4),
+        },
+        DocumentCommand::SetOpacity {
+            channel_id: ChannelId(10),
+            opacity: 0.5,
+        },
+        DocumentCommand::SetVisibility {
+            channel_id: ChannelId(10),
+            visible: false,
+        },
+    ] {
+        assert_eq!(
+            session
+                .apply(&command)
+                .expect("valid presentation edit")
+                .invalidation,
+            InvalidationLevel::Presentation
+        );
+    }
+    assert_eq!(
+        session
+            .apply(&DocumentCommand::SetColor {
+                channel_id: ChannelId(10),
+                color: ColorValue {
+                    red: 0.6,
+                    green: 0.5,
+                    blue: 0.4,
+                    alpha: 1.0,
+                },
+            })
+            .expect("ordinary solid color")
+            .invalidation,
+        InvalidationLevel::Presentation
+    );
+
+    let source_topology = valid_document()
+        .canonical_channel_topology(HalftoneChannelModel::SourceColorAlpha, topology_template())
+        .expect("valid sampled-source topology");
+    let mut source_session = DocumentSession::new(valid_document()).expect("valid session");
+    source_session
+        .apply(&DocumentCommand::ReplaceChannelTopology {
+            model: HalftoneChannelModel::SourceColorAlpha,
+            topology: source_topology,
+        })
+        .expect("valid replacement");
+    assert!(
+        source_session
+            .apply(&DocumentCommand::SetChannelPaint {
+                channel_id: ChannelId(8),
+                paint: solid(1.0, 1.0, 1.0),
+            })
+            .is_err()
+    );
 }
