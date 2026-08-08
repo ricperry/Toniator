@@ -493,6 +493,27 @@ model; selecting CMYK never creates CMYK-encoded PNG data. SVG remains
 transparent unless a later explicitly authorized SVG-background feature is
 added.
 
+PNG rasterization also exposes a user-selectable antialiasing option:
+
+```bash
+--antialiasing on|off
+```
+
+The default is `on`. `off` produces hard-edged, non-antialiased rasterization.
+The application exposes the equivalent export control. This option applies
+only to PNG rasterization; SVG output is unchanged. Where a raster output or
+raster cache is keyed, the antialiasing choice participates in that identity,
+but it does not alter the authoritative `Document`, family, realization,
+`RenderScene`, or scene authority.
+
+When a direct still source is opened or rendered without an explicit canvas
+override, the app and CLI use the decoded/intrinsic source width and height as
+the canvas dimensions and preserve the source aspect ratio. For SVG, the
+resolved intrinsic dimensions or `viewBox` dimensions supply those defaults.
+An explicit canvas override remains available (for example,
+`--canvas <width>x<height>`); it replaces the source-native default only when
+the user supplies it.
+
 ### 4.7 Suggested subcommands
 
 ```text

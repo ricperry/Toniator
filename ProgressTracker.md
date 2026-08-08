@@ -105,7 +105,7 @@ then view-only GTK preview, undo/redo, portable persistence, command-bound
 editors, generalized families, connected/region output, multiframe, and simple
 transitions remain planned.
 
-**Stage 9 — In progress.** The complete bounded headless authoritative
+**Stage 9 — Complete at commit `67e831a`.** The complete bounded headless authoritative
 multi-channel document-evaluation path is split into five separately reviewed
 and locally checkpointed substages. Every substage starts only after the
 previous substage is user-accepted and its implementation plus tracker closeout
@@ -139,12 +139,22 @@ unprefixed engine namespace can become complete-document authority in Stage 9D.
 evaluation, strict aggregate/per-channel identities, accepted-cache reuse,
 transactional scheduler behavior, and ordered diagnostics.
 
-**Stage 9E — Planned.** Migrate `toniator render` to the authoritative document
-path, add channel-model and export-background CLI semantics, generate the
-native review artifacts, and run the complete Stage 9 integration gate.
+**Stage 9E — Complete at commit `67e831a`.** Migrate `toniator render` to the
+authoritative document path, add channel-model and export-background CLI
+semantics, generate the native review artifacts, and run the complete Stage 9
+integration gate. The accepted Stage 9E CLI still requires explicit `--canvas`
+for direct-source rendering and does not yet expose PNG antialiasing control.
+Its accepted artifact template uses channel opacity `1.0`; SourceColorAlpha
+source alpha changes mark size only, leaving positive-alpha SVG marks opaque
+and PNG mark interiors at alpha `1.0` except for antialiased edge coverage.
 
 **Stage 10 — Planned.** Add the first view-only GTK preview only after Stage 9E
-and the Stage 9 umbrella are accepted and locally checkpointed.
+and the Stage 9 umbrella are accepted and locally checkpointed. Opening a
+direct still source without an explicit canvas override will use decoded/
+intrinsic source dimensions (resolved intrinsic/`viewBox` dimensions for SVG)
+while preserving aspect ratio; explicit canvas override remains available.
+Ordinary acceptance commands omit pixel dimensions, with dimensions appearing
+only in tests that deliberately exercise override behavior.
 
 **Stage 11 — Planned.** Add headless undo and redo, including atomic channel
 model/topology transitions.
@@ -153,7 +163,12 @@ model/topology transitions.
 authoritative documents and embedded source bytes.
 
 **Stage 13+ — Planned.** Add GTK document actions and command-bound editors in
-later separately authorized stages.
+later separately authorized stages. A future export stage will add app and CLI
+PNG antialiasing control (`--antialiasing on|off`, default `on`; `off` is
+hard-edged/non-antialiased; SVG is unaffected) with raster output/cache
+identity impact only. A future CLI/native-sizing slice will add the same
+source-native direct-still sizing default; neither requirement is implemented
+in Stage 9E.
 
 ## Maintenance rules
 

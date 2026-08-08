@@ -532,10 +532,11 @@ review**, leave the work uncommitted, and do not begin GTK or Stage 9.
 
 ## Stage 9 — Authoritative Multi-Channel Document Evaluation
 
-**Status: Planned.** Replace the temporary single-channel document assumption
-with a bounded headless authority for RGB, CMYK, and SourceColorAlpha channel
-topologies. The technical contract below is one coherent Stage 9 contract,
-delivered through five separately accepted local checkpoints:
+**Status: Complete at `67e831a`.** Replace the temporary single-channel
+document assumption with a bounded headless authority for RGB, CMYK, and
+SourceColorAlpha channel topologies. The technical contract below is one
+coherent Stage 9 contract, delivered through five separately accepted local
+checkpoints:
 
 1. **Stage 9A — Channel authority and topology.** Domain model, roles, stable
    IDs, canonical topology factory, mappings, validation, atomic replacement,
@@ -803,6 +804,10 @@ accepted current successful completion commits it.
 - `inspect grid` and `inspect marks` retain their diagnostic roles and never
   construct an alternate document-render path.
 
+Stage 9E does not implement the later source-native sizing or PNG
+antialiasing contracts: its direct-source CLI still requires explicit
+`--canvas`, and it has no `--antialiasing` option.
+
 ### Stage 9 substage scope and acceptance gates
 
 The following allowlists are cumulative only through accepted commits, never
@@ -934,13 +939,18 @@ RGB/SVG source, CMYK/PNG source, CMYK/SVG source, SourceColorAlpha/PNG source,
 and SourceColorAlpha/SVG source. Preserve native alpha and vector geometry. Do
 not flatten, checkerboard, or replace review files with composites. Inspect RGB
 and alpha separately, distinguish viewer background from file content, verify
-SVG XML/filter structure, and retain the live-text/system-font caveat.
+SVG XML/filter structure, and retain the live-text/system-font caveat. The
+accepted artifact template uses channel opacity `1.0`. For SourceColorAlpha,
+source alpha affects mark size only: every positive-alpha SVG mark is opaque,
+and PNG mark interiors reach alpha `1.0`, with fractional alpha arising only
+from antialiasing. This is a validation-template rule and does not remove or
+alter the channel-opacity feature.
 
-**9E stop:** Update only Stage 9E to **Implemented awaiting review**, report the
-complete Stage 9 evidence and all twelve native artifacts, and wait for user
-technical and visual acceptance. After acceptance, create local implementation
-and tracker/documentation checkpoint commits. Do not begin GTK or Stage 10 and
-do not push unless explicitly requested.
+**9E stop (accepted):** The user accepted the complete Stage 9 evidence and all
+twelve native artifacts. The Stage 9E implementation is checkpointed at
+`67e831a`; this roadmap and the tracker record its documentation closeout. Do
+not begin GTK or Stage 10 without the parent’s next-stage authorization, and do
+not push unless explicitly requested.
 
 ### Complete Stage 9 test matrix
 
@@ -987,10 +997,10 @@ protected-tree, and diff/status gate after the last executable change. Reuse
 successful gate evidence; do not rerun the full gate unless a later executable
 change invalidates it.
 
-**Stage 9 umbrella stop condition:** Stage 9 is not accepted as a whole until
-9A through 9E are each accepted and locally checkpointed and the user visually
-accepts all six native model/source artifact pairs. Do not begin GTK or Stage
-10 from an unaccepted or uncheckpointed substage.
+**Stage 9 umbrella status: Complete at `67e831a`.** Stages 9A through 9E are
+accepted and locally checkpointed, and the user visually accepted all six
+native model/source artifact pairs. Do not begin GTK or Stage 10 without the
+parent’s next-stage authorization.
 
 ## Stage 10 — View-only GTK preview
 
@@ -1009,6 +1019,10 @@ path.
 - Opening artwork commits a new authoritative source reference, constructs the
   requested canonical Stage 9 topology, and schedules complete-document
   evaluation.
+- When opening a direct still source without an explicit canvas override, use
+  the decoded/intrinsic source width and height, or the resolved intrinsic/
+  `viewBox` dimensions for SVG, while preserving aspect ratio. Keep an
+  explicit canvas override available.
 - Display only a completion accepted by the current document revision.
 - Wrap the exact straight-sRGBA `RasterSurface` in a GDK memory texture. Do not
   PNG-encode, flatten, checkerboard, recompose channels, or alter pixels.
@@ -1032,6 +1046,10 @@ cargo check -p toniator-app --all-targets
 GDK_BACKEND=wayland cargo run --bin toniator-app -- assets/raster-sample.png
 GDK_BACKEND=wayland cargo run --bin toniator-app -- assets/vector-sample.svg
 ```
+
+Ordinary Stage 10 acceptance commands intentionally omit pixel dimensions.
+Tests that exercise the explicit canvas override provide dimensions only in
+those override cases.
 
 Manually inspect every model with both sources for Stage 9 pixel identity,
 backdrop policy, resize fitting, SVG diagnostics, and stale-preview rejection
@@ -1165,6 +1183,20 @@ Stage 13 and later work is deliberately deferred. GTK Open/Save integration,
 document actions, command-bound pattern and channel editors, generalized
 families, connected and region output, multiframe evaluation, and simple
 transitions require separately scoped and approved short-stage contracts.
+
+### Planned export and direct-source CLI contract
+
+A future explicitly approved export stage must add equivalent app and CLI PNG
+antialiasing controls (`--antialiasing on|off`, default `on`; `off` produces
+hard-edged/non-antialiased rasterization). The option is a PNG raster
+consumer/export choice, affects raster output/cache identity where applicable,
+and leaves SVG and document/family/realization/scene authority unchanged.
+
+A future explicitly approved CLI/native-sizing stage must make direct still
+rendering use decoded/intrinsic source dimensions by default, with resolved
+intrinsic/`viewBox` dimensions for SVG, preserving aspect ratio when no
+`--canvas` override is supplied. Explicit canvas sizing remains available.
+These controls are planned and are not implemented in Stage 9E.
 
 ## Common validation and Git gates
 
