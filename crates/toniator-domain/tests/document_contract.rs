@@ -58,6 +58,7 @@ fn definition() -> PatternDefinition {
         structure: PatternStructure::StraightGrid,
         output: PatternOutput::CircularMarks,
         guard_steps: 2,
+        maximum_support_radius: 4.5,
     }
 }
 
@@ -452,17 +453,28 @@ fn stage_six_source_reference_snapshot_and_diameter_contracts_are_authoritative(
         "evaluation.channel_id"
     );
 
-    let mut too_small = channel();
-    too_small.mark_geometry_response.minimum_size = 1.99;
-    assert_path(
-        document_with(canvas(), vec![definition()], vec![too_small]),
-        "channel.pattern.mark_geometry_response.minimum_size",
-    );
+    let mut below_baseline = channel();
+    below_baseline.mark_geometry_response.minimum_size = 0.25;
+    below_baseline.mark_geometry_response.maximum_size = 1.0;
+    assert!(document_with(canvas(), vec![definition()], vec![below_baseline]).is_ok());
     let mut too_large = channel();
     too_large.mark_geometry_response.maximum_size = 9.01;
     assert_path(
         document_with(canvas(), vec![definition()], vec![too_large]),
         "channel.pattern.mark_geometry_response.maximum_size",
+    );
+    let mut larger_definition = definition();
+    larger_definition.maximum_support_radius = 6.0;
+    let mut above_baseline = channel();
+    above_baseline.mark_geometry_response.minimum_size = 10.0;
+    above_baseline.mark_geometry_response.maximum_size = 12.0;
+    assert!(document_with(canvas(), vec![larger_definition], vec![above_baseline]).is_ok());
+
+    let mut invalid_capability = definition();
+    invalid_capability.maximum_support_radius = f64::NAN;
+    assert_path(
+        document_with(canvas(), vec![invalid_capability], vec![channel()]),
+        "pattern_definitions.maximum_support_radius",
     );
 
     let mut unsupported = definition();

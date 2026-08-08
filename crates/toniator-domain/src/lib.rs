@@ -142,13 +142,16 @@ pub enum PatternOutput {
 }
 
 /// Structural pattern metadata owned by the authoritative document.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PatternDefinition {
     pub id: PatternDefinitionId,
     pub name: String,
     pub structure: PatternStructure,
     pub output: PatternOutput,
     pub guard_steps: u32,
+    /// The largest canonical mark radius this structural definition can cover.
+    /// It is a capability, not a transient response default.
+    pub maximum_support_radius: f64,
 }
 
 /// Source state owned by the document, never a filesystem path.
@@ -273,6 +276,10 @@ impl Document {
                     "unsupported pattern output",
                 ));
             }
+            validate_nonnegative_finite(
+                definition.maximum_support_radius,
+                "pattern_definitions.maximum_support_radius",
+            )?;
         }
 
         let mut channel_ids = HashSet::new();
@@ -289,7 +296,12 @@ impl Document {
                     "channel references a missing pattern definition",
                 ));
             }
-            validate_channel(channel)?;
+            let definition = self
+                .pattern_definitions
+                .iter()
+                .find(|definition| definition.id == channel.pattern_definition_id)
+                .expect("definition existence was checked above");
+            validate_channel(channel, definition)?;
         }
         Ok(())
     }
@@ -310,7 +322,10 @@ impl Document {
     }
 }
 
-fn validate_channel(channel: &ChannelState) -> Result<(), ValidationError> {
+fn validate_channel(
+    channel: &ChannelState,
+    definition: &PatternDefinition,
+) -> Result<(), ValidationError> {
     validate_positive_finite(
         channel.layout.density.across_x,
         "channel.pattern.layout.density.across_x",
@@ -353,22 +368,16 @@ fn validate_channel(channel: &ChannelState) -> Result<(), ValidationError> {
         channel.mark_geometry_response.maximum_size,
         "channel.pattern.mark_geometry_response.maximum_size",
     )?;
-    if channel.mark_geometry_response.minimum_size < 2.0 {
-        return Err(ValidationError::new(
-            "channel.pattern.mark_geometry_response.minimum_size",
-            "minimum_size must be at least 2.0",
-        ));
-    }
-    if channel.mark_geometry_response.maximum_size > 9.0 {
-        return Err(ValidationError::new(
-            "channel.pattern.mark_geometry_response.maximum_size",
-            "maximum_size must be at most 9.0",
-        ));
-    }
     if channel.mark_geometry_response.minimum_size > channel.mark_geometry_response.maximum_size {
         return Err(ValidationError::new(
             "channel.pattern.mark_geometry_response",
             "minimum_size must not exceed maximum_size",
+        ));
+    }
+    if channel.mark_geometry_response.maximum_size / 2.0 > definition.maximum_support_radius {
+        return Err(ValidationError::new(
+            "channel.pattern.mark_geometry_response.maximum_size",
+            "maximum_size exceeds the pattern definition support capability",
         ));
     }
     Ok(())
@@ -545,7 +554,10 @@ impl DocumentCommand {
                 validate_finite(*translation_x, "channel.pattern.layout.translation_x")?;
                 validate_finite(*translation_y, "channel.pattern.layout.translation_y")
             }
-            Self::SetMarkGeometryResponse { response, .. } => {
+            Self::SetMarkGeometryResponse {
+                channel_id,
+                response,
+            } => {
                 validate_nonnegative_finite(
                     response.minimum_size,
                     "channel.pattern.mark_geometry_response.minimum_size",
@@ -554,22 +566,24 @@ impl DocumentCommand {
                     response.maximum_size,
                     "channel.pattern.mark_geometry_response.maximum_size",
                 )?;
-                if response.minimum_size < 2.0 {
-                    return Err(ValidationError::new(
-                        "channel.pattern.mark_geometry_response.minimum_size",
-                        "minimum_size must be at least 2.0",
-                    ));
-                }
-                if response.maximum_size > 9.0 {
-                    return Err(ValidationError::new(
-                        "channel.pattern.mark_geometry_response.maximum_size",
-                        "maximum_size must be at most 9.0",
-                    ));
-                }
                 if response.minimum_size > response.maximum_size {
                     return Err(ValidationError::new(
                         "channel.pattern.mark_geometry_response",
                         "minimum_size must not exceed maximum_size",
+                    ));
+                }
+                let channel = document
+                    .channel(*channel_id)
+                    .expect("command channel existence was checked above");
+                let definition = document
+                    .pattern_definitions
+                    .iter()
+                    .find(|definition| definition.id == channel.pattern_definition_id)
+                    .expect("document validation keeps channel definitions valid");
+                if response.maximum_size / 2.0 > definition.maximum_support_radius {
+                    return Err(ValidationError::new(
+                        "channel.pattern.mark_geometry_response.maximum_size",
+                        "maximum_size exceeds the pattern definition support capability",
                     ));
                 }
                 Ok(())

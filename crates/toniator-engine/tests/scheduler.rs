@@ -11,8 +11,8 @@ use toniator_domain::{
     PatternStructure, SourceComponent, SourcePlacement, SourceReference, SourceReferenceId,
 };
 use toniator_engine::{
-    EvaluationCompletion, EvaluationRequest, EvaluationScheduler, ResolvedSource, SourceFormatHint,
-    evaluate, srgb_to_linear,
+    CacheDiagnostics, CacheDisposition, EvaluationCompletion, EvaluationRequest,
+    EvaluationScheduler, ResolvedSource, SourceFormatHint, evaluate, srgb_to_linear,
 };
 
 const CHANNEL_ID: ChannelId = ChannelId(1);
@@ -34,6 +34,7 @@ fn session() -> DocumentSession {
                 structure: PatternStructure::StraightGrid,
                 output: PatternOutput::CircularMarks,
                 guard_steps: 2,
+                maximum_support_radius: 4.5,
             }],
             vec![ChannelState {
                 id: CHANNEL_ID,
@@ -100,6 +101,23 @@ fn wait_for_latest(scheduler: &EvaluationScheduler) -> EvaluationCompletion {
     }
 }
 
+fn assert_diagnostics(completion: &EvaluationCompletion, expected: CacheDiagnostics) {
+    assert_eq!(completion.cache_diagnostics(), Some(&expected));
+    assert_eq!(*completion.cache_diagnostics().unwrap(), expected);
+}
+
+fn submit_and_accept(
+    scheduler: &EvaluationScheduler,
+    session: &DocumentSession,
+    request: EvaluationRequest,
+) -> EvaluationCompletion {
+    let ticket = scheduler.submit(request).unwrap();
+    let completion = wait_for_latest(scheduler);
+    assert_eq!(completion.ticket(), ticket);
+    assert!(scheduler.accept_completion(&completion, session).unwrap());
+    completion
+}
+
 #[test]
 fn scheduled_raster_and_svg_baselines_match_synchronous_results_exactly() {
     for (path, format, source_hash) in [
@@ -122,22 +140,358 @@ fn scheduled_raster_and_svg_baselines_match_synchronous_results_exactly() {
             format!("sha256:{source_hash}")
         );
         let scheduler = EvaluationScheduler::new().unwrap();
-        let ticket = scheduler.submit(request(&session, bytes, format)).unwrap();
-        let EvaluationCompletion::Completed {
-            ticket: completed_ticket,
-            result,
-        } = wait_for_latest(&scheduler)
-        else {
+        let completion = submit_and_accept(
+            &scheduler,
+            &session,
+            request(&session, Arc::clone(&bytes), format),
+        );
+        let EvaluationCompletion::Completed { result, .. } = completion else {
             panic!("valid baseline must complete")
         };
-        assert_eq!(completed_ticket, ticket);
         assert_eq!(*result, synchronous);
         assert_eq!(
             result.token(),
             session.evaluation_token(CHANNEL_ID).unwrap()
         );
+        let cached = submit_and_accept(&scheduler, &session, request(&session, bytes, format));
+        assert_diagnostics(
+            &cached,
+            CacheDiagnostics {
+                decoded_source: CacheDisposition::Hit,
+                family: CacheDisposition::Hit,
+                realization: CacheDisposition::Hit,
+                scene: CacheDisposition::Hit,
+                raster: CacheDisposition::Hit,
+            },
+        );
+        assert_eq!(cached.result(), Some(&synchronous));
+        assert_eq!(
+            cached.result().unwrap().raster().pixels(),
+            synchronous.raster().pixels(),
+        );
+        assert_eq!(
+            toniator_engine::write_svg(cached.result().unwrap().scene()),
+            toniator_engine::write_svg(synchronous.scene()),
+        );
         scheduler.shutdown().unwrap();
     }
+}
+
+#[test]
+fn accepted_cache_obeys_the_complete_reuse_matrix_and_keeps_outputs_exact() {
+    let bytes: Arc<[u8]> = std::fs::read("../../assets/raster-sample.png")
+        .unwrap()
+        .into();
+    let mut session = session();
+    let scheduler = EvaluationScheduler::new().unwrap();
+    let miss = CacheDiagnostics {
+        decoded_source: CacheDisposition::Miss,
+        family: CacheDisposition::Miss,
+        realization: CacheDisposition::Miss,
+        scene: CacheDisposition::Miss,
+        raster: CacheDisposition::Miss,
+    };
+    let hit = CacheDiagnostics {
+        decoded_source: CacheDisposition::Hit,
+        family: CacheDisposition::Hit,
+        realization: CacheDisposition::Hit,
+        scene: CacheDisposition::Hit,
+        raster: CacheDisposition::Hit,
+    };
+    let first = submit_and_accept(
+        &scheduler,
+        &session,
+        request(&session, Arc::clone(&bytes), SourceFormatHint::Png),
+    );
+    assert_diagnostics(&first, miss);
+    assert!(
+        scheduler.accept_completion(&first, &session).unwrap(),
+        "acceptance is idempotent"
+    );
+
+    let exact = submit_and_accept(
+        &scheduler,
+        &session,
+        request(&session, Arc::clone(&bytes), SourceFormatHint::Png),
+    );
+    assert_diagnostics(&exact, hit);
+    assert_eq!(first.result(), exact.result());
+
+    session
+        .apply(&DocumentCommand::SetColor {
+            channel_id: CHANNEL_ID,
+            color: ColorValue {
+                red: 0.3,
+                green: 0.2,
+                blue: 0.1,
+                alpha: 1.0,
+            },
+        })
+        .unwrap();
+    let presentation = submit_and_accept(
+        &scheduler,
+        &session,
+        request(&session, Arc::clone(&bytes), SourceFormatHint::Png),
+    );
+    assert_diagnostics(
+        &presentation,
+        CacheDiagnostics {
+            decoded_source: CacheDisposition::Hit,
+            family: CacheDisposition::Hit,
+            realization: CacheDisposition::Hit,
+            scene: CacheDisposition::Miss,
+            raster: CacheDisposition::Miss,
+        },
+    );
+
+    session
+        .apply(&DocumentCommand::SetMarkGeometryResponse {
+            channel_id: CHANNEL_ID,
+            response: MarkGeometryResponse {
+                minimum_size: 1.0,
+                maximum_size: 8.0,
+            },
+        })
+        .unwrap();
+    let response = submit_and_accept(
+        &scheduler,
+        &session,
+        request(&session, Arc::clone(&bytes), SourceFormatHint::Png),
+    );
+    assert_diagnostics(
+        &response,
+        CacheDiagnostics {
+            decoded_source: CacheDisposition::Hit,
+            family: CacheDisposition::Hit,
+            realization: CacheDisposition::Miss,
+            scene: CacheDisposition::Miss,
+            raster: CacheDisposition::Miss,
+        },
+    );
+
+    session
+        .apply(&DocumentCommand::SetDensity {
+            channel_id: CHANNEL_ID,
+            density: DensityMetric2D {
+                across_x: 80.0,
+                across_y: 60.0,
+                aspect_locked: true,
+            },
+        })
+        .unwrap();
+    let family = submit_and_accept(
+        &scheduler,
+        &session,
+        request(&session, Arc::clone(&bytes), SourceFormatHint::Png),
+    );
+    assert_diagnostics(
+        &family,
+        CacheDiagnostics {
+            decoded_source: CacheDisposition::Hit,
+            family: CacheDisposition::Miss,
+            realization: CacheDisposition::Miss,
+            scene: CacheDisposition::Miss,
+            raster: CacheDisposition::Miss,
+        },
+    );
+
+    session
+        .apply(&DocumentCommand::SetDensity {
+            channel_id: CHANNEL_ID,
+            density: DensityMetric2D {
+                across_x: 80.0,
+                across_y: 60.0,
+                aspect_locked: false,
+            },
+        })
+        .unwrap();
+    let aspect_only = submit_and_accept(
+        &scheduler,
+        &session,
+        request(&session, Arc::clone(&bytes), SourceFormatHint::Png),
+    );
+    assert_diagnostics(
+        &aspect_only,
+        CacheDiagnostics {
+            decoded_source: CacheDisposition::Hit,
+            family: CacheDisposition::Miss,
+            realization: CacheDisposition::Miss,
+            scene: CacheDisposition::Miss,
+            raster: CacheDisposition::Miss,
+        },
+    );
+
+    let replacement_id = SourceReferenceId::new("scheduler-source-replacement").unwrap();
+    session
+        .apply(&DocumentCommand::SetSourceReference {
+            source: SourceReference::Assigned(replacement_id.clone()),
+        })
+        .unwrap();
+    let source_change = submit_and_accept(
+        &scheduler,
+        &session,
+        EvaluationRequest::new(
+            session.evaluation_snapshot(CHANNEL_ID).unwrap(),
+            ResolvedSource::new(replacement_id, Arc::clone(&bytes), SourceFormatHint::Png).unwrap(),
+        ),
+    );
+    assert_diagnostics(&source_change, miss);
+    scheduler.shutdown().unwrap();
+}
+
+#[test]
+fn unaccepted_stale_cancelled_and_failed_work_never_replaces_accepted_cache() {
+    let bytes: Arc<[u8]> = std::fs::read("../../assets/raster-sample.png")
+        .unwrap()
+        .into();
+    let mut session = session();
+    let scheduler = EvaluationScheduler::new().unwrap();
+    let accepted = submit_and_accept(
+        &scheduler,
+        &session,
+        request(&session, Arc::clone(&bytes), SourceFormatHint::Png),
+    );
+
+    // A completed presentation edit is deliberately not accepted. A later
+    // return to the accepted document proves its staged scene/raster were not installed.
+    session
+        .apply(&DocumentCommand::SetOpacity {
+            channel_id: CHANNEL_ID,
+            opacity: 0.4,
+        })
+        .unwrap();
+    let unaccepted = {
+        let ticket = scheduler
+            .submit(request(&session, Arc::clone(&bytes), SourceFormatHint::Png))
+            .unwrap();
+        let completion = wait_for_latest(&scheduler);
+        assert_eq!(completion.ticket(), ticket);
+        completion
+    };
+    assert!(unaccepted.result().is_some());
+    session
+        .apply(&DocumentCommand::SetOpacity {
+            channel_id: CHANNEL_ID,
+            opacity: 0.72,
+        })
+        .unwrap();
+    let returned = submit_and_accept(
+        &scheduler,
+        &session,
+        request(&session, Arc::clone(&bytes), SourceFormatHint::Png),
+    );
+    assert_diagnostics(
+        &returned,
+        CacheDiagnostics {
+            decoded_source: CacheDisposition::Hit,
+            family: CacheDisposition::Hit,
+            realization: CacheDisposition::Hit,
+            scene: CacheDisposition::Hit,
+            raster: CacheDisposition::Hit,
+        },
+    );
+    assert_eq!(
+        returned.result().unwrap().source_identity(),
+        accepted.result().unwrap().source_identity()
+    );
+    assert_eq!(
+        returned.result().unwrap().scene(),
+        accepted.result().unwrap().scene()
+    );
+    assert_eq!(
+        returned.result().unwrap().raster(),
+        accepted.result().unwrap().raster()
+    );
+
+    // A document-stale completion is rejected even while its ticket is latest.
+    let ticket = scheduler
+        .submit(request(&session, Arc::clone(&bytes), SourceFormatHint::Png))
+        .unwrap();
+    let stale_document = wait_for_latest(&scheduler);
+    assert_eq!(stale_document.ticket(), ticket);
+    session
+        .apply(&DocumentCommand::SetRotation {
+            channel_id: CHANNEL_ID,
+            rotation_degrees: 18.0,
+        })
+        .unwrap();
+    assert!(
+        !scheduler
+            .accept_completion(&stale_document, &session)
+            .unwrap()
+    );
+    session
+        .apply(&DocumentCommand::SetRotation {
+            channel_id: CHANNEL_ID,
+            rotation_degrees: 17.0,
+        })
+        .unwrap();
+
+    // Submitting a new ticket makes a retained completion ticket-stale and
+    // discards its unaccepted transaction.
+    let older = {
+        let ticket = scheduler
+            .submit(request(&session, Arc::clone(&bytes), SourceFormatHint::Png))
+            .unwrap();
+        let completion = wait_for_latest(&scheduler);
+        assert_eq!(completion.ticket(), ticket);
+        completion
+    };
+    let newest = submit_and_accept(
+        &scheduler,
+        &session,
+        request(&session, Arc::clone(&bytes), SourceFormatHint::Png),
+    );
+    assert!(!scheduler.accept_completion(&older, &session).unwrap());
+    assert_diagnostics(
+        &newest,
+        CacheDiagnostics {
+            decoded_source: CacheDisposition::Hit,
+            family: CacheDisposition::Hit,
+            realization: CacheDisposition::Hit,
+            scene: CacheDisposition::Hit,
+            raster: CacheDisposition::Hit,
+        },
+    );
+
+    // Superseding an active valid request cancels or coalesces it before it can
+    // commit; the current failure is accepted for presentation but owns no
+    // transaction. A valid later request still reuses the last accepted cache.
+    let cancelled_ticket = scheduler
+        .submit(request(&session, Arc::clone(&bytes), SourceFormatHint::Png))
+        .unwrap();
+    let failed = {
+        let ticket = scheduler
+            .submit(request(
+                &session,
+                Arc::<[u8]>::from(vec![1_u8, 2, 3]),
+                SourceFormatHint::Png,
+            ))
+            .unwrap();
+        assert_ne!(ticket, cancelled_ticket);
+        let completion = wait_for_latest(&scheduler);
+        assert_eq!(completion.ticket(), ticket);
+        assert!(completion.error().is_some());
+        completion
+    };
+    assert!(scheduler.accept_completion(&failed, &session).unwrap());
+    assert_eq!(failed.cache_diagnostics(), None);
+    let after_failure = submit_and_accept(
+        &scheduler,
+        &session,
+        request(&session, bytes, SourceFormatHint::Png),
+    );
+    assert_diagnostics(
+        &after_failure,
+        CacheDiagnostics {
+            decoded_source: CacheDisposition::Hit,
+            family: CacheDisposition::Hit,
+            realization: CacheDisposition::Hit,
+            scene: CacheDisposition::Hit,
+            raster: CacheDisposition::Hit,
+        },
+    );
+    scheduler.shutdown().unwrap();
 }
 
 #[test]

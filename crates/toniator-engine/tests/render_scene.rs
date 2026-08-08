@@ -5,7 +5,8 @@ use toniator_domain::{
     SourceComponent, SourcePlacement, SourceReference, SourceReferenceId,
 };
 use toniator_engine::{
-    EvaluationRequest, GeometryOutput, ResolvedSource, SourceFormatHint, evaluate, write_svg,
+    EvaluationLimits, EvaluationRequest, GeometryOutput, ResolvedSource, SourceFormatHint,
+    evaluate, evaluate_with_limits, write_svg,
 };
 
 const CHANNEL_ID: ChannelId = ChannelId(1);
@@ -25,6 +26,7 @@ fn request(bytes: Vec<u8>, format: SourceFormatHint) -> EvaluationRequest {
             structure: PatternStructure::StraightGrid,
             output: PatternOutput::CircularMarks,
             guard_steps: 2,
+            maximum_support_radius: 4.5,
         }],
         vec![ChannelState {
             id: CHANNEL_ID,
@@ -135,6 +137,7 @@ fn source_mismatch_is_rejected_before_decode_or_geometry() {
             structure: PatternStructure::StraightGrid,
             output: PatternOutput::CircularMarks,
             guard_steps: 2,
+            maximum_support_radius: 4.5,
         }],
         vec![ChannelState {
             id: CHANNEL_ID,
@@ -193,6 +196,7 @@ fn unassigned_source_reference_fails_at_the_authoritative_boundary() {
             structure: PatternStructure::StraightGrid,
             output: PatternOutput::CircularMarks,
             guard_steps: 2,
+            maximum_support_radius: 4.5,
         }],
         vec![ChannelState {
             id: CHANNEL_ID,
@@ -240,4 +244,32 @@ fn unassigned_source_reference_fails_at_the_authoritative_boundary() {
     ))
     .expect_err("unassigned source fails before decode");
     assert_eq!(error.path(), "evaluation.source_reference");
+}
+
+#[test]
+fn default_and_custom_candidate_limits_fail_before_oversized_family_allocation() {
+    assert_eq!(
+        EvaluationLimits::default().max_family_candidates(),
+        1_048_576
+    );
+    assert_eq!(
+        EvaluationLimits::new(0)
+            .expect_err("zero is invalid")
+            .path(),
+        "coverage.candidate_limit"
+    );
+    let bytes = std::fs::read("../../assets/raster-sample.png").unwrap();
+    let error = evaluate_with_limits(
+        request(bytes.clone(), SourceFormatHint::Png),
+        EvaluationLimits::new(1).unwrap(),
+    )
+    .expect_err("one candidate cannot cover the requested grid");
+    assert_eq!(error.path(), "coverage.candidate_limit");
+    assert!(
+        evaluate_with_limits(
+            request(bytes, SourceFormatHint::Png),
+            EvaluationLimits::new(100_000).unwrap(),
+        )
+        .is_ok()
+    );
 }

@@ -12,10 +12,10 @@ use toniator_domain::{
     ValidationError,
 };
 use toniator_engine::{
-    CanonicalCircleMark, EvaluationRequest, GridError, GridInspectRequest, MarkResponse,
-    MarksInspectError, MarksInspectRequest, Point2, RasterBackground, ResolvedSource, SiteId,
-    SiteScope, SourceFormat, SourceFormatHint, SvgTextDiagnostic, encode_png, evaluate,
-    inspect_circular_marks, inspect_straight_grid, srgb_to_linear, write_svg,
+    CanonicalCircleMark, EvaluationLimits, EvaluationRequest, GridError, GridInspectRequest,
+    MarkResponse, MarksInspectError, MarksInspectRequest, Point2, RasterBackground, ResolvedSource,
+    SiteId, SiteScope, SourceFormat, SourceFormatHint, SvgTextDiagnostic, encode_png,
+    evaluate_with_limits, inspect_circular_marks, inspect_straight_grid, srgb_to_linear, write_svg,
 };
 
 /// Headless Toniator command-line frontend.
@@ -84,6 +84,8 @@ struct GridArgs {
     guard_steps: u32,
     #[arg(long)]
     support_radius: f64,
+    #[arg(long, default_value_t = 1_048_576)]
+    max_family_candidates: usize,
     #[arg(long, value_enum)]
     format: InspectFormat,
 }
@@ -110,6 +112,8 @@ struct MarksArgs {
     guard_steps: u32,
     #[arg(long)]
     support_radius: f64,
+    #[arg(long, default_value_t = 1_048_576)]
+    max_family_candidates: usize,
     #[arg(long, value_enum)]
     source_component: CliSourceComponent,
     #[arg(long)]
@@ -148,6 +152,8 @@ struct RenderArgs {
     offset_y: f64,
     #[arg(long)]
     guard_steps: u32,
+    #[arg(long, default_value_t = 1_048_576)]
+    max_family_candidates: usize,
     #[arg(long, value_enum)]
     source_component: CliSourceComponent,
     #[arg(long)]
@@ -283,6 +289,7 @@ fn render(arguments: RenderArgs) -> Result<(), CliError> {
             structure: PatternStructure::StraightGrid,
             output: PatternOutput::CircularMarks,
             guard_steps: arguments.guard_steps,
+            maximum_support_radius: 4.5,
         }],
         vec![ChannelState {
             id: channel_id,
@@ -316,10 +323,13 @@ fn render(arguments: RenderArgs) -> Result<(), CliError> {
     session.apply(&DocumentCommand::SetSourceReference {
         source: SourceReference::Assigned(source_reference.clone()),
     })?;
-    let result = evaluate(EvaluationRequest::new(
-        session.evaluation_snapshot(channel_id)?,
-        ResolvedSource::new(source_reference, source_bytes, source_format)?,
-    ))?;
+    let result = evaluate_with_limits(
+        EvaluationRequest::new(
+            session.evaluation_snapshot(channel_id)?,
+            ResolvedSource::new(source_reference, source_bytes, source_format)?,
+        ),
+        EvaluationLimits::new(arguments.max_family_candidates)?,
+    )?;
     match format {
         OutputFormat::Png => {
             let background = if arguments.transparent {
@@ -385,6 +395,7 @@ fn inspect_marks(arguments: MarksArgs) -> Result<(), CliError> {
             translation_y: arguments.offset_y,
             guard_steps: arguments.guard_steps,
             support_radius: arguments.support_radius,
+            max_family_candidates: arguments.max_family_candidates,
         },
         source_bytes: &source_bytes,
         source_format,
@@ -573,6 +584,7 @@ fn inspect_grid(arguments: GridArgs) -> Result<(), CliError> {
         translation_y: arguments.offset_y,
         guard_steps: arguments.guard_steps,
         support_radius: arguments.support_radius,
+        max_family_candidates: arguments.max_family_candidates,
     };
     let output = inspect_straight_grid(&request)?;
     let serialized = match arguments.format {
@@ -599,6 +611,7 @@ fn validate(arguments: ValidateArgs) -> Result<(), ValidationError> {
             structure: PatternStructure::StraightGrid,
             output: PatternOutput::CircularMarks,
             guard_steps: 2,
+            maximum_support_radius: 4.5,
         }],
         vec![ChannelState {
             id: ChannelId(1),

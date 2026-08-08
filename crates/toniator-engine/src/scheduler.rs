@@ -9,10 +9,12 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use toniator_domain::EvaluationToken;
+use toniator_domain::{DocumentSession, EvaluationToken};
 
 use crate::{
-    EvaluationError, EvaluationRequest, EvaluationResult, EvaluationRunError, evaluate_cancellable,
+    CacheDiagnostics, CacheTransaction, DerivedCache, DerivedCacheSnapshot, EvaluationError,
+    EvaluationLimits, EvaluationRequest, EvaluationResult, EvaluationRunError,
+    evaluate_cancellable_cached,
 };
 #[cfg(test)]
 use crate::{EvaluationStageGate, evaluate_cancellable_with_gate};
@@ -34,6 +36,7 @@ pub enum EvaluationCompletion {
     Completed {
         ticket: EvaluationTicket,
         result: Box<EvaluationResult>,
+        cache_diagnostics: CacheDiagnostics,
     },
     Failed {
         ticket: EvaluationTicket,
@@ -69,6 +72,17 @@ impl EvaluationCompletion {
             Self::Failed { error, .. } => Some(error),
         }
     }
+
+    /// Successful completions expose immutable reuse diagnostics. Failures
+    /// deliberately retain their Stage 7 shape.
+    pub fn cache_diagnostics(&self) -> Option<&CacheDiagnostics> {
+        match self {
+            Self::Completed {
+                cache_diagnostics, ..
+            } => Some(cache_diagnostics),
+            Self::Failed { .. } => None,
+        }
+    }
 }
 
 /// Lifecycle failures for the one-worker scheduler.
@@ -99,13 +113,25 @@ struct Job {
     ticket: EvaluationTicket,
     request: EvaluationRequest,
     cancelled: Arc<AtomicBool>,
+    cache: DerivedCacheSnapshot,
 }
 
+struct WorkerCompletion {
+    completion: EvaluationCompletion,
+    transaction: Option<CacheTransaction>,
+}
+
+/// One mutex serializes ticket publication, accepted-cache snapshots, staged
+/// transactions, and acceptance commits. No worker mutates this state.
 struct SchedulerState {
     next_ticket: Option<u64>,
     sender: Option<Sender<Job>>,
     worker: Option<JoinHandle<()>>,
     latest_cancellation: Option<Arc<AtomicBool>>,
+    latest_ticket: Option<EvaluationTicket>,
+    cache: DerivedCache,
+    pending_transaction: Option<(EvaluationTicket, CacheTransaction)>,
+    accepted_ticket: Option<EvaluationTicket>,
 }
 
 /// An engine-owned, latest-only evaluator with exactly one worker thread.
@@ -113,7 +139,7 @@ pub struct EvaluationScheduler {
     state: Mutex<SchedulerState>,
     latest_ticket: Arc<AtomicU64>,
     shutdown: Arc<AtomicBool>,
-    completions: Mutex<Receiver<EvaluationCompletion>>,
+    completions: Mutex<Receiver<WorkerCompletion>>,
     #[cfg(test)]
     shutdown_notifier: Option<Sender<()>>,
 }
@@ -121,10 +147,18 @@ pub struct EvaluationScheduler {
 impl EvaluationScheduler {
     /// Starts the scheduler's one engine-owned worker.
     pub fn new() -> Result<Self, SchedulerError> {
-        Self::new_with_next_ticket(1)
+        Self::new_with_limits(EvaluationLimits::default())
     }
 
-    fn new_with_next_ticket(next_ticket: u64) -> Result<Self, SchedulerError> {
+    /// Starts the scheduler with an immutable family candidate policy.
+    pub fn new_with_limits(limits: EvaluationLimits) -> Result<Self, SchedulerError> {
+        Self::new_with_next_ticket(limits, 1)
+    }
+
+    fn new_with_next_ticket(
+        limits: EvaluationLimits,
+        next_ticket: u64,
+    ) -> Result<Self, SchedulerError> {
         let (sender, receiver) = mpsc::channel();
         let (completion_sender, completions) = mpsc::channel();
         let latest_ticket = Arc::new(AtomicU64::new(0));
@@ -139,6 +173,7 @@ impl EvaluationScheduler {
                     completion_sender,
                     worker_latest_ticket,
                     worker_shutdown,
+                    limits,
                 )
             })
             .map_err(|_| SchedulerError::WorkerSpawn)?;
@@ -148,6 +183,10 @@ impl EvaluationScheduler {
                 sender: Some(sender),
                 worker: Some(worker),
                 latest_cancellation: None,
+                latest_ticket: None,
+                cache: DerivedCache::default(),
+                pending_transaction: None,
+                accepted_ticket: None,
             }),
             latest_ticket,
             shutdown,
@@ -176,7 +215,22 @@ impl EvaluationScheduler {
                     completion_sender,
                     worker_latest_ticket,
                     worker_shutdown,
-                    |request, cancelled| evaluate_cancellable_with_gate(request, cancelled, &gate),
+                    EvaluationLimits::default(),
+                    |request, cancelled, _cache, _limits| {
+                        evaluate_cancellable_with_gate(request, cancelled, &gate).map(|result| {
+                            crate::CachedEvaluation {
+                                result,
+                                diagnostics: CacheDiagnostics {
+                                    decoded_source: crate::CacheDisposition::Miss,
+                                    family: crate::CacheDisposition::Miss,
+                                    realization: crate::CacheDisposition::Miss,
+                                    scene: crate::CacheDisposition::Miss,
+                                    raster: crate::CacheDisposition::Miss,
+                                },
+                                transaction: CacheTransaction::default(),
+                            }
+                        })
+                    },
                 )
             })
             .map_err(|_| SchedulerError::WorkerSpawn)?;
@@ -186,6 +240,10 @@ impl EvaluationScheduler {
                 sender: Some(sender),
                 worker: Some(worker),
                 latest_cancellation: None,
+                latest_ticket: None,
+                cache: DerivedCache::default(),
+                pending_transaction: None,
+                accepted_ticket: None,
             }),
             latest_ticket,
             shutdown,
@@ -203,12 +261,19 @@ impl EvaluationScheduler {
         if self.shutdown.load(Ordering::Acquire) {
             return Err(SchedulerError::WorkerUnavailable);
         }
+        // One lock owns the accepted cache, latest ticket, and outstanding
+        // transaction. Snapshot only after acquiring it, so a new job cannot
+        // observe cache state from before a concurrent accepted completion.
+        let cache = state.cache.snapshot();
         let ticket = take_next_ticket(&mut state.next_ticket)?;
         if let Some(previous) = &state.latest_cancellation {
             previous.store(true, Ordering::Release);
         }
+        state.pending_transaction = None;
+        state.accepted_ticket = None;
         let cancelled = Arc::new(AtomicBool::new(false));
         state.latest_cancellation = Some(Arc::clone(&cancelled));
+        state.latest_ticket = Some(ticket);
         self.latest_ticket.store(ticket.value(), Ordering::Release);
         let sender = state
             .sender
@@ -219,6 +284,7 @@ impl EvaluationScheduler {
                 ticket,
                 request,
                 cancelled,
+                cache,
             })
             .map_err(|_| SchedulerError::WorkerUnavailable)?;
         Ok(ticket)
@@ -233,8 +299,21 @@ impl EvaluationScheduler {
         let mut current = None;
         loop {
             match receiver.try_recv() {
-                Ok(completion) if self.is_latest(completion.ticket()) => current = Some(completion),
-                Ok(_) => {}
+                Ok(worker_completion) => {
+                    let mut state = self
+                        .state
+                        .lock()
+                        .expect("evaluation scheduler state lock poisoned");
+                    if !self.shutdown.load(Ordering::Acquire)
+                        && state.latest_ticket == Some(worker_completion.completion.ticket())
+                    {
+                        if let Some(transaction) = worker_completion.transaction {
+                            state.pending_transaction =
+                                Some((worker_completion.completion.ticket(), transaction));
+                        }
+                        current = Some(worker_completion.completion);
+                    }
+                }
                 Err(TryRecvError::Empty) => return Ok(current),
                 Err(TryRecvError::Disconnected) => {
                     return if self.shutdown.load(Ordering::Acquire) {
@@ -250,7 +329,43 @@ impl EvaluationScheduler {
     /// Whether this ticket remains the scheduler's newest submission.
     pub fn is_latest(&self, ticket: EvaluationTicket) -> bool {
         !self.shutdown.load(Ordering::Acquire)
-            && self.latest_ticket.load(Ordering::Acquire) == ticket.value()
+            && self
+                .state
+                .lock()
+                .expect("evaluation scheduler state lock poisoned")
+                .latest_ticket
+                == Some(ticket)
+    }
+
+    /// Accepts a currently presentable completion. A successful completion
+    /// atomically installs only its own staged derived values; current failures
+    /// are accepted as terminal reporting without changing the cache.
+    pub fn accept_completion(
+        &self,
+        completion: &EvaluationCompletion,
+        session: &DocumentSession,
+    ) -> Result<bool, SchedulerError> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("evaluation scheduler state lock poisoned");
+        if self.shutdown.load(Ordering::Acquire)
+            || state.latest_ticket != Some(completion.ticket())
+            || !session.accepts_evaluation(completion.token())
+        {
+            return Ok(false);
+        }
+        if state.accepted_ticket == Some(completion.ticket()) {
+            return Ok(true);
+        }
+        if completion.result().is_some()
+            && let Some((ticket, transaction)) = state.pending_transaction.take()
+            && ticket == completion.ticket()
+        {
+            state.cache.commit(transaction);
+        }
+        state.accepted_ticket = Some(completion.ticket());
+        Ok(true)
     }
 
     /// Cancels outstanding work, signals the worker, and joins it.
@@ -259,12 +374,12 @@ impl EvaluationScheduler {
     }
 
     fn stop_worker(&mut self) -> Result<(), SchedulerError> {
-        self.shutdown.store(true, Ordering::Release);
         let worker = {
             let mut state = self
                 .state
                 .lock()
                 .expect("evaluation scheduler state lock poisoned");
+            self.shutdown.store(true, Ordering::Release);
             if let Some(cancelled) = &state.latest_cancellation {
                 cancelled.store(true, Ordering::Release);
             }
@@ -290,27 +405,35 @@ impl Drop for EvaluationScheduler {
 
 fn worker_loop(
     receiver: Receiver<Job>,
-    completion_sender: Sender<EvaluationCompletion>,
+    completion_sender: Sender<WorkerCompletion>,
     latest_ticket: Arc<AtomicU64>,
     shutdown: Arc<AtomicBool>,
+    limits: EvaluationLimits,
 ) {
     worker_loop_with(
         receiver,
         completion_sender,
         latest_ticket,
         shutdown,
-        evaluate_cancellable,
+        limits,
+        evaluate_cancellable_cached,
     );
 }
 
 fn worker_loop_with<F>(
     receiver: Receiver<Job>,
-    completion_sender: Sender<EvaluationCompletion>,
+    completion_sender: Sender<WorkerCompletion>,
     latest_ticket: Arc<AtomicU64>,
     shutdown: Arc<AtomicBool>,
+    limits: EvaluationLimits,
     mut evaluate: F,
 ) where
-    F: FnMut(EvaluationRequest, &AtomicBool) -> Result<EvaluationResult, EvaluationRunError>,
+    F: FnMut(
+        EvaluationRequest,
+        &AtomicBool,
+        DerivedCacheSnapshot,
+        EvaluationLimits,
+    ) -> Result<crate::CachedEvaluation, EvaluationRunError>,
 {
     while !shutdown.load(Ordering::Acquire) {
         let mut job = match receiver.recv() {
@@ -324,15 +447,22 @@ fn worker_loop_with<F>(
         let token = job.request.token();
         let ticket = job.ticket;
         let cancelled = Arc::clone(&job.cancelled);
-        let completion = match evaluate(job.request, &cancelled) {
-            Ok(result) => EvaluationCompletion::Completed {
-                ticket,
-                result: Box::new(result),
+        let completion = match evaluate(job.request, &cancelled, job.cache, limits) {
+            Ok(result) => WorkerCompletion {
+                completion: EvaluationCompletion::Completed {
+                    ticket,
+                    result: Box::new(result.result),
+                    cache_diagnostics: result.diagnostics,
+                },
+                transaction: Some(result.transaction),
             },
-            Err(EvaluationRunError::Evaluation(error)) => EvaluationCompletion::Failed {
-                ticket,
-                token,
-                error,
+            Err(EvaluationRunError::Evaluation(error)) => WorkerCompletion {
+                completion: EvaluationCompletion::Failed {
+                    ticket,
+                    token,
+                    error,
+                },
+                transaction: None,
             },
             Err(EvaluationRunError::Cancelled) => continue,
         };

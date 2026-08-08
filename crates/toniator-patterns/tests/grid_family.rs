@@ -22,6 +22,7 @@ fn request(rotation_degrees: f64, translation_x: f64, translation_y: f64) -> Gri
         translation_y,
         guard_steps: 2,
         support_radius: 4.5,
+        max_family_candidates: 1_048_576,
     }
 }
 
@@ -258,6 +259,40 @@ fn rejects_invalid_or_nonfinite_values_before_generation() {
             path
         );
     }
+}
+
+#[test]
+fn candidate_limits_reject_before_family_allocation_and_range_arithmetic_is_checked() {
+    let mut default_limited = request(17.0, 3.25, -4.5);
+    default_limited.density = DensityMetric2D {
+        across_x: 5_000.0,
+        across_y: 5_000.0,
+        aspect_locked: true,
+    };
+    assert_eq!(
+        evaluate_straight_grid(&default_limited)
+            .expect_err("the default policy rejects the multi-million candidate product")
+            .path(),
+        "coverage.candidate_limit"
+    );
+
+    let mut limited = request(17.0, 3.25, -4.5);
+    limited.max_family_candidates = 1;
+    assert_eq!(
+        evaluate_straight_grid(&limited)
+            .expect_err("the Cartesian guide range exceeds one candidate")
+            .path(),
+        "coverage.candidate_limit"
+    );
+
+    let mut zero = request(0.0, 0.0, 0.0);
+    zero.max_family_candidates = 0;
+    assert_eq!(
+        evaluate_straight_grid(&zero)
+            .expect_err("zero is not a policy")
+            .path(),
+        "coverage.candidate_limit"
+    );
 }
 
 fn distance_to_canvas(x: f64, y: f64, width: f64, height: f64) -> f64 {

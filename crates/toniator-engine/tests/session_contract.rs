@@ -21,6 +21,7 @@ fn session() -> DocumentSession {
             structure: PatternStructure::StraightGrid,
             output: PatternOutput::CircularMarks,
             guard_steps: 2,
+            maximum_support_radius: 4.5,
         }],
         vec![ChannelState {
             id: CHANNEL_ID,

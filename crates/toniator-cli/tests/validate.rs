@@ -111,6 +111,124 @@ fn inspect_grid_accepts_negative_offsets_and_emits_deterministic_json() {
 }
 
 #[test]
+fn every_evaluation_command_accepts_the_candidate_limit_and_rejects_an_oversized_grid() {
+    let grid = Command::new(env!("CARGO_BIN_EXE_toniator"))
+        .args([
+            "inspect",
+            "grid",
+            "--canvas",
+            "900x600",
+            "--density-x",
+            "90",
+            "--density-y",
+            "60",
+            "--rotation",
+            "17",
+            "--offset-x",
+            "3.25",
+            "--offset-y",
+            "-4.5",
+            "--guard-steps",
+            "2",
+            "--support-radius",
+            "4.5",
+            "--max-family-candidates",
+            "1",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(grid.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&grid.stderr).contains("coverage.candidate_limit"));
+
+    let marks = Command::new(env!("CARGO_BIN_EXE_toniator"))
+        .args([
+            "inspect",
+            "marks",
+            "--source",
+            "../../assets/raster-sample.png",
+            "--canvas",
+            "900x600",
+            "--density-x",
+            "90",
+            "--density-y",
+            "60",
+            "--rotation",
+            "17",
+            "--offset-x",
+            "3.25",
+            "--offset-y",
+            "-4.5",
+            "--guard-steps",
+            "2",
+            "--support-radius",
+            "4.5",
+            "--max-family-candidates",
+            "1",
+            "--source-component",
+            "luminance",
+            "--size-min",
+            "2",
+            "--size-max",
+            "9",
+            "--color",
+            "#00b7ff",
+            "--opacity",
+            "0.72",
+            "--summary",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(marks.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&marks.stderr).contains("coverage.candidate_limit"));
+
+    let output = std::env::temp_dir().join("toniator-stage-8-limit.png");
+    let render = Command::new(env!("CARGO_BIN_EXE_toniator"))
+        .args([
+            "render",
+            "-i",
+            "../../assets/raster-sample.png",
+            "-o",
+            output.to_str().unwrap(),
+            "--mode",
+            "rgb",
+            "--canvas",
+            "900x600",
+            "--density-x",
+            "90",
+            "--density-y",
+            "60",
+            "--rotation",
+            "17",
+            "--offset-x",
+            "3.25",
+            "--offset-y",
+            "-4.5",
+            "--guard-steps",
+            "2",
+            "--max-family-candidates",
+            "1",
+            "--source-component",
+            "luminance",
+            "--size-min",
+            "2",
+            "--size-max",
+            "9",
+            "--color",
+            "#00b7ff",
+            "--opacity",
+            "0.72",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(render.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&render.stderr).contains("coverage.candidate_limit"));
+}
+
+#[test]
 fn inspect_marks_compact_summaries_match_both_canonical_fixtures() {
     for (source, fixture) in [
         (

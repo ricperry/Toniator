@@ -14,6 +14,11 @@ use toniator_geometry::Point2;
 
 const MAX_SOURCE_PIXELS: u64 = 64 * 1024 * 1024;
 
+/// Versioned identity for the decoder behavior that participates in derived
+/// cache keys. Bump it whenever decoding can yield different source pixels for
+/// the same bytes and format hint.
+pub const DECODER_CONTRACT_ID: &str = "toniator-sampling-decoder-v1";
+
 /// The only source formats supported by the bounded Stage 4 decoder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]

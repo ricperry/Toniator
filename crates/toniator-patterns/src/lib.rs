@@ -31,6 +31,9 @@ pub struct GridInspectRequest {
     pub translation_y: f64,
     pub guard_steps: u32,
     pub support_radius: f64,
+    /// Caller-owned upper bound for the conservative guide-range Cartesian
+    /// product, checked before allocating guides or sites.
+    pub max_family_candidates: usize,
 }
 
 /// A coverage result for one stable guide dimension.
@@ -131,7 +134,7 @@ pub fn realize_circular_marks(
     component: SourceComponent,
     response: MarkResponse,
 ) -> Result<CircularMarkRealization, RealizationError> {
-    validate_response(response)?;
+    validate_response(response, family.support_radius)?;
     if !family.has_only_finite_geometry() {
         return Err(RealizationError::new(
             "realization.family",
@@ -147,7 +150,7 @@ pub fn realize_circular_marks(
                 "effective mark ink must be finite",
             ));
         }
-        let radius = radius_from_ink(ink, response)?;
+        let radius = radius_from_ink_with_support(ink, response, family.support_radius)?;
         let mark = CanonicalCircleMark::new(
             site.id,
             site.position,
@@ -184,7 +187,7 @@ pub fn realize_circular_marks(
 /// Maps an effective mark-ink response linearly to radius using the authored
 /// diameter bounds. Source sampling owns component polarity and alpha handling.
 pub fn radius_from_ink(ink: f64, response: MarkResponse) -> Result<f64, RealizationError> {
-    validate_response(response)?;
+    validate_response_basic(response)?;
     if !ink.is_finite() {
         return Err(RealizationError::new(
             "realization.ink",
@@ -195,20 +198,56 @@ pub fn radius_from_ink(ink: f64, response: MarkResponse) -> Result<f64, Realizat
     Ok((response.minimum_size + ink * (response.maximum_size - response.minimum_size)) / 2.0)
 }
 
-fn validate_response(response: MarkResponse) -> Result<(), RealizationError> {
+fn radius_from_ink_with_support(
+    ink: f64,
+    response: MarkResponse,
+    maximum_support_radius: f64,
+) -> Result<f64, RealizationError> {
+    validate_response(response, maximum_support_radius)?;
+    if !ink.is_finite() {
+        return Err(RealizationError::new(
+            "realization.ink",
+            "effective mark ink must be finite",
+        ));
+    }
+    let ink = ink.clamp(0.0, 1.0);
+    Ok((response.minimum_size + ink * (response.maximum_size - response.minimum_size)) / 2.0)
+}
+
+fn validate_response(
+    response: MarkResponse,
+    maximum_support_radius: f64,
+) -> Result<(), RealizationError> {
+    validate_response_basic(response)?;
+    if !maximum_support_radius.is_finite() || maximum_support_radius < 0.0 {
+        return Err(RealizationError::new(
+            "realization.family.support_radius",
+            "family support capability must be finite and nonnegative",
+        ));
+    }
+    if response.maximum_size / 2.0 > maximum_support_radius {
+        return Err(RealizationError::new(
+            "realization.response.maximum_size",
+            "maximum diameter exceeds the family support capability",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_response_basic(response: MarkResponse) -> Result<(), RealizationError> {
     if !response.minimum_size.is_finite() || !response.maximum_size.is_finite() {
         return Err(RealizationError::new(
             "realization.response",
             "diameters must be finite",
         ));
     }
-    if response.minimum_size < 2.0
-        || response.maximum_size > 9.0
+    if response.minimum_size < 0.0
+        || response.maximum_size < 0.0
         || response.minimum_size > response.maximum_size
     {
         return Err(RealizationError::new(
             "realization.response",
-            "diameters must satisfy 2.0 <= minimum <= maximum <= 9.0",
+            "diameters must be nonnegative and minimum must not exceed maximum",
         ));
     }
     Ok(())
@@ -272,6 +311,7 @@ mod realization_tests {
             translation_y: -4.5,
             guard_steps: 2,
             support_radius: 4.5,
+            max_family_candidates: 1_048_576,
         })
         .unwrap()
     }
@@ -386,11 +426,21 @@ mod realization_tests {
             radius_from_ink(
                 0.5,
                 MarkResponse {
-                    minimum_size: 1.0,
+                    minimum_size: -1.0,
                     maximum_size: 9.0
                 }
             )
             .is_err()
+        );
+        assert!(
+            radius_from_ink(
+                0.5,
+                MarkResponse {
+                    minimum_size: 0.5,
+                    maximum_size: 12.0,
+                }
+            )
+            .is_ok()
         );
     }
 
@@ -451,6 +501,49 @@ mod realization_tests {
         assert_ne!(
             first.realization_fingerprint,
             second.realization_fingerprint
+        );
+    }
+
+    #[test]
+    fn direct_realization_rejects_a_response_beyond_declared_family_support() {
+        let family = family();
+        let canvas = CanvasSpec {
+            width: 90.0,
+            height: 60.0,
+        };
+        let error = realize_circular_marks(
+            &family,
+            &field(),
+            &canvas,
+            SourcePlacement::StretchToCanvas,
+            SourceComponent::Luminance,
+            MarkResponse {
+                minimum_size: 2.0,
+                maximum_size: 9.1,
+            },
+        )
+        .expect_err("family support is authoritative at direct realization");
+        assert_eq!(error.path(), "realization.response.maximum_size");
+
+        let mut wider_family = family;
+        wider_family.support_radius = 6.0;
+        let wider = realize_circular_marks(
+            &wider_family,
+            &field(),
+            &canvas,
+            SourcePlacement::StretchToCanvas,
+            SourceComponent::Luminance,
+            MarkResponse {
+                minimum_size: 0.5,
+                maximum_size: 12.0,
+            },
+        )
+        .expect("declared support permits diameters below 2 and above 9");
+        assert!(
+            wider
+                .marks
+                .iter()
+                .all(|mark| mark.radius >= 0.25 && mark.radius <= 6.0)
         );
     }
 
@@ -588,6 +681,18 @@ pub fn evaluate_straight_grid(request: &GridInspectRequest) -> Result<GridFamily
         dimensions[0].coverage(generation_domain, transform, request)?,
         dimensions[1].coverage(generation_domain, transform, request)?,
     ];
+    let first_count = guide_range_count(plans[0])?;
+    let second_count = guide_range_count(plans[1])?;
+    let candidate_count = first_count.checked_mul(second_count).ok_or(GridError::new(
+        "coverage.candidate_limit",
+        "guide-range candidate count overflowed",
+    ))?;
+    if candidate_count > request.max_family_candidates {
+        return Err(GridError::new(
+            "coverage.candidate_limit",
+            "guide-range candidate count exceeds the configured limit",
+        ));
+    }
 
     let extension = planning_margin;
     let mut guides = Vec::new();
@@ -754,6 +859,23 @@ fn checked_index(value: f64) -> Result<i64, GridError> {
     Ok(value as i64)
 }
 
+fn guide_range_count(coverage: GuideCoverage) -> Result<usize, GridError> {
+    let span = coverage
+        .last_index
+        .checked_sub(coverage.first_index)
+        .and_then(|value| value.checked_add(1))
+        .ok_or(GridError::new(
+            "coverage.candidate_limit",
+            "guide-range candidate count overflowed",
+        ))?;
+    usize::try_from(span).map_err(|_| {
+        GridError::new(
+            "coverage.candidate_limit",
+            "guide-range candidate count overflowed",
+        )
+    })
+}
+
 fn validate(request: &GridInspectRequest) -> Result<(), GridError> {
     validate_positive(request.canvas.width, "canvas.width")?;
     validate_positive(request.canvas.height, "canvas.height")?;
@@ -782,6 +904,12 @@ fn validate(request: &GridInspectRequest) -> Result<(), GridError> {
         return Err(GridError::new(
             "coverage.support_radius",
             "value must not be negative",
+        ));
+    }
+    if request.max_family_candidates == 0 {
+        return Err(GridError::new(
+            "coverage.candidate_limit",
+            "configured candidate limit must be nonzero",
         ));
     }
     Ok(())
@@ -866,4 +994,26 @@ fn fingerprint(request: &GridInspectRequest, spacing_x: f64, spacing_y: f64) -> 
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     format!("fnv1a64:{hash:016x}")
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    fn candidate_range_multiplication_reports_overflow_at_the_stable_limit_path() {
+        let coverage = GuideCoverage {
+            dimension_id: 1,
+            spacing: 1.0,
+            normalized_phase: 0.0,
+            first_index: i64::MIN,
+            last_index: i64::MAX,
+        };
+        assert_eq!(
+            guide_range_count(coverage)
+                .expect_err("span cannot fit i64")
+                .path(),
+            "coverage.candidate_limit"
+        );
+    }
 }

@@ -18,6 +18,7 @@ fn inspect_orchestration_preserves_family_output_without_document_mutation() {
         translation_y: -4.5,
         guard_steps: 2,
         support_radius: 4.5,
+        max_family_candidates: 1_048_576,
     })
     .expect("valid grid");
 

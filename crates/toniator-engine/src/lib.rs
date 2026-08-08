@@ -30,7 +30,8 @@ pub use toniator_render::{
 };
 use toniator_sampling::decode_source;
 pub use toniator_sampling::{
-    SourceField, SourceFormat, SourceFormatHint, SourceIdentity, SvgTextDiagnostic,
+    DECODER_CONTRACT_ID, SourceField, SourceFormat, SourceFormatHint, SourceIdentity,
+    SvgTextDiagnostic,
 };
 
 pub use toniator_patterns::{GridError, GridInspectRequest};
@@ -124,6 +125,57 @@ pub struct EvaluationRequest {
     source: ResolvedSource,
 }
 
+/// Immutable resource policy for one evaluation or scheduler.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EvaluationLimits {
+    max_family_candidates: usize,
+}
+
+impl EvaluationLimits {
+    pub const DEFAULT_MAX_FAMILY_CANDIDATES: usize = 1_048_576;
+
+    pub fn new(max_family_candidates: usize) -> Result<Self, EvaluationError> {
+        if max_family_candidates == 0 {
+            return Err(EvaluationError::new(
+                "coverage.candidate_limit",
+                "configured candidate limit must be nonzero",
+            ));
+        }
+        Ok(Self {
+            max_family_candidates,
+        })
+    }
+
+    pub const fn max_family_candidates(self) -> usize {
+        self.max_family_candidates
+    }
+}
+
+impl Default for EvaluationLimits {
+    fn default() -> Self {
+        Self {
+            max_family_candidates: Self::DEFAULT_MAX_FAMILY_CANDIDATES,
+        }
+    }
+}
+
+/// Whether a successful evaluation reused an accepted derived value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CacheDisposition {
+    Hit,
+    Miss,
+}
+
+/// Immutable per-layer diagnostics for a successful evaluation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CacheDiagnostics {
+    pub decoded_source: CacheDisposition,
+    pub family: CacheDisposition,
+    pub realization: CacheDisposition,
+    pub scene: CacheDisposition,
+    pub raster: CacheDisposition,
+}
+
 impl EvaluationRequest {
     pub fn new(snapshot: EvaluationSnapshot, source: ResolvedSource) -> Self {
         Self { snapshot, source }
@@ -158,21 +210,166 @@ impl EvaluationResult {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SourceCacheKey {
+    reference_id: String,
+    bytes: Arc<[u8]>,
+    format: SourceFormatHint,
+    decoder_contract: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FamilyCacheKey {
+    source: SourceCacheKey,
+    decoded_pixel_identity: String,
+    canvas: (u64, u64),
+    density: (u64, u64),
+    aspect_locked: bool,
+    rotation: u64,
+    translation: (u64, u64),
+    guard_steps: u32,
+    structure: u8,
+    output: u8,
+    maximum_support_radius: u64,
+    max_family_candidates: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RealizationCacheKey {
+    family: FamilyCacheKey,
+    decoded_pixel_identity: String,
+    canvas: (u64, u64),
+    source_component: u8,
+    placement: u8,
+    response: (u64, u64),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SceneCacheKey {
+    realization: RealizationCacheKey,
+    canvas: (u64, u64),
+    channel_id: u64,
+    visible: bool,
+    color: (u64, u64, u64, u64),
+    opacity: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RasterCacheKey {
+    scene: SceneCacheKey,
+    transparent_raster_contract: &'static str,
+}
+
+const TRANSPARENT_RASTER_CONTRACT_ID: &str = "toniator-render-transparent-raster-v1";
+
+#[derive(Clone)]
+struct DerivedCacheSnapshot {
+    source: Option<(SourceCacheKey, Arc<SourceField>)>,
+    family: Option<(FamilyCacheKey, Arc<GridFamilyOutput>)>,
+    realization: Option<(RealizationCacheKey, Arc<CircularMarkRealization>)>,
+    scene: Option<(SceneCacheKey, Arc<RenderScene>)>,
+    raster: Option<(RasterCacheKey, Arc<RasterSurface>)>,
+}
+
+impl DerivedCacheSnapshot {
+    fn empty() -> Self {
+        Self {
+            source: None,
+            family: None,
+            realization: None,
+            scene: None,
+            raster: None,
+        }
+    }
+}
+
+/// Private, disposable, last-successful cache. Values are immutable `Arc`s and
+/// are installed only by scheduler acceptance.
+#[derive(Default)]
+pub(crate) struct DerivedCache {
+    source: Option<(SourceCacheKey, Arc<SourceField>)>,
+    family: Option<(FamilyCacheKey, Arc<GridFamilyOutput>)>,
+    realization: Option<(RealizationCacheKey, Arc<CircularMarkRealization>)>,
+    scene: Option<(SceneCacheKey, Arc<RenderScene>)>,
+    raster: Option<(RasterCacheKey, Arc<RasterSurface>)>,
+}
+
+impl DerivedCache {
+    pub(crate) fn snapshot(&self) -> DerivedCacheSnapshot {
+        DerivedCacheSnapshot {
+            source: self.source.clone(),
+            family: self.family.clone(),
+            realization: self.realization.clone(),
+            scene: self.scene.clone(),
+            raster: self.raster.clone(),
+        }
+    }
+
+    pub(crate) fn commit(&mut self, transaction: CacheTransaction) {
+        if let Some(value) = transaction.source {
+            self.source = Some(value);
+        }
+        if let Some(value) = transaction.family {
+            self.family = Some(value);
+        }
+        if let Some(value) = transaction.realization {
+            self.realization = Some(value);
+        }
+        if let Some(value) = transaction.scene {
+            self.scene = Some(value);
+        }
+        if let Some(value) = transaction.raster {
+            self.raster = Some(value);
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct CacheTransaction {
+    source: Option<(SourceCacheKey, Arc<SourceField>)>,
+    family: Option<(FamilyCacheKey, Arc<GridFamilyOutput>)>,
+    realization: Option<(RealizationCacheKey, Arc<CircularMarkRealization>)>,
+    scene: Option<(SceneCacheKey, Arc<RenderScene>)>,
+    raster: Option<(RasterCacheKey, Arc<RasterSurface>)>,
+}
+
+pub(crate) struct CachedEvaluation {
+    pub(crate) result: EvaluationResult,
+    pub(crate) diagnostics: CacheDiagnostics,
+    pub(crate) transaction: CacheTransaction,
+}
+
 /// Evaluates exactly the Stage 3 -> Stage 4 -> Stage 5 chain represented by
 /// the immutable snapshot. It performs no document mutation or source lookup.
 pub fn evaluate(request: EvaluationRequest) -> Result<EvaluationResult, EvaluationError> {
-    match evaluate_with_cancellation(request, &NeverCancelled) {
-        Ok(result) => Ok(result),
+    evaluate_with_limits(request, EvaluationLimits::default())
+}
+
+/// Evaluates one immutable request under a caller-selected family candidate
+/// policy. This synchronous entry is intentionally uncached.
+pub fn evaluate_with_limits(
+    request: EvaluationRequest,
+    limits: EvaluationLimits,
+) -> Result<EvaluationResult, EvaluationError> {
+    match evaluate_cached_with_cancellation(
+        request,
+        &NeverCancelled,
+        DerivedCacheSnapshot::empty(),
+        limits,
+    ) {
+        Ok(result) => Ok(result.result),
         Err(EvaluationRunError::Evaluation(error)) => Err(error),
         Err(EvaluationRunError::Cancelled) => unreachable!("synchronous evaluation never cancels"),
     }
 }
 
-pub(crate) fn evaluate_cancellable(
+pub(crate) fn evaluate_cancellable_cached(
     request: EvaluationRequest,
     cancelled: &AtomicBool,
-) -> Result<EvaluationResult, EvaluationRunError> {
-    evaluate_with_cancellation(request, &AtomicCancellation(cancelled))
+    cache: DerivedCacheSnapshot,
+    limits: EvaluationLimits,
+) -> Result<CachedEvaluation, EvaluationRunError> {
+    evaluate_cached_with_cancellation(request, &AtomicCancellation(cancelled), cache, limits)
 }
 
 #[cfg(test)]
@@ -181,7 +378,13 @@ pub(crate) fn evaluate_cancellable_with_gate(
     cancelled: &AtomicBool,
     gate: &EvaluationStageGate,
 ) -> Result<EvaluationResult, EvaluationRunError> {
-    evaluate_with_cancellation(request, &ObservedCancellation { cancelled, gate })
+    evaluate_cached_with_cancellation(
+        request,
+        &ObservedCancellation { cancelled, gate },
+        DerivedCacheSnapshot::empty(),
+        EvaluationLimits::default(),
+    )
+    .map(|result| result.result)
 }
 
 trait CancellationProbe {
@@ -346,10 +549,12 @@ fn evaluate_stage<T>(
 
 /// Evaluates the same ordered Stage 3 -> Stage 4 -> Stage 5 path as
 /// [`evaluate`], checking cancellation only between existing pipeline stages.
-fn evaluate_with_cancellation(
+fn evaluate_cached_with_cancellation(
     request: EvaluationRequest,
     cancellation: &dyn CancellationProbe,
-) -> Result<EvaluationResult, EvaluationRunError> {
+    cache: DerivedCacheSnapshot,
+    limits: EvaluationLimits,
+) -> Result<CachedEvaluation, EvaluationRunError> {
     let document = request.snapshot.document();
     let channel_id = request.snapshot.token().channel_id();
     let channel = document.channel(channel_id).ok_or(EvaluationError::new(
@@ -399,6 +604,45 @@ fn evaluate_with_cancellation(
         minimum_size: channel.mark_geometry_response.minimum_size,
         maximum_size: channel.mark_geometry_response.maximum_size,
     };
+    let source_key = SourceCacheKey {
+        reference_id: request.source.reference_id().as_str().to_owned(),
+        bytes: Arc::clone(&request.source.bytes),
+        format: request.source.format(),
+        decoder_contract: DECODER_CONTRACT_ID,
+    };
+    // Preflight above remains authoritative. Decode deliberately occurs before
+    // the family lookup so decoded-pixel identity participates downstream.
+    let (source, source_disposition) =
+        evaluate_stage(EvaluationStage::Decode, cancellation, || {
+            match &cache.source {
+                Some((key, source)) if *key == source_key => {
+                    Ok((Arc::clone(source), CacheDisposition::Hit))
+                }
+                _ => decode_source(request.source.bytes(), request.source.format())
+                    .map(|source| (Arc::new(source), CacheDisposition::Miss))
+                    .map_err(EvaluationError::from_sampling),
+            }
+        })?;
+    let family_key = FamilyCacheKey {
+        source: source_key.clone(),
+        decoded_pixel_identity: source.identity().decoded_pixel_hash.clone(),
+        canvas: canvas_key(document.canvas()),
+        density: (
+            channel.layout.density.across_x.to_bits(),
+            channel.layout.density.across_y.to_bits(),
+        ),
+        aspect_locked: channel.layout.density.aspect_locked,
+        rotation: channel.layout.rotation_degrees.to_bits(),
+        translation: (
+            channel.layout.translation_x.to_bits(),
+            channel.layout.translation_y.to_bits(),
+        ),
+        guard_steps: definition.guard_steps,
+        structure: structure_key(definition.structure),
+        output: output_key(definition.output),
+        maximum_support_radius: definition.maximum_support_radius.to_bits(),
+        max_family_candidates: limits.max_family_candidates(),
+    };
     let grid = GridInspectRequest {
         canvas: document.canvas().clone(),
         density: channel.layout.density.clone(),
@@ -406,46 +650,119 @@ fn evaluate_with_cancellation(
         translation_x: channel.layout.translation_x,
         translation_y: channel.layout.translation_y,
         guard_steps: definition.guard_steps,
-        support_radius: response.maximum_size / 2.0,
+        support_radius: definition.maximum_support_radius,
+        max_family_candidates: limits.max_family_candidates(),
     };
-    let family = evaluate_stage(EvaluationStage::Family, cancellation, || {
-        inspect_straight_grid(&grid).map_err(EvaluationError::from_grid)
+    let (family, family_disposition) =
+        evaluate_stage(EvaluationStage::Family, cancellation, || {
+            match &cache.family {
+                Some((key, family)) if *key == family_key => {
+                    Ok((Arc::clone(family), CacheDisposition::Hit))
+                }
+                _ => inspect_straight_grid(&grid)
+                    .map(|family| (Arc::new(family), CacheDisposition::Miss))
+                    .map_err(EvaluationError::from_grid),
+            }
+        })?;
+    let realization_key = RealizationCacheKey {
+        family: family_key.clone(),
+        decoded_pixel_identity: source.identity().decoded_pixel_hash.clone(),
+        canvas: canvas_key(document.canvas()),
+        source_component: source_component_key(channel.source_mapping.component),
+        placement: placement_key(channel.source_mapping.placement),
+        response: (
+            response.minimum_size.to_bits(),
+            response.maximum_size.to_bits(),
+        ),
+    };
+    let (realization, realization_disposition) = evaluate_stage(
+        EvaluationStage::Realization,
+        cancellation,
+        || match &cache.realization {
+            Some((key, realization)) if *key == realization_key => {
+                Ok((Arc::clone(realization), CacheDisposition::Hit))
+            }
+            _ => realize_from_existing_family(
+                &family,
+                &source,
+                document.canvas(),
+                channel.source_mapping.placement,
+                channel.source_mapping.component,
+                response,
+            )
+            .map(|realization| (Arc::new(realization), CacheDisposition::Miss))
+            .map_err(EvaluationError::from_realization),
+        },
+    )?;
+    let scene_key = SceneCacheKey {
+        realization: realization_key.clone(),
+        canvas: canvas_key(document.canvas()),
+        channel_id: channel_id.0,
+        visible: channel.appearance.visible,
+        color: color_key(&channel.appearance.color),
+        opacity: channel.appearance.opacity.to_bits(),
+    };
+    let (scene, scene_disposition) = evaluate_stage(EvaluationStage::Scene, cancellation, || {
+        match &cache.scene {
+            Some((key, scene)) if *key == scene_key => {
+                Ok((Arc::clone(scene), CacheDisposition::Hit))
+            }
+            _ => build_scene(SceneBuild {
+                canvas: document.canvas().clone(),
+                channel_id,
+                visible: channel.appearance.visible,
+                color: channel.appearance.color.clone(),
+                opacity: channel.appearance.opacity,
+                family_fingerprint: realization.family_fingerprint.clone(),
+                realization_fingerprint: realization.realization_fingerprint.clone(),
+                marks: realization.marks.clone(),
+            })
+            .map(|scene| (Arc::new(scene), CacheDisposition::Miss)),
+        }
     })?;
-    let source = evaluate_stage(EvaluationStage::Decode, cancellation, || {
-        decode_source(request.source.bytes(), request.source.format())
-            .map_err(EvaluationError::from_sampling)
-    })?;
-    let realization = evaluate_stage(EvaluationStage::Realization, cancellation, || {
-        realize_from_existing_family(
-            &family,
-            &source,
-            document.canvas(),
-            channel.source_mapping.placement,
-            channel.source_mapping.component,
-            response,
-        )
-        .map_err(EvaluationError::from_realization)
-    })?;
-    let scene = evaluate_stage(EvaluationStage::Scene, cancellation, || {
-        build_scene(SceneBuild {
-            canvas: document.canvas().clone(),
-            channel_id,
-            visible: channel.appearance.visible,
-            color: channel.appearance.color.clone(),
-            opacity: channel.appearance.opacity,
-            family_fingerprint: realization.family_fingerprint,
-            realization_fingerprint: realization.realization_fingerprint,
-            marks: realization.marks,
-        })
-    })?;
-    let raster = evaluate_stage(EvaluationStage::Raster, cancellation, || {
-        rasterize(&scene, RasterBackground::Transparent).map_err(EvaluationError::from_render)
-    })?;
-    Ok(EvaluationResult {
-        token: request.snapshot.token(),
-        source_identity: source.identity().clone(),
-        scene,
-        raster,
+    let raster_key = RasterCacheKey {
+        scene: scene_key.clone(),
+        transparent_raster_contract: TRANSPARENT_RASTER_CONTRACT_ID,
+    };
+    let (raster, raster_disposition) =
+        evaluate_stage(EvaluationStage::Raster, cancellation, || {
+            match &cache.raster {
+                Some((key, raster)) if *key == raster_key => {
+                    Ok((Arc::clone(raster), CacheDisposition::Hit))
+                }
+                _ => rasterize(&scene, RasterBackground::Transparent)
+                    .map(|raster| (Arc::new(raster), CacheDisposition::Miss))
+                    .map_err(EvaluationError::from_render),
+            }
+        })?;
+    let diagnostics = CacheDiagnostics {
+        decoded_source: source_disposition,
+        family: family_disposition,
+        realization: realization_disposition,
+        scene: scene_disposition,
+        raster: raster_disposition,
+    };
+    let transaction = CacheTransaction {
+        source: matches!(source_disposition, CacheDisposition::Miss)
+            .then(|| (source_key, source.clone())),
+        family: matches!(family_disposition, CacheDisposition::Miss)
+            .then(|| (family_key, family.clone())),
+        realization: matches!(realization_disposition, CacheDisposition::Miss)
+            .then(|| (realization_key, realization.clone())),
+        scene: matches!(scene_disposition, CacheDisposition::Miss)
+            .then(|| (scene_key, scene.clone())),
+        raster: matches!(raster_disposition, CacheDisposition::Miss)
+            .then(|| (raster_key, raster.clone())),
+    };
+    Ok(CachedEvaluation {
+        result: EvaluationResult {
+            token: request.snapshot.token(),
+            source_identity: source.identity().clone(),
+            scene: (*scene).clone(),
+            raster: (*raster).clone(),
+        },
+        diagnostics,
+        transaction,
     })
 }
 
@@ -477,6 +794,46 @@ fn build_scene(input: SceneBuild) -> Result<RenderScene, EvaluationError> {
         ],
     )
     .map_err(EvaluationError::from_render)
+}
+
+fn canvas_key(canvas: &CanvasSpec) -> (u64, u64) {
+    (canvas.width.to_bits(), canvas.height.to_bits())
+}
+
+fn structure_key(value: PatternStructure) -> u8 {
+    match value {
+        PatternStructure::StraightGrid => 1,
+        PatternStructure::Unsupported => 255,
+    }
+}
+
+fn output_key(value: PatternOutput) -> u8 {
+    match value {
+        PatternOutput::CircularMarks => 1,
+        PatternOutput::Unsupported => 255,
+    }
+}
+
+fn source_component_key(value: SourceComponent) -> u8 {
+    match value {
+        SourceComponent::Luminance => 1,
+        SourceComponent::Alpha => 2,
+    }
+}
+
+fn placement_key(value: SourcePlacement) -> u8 {
+    match value {
+        SourcePlacement::StretchToCanvas => 1,
+    }
+}
+
+fn color_key(color: &toniator_domain::ColorValue) -> (u64, u64, u64, u64) {
+    (
+        color.red.to_bits(),
+        color.green.to_bits(),
+        color.blue.to_bits(),
+        color.alpha.to_bits(),
+    )
 }
 
 /// Exposes realization from an already evaluated family so callers can prove
@@ -614,6 +971,7 @@ pub(crate) mod test_support {
                 structure: PatternStructure::StraightGrid,
                 output: PatternOutput::CircularMarks,
                 guard_steps: 2,
+                maximum_support_radius: 4.5,
             }],
             vec![ChannelState {
                 id: CHANNEL_ID,
@@ -718,5 +1076,131 @@ pub(crate) mod test_support {
             Err(EvaluationRunError::Cancelled)
         );
         worker.join().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod cache_key_tests {
+    use super::*;
+
+    #[test]
+    fn svg_decoded_pixel_identity_participates_in_every_downstream_key() {
+        let source = SourceCacheKey {
+            reference_id: "svg".to_owned(),
+            bytes: Arc::<[u8]>::from(vec![1_u8, 2, 3]),
+            format: SourceFormatHint::Svg,
+            decoder_contract: DECODER_CONTRACT_ID,
+        };
+        let family = |decoded: &str, aspect_locked: bool| FamilyCacheKey {
+            source: source.clone(),
+            decoded_pixel_identity: decoded.to_owned(),
+            canvas: (900.0_f64.to_bits(), 600.0_f64.to_bits()),
+            density: (90.0_f64.to_bits(), 60.0_f64.to_bits()),
+            aspect_locked,
+            rotation: 17.0_f64.to_bits(),
+            translation: (3.25_f64.to_bits(), (-4.5_f64).to_bits()),
+            guard_steps: 2,
+            structure: 1,
+            output: 1,
+            maximum_support_radius: 4.5_f64.to_bits(),
+            max_family_candidates: EvaluationLimits::DEFAULT_MAX_FAMILY_CANDIDATES,
+        };
+        let first_family = family("pixels-a", true);
+        let second_family = family("pixels-b", true);
+        assert_ne!(first_family, second_family);
+        assert_ne!(family("pixels-a", true), family("pixels-a", false));
+        let realization = |family: FamilyCacheKey| RealizationCacheKey {
+            family,
+            decoded_pixel_identity: "pixels-a".to_owned(),
+            canvas: (900.0_f64.to_bits(), 600.0_f64.to_bits()),
+            source_component: 1,
+            placement: 1,
+            response: (2.0_f64.to_bits(), 9.0_f64.to_bits()),
+        };
+        let first_realization = realization(first_family);
+        let second_realization = realization(second_family);
+        assert_ne!(first_realization, second_realization);
+        let scene = |realization: RealizationCacheKey| SceneCacheKey {
+            realization,
+            canvas: (900.0_f64.to_bits(), 600.0_f64.to_bits()),
+            channel_id: 1,
+            visible: true,
+            color: (0, 0, 0, 1.0_f64.to_bits()),
+            opacity: 0.72_f64.to_bits(),
+        };
+        let first_scene = scene(first_realization);
+        let second_scene = scene(second_realization);
+        assert_ne!(first_scene, second_scene);
+        assert_ne!(
+            RasterCacheKey {
+                scene: first_scene,
+                transparent_raster_contract: TRANSPARENT_RASTER_CONTRACT_ID
+            },
+            RasterCacheKey {
+                scene: second_scene,
+                transparent_raster_contract: TRANSPARENT_RASTER_CONTRACT_ID
+            },
+        );
+    }
+
+    #[test]
+    fn source_key_invalidation_includes_reference_bytes_format_and_decoder_contract() {
+        let baseline = SourceCacheKey {
+            reference_id: "source-a".to_owned(),
+            bytes: Arc::<[u8]>::from(vec![1_u8, 2, 3]),
+            format: SourceFormatHint::Png,
+            decoder_contract: "decoder-a",
+        };
+        let variants = [
+            SourceCacheKey {
+                reference_id: "source-b".to_owned(),
+                ..baseline.clone()
+            },
+            SourceCacheKey {
+                bytes: Arc::<[u8]>::from(vec![1_u8, 2, 4]),
+                ..baseline.clone()
+            },
+            SourceCacheKey {
+                format: SourceFormatHint::Svg,
+                ..baseline.clone()
+            },
+            SourceCacheKey {
+                decoder_contract: "decoder-b",
+                ..baseline.clone()
+            },
+        ];
+        for changed in variants {
+            assert_ne!(baseline, changed);
+            assert_ne!(
+                FamilyCacheKey {
+                    source: baseline.clone(),
+                    decoded_pixel_identity: "pixels".to_owned(),
+                    canvas: (1, 1),
+                    density: (1, 1),
+                    aspect_locked: true,
+                    rotation: 1,
+                    translation: (1, 1),
+                    guard_steps: 2,
+                    structure: 1,
+                    output: 1,
+                    maximum_support_radius: 1,
+                    max_family_candidates: 1,
+                },
+                FamilyCacheKey {
+                    source: changed,
+                    decoded_pixel_identity: "pixels".to_owned(),
+                    canvas: (1, 1),
+                    density: (1, 1),
+                    aspect_locked: true,
+                    rotation: 1,
+                    translation: (1, 1),
+                    guard_steps: 2,
+                    structure: 1,
+                    output: 1,
+                    maximum_support_radius: 1,
+                    max_family_candidates: 1,
+                },
+            );
+        }
     }
 }
