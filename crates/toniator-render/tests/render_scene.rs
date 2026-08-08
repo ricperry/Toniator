@@ -1,10 +1,16 @@
-use toniator_domain::{CanvasSpec, ChannelId, ColorValue};
+use std::{
+    fs,
+    process::Command,
+    sync::{Mutex, OnceLock},
+};
+
+use toniator_domain::{CanvasSpec, ChannelId, ColorValue, HalftoneChannelModel};
 use toniator_geometry::{
     CanonicalCircleMark, GuideInstanceId, GuideIntersectionProvenance, Point2, SiteId, SiteScope,
 };
 use toniator_render::{
-    GeometryOutput, RasterBackground, RasterSurface, RenderLayer, RenderScene, encode_png,
-    linear_to_srgb, rasterize, srgb_to_linear, write_svg,
+    GeometryOutput, RasterBackground, RasterSurface, RenderLayer, RenderScene, SourceColorCircle,
+    encode_png, linear_to_srgb, rasterize, srgb_to_linear, write_svg,
 };
 
 fn mark(x: f64, y: f64, radius: f64, scope: SiteScope) -> CanonicalCircleMark {
@@ -57,6 +63,69 @@ fn scene(visible: bool, color: ColorValue, opacity: f64) -> RenderScene {
         ],
     )
     .unwrap()
+}
+
+fn modeled(model: HalftoneChannelModel, layers: Vec<RenderLayer>) -> RenderScene {
+    modeled_with_canvas(model, 6.0, 6.0, layers)
+}
+
+fn modeled_with_canvas(
+    model: HalftoneChannelModel,
+    width: f64,
+    height: f64,
+    layers: Vec<RenderLayer>,
+) -> RenderScene {
+    RenderScene::new_modeled(
+        CanvasSpec { width, height },
+        "stage-9c-family".into(),
+        "stage-9c-realization".into(),
+        model,
+        layers,
+    )
+    .unwrap()
+}
+
+fn overlap_layer(channel_id: u64, color: ColorValue, opacity: f64, center_x: f64) -> RenderLayer {
+    overlap_layer_with_visibility(channel_id, true, color, opacity, center_x)
+}
+
+fn overlap_layer_with_visibility(
+    channel_id: u64,
+    visible: bool,
+    color: ColorValue,
+    opacity: f64,
+    center_x: f64,
+) -> RenderLayer {
+    RenderLayer::new(
+        ChannelId(channel_id),
+        visible,
+        color,
+        opacity,
+        GeometryOutput::CircularMarks(vec![mark(center_x, 80.0, 66.0, SiteScope::Canvas)]),
+    )
+    .unwrap()
+}
+
+fn full_mark() -> GeometryOutput {
+    GeometryOutput::CircularMarks(vec![mark(3.5, 3.5, 1.0, SiteScope::Canvas)])
+}
+
+fn solid(channel_id: u64, color: ColorValue, opacity: f64) -> RenderLayer {
+    RenderLayer::new(ChannelId(channel_id), true, color, opacity, full_mark()).unwrap()
+}
+
+fn center(surface: &RasterSurface) -> [u8; 4] {
+    let offset = 4 * (3 * surface.width() as usize + 3);
+    surface.pixels()[offset..offset + 4].try_into().unwrap()
+}
+
+fn color(red: f64, green: f64, blue: f64, alpha: f64) -> ColorValue {
+    ColorValue {
+        red,
+        green,
+        blue,
+        alpha,
+    }
 }
 
 #[test]
@@ -354,4 +423,698 @@ fn svg_is_deterministic_clipped_and_uses_linear_to_srgb_color() {
     assert!(svg.contains("fill=\"#00b7ff\" fill-opacity=\"0.72\""));
     assert_eq!(svg.matches("<circle ").count(), 2);
     assert!(svg.contains("family=family;realization=realization;scene=fnv1a64:"));
+}
+
+#[test]
+fn rgb_plus_uses_linear_primaries_secondaries_neutrals_and_saturation() {
+    let red = color(1.0, 0.0, 0.0, 1.0);
+    let green = color(0.0, 1.0, 0.0, 1.0);
+    let blue = color(0.0, 0.0, 1.0, 1.0);
+    for (layers, expected) in [
+        (vec![solid(1, red.clone(), 1.0)], [255, 0, 0, 255]),
+        (
+            vec![solid(1, red.clone(), 1.0), solid(2, green.clone(), 1.0)],
+            [255, 255, 0, 255],
+        ),
+        (
+            vec![solid(1, red.clone(), 1.0), solid(3, blue.clone(), 1.0)],
+            [255, 0, 255, 255],
+        ),
+        (
+            vec![solid(2, green.clone(), 1.0), solid(3, blue.clone(), 1.0)],
+            [0, 255, 255, 255],
+        ),
+        (
+            vec![
+                solid(1, red.clone(), 1.0),
+                solid(2, green.clone(), 1.0),
+                solid(3, blue.clone(), 1.0),
+            ],
+            [255, 255, 255, 255],
+        ),
+    ] {
+        let surface = rasterize(
+            &modeled(HalftoneChannelModel::Rgb, layers),
+            RasterBackground::Transparent,
+        )
+        .unwrap();
+        assert_eq!(center(&surface), expected);
+    }
+    let neutral = rasterize(
+        &modeled(
+            HalftoneChannelModel::Rgb,
+            vec![solid(1, color(0.25, 0.25, 0.25, 1.0), 1.0)],
+        ),
+        RasterBackground::Transparent,
+    )
+    .unwrap();
+    assert_eq!(center(&neutral)[0], center(&neutral)[1]);
+    assert_eq!(center(&neutral)[1], center(&neutral)[2]);
+    let saturated = rasterize(
+        &modeled(
+            HalftoneChannelModel::Rgb,
+            vec![solid(1, red.clone(), 1.0), solid(2, red, 1.0)],
+        ),
+        RasterBackground::Transparent,
+    )
+    .unwrap();
+    assert_eq!(center(&saturated), [255, 0, 0, 255]);
+}
+
+#[test]
+fn cmyk_transmittance_has_exact_secondaries_k_and_white_recovery() {
+    let cyan = color(0.0, 1.0, 1.0, 1.0);
+    let magenta = color(1.0, 0.0, 1.0, 1.0);
+    let yellow = color(1.0, 1.0, 0.0, 1.0);
+    let black = color(0.0, 0.0, 0.0, 1.0);
+    for (layers, expected) in [
+        (
+            vec![
+                solid(5, magenta.clone(), 1.0),
+                solid(6, yellow.clone(), 1.0),
+            ],
+            [255, 0, 0, 255],
+        ),
+        (
+            vec![solid(4, cyan.clone(), 1.0), solid(6, yellow.clone(), 1.0)],
+            [0, 255, 0, 255],
+        ),
+        (
+            vec![solid(4, cyan.clone(), 1.0), solid(5, magenta.clone(), 1.0)],
+            [0, 0, 255, 255],
+        ),
+        (
+            vec![
+                solid(4, cyan.clone(), 1.0),
+                solid(5, magenta.clone(), 1.0),
+                solid(6, yellow.clone(), 1.0),
+            ],
+            [0, 0, 0, 255],
+        ),
+        (vec![solid(7, black, 1.0)], [0, 0, 0, 255]),
+    ] {
+        let surface = rasterize(
+            &modeled(HalftoneChannelModel::Cmyk, layers),
+            RasterBackground::Transparent,
+        )
+        .unwrap();
+        assert_eq!(center(&surface), expected);
+    }
+    let half_cyan = rasterize(
+        &modeled(HalftoneChannelModel::Cmyk, vec![solid(4, cyan, 0.5)]),
+        RasterBackground::Transparent,
+    )
+    .unwrap();
+    let transparent = center(&half_cyan);
+    assert_eq!(transparent[3], 128);
+    let over_white = rasterize(
+        &modeled(
+            HalftoneChannelModel::Cmyk,
+            vec![solid(4, color(0.0, 1.0, 1.0, 1.0), 0.5)],
+        ),
+        RasterBackground::OpaqueWhite,
+    )
+    .unwrap();
+    assert_eq!(
+        center(&over_white),
+        [188, 255, 255, 255],
+        "T is recovered over white"
+    );
+    let over_black = rasterize(
+        &modeled(
+            HalftoneChannelModel::Cmyk,
+            vec![solid(4, color(0.0, 1.0, 1.0, 1.0), 0.5)],
+        ),
+        RasterBackground::OpaqueBlack,
+    )
+    .unwrap();
+    assert_eq!(center(&over_black), [0, 188, 188, 255]);
+    let neutral = rasterize(
+        &modeled(
+            HalftoneChannelModel::Cmyk,
+            vec![solid(7, color(0.0, 0.0, 0.0, 1.0), 0.5)],
+        ),
+        RasterBackground::OpaqueWhite,
+    )
+    .unwrap();
+    assert_eq!(center(&neutral), [188, 188, 188, 255]);
+}
+
+#[test]
+fn modeled_layers_keep_per_mark_coverage_opacity_visibility_and_straight_output() {
+    let half = solid(1, color(1.0, 0.0, 0.0, 0.5), 0.5);
+    let surface = rasterize(
+        &modeled(HalftoneChannelModel::Rgb, vec![half]),
+        RasterBackground::Transparent,
+    )
+    .unwrap();
+    assert_eq!(center(&surface), [255, 0, 0, 64]);
+    let invisible = RenderLayer::new(
+        ChannelId(1),
+        false,
+        color(1.0, 0.0, 0.0, 1.0),
+        1.0,
+        full_mark(),
+    )
+    .unwrap();
+    let transparent = rasterize(
+        &modeled(HalftoneChannelModel::Rgb, vec![invisible]),
+        RasterBackground::Transparent,
+    )
+    .unwrap();
+    assert!(
+        transparent
+            .pixels()
+            .chunks_exact(4)
+            .all(|pixel| pixel == [0, 0, 0, 0])
+    );
+    let fractional = RenderLayer::new(
+        ChannelId(1),
+        true,
+        color(1.0, 0.0, 0.0, 1.0),
+        1.0,
+        GeometryOutput::CircularMarks(vec![mark(0.5, 0.5, 0.5, SiteScope::Canvas)]),
+    )
+    .unwrap();
+    let fractional = rasterize(
+        &modeled(HalftoneChannelModel::Rgb, vec![fractional]),
+        RasterBackground::Transparent,
+    )
+    .unwrap();
+    let edge = &fractional.pixels()[..4];
+    assert!(edge[3] > 0 && edge[3] < 255);
+    assert_eq!(edge[0], 255, "unassociation remains straight sRGBA");
+}
+
+#[test]
+fn source_color_alpha_uses_stable_mark_source_over() {
+    let source_marks = vec![
+        SourceColorCircle {
+            mark: mark(3.5, 3.5, 1.0, SiteScope::Canvas),
+            paint: color(1.0, 0.0, 0.0, 1.0),
+        },
+        SourceColorCircle {
+            mark: mark(3.5, 3.5, 1.0, SiteScope::Canvas),
+            paint: color(0.0, 0.0, 1.0, 1.0),
+        },
+    ];
+    let layer = RenderLayer::new_source_color(ChannelId(8), true, 0.5, source_marks).unwrap();
+    let surface = rasterize(
+        &modeled(HalftoneChannelModel::SourceColorAlpha, vec![layer]),
+        RasterBackground::Transparent,
+    )
+    .unwrap();
+    assert_eq!(center(&surface), [156, 0, 213, 191]);
+    assert!(
+        RenderScene::new_modeled(
+            CanvasSpec {
+                width: 6.0,
+                height: 6.0
+            },
+            "source".into(),
+            "source".into(),
+            HalftoneChannelModel::SourceColorAlpha,
+            vec![
+                solid(8, color(1.0, 0.0, 0.0, 1.0), 1.0),
+                solid(9, color(0.0, 0.0, 1.0, 1.0), 1.0)
+            ],
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn modeled_scene_validates_fixed_paint_kinds_and_opaque_source_paint() {
+    let source_marks = vec![SourceColorCircle {
+        mark: mark(3.5, 3.5, 1.0, SiteScope::Canvas),
+        paint: color(0.2, 0.4, 0.6, 1.0),
+    }];
+    let sampled = RenderLayer::new_source_color(ChannelId(8), true, 1.0, source_marks).unwrap();
+    let canvas = CanvasSpec {
+        width: 6.0,
+        height: 6.0,
+    };
+    for model in [HalftoneChannelModel::Rgb, HalftoneChannelModel::Cmyk] {
+        assert_eq!(
+            RenderScene::new_modeled(
+                canvas.clone(),
+                "sampled".into(),
+                "sampled".into(),
+                model,
+                vec![sampled.clone()],
+            )
+            .unwrap_err()
+            .path(),
+            "scene.layers"
+        );
+    }
+    assert_eq!(
+        RenderScene::new(
+            canvas.clone(),
+            "legacy".into(),
+            "legacy".into(),
+            vec![sampled.clone()],
+        )
+        .unwrap_err()
+        .path(),
+        "scene.layers"
+    );
+    assert_eq!(
+        RenderScene::new_modeled(
+            canvas,
+            "solid".into(),
+            "solid".into(),
+            HalftoneChannelModel::SourceColorAlpha,
+            vec![solid(8, color(0.2, 0.4, 0.6, 1.0), 1.0)],
+        )
+        .unwrap_err()
+        .path(),
+        "scene.layers"
+    );
+    assert_eq!(
+        RenderLayer::new_source_color(
+            ChannelId(8),
+            true,
+            1.0,
+            vec![SourceColorCircle {
+                mark: mark(3.5, 3.5, 1.0, SiteScope::Canvas),
+                paint: color(0.2, 0.4, 0.6, 0.5),
+            }],
+        )
+        .unwrap_err()
+        .path(),
+        "scene.layer.source_color"
+    );
+}
+
+#[test]
+fn modeled_single_layer_matches_accepted_stage5_transparent_pixels() {
+    let accepted = RenderScene::new(
+        CanvasSpec {
+            width: 6.0,
+            height: 6.0,
+        },
+        "family".into(),
+        "realization".into(),
+        vec![solid(1, color(0.2, 0.6, 0.9, 0.7), 0.8)],
+    )
+    .unwrap();
+    let modeled = modeled(
+        HalftoneChannelModel::Rgb,
+        vec![solid(1, color(0.2, 0.6, 0.9, 0.7), 0.8)],
+    );
+    assert_eq!(
+        rasterize(&accepted, RasterBackground::Transparent)
+            .unwrap()
+            .pixels(),
+        rasterize(&modeled, RasterBackground::Transparent)
+            .unwrap()
+            .pixels(),
+    );
+}
+
+#[test]
+fn modeled_svg_is_one_editable_canvas_with_ordered_vector_channel_groups() {
+    let rgb = write_svg(&modeled(
+        HalftoneChannelModel::Rgb,
+        vec![
+            solid(1, color(1.0, 0.0, 0.0, 1.0), 1.0),
+            solid(2, color(0.0, 1.0, 0.0, 1.0), 1.0),
+        ],
+    ));
+    assert!(rgb.contains("<title>Toniator RGB halftone</title>"));
+    assert_eq!(rgb.matches("clip-path=").count(), 1);
+    assert!(
+        rgb.contains(
+            "<g id=\"canvas\" clip-path=\"url(#canvas-clip)\" style=\"isolation:isolate\">"
+        )
+    );
+    let defs_end = rgb.find("</defs>").unwrap();
+    let canvas = rgb.find("<g id=\"canvas\"").unwrap();
+    let channel_one = rgb
+        .find("<g id=\"channel-1\" style=\"mix-blend-mode:screen\">")
+        .unwrap();
+    let channel_two = rgb
+        .find("<g id=\"channel-2\" style=\"mix-blend-mode:screen\">")
+        .unwrap();
+    assert!(defs_end < canvas && canvas < channel_one && channel_one < channel_two);
+    assert_eq!(rgb.matches("<g id=\"channel-").count(), 2);
+    assert_eq!(rgb.matches("<circle ").count(), 2);
+    assert!(rgb.contains("id=\"channel-1-mark-0\""));
+    assert!(rgb.contains("id=\"channel-2-mark-0\""));
+    assert!(!rgb.contains("<feImage") && !rgb.contains("<filter") && !rgb.contains("data:image"));
+    assert!(!rgb.contains("fill-opacity=\"0\" filter="));
+    let cmyk = write_svg(&modeled(
+        HalftoneChannelModel::Cmyk,
+        vec![
+            solid(4, color(0.0, 1.0, 1.0, 1.0), 1.0),
+            solid(5, color(1.0, 0.0, 1.0, 1.0), 1.0),
+        ],
+    ));
+    assert!(cmyk.contains("<title>Toniator CMYK halftone</title>"));
+    assert!(cmyk.contains("<g id=\"channel-4\" style=\"mix-blend-mode:multiply\">"));
+    assert!(cmyk.contains("<g id=\"channel-5\" style=\"mix-blend-mode:multiply\">"));
+    assert_eq!(cmyk.matches("<g id=\"channel-").count(), 2);
+    let source_color = write_svg(&modeled(
+        HalftoneChannelModel::SourceColorAlpha,
+        vec![
+            RenderLayer::new_source_color(
+                ChannelId(8),
+                true,
+                1.0,
+                vec![SourceColorCircle {
+                    mark: mark(3.5, 3.5, 1.0, SiteScope::Canvas),
+                    paint: color(0.2, 0.4, 0.6, 1.0),
+                }],
+            )
+            .unwrap(),
+        ],
+    ));
+    assert!(source_color.contains("<title>Toniator source-colored halftone</title>"));
+    assert_eq!(source_color.matches("clip-path=").count(), 1);
+    assert!(
+        source_color.contains(
+            "<g id=\"canvas\" clip-path=\"url(#canvas-clip)\" style=\"isolation:isolate\">"
+        )
+    );
+    assert!(source_color.contains("<g id=\"channel-8\">"));
+    assert!(source_color.contains("id=\"channel-8-mark-0\""));
+    assert_eq!(source_color.matches("<g id=\"channel-").count(), 1);
+    assert!(!source_color.contains("<filter"));
+    assert!(!source_color.contains("mix-blend-mode"));
+}
+
+#[test]
+fn invisible_modeled_channels_keep_editable_geometry_but_do_not_render() {
+    let output = validation_output();
+    let rgb = modeled_with_canvas(
+        HalftoneChannelModel::Rgb,
+        200.0,
+        160.0,
+        vec![
+            overlap_layer(1, color(1.0, 0.0, 0.0, 1.0), 1.0, 80.0),
+            overlap_layer_with_visibility(2, false, color(0.0, 1.0, 0.0, 1.0), 1.0, 120.0),
+        ],
+    );
+    assert_invisible_channel_is_editable_but_hidden(
+        &rgb,
+        &output.join("synthetic-rgb-hidden-channel.svg"),
+        &output.join("synthetic-rgb-hidden-channel-inkscape.png"),
+        "<g id=\"channel-2\" style=\"mix-blend-mode:screen;display:none\">",
+        "channel-2-mark-0",
+        [255, 0, 0, 255],
+    );
+
+    let cmyk = modeled_with_canvas(
+        HalftoneChannelModel::Cmyk,
+        200.0,
+        160.0,
+        vec![
+            overlap_layer(4, color(0.0, 1.0, 1.0, 1.0), 1.0, 80.0),
+            overlap_layer_with_visibility(5, false, color(1.0, 0.0, 1.0, 1.0), 1.0, 120.0),
+        ],
+    );
+    assert_invisible_channel_is_editable_but_hidden(
+        &cmyk,
+        &output.join("synthetic-cmyk-hidden-channel.svg"),
+        &output.join("synthetic-cmyk-hidden-channel-inkscape.png"),
+        "<g id=\"channel-5\" style=\"mix-blend-mode:multiply;display:none\">",
+        "channel-5-mark-0",
+        [0, 255, 255, 255],
+    );
+
+    let source = modeled_with_canvas(
+        HalftoneChannelModel::SourceColorAlpha,
+        200.0,
+        160.0,
+        vec![
+            RenderLayer::new_source_color(
+                ChannelId(8),
+                false,
+                1.0,
+                vec![SourceColorCircle {
+                    mark: mark(80.0, 80.0, 66.0, SiteScope::Canvas),
+                    paint: color(0.2, 0.4, 0.6, 1.0),
+                }],
+            )
+            .unwrap(),
+        ],
+    );
+    assert_invisible_channel_is_editable_but_hidden(
+        &source,
+        &output.join("synthetic-source-hidden-channel.svg"),
+        &output.join("synthetic-source-hidden-channel-inkscape.png"),
+        "<g id=\"channel-8\" style=\"display:none\">",
+        "channel-8-mark-0",
+        [0, 0, 0, 0],
+    );
+}
+
+#[test]
+fn editable_rgb_svg_has_opaque_semantic_correspondence_in_both_renderers_and_characterized_fractional_difference()
+ {
+    let output = validation_output();
+    let opaque = modeled_with_canvas(
+        HalftoneChannelModel::Rgb,
+        200.0,
+        160.0,
+        vec![
+            overlap_layer(1, color(1.0, 0.0, 0.0, 1.0), 1.0, 80.0),
+            overlap_layer(2, color(0.0, 1.0, 0.0, 1.0), 1.0, 120.0),
+        ],
+    );
+    let opaque_svg = output.join("synthetic-rgb-screen-overlap.svg");
+    let opaque_native = output.join("synthetic-rgb-screen-overlap-native.png");
+    let opaque_inkscape = output.join("synthetic-rgb-screen-overlap-inkscape.png");
+    assert_opaque_editable_secondary(
+        &opaque,
+        &opaque_svg,
+        &opaque_native,
+        &opaque_inkscape,
+        [255, 255, 0, 255],
+        &[
+            "channel-1",
+            "channel-1-mark-0",
+            "channel-2",
+            "channel-2-mark-0",
+        ],
+    );
+
+    let fractional = modeled_with_canvas(
+        HalftoneChannelModel::Rgb,
+        200.0,
+        160.0,
+        vec![
+            overlap_layer(1, color(1.0, 0.0, 0.0, 1.0), 0.5, 80.0),
+            overlap_layer(2, color(0.0, 1.0, 0.0, 1.0), 0.5, 120.0),
+        ],
+    );
+    assert_fractional_svg_difference(
+        &fractional,
+        output.join("synthetic-rgb-screen-fractional.svg"),
+        output.join("synthetic-rgb-screen-fractional-native.png"),
+        output.join("synthetic-rgb-screen-fractional-inkscape.png"),
+        [188, 188, 0, 255],
+        [170, 170, 0, 192],
+    );
+}
+
+#[test]
+fn editable_cmyk_svg_has_opaque_semantic_correspondence_in_both_renderers_and_characterized_fractional_difference()
+ {
+    let output = validation_output();
+    let opaque = modeled_with_canvas(
+        HalftoneChannelModel::Cmyk,
+        200.0,
+        160.0,
+        vec![
+            overlap_layer(4, color(0.0, 1.0, 1.0, 1.0), 1.0, 80.0),
+            overlap_layer(5, color(1.0, 0.0, 1.0, 1.0), 1.0, 120.0),
+        ],
+    );
+    let opaque_svg = output.join("synthetic-cmyk-multiply-overlap.svg");
+    let opaque_native = output.join("synthetic-cmyk-multiply-overlap-native.png");
+    let opaque_inkscape = output.join("synthetic-cmyk-multiply-overlap-inkscape.png");
+    assert_opaque_editable_secondary(
+        &opaque,
+        &opaque_svg,
+        &opaque_native,
+        &opaque_inkscape,
+        [0, 0, 255, 255],
+        &[
+            "channel-4",
+            "channel-4-mark-0",
+            "channel-5",
+            "channel-5-mark-0",
+        ],
+    );
+
+    let fractional = modeled_with_canvas(
+        HalftoneChannelModel::Cmyk,
+        200.0,
+        160.0,
+        vec![
+            overlap_layer(4, color(0.0, 1.0, 1.0, 1.0), 0.5, 80.0),
+            overlap_layer(5, color(1.0, 0.0, 1.0, 1.0), 0.5, 120.0),
+        ],
+    );
+    assert_fractional_svg_difference(
+        &fractional,
+        output.join("synthetic-cmyk-multiply-fractional.svg"),
+        output.join("synthetic-cmyk-multiply-fractional-native.png"),
+        output.join("synthetic-cmyk-multiply-fractional-inkscape.png"),
+        [156, 156, 255, 191],
+        [85, 85, 255, 192],
+    );
+}
+
+#[test]
+fn immutable_project_assets_decode_and_vector_rasterizes_without_claiming_model_evaluation() {
+    let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+    let raster = fs::read(assets.join("raster-sample.png")).unwrap();
+    assert!(raster.starts_with(b"\x89PNG\r\n\x1a\n"));
+    let decoded = image::load_from_memory(&raster).unwrap().to_rgba8();
+    assert_eq!(decoded.dimensions(), (1024, 1024));
+    assert!(decoded.pixels().any(|pixel| pixel[3] == 0));
+    assert!(decoded.pixels().any(|pixel| pixel[3] == 255));
+
+    let vector_path = assets.join("vector-sample.svg");
+    let vector = fs::read_to_string(&vector_path).unwrap();
+    assert!(vector.contains("<text"));
+    let rasterized = validation_output().join("asset-vector-sample-inkscape.png");
+    export_inkscape(&vector_path, &rasterized);
+    let rasterized = image::open(rasterized).unwrap().to_rgba8();
+    assert_eq!(rasterized.dimensions(), (900, 620));
+    assert!(rasterized.pixels().any(|pixel| pixel[3] != 0));
+}
+
+fn assert_opaque_editable_secondary(
+    scene: &RenderScene,
+    svg_path: &std::path::Path,
+    native_path: &std::path::Path,
+    inkscape_path: &std::path::Path,
+    expected_center: [u8; 4],
+    visible_ids: &[&str],
+) {
+    fs::write(svg_path, write_svg(scene)).unwrap();
+    let native = rasterize(scene, RasterBackground::Transparent).unwrap();
+    fs::write(native_path, encode_png(&native).unwrap()).unwrap();
+    export_inkscape(svg_path, inkscape_path);
+    let inkscape = image::open(inkscape_path).unwrap().to_rgba8();
+    let native_center = surface_pixel(&native, 100, 80);
+    assert_eq!(native_center, expected_center);
+    assert_eq!(inkscape.get_pixel(100, 80).0, expected_center);
+    for id in visible_ids {
+        assert!(
+            inkscape_query_width(svg_path, id) > 0.0,
+            "visible SVG ID {id}"
+        );
+    }
+}
+
+fn assert_invisible_channel_is_editable_but_hidden(
+    scene: &RenderScene,
+    svg_path: &std::path::Path,
+    inkscape_path: &std::path::Path,
+    hidden_group: &str,
+    hidden_mark_id: &str,
+    expected_center: [u8; 4],
+) {
+    let svg = write_svg(scene);
+    assert_eq!(svg.matches("clip-path=").count(), 1);
+    assert!(svg.contains(hidden_group));
+    assert!(svg.contains(&format!("id=\"{hidden_mark_id}\"")));
+    fs::write(svg_path, svg).unwrap();
+    let native = rasterize(scene, RasterBackground::Transparent).unwrap();
+    assert_eq!(surface_pixel(&native, 100, 80), expected_center);
+    export_inkscape(svg_path, inkscape_path);
+    let exported_center = image::open(inkscape_path)
+        .unwrap()
+        .to_rgba8()
+        .get_pixel(100, 80)
+        .0;
+    if expected_center[3] == 0 {
+        assert_eq!(
+            exported_center[3], 0,
+            "hidden SVG group has no visible coverage"
+        );
+    } else {
+        assert_eq!(exported_center, expected_center);
+    }
+}
+
+fn assert_fractional_svg_difference(
+    scene: &RenderScene,
+    svg_path: std::path::PathBuf,
+    native_path: std::path::PathBuf,
+    inkscape_path: std::path::PathBuf,
+    expected_native: [u8; 4],
+    expected_inkscape: [u8; 4],
+) {
+    fs::write(&svg_path, write_svg(scene)).unwrap();
+    let native = rasterize(scene, RasterBackground::Transparent).unwrap();
+    fs::write(&native_path, encode_png(&native).unwrap()).unwrap();
+    export_inkscape(&svg_path, &inkscape_path);
+    let native_center = surface_pixel(&native, 100, 80);
+    let inkscape_center = image::open(&inkscape_path)
+        .unwrap()
+        .to_rgba8()
+        .get_pixel(100, 80)
+        .0;
+    assert_eq!(native_center, expected_native);
+    assert_eq!(inkscape_center, expected_inkscape);
+    assert_ne!(
+        native_center, inkscape_center,
+        "fractional correspondence is intentionally not pixel parity"
+    );
+}
+
+fn validation_output() -> std::path::PathBuf {
+    let output =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/validation/stage-9c");
+    fs::create_dir_all(&output).unwrap();
+    output
+}
+
+fn export_inkscape(svg_path: &std::path::Path, png_path: &std::path::Path) {
+    let inkscape_guard = inkscape_lock().lock().unwrap();
+    let status = Command::new("inkscape")
+        .arg(svg_path)
+        .arg("--export-type=png")
+        .arg(format!("--export-filename={}", png_path.display()))
+        .status()
+        .unwrap();
+    drop(inkscape_guard);
+    assert!(
+        status.success(),
+        "Inkscape export for {}",
+        svg_path.display()
+    );
+}
+
+fn inkscape_query_width(svg_path: &std::path::Path, id: &str) -> f64 {
+    let inkscape_guard = inkscape_lock().lock().unwrap();
+    let output = Command::new("inkscape")
+        .arg(svg_path)
+        .arg(format!("--query-id={id}"))
+        .arg("--query-width")
+        .output()
+        .unwrap();
+    drop(inkscape_guard);
+    assert!(output.status.success(), "Inkscape query for SVG ID {id}");
+    std::str::from_utf8(&output.stdout)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+fn surface_pixel(surface: &RasterSurface, x: usize, y: usize) -> [u8; 4] {
+    let offset = 4 * (y * surface.width() as usize + x);
+    surface.pixels()[offset..offset + 4].try_into().unwrap()
+}
+
+fn inkscape_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }

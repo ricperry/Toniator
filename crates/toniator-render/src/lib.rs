@@ -9,7 +9,7 @@
 use std::{collections::HashSet, error::Error, fmt};
 
 use image::{ColorType, ImageEncoder, codecs::png::PngEncoder};
-use toniator_domain::{CanvasSpec, ChannelId, ColorValue};
+use toniator_domain::{CanvasSpec, ChannelId, ColorValue, HalftoneChannelModel};
 use toniator_geometry::CanonicalCircleMark;
 
 const SUBPIXEL_GRID: u32 = 8;
@@ -18,6 +18,10 @@ const SUBPIXEL_GRID: u32 = 8;
 pub struct RenderScene {
     canvas: CanvasSpec,
     layers: Vec<RenderLayer>,
+    /// `None` is the accepted Stage 5 single-layer scene contract. Modeled
+    /// scenes opt into the fixed Stage 9C equations without reinterpreting
+    /// existing callers before complete-document evaluation is authorized.
+    model: Option<HalftoneChannelModel>,
     identity: SceneIdentity,
 }
 
@@ -36,11 +40,23 @@ pub struct RenderLayer {
     color: ColorValue,
     opacity: f64,
     geometry: GeometryOutput,
+    /// SourceColorAlpha carries immutable straight-linear paint per canonical
+    /// mark. Solid layers leave this as `None`.
+    mark_paints: Option<Vec<ColorValue>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum GeometryOutput {
     CircularMarks(Vec<CanonicalCircleMark>),
+}
+
+/// Renderer-owned immutable source-colored circle. Stage 9D may adapt the
+/// accepted Stage 9B realization into this DTO without making rendering depend
+/// on pattern realization or source sampling crates.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SourceColorCircle {
+    pub mark: CanonicalCircleMark,
+    pub paint: ColorValue,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,6 +94,39 @@ impl RenderScene {
         realization_fingerprint: String,
         layers: Vec<RenderLayer>,
     ) -> Result<Self, RenderError> {
+        Self::build(
+            canvas,
+            family_fingerprint,
+            realization_fingerprint,
+            None,
+            layers,
+        )
+    }
+
+    /// Constructs a Stage 9C scene with fixed, non-selectable model semantics.
+    pub fn new_modeled(
+        canvas: CanvasSpec,
+        family_fingerprint: String,
+        realization_fingerprint: String,
+        model: HalftoneChannelModel,
+        layers: Vec<RenderLayer>,
+    ) -> Result<Self, RenderError> {
+        Self::build(
+            canvas,
+            family_fingerprint,
+            realization_fingerprint,
+            Some(model),
+            layers,
+        )
+    }
+
+    fn build(
+        canvas: CanvasSpec,
+        family_fingerprint: String,
+        realization_fingerprint: String,
+        model: Option<HalftoneChannelModel>,
+        layers: Vec<RenderLayer>,
+    ) -> Result<Self, RenderError> {
         validate_canvas(&canvas)?;
         if family_fingerprint.is_empty() || realization_fingerprint.is_empty() {
             return Err(RenderError::new(
@@ -91,9 +140,41 @@ impl RenderScene {
                 "at least one layer is required",
             ));
         }
+        if matches!(model, Some(HalftoneChannelModel::SourceColorAlpha)) && layers.len() != 1 {
+            return Err(RenderError::new(
+                "scene.layers",
+                "SourceColorAlpha requires exactly one ordered source-colored layer",
+            ));
+        }
         let mut channel_ids = HashSet::new();
         for layer in &layers {
             validate_layer(layer)?;
+            match model {
+                None => {
+                    if layer.mark_paints.is_some() {
+                        return Err(RenderError::new(
+                            "scene.layers",
+                            "unmodeled legacy scenes cannot carry sampled per-mark paints",
+                        ));
+                    }
+                }
+                Some(HalftoneChannelModel::Rgb | HalftoneChannelModel::Cmyk) => {
+                    if layer.mark_paints.is_some() {
+                        return Err(RenderError::new(
+                            "scene.layers",
+                            "RGB and CMYK layers must use solid paint",
+                        ));
+                    }
+                }
+                Some(HalftoneChannelModel::SourceColorAlpha) => {
+                    if layer.mark_paints.is_none() {
+                        return Err(RenderError::new(
+                            "scene.layers",
+                            "SourceColorAlpha requires sampled per-mark paint",
+                        ));
+                    }
+                }
+            }
             if !channel_ids.insert(layer.channel_id) {
                 return Err(RenderError::new(
                     "scene.layers",
@@ -105,11 +186,13 @@ impl RenderScene {
             &canvas,
             &family_fingerprint,
             &realization_fingerprint,
+            model,
             &layers,
         );
         Ok(Self {
             canvas,
             layers,
+            model,
             identity: SceneIdentity {
                 family_fingerprint,
                 realization_fingerprint,
@@ -132,6 +215,9 @@ impl RenderScene {
     }
     pub fn layers(&self) -> &[RenderLayer] {
         &self.layers
+    }
+    pub const fn model(&self) -> Option<HalftoneChannelModel> {
+        self.model
     }
     pub fn identity(&self) -> &SceneIdentity {
         &self.identity
@@ -164,6 +250,48 @@ impl RenderLayer {
             color,
             opacity,
             geometry,
+            mark_paints: None,
+        };
+        validate_layer(&layer)?;
+        Ok(layer)
+    }
+
+    /// Builds the one SourceColorAlpha layer from Stage 9B's immutable marked
+    /// paint. The per-mark source alpha has already determined inclusion and
+    /// color sampling; it is applied here exactly once with layer opacity.
+    pub fn new_source_color(
+        channel_id: ChannelId,
+        visible: bool,
+        opacity: f64,
+        marks: Vec<SourceColorCircle>,
+    ) -> Result<Self, RenderError> {
+        let geometry = GeometryOutput::CircularMarks(
+            marks
+                .iter()
+                .map(|source_mark| source_mark.mark.clone())
+                .collect(),
+        );
+        let mark_paints = marks
+            .into_iter()
+            .map(|source_mark| ColorValue {
+                red: source_mark.paint.red,
+                green: source_mark.paint.green,
+                blue: source_mark.paint.blue,
+                alpha: source_mark.paint.alpha,
+            })
+            .collect();
+        let layer = Self {
+            channel_id,
+            visible,
+            color: ColorValue {
+                red: 0.0,
+                green: 0.0,
+                blue: 0.0,
+                alpha: 1.0,
+            },
+            opacity,
+            geometry,
+            mark_paints: Some(mark_paints),
         };
         validate_layer(&layer)?;
         Ok(layer)
@@ -183,6 +311,13 @@ impl RenderLayer {
     }
     pub fn geometry(&self) -> &GeometryOutput {
         &self.geometry
+    }
+
+    fn mark_paint(&self, index: usize) -> &ColorValue {
+        self.mark_paints
+            .as_ref()
+            .and_then(|paints| paints.get(index))
+            .unwrap_or(&self.color)
     }
 }
 
@@ -227,6 +362,31 @@ fn validate_layer(layer: &RenderLayer) -> Result<(), RenderError> {
             }
         }
     }
+    if let Some(paints) = &layer.mark_paints {
+        let GeometryOutput::CircularMarks(marks) = &layer.geometry;
+        if paints.len() != marks.len() {
+            return Err(RenderError::new(
+                "scene.layer.source_color",
+                "source-colored paint count must match canonical mark count",
+            ));
+        }
+        for paint in paints {
+            for value in [paint.red, paint.green, paint.blue, paint.alpha] {
+                if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                    return Err(RenderError::new(
+                        "scene.layer.source_color",
+                        "source-colored paint must be finite values within 0.0..=1.0",
+                    ));
+                }
+            }
+            if paint.alpha != 1.0 {
+                return Err(RenderError::new(
+                    "scene.layer.source_color",
+                    "sampled per-mark paint alpha must be exactly 1.0",
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -234,6 +394,7 @@ fn scene_fingerprint(
     canvas: &CanvasSpec,
     family: &str,
     realization: &str,
+    model: Option<HalftoneChannelModel>,
     layers: &[RenderLayer],
 ) -> String {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
@@ -249,6 +410,16 @@ fn scene_fingerprint(
     );
     add(&mut hash, family.bytes());
     add(&mut hash, realization.bytes());
+    if let Some(model) = model {
+        add(
+            &mut hash,
+            [match model {
+                HalftoneChannelModel::Rgb => 1,
+                HalftoneChannelModel::Cmyk => 2,
+                HalftoneChannelModel::SourceColorAlpha => 3,
+            }],
+        );
+    }
     add(&mut hash, canvas.width.to_bits().to_le_bytes());
     add(&mut hash, canvas.height.to_bits().to_le_bytes());
     // The complete scene identity includes ordered presentation. Family and
@@ -290,6 +461,19 @@ fn scene_fingerprint(
                         add(&mut hash, contributor.index.to_le_bytes());
                     }
                 }
+            }
+        }
+        if model.is_some() {
+            if let Some(paints) = &layer.mark_paints {
+                add(&mut hash, [1]);
+                for paint in paints {
+                    add(&mut hash, paint.red.to_bits().to_le_bytes());
+                    add(&mut hash, paint.green.to_bits().to_le_bytes());
+                    add(&mut hash, paint.blue.to_bits().to_le_bytes());
+                    add(&mut hash, paint.alpha.to_bits().to_le_bytes());
+                }
+            } else {
+                add(&mut hash, [0]);
             }
         }
     }
@@ -355,9 +539,53 @@ pub fn rasterize(
     scene: &RenderScene,
     background: RasterBackground,
 ) -> Result<RasterSurface, RenderError> {
+    if scene.model.is_none() {
+        return rasterize_stage5(scene, background);
+    }
+
     let width = integral_dimension(scene.canvas.width)?;
     let height = integral_dimension(scene.canvas.height)?;
-    let background = match background {
+    let layer_pixels = scene
+        .layers
+        .iter()
+        .map(|layer| rasterize_layer(layer, width, height))
+        .collect::<Vec<_>>();
+    let mut linear_pixels = compose_model(scene.model.expect("modeled scene"), &layer_pixels);
+    apply_background(&mut linear_pixels, background);
+    pixels_from_linear(width, height, linear_pixels)
+}
+
+/// Retains the accepted Stage 5 raster path byte-for-byte for callers which
+/// have not opted into an explicit Stage 9C model.
+fn rasterize_stage5(
+    scene: &RenderScene,
+    background: RasterBackground,
+) -> Result<RasterSurface, RenderError> {
+    let width = integral_dimension(scene.canvas.width)?;
+    let height = integral_dimension(scene.canvas.height)?;
+    let background = background_pixel(background);
+    let mut linear_pixels = vec![background; width as usize * height as usize];
+    for layer in &scene.layers {
+        if !layer.visible {
+            continue;
+        }
+        let GeometryOutput::CircularMarks(marks) = &layer.geometry;
+        for (index, mark) in marks.iter().enumerate() {
+            composite_circle(
+                &mut linear_pixels,
+                width,
+                height,
+                mark,
+                layer.mark_paint(index),
+                layer.opacity,
+            );
+        }
+    }
+    pixels_from_linear(width, height, linear_pixels)
+}
+
+fn background_pixel(background: RasterBackground) -> PremultipliedLinearPixel {
+    match background {
         RasterBackground::OpaqueBlack => PremultipliedLinearPixel {
             red: 0.0,
             green: 0.0,
@@ -376,24 +604,126 @@ pub fn rasterize(
             blue: 0.0,
             alpha: 0.0,
         },
-    };
-    let mut linear_pixels = vec![background; width as usize * height as usize];
-    for layer in &scene.layers {
-        if !layer.visible {
-            continue;
-        }
-        let GeometryOutput::CircularMarks(marks) = &layer.geometry;
-        for mark in marks {
-            composite_circle(
-                &mut linear_pixels,
-                width,
-                height,
-                mark,
-                &layer.color,
-                layer.opacity,
-            );
-        }
     }
+}
+
+fn rasterize_layer(layer: &RenderLayer, width: u32, height: u32) -> Vec<PremultipliedLinearPixel> {
+    let mut pixels =
+        vec![background_pixel(RasterBackground::Transparent); width as usize * height as usize];
+    if !layer.visible {
+        return pixels;
+    }
+    let GeometryOutput::CircularMarks(marks) = &layer.geometry;
+    for (index, mark) in marks.iter().enumerate() {
+        composite_circle(
+            &mut pixels,
+            width,
+            height,
+            mark,
+            layer.mark_paint(index),
+            layer.opacity,
+        );
+    }
+    pixels
+}
+
+fn compose_model(
+    model: HalftoneChannelModel,
+    layers: &[Vec<PremultipliedLinearPixel>],
+) -> Vec<PremultipliedLinearPixel> {
+    let count = layers.first().map_or(0, Vec::len);
+    match model {
+        HalftoneChannelModel::Rgb => (0..count)
+            .map(|index| {
+                let mut pixel = background_pixel(RasterBackground::Transparent);
+                for layer in layers {
+                    let source = layer[index];
+                    pixel.red = (pixel.red + source.red).clamp(0.0, 1.0);
+                    pixel.green = (pixel.green + source.green).clamp(0.0, 1.0);
+                    pixel.blue = (pixel.blue + source.blue).clamp(0.0, 1.0);
+                    pixel.alpha = (pixel.alpha + source.alpha).clamp(0.0, 1.0);
+                }
+                pixel
+            })
+            .collect(),
+        HalftoneChannelModel::Cmyk => (0..count)
+            .map(|index| {
+                let mut transmittance = [1.0; 3];
+                let mut uncovered = 1.0;
+                for layer in layers {
+                    let source = layer[index];
+                    if source.alpha > 0.0 {
+                        let straight = [
+                            source.red / source.alpha,
+                            source.green / source.alpha,
+                            source.blue / source.alpha,
+                        ];
+                        for component in 0..3 {
+                            transmittance[component] *=
+                                1.0 - source.alpha * (1.0 - straight[component]);
+                        }
+                        uncovered *= 1.0 - source.alpha;
+                    }
+                }
+                let alpha = (1.0 - uncovered).clamp(0.0, 1.0);
+                PremultipliedLinearPixel {
+                    red: boundary_clamp(transmittance[0] - (1.0 - alpha)),
+                    green: boundary_clamp(transmittance[1] - (1.0 - alpha)),
+                    blue: boundary_clamp(transmittance[2] - (1.0 - alpha)),
+                    alpha,
+                }
+            })
+            .collect(),
+        HalftoneChannelModel::SourceColorAlpha => (0..count)
+            .map(|index| {
+                let mut destination = background_pixel(RasterBackground::Transparent);
+                for layer in layers {
+                    source_over(&mut destination, layer[index]);
+                }
+                destination
+            })
+            .collect(),
+    }
+}
+
+fn boundary_clamp(value: f64) -> f64 {
+    const EPSILON: f64 = 1e-12;
+    if (-EPSILON..0.0).contains(&value) {
+        0.0
+    } else if (1.0..=1.0 + EPSILON).contains(&value) {
+        1.0
+    } else {
+        value
+    }
+}
+
+fn source_over(destination: &mut PremultipliedLinearPixel, source: PremultipliedLinearPixel) {
+    let remaining = 1.0 - source.alpha;
+    destination.red = source.red + destination.red * remaining;
+    destination.green = source.green + destination.green * remaining;
+    destination.blue = source.blue + destination.blue * remaining;
+    destination.alpha = source.alpha + destination.alpha * remaining;
+}
+
+fn apply_background(pixels: &mut [PremultipliedLinearPixel], background: RasterBackground) {
+    if matches!(background, RasterBackground::Transparent) {
+        return;
+    }
+    let background = background_pixel(background);
+    for pixel in pixels {
+        let remaining = 1.0 - pixel.alpha;
+        pixel.red += background.red * remaining;
+        pixel.green += background.green * remaining;
+        pixel.blue += background.blue * remaining;
+        pixel.alpha = 1.0;
+    }
+}
+
+fn pixels_from_linear(
+    width: u32,
+    height: u32,
+    linear_pixels: Vec<PremultipliedLinearPixel>,
+) -> Result<RasterSurface, RenderError> {
     let mut pixels = Vec::with_capacity(linear_pixels.len() * 4);
     for pixel in linear_pixels {
         let alpha = pixel.alpha.clamp(0.0, 1.0);
@@ -512,6 +842,13 @@ fn quantize_linear(value: f64) -> u8 {
 }
 
 pub fn write_svg(scene: &RenderScene) -> String {
+    match scene.model {
+        None => write_stage5_svg(scene),
+        Some(model) => write_modeled_svg(scene, model),
+    }
+}
+
+fn write_stage5_svg(scene: &RenderScene) -> String {
     let width = compact_number(scene.canvas.width);
     let height = compact_number(scene.canvas.height);
     let mut document = format!(
@@ -540,6 +877,66 @@ pub fn write_svg(scene: &RenderScene) -> String {
     }
     document.push_str("</svg>\n");
     document
+}
+
+fn write_modeled_svg(scene: &RenderScene, model: HalftoneChannelModel) -> String {
+    let width = compact_number(scene.canvas.width);
+    let height = compact_number(scene.canvas.height);
+    let title = match model {
+        HalftoneChannelModel::Rgb => "Toniator RGB halftone",
+        HalftoneChannelModel::Cmyk => "Toniator CMYK halftone",
+        HalftoneChannelModel::SourceColorAlpha => "Toniator source-colored halftone",
+    };
+    let mut document = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">\n<title>{title}</title>\n<metadata>family={};realization={};scene={}</metadata>\n<defs><clipPath id=\"canvas-clip\"><rect x=\"0\" y=\"0\" width=\"{width}\" height=\"{height}\"/></clipPath></defs>\n",
+        xml_escape(&scene.identity.family_fingerprint),
+        xml_escape(&scene.identity.realization_fingerprint),
+        xml_escape(&scene.identity.scene_fingerprint),
+    );
+    document.push_str(
+        "<g id=\"canvas\" clip-path=\"url(#canvas-clip)\" style=\"isolation:isolate\">\n",
+    );
+    let blend_mode = match model {
+        HalftoneChannelModel::Rgb => Some("screen"),
+        HalftoneChannelModel::Cmyk => Some("multiply"),
+        HalftoneChannelModel::SourceColorAlpha => None,
+    };
+    for layer in &scene.layers {
+        write_svg_channel_group(&mut document, layer, blend_mode);
+    }
+    document.push_str("</g>\n");
+    document.push_str("</svg>\n");
+    document
+}
+
+fn write_svg_channel_group(document: &mut String, layer: &RenderLayer, blend_mode: Option<&str>) {
+    let mut styles = Vec::new();
+    if let Some(mode) = blend_mode {
+        styles.push(format!("mix-blend-mode:{mode}"));
+    }
+    if !layer.visible {
+        styles.push("display:none".to_owned());
+    }
+    let style = (!styles.is_empty()).then(|| format!(" style=\"{}\"", styles.join(";")));
+    document.push_str(&format!(
+        "<g id=\"channel-{}\"{}>\n",
+        layer.channel_id.0,
+        style.unwrap_or_default(),
+    ));
+    let GeometryOutput::CircularMarks(marks) = &layer.geometry;
+    for (index, mark) in marks.iter().enumerate() {
+        let paint = layer.mark_paint(index);
+        document.push_str(&format!(
+            "<circle id=\"channel-{}-mark-{index}\" cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"{}\" fill-opacity=\"{}\"/>\n",
+            layer.channel_id.0,
+            compact_number(mark.center.x),
+            compact_number(mark.center.y),
+            compact_number(mark.radius),
+            color_hex(paint),
+            compact_number(paint.alpha * layer.opacity),
+        ));
+    }
+    document.push_str("</g>\n");
 }
 
 fn color_hex(color: &ColorValue) -> String {
