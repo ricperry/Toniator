@@ -117,7 +117,7 @@ explicit ordered topologies, stable IDs, source mappings, paint compatibility,
 atomic model/topology replacement, revision behavior, affected-channel
 reporting, and `ChannelTopology` invalidation in the domain layer.
 
-**Stage 9B — Planned.** Add deterministic linear RGB/full-UCR CMYK source
+**Stage 9B — Complete at commit `fb1b31d`.** Add deterministic linear RGB/full-UCR CMYK source
 fields and SourceColorAlpha sampled-paint realization, including alpha
 association exactly once and zero-alpha paint suppression.
 
