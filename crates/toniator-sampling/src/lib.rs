@@ -9,7 +9,9 @@ use resvg::{tiny_skia, usvg};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use toniator_domain::CanvasSpec;
-pub use toniator_domain::{SourceComponent, SourcePlacement};
+pub use toniator_domain::{
+    SourceComponent, SourceMapping, SourceMappingComponent, SourcePlacement,
+};
 use toniator_geometry::Point2;
 
 const MAX_SOURCE_PIXELS: u64 = 64 * 1024 * 1024;
@@ -17,7 +19,7 @@ const MAX_SOURCE_PIXELS: u64 = 64 * 1024 * 1024;
 /// Versioned identity for the decoder behavior that participates in derived
 /// cache keys. Bump it whenever decoding can yield different source pixels for
 /// the same bytes and format hint.
-pub const DECODER_CONTRACT_ID: &str = "toniator-sampling-decoder-v1";
+pub const DECODER_CONTRACT_ID: &str = "toniator-sampling-decoder-v2-linear-source-fields";
 
 /// The only source formats supported by the bounded Stage 4 decoder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -42,6 +44,30 @@ pub struct SourcePixel {
     pub green: f64,
     pub blue: f64,
     pub alpha: f64,
+}
+
+/// A straight linear-light source color associated with a mark response.
+///
+/// `alpha` is always one for a present paint. An absent paint is represented
+/// by [`SourceColorSample::paint`] being `None`, which makes exact-zero alpha
+/// suppression explicit instead of encoding it as transparent paint.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct SampledSourcePaint {
+    pub red: f64,
+    pub green: f64,
+    pub blue: f64,
+    pub alpha: f64,
+}
+
+/// The independently sampled mark response and evaluated SourceColor paint.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct SourceColorSample {
+    /// The mapping-derived scalar response. For the canonical SourceColor
+    /// mapping this is source alpha, applied exactly once to mark size.
+    pub response: f64,
+    /// Straight linear source paint for a positive sampled alpha, or `None`
+    /// for an exact-zero alpha sample.
+    pub paint: Option<SampledSourcePaint>,
 }
 
 /// SVG-specific decoder behavior surfaced to headless diagnostics.
@@ -124,6 +150,60 @@ impl SourceField {
         }
     }
 
+    /// Samples a complete Stage 9 mapping. Color-derived fields are converted
+    /// from straight sRGB to linear light, transformed, then associated with
+    /// source alpha exactly once before interpolation. Alpha remains an
+    /// independent transformed scalar.
+    pub fn sample_mapping_response(
+        &self,
+        point: Point2,
+        canvas: &CanvasSpec,
+        mapping: SourceMapping,
+    ) -> Result<f64, SamplingError> {
+        validate_canvas(canvas)?;
+        validate_mapping(mapping)?;
+        if !point.is_finite() {
+            return Err(SamplingError::new("sampling.point", "point must be finite"));
+        }
+        match mapping.placement {
+            SourcePlacement::StretchToCanvas => {
+                self.sample_stretch_with(point, canvas, |pixel| mapped_response(pixel, mapping))
+            }
+        }
+    }
+
+    /// Samples SourceColorAlpha's associated linear RGB and independent alpha.
+    ///
+    /// The returned paint is straight linear and fully opaque when source alpha
+    /// is positive. At exactly zero alpha it is absent, so a nonzero minimum
+    /// mark size cannot expose hidden RGB or a transparent paint fringe.
+    pub fn sample_source_color(
+        &self,
+        point: Point2,
+        canvas: &CanvasSpec,
+        mapping: SourceMapping,
+    ) -> Result<SourceColorSample, SamplingError> {
+        validate_canvas(canvas)?;
+        validate_mapping(mapping)?;
+        if !point.is_finite() {
+            return Err(SamplingError::new("sampling.point", "point must be finite"));
+        }
+        match mapping.placement {
+            SourcePlacement::StretchToCanvas => {
+                let (red, green, blue, alpha) =
+                    self.sample_stretch_associated_rgb(point, canvas)?;
+                let paint = (alpha > 0.0).then(|| SampledSourcePaint {
+                    red: (red / alpha).clamp(0.0, 1.0),
+                    green: (green / alpha).clamp(0.0, 1.0),
+                    blue: (blue / alpha).clamp(0.0, 1.0),
+                    alpha: 1.0,
+                });
+                let response = self.sample_mapping_response(point, canvas, mapping)?;
+                Ok(SourceColorSample { response, paint })
+            }
+        }
+    }
+
     fn sample_stretch_with<F>(
         &self,
         point: Point2,
@@ -147,6 +227,49 @@ impl SourceField {
         let sampled = top.mul_add(1.0 - ty, bottom * ty);
         if sampled.is_finite() {
             Ok(sampled.clamp(0.0, 1.0))
+        } else {
+            Err(SamplingError::new(
+                "sampling.value",
+                "sampled value must be finite",
+            ))
+        }
+    }
+
+    fn sample_stretch_associated_rgb(
+        &self,
+        point: Point2,
+        canvas: &CanvasSpec,
+    ) -> Result<(f64, f64, f64, f64), SamplingError> {
+        let x = map_axis(point.x, canvas.width, self.identity.width);
+        let y = map_axis(point.y, canvas.height, self.identity.height);
+        let x0 = x.floor() as u32;
+        let y0 = y.floor() as u32;
+        let x1 = (x0 + 1).min(self.identity.width - 1);
+        let y1 = (y0 + 1).min(self.identity.height - 1);
+        let tx = x - f64::from(x0);
+        let ty = y - f64::from(y0);
+        let sample = |x, y| associated_linear(self.pixel(x, y).expect("mapped pixel"));
+        let interpolate = |index: usize| {
+            let top = sample(x0, y0)[index].mul_add(1.0 - tx, sample(x1, y0)[index] * tx);
+            let bottom = sample(x0, y1)[index].mul_add(1.0 - tx, sample(x1, y1)[index] * tx);
+            top.mul_add(1.0 - ty, bottom * ty)
+        };
+        let sampled = (
+            interpolate(0),
+            interpolate(1),
+            interpolate(2),
+            interpolate(3),
+        );
+        if [sampled.0, sampled.1, sampled.2, sampled.3]
+            .into_iter()
+            .all(f64::is_finite)
+        {
+            Ok((
+                sampled.0.clamp(0.0, 1.0),
+                sampled.1.clamp(0.0, 1.0),
+                sampled.2.clamp(0.0, 1.0),
+                sampled.3.clamp(0.0, 1.0),
+            ))
         } else {
             Err(SamplingError::new(
                 "sampling.value",
@@ -384,6 +507,69 @@ fn component_value(pixel: SourcePixel, component: SourceComponent) -> f64 {
     }
 }
 
+/// Returns the requested Stage 9 scalar field for one decoded straight-sRGB
+/// pixel. RGB and CMYK are always calculated in linear light and CMY is the
+/// unnormalized full-UCR separation, not a `(1-K)` normalized variant.
+pub fn mapping_component_value(pixel: SourcePixel, component: SourceMappingComponent) -> f64 {
+    let (red, green, blue) = linear_rgb(pixel);
+    let black = (1.0 - red.max(green).max(blue)).clamp(0.0, 1.0);
+    match component {
+        SourceMappingComponent::Red => red,
+        SourceMappingComponent::Green => green,
+        SourceMappingComponent::Blue => blue,
+        SourceMappingComponent::Cyan => (1.0 - red - black).clamp(0.0, 1.0),
+        SourceMappingComponent::Magenta => (1.0 - green - black).clamp(0.0, 1.0),
+        SourceMappingComponent::Yellow => (1.0 - blue - black).clamp(0.0, 1.0),
+        SourceMappingComponent::Black => black,
+        SourceMappingComponent::Alpha => pixel.alpha.clamp(0.0, 1.0),
+        SourceMappingComponent::Luminance => rec709_luminance_linear(red, green, blue),
+    }
+}
+
+fn mapped_response(pixel: SourcePixel, mapping: SourceMapping) -> f64 {
+    let value = mapping_component_value(pixel, mapping.component);
+    let transformed = transform_mapping(value, mapping);
+    match mapping.component {
+        SourceMappingComponent::Alpha => transformed,
+        _ => (transformed * pixel.alpha).clamp(0.0, 1.0),
+    }
+}
+
+fn validate_mapping(mapping: SourceMapping) -> Result<(), SamplingError> {
+    if !mapping.gain.is_finite() || mapping.gain < 0.0 {
+        return Err(SamplingError::new(
+            "sampling.mapping.gain",
+            "mapping gain must be finite and nonnegative",
+        ));
+    }
+    if !mapping.bias.is_finite() {
+        return Err(SamplingError::new(
+            "sampling.mapping.bias",
+            "mapping bias must be finite",
+        ));
+    }
+    Ok(())
+}
+
+fn transform_mapping(value: f64, mapping: SourceMapping) -> f64 {
+    let value = if mapping.inverted { 1.0 - value } else { value };
+    (mapping.gain * value + mapping.bias).clamp(0.0, 1.0)
+}
+
+fn linear_rgb(pixel: SourcePixel) -> (f64, f64, f64) {
+    (
+        srgb_to_linear(pixel.red.clamp(0.0, 1.0)),
+        srgb_to_linear(pixel.green.clamp(0.0, 1.0)),
+        srgb_to_linear(pixel.blue.clamp(0.0, 1.0)),
+    )
+}
+
+fn associated_linear(pixel: SourcePixel) -> [f64; 4] {
+    let (red, green, blue) = linear_rgb(pixel);
+    let alpha = pixel.alpha.clamp(0.0, 1.0);
+    [red * alpha, green * alpha, blue * alpha, alpha]
+}
+
 /// Converts one raw source pixel into the realization's normalized mark-ink
 /// response. This happens before bilinear interpolation.
 pub fn effective_mark_ink(pixel: SourcePixel, component: SourceComponent) -> f64 {
@@ -409,6 +595,10 @@ pub fn srgb_to_linear(value: f64) -> f64 {
 /// Computes Rec.709 luminance in linear light, never multiplying by alpha.
 pub fn rec709_luminance(red: f64, green: f64, blue: f64) -> f64 {
     0.2126 * srgb_to_linear(red) + 0.7152 * srgb_to_linear(green) + 0.0722 * srgb_to_linear(blue)
+}
+
+fn rec709_luminance_linear(red: f64, green: f64, blue: f64) -> f64 {
+    (0.2126 * red + 0.7152 * green + 0.0722 * blue).clamp(0.0, 1.0)
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -830,6 +1020,331 @@ mod tests {
                 .abs()
                 < 1e-12
         );
+    }
+
+    fn synthetic_field(pixels: Vec<SourcePixel>) -> SourceField {
+        SourceField {
+            identity: SourceIdentity {
+                format: SourceFormat::Png,
+                width: pixels.len() as u32,
+                height: 1,
+                content_hash: "sha256:synthetic".to_owned(),
+                decoded_pixel_hash: "sha256:synthetic-pixels".to_owned(),
+                svg_text: None,
+            },
+            pixels,
+        }
+    }
+
+    #[test]
+    fn stage9_linear_rgb_and_full_ucr_fields_cover_synthetic_colors() {
+        let field = synthetic_field(vec![
+            SourcePixel {
+                red: 0.0,
+                green: 0.0,
+                blue: 0.0,
+                alpha: 1.0,
+            },
+            SourcePixel {
+                red: 1.0,
+                green: 1.0,
+                blue: 1.0,
+                alpha: 1.0,
+            },
+            SourcePixel {
+                red: 1.0,
+                green: 0.0,
+                blue: 0.0,
+                alpha: 1.0,
+            },
+            SourcePixel {
+                red: 0.0,
+                green: 1.0,
+                blue: 0.0,
+                alpha: 1.0,
+            },
+            SourcePixel {
+                red: 0.0,
+                green: 0.0,
+                blue: 1.0,
+                alpha: 1.0,
+            },
+            SourcePixel {
+                red: 0.0,
+                green: 1.0,
+                blue: 1.0,
+                alpha: 1.0,
+            },
+            SourcePixel {
+                red: 1.0,
+                green: 0.0,
+                blue: 1.0,
+                alpha: 1.0,
+            },
+            SourcePixel {
+                red: 1.0,
+                green: 1.0,
+                blue: 0.0,
+                alpha: 1.0,
+            },
+            SourcePixel {
+                red: 0.5,
+                green: 0.5,
+                blue: 0.5,
+                alpha: 1.0,
+            },
+            SourcePixel {
+                red: 0.8,
+                green: 0.4,
+                blue: 0.2,
+                alpha: 1.0,
+            },
+        ]);
+        let component = |pixel, component| mapping_component_value(pixel, component);
+        let black = field.pixel(0, 0).unwrap();
+        assert_eq!(component(black, SourceMappingComponent::Black), 1.0);
+        assert_eq!(component(black, SourceMappingComponent::Cyan), 0.0);
+        let white = field.pixel(1, 0).unwrap();
+        assert_eq!(component(white, SourceMappingComponent::Black), 0.0);
+        assert_eq!(component(white, SourceMappingComponent::Cyan), 0.0);
+        let red = field.pixel(2, 0).unwrap();
+        assert_eq!(component(red, SourceMappingComponent::Red), 1.0);
+        assert_eq!(component(red, SourceMappingComponent::Cyan), 0.0);
+        assert_eq!(component(red, SourceMappingComponent::Magenta), 1.0);
+        assert_eq!(component(red, SourceMappingComponent::Yellow), 1.0);
+        let green = field.pixel(3, 0).unwrap();
+        assert_eq!(component(green, SourceMappingComponent::Green), 1.0);
+        assert_eq!(component(green, SourceMappingComponent::Cyan), 1.0);
+        assert_eq!(component(green, SourceMappingComponent::Magenta), 0.0);
+        assert_eq!(component(green, SourceMappingComponent::Yellow), 1.0);
+        let blue = field.pixel(4, 0).unwrap();
+        assert_eq!(component(blue, SourceMappingComponent::Blue), 1.0);
+        assert_eq!(component(blue, SourceMappingComponent::Cyan), 1.0);
+        assert_eq!(component(blue, SourceMappingComponent::Magenta), 1.0);
+        assert_eq!(component(blue, SourceMappingComponent::Yellow), 0.0);
+        let cyan = field.pixel(5, 0).unwrap();
+        assert_eq!(component(cyan, SourceMappingComponent::Red), 0.0);
+        assert_eq!(component(cyan, SourceMappingComponent::Cyan), 1.0);
+        assert_eq!(component(cyan, SourceMappingComponent::Magenta), 0.0);
+        assert_eq!(component(cyan, SourceMappingComponent::Yellow), 0.0);
+        let magenta = field.pixel(6, 0).unwrap();
+        assert_eq!(component(magenta, SourceMappingComponent::Cyan), 0.0);
+        assert_eq!(component(magenta, SourceMappingComponent::Magenta), 1.0);
+        assert_eq!(component(magenta, SourceMappingComponent::Yellow), 0.0);
+        let yellow = field.pixel(7, 0).unwrap();
+        assert_eq!(component(yellow, SourceMappingComponent::Cyan), 0.0);
+        assert_eq!(component(yellow, SourceMappingComponent::Magenta), 0.0);
+        assert_eq!(component(yellow, SourceMappingComponent::Yellow), 1.0);
+        let gray = field.pixel(8, 0).unwrap();
+        let linear_gray = srgb_to_linear(0.5);
+        assert!((component(gray, SourceMappingComponent::Red) - linear_gray).abs() < 1e-12);
+        assert!(
+            (component(gray, SourceMappingComponent::Black) - (1.0 - linear_gray)).abs() < 1e-12
+        );
+        assert!(component(gray, SourceMappingComponent::Luminance) > 0.21);
+        let chromatic_midtone = field.pixel(9, 0).unwrap();
+        let linear_red = srgb_to_linear(0.8);
+        let linear_green = srgb_to_linear(0.4);
+        let linear_blue = srgb_to_linear(0.2);
+        let chromatic_black = 1.0 - linear_red.max(linear_green).max(linear_blue);
+        let unnormalized_magenta = 1.0 - linear_green - chromatic_black;
+        let normalized_magenta = unnormalized_magenta / (1.0 - chromatic_black);
+        assert!(
+            (component(chromatic_midtone, SourceMappingComponent::Black) - chromatic_black).abs()
+                < 1e-12
+        );
+        assert!(
+            (component(chromatic_midtone, SourceMappingComponent::Magenta) - unnormalized_magenta)
+                .abs()
+                < 1e-12
+        );
+        assert!(
+            (component(chromatic_midtone, SourceMappingComponent::Yellow)
+                - (1.0 - linear_blue - chromatic_black))
+                .abs()
+                < 1e-12
+        );
+        assert!(
+            (component(chromatic_midtone, SourceMappingComponent::Magenta) - normalized_magenta)
+                .abs()
+                > 0.1,
+            "full UCR CMY is intentionally not normalized by (1-K)"
+        );
+        assert_eq!(
+            DECODER_CONTRACT_ID,
+            "toniator-sampling-decoder-v2-linear-source-fields"
+        );
+    }
+
+    #[test]
+    fn stage9_mapping_transform_associates_color_once_but_not_alpha() {
+        let field = synthetic_field(vec![
+            SourcePixel {
+                red: 1.0,
+                green: 0.0,
+                blue: 0.0,
+                alpha: 0.25,
+            },
+            SourcePixel {
+                red: 0.0,
+                green: 0.0,
+                blue: 0.0,
+                alpha: 0.0,
+            },
+        ]);
+        let canvas = CanvasSpec {
+            width: 1.0,
+            height: 1.0,
+        };
+        let red = SourceMapping {
+            component: SourceMappingComponent::Red,
+            placement: SourcePlacement::StretchToCanvas,
+            inverted: true,
+            gain: 2.0,
+            bias: -0.5,
+        };
+        // red is 1 -> inverted 0 -> transformed/clamped 0, then alpha once.
+        assert_eq!(
+            field
+                .sample_mapping_response(Point2::new(0.0, 0.0), &canvas, red)
+                .unwrap(),
+            0.0
+        );
+        let blue = SourceMapping {
+            component: SourceMappingComponent::Blue,
+            inverted: true,
+            gain: 0.5,
+            bias: 0.25,
+            ..red
+        };
+        // blue is 0 -> inverted 1 -> 0.75, then alpha = 0.1875.
+        assert!(
+            (field
+                .sample_mapping_response(Point2::new(0.0, 0.0), &canvas, blue)
+                .unwrap()
+                - 0.1875)
+                .abs()
+                < 1e-12
+        );
+        let alpha = SourceMapping {
+            component: SourceMappingComponent::Alpha,
+            inverted: false,
+            gain: 2.0,
+            bias: 0.1,
+            ..red
+        };
+        // Alpha is transformed and clamped but never multiplied by itself.
+        assert_eq!(
+            field
+                .sample_mapping_response(Point2::new(0.0, 0.0), &canvas, alpha)
+                .unwrap(),
+            0.6
+        );
+        assert_eq!(
+            field
+                .sample_mapping_response(
+                    Point2::new(0.0, 0.0),
+                    &canvas,
+                    SourceMapping { bias: 2.0, ..alpha }
+                )
+                .unwrap(),
+            1.0,
+            "mapping clamp occurs before the independent alpha response"
+        );
+        assert_eq!(
+            field
+                .sample_mapping_response(
+                    Point2::new(0.0, 0.0),
+                    &canvas,
+                    SourceMapping {
+                        gain: -1.0,
+                        ..alpha
+                    }
+                )
+                .unwrap_err()
+                .path(),
+            "sampling.mapping.gain"
+        );
+    }
+
+    #[test]
+    fn source_color_associates_unassociates_and_suppresses_zero_alpha() {
+        let field = synthetic_field(vec![
+            SourcePixel {
+                red: 1.0,
+                green: 0.0,
+                blue: 0.0,
+                alpha: 1.0,
+            },
+            SourcePixel {
+                red: 0.0,
+                green: 1.0,
+                blue: 0.0,
+                alpha: 0.0,
+            },
+            SourcePixel {
+                red: 0.0,
+                green: 0.0,
+                blue: 1.0,
+                alpha: 0.5,
+            },
+            SourcePixel {
+                red: 1.0,
+                green: 1.0,
+                blue: 1.0,
+                alpha: 0.0,
+            },
+        ]);
+        let canvas = CanvasSpec {
+            width: 3.0,
+            height: 1.0,
+        };
+        let alpha = SourceMapping::canonical(SourceMappingComponent::Alpha);
+        let opaque = field
+            .sample_source_color(Point2::new(0.0, 0.0), &canvas, alpha)
+            .unwrap();
+        assert_eq!(opaque.response, 1.0);
+        assert_eq!(
+            opaque.paint.unwrap(),
+            SampledSourcePaint {
+                red: 1.0,
+                green: 0.0,
+                blue: 0.0,
+                alpha: 1.0
+            }
+        );
+        let edge = field
+            .sample_source_color(Point2::new(0.5, 0.0), &canvas, alpha)
+            .unwrap();
+        // Associated interpolation ignores transparent green; response still comes from alpha.
+        assert_eq!(edge.response, 0.5);
+        assert_eq!(
+            edge.paint.unwrap(),
+            SampledSourcePaint {
+                red: 1.0,
+                green: 0.0,
+                blue: 0.0,
+                alpha: 1.0
+            }
+        );
+        let partial = field
+            .sample_source_color(Point2::new(2.0, 0.0), &canvas, alpha)
+            .unwrap();
+        assert_eq!(partial.response, 0.5);
+        assert_eq!(
+            partial.paint.unwrap(),
+            SampledSourcePaint {
+                red: 0.0,
+                green: 0.0,
+                blue: 1.0,
+                alpha: 1.0
+            }
+        );
+        let hidden = field
+            .sample_source_color(Point2::new(3.0, 0.0), &canvas, alpha)
+            .unwrap();
+        assert_eq!(hidden.response, 0.0);
+        assert_eq!(hidden.paint, None);
     }
 
     fn crc32(bytes: &[u8]) -> u32 {

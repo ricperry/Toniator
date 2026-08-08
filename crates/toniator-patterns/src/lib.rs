@@ -5,12 +5,15 @@
 use std::{error::Error, fmt};
 
 use serde::Serialize;
-use toniator_domain::{CanvasSpec, DensityMetric2D, GuideDimensionId};
+use toniator_domain::{CanvasSpec, DensityMetric2D, GuideDimensionId, SourceMapping};
 pub use toniator_geometry::{
     AffineTransform2D, Bounds, CanonicalCircleMark, GuideInstanceId, GuideIntersectionProvenance,
     IntersectionSite, Point2, SiteId, SiteScope, StraightGuide, Vector2, projection_range,
 };
-use toniator_sampling::{SamplingError, SourceComponent, SourceField, SourcePlacement};
+use toniator_sampling::{
+    SampledSourcePaint, SamplingError, SourceComponent, SourceField, SourceMappingComponent,
+    SourcePlacement,
+};
 
 /// The finite antialiasing envelope included in every Stage 3 generation plan.
 pub const ANTIALIAS_MARGIN: f64 = 1.0;
@@ -70,6 +73,60 @@ pub struct CircularMarkRealization {
     pub placement: SourcePlacement,
     pub response: MarkResponse,
     pub marks: Vec<CanonicalCircleMark>,
+}
+
+/// Immutable scalar-field realization for an explicit Stage 9 source mapping.
+/// This is deliberately distinct from the retained Stage 3–8 single-channel
+/// realization so its new mapping identity cannot alter accepted results.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MappedCircularMarkRealization {
+    pub family_fingerprint: String,
+    pub realization_fingerprint: String,
+    pub source_identity: toniator_sampling::SourceIdentity,
+    pub mapping: SourceMapping,
+    pub response: MarkResponse,
+    pub marks: Vec<CanonicalCircleMark>,
+}
+
+impl MappedCircularMarkRealization {
+    pub fn has_only_finite_marks(&self) -> bool {
+        self.marks
+            .iter()
+            .all(|mark| mark.center.is_finite() && mark.radius.is_finite())
+    }
+}
+
+/// One immutable SourceColorAlpha mark. `paint.alpha` is always one; channel
+/// presentation opacity is intentionally not represented at this layer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SourceColorCircleMark {
+    pub mark: CanonicalCircleMark,
+    pub paint: SampledSourcePaint,
+}
+
+/// SourceColorAlpha realization. Exact-zero source alpha is represented by an
+/// omitted mark, rather than a transparent sampled paint.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SourceColorCircularMarkRealization {
+    pub family_fingerprint: String,
+    pub realization_fingerprint: String,
+    pub source_identity: toniator_sampling::SourceIdentity,
+    pub mapping: SourceMapping,
+    pub response: MarkResponse,
+    pub marks: Vec<SourceColorCircleMark>,
+}
+
+impl SourceColorCircularMarkRealization {
+    pub fn has_only_finite_marks(&self) -> bool {
+        self.marks.iter().all(|mark| {
+            mark.mark.center.is_finite()
+                && mark.mark.radius.is_finite()
+                && mark.paint.red.is_finite()
+                && mark.paint.green.is_finite()
+                && mark.paint.blue.is_finite()
+                && mark.paint.alpha == 1.0
+        })
+    }
 }
 
 impl CircularMarkRealization {
@@ -172,6 +229,118 @@ pub fn realize_circular_marks(
         source_identity: source.identity().clone(),
         source_component: component,
         placement,
+        response,
+        marks,
+    };
+    output
+        .has_only_finite_marks()
+        .then_some(output)
+        .ok_or(RealizationError::new(
+            "realization.mark",
+            "realization produced non-finite marks",
+        ))
+}
+
+/// Realizes an explicit Stage 9 scalar mapping while retaining the family as a
+/// structural-only input. Mapping, source, and response all live in the
+/// realization identity.
+pub fn realize_mapped_circular_marks(
+    family: &GridFamilyOutput,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: MarkResponse,
+) -> Result<MappedCircularMarkRealization, RealizationError> {
+    validate_response(response, family.support_radius)?;
+    if !family.has_only_finite_geometry() {
+        return Err(RealizationError::new(
+            "realization.family",
+            "family geometry must be finite",
+        ));
+    }
+    let mut marks = Vec::with_capacity(family.sites.len());
+    for site in &family.sites {
+        let ink = source.sample_mapping_response(site.position, canvas, mapping)?;
+        let radius = radius_from_ink_with_support(ink, response, family.support_radius)?;
+        let mark = CanonicalCircleMark::new(
+            site.id,
+            site.position,
+            radius,
+            site.scope,
+            site.provenance.clone(),
+        )
+        .ok_or(RealizationError::new(
+            "realization.mark",
+            "mark geometry must be finite",
+        ))?;
+        marks.push(mark);
+    }
+    let output = MappedCircularMarkRealization {
+        family_fingerprint: family.family_fingerprint.clone(),
+        realization_fingerprint: mapped_realization_fingerprint(
+            family, source, mapping, response, &marks,
+        ),
+        source_identity: source.identity().clone(),
+        mapping,
+        response,
+        marks,
+    };
+    output
+        .has_only_finite_marks()
+        .then_some(output)
+        .ok_or(RealizationError::new(
+            "realization.mark",
+            "realization produced non-finite marks",
+        ))
+}
+
+/// Realizes source-colored marks without a compositor. Associated interpolation
+/// and unassociation are owned by sampling; this layer only turns the sampled
+/// alpha response into size and retains an immutable per-mark paint. A source
+/// sample with exactly zero alpha produces no mark even with a positive minimum
+/// diameter.
+pub fn realize_source_color_circular_marks(
+    family: &GridFamilyOutput,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: MarkResponse,
+) -> Result<SourceColorCircularMarkRealization, RealizationError> {
+    validate_response(response, family.support_radius)?;
+    if !family.has_only_finite_geometry() {
+        return Err(RealizationError::new(
+            "realization.family",
+            "family geometry must be finite",
+        ));
+    }
+    let mut marks = Vec::with_capacity(family.sites.len());
+    for site in &family.sites {
+        let sample = source.sample_source_color(site.position, canvas, mapping)?;
+        let Some(paint) = sample.paint else {
+            continue;
+        };
+        let radius =
+            radius_from_ink_with_support(sample.response, response, family.support_radius)?;
+        let mark = CanonicalCircleMark::new(
+            site.id,
+            site.position,
+            radius,
+            site.scope,
+            site.provenance.clone(),
+        )
+        .ok_or(RealizationError::new(
+            "realization.mark",
+            "mark geometry must be finite",
+        ))?;
+        marks.push(SourceColorCircleMark { mark, paint });
+    }
+    let output = SourceColorCircularMarkRealization {
+        family_fingerprint: family.family_fingerprint.clone(),
+        realization_fingerprint: source_color_realization_fingerprint(
+            family, source, mapping, response, &marks,
+        ),
+        source_identity: source.identity().clone(),
+        mapping,
         response,
         marks,
     };
@@ -290,6 +459,113 @@ fn realization_fingerprint(
     format!("fnv1a64:{hash:016x}")
 }
 
+fn mapped_realization_fingerprint(
+    family: &GridFamilyOutput,
+    source: &SourceField,
+    mapping: SourceMapping,
+    response: MarkResponse,
+    marks: &[CanonicalCircleMark],
+) -> String {
+    let mut bytes = realization_identity_prefix(
+        b"toniator-stage-9b-mapped-circular-realization-v1",
+        family,
+        source,
+        mapping,
+        response,
+    );
+    for mark in marks {
+        append_mark_identity(&mut bytes, mark);
+    }
+    fnv1a64(bytes)
+}
+
+fn source_color_realization_fingerprint(
+    family: &GridFamilyOutput,
+    source: &SourceField,
+    mapping: SourceMapping,
+    response: MarkResponse,
+    marks: &[SourceColorCircleMark],
+) -> String {
+    let mut bytes = realization_identity_prefix(
+        b"toniator-stage-9b-source-color-circular-realization-v1",
+        family,
+        source,
+        mapping,
+        response,
+    );
+    for source_color_mark in marks {
+        append_mark_identity(&mut bytes, &source_color_mark.mark);
+        bytes.extend(source_color_mark.paint.red.to_bits().to_le_bytes());
+        bytes.extend(source_color_mark.paint.green.to_bits().to_le_bytes());
+        bytes.extend(source_color_mark.paint.blue.to_bits().to_le_bytes());
+        bytes.extend(source_color_mark.paint.alpha.to_bits().to_le_bytes());
+    }
+    fnv1a64(bytes)
+}
+
+fn realization_identity_prefix(
+    contract: &[u8],
+    family: &GridFamilyOutput,
+    source: &SourceField,
+    mapping: SourceMapping,
+    response: MarkResponse,
+) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend(contract);
+    bytes.extend(family.family_fingerprint.bytes());
+    bytes.extend(source.identity().content_hash.bytes());
+    bytes.extend(source.identity().decoded_pixel_hash.bytes());
+    bytes.push(match source.identity().format {
+        toniator_sampling::SourceFormat::Png => 1,
+        toniator_sampling::SourceFormat::Svg => 2,
+    });
+    bytes.extend(source.identity().width.to_le_bytes());
+    bytes.extend(source.identity().height.to_le_bytes());
+    bytes.push(match mapping.placement {
+        SourcePlacement::StretchToCanvas => 1,
+    });
+    bytes.push(mapping_component_code(mapping.component));
+    bytes.push(u8::from(mapping.inverted));
+    bytes.extend(mapping.gain.to_bits().to_le_bytes());
+    bytes.extend(mapping.bias.to_bits().to_le_bytes());
+    bytes.extend(response.minimum_size.to_bits().to_le_bytes());
+    bytes.extend(response.maximum_size.to_bits().to_le_bytes());
+    bytes
+}
+
+fn mapping_component_code(component: SourceMappingComponent) -> u8 {
+    match component {
+        SourceMappingComponent::Red => 1,
+        SourceMappingComponent::Green => 2,
+        SourceMappingComponent::Blue => 3,
+        SourceMappingComponent::Cyan => 4,
+        SourceMappingComponent::Magenta => 5,
+        SourceMappingComponent::Yellow => 6,
+        SourceMappingComponent::Black => 7,
+        SourceMappingComponent::Alpha => 8,
+        SourceMappingComponent::Luminance => 9,
+    }
+}
+
+fn append_mark_identity(bytes: &mut Vec<u8>, mark: &CanonicalCircleMark) {
+    bytes.extend(mark.source_site_id.first_dimension_id.to_le_bytes());
+    bytes.extend(mark.source_site_id.first_index.to_le_bytes());
+    bytes.extend(mark.source_site_id.second_dimension_id.to_le_bytes());
+    bytes.extend(mark.source_site_id.second_index.to_le_bytes());
+    bytes.extend(mark.center.x.to_bits().to_le_bytes());
+    bytes.extend(mark.center.y.to_bits().to_le_bytes());
+    bytes.extend(mark.radius.to_bits().to_le_bytes());
+}
+
+fn fnv1a64(bytes: impl IntoIterator<Item = u8>) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("fnv1a64:{hash:016x}")
+}
+
 #[cfg(test)]
 mod realization_tests {
     use super::*;
@@ -323,6 +599,15 @@ mod realization_tests {
         ))
         .unwrap();
         decode_source(&bytes, SourceFormatHint::Png).unwrap()
+    }
+
+    fn asset_field(name: &str, hint: SourceFormatHint) -> SourceField {
+        let bytes = std::fs::read(format!(
+            "{}/../../assets/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        decode_source(&bytes, hint).unwrap()
     }
 
     #[test]
@@ -585,6 +870,349 @@ mod realization_tests {
         );
         assert_eq!(left.realization_fingerprint, right.realization_fingerprint);
         assert!(left.has_only_finite_marks());
+    }
+
+    fn source_from_rgba(width: u32, rgba: Vec<u8>) -> SourceField {
+        let image = image::RgbaImage::from_raw(width, 1, rgba).unwrap();
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        decode_source(&bytes, SourceFormatHint::Png).unwrap()
+    }
+
+    fn sites_at_positions(positions: &[f64]) -> GridFamilyOutput {
+        let mut output = family();
+        let prototype = output.sites[0].clone();
+        output.sites = positions
+            .iter()
+            .map(|x| {
+                let mut site = prototype.clone();
+                site.position = Point2::new(*x, 0.0);
+                site
+            })
+            .collect();
+        output
+    }
+
+    #[test]
+    fn mapped_realization_keeps_family_structural_and_validates_direct_inputs() {
+        let family = sites_at_positions(&[0.0, 1.0]);
+        let source = source_from_rgba(2, vec![255, 0, 0, 128, 0, 0, 0, 255]);
+        let canvas = CanvasSpec {
+            width: 1.0,
+            height: 1.0,
+        };
+        let response = MarkResponse {
+            minimum_size: 2.0,
+            maximum_size: 9.0,
+        };
+        let mapping = SourceMapping::canonical(SourceMappingComponent::Red);
+        let first =
+            realize_mapped_circular_marks(&family, &source, &canvas, mapping, response).unwrap();
+        let second =
+            realize_mapped_circular_marks(&family, &source, &canvas, mapping, response).unwrap();
+        assert_eq!(first.family_fingerprint, family.family_fingerprint);
+        assert_eq!(
+            first.realization_fingerprint,
+            second.realization_fingerprint
+        );
+        assert_eq!(first.marks.len(), family.sites.len());
+        assert!(first.marks[0].radius > first.marks[1].radius);
+        assert_eq!(
+            realize_mapped_circular_marks(
+                &family,
+                &source,
+                &canvas,
+                SourceMapping {
+                    gain: f64::NAN,
+                    ..mapping
+                },
+                response,
+            )
+            .unwrap_err()
+            .path(),
+            "sampling.mapping.gain"
+        );
+        assert_eq!(
+            realize_mapped_circular_marks(
+                &family,
+                &source,
+                &canvas,
+                mapping,
+                MarkResponse {
+                    minimum_size: 2.0,
+                    maximum_size: 9.1
+                },
+            )
+            .unwrap_err()
+            .path(),
+            "realization.response.maximum_size"
+        );
+    }
+
+    #[test]
+    fn source_color_realization_suppresses_zero_alpha_and_keeps_positive_paint_opaque() {
+        let family = sites_at_positions(&[0.0, 1.0, 2.0, 3.0]);
+        let source = source_from_rgba(
+            4,
+            vec![
+                255, 0, 0, 0, // hidden red must not leak a mark
+                255, 0, 0, 255, // opaque red
+                0, 255, 0, 128, // partial green
+                0, 0, 255, 0, // hidden blue must not leak a mark
+            ],
+        );
+        let canvas = CanvasSpec {
+            width: 3.0,
+            height: 1.0,
+        };
+        let response = MarkResponse {
+            minimum_size: 2.0,
+            maximum_size: 9.0,
+        };
+        let mapping = SourceMapping::canonical(SourceMappingComponent::Alpha);
+        let realization =
+            realize_source_color_circular_marks(&family, &source, &canvas, mapping, response)
+                .unwrap();
+        assert_eq!(
+            realization.marks.len(),
+            2,
+            "exact-zero alpha omits marks despite minimum size"
+        );
+        let opaque = &realization.marks[0];
+        let partial = &realization.marks[1];
+        assert_eq!(
+            opaque.paint,
+            SampledSourcePaint {
+                red: 1.0,
+                green: 0.0,
+                blue: 0.0,
+                alpha: 1.0
+            }
+        );
+        assert_eq!(
+            partial.paint,
+            SampledSourcePaint {
+                red: 0.0,
+                green: 1.0,
+                blue: 0.0,
+                alpha: 1.0
+            }
+        );
+        assert_eq!(opaque.mark.radius, 4.5);
+        assert!((partial.mark.radius - (2.0 + (128.0 / 255.0) * 7.0) / 2.0).abs() < 1e-12);
+        assert!(realization.has_only_finite_marks());
+
+        let repeated =
+            realize_source_color_circular_marks(&family, &source, &canvas, mapping, response)
+                .unwrap();
+        assert_eq!(
+            realization, repeated,
+            "sampled paint is immutable realization content"
+        );
+        let changed_source = source_from_rgba(
+            4,
+            vec![255, 0, 0, 0, 255, 0, 0, 255, 0, 0, 255, 128, 0, 0, 255, 0],
+        );
+        let changed = realize_source_color_circular_marks(
+            &family,
+            &changed_source,
+            &canvas,
+            mapping,
+            response,
+        )
+        .unwrap();
+        assert_ne!(
+            realization.realization_fingerprint,
+            changed.realization_fingerprint
+        );
+        assert_ne!(realization.marks[1].paint, changed.marks[1].paint);
+    }
+
+    #[test]
+    fn sampled_paint_alone_changes_the_source_color_realization_identity() {
+        let family = sites_at_positions(&[0.0]);
+        let source = source_from_rgba(1, vec![255, 0, 0, 255]);
+        let canvas = CanvasSpec {
+            width: 1.0,
+            height: 1.0,
+        };
+        let mapping = SourceMapping::canonical(SourceMappingComponent::Alpha);
+        let response = MarkResponse {
+            minimum_size: 2.0,
+            maximum_size: 9.0,
+        };
+        let realization =
+            realize_source_color_circular_marks(&family, &source, &canvas, mapping, response)
+                .unwrap();
+        let mut changed_paint_only = realization.marks.clone();
+        changed_paint_only[0].paint.blue = 0.25;
+        let original = source_color_realization_fingerprint(
+            &family,
+            &source,
+            mapping,
+            response,
+            &realization.marks,
+        );
+        let changed = source_color_realization_fingerprint(
+            &family,
+            &source,
+            mapping,
+            response,
+            &changed_paint_only,
+        );
+        assert_eq!(original, realization.realization_fingerprint);
+        assert_ne!(
+            original, changed,
+            "sampled paint is an identity input on its own"
+        );
+    }
+
+    #[test]
+    fn source_color_unassociates_after_interpolation_without_a_hidden_rgb_fringe() {
+        let family = sites_at_positions(&[0.5]);
+        let source = source_from_rgba(2, vec![255, 0, 0, 255, 0, 255, 0, 0]);
+        let canvas = CanvasSpec {
+            width: 1.0,
+            height: 1.0,
+        };
+        let realization = realize_source_color_circular_marks(
+            &family,
+            &source,
+            &canvas,
+            SourceMapping::canonical(SourceMappingComponent::Alpha),
+            MarkResponse {
+                minimum_size: 2.0,
+                maximum_size: 9.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(realization.marks.len(), 1);
+        assert_eq!(
+            realization.marks[0].paint,
+            SampledSourcePaint {
+                red: 1.0,
+                green: 0.0,
+                blue: 0.0,
+                alpha: 1.0
+            }
+        );
+        assert_eq!(realization.marks[0].mark.radius, 2.75);
+    }
+
+    #[test]
+    fn inverted_stage9_luminance_and_alpha_mappings_retain_legacy_mark_geometry() {
+        let family = sites_at_positions(&[0.0, 1.0]);
+        let source = source_from_rgba(2, vec![255, 0, 0, 128, 255, 255, 255, 64]);
+        let canvas = CanvasSpec {
+            width: 1.0,
+            height: 1.0,
+        };
+        let response = MarkResponse {
+            minimum_size: 2.0,
+            maximum_size: 9.0,
+        };
+        for (legacy_component, mapping_component) in [
+            (
+                SourceComponent::Luminance,
+                SourceMappingComponent::Luminance,
+            ),
+            (SourceComponent::Alpha, SourceMappingComponent::Alpha),
+        ] {
+            let legacy = realize_circular_marks(
+                &family,
+                &source,
+                &canvas,
+                SourcePlacement::StretchToCanvas,
+                legacy_component,
+                response,
+            )
+            .unwrap();
+            let legacy_repeat = realize_circular_marks(
+                &family,
+                &source,
+                &canvas,
+                SourcePlacement::StretchToCanvas,
+                legacy_component,
+                response,
+            )
+            .unwrap();
+            let mapped = realize_mapped_circular_marks(
+                &family,
+                &source,
+                &canvas,
+                SourceMapping {
+                    component: mapping_component,
+                    placement: SourcePlacement::StretchToCanvas,
+                    inverted: true,
+                    gain: 1.0,
+                    bias: 0.0,
+                },
+                response,
+            )
+            .unwrap();
+            assert_eq!(legacy.marks, mapped.marks);
+            assert_eq!(
+                legacy.realization_fingerprint,
+                legacy_repeat.realization_fingerprint
+            );
+            assert_ne!(
+                legacy.realization_fingerprint,
+                mapped.realization_fingerprint
+            );
+        }
+    }
+
+    #[test]
+    fn stage9_realizations_exercise_both_immutable_baseline_sources() {
+        let family = family();
+        let canvas = CanvasSpec {
+            width: 90.0,
+            height: 60.0,
+        };
+        let response = MarkResponse {
+            minimum_size: 2.0,
+            maximum_size: 9.0,
+        };
+        for (name, hint, expected_hash) in [
+            (
+                "raster-sample.png",
+                SourceFormatHint::Png,
+                "sha256:324ac232e319002a13fbcfac46538ca5d7e8ba8a127eea2eaf20e8ddb3ed2ef2",
+            ),
+            (
+                "vector-sample.svg",
+                SourceFormatHint::Svg,
+                "sha256:42eb5e23111a5dbad66f2b1802a7cc06391c7ede829b99eb28aeb1ac91596e2e",
+            ),
+        ] {
+            let source = asset_field(name, hint);
+            assert_eq!(source.identity().content_hash, expected_hash);
+            let mapped = realize_mapped_circular_marks(
+                &family,
+                &source,
+                &canvas,
+                SourceMapping::canonical(SourceMappingComponent::Luminance),
+                response,
+            )
+            .unwrap();
+            let source_color = realize_source_color_circular_marks(
+                &family,
+                &source,
+                &canvas,
+                SourceMapping::canonical(SourceMappingComponent::Alpha),
+                response,
+            )
+            .unwrap();
+            assert_eq!(mapped.family_fingerprint, family.family_fingerprint);
+            assert!(mapped.has_only_finite_marks());
+            assert!(source_color.has_only_finite_marks());
+            assert!(source_color.marks.len() <= family.sites.len());
+        }
     }
 }
 
