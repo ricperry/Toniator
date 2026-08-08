@@ -872,6 +872,24 @@ evidence, and known fractional-alpha differences, and wait. After user
 acceptance, create local implementation and tracker checkpoint commits before
 Stage 9D.
 
+#### Stage 9D entry seam correction — explicit channel diagnostics
+
+Before Stage 9D, rename the accepted Stage 3–8 single-channel engine request,
+result, synchronous evaluator, and scheduler APIs to explicit
+`ChannelDiagnostic*` / `evaluate_channel_diagnostic*` names, and mechanically
+migrate their existing CLI caller and regression tests. Remove the old
+unprefixed single-channel names so Stage 9D can make that namespace the
+complete-document authority without a compatibility dispatcher or competing
+render path.
+
+This corrective checkpoint may change only `toniator-engine`, `toniator-cli`,
+their tests, checkout-aware evidence, this roadmap, and `ProgressTracker.md`.
+It must preserve exact accepted Stage 3–8 behavior, identities, scheduler/cache
+semantics, CLI syntax/output, and both immutable source results. It adds no
+channel-model CLI integration, export-background behavior, complete-document
+evaluation, or other Stage 9D/9E product behavior. Checkpoint the correction
+and its documentation closeout before Stage 9D begins.
+
 #### Stage 9D — Complete-document engine evaluation
 
 Allowed: `crates/toniator-engine/{Cargo.toml,src/**,tests/**}`;

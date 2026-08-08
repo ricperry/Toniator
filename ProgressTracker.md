@@ -131,6 +131,10 @@ behavior, transparent straight-sRGBA, consumer-only PNG backing, and ordinary
 editable per-channel SVG geometry with documented raster/SVG semantic
 correspondence.
 
+**Stage 9D entry seam correction — Complete at commit `cad3705`.** Rename the retained
+single-channel engine and CLI path to explicit channel-diagnostic APIs so the
+unprefixed engine namespace can become complete-document authority in Stage 9D.
+
 **Stage 9D — Planned.** Add complete-document ordered multi-channel engine
 evaluation, strict aggregate/per-channel identities, accepted-cache reuse,
 transactional scheduler behavior, and ordered diagnostics.
