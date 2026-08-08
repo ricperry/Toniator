@@ -1,6 +1,6 @@
 # Toniator Greenfield Rewrite Plan
 
-Status: approved execution roadmap and stage contract (2026-08-05)
+Status: approved execution roadmap and stage contract (2026-08-08)
 
 This plan is subordinate to the normative files in `Project Specification/`.
 It records the approved order, scope, and gates for the rewrite; it does not
@@ -57,6 +57,19 @@ two frontends:
 The intended flow is `domain → geometry/sampling → patterns → render/io →
 engine → app or cli`; engine is the shared orchestration boundary, not a
 second state authority.
+
+### Authoritative CLI hierarchy
+
+- `toniator render` is the product-level integration and acceptance surface.
+  It evaluates the complete authoritative document and renders its ordered
+  active channel topology.
+- `toniator inspect grid` is a structural guide/site diagnostic.
+- `toniator inspect marks` is a single-channel sampling/realization diagnostic.
+- Inspect commands may expose low-level characterization parameters, but they
+  are not document authorities or alternate product-render paths.
+- Future CLI and GTK work extends or consumes the authoritative document
+  evaluation path used by `toniator render`; it must not add a competing
+  render authority.
 
 ## Baseline test artwork
 
@@ -271,6 +284,12 @@ Historical note: Stages 4 and 5 share implementation checkpoint `31f4cc9`.
 Stage 5 visual review prompted the accepted Stage 4 alpha-associated luminance
 correction. The accepted outputs remain derived validation artifacts under
 `target/validation/`, not committed binary goldens.
+
+The Stage 5 `RGB`/`CMYK` CLI selector was a temporary output-background choice
+for that single-channel vertical slice, not an authoritative halftone channel
+model. Stage 9 replaces that conflated syntax with independent
+`--channel-model` and `--background` contracts while retaining Stage 5's
+historical validation commands as checkpoint evidence.
 
 The slice excludes curves, random, maze, Voronoi, regions/offset, video,
 animation UI, plugins, and legacy import. GTK editing remains a later stage.
@@ -511,12 +530,450 @@ makes no graphical or GTK acceptance claim because it must not change pixels.
 resource-limit evidence, and unchanged outputs; propose **Implemented awaiting
 review**, leave the work uncommitted, and do not begin GTK or Stage 9.
 
-## Stage 9 — view-only GTK preview
+## Stage 9 — Authoritative Multi-Channel Document Evaluation
 
-**Status: Planned.** Provide the first native GTK/libadwaita frontend over the
-Stage 6–8 engine pipeline.
+**Status: Planned.** Replace the temporary single-channel document assumption
+with a bounded headless authority for RGB, CMYK, and SourceColorAlpha channel
+topologies. The technical contract below is one coherent Stage 9 contract,
+delivered through five separately accepted local checkpoints:
 
-### Stage 9 implementation contract
+1. **Stage 9A — Channel authority and topology.** Domain model, roles, stable
+   IDs, canonical topology factory, mappings, validation, atomic replacement,
+   revisions, affected-channel reporting, and invalidation.
+2. **Stage 9B — Source fields and source-colored realization.** Linear RGB,
+   deterministic full-UCR CMYK fields, mapping transforms, alpha association,
+   SourceColorAlpha interpolation, zero-alpha suppression, and per-mark sampled
+   paint/content identity.
+3. **Stage 9C — Fixed model compositors.** Layer-local coverage, additive RGB,
+   idealized subtractive CMYK, SourceColorAlpha source-over, straight-sRGBA,
+   consumer-only PNG backing, and deterministic vector SVG parity.
+4. **Stage 9D — Complete-document engine evaluation.** Ordered multi-channel
+   evaluation, aggregate identities, accepted-cache reuse, transactional
+   scheduler semantics, cancellation, and diagnostics.
+5. **Stage 9E — Authoritative CLI and integration evidence.** Complete-document
+   `render`, channel-model/background migration, native artifacts, full
+   workspace validation, and final Stage 9 visual review.
+
+Each substage starts only from the previous accepted local checkpoint. One
+writer implements one substage through its narrow allowlist, stops at
+**Implemented awaiting review**, and waits for user acceptance. After
+acceptance, create the local implementation and tracker/documentation
+checkpoint commits before beginning the next substage. A push is optional and
+occurs only when the user explicitly requests it. Stage 10 cannot begin until
+Stage 9E is accepted and locally checkpointed.
+
+### Stage 9 authoritative topology and mapping
+
+- Add `HalftoneChannelModel::{Rgb, Cmyk, SourceColorAlpha}` to the authoritative
+  document.
+- Add ordered channel roles with canonical IDs: Red `1`, Green `2`, Blue `3`;
+  Cyan `4`, Magenta `5`, Yellow `6`, Black `7`; SourceColor `8`.
+- RGB topology is ordered Red, Green, Blue. CMYK is ordered Cyan, Magenta,
+  Yellow, Black. SourceColorAlpha contains the SourceColor role.
+- A canonical topology factory owns role, canonical stable ID, order, default
+  mapping, default paint, visibility, and opacity. It clones one caller-supplied
+  validated pattern/layout/mark-response template across every role. It does
+  not choose pattern family settings, density, phase, or role-specific angles.
+- Explicit topologies may use arbitrary valid stable IDs. Validation requires
+  unique IDs, the model's roles exactly once and in canonical order, supported
+  mappings and paint, valid pattern-definition references, and no extraneous
+  roles.
+- Add one atomic model/topology replacement command carrying the requested
+  model and complete explicit ordered channels. It installs both or neither,
+  never resets, guesses, or migrates settings. Report
+  `InvalidationLevel::ChannelTopology` with affected IDs in deterministic old
+  order followed by newly introduced IDs in new order.
+- Keep per-channel source mapping independent from layer paint. Mapping changes
+  are `Realization`; ordinary solid color, opacity, and visibility changes are
+  `Presentation`.
+
+Source mappings support Red, Green, Blue, Cyan, Magenta, Yellow, Black, Alpha,
+and Luminance plus the existing placement. Mapping applies:
+
+```text
+mapped = clamp(gain * (inverted ? 1 - value : value) + bias)
+```
+
+Gain is finite and nonnegative; bias is finite. Canonical RGB, CMYK, and
+SourceColorAlpha mappings use `inverted=false`, `gain=1`, and `bias=0`.
+Existing single-channel Luminance/Alpha behavior remains expressible and must
+retain its accepted Stage 3–8 identities and output under equivalent mapping.
+
+Decode straight sRGB, convert color to linear light, and derive fields before
+spatial interpolation. RGB uses linear `R`, `G`, and `B`. CMYK uses
+profile-independent unnormalized full UCR:
+
+```text
+K = 1 - max(R, G, B)
+C = 1 - R - K
+M = 1 - G - K
+Y = 1 - B - K
+```
+
+Clamp component values to `[0,1]`. Apply the mapping transform, then multiply
+color-derived responses by source alpha exactly once before interpolation.
+Alpha is independent and is not alpha-multiplied again. Do not add normalized
+CMYK, ICC/profile handling, dot gain, configurable UCR/GCR, black-generation
+curves, physical ink simulation, or soft proofing.
+
+SourceColorAlpha has one special evaluated-paint contract:
+
+1. Decode straight sRGB and independent alpha.
+2. Convert RGB to linear light.
+3. Associate linear RGB with alpha for spatial interpolation.
+4. Interpolate associated RGB and alpha.
+5. For positive sampled alpha, unassociate back to straight linear RGB and use
+   it as per-mark paint.
+6. Independently use sampled alpha as the mark-response field.
+
+Positive alpha changes mark size only; it does not also scale mark color or
+opacity. Exact zero sampled alpha suppresses visible paint even when the
+configured minimum mark size is nonzero. Hidden RGB remains inspectable but
+cannot bleed across transparent edges or contribute visible zero-alpha marks.
+
+### Document evaluation and scheduling
+
+- Promote the shared unprefixed evaluation request/result/scheduler path to
+  complete-document evaluation. Retain the Stage 3–8 single-channel evaluator
+  under explicit channel-diagnostic names for `inspect marks` and regression
+  characterization, not as a competing render authority.
+- One immutable document snapshot/token represents one authoritative revision.
+  One resolved source is shared by all channels in Stage 9.
+- Perform authoritative preflight for the complete topology, decode source
+  bytes once, evaluate channels in authoritative order, and construct one
+  ordered `RenderScene` containing every topology channel. Invisible channels
+  remain ordered authoritative layers but contribute nothing.
+- Failure of any required channel fails the complete evaluation. Do not expose
+  or stage an acceptable partial scene. Check cancellation between channel
+  evaluations as well as at the existing Stage 7 boundaries.
+- Preserve latest-only polling, coalescing, cancellation-over-error, stale
+  rejection, transactional acceptance, idempotent acceptance, checked tickets,
+  shutdown, and `Drop` joining.
+- Default/custom family-candidate limits remain checked per evaluated family
+  before allocation.
+
+### Fixed model compositing semantics
+
+Each ordered layer first produces its accepted conventional layer-local
+premultiplied-linear result `(P_i, A_i)` in stable mark order. Raster
+antialiasing retains the Stage 5 8×8 grid: fractional mark coverage is
+`q = covered_subsamples / 64`. With straight-linear paint `C`, paint alpha `a`,
+and layer opacity `o`, each mark uses:
+
+```text
+s = clamp(q * a * o)
+P <- s*C + P*(1-s)
+A <- s   + A*(1-s)
+```
+
+Invisible layers use `(0,0)`. This local step preserves exact accepted
+single-layer behavior, including overlapping marks.
+
+RGB is fixed additive linear Porter-Duff lighter composition:
+
+```text
+P_rgb = clamp(sum(P_i))
+A_rgb = clamp(sum(A_i))
+```
+
+The sums and clamp are componentwise. This yields red+green=yellow,
+red+blue=magenta, green+blue=cyan, and red+green+blue=white for full canonical
+coverage while using actual validated paint and opacity.
+
+CMYK is fixed idealized subtractive transmittance. For positive `A_i`, let
+`C_i = P_i / A_i`; zero-alpha layers have no factor:
+
+```text
+T = product(1 - A_i * (1 - C_i))
+A_cmyk = 1 - product(1 - A_i)
+P_cmyk = T - (1 - A_cmyk)
+```
+
+Products are componentwise and clamped for deterministic floating-point
+boundaries. Canonical full coverage yields M+Y=red, C+Y=green, C+M=blue,
+C+M+Y=black, and K independently reduces every transmittance component.
+Compositing the transparent result over white exactly recovers `T`; white is
+not baked into transparent output.
+
+SourceColorAlpha uses its layer-local conventional ordered source-over result.
+These three compositors are fixed semantics of the model, not selectable blend
+modes.
+
+For every model, if final alpha is positive, unassociate `P/A`, convert linear
+RGB to sRGB, quantize each RGB component to nearest 8-bit, and quantize alpha
+to nearest 8-bit. Zero alpha is transparent black. `RasterSurface` remains
+straight 8-bit sRGBA. An explicit PNG black/white background is applied only
+after this transparent scene result as a final consumer operation.
+
+### Vector SVG parity
+
+- Keep channel circles as vector groups in `<defs>` with canonical clipping and
+  stable order. Use same-document `feImage` fragment references; do not embed a
+  raster image.
+- Apply paint alpha and layer opacity to each vector mark so overlapping marks
+  reproduce the layer-local equation; do not move opacity to a post-composited
+  group operation.
+- Set `color-interpolation-filters="linearRGB"` explicitly and use
+  premultiplied-RGBA filter arithmetic rather than CSS/viewer-selected blend
+  behavior.
+- RGB iteratively combines channel images with `feComposite
+  operator="arithmetic" k2="1" k3="1"`, exactly implementing saturating
+  premultiplied color and alpha addition.
+- CMYK composites each channel image over opaque white to form
+  `1-A_i*(1-C_i)`, multiplies those opaque transmittance factors in linear RGB,
+  constructs a white premultiplied alpha mask by source-over union, and applies
+  final arithmetic `T + A - 1` with `k2="1" k3="1" k4="-1"`. The result is the
+  same `(P_cmyk,A_cmyk)` defined above.
+- SourceColorAlpha directly renders its source-colored vector marks in stable
+  source-over order.
+- Reject ordinary source-over fallback for RGB/CMYK, unspecified viewer blend
+  modes, external filter inputs, and raster embedding. SVG remains transparent.
+- Assert the serialized filter structure and render synthetic SVG fixtures
+  through the in-process SVG stack and Inkscape. Exact full-coverage interior
+  samples must match the equations; antialiased-edge comparisons use separately
+  reported RGB and alpha error, never a flattened comparison.
+
+### Identity and cache layering
+
+- A per-channel family content identity contains only inputs that determine
+  Stage 3 structural output: canvas, resolved density values, rotation,
+  translation, guard depth, structural family parameters, and declared support
+  capability. It does not include source identity/bytes, aspect-lock authoring
+  state, pattern output treatment, candidate-limit policy, mapping, sampled
+  values, response, paint, visibility, opacity, model compositor, or consumer
+  settings. The private family cache lookup additionally carries the configured
+  candidate limit so accepted cached work cannot bypass a stricter policy; that
+  safety policy is not part of the successful structural content fingerprint.
+- The aggregate document family identity contains the model and ordered
+  `(role, channel ID, per-channel family identity)` topology. A topology change
+  changes this aggregate identity, but an immutable family artifact is reusable
+  for any channel whose complete structural key matches, regardless of model,
+  role, or channel ID.
+- A per-channel realization/content key and identity contains its family
+  identity, decoded source identity, complete source mapping, mark response,
+  and resulting canonical geometry/content. SourceColorAlpha sampled per-mark
+  color is evaluated content and participates here. Ordinary solid
+  presentation color does not.
+- The aggregate realization identity contains ordered topology and ordered
+  per-channel realization/content identities.
+- Scene identity adds ordered layers, solid or sampled paint, visibility,
+  opacity, and the fixed halftone-model compositor contract.
+- The transparent raster key adds only the versioned transparent rasterization
+  and model-compositor contract. Export background, PNG/SVG selection, encoder
+  options, and other final-consumer choices remain outside source/family/
+  realization/scene identity and cannot invalidate `RenderScene`.
+
+Retain exactly five private last-successful aggregate cache slots. Source holds
+one decoded value. Family and realization each hold the last accepted
+document's immutable per-channel keyed collection; scene and transparent raster
+are aggregate values. Matching entries may be shared with `Arc`. A source edit
+misses source and source-dependent realization/scene/raster but may reuse an
+unchanged structural family. A structural edit misses the affected family and
+downstream. A mapping/response edit misses only the affected channel
+realization before aggregate scene/raster reconstruction. A presentation edit
+reuses source/family/realization and misses scene/raster. Export background or
+encoding changes reuse the scene.
+
+Preserve the five-field immutable aggregate `CacheDiagnostics`; family or
+realization is an aggregate Hit only when every required channel entry came
+from the accepted cache. Add ordered immutable per-channel family/realization
+diagnostics. `Hit` always means accepted-cache reuse, never intra-evaluation
+memoization. Workers stage one private multi-channel transaction; only an
+accepted current successful completion commits it.
+
+### CLI migration
+
+- `toniator render` constructs/evaluates the complete authoritative document
+  topology and is the only product render path.
+- Add required `--channel-model rgb|cmyk|source-color-alpha` for direct-source
+  rendering. Reject the old `--mode` semantics rather than retaining a second
+  interpretation.
+- Use the existing common pattern/layout/response settings as the one factory
+  template cloned across canonical roles. A global opacity override may be
+  deliberately applied to every created channel. Canonical role mappings and
+  paints replace the old global render `--source-component` and `--color`;
+  those low-level controls remain available to `inspect marks`.
+- Add `--background transparent|black|white` for PNG, defaulting to
+  transparent. It is a final-consumer choice and is never inferred from model.
+  Explicit black/white background with SVG fails clearly; SVG remains
+  transparent.
+- PNG encoding remains sRGB/sRGBA for every model. CMYK denotes halftone
+  topology and fixed composition, never a CMYK file encoding.
+- `inspect grid` and `inspect marks` retain their diagnostic roles and never
+  construct an alternate document-render path.
+
+### Stage 9 substage scope and acceptance gates
+
+The following allowlists are cumulative only through accepted commits, never
+within one writer assignment. If a later integration substage exposes a defect
+in an earlier accepted layer, stop and open a bounded corrective checkpoint for
+that owning substage instead of silently widening the active allowlist.
+
+#### Stage 9A — Channel authority and topology
+
+Allowed: `crates/toniator-domain/{Cargo.toml,src/**,tests/**}`;
+`ProgressTracker.md`; checkout-aware Stage 9A evidence; workspace
+`Cargo.toml`/`Cargo.lock` only if narrowly required. No dependency is expected.
+
+Acceptance proves all three canonical topologies, exact role order and IDs,
+arbitrary valid explicit IDs, missing/duplicate/extraneous/out-of-order roles,
+mapping and paint compatibility, atomic replacement success/failure, unchanged
+state on failure, one revision advance on success, deterministic affected IDs,
+`ChannelTopology` invalidation, mapping/response `Realization`, and ordinary
+solid paint/opacity/visibility `Presentation`.
+
+**9A stop:** Update only Stage 9A to **Implemented awaiting review**, report the
+focused domain and workspace boundary evidence, and wait. After user acceptance,
+create local implementation and tracker checkpoint commits before Stage 9B.
+
+#### Stage 9B — Source fields and source-colored realization
+
+Allowed: `crates/toniator-sampling/{Cargo.toml,src/**,tests/**}` and
+`crates/toniator-patterns/{Cargo.toml,src/**,tests/**}`;
+`ProgressTracker.md`; checkout-aware Stage 9B evidence; workspace
+`Cargo.toml`/`Cargo.lock` only if narrowly required. The accepted Stage 9A
+domain API is read-only in this substage.
+
+Acceptance uses exact black, white, RGB primary/secondary, neutral-gray,
+partial-alpha, zero-alpha hidden-RGB, and opaque/transparent-boundary fixtures.
+It proves linear fields, unnormalized full UCR, transform order,
+inversion/gain/bias/clamping, color alpha association exactly once, independent
+Alpha, SourceColorAlpha unassociation and straight sampled paint, exact-zero
+suppression, positive-alpha size-only behavior, immutable source-derived paint
+content identity, and retained Stage 3–8 single-channel results. Both immutable
+baseline sources are exercised without modifying them.
+
+**9B stop:** Update only Stage 9B to **Implemented awaiting review**, report
+sampling/realization evidence, and wait. After user acceptance, create local
+implementation and tracker checkpoint commits before Stage 9C.
+
+#### Stage 9C — Fixed model compositors
+
+Allowed: `crates/toniator-render/{Cargo.toml,src/**,tests/**}`;
+`ProgressTracker.md`; checkout-aware Stage 9C evidence; derived compositor
+artifacts under `target/validation/stage-9c/`; workspace `Cargo.toml`/`Cargo.lock`
+only if narrowly required. Accepted domain/sampling/pattern APIs are read-only.
+
+Acceptance proves exact RGB and CMYK primary/secondary/neutral relationships,
+overlap, fractional coverage, saturation, opacity, visibility, transparent
+representation, K behavior, SourceColorAlpha source-over, straight-sRGBA
+quantization, consumer-only transparent/black/white PNG backing, exact
+single-layer compatibility, deterministic SVG filter structure, no raster
+embedding or blend fallback, and in-process plus Inkscape raster/SVG parity
+with RGB and alpha measured separately. Both immutable sources are exercised.
+
+**9C stop:** Update only Stage 9C to **Implemented awaiting review**, report the
+equations, synthetic results, SVG compatibility uncertainty, and parity
+evidence, and wait. After user acceptance, create local implementation and
+tracker checkpoint commits before Stage 9D.
+
+#### Stage 9D — Complete-document engine evaluation
+
+Allowed: `crates/toniator-engine/{Cargo.toml,src/**,tests/**}`;
+`ProgressTracker.md`; checkout-aware Stage 9D evidence; workspace
+`Cargo.toml`/`Cargo.lock` only if narrowly required. All accepted lower-layer
+APIs are read-only.
+
+Acceptance proves 3 ordered RGB layers, 4 ordered CMYK layers, 1
+SourceColorAlpha layer, one decode per source miss, invisible authoritative
+layers, all-or-nothing failure, per-channel mapping/presentation/structural
+reuse, source/family independence, safe topology reuse, aggregate identities,
+ordered immutable per-channel diagnostics, five aggregate cache dispositions,
+candidate limits, transactional failure/canceled/stale/unaccepted safety, and
+every retained Stage 7–8 scheduler and single-channel primitive behavior. Both
+immutable sources must produce equal cached/uncached results, identities,
+raster bytes, and SVG bytes; decoded-pixel identity remains downstream.
+
+**9D stop:** Update only Stage 9D to **Implemented awaiting review**, report the
+complete reuse matrix and scheduler evidence, and wait. After user acceptance,
+create local implementation and tracker checkpoint commits before Stage 9E.
+
+#### Stage 9E — Authoritative CLI and integration evidence
+
+Allowed: `crates/toniator-cli/{Cargo.toml,src/**,tests/**}`;
+`scripts/validate_architecture.sh` only for a narrowly necessary boundary
+assertion; `ProgressTracker.md`; checkout-aware Stage 9E evidence; derived
+artifacts under `target/validation/stage-9/`; workspace `Cargo.toml`/`Cargo.lock`
+only if narrowly required. Accepted core APIs are read-only. A lower-layer
+defect pauses 9E for a separate bounded correction rather than widening 9E.
+
+Acceptance proves all three models use the complete authoritative `render`
+path; inspect commands remain diagnostics; obsolete `--mode` is rejected;
+`--channel-model` is required for direct-source render; background is
+consumer-only with transparent default; black/white PNG backing works; SVG
+rejects opaque backing; PNG remains sRGB/sRGBA; and candidate limits remain
+enforced. Run the one complete final workspace gate after the last executable
+change and reuse it unless another executable change invalidates it.
+
+Generate one native transparent PNG and one vector SVG for each of the six
+model/source combinations under `target/validation/stage-9/`: RGB/PNG source,
+RGB/SVG source, CMYK/PNG source, CMYK/SVG source, SourceColorAlpha/PNG source,
+and SourceColorAlpha/SVG source. Preserve native alpha and vector geometry. Do
+not flatten, checkerboard, or replace review files with composites. Inspect RGB
+and alpha separately, distinguish viewer background from file content, verify
+SVG XML/filter structure, and retain the live-text/system-font caveat.
+
+**9E stop:** Update only Stage 9E to **Implemented awaiting review**, report the
+complete Stage 9 evidence and all twelve native artifacts, and wait for user
+technical and visual acceptance. After acceptance, create local implementation
+and tracker/documentation checkpoint commits. Do not begin GTK or Stage 10 and
+do not push unless explicitly requested.
+
+### Complete Stage 9 test matrix
+
+Domain/topology tests must cover all three canonical topologies, exact canonical
+roles/order/IDs, arbitrary valid explicit IDs, missing/duplicate/extraneous or
+out-of-order roles, mapping and paint validation, atomic replacement failure,
+revision behavior, deterministic affected IDs, and `ChannelTopology`
+invalidation.
+
+Sampling/math tests use exact black, white, RGB primary/secondary, neutral-gray,
+partial-alpha, and zero-alpha hidden-RGB fixtures. Prove linear fields,
+unnormalized UCR, transform order, inversion/gain/bias/clamping, color alpha
+association exactly once, independent Alpha, SourceColorAlpha interpolation,
+zero-alpha suppression, and that positive alpha changes size without fading
+paint.
+
+Render tests prove exact RGB and CMYK primary/secondary/neutral relationships,
+overlap, fractional coverage, opacity, visibility, transparent output,
+straight-sRGBA quantization, single-layer compatibility, deterministic SVG
+filter structure, and native-raster/SVG semantic parity without raster
+embedding.
+
+Engine/cache/scheduler tests prove 3 ordered RGB layers, 4 ordered CMYK layers,
+1 SourceColorAlpha layer, per-channel mapping/presentation/topology reuse,
+source/family independence, safe topology artifact reuse, transactional failure
+safety, cancellation/stale/unaccepted safety, deterministic aggregate
+identities, ordered per-channel diagnostics, and every retained Stage 7–8 and
+single-channel primitive behavior. Both immutable sources must produce equal
+cached/uncached document results, raster bytes, and SVG bytes in-process; SVG
+decoded-pixel identity remains downstream where source-derived content needs
+it.
+
+CLI tests prove every model uses the authoritative document path, inspect
+commands remain diagnostics, obsolete `--mode` render semantics are rejected,
+background is consumer-only with transparent default, SVG rejects opaque
+background, and PNG is always sRGB/sRGBA.
+
+Run focused crate tests within every substage and a proportional workspace
+boundary check before its review stop. Stage 9E owns the one complete final
+workspace format/check/strict-Clippy/test, architecture, asset-hash, XML,
+protected-tree, and diff/status gate after the last executable change. Reuse
+successful gate evidence; do not rerun the full gate unless a later executable
+change invalidates it.
+
+**Stage 9 umbrella stop condition:** Stage 9 is not accepted as a whole until
+9A through 9E are each accepted and locally checkpointed and the user visually
+accepts all six native model/source artifact pairs. Do not begin GTK or Stage
+10 from an unaccepted or uncheckpointed substage.
+
+## Stage 10 — View-only GTK preview
+
+**Status: Planned.** Provide the first native GTK/libadwaita frontend only over
+the accepted, locally checkpointed Stage 9E complete-document integration
+path.
+
+### Stage 10 implementation contract
 
 - Add GTK4/libadwaita dependencies only to `toniator-app`.
 - Use tracked Blueprint sources and GResource; generated `.ui` files remain in
@@ -524,23 +981,25 @@ Stage 6–8 engine pipeline.
 - Create an `AdwApplicationWindow` with header bar, Open action, empty state,
   loading state, error display, and fit-to-window canvas.
 - Support a normal file chooser and `toniator-app [PATH]`.
-- Opening artwork commits a new authoritative source reference and schedules
+- Opening artwork commits a new authoritative source reference, constructs the
+  requested canonical Stage 9 topology, and schedules complete-document
   evaluation.
 - Display only a completion accepted by the current document revision.
-- Wrap the exact straight-sRGBA `RasterSurface` in a GDK memory texture.
-- Do not PNG-encode, flatten, checkerboard, or alter pixels for preview.
-- Treat the widget background explicitly as viewer presentation, not file
-  content.
+- Wrap the exact straight-sRGBA `RasterSurface` in a GDK memory texture. Do not
+  PNG-encode, flatten, checkerboard, recompose channels, or alter pixels.
+- Use viewer-only backdrop defaults: RGB black, CMYK white, and
+  SourceColorAlpha fixed neutral mid-gray. Backdrop never changes document,
+  scene, pixels, SVG, or export background.
 - Surface SVG live-text/system-font diagnostics.
 
 Allowed: `toniator-app`, Blueprint/GResource/build files, workspace dependency
-declarations, architecture validation, future plan/tracker text, and Stage 9
+declarations, architecture validation, future plan/tracker text, and Stage 10
 validation artifacts.
 
 Forbidden: pattern/channel editing, undo, save, export UI, recent files,
-drag-and-drop, zoom tools, GTK geometry, or alternate rendering.
+drag-and-drop, zoom tools, GTK geometry/composition, or alternate rendering.
 
-### Stage 9 validation
+### Stage 10 validation
 
 ```bash
 cargo test -p toniator-app
@@ -549,23 +1008,23 @@ GDK_BACKEND=wayland cargo run --bin toniator-app -- assets/raster-sample.png
 GDK_BACKEND=wayland cargo run --bin toniator-app -- assets/vector-sample.svg
 ```
 
-Manually inspect both sources for rotation, translation, mark response, edge
-clipping, alpha behavior, resize fitting, SVG text diagnostics, and
-stale-preview rejection during rapid source changes.
+Manually inspect every model with both sources for Stage 9 pixel identity,
+backdrop policy, resize fitting, SVG diagnostics, and stale-preview rejection
+during rapid source changes.
 
-**Stop condition:** User visual acceptance is required. Do not begin Stage 10
+**Stop condition:** User visual acceptance is required. Do not begin Stage 11
 automatically.
 
-## Stage 10 — headless undo and redo
+## Stage 11 — Headless undo and redo
 
 **Status: Planned.** Make authoritative commands reversible independently of
 GTK widget state.
 
-### Stage 10 public contract
+### Stage 11 public contract
 
 - Add `DocumentHistory` around `DocumentSession`.
 - Successful commands record authoritative before/after states and invalidation
-  results.
+  results, including atomic model/topology replacement.
 - `undo()` and `redo()` each advance the current revision exactly once; old
   revision numbers are never restored.
 - Undo/redo report the same affected channels and invalidation level as the
@@ -574,10 +1033,12 @@ GTK widget state.
 - A new successful command after undo clears redo.
 - Command coalescing is deferred.
 
-### Stage 10 tests
+### Stage 11 tests
 
-- Round-trip every supported command, including source assignment and mapping.
-- Restore exact values and pattern-definition references.
+- Round-trip every supported command, including source assignment, mapping,
+  and complete model/topology replacement.
+- Restore exact channel model, ordered roles/IDs/mappings/paint, values, and
+  pattern-definition references.
 - Verify monotonic revisions and stale-token rejection.
 - Verify empty undo/redo and failed commands are no-ops.
 - Verify branching clears redo.
@@ -589,12 +1050,12 @@ controls.
 **Stop condition:** Accept the headless history contract before persistence
 begins.
 
-## Stage 11 — portable `.toniator` container
+## Stage 12 — Portable `.toniator` container
 
 **Status: Planned.** Save the complete supported document and its exact source
 artwork in one portable file, then load and render it through the shared engine.
 
-### Stage 11 container format
+### Stage 12 container format
 
 `.toniator` is a deterministic ZIP container, not plain JSON. Required entries
 are:
@@ -631,7 +1092,7 @@ Rules:
 - Unknown container or document versions fail clearly; migrations are not
   implemented yet.
 
-### Stage 11 IO and CLI behavior
+### Stage 12 IO and CLI behavior
 
 - `toniator-io` owns ZIP layout, JSON DTO conversion, validation, and atomic
   saving.
@@ -645,10 +1106,11 @@ Rules:
   `toniator render -i file.toniator -o output.svg`.
 - Document rendering uses saved state. CLI document overrides remain deferred.
 
-### Stage 11 tests
+### Stage 12 tests
 
-- Exact round-trip of IDs, canvas, pattern definition, density, transform,
-  source mapping, size response, appearance, and source bytes.
+- Exact round-trip of halftone channel model, ordered role/ID topology, canvas,
+  pattern definition, density, transform, source mapping, size response, paint,
+  appearance, and source bytes.
 - Embedded PNG bytes exactly match `assets/raster-sample.png`.
 - Embedded SVG bytes exactly match `assets/vector-sample.svg`, including live
   text.
@@ -670,18 +1132,19 @@ broad compatibility.
 
 **Stop condition:** User inspects both `.toniator` containers and their
 rendered PNG/SVG outputs. GTK document actions and editors require a separately
-approved Stage 12 plan.
+approved Stage 13 plan.
 
-## Stage 12+ — GTK document actions and command-bound editors
+## Stage 13+ — GTK document actions and command-bound editors
 
-Stage 12 and later work is deliberately deferred. GTK Open/Save integration,
+Stage 13 and later work is deliberately deferred. GTK Open/Save integration,
 document actions, command-bound pattern and channel editors, generalized
 families, connected and region output, multiframe evaluation, and simple
 transitions require separately scoped and approved short-stage contracts.
 
 ## Common validation and Git gates
 
-Every stage ends with:
+Unless a bounded stage contract specifies a proportional checkpoint gate,
+every stage ends with:
 
 ```bash
 cargo fmt --all -- --check
@@ -694,17 +1157,28 @@ git status --short --branch
 sha256sum assets/raster-sample.png assets/vector-sample.svg
 ```
 
-At each transition:
+Stage 9A–9D use their focused crate tests plus workspace check, strict Clippy,
+architecture, asset-hash, protected-path, and diff/status gates before review.
+Stage 9E runs the complete workspace test gate once after the last executable
+Stage 9 change. This keeps every accepted local checkpoint independently
+reviewable without repeating the full integration suite after every bounded
+slice.
+
+At each stage or Stage 9 substage transition:
 
 1. Mark only the approved stage **In progress**.
 2. One writer implements only its allowlist.
 3. Record **Implemented awaiting review**.
 4. Obtain automated and, where applicable, visual acceptance.
 5. Mark **Accepted awaiting checkpoint**.
-6. Commit only after explicit authorization.
-7. Record the implementation SHA in a documentation closeout commit.
-8. Push only after explicit authorization and verify the upstream commit.
-9. Stop before the next stage.
+6. User acceptance authorizes the required local implementation checkpoint;
+   do not begin the next substage before it exists.
+7. Record the implementation SHA and **Complete at commit** status in a local
+   documentation closeout commit before beginning the next substage.
+8. Push only after separate explicit authorization; a local checkpoint does
+   not imply a push.
+9. Start the next substage from that accepted documentation checkpoint and a
+   clean tracked worktree, then stop at its own review gate.
 
 ## Legacy quarry procedure
 

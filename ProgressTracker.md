@@ -80,7 +80,7 @@ acceptance. The alpha-aware carried condition is satisfied, and deferred Stage
 committed or accepted. Stage 6 is not started and remains planned; GTK remains
 out of scope. Details and non-goals are in the plan.
 
-### Stages 6–9+
+### Stages 6+
 
 **Stage 6 — Complete at commit `d8d1dc3`.** Authoritative document evaluation
 and the bounded Stage 3 family-output correction passed parent review, user
@@ -100,10 +100,51 @@ scheduler ticket/document token, immutable hit/miss diagnostics, declared
 pattern support capability instead of the temporary global 2.0–9.0 diameter
 restriction, and a configurable checked family-candidate safety limit.
 Implementation, the automated final gate, user review, and the implementation
-checkpoint are complete. View-only GTK preview;
-command bindings/undo-redo/current persistence/editors; then newly scoped
-generalized families, connected/region output, multiframe, and simple
+checkpoint are complete. Authoritative multi-channel document evaluation,
+then view-only GTK preview, undo/redo, portable persistence, command-bound
+editors, generalized families, connected/region output, multiframe, and simple
 transitions remain planned.
+
+**Stage 9 — Planned.** The complete bounded headless authoritative
+multi-channel document-evaluation path is split into five separately reviewed
+and locally checkpointed substages. Every substage starts only after the
+previous substage is user-accepted and its implementation plus tracker closeout
+are committed locally. Push remains optional and requires a separate user
+decision.
+
+**Stage 9A — Planned.** Add authoritative channel models, canonical and
+explicit ordered topologies, stable IDs, source mappings, paint compatibility,
+atomic model/topology replacement, revision behavior, affected-channel
+reporting, and `ChannelTopology` invalidation in the domain layer.
+
+**Stage 9B — Planned.** Add deterministic linear RGB/full-UCR CMYK source
+fields and SourceColorAlpha sampled-paint realization, including alpha
+association exactly once and zero-alpha paint suppression.
+
+**Stage 9C — Planned.** Add the fixed additive RGB, idealized subtractive CMYK,
+and SourceColorAlpha raster/SVG compositors while preserving single-layer
+behavior, vector geometry, transparent straight-sRGBA, and consumer-only PNG
+backing.
+
+**Stage 9D — Planned.** Add complete-document ordered multi-channel engine
+evaluation, strict aggregate/per-channel identities, accepted-cache reuse,
+transactional scheduler behavior, and ordered diagnostics.
+
+**Stage 9E — Planned.** Migrate `toniator render` to the authoritative document
+path, add channel-model and export-background CLI semantics, generate the
+native review artifacts, and run the complete Stage 9 integration gate.
+
+**Stage 10 — Planned.** Add the first view-only GTK preview only after Stage 9E
+and the Stage 9 umbrella are accepted and locally checkpointed.
+
+**Stage 11 — Planned.** Add headless undo and redo, including atomic channel
+model/topology transitions.
+
+**Stage 12 — Planned.** Add the portable `.toniator` container for complete
+authoritative documents and embedded source bytes.
+
+**Stage 13+ — Planned.** Add GTK document actions and command-bound editors in
+later separately authorized stages.
 
 ## Maintenance rules
 

@@ -362,20 +362,136 @@ Examples:
 --channel C.shape-size-max 1.0
 ```
 
-### 4.5 RGB/CMYK mode
+### 4.5 Halftone channel model, mapping, and paint
+
+The authoritative halftone channel model is selected independently from final
+output encoding or background:
 
 ```bash
---mode rgb
---mode cmyk
+--channel-model rgb
+--channel-model cmyk
+--channel-model source-color-alpha
 ```
 
-Mode controls channel defaults, source mapping defaults, and PNG background defaults.
+```rust
+pub enum HalftoneChannelModel {
+    Rgb,
+    Cmyk,
+    SourceColorAlpha,
+}
+```
 
-### 4.6 PNG background
+The model owns an ordered channel topology. Canonical topology uses stable
+role IDs and order: Red `1`, Green `2`, Blue `3`; Cyan `4`, Magenta `5`,
+Yellow `6`, Black `7`; and SourceColor `8`. A canonical topology factory owns
+those roles, IDs, ordering, default source mappings, default layer paint,
+visibility, and opacity. The caller supplies one validated
+pattern/layout/response template, which the factory clones across roles. The
+factory does not own screen angles or other pattern-geometry defaults.
 
-- RGB PNG default: solid black.
-- CMYK PNG default: solid white.
-- `--transparent`: omit the solid background.
+A model change atomically replaces the model and a complete explicit ordered
+channel topology. The command validates the supplied topology and never
+silently resets, guesses, or migrates settings. Missing, duplicate,
+out-of-order, unsupported, or extraneous roles are invalid; channel IDs must
+be unique and stable. This transition reports `ChannelTopology` invalidation.
+
+Source mapping and layer paint are separate authoritative concepts. Source
+mapping selects a scalar field from Red, Green, Blue, Cyan, Magenta, Yellow,
+Black, Alpha, or Luminance and applies:
+
+```text
+clamp(gain * (inverted ? 1 - value : value) + bias)
+```
+
+Layer paint supplies either a solid presentation color or, for the
+SourceColorAlpha topology, evaluated per-mark source color. Ordinary solid
+color, visibility, and opacity changes are presentation invalidations. Source
+mapping and mark-response changes are realization invalidations.
+
+RGB scalar fields are decoded sRGB converted to linear-light `R`, `G`, and
+`B`. CMYK scalar fields use deterministic profile-independent unnormalized
+full UCR:
+
+```text
+K = 1 - max(R, G, B)
+C = 1 - R - K
+M = 1 - G - K
+Y = 1 - B - K
+```
+
+Color-derived response fields are associated with source alpha exactly once
+before spatial interpolation. Alpha is an independent scalar and is not
+alpha-multiplied again.
+
+For SourceColorAlpha, source alpha drives mark response/size exactly once,
+sampled source RGB supplies mark color, and channel opacity supplies
+presentation opacity. Source-color sampling converts straight sRGB to linear
+RGB, associates it with alpha for interpolation, interpolates associated RGB
+and alpha, and unassociates RGB when sampled alpha is positive. Positive alpha
+does not additionally attenuate mark color or opacity. At exactly zero sampled
+alpha, hidden RGB remains inspectable but the mark makes no visible paint
+contribution even when the configured minimum mark size is nonzero.
+
+Halftone models have fixed, non-user-selectable composition semantics. Let
+each ordered layer first produce its conventional layer-local premultiplied
+linear result `(P_i, A_i)` in stable mark order. For fractional mark coverage
+`q`, paint alpha `a`, layer opacity `o`, and straight-linear paint `C`, each
+mark uses `s = clamp(q * a * o)`, then:
+
+```text
+P <- s*C + P*(1-s)
+A <- s   + A*(1-s)
+```
+
+RGB uses additive linear Porter-Duff lighter composition:
+
+```text
+P = clamp(sum(P_i))
+A = clamp(sum(A_i))
+```
+
+CMYK uses idealized subtractive transmittance. With
+`C_i = P_i / A_i` for positive `A_i`:
+
+```text
+T = product(1 - A_i * (1 - C_i))
+A = 1 - product(1 - A_i)
+P = T - (1 - A)
+```
+
+SourceColorAlpha uses conventional ordered source-over. All three produce
+straight sRGBA by returning `P / A` when `A` is positive and transparent black
+when `A` is zero. The equations preserve the accepted single-layer result.
+They are fixed model semantics, not user-selectable blend modes. ICC profiles,
+physical ink simulation, dot gain, configurable UCR/GCR, black-generation
+curves, and soft proofing are separate future concerns.
+
+SVG retains vector channel geometry and applies the same model equations with
+explicit same-document filter inputs, premultiplied-RGBA arithmetic, and
+`color-interpolation-filters="linearRGB"`. It must not rely on unspecified
+viewer blending, ordinary source-over for RGB/CMYK, or an embedded raster
+substitute.
+
+### 4.6 Preview backdrop and export background
+
+Preview backdrop is viewer-only presentation. Default viewer policy is black
+for RGB, white for CMYK, and fixed neutral mid-gray for SourceColorAlpha. It
+does not modify the document, `RenderScene`, raster bytes, SVG, or export
+background.
+
+PNG export background is an independent final-consumer choice:
+
+```bash
+--background transparent
+--background black
+--background white
+```
+
+The default is transparent. Black or white explicitly composites the final
+scene onto that background. PNG remains sRGB/sRGBA for every halftone channel
+model; selecting CMYK never creates CMYK-encoded PNG data. SVG remains
+transparent unless a later explicitly authorized SVG-background feature is
+added.
 
 ### 4.7 Suggested subcommands
 
@@ -393,7 +509,7 @@ Recommended deterministic precedence:
 
 ```text
 Built-in defaults
-→ RGB/CMYK defaults
+→ halftone-channel topology defaults
 → general preset
 → pattern preset
 → loaded document
@@ -402,7 +518,11 @@ Built-in defaults
 
 ### 4.9 CLI acceptance rule
 
-Every primary output producible through the GUI must also be producible headlessly using presets and channel overrides, without GTK.
+Every primary output producible through the GUI must also be producible
+headlessly using presets and channel overrides, without GTK. `toniator render`
+is the authoritative complete-document integration path. `inspect grid` and
+`inspect marks` are lower-level structural and single-channel realization
+diagnostics, not alternate document-render authorities.
 
 ---
 
@@ -853,6 +973,7 @@ These should reuse family sites/guides where possible:
 - Curve/network thickness.
 - Region/cell inset.
 - Geometry response curve or polarity.
+- Source mapping, including component, inversion, gain, bias, and placement.
 
 ### 10.3 Presentation only
 
@@ -867,9 +988,7 @@ These must not regenerate family geometry:
 These require source resampling and dependent evaluation:
 
 - Source frame/image.
-- Source mapping.
-- Sampling field.
-- Gain/bias when used for placement or geometry.
+- Decoded source content or decoder contract.
 
 ### 10.5 Invalidation contract
 
@@ -879,10 +998,15 @@ pub enum InvalidationLevel {
     Realization,
     Family,
     Source,
+    ChannelTopology,
 }
 ```
 
-Every authoritative command returns its invalidation level.
+Every authoritative command returns its invalidation level. `ChannelTopology`
+is a structural document transition for an atomic model/topology replacement;
+it invalidates affected channel evaluations and aggregate scene/raster state
+without making otherwise matching per-channel structural artifacts unsafe to
+reuse.
 
 ```rust
 pub struct CommandResult {
@@ -981,9 +1105,10 @@ The CLI must not depend on GTK or libadwaita.
 
 - `--help`, `-i`, and `-o` work conventionally.
 - Output extension chooses PNG/SVG.
-- RGB PNG defaults black.
-- CMYK PNG defaults white.
-- `--transparent` removes background.
+- `--channel-model rgb|cmyk|source-color-alpha` selects authoritative topology.
+- `--background transparent|black|white` is consumer-only and defaults to transparent.
+- Halftone channel model never selects export background or PNG encoding.
+- PNG output is always sRGB/sRGBA; SVG remains transparent.
 - All primary channel settings are headlessly overridable.
 - GTK and CLI produce equivalent canonical geometry.
 
@@ -1100,16 +1225,19 @@ Add:
 ## 15. Source-alpha interpretation
 
 Decoded source pixels retain their raw straight (unassociated) sRGBA values,
-including hidden RGB where alpha is zero. Realization derives its mark response
-at the sampling boundary, before bilinear interpolation:
+including hidden RGB where alpha is zero. Realization derives mapped scalar
+responses at the sampling boundary before bilinear interpolation. Linear RGB,
+CMYK, and Luminance are color-derived and are associated with alpha exactly
+once after their component and mapping transform are evaluated. Hidden RGB at
+alpha zero therefore cannot create a response fringe. Alpha remains an
+independent scalar; mapping inversion/gain/bias determines its response, and
+it is never multiplied by alpha a second time.
 
-- For the color-derived Luminance component, `L` is Rec.709 luminance of linear
-  RGB, opaque ink is `1 - L`, and effective ink is `alpha * (1 - L)` per source
-  sample. These effective-ink values are bilinearly interpolated, so hidden RGB
-  at alpha zero cannot create a fringe.
-- For the independent Alpha component, alpha itself is bilinearly interpolated
-  and the existing Alpha response is applied once: mark ink is `1 - alpha`.
-  It is not multiplied by alpha a second time.
+SourceColorAlpha separately interpolates associated linear RGB and alpha,
+unassociates positive-alpha RGB for per-mark paint, and uses sampled alpha as
+the mark-response field. Positive alpha affects mark size only. Exact zero
+sampled alpha suppresses visible mark paint even when minimum mark size is
+nonzero.
 
 SVG decoder output must be unpremultiplied to retain straight RGBA; the normal
 precision and zero-alpha caveats of that conversion remain applicable. Raw
