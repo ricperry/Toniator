@@ -121,10 +121,11 @@ reporting, and `ChannelTopology` invalidation in the domain layer.
 fields and SourceColorAlpha sampled-paint realization, including alpha
 association exactly once and zero-alpha paint suppression.
 
-**Stage 9C — Planned.** Add the fixed additive RGB, idealized subtractive CMYK,
+**Stage 9C — Complete at commit `d37469a`.** Add the fixed additive RGB, idealized subtractive CMYK,
 and SourceColorAlpha raster/SVG compositors while preserving single-layer
-behavior, vector geometry, transparent straight-sRGBA, and consumer-only PNG
-backing.
+behavior, transparent straight-sRGBA, consumer-only PNG backing, and ordinary
+editable per-channel SVG geometry with documented raster/SVG semantic
+correspondence.
 
 **Stage 9D — Planned.** Add complete-document ordered multi-channel engine
 evaluation, strict aggregate/per-channel identities, accepted-cache reuse,
