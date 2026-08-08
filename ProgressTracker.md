@@ -117,6 +117,10 @@ explicit ordered topologies, stable IDs, source mappings, paint compatibility,
 atomic model/topology replacement, revision behavior, affected-channel
 reporting, and `ChannelTopology` invalidation in the domain layer.
 
+**Stage 9A corrective checkpoint — Complete at commit `2320feb`.** Add the domain-owned
+complete-document evaluation snapshot/token boundary required by Stage 9D
+without changing the accepted single-channel evaluation APIs.
+
 **Stage 9B — Complete at commit `fb1b31d`.** Add deterministic linear RGB/full-UCR CMYK source
 fields and SourceColorAlpha sampled-paint realization, including alpha
 association exactly once and zero-alpha paint suppression.
