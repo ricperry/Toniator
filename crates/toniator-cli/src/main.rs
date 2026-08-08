@@ -6,17 +6,16 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use toniator_domain::{
     CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternLayout, ChannelSourceMapping,
-    ChannelState, ColorValue, DensityMetric2D, Document, DocumentCommand, DocumentId,
-    DocumentSession, MarkGeometryResponse, PatternDefinition, PatternDefinitionId, PatternOutput,
-    PatternStructure, SourceComponent, SourcePlacement, SourceReference, SourceReferenceId,
-    ValidationError,
+    ChannelState, ChannelTopologyTemplate, ColorValue, DensityMetric2D, Document, DocumentCommand,
+    DocumentId, DocumentSession, HalftoneChannelModel, MarkGeometryResponse, PatternDefinition,
+    PatternDefinitionId, PatternOutput, PatternStructure, SourceComponent, SourcePlacement,
+    SourceReference, SourceReferenceId, ValidationError,
 };
 use toniator_engine::{
-    CanonicalCircleMark, ChannelDiagnosticRequest, EvaluationLimits, GridError, GridInspectRequest,
-    MarkResponse, MarksInspectError, MarksInspectRequest, Point2, RasterBackground, ResolvedSource,
-    SiteId, SiteScope, SourceFormat, SourceFormatHint, SvgTextDiagnostic, encode_png,
-    evaluate_channel_diagnostic_with_limits, inspect_circular_marks, inspect_straight_grid,
-    srgb_to_linear, write_svg,
+    CanonicalCircleMark, EvaluationLimits, GridError, GridInspectRequest, MarkResponse,
+    MarksInspectError, MarksInspectRequest, Point2, RasterBackground, ResolvedSource, SiteId,
+    SiteScope, SourceFormat, SourceFormatHint, SvgTextDiagnostic, encode_png, evaluate_with_limits,
+    inspect_circular_marks, inspect_straight_grid, write_svg,
 };
 
 /// Headless Toniator command-line frontend.
@@ -33,7 +32,7 @@ enum Command {
     Validate(ValidateArgs),
     /// Inspect deterministic family output without realizing marks or rendering.
     Inspect(InspectArgs),
-    /// Render canonical Stage 4 circles to PNG or SVG through one RenderScene.
+    /// Render a complete authoritative document to PNG or SVG.
     Render(RenderArgs),
 }
 
@@ -137,8 +136,9 @@ struct RenderArgs {
     input: PathBuf,
     #[arg(short, long)]
     output: PathBuf,
+    /// Authoritative ordered halftone channel topology for a direct source.
     #[arg(long, value_enum)]
-    mode: OutputMode,
+    channel_model: CliChannelModel,
     #[arg(long)]
     canvas: String,
     #[arg(long)]
@@ -155,18 +155,16 @@ struct RenderArgs {
     guard_steps: u32,
     #[arg(long, default_value_t = 1_048_576)]
     max_family_candidates: usize,
-    #[arg(long, value_enum)]
-    source_component: CliSourceComponent,
     #[arg(long)]
     size_min: f64,
     #[arg(long)]
     size_max: f64,
+    /// Override opacity for every canonical channel in the selected topology.
     #[arg(long)]
-    color: String,
-    #[arg(long)]
-    opacity: f64,
-    #[arg(long)]
-    transparent: bool,
+    opacity: Option<f64>,
+    /// Consumer-only PNG backing. SVG remains transparent.
+    #[arg(long, value_enum, default_value_t = CliBackground::Transparent)]
+    background: CliBackground,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -181,9 +179,37 @@ enum CliSourceComponent {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
-enum OutputMode {
+enum CliChannelModel {
     Rgb,
     Cmyk,
+    SourceColorAlpha,
+}
+
+impl From<CliChannelModel> for HalftoneChannelModel {
+    fn from(value: CliChannelModel) -> Self {
+        match value {
+            CliChannelModel::Rgb => Self::Rgb,
+            CliChannelModel::Cmyk => Self::Cmyk,
+            CliChannelModel::SourceColorAlpha => Self::SourceColorAlpha,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CliBackground {
+    Transparent,
+    Black,
+    White,
+}
+
+impl From<CliBackground> for RasterBackground {
+    fn from(value: CliBackground) -> Self {
+        match value {
+            CliBackground::Transparent => Self::Transparent,
+            CliBackground::Black => Self::OpaqueBlack,
+            CliBackground::White => Self::OpaqueWhite,
+        }
+    }
 }
 
 impl From<CliSourceComponent> for SourceComponent {
@@ -269,8 +295,17 @@ fn run(cli: Cli) -> Result<(), CliError> {
 
 fn render(arguments: RenderArgs) -> Result<(), CliError> {
     let format = output_format(&arguments.output)?;
-    let color = parse_color_value(&arguments.color)?;
-    if !arguments.opacity.is_finite() || !(0.0..=1.0).contains(&arguments.opacity) {
+    if matches!(format, OutputFormat::Svg)
+        && !matches!(arguments.background, CliBackground::Transparent)
+    {
+        return Err(CliError::new(
+            "render.background",
+            "SVG output supports only a transparent background",
+        ));
+    }
+    if let Some(opacity) = arguments.opacity
+        && (!opacity.is_finite() || !(0.0..=1.0).contains(&opacity))
+    {
         return Err(CliError::new(
             "presentation.opacity",
             "opacity must be within 0.0..=1.0",
@@ -280,10 +315,11 @@ fn render(arguments: RenderArgs) -> Result<(), CliError> {
     let source_bytes = std::fs::read(&arguments.input)
         .map_err(|_| CliError::new("source", "could not read source file"))?;
     let source_reference = SourceReferenceId::new("cli-input-1")?;
-    let channel_id = ChannelId(1);
-    let document = Document::new(
+    let template_channel_id = ChannelId(1);
+    let document = Document::with_source(
         DocumentId(1),
         parse_canvas(&arguments.canvas)?,
+        SourceReference::Assigned(source_reference.clone()),
         vec![PatternDefinition {
             id: PatternDefinitionId(1),
             name: "straight-grid".to_owned(),
@@ -293,7 +329,7 @@ fn render(arguments: RenderArgs) -> Result<(), CliError> {
             maximum_support_radius: 4.5,
         }],
         vec![ChannelState {
-            id: channel_id,
+            id: template_channel_id,
             pattern_definition_id: PatternDefinitionId(1),
             layout: ChannelPatternLayout {
                 density: DensityMetric2D {
@@ -307,40 +343,70 @@ fn render(arguments: RenderArgs) -> Result<(), CliError> {
             },
             appearance: ChannelAppearance {
                 visible: true,
-                color,
-                opacity: arguments.opacity,
+                color: ColorValue {
+                    red: 0.0,
+                    green: 0.0,
+                    blue: 0.0,
+                    alpha: 1.0,
+                },
+                opacity: 1.0,
             },
             mark_geometry_response: MarkGeometryResponse {
                 minimum_size: arguments.size_min,
                 maximum_size: arguments.size_max,
             },
             source_mapping: ChannelSourceMapping {
-                component: arguments.source_component.into(),
+                component: SourceComponent::Luminance,
                 placement: SourcePlacement::StretchToCanvas,
             },
         }],
     )?;
     let mut session = DocumentSession::new(document)?;
-    session.apply(&DocumentCommand::SetSourceReference {
-        source: SourceReference::Assigned(source_reference.clone()),
-    })?;
-    let result = evaluate_channel_diagnostic_with_limits(
-        ChannelDiagnosticRequest::new(
-            session.evaluation_snapshot(channel_id)?,
+    let model: HalftoneChannelModel = arguments.channel_model.into();
+    let topology = session.document().canonical_channel_topology(
+        model,
+        ChannelTopologyTemplate {
+            pattern_definition_id: PatternDefinitionId(1),
+            layout: ChannelPatternLayout {
+                density: DensityMetric2D {
+                    across_x: arguments.density_x,
+                    across_y: arguments.density_y,
+                    aspect_locked: true,
+                },
+                rotation_degrees: arguments.rotation,
+                translation_x: arguments.offset_x,
+                translation_y: arguments.offset_y,
+            },
+            mark_geometry_response: MarkGeometryResponse {
+                minimum_size: arguments.size_min,
+                maximum_size: arguments.size_max,
+            },
+        },
+    )?;
+    let channel_ids = topology
+        .channels()
+        .iter()
+        .map(|channel| channel.id)
+        .collect::<Vec<_>>();
+    session.apply(&DocumentCommand::ReplaceChannelTopology { model, topology })?;
+    if let Some(opacity) = arguments.opacity {
+        for channel_id in channel_ids {
+            session.apply(&DocumentCommand::SetOpacity {
+                channel_id,
+                opacity,
+            })?;
+        }
+    }
+    let result = evaluate_with_limits(
+        toniator_engine::EvaluationRequest::new(
+            session.document_evaluation_snapshot(),
             ResolvedSource::new(source_reference, source_bytes, source_format)?,
         ),
         EvaluationLimits::new(arguments.max_family_candidates)?,
     )?;
     match format {
         OutputFormat::Png => {
-            let background = if arguments.transparent {
-                RasterBackground::Transparent
-            } else {
-                match arguments.mode {
-                    OutputMode::Rgb => RasterBackground::OpaqueBlack,
-                    OutputMode::Cmyk => RasterBackground::OpaqueWhite,
-                }
-            };
+            let background = arguments.background.into();
             let raster = if matches!(background, RasterBackground::Transparent) {
                 result.raster().clone()
             } else {
@@ -351,7 +417,6 @@ fn render(arguments: RenderArgs) -> Result<(), CliError> {
                 .map_err(|_| CliError::new("output", "could not write PNG output"))?;
         }
         OutputFormat::Svg => {
-            // SVG has no mode background; --transparent is intentionally a no-op.
             std::fs::write(&arguments.output, write_svg(result.scene()))
                 .map_err(|_| CliError::new("output", "could not write SVG output"))?;
         }
@@ -529,21 +594,6 @@ fn parse_color(value: &str) -> Result<String, CliError> {
         return Err(CliError::new("presentation.color", "expected #RRGGBB"));
     }
     Ok(format!("#{}", hex.to_ascii_lowercase()))
-}
-
-fn parse_color_value(value: &str) -> Result<ColorValue, CliError> {
-    let normalized = parse_color(value)?;
-    let parse_component = |range: std::ops::Range<usize>| {
-        u8::from_str_radix(&normalized[range], 16)
-            .map(|component| srgb_to_linear(f64::from(component) / 255.0))
-            .map_err(|_| CliError::new("presentation.color", "expected #RRGGBB"))
-    };
-    Ok(ColorValue {
-        red: parse_component(1..3)?,
-        green: parse_component(3..5)?,
-        blue: parse_component(5..7)?,
-        alpha: 1.0,
-    })
 }
 
 #[derive(Clone, Copy, Debug)]

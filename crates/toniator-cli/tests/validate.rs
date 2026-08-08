@@ -193,7 +193,7 @@ fn every_evaluation_command_accepts_the_candidate_limit_and_rejects_an_oversized
             "../../assets/raster-sample.png",
             "-o",
             output.to_str().unwrap(),
-            "--mode",
+            "--channel-model",
             "rgb",
             "--canvas",
             "900x600",
@@ -211,14 +211,10 @@ fn every_evaluation_command_accepts_the_candidate_limit_and_rejects_an_oversized
             "2",
             "--max-family-candidates",
             "1",
-            "--source-component",
-            "luminance",
             "--size-min",
             "2",
             "--size-max",
             "9",
-            "--color",
-            "#00b7ff",
             "--opacity",
             "0.72",
         ])
@@ -361,54 +357,99 @@ fn inspect_marks_presentation_changes_leave_geometry_summary_identical() {
     assert_eq!(first, second);
 }
 
-#[test]
-fn render_infers_png_and_svg_and_rejects_invalid_output_extensions() {
+fn render_command(source: &str, output: &std::path::Path, model: &str) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_toniator"));
+    command.args([
+        "render",
+        "--input",
+        source,
+        "--output",
+        output.to_str().unwrap(),
+        "--channel-model",
+        model,
+        "--canvas",
+        "900x600",
+        "--density-x",
+        "90.0",
+        "--density-y",
+        "60.0",
+        "--rotation",
+        "17.0",
+        "--offset-x",
+        "3.25",
+        "--offset-y",
+        "-4.5",
+        "--guard-steps",
+        "2",
+        "--size-min",
+        "2.0",
+        "--size-max",
+        "9.0",
+        "--opacity",
+        "0.72",
+    ]);
+    command
+}
+
+fn temporary_directory(label: &str) -> std::path::PathBuf {
     let directory = std::env::temp_dir().join(format!(
-        "toniator-stage-5-{}",
+        "toniator-{label}-{}",
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos()
     ));
     fs::create_dir(&directory).unwrap();
-    for extension in ["png", "svg"] {
-        let output_path = directory.join(format!("output.{extension}"));
-        let input_flag = if extension == "png" { "-i" } else { "--source" };
-        let output = Command::new(env!("CARGO_BIN_EXE_toniator"))
-            .args([
-                "render",
-                input_flag,
-                "../../assets/raster-sample.png",
-                "--output",
-                output_path.to_str().unwrap(),
-                "--mode",
-                "rgb",
-                "--canvas",
-                "900x600",
-                "--density-x",
-                "90.0",
-                "--density-y",
-                "60.0",
-                "--rotation",
-                "17.0",
-                "--offset-x",
-                "3.25",
-                "--offset-y",
-                "-4.5",
-                "--guard-steps",
-                "2",
-                "--source-component",
-                "luminance",
-                "--size-min",
-                "2.0",
-                "--size-max",
-                "9.0",
-                "--color",
-                "#00b7ff",
-                "--opacity",
-                "0.72",
-                "--transparent",
-            ])
+    directory
+}
+
+#[test]
+fn render_uses_authoritative_document_models_for_both_immutable_sources() {
+    let directory = temporary_directory("stage-9e-models");
+    for (source, source_label) in [
+        ("../../assets/raster-sample.png", "raster"),
+        ("../../assets/vector-sample.svg", "vector"),
+    ] {
+        for (model, title, roles) in [
+            ("rgb", "Toniator RGB halftone", &[1, 2, 3][..]),
+            ("cmyk", "Toniator CMYK halftone", &[4, 5, 6, 7][..]),
+            (
+                "source-color-alpha",
+                "Toniator source-colored halftone",
+                &[8][..],
+            ),
+        ] {
+            let output_path = directory.join(format!("{model}-{source_label}.svg"));
+            let output = render_command(source, &output_path, model)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{model}/{source_label}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let svg = String::from_utf8(fs::read(&output_path).unwrap()).unwrap();
+            assert!(svg.contains(title));
+            for channel_id in roles {
+                assert!(svg.contains(&format!("id=\"channel-{channel_id}\"")));
+            }
+            assert!(svg.contains("id=\"canvas\""));
+            assert!(svg.contains("<circle "));
+        }
+    }
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn render_background_is_consumer_only_and_png_is_straight_srgba() {
+    let directory = temporary_directory("stage-9e-background");
+    let transparent = directory.join("transparent-cmyk.png");
+    let black = directory.join("black.png");
+    let white = directory.join("white.png");
+
+    for model in ["rgb", "cmyk", "source-color-alpha"] {
+        let output_path = directory.join(format!("transparent-{model}.png"));
+        let output = render_command("../../assets/raster-sample.png", &output_path, model)
             .output()
             .unwrap();
         assert!(
@@ -416,159 +457,103 @@ fn render_infers_png_and_svg_and_rejects_invalid_output_extensions() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let bytes = fs::read(&output_path).unwrap();
-        assert!(!bytes.is_empty());
-        if extension == "svg" {
-            assert!(String::from_utf8(bytes).unwrap().contains("<circle "));
-        }
+        let bytes = fs::read(output_path).unwrap();
+        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert_eq!(bytes[25], 6, "PNG must use RGBA color type");
     }
-    let invalid = Command::new(env!("CARGO_BIN_EXE_toniator"))
-        .args([
-            "render",
-            "-i",
-            "../../assets/raster-sample.png",
-            "--output",
-            directory.join("output.txt").to_str().unwrap(),
-            "--mode",
-            "rgb",
-            "--canvas",
-            "900x600",
-            "--density-x",
-            "90",
-            "--density-y",
-            "60",
-            "--rotation",
-            "0",
-            "--offset-x",
-            "0",
-            "--offset-y",
-            "0",
-            "--guard-steps",
-            "2",
-            "--source-component",
-            "luminance",
-            "--size-min",
-            "2",
-            "--size-max",
-            "9",
-            "--color",
-            "#00b7ff",
-            "--opacity",
-            "0.72",
-        ])
+
+    for (path, background) in [
+        (&transparent, None),
+        (&black, Some("black")),
+        (&white, Some("white")),
+    ] {
+        let mut command = render_command("../../assets/raster-sample.png", path, "cmyk");
+        if let Some(background) = background {
+            command.args(["--background", background]);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let bytes = fs::read(path).unwrap();
+        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert_eq!(bytes[25], 6, "PNG must use RGBA color type");
+    }
+    assert_ne!(fs::read(&transparent).unwrap(), fs::read(&black).unwrap());
+    assert_ne!(fs::read(&black).unwrap(), fs::read(&white).unwrap());
+
+    let svg = directory.join("opaque.svg");
+    let output = render_command("../../assets/raster-sample.png", &svg, "rgb")
+        .args(["--background", "black"])
         .output()
         .unwrap();
-    assert_eq!(invalid.status.code(), Some(2));
-    assert!(
-        String::from_utf8_lossy(&invalid.stderr).contains("output extension must be .png or .svg")
-    );
-    let deprecated = Command::new(env!("CARGO_BIN_EXE_toniator"))
-        .args([
-            "render",
-            "-i",
-            "../../assets/raster-sample.png",
-            "--output",
-            directory.join("deprecated.png").to_str().unwrap(),
-            "--mode",
-            "rgb",
-            "--canvas",
-            "900x600",
-            "--density-x",
-            "90",
-            "--density-y",
-            "60",
-            "--rotation",
-            "0",
-            "--offset-x",
-            "0",
-            "--offset-y",
-            "0",
-            "--guard-steps",
-            "2",
-            "--support-radius",
-            "4.5",
-            "--source-component",
-            "luminance",
-            "--size-min",
-            "2",
-            "--size-max",
-            "9",
-            "--color",
-            "#00b7ff",
-            "--opacity",
-            "0.72",
-        ])
-        .output()
-        .unwrap();
-    assert_eq!(deprecated.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&deprecated.stderr).contains("--support-radius"));
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("error at render.background"));
     fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
-fn render_rejects_missing_extension_and_invalid_presentation_options() {
-    let directory = std::env::temp_dir().join(format!(
-        "toniator-stage-5-errors-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    fs::create_dir(&directory).unwrap();
-    for (output_name, color, opacity, expected) in [
-        (
-            "missing-extension",
-            "#00b7ff",
-            "0.72",
-            "output extension must be .png or .svg",
-        ),
-        (
-            "invalid-opacity.png",
-            "#00b7ff",
-            "1.1",
-            "opacity must be within 0.0..=1.0",
-        ),
-        ("invalid-color.png", "00b7ff", "0.72", "expected #RRGGBB"),
+fn render_requires_channel_model_and_rejects_obsolete_render_options() {
+    let directory = temporary_directory("stage-9e-arguments");
+    let output_path = directory.join("output.png");
+    let required = Command::new(env!("CARGO_BIN_EXE_toniator"))
+        .args([
+            "render",
+            "--input",
+            "../../assets/raster-sample.png",
+            "--output",
+            output_path.to_str().unwrap(),
+            "--canvas",
+            "900x600",
+            "--density-x",
+            "90",
+            "--density-y",
+            "60",
+            "--rotation",
+            "0",
+            "--offset-x",
+            "0",
+            "--offset-y",
+            "0",
+            "--guard-steps",
+            "2",
+            "--size-min",
+            "2",
+            "--size-max",
+            "9",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(required.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&required.stderr).contains("--channel-model"));
+
+    for (option, value) in [
+        ("--mode", "rgb"),
+        ("--source-component", "luminance"),
+        ("--color", "#00b7ff"),
     ] {
-        let output_path = directory.join(output_name);
-        let output = Command::new(env!("CARGO_BIN_EXE_toniator"))
-            .args([
-                "render",
-                "--source",
-                "../../assets/raster-sample.png",
-                "--output",
-                output_path.to_str().unwrap(),
-                "--mode",
-                "rgb",
-                "--canvas",
-                "900x600",
-                "--density-x",
-                "90",
-                "--density-y",
-                "60",
-                "--rotation",
-                "0",
-                "--offset-x",
-                "0",
-                "--offset-y",
-                "0",
-                "--guard-steps",
-                "2",
-                "--source-component",
-                "luminance",
-                "--size-min",
-                "2",
-                "--size-max",
-                "9",
-                "--color",
-                color,
-                "--opacity",
-                opacity,
-            ])
+        let output = render_command("../../assets/raster-sample.png", &output_path, "rgb")
+            .args([option, value])
             .output()
             .unwrap();
         assert_eq!(output.status.code(), Some(2));
-        assert!(String::from_utf8_lossy(&output.stderr).contains(expected));
+        assert!(String::from_utf8_lossy(&output.stderr).contains(option));
     }
+
+    let invalid_extension = render_command(
+        "../../assets/raster-sample.png",
+        &directory.join("output.txt"),
+        "rgb",
+    )
+    .output()
+    .unwrap();
+    assert_eq!(invalid_extension.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&invalid_extension.stderr)
+            .contains("output extension must be .png or .svg")
+    );
+
     fs::remove_dir_all(directory).unwrap();
 }
