@@ -36,9 +36,10 @@ pub use toniator_patterns::{
     SiteScope,
 };
 use toniator_patterns::{
-    GridFamilyOutput, MappedCircularMarkRealization, SourceColorCircularMarkRealization,
-    evaluate_straight_grid, realize_circular_marks, realize_mapped_circular_marks,
-    realize_source_color_circular_marks,
+    FamilyCapability, GridFamilyOutput, MappedCircularMarkRealization, PatternPipelineError,
+    SourceColorCircularMarkRealization, TypedFamilyOutput, TypedRealization,
+    evaluate_straight_grid, evaluate_typed_family_product_cancellable, realize_circular_marks,
+    realize_typed_mapped_outputs, realize_typed_source_color_outputs,
 };
 pub use toniator_render::{
     GeometryOutput, OutputRasterTarget, PreviewRasterTarget, RasterAntialiasing, RasterBackground,
@@ -253,29 +254,46 @@ struct SourceCacheKey {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FamilyCacheKey {
-    source: SourceCacheKey,
-    decoded_pixel_identity: String,
     canvas: (u64, u64),
     density: (u64, u64),
     aspect_locked: bool,
     rotation: u64,
     translation: (u64, u64),
     guard_steps: u32,
-    definition: TypedDefinitionKey,
+    definition: FamilyDefinitionKey,
     maximum_support_radius: u64,
     max_family_candidates: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct TypedDefinitionKey {
+struct FamilyDefinitionKey {
+    definition_id: u64,
+    family: toniator_domain::PatternFamily,
     mechanisms: Vec<PatternMechanism>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RealizationContractKey {
     output_layers: Vec<PatternOutputLayer>,
+    modulation: toniator_domain::PatternModulation,
+}
+
+/// The decoder-owned source identity consumed by realization. Logical source
+/// lookup/reference identity stays at the decode cache boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RealizationSourceIdentity {
+    format: toniator_sampling::SourceFormat,
+    width: u32,
+    height: u32,
+    content_hash: String,
+    decoded_pixel_hash: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RealizationCacheKey {
     family: FamilyCacheKey,
-    decoded_pixel_identity: String,
+    contract: RealizationContractKey,
+    source_identity: RealizationSourceIdentity,
     canvas: (u64, u64),
     source_component: u8,
     placement: u8,
@@ -303,8 +321,11 @@ const TRANSPARENT_RASTER_CONTRACT_ID: &str = "toniator-render-transparent-raster
 #[derive(Clone)]
 struct DerivedCacheSnapshot {
     source: Option<(SourceCacheKey, Arc<SourceField>)>,
-    family: Option<(FamilyCacheKey, Arc<GridFamilyOutput>)>,
-    realization: Option<(RealizationCacheKey, Arc<CircularMarkRealization>)>,
+    family: Option<(FamilyCacheKey, Arc<TypedFamilyOutput>)>,
+    realization: Option<(
+        RealizationCacheKey,
+        Arc<TypedRealization<CircularMarkRealization>>,
+    )>,
     scene: Option<(SceneCacheKey, Arc<RenderScene>)>,
     raster: Option<(RasterCacheKey, Arc<RasterSurface>)>,
 }
@@ -326,8 +347,11 @@ impl DerivedCacheSnapshot {
 #[derive(Default)]
 pub(crate) struct DerivedCache {
     source: Option<(SourceCacheKey, Arc<SourceField>)>,
-    family: Option<(FamilyCacheKey, Arc<GridFamilyOutput>)>,
-    realization: Option<(RealizationCacheKey, Arc<CircularMarkRealization>)>,
+    family: Option<(FamilyCacheKey, Arc<TypedFamilyOutput>)>,
+    realization: Option<(
+        RealizationCacheKey,
+        Arc<TypedRealization<CircularMarkRealization>>,
+    )>,
     scene: Option<(SceneCacheKey, Arc<RenderScene>)>,
     raster: Option<(RasterCacheKey, Arc<RasterSurface>)>,
 }
@@ -365,8 +389,11 @@ impl DerivedCache {
 #[derive(Default)]
 pub(crate) struct CacheTransaction {
     source: Option<(SourceCacheKey, Arc<SourceField>)>,
-    family: Option<(FamilyCacheKey, Arc<GridFamilyOutput>)>,
-    realization: Option<(RealizationCacheKey, Arc<CircularMarkRealization>)>,
+    family: Option<(FamilyCacheKey, Arc<TypedFamilyOutput>)>,
+    realization: Option<(
+        RealizationCacheKey,
+        Arc<TypedRealization<CircularMarkRealization>>,
+    )>,
     scene: Option<(SceneCacheKey, Arc<RenderScene>)>,
     raster: Option<(RasterCacheKey, Arc<RasterSurface>)>,
 }
@@ -594,6 +621,22 @@ fn evaluate_stage<T>(
     result.map_err(EvaluationRunError::Evaluation)
 }
 
+fn evaluate_generic_family_stage(
+    family: &FamilyCapability,
+    request: &GridInspectRequest,
+    cancellation: &dyn CancellationProbe,
+) -> Result<TypedFamilyOutput, EvaluationRunError> {
+    match evaluate_stage(EvaluationStage::Family, cancellation, || {
+        evaluate_typed_family_product_cancellable(family, request, &|| cancellation.is_cancelled())
+            .map_err(EvaluationError::from_pipeline)
+    }) {
+        Err(EvaluationRunError::Evaluation(error)) if error.path() == "evaluation.cancelled" => {
+            Err(EvaluationRunError::Cancelled)
+        }
+        result => result,
+    }
+}
+
 /// Evaluates the same ordered Stage 3 -> Stage 4 -> Stage 5 path as
 /// [`evaluate_channel_diagnostic`], checking cancellation only between
 /// existing pipeline stages.
@@ -634,13 +677,11 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
             "evaluation.pattern_definition",
             "channel references a missing pattern definition",
         ))?;
-    let coverage =
-        definition
-            .supported_straight_grid_compatibility()
-            .ok_or(EvaluationError::new(
-                "evaluation.pattern_definition.output",
-                "unsupported typed pattern definition",
-            ))?;
+    // Capability resolution is authoritative and happens before decoding or
+    // cache lookup, so an unsupported composition cannot publish a partial
+    // artifact into a last-successful cache.
+    let plan = toniator_patterns::resolve_pattern_pipeline(definition)
+        .map_err(EvaluationError::from_pipeline)?;
     let response = MarkResponse {
         minimum_size: channel.mark_geometry_response.minimum_size,
         maximum_size: channel.mark_geometry_response.maximum_size,
@@ -665,8 +706,6 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
             }
         })?;
     let family_key = FamilyCacheKey {
-        source: source_key.clone(),
-        decoded_pixel_identity: source.identity().decoded_pixel_hash.clone(),
         canvas: canvas_key(document.canvas()),
         density: (
             channel.layout.density.across_x.to_bits(),
@@ -678,9 +717,9 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
             channel.layout.translation_x.to_bits(),
             channel.layout.translation_y.to_bits(),
         ),
-        guard_steps: coverage.guard_steps,
-        definition: typed_definition_key(definition),
-        maximum_support_radius: coverage.maximum_support_radius.to_bits(),
+        guard_steps: definition.coverage.guard_steps,
+        definition: family_definition_key(definition),
+        maximum_support_radius: definition.coverage.maximum_support_radius.to_bits(),
         max_family_candidates: limits.max_family_candidates(),
     };
     let grid = GridInspectRequest {
@@ -689,24 +728,25 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
         rotation_degrees: channel.layout.rotation_degrees,
         translation_x: channel.layout.translation_x,
         translation_y: channel.layout.translation_y,
-        guard_steps: coverage.guard_steps,
-        support_radius: coverage.maximum_support_radius,
+        guard_steps: definition.coverage.guard_steps,
+        support_radius: definition.coverage.maximum_support_radius,
         max_family_candidates: limits.max_family_candidates(),
     };
-    let (family, family_disposition) =
-        evaluate_stage(EvaluationStage::Family, cancellation, || {
-            match &cache.family {
-                Some((key, family)) if *key == family_key => {
-                    Ok((Arc::clone(family), CacheDisposition::Hit))
-                }
-                _ => inspect_straight_grid(&grid)
-                    .map(|family| (Arc::new(family), CacheDisposition::Miss))
-                    .map_err(EvaluationError::from_grid),
-            }
-        })?;
+    let (family, family_disposition) = match &cache.family {
+        Some((key, family)) if *key == family_key => (Arc::clone(family), CacheDisposition::Hit),
+        _ => (
+            Arc::new(evaluate_generic_family_stage(
+                &plan.family,
+                &grid,
+                cancellation,
+            )?),
+            CacheDisposition::Miss,
+        ),
+    };
     let realization_key = RealizationCacheKey {
         family: family_key.clone(),
-        decoded_pixel_identity: source.identity().decoded_pixel_hash.clone(),
+        contract: realization_contract_key(definition),
+        source_identity: realization_source_identity(source.identity()),
         canvas: canvas_key(document.canvas()),
         source_component: source_component_key(channel.source_mapping.component),
         placement: placement_key(channel.source_mapping.placement),
@@ -722,8 +762,9 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
             Some((key, realization)) if *key == realization_key => {
                 Ok((Arc::clone(realization), CacheDisposition::Hit))
             }
-            _ => realize_from_existing_family(
+            _ => toniator_patterns::realize_typed_diagnostic_outputs(
                 &family,
+                &plan,
                 &source,
                 document.canvas(),
                 channel.source_mapping.placement,
@@ -731,7 +772,7 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
                 response,
             )
             .map(|realization| (Arc::new(realization), CacheDisposition::Miss))
-            .map_err(EvaluationError::from_realization),
+            .map_err(EvaluationError::from_pipeline),
         },
     )?;
     let scene_key = SceneCacheKey {
@@ -753,9 +794,9 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
                 visible: channel.appearance.visible,
                 color: channel.appearance.color.clone(),
                 opacity: channel.appearance.opacity,
-                family_fingerprint: realization.family_fingerprint.clone(),
-                realization_fingerprint: realization.realization_fingerprint.clone(),
-                marks: realization.marks.clone(),
+                family_fingerprint: family.family_fingerprint().to_owned(),
+                realization_fingerprint: realization.output.realization_fingerprint.clone(),
+                marks: realization.output.marks.clone(),
             })
             .map(|scene| (Arc::new(scene), CacheDisposition::Miss)),
         }
@@ -840,10 +881,28 @@ fn canvas_key(canvas: &CanvasSpec) -> (u64, u64) {
     (canvas.width.to_bits(), canvas.height.to_bits())
 }
 
-fn typed_definition_key(value: &PatternDefinition) -> TypedDefinitionKey {
-    TypedDefinitionKey {
+fn family_definition_key(value: &PatternDefinition) -> FamilyDefinitionKey {
+    FamilyDefinitionKey {
+        definition_id: value.id.0,
+        family: value.family.clone(),
         mechanisms: value.mechanisms.clone(),
+    }
+}
+
+fn realization_source_identity(value: &SourceIdentity) -> RealizationSourceIdentity {
+    RealizationSourceIdentity {
+        format: value.format,
+        width: value.width,
+        height: value.height,
+        content_hash: value.content_hash.clone(),
+        decoded_pixel_hash: value.decoded_pixel_hash.clone(),
+    }
+}
+
+fn realization_contract_key(value: &PatternDefinition) -> RealizationContractKey {
+    RealizationContractKey {
         output_layers: value.output_layers.clone(),
+        modulation: value.modulation.clone(),
     }
 }
 
@@ -907,13 +966,10 @@ impl EvaluationError {
     pub const fn message(&self) -> &'static str {
         self.message
     }
-    fn from_grid(error: GridError) -> Self {
-        Self::new(error.path(), error.message())
-    }
     fn from_sampling(error: toniator_sampling::SamplingError) -> Self {
         Self::new(error.path(), error.message())
     }
-    fn from_realization(error: RealizationError) -> Self {
+    fn from_pipeline(error: PatternPipelineError) -> Self {
         Self::new(error.path(), error.message())
     }
     fn from_render(error: toniator_render::RenderError) -> Self {
@@ -1523,13 +1579,8 @@ fn evaluate_cached_document_impl(
                 "evaluation.pattern_definition",
                 "channel references a missing pattern definition",
             ))?;
-        if definition.supported_straight_grid_compatibility().is_none() {
-            return Err(EvaluationError::new(
-                "evaluation.pattern_definition",
-                "unsupported pattern structure or output",
-            )
-            .into());
-        }
+        toniator_patterns::resolve_pattern_pipeline(definition)
+            .map_err(EvaluationError::from_pipeline)?;
     }
     let source_key = SourceCacheKey {
         reference_id: request.source.reference_id().as_str().to_owned(),
@@ -1578,15 +1629,8 @@ fn evaluate_cached_document_impl(
                 "evaluation.pattern_definition",
                 "channel references a missing pattern definition",
             ))?;
-        let coverage = if let Some(coverage) = definition.supported_straight_grid_compatibility() {
-            coverage
-        } else {
-            return Err(EvaluationError::new(
-                "evaluation.pattern_definition",
-                "unsupported pattern structure or output",
-            )
-            .into());
-        };
+        let plan = toniator_patterns::resolve_pattern_pipeline(definition)
+            .map_err(EvaluationError::from_pipeline)?;
         let key = document_family_cache_key(document.canvas(), definition, channel, limits);
         let (family, disposition) = match accepted
             .families
@@ -1595,29 +1639,27 @@ fn evaluate_cached_document_impl(
         {
             Some((_, family)) => (Arc::clone(family), CacheDisposition::Hit),
             None => (
-                Arc::new(evaluate_stage(
-                    EvaluationStage::Family,
-                    cancellation,
-                    || {
-                        inspect_straight_grid(&GridInspectRequest {
-                            canvas: document.canvas().clone(),
-                            density: channel.layout.density.clone(),
-                            rotation_degrees: channel.layout.rotation_degrees,
-                            translation_x: channel.layout.translation_x,
-                            translation_y: channel.layout.translation_y,
-                            guard_steps: coverage.guard_steps,
-                            support_radius: coverage.maximum_support_radius,
-                            max_family_candidates: limits.max_family_candidates(),
-                        })
-                        .map_err(EvaluationError::from_grid)
+                Arc::new(evaluate_generic_family_stage(
+                    &plan.family,
+                    &GridInspectRequest {
+                        canvas: document.canvas().clone(),
+                        density: channel.layout.density.clone(),
+                        rotation_degrees: channel.layout.rotation_degrees,
+                        translation_x: channel.layout.translation_x,
+                        translation_y: channel.layout.translation_y,
+                        guard_steps: definition.coverage.guard_steps,
+                        support_radius: definition.coverage.maximum_support_radius,
+                        max_family_candidates: limits.max_family_candidates(),
                     },
+                    cancellation,
                 )?),
                 CacheDisposition::Miss,
             ),
         };
         let realization_key = DocumentRealizationCacheKey {
             family_content: key.content.clone(),
-            decoded_identity: source.identity().decoded_pixel_hash.clone(),
+            contract: realization_contract_key(definition),
+            source_identity: realization_source_identity(source.identity()),
             mapping: format!(
                 "{:?}:{:?}:{}:{}:{}",
                 channel.mapping.component,
@@ -1642,7 +1684,7 @@ fn evaluate_cached_document_impl(
                 Arc::new(evaluate_stage(
                     EvaluationStage::Realization,
                     cancellation,
-                    || evaluate_document_channel(document, channel, &source, &family),
+                    || evaluate_document_channel(document, channel, &source, &family, &plan),
                 )?),
                 CacheDisposition::Miss,
             ),
@@ -1650,7 +1692,7 @@ fn evaluate_cached_document_impl(
         summaries.push(ChannelEvaluationSummary {
             role: channel.role,
             channel_id: channel.id,
-            family_identity: family.family_fingerprint.clone(),
+            family_identity: family.family_fingerprint().to_owned(),
             realization_identity: document_realization_identity(&realization).to_owned(),
         });
         layers.push(document_render_layer(channel, (*realization).clone())?);
@@ -1779,20 +1821,21 @@ fn evaluate_cached_document_impl(
 
 #[derive(Clone)]
 enum DocumentRealization {
-    Mapped(MappedCircularMarkRealization),
-    SourceColor(SourceColorCircularMarkRealization),
+    Mapped(TypedRealization<MappedCircularMarkRealization>),
+    SourceColor(TypedRealization<SourceColorCircularMarkRealization>),
 }
 fn document_realization_identity(value: &DocumentRealization) -> &str {
     match value {
-        DocumentRealization::Mapped(value) => &value.realization_fingerprint,
-        DocumentRealization::SourceColor(value) => &value.realization_fingerprint,
+        DocumentRealization::Mapped(value) => &value.output.realization_fingerprint,
+        DocumentRealization::SourceColor(value) => &value.output.realization_fingerprint,
     }
 }
 fn evaluate_document_channel(
     document: &toniator_domain::Document,
     channel: &ModeledChannelState,
     source: &SourceField,
-    family: &GridFamilyOutput,
+    family: &TypedFamilyOutput,
+    plan: &toniator_patterns::PatternPipelinePlan,
 ) -> Result<DocumentRealization, EvaluationError> {
     let response = MarkResponse {
         minimum_size: channel.mark_geometry_response.minimum_size,
@@ -1800,24 +1843,26 @@ fn evaluate_document_channel(
     };
     let realization = match channel.paint {
         ChannelPaint::Solid(_) => DocumentRealization::Mapped(
-            realize_mapped_circular_marks(
+            realize_typed_mapped_outputs(
                 family,
+                plan,
                 source,
                 document.canvas(),
                 channel.mapping,
                 response,
             )
-            .map_err(EvaluationError::from_realization)?,
+            .map_err(EvaluationError::from_pipeline)?,
         ),
         ChannelPaint::SampledSource => DocumentRealization::SourceColor(
-            realize_source_color_circular_marks(
+            realize_typed_source_color_outputs(
                 family,
+                plan,
                 source,
                 document.canvas(),
                 channel.mapping,
                 response,
             )
-            .map_err(EvaluationError::from_realization)?,
+            .map_err(EvaluationError::from_pipeline)?,
         ),
     };
     Ok(realization)
@@ -1833,7 +1878,7 @@ fn document_render_layer(
                 channel.visible,
                 color.clone(),
                 channel.opacity,
-                GeometryOutput::CircularMarks(value.marks),
+                GeometryOutput::CircularMarks(value.output.marks),
             )
             .map_err(EvaluationError::from_render),
             ChannelPaint::SampledSource => unreachable!(),
@@ -1843,6 +1888,7 @@ fn document_render_layer(
             channel.visible,
             channel.opacity,
             value
+                .output
                 .marks
                 .into_iter()
                 .map(|entry| toniator_render::SourceColorCircle {
@@ -1882,7 +1928,7 @@ struct DocumentFamilyContentKey {
     translation: (u64, u64),
     guard_steps: u32,
     support_radius: u64,
-    definition: TypedDefinitionKey,
+    definition: FamilyDefinitionKey,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1911,7 +1957,7 @@ fn document_family_cache_key(
             ),
             guard_steps: definition.coverage.guard_steps,
             support_radius: definition.coverage.maximum_support_radius.to_bits(),
-            definition: typed_definition_key(definition),
+            definition: family_definition_key(definition),
         },
         candidate_limit: limits.max_family_candidates(),
     }
@@ -1920,7 +1966,8 @@ fn document_family_cache_key(
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DocumentRealizationCacheKey {
     family_content: DocumentFamilyContentKey,
-    decoded_identity: String,
+    contract: RealizationContractKey,
+    source_identity: RealizationSourceIdentity,
     mapping: String,
     response: (u64, u64),
     sampled_paint: bool,
@@ -1929,7 +1976,7 @@ struct DocumentRealizationCacheKey {
 #[derive(Clone, Default)]
 struct DocumentDerivedCache {
     decoded_source: Option<(SourceCacheKey, Arc<SourceField>)>,
-    families: Vec<(DocumentFamilyCacheKey, Arc<GridFamilyOutput>)>,
+    families: Vec<(DocumentFamilyCacheKey, Arc<TypedFamilyOutput>)>,
     realizations: Vec<(DocumentRealizationCacheKey, Arc<DocumentRealization>)>,
     scene: Option<(String, Arc<RenderScene>)>,
     raster: Option<(String, Arc<RasterSurface>)>,
@@ -1938,7 +1985,7 @@ struct DocumentDerivedCache {
 #[derive(Clone)]
 struct DocumentCacheTransaction {
     decoded_source: Option<(SourceCacheKey, Arc<SourceField>)>,
-    families: Vec<(DocumentFamilyCacheKey, Arc<GridFamilyOutput>)>,
+    families: Vec<(DocumentFamilyCacheKey, Arc<TypedFamilyOutput>)>,
     realizations: Vec<(DocumentRealizationCacheKey, Arc<DocumentRealization>)>,
     scene: Option<(String, Arc<RenderScene>)>,
     raster: Option<(String, Arc<RasterSurface>)>,
@@ -2380,45 +2427,73 @@ pub(crate) mod test_support {
 mod cache_key_tests {
     use super::*;
 
-    #[test]
-    fn svg_decoded_pixel_identity_participates_in_every_downstream_key() {
-        let source = SourceCacheKey {
-            reference_id: "svg".to_owned(),
-            bytes: Arc::<[u8]>::from(vec![1_u8, 2, 3]),
-            format: SourceFormatHint::Svg,
-            decoder_contract: DECODER_CONTRACT_ID,
-        };
-        let family = |decoded: &str, aspect_locked: bool| FamilyCacheKey {
-            source: source.clone(),
-            decoded_pixel_identity: decoded.to_owned(),
+    fn family(aspect_locked: bool) -> FamilyCacheKey {
+        FamilyCacheKey {
             canvas: (900.0_f64.to_bits(), 600.0_f64.to_bits()),
             density: (90.0_f64.to_bits(), 60.0_f64.to_bits()),
             aspect_locked,
             rotation: 17.0_f64.to_bits(),
             translation: (3.25_f64.to_bits(), (-4.5_f64).to_bits()),
             guard_steps: 2,
-            definition: TypedDefinitionKey {
+            definition: FamilyDefinitionKey {
+                definition_id: 1,
+                family: toniator_domain::PatternFamily::GuideIntersections {
+                    guide_mechanism_id: toniator_domain::PatternMechanismId(1),
+                    site_mechanism_id: toniator_domain::PatternMechanismId(2),
+                },
                 mechanisms: vec![],
-                output_layers: vec![],
             },
             maximum_support_radius: 4.5_f64.to_bits(),
             max_family_candidates: EvaluationLimits::DEFAULT_MAX_FAMILY_CANDIDATES,
-        };
-        let first_family = family("pixels-a", true);
-        let second_family = family("pixels-b", true);
-        assert_ne!(first_family, second_family);
-        assert_ne!(family("pixels-a", true), family("pixels-a", false));
-        let realization = |family: FamilyCacheKey| RealizationCacheKey {
+        }
+    }
+
+    fn contract(layer_id: u64) -> RealizationContractKey {
+        RealizationContractKey {
+            output_layers: vec![PatternOutputLayer::CircularMarks {
+                id: toniator_domain::PatternOutputLayerId(layer_id),
+                site_mechanism_id: toniator_domain::PatternMechanismId(2),
+            }],
+            modulation: toniator_domain::PatternModulation,
+        }
+    }
+
+    fn realization(
+        family: FamilyCacheKey,
+        content: &str,
+        decoded: &str,
+        contract: RealizationContractKey,
+    ) -> RealizationCacheKey {
+        RealizationCacheKey {
             family,
-            decoded_pixel_identity: "pixels-a".to_owned(),
+            contract,
+            source_identity: RealizationSourceIdentity {
+                format: toniator_sampling::SourceFormat::Png,
+                width: 900,
+                height: 600,
+                content_hash: content.to_owned(),
+                decoded_pixel_hash: decoded.to_owned(),
+            },
             canvas: (900.0_f64.to_bits(), 600.0_f64.to_bits()),
             source_component: 1,
             placement: 1,
             response: (2.0_f64.to_bits(), 9.0_f64.to_bits()),
-        };
-        let first_realization = realization(first_family);
-        let second_realization = realization(second_family);
+        }
+    }
+
+    #[test]
+    fn family_key_is_structural_while_decoded_pixels_invalidate_every_downstream_key() {
+        let first_family = family(true);
+        let second_family = family(true);
+        assert_eq!(first_family, second_family);
+        assert_ne!(family(true), family(false));
+        let first_realization = realization(first_family, "content-a", "pixels-a", contract(1));
+        let second_realization = realization(second_family, "content-a", "pixels-b", contract(1));
         assert_ne!(first_realization, second_realization);
+        assert_ne!(
+            first_realization,
+            realization(family(true), "content-b", "pixels-a", contract(1))
+        );
         let scene = |realization: RealizationCacheKey| SceneCacheKey {
             realization,
             canvas: (900.0_f64.to_bits(), 600.0_f64.to_bits()),
@@ -2443,67 +2518,56 @@ mod cache_key_tests {
     }
 
     #[test]
-    fn source_key_invalidation_includes_reference_bytes_format_and_decoder_contract() {
+    fn family_definition_id_keys_cached_provenance_but_name_is_presentation_only() {
+        let definition = PatternDefinition::supported_straight_grid(
+            toniator_domain::PatternDefinitionId(1),
+            "first name",
+            toniator_domain::PatternMechanismId(1),
+            toniator_domain::PatternMechanismId(2),
+            toniator_domain::PatternOutputLayerId(1),
+            toniator_domain::CoveragePolicy {
+                guard_steps: 2,
+                maximum_support_radius: 4.5,
+            },
+        );
+        let mut renamed = definition.clone();
+        renamed.name = "presentation-only rename".to_owned();
+        let mut different_provenance = definition.clone();
+        different_provenance.id = toniator_domain::PatternDefinitionId(2);
+        assert_eq!(
+            family_definition_key(&definition),
+            family_definition_key(&renamed)
+        );
+        assert_ne!(
+            family_definition_key(&definition),
+            family_definition_key(&different_provenance)
+        );
+    }
+
+    #[test]
+    fn logical_source_lookup_misses_decode_but_reuses_decoded_realization_identity() {
         let baseline = SourceCacheKey {
             reference_id: "source-a".to_owned(),
             bytes: Arc::<[u8]>::from(vec![1_u8, 2, 3]),
             format: SourceFormatHint::Png,
             decoder_contract: "decoder-a",
         };
-        let variants = [
-            SourceCacheKey {
-                reference_id: "source-b".to_owned(),
-                ..baseline.clone()
-            },
-            SourceCacheKey {
-                bytes: Arc::<[u8]>::from(vec![1_u8, 2, 4]),
-                ..baseline.clone()
-            },
-            SourceCacheKey {
-                format: SourceFormatHint::Svg,
-                ..baseline.clone()
-            },
-            SourceCacheKey {
-                decoder_contract: "decoder-b",
-                ..baseline.clone()
-            },
-        ];
-        for changed in variants {
-            assert_ne!(baseline, changed);
-            assert_ne!(
-                FamilyCacheKey {
-                    source: baseline.clone(),
-                    decoded_pixel_identity: "pixels".to_owned(),
-                    canvas: (1, 1),
-                    density: (1, 1),
-                    aspect_locked: true,
-                    rotation: 1,
-                    translation: (1, 1),
-                    guard_steps: 2,
-                    definition: TypedDefinitionKey {
-                        mechanisms: vec![],
-                        output_layers: vec![]
-                    },
-                    maximum_support_radius: 1,
-                    max_family_candidates: 1,
-                },
-                FamilyCacheKey {
-                    source: changed,
-                    decoded_pixel_identity: "pixels".to_owned(),
-                    canvas: (1, 1),
-                    density: (1, 1),
-                    aspect_locked: true,
-                    rotation: 1,
-                    translation: (1, 1),
-                    guard_steps: 2,
-                    definition: TypedDefinitionKey {
-                        mechanisms: vec![],
-                        output_layers: vec![]
-                    },
-                    maximum_support_radius: 1,
-                    max_family_candidates: 1,
-                },
-            );
-        }
+        let changed_lookup = SourceCacheKey {
+            reference_id: "source-b".to_owned(),
+            ..baseline.clone()
+        };
+        assert_ne!(baseline, changed_lookup);
+        assert_eq!(family(true), family(true));
+        // Decode cache lookup deliberately sees the logical reference, while
+        // realization consumes only the immutable decoder result.
+        assert_eq!(
+            realization(family(true), "content-a", "pixels-a", contract(1)),
+            realization(family(true), "content-a", "pixels-a", contract(1)),
+        );
+        assert_eq!(family(true), family(true));
+        assert_ne!(
+            realization(family(true), "content", "pixels", contract(1)),
+            realization(family(true), "content", "pixels", contract(2)),
+        );
     }
 }

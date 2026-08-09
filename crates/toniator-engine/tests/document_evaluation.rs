@@ -516,7 +516,7 @@ fn scheduler_rebuilds_families_and_realizations_when_canvas_changes() {
 
 #[test]
 fn frozen_v1_migration_and_saved_v2_preserve_accepted_outputs_for_every_model() {
-    let validation = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/validation/stage-14");
+    let validation = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/validation/stage-15");
     fs::create_dir_all(&validation).unwrap();
     for (fixture, source_format) in [
         ("raster-sample-v1.toniator", SourceFormatHint::Png),
@@ -584,14 +584,16 @@ fn frozen_v1_migration_and_saved_v2_preserve_accepted_outputs_for_every_model() 
                 assert_eq!(write_svg(current.scene()), write_svg(original.scene()));
             }
             let label = fixture.trim_end_matches(".toniator");
+            let v1_png = encode_png(current.raster()).unwrap();
+            let v1_svg = write_svg(current.scene());
             fs::write(
-                validation.join(format!("{label}-{model:?}-migrated-v2.png")),
-                encode_png(current.raster()).unwrap(),
+                validation.join(format!("{label}-{model:?}-frozen-v1.png")),
+                &v1_png,
             )
             .unwrap();
             fs::write(
-                validation.join(format!("{label}-{model:?}-migrated-v2.svg")),
-                write_svg(current.scene()),
+                validation.join(format!("{label}-{model:?}-frozen-v1.svg")),
+                &v1_svg,
             )
             .unwrap();
             let saved = validation.join(format!(
@@ -625,6 +627,20 @@ fn frozen_v1_migration_and_saved_v2_preserve_accepted_outputs_for_every_model() 
                 write_svg(reopened_result.scene()),
                 write_svg(current.scene())
             );
+            let v2_png = encode_png(reopened_result.raster()).unwrap();
+            let v2_svg = write_svg(reopened_result.scene());
+            assert_eq!(v2_png, v1_png);
+            assert_eq!(v2_svg, v1_svg);
+            fs::write(
+                validation.join(format!("{label}-{model:?}-saved-reopened-v2.png")),
+                v2_png,
+            )
+            .unwrap();
+            fs::write(
+                validation.join(format!("{label}-{model:?}-saved-reopened-v2.svg")),
+                v2_svg,
+            )
+            .unwrap();
         }
     }
 }

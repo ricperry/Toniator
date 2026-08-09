@@ -95,7 +95,7 @@ fn default_document_factory_builds_the_accepted_modeled_document_at_revision_zer
     assert_eq!(document.channel_model(), Some(HalftoneChannelModel::Rgb));
     assert_eq!(document.pattern_definitions().len(), 1);
     let definition = &document.pattern_definitions()[0];
-    assert!(definition.supported_straight_grid_compatibility().is_some());
+    assert!(document.validate().is_ok());
     assert_eq!(definition.coverage.guard_steps, 2);
     assert_eq!(definition.coverage.maximum_support_radius, 4.5);
     for channel in document.channel_topology().unwrap().channels() {
@@ -229,7 +229,7 @@ fn accepts_the_required_900_by_600_density_document() {
 #[test]
 fn typed_pattern_roots_require_unique_ordered_mechanisms_layers_and_finite_coverage() {
     let valid = definition();
-    assert!(valid.supported_straight_grid_compatibility().is_some());
+    assert!(document_with(canvas(), vec![valid.clone()], vec![channel()]).is_ok());
     let mut duplicate_mechanism = valid.clone();
     duplicate_mechanism.mechanisms[1] = PatternMechanism::GuideIntersections {
         id: PatternMechanismId(5),

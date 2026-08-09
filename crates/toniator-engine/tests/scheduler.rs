@@ -341,7 +341,16 @@ fn accepted_cache_obeys_the_complete_reuse_matrix_and_keeps_outputs_exact() {
             ResolvedSource::new(replacement_id, Arc::clone(&bytes), SourceFormatHint::Png).unwrap(),
         ),
     );
-    assert_diagnostics(&source_change, miss);
+    assert_diagnostics(
+        &source_change,
+        CacheDiagnostics {
+            decoded_source: CacheDisposition::Miss,
+            family: CacheDisposition::Hit,
+            realization: CacheDisposition::Hit,
+            scene: CacheDisposition::Hit,
+            raster: CacheDisposition::Hit,
+        },
+    );
     scheduler.shutdown().unwrap();
 }
 

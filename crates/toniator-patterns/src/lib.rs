@@ -5,7 +5,11 @@
 use std::{error::Error, fmt};
 
 use serde::Serialize;
-use toniator_domain::{CanvasSpec, DensityMetric2D, GuideDimensionId, SourceMapping};
+use toniator_domain::{
+    CanvasSpec, DensityMetric2D, GuideDimensionId, PatternDefinition, PatternFamily,
+    PatternMechanism, PatternMechanismId, PatternModulation, PatternOutputLayer,
+    PatternOutputLayerId, SourceMapping,
+};
 pub use toniator_geometry::{
     AffineTransform2D, Bounds, CanonicalCircleMark, GuideInstanceId, GuideIntersectionProvenance,
     IntersectionSite, Point2, SiteId, SiteScope, StraightGuide, Vector2, projection_range,
@@ -21,6 +25,320 @@ pub const ANTIALIAS_MARGIN: f64 = 1.0;
 /// Stable IDs for the two fixed rectangular straight-guide dimensions.
 pub const FIRST_DIMENSION_ID: GuideDimensionId = GuideDimensionId(1);
 pub const SECOND_DIMENSION_ID: GuideDimensionId = GuideDimensionId(2);
+
+/// The structural product a family makes available to later pipeline stages.
+/// It is deliberately typed rather than inferred from a pattern name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StructuralProductCapability {
+    GuideIntersections,
+}
+
+/// A stable record of the typed mechanisms that produced a structural product.
+/// It travels beside geometry without changing the accepted Stage 3 geometry
+/// fingerprint, so current artifacts remain byte-for-byte equivalent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StructuralProductProvenance {
+    pub definition_id: u64,
+    pub family_capability: StructuralProductCapability,
+    pub mechanism_ids: Vec<PatternMechanismId>,
+}
+
+/// A reusable family contract resolved from the document's typed definition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FamilyCapability {
+    pub product: StructuralProductCapability,
+    pub provenance: StructuralProductProvenance,
+}
+
+/// A reusable ordered realization contract. A realizer can consume only the
+/// declared structural product, before any source sampling or geometry output.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutputCapability {
+    pub layer_id: PatternOutputLayerId,
+    pub consumes: StructuralProductCapability,
+}
+
+/// Typed family/modulation/output plan. Modulation has no variants in the
+/// accepted schema, but remains an explicit stage instead of a hidden no-op in
+/// family or renderer code.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PatternPipelinePlan {
+    pub family: FamilyCapability,
+    pub modulation: PatternModulation,
+    pub ordered_outputs: Vec<OutputCapability>,
+}
+
+/// A family result flowing into modulation and ordered realization. Renderers
+/// consume only the canonical marks emitted by realizers, never this enum.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TypedFamilyOutput {
+    GuideIntersections {
+        family: FamilyCapability,
+        output: GridFamilyOutput,
+    },
+}
+
+impl TypedFamilyOutput {
+    pub fn family(&self) -> &FamilyCapability {
+        match self {
+            Self::GuideIntersections { family, .. } => family,
+        }
+    }
+
+    pub fn family_fingerprint(&self) -> &str {
+        match self {
+            Self::GuideIntersections { output, .. } => &output.family_fingerprint,
+        }
+    }
+
+    pub fn grid(&self) -> &GridFamilyOutput {
+        match self {
+            Self::GuideIntersections { output, .. } => output,
+        }
+    }
+}
+
+/// Provenance that survives explicit modulation and ordered output realization.
+/// It is intentionally adjacent to, rather than mixed into, canonical marks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypedRealizationProvenance {
+    pub structural: StructuralProductProvenance,
+    pub modulation: PatternModulation,
+    pub ordered_output_layer_ids: Vec<PatternOutputLayerId>,
+}
+
+/// A realization plus its typed provenance. Renderers consume `output` only.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TypedRealization<T> {
+    pub provenance: TypedRealizationProvenance,
+    pub output: T,
+}
+
+/// Stable typed diagnostic emitted before family output, cache publication, or
+/// partial realization when a definition cannot form one compatible pipeline.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PatternPipelineError {
+    path: &'static str,
+    message: &'static str,
+}
+
+impl PatternPipelineError {
+    pub const fn new(path: &'static str, message: &'static str) -> Self {
+        Self { path, message }
+    }
+
+    pub const fn path(&self) -> &'static str {
+        self.path
+    }
+
+    pub const fn message(&self) -> &'static str {
+        self.message
+    }
+}
+
+impl fmt::Display for PatternPipelineError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}: {}", self.path, self.message)
+    }
+}
+
+impl Error for PatternPipelineError {}
+
+/// Resolve the typed capability graph in declared order. This is the one
+/// family/output compatibility boundary shared by document and diagnostic
+/// evaluation; unsupported combinations fail before any source decode or
+/// cache transaction can occur.
+pub fn resolve_pattern_pipeline(
+    definition: &PatternDefinition,
+) -> Result<PatternPipelinePlan, PatternPipelineError> {
+    let PatternFamily::GuideIntersections {
+        guide_mechanism_id,
+        site_mechanism_id,
+    } = definition.family;
+    let ordered_mechanisms = match definition.mechanisms.as_slice() {
+        [
+            PatternMechanism::StraightGuides { id },
+            PatternMechanism::GuideIntersections {
+                id: intersection_id,
+                guide_mechanism_id: parent_id,
+            },
+        ] if *id == guide_mechanism_id
+            && *intersection_id == site_mechanism_id
+            && *parent_id == guide_mechanism_id =>
+        {
+            vec![*id, *intersection_id]
+        }
+        _ => {
+            return Err(PatternPipelineError::new(
+                "pattern.family.capability",
+                "typed family mechanisms cannot produce the declared structural product",
+            ));
+        }
+    };
+    let mut ordered_outputs = Vec::with_capacity(definition.output_layers.len());
+    for output in &definition.output_layers {
+        match output {
+            PatternOutputLayer::CircularMarks {
+                id,
+                site_mechanism_id: source_id,
+            } if *source_id == site_mechanism_id => ordered_outputs.push(OutputCapability {
+                layer_id: *id,
+                consumes: StructuralProductCapability::GuideIntersections,
+            }),
+            _ => {
+                return Err(PatternPipelineError::new(
+                    "pattern.output_layers.capability",
+                    "output layer cannot consume the declared structural product",
+                ));
+            }
+        }
+    }
+    if ordered_outputs.len() != 1 {
+        return Err(PatternPipelineError::new(
+            "pattern.output_layers.capability",
+            "the current typed output contract requires exactly one ordered realization layer",
+        ));
+    }
+    Ok(PatternPipelinePlan {
+        family: FamilyCapability {
+            product: StructuralProductCapability::GuideIntersections,
+            provenance: StructuralProductProvenance {
+                definition_id: definition.id.0,
+                family_capability: StructuralProductCapability::GuideIntersections,
+                mechanism_ids: ordered_mechanisms,
+            },
+        },
+        modulation: definition.modulation.clone(),
+        ordered_outputs,
+    })
+}
+
+/// Evaluate one typed family through its resolved capability plan. The current
+/// no-variant modulation is deliberately resolved between family generation
+/// and realization, preserving the authoritative stage order for future data
+/// additions without a name-based dispatch path.
+pub fn evaluate_typed_family(
+    definition: &PatternDefinition,
+    request: &GridInspectRequest,
+) -> Result<TypedFamilyOutput, PatternPipelineError> {
+    evaluate_typed_family_cancellable(definition, request, &|| false)
+}
+
+/// Cancellation-aware typed family planning. It checks before coverage,
+/// allocation, and each bounded candidate row; final-consumer clipping is not
+/// involved in the structural work policy.
+pub fn evaluate_typed_family_cancellable(
+    definition: &PatternDefinition,
+    request: &GridInspectRequest,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<TypedFamilyOutput, PatternPipelineError> {
+    let plan = resolve_pattern_pipeline(definition)?;
+    evaluate_typed_family_product_cancellable(&plan.family, request, is_cancelled)
+}
+
+/// Evaluates only the structural family product. Output-layer and modulation
+/// contracts intentionally stay out of this cacheable result and are supplied
+/// later to realization.
+pub fn evaluate_typed_family_product_cancellable(
+    family: &FamilyCapability,
+    request: &GridInspectRequest,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<TypedFamilyOutput, PatternPipelineError> {
+    let output = evaluate_straight_grid_cancellable(request, is_cancelled)
+        .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
+    Ok(TypedFamilyOutput::GuideIntersections {
+        family: family.clone(),
+        output,
+    })
+}
+
+/// Ordered scalar-field output realization through the declared typed layer.
+/// The returned mark geometry is canonical; clipping remains exclusively with
+/// the final renderer consumer.
+pub fn realize_typed_mapped_outputs(
+    family: &TypedFamilyOutput,
+    plan: &PatternPipelinePlan,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: MarkResponse,
+) -> Result<TypedRealization<MappedCircularMarkRealization>, PatternPipelineError> {
+    let provenance = realization_provenance(family, plan)?;
+    realize_mapped_circular_marks(family.grid(), source, canvas, mapping, response)
+        .map(|output| TypedRealization { provenance, output })
+        .map_err(|error| PatternPipelineError::new(error.path(), error.message()))
+}
+
+/// Ordered sampled-paint output realization through the declared typed layer.
+pub fn realize_typed_source_color_outputs(
+    family: &TypedFamilyOutput,
+    plan: &PatternPipelinePlan,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: MarkResponse,
+) -> Result<TypedRealization<SourceColorCircularMarkRealization>, PatternPipelineError> {
+    let provenance = realization_provenance(family, plan)?;
+    realize_source_color_circular_marks(family.grid(), source, canvas, mapping, response)
+        .map(|output| TypedRealization { provenance, output })
+        .map_err(|error| PatternPipelineError::new(error.path(), error.message()))
+}
+
+/// Retained diagnostic realization, now routed through the same typed output
+/// capability boundary as authoritative document evaluation.
+pub fn realize_typed_diagnostic_outputs(
+    family: &TypedFamilyOutput,
+    plan: &PatternPipelinePlan,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    placement: SourcePlacement,
+    component: SourceComponent,
+    response: MarkResponse,
+) -> Result<TypedRealization<CircularMarkRealization>, PatternPipelineError> {
+    let provenance = realization_provenance(family, plan)?;
+    realize_circular_marks(
+        family.grid(),
+        source,
+        canvas,
+        placement,
+        component,
+        response,
+    )
+    .map(|output| TypedRealization { provenance, output })
+    .map_err(|error| PatternPipelineError::new(error.path(), error.message()))
+}
+
+fn realization_provenance(
+    family: &TypedFamilyOutput,
+    plan: &PatternPipelinePlan,
+) -> Result<TypedRealizationProvenance, PatternPipelineError> {
+    if family.family() != &plan.family {
+        return Err(PatternPipelineError::new(
+            "pattern.family.provenance",
+            "realization plan does not match the structural family product",
+        ));
+    }
+    match plan.ordered_outputs.as_slice() {
+        [
+            OutputCapability {
+                consumes: StructuralProductCapability::GuideIntersections,
+                ..
+            },
+        ] => Ok(TypedRealizationProvenance {
+            structural: family.family().provenance.clone(),
+            modulation: plan.modulation.clone(),
+            ordered_output_layer_ids: plan
+                .ordered_outputs
+                .iter()
+                .map(|output| output.layer_id)
+                .collect(),
+        }),
+        _ => Err(PatternPipelineError::new(
+            "pattern.output_layers.capability",
+            "ordered output realization has no compatible circular-mark layer",
+        )),
+    }
+}
 
 /// Headless input to the two-dimension straight-grid family.
 #[derive(Clone, Debug, PartialEq)]
@@ -1268,6 +1586,21 @@ impl Error for GridError {}
 /// guide, a site, or topology. Returned lines are finite presentations of
 /// infinite guides and deliberately extend beyond that planned local extent.
 pub fn evaluate_straight_grid(request: &GridInspectRequest) -> Result<GridFamilyOutput, GridError> {
+    evaluate_straight_grid_cancellable(request, &|| false)
+}
+
+/// The cancellation-aware structural planner used by the generic evaluator.
+/// It retains the exact accepted output when the probe never cancels.
+pub fn evaluate_straight_grid_cancellable(
+    request: &GridInspectRequest,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<GridFamilyOutput, GridError> {
+    if is_cancelled() {
+        return Err(GridError::new(
+            "evaluation.cancelled",
+            "evaluation was cancelled",
+        ));
+    }
     validate(request)?;
 
     let spacing_x = directional_spacing(&request.canvas, &request.density, Vector2::new(1.0, 0.0))?;
@@ -1309,6 +1642,12 @@ pub fn evaluate_straight_grid(request: &GridInspectRequest) -> Result<GridFamily
         dimensions[0].coverage(generation_domain, transform, request)?,
         dimensions[1].coverage(generation_domain, transform, request)?,
     ];
+    if is_cancelled() {
+        return Err(GridError::new(
+            "evaluation.cancelled",
+            "evaluation was cancelled",
+        ));
+    }
     let first_count = guide_range_count(plans[0])?;
     let second_count = guide_range_count(plans[1])?;
     let candidate_count = first_count.checked_mul(second_count).ok_or(GridError::new(
@@ -1325,11 +1664,23 @@ pub fn evaluate_straight_grid(request: &GridInspectRequest) -> Result<GridFamily
     let extension = planning_margin;
     let mut guides = Vec::new();
     for (dimension, coverage) in dimensions.iter().zip(plans.iter()) {
+        if is_cancelled() {
+            return Err(GridError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
         guides.extend(dimension.guides(*coverage, generation_domain, transform, extension));
     }
 
     let mut sites = Vec::new();
     for first_index in plans[0].first_index..=plans[0].last_index {
+        if is_cancelled() {
+            return Err(GridError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
         for second_index in plans[1].first_index..=plans[1].last_index {
             let local = Point2::new(
                 first_index as f64 * dimensions[0].spacing,
@@ -1643,5 +1994,127 @@ mod coverage_tests {
                 .path(),
             "coverage.candidate_limit"
         );
+    }
+}
+
+#[cfg(test)]
+mod typed_pipeline_tests {
+    use std::cell::Cell;
+
+    use super::*;
+    use toniator_domain::{
+        CoveragePolicy, PatternDefinitionId, PatternMechanismId, PatternOutputLayerId,
+        SourceMappingComponent,
+    };
+    use toniator_sampling::{SourceFormatHint, decode_source};
+
+    fn definition() -> PatternDefinition {
+        PatternDefinition::supported_straight_grid(
+            PatternDefinitionId(7),
+            "presentation-only-name-is-not-dispatch",
+            PatternMechanismId(11),
+            PatternMechanismId(12),
+            PatternOutputLayerId(13),
+            CoveragePolicy {
+                guard_steps: 2,
+                maximum_support_radius: 4.5,
+            },
+        )
+    }
+
+    fn request() -> GridInspectRequest {
+        GridInspectRequest {
+            canvas: CanvasSpec {
+                width: 90.0,
+                height: 60.0,
+            },
+            density: DensityMetric2D {
+                across_x: 9.0,
+                across_y: 6.0,
+                aspect_locked: true,
+            },
+            rotation_degrees: 17.0,
+            translation_x: 3.25,
+            translation_y: -4.5,
+            guard_steps: 2,
+            support_radius: 4.5,
+            max_family_candidates: 100_000,
+        }
+    }
+
+    fn source() -> SourceField {
+        let image = image::RgbaImage::from_raw(1, 1, vec![255, 0, 0, 255]).unwrap();
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        decode_source(&bytes, SourceFormatHint::Png).unwrap()
+    }
+
+    #[test]
+    fn typed_capability_plan_preserves_order_provenance_and_accepted_geometry() {
+        let definition = definition();
+        let plan = resolve_pattern_pipeline(&definition).unwrap();
+        assert_eq!(plan.family.provenance.definition_id, 7);
+        assert_eq!(
+            plan.family.provenance.mechanism_ids,
+            vec![PatternMechanismId(11), PatternMechanismId(12)]
+        );
+        assert_eq!(plan.ordered_outputs[0].layer_id, PatternOutputLayerId(13));
+
+        let expected = evaluate_straight_grid(&request()).unwrap();
+        let generic = evaluate_typed_family(&definition, &request()).unwrap();
+        assert_eq!(generic.family_fingerprint(), expected.family_fingerprint);
+        assert_eq!(generic.grid(), &expected);
+
+        let realization = realize_typed_mapped_outputs(
+            &generic,
+            &plan,
+            &source(),
+            &request().canvas,
+            SourceMapping::canonical(SourceMappingComponent::Red),
+            MarkResponse {
+                minimum_size: 2.0,
+                maximum_size: 9.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(realization.provenance.structural.definition_id, 7);
+        assert_eq!(
+            realization.provenance.structural.mechanism_ids,
+            vec![PatternMechanismId(11), PatternMechanismId(12)]
+        );
+        assert_eq!(
+            realization.provenance.ordered_output_layer_ids,
+            vec![PatternOutputLayerId(13)]
+        );
+    }
+
+    #[test]
+    fn incompatible_output_is_a_stable_preflight_error_without_family_output() {
+        let mut definition = definition();
+        definition.output_layers.clear();
+        let error = evaluate_typed_family(&definition, &request()).unwrap_err();
+        assert_eq!(error.path(), "pattern.output_layers.capability");
+        assert_eq!(
+            error.message(),
+            "the current typed output contract requires exactly one ordered realization layer"
+        );
+    }
+
+    #[test]
+    fn bounded_structural_planning_observes_cancellation_before_final_clipping() {
+        let checks = Cell::new(0_u32);
+        let error = evaluate_typed_family_cancellable(&definition(), &request(), &|| {
+            let next = checks.get() + 1;
+            checks.set(next);
+            next >= 5
+        })
+        .unwrap_err();
+        assert_eq!(error.path(), "evaluation.cancelled");
+        assert!(checks.get() >= 5);
     }
 }

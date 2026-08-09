@@ -178,7 +178,7 @@ fn typed_definition_commands_allocate_copy_share_and_history_atomically() {
     );
     assert_eq!(duplicate.output_layers.len(), 1);
     assert_eq!(duplicate.output_layers[0].id(), PatternOutputLayerId(5));
-    assert!(duplicate.supported_straight_grid_compatibility().is_some());
+    assert!(history.document().validate().is_ok());
 
     let before_failure = history.document().clone();
     let before_revision = history.revision();

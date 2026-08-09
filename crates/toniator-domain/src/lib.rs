@@ -513,26 +513,6 @@ impl PatternDefinition {
             coverage,
         }
     }
-
-    /// The narrow, headless, temporary Stage 14 seam into the accepted
-    /// straight-guide/circular-mark evaluator.  Stage 15 owns generalization.
-    pub fn supported_straight_grid_compatibility(&self) -> Option<&CoveragePolicy> {
-        let PatternFamily::GuideIntersections {
-            guide_mechanism_id,
-            site_mechanism_id: root_site_id,
-        } = self.family;
-        let guides = self.mechanisms.iter().any(|mechanism| {
-            matches!(mechanism, PatternMechanism::StraightGuides { id } if *id == guide_mechanism_id)
-        });
-        let intersections = self.mechanisms.iter().any(|mechanism| {
-            matches!(mechanism, PatternMechanism::GuideIntersections { id, guide_mechanism_id: parent } if *id == root_site_id && *parent == guide_mechanism_id)
-        });
-        let output = self.output_layers.as_slice().iter().all(|layer| {
-            matches!(layer, PatternOutputLayer::CircularMarks { site_mechanism_id, .. } if *site_mechanism_id == root_site_id)
-        });
-        (guides && intersections && output && self.output_layers.len() == 1)
-            .then_some(&self.coverage)
-    }
 }
 
 /// Source state owned by the document, never a filesystem path.
