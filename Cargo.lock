@@ -1338,6 +1338,7 @@ dependencies = [
  "libadwaita",
  "toniator-domain",
  "toniator-engine",
+ "toniator-io",
 ]
 
 [[package]]

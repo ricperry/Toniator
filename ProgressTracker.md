@@ -172,10 +172,12 @@ out of scope.
 IO-owned version-specific DTOs, exact embedded source bundles, deterministic
 version dispatch with no transforming migration yet, atomic save, CLI
 create/validate/render, and frozen PNG/SVG-backed v1 fixtures for the later
-v1-to-v2 migration gate. History, dirty state, and filesystem source paths are
-not serialized.
+v1-to-v2 migration gate. Canonical saves remain deterministic two-file Stored
+archives; the reader also tolerates Deflated required files and one exact empty
+`sources/` directory marker from benign manual repacks. History, dirty state,
+and filesystem source paths are not serialized.
 
-**Stage 13A — Planned.** Add GTK New/Open/Save/Save As/Close, exact content-based
+**Stage 13A — Accepted awaiting checkpoint.** Add GTK New/Open/Save/Save As/Close, exact content-based
 dirty/savepoint tracking, history state, direct-source/container opening, title
 identity, and atomic error handling. GTK delegates default document creation
 and remains completely ignorant of pattern internals.

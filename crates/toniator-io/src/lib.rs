@@ -329,9 +329,9 @@ pub fn load(path: &Path) -> Result<LoadedDocument, LoadError> {
     let mut archive = ZipArchive::new(file).map_err(|error| LoadError::Archive {
         context: error.to_string(),
     })?;
-    if archive.len() != 2 {
+    if !(2..=3).contains(&archive.len()) {
         return Err(LoadError::EntryTopology {
-            context: "v1 archive must contain exactly two entries".into(),
+            context: "v1 archive must contain exactly two file entries; the only optional marker is an empty sources/ directory entry".into(),
         });
     }
 
@@ -339,6 +339,7 @@ pub fn load(path: &Path) -> Result<LoadedDocument, LoadError> {
     let mut uncompressed = 0_u64;
     let mut document_index = None;
     let mut source_index = None;
+    let mut sources_marker = false;
     for index in 0..archive.len() {
         let entry = archive
             .by_index_raw(index)
@@ -361,11 +362,6 @@ pub fn load(path: &Path) -> Result<LoadedDocument, LoadError> {
                 context: format!("encrypted entry is unsupported: {name}"),
             });
         }
-        if entry.compression() != CompressionMethod::Stored {
-            return Err(LoadError::Archive {
-                context: format!("compressed entry is unsupported: {name}"),
-            });
-        }
         uncompressed = uncompressed
             .checked_add(entry.size())
             .ok_or_else(|| LoadError::Limits {
@@ -377,8 +373,35 @@ pub fn load(path: &Path) -> Result<LoadedDocument, LoadError> {
             });
         }
         match name.as_str() {
-            "document.json" => document_index = Some(index),
-            _ if name.starts_with("sources/") => source_index = Some(index),
+            "sources/" => {
+                if !entry.is_dir() || entry.size() != 0 {
+                    return Err(LoadError::EntryTopology {
+                        context: "sources/ must be an empty directory marker".into(),
+                    });
+                }
+                if sources_marker {
+                    return Err(LoadError::EntryTopology {
+                        context: "duplicate sources/ directory marker".into(),
+                    });
+                }
+                sources_marker = true;
+            }
+            "document.json" if entry.is_file() => {
+                if document_index.replace(index).is_some() {
+                    return Err(LoadError::EntryTopology {
+                        context: "multiple document.json file entries".into(),
+                    });
+                }
+                ensure_supported_file_compression(&name, entry.compression())?;
+            }
+            _ if name.starts_with("sources/") && entry.is_file() => {
+                if source_index.replace(index).is_some() {
+                    return Err(LoadError::EntryTopology {
+                        context: "multiple source file entries".into(),
+                    });
+                }
+                ensure_supported_file_compression(&name, entry.compression())?;
+            }
             _ => {
                 return Err(LoadError::EntryTopology {
                     context: format!("unexpected archive entry: {name}"),
@@ -488,6 +511,23 @@ pub fn load(path: &Path) -> Result<LoadedDocument, LoadError> {
         sources,
         versions: StoredVersions::new(CONTAINER_VERSION, DOCUMENT_SCHEMA_VERSION),
         report: MigrationReport::default(),
+    })
+}
+
+fn ensure_supported_file_compression(
+    name: &str,
+    method: CompressionMethod,
+) -> Result<(), LoadError> {
+    if matches!(
+        method,
+        CompressionMethod::Stored | CompressionMethod::Deflated
+    ) {
+        return Ok(());
+    }
+    Err(LoadError::Archive {
+        context: format!(
+            "unsupported compression method {method:?} for entry {name}; only Stored or Deflated file entries are accepted"
+        ),
     })
 }
 
@@ -634,10 +674,17 @@ fn read_limited(
     }
     let mut bytes = Vec::with_capacity(entry.size() as usize);
     entry
+        .by_ref()
+        .take(limit.saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|error| LoadError::Archive {
             context: error.to_string(),
         })?;
+    if bytes.len() as u64 > limit {
+        return Err(LoadError::Limits {
+            context: format!("{name} exceeds its v1 size limit"),
+        });
+    }
     Ok(bytes)
 }
 

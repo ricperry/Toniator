@@ -1,8 +1,8 @@
 use toniator_domain::{
     CanvasSpec, ChannelAppearance, ChannelId, ChannelPaint, ChannelPatternLayout,
     ChannelSourceMapping, ChannelState, ChannelTopology, ChannelTopologyTemplate, ColorValue,
-    DensityMetric2D, Document, DocumentCommand, DocumentEvaluationToken, DocumentId,
-    DocumentSession, HalftoneChannelModel, HalftoneChannelRole, InvalidationLevel,
+    DensityMetric2D, Document, DocumentCommand, DocumentEvaluationToken, DocumentHistory,
+    DocumentId, DocumentSession, HalftoneChannelModel, HalftoneChannelRole, InvalidationLevel,
     MarkGeometryResponse, ModeledChannelState, PatternDefinition, PatternDefinitionId,
     PatternOutput, PatternStructure, SourceComponent, SourceMapping, SourceMappingComponent,
     SourcePlacement, SourceReference, SourceReferenceId,
@@ -74,6 +74,38 @@ fn document_with(
 
 fn valid_document() -> Document {
     document_with(canvas(), vec![definition()], vec![channel()]).expect("valid fixture")
+}
+
+#[test]
+fn default_document_factory_builds_the_accepted_modeled_document_at_revision_zero() {
+    let source = SourceReference::Assigned(SourceReferenceId::new("content-derived-id").unwrap());
+    let document = Document::new_default_document(
+        CanvasSpec {
+            width: 1024.0,
+            height: 620.0,
+        },
+        source.clone(),
+    )
+    .unwrap();
+    assert_eq!(document.source(), &source);
+    assert_eq!(document.channel_model(), Some(HalftoneChannelModel::Rgb));
+    assert_eq!(document.pattern_definitions().len(), 1);
+    let definition = &document.pattern_definitions()[0];
+    assert_eq!(definition.structure, PatternStructure::StraightGrid);
+    assert_eq!(definition.output, PatternOutput::CircularMarks);
+    assert_eq!(definition.guard_steps, 2);
+    assert_eq!(definition.maximum_support_radius, 4.5);
+    for channel in document.channel_topology().unwrap().channels() {
+        assert_eq!(channel.layout.density.across_x, 102.4);
+        assert_eq!(channel.layout.density.across_y, 62.0);
+        assert!(channel.layout.density.aspect_locked);
+        assert_eq!(channel.mark_geometry_response.minimum_size, 2.0);
+        assert_eq!(channel.mark_geometry_response.maximum_size, 9.0);
+    }
+    let history = DocumentHistory::new(DocumentSession::new(document).unwrap());
+    assert_eq!(history.revision().0, 0);
+    assert!(!history.can_undo());
+    assert!(!history.can_redo());
 }
 
 fn topology_template() -> ChannelTopologyTemplate {

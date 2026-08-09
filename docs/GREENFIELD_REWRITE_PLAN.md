@@ -1225,9 +1225,14 @@ Rules:
   optional non-authoritative display name.
 - Source paths on the original filesystem are not persisted or used during
   loading.
-- Entries use a stable order and normalized timestamps.
-- Store entries without archive compression in version 1 for deterministic,
-  lossless byte preservation.
+- Canonical writer output uses exactly the two file entries above, in stable
+  order with normalized timestamps, and stores both entries without archive
+  compression for deterministic, lossless byte preservation.
+- The v1 reader tolerates standard Deflate for either required file and may
+  accept one exact, empty `sources/` directory marker from a benign manual
+  repack. It rejects every other directory, wrapper root, extra entry, or
+  unsupported required-file compression method; this input tolerance does not change v1 JSON/DTO
+  interpretation or the canonical writer output.
 - Reject duplicate required entries, missing entries, unsupported formats,
   invalid paths, hash/length mismatches, oversized entries, and malformed
   archives.
@@ -1310,7 +1315,7 @@ lifecycle or the v1-to-v2 migration automatically.
 
 ## Stage 13A — GTK document lifecycle
 
-**Status: Planned.** Add document lifecycle around Stage 11 history and Stage
+**Status: Accepted awaiting checkpoint.** Add document lifecycle around Stage 11 history and Stage
 12 persistence while remaining completely ignorant of pattern internals.
 
 - Add New, Open, Save, Save As, and Close plus close-with-unsaved-work

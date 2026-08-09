@@ -132,6 +132,53 @@ fn archive_from_entries(entries: &[(&str, &[u8], zip::CompressionMethod)]) -> Ve
     writer.finish().unwrap().into_inner()
 }
 
+fn archive_with_sources_marker(
+    document: (&[u8], zip::CompressionMethod),
+    source_name: &str,
+    source: (&[u8], zip::CompressionMethod),
+) -> Vec<u8> {
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    writer
+        .start_file(
+            "document.json",
+            zip::write::SimpleFileOptions::default().compression_method(document.1),
+        )
+        .unwrap();
+    writer.write_all(document.0).unwrap();
+    writer
+        .add_directory("sources/", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    writer
+        .start_file(
+            source_name,
+            zip::write::SimpleFileOptions::default().compression_method(source.1),
+        )
+        .unwrap();
+    writer.write_all(source.0).unwrap();
+    writer.finish().unwrap().into_inner()
+}
+
+fn archive_with_directory_and_files(
+    directory: &str,
+    document: &[u8],
+    source_name: &str,
+    source: &[u8],
+) -> Vec<u8> {
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    writer
+        .start_file("document.json", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    writer.write_all(document).unwrap();
+    writer
+        .add_directory(directory, zip::write::SimpleFileOptions::default())
+        .unwrap();
+    writer
+        .start_file(source_name, zip::write::SimpleFileOptions::default())
+        .unwrap();
+    writer.write_all(source).unwrap();
+    writer.finish().unwrap().into_inner()
+}
+
 fn set_central_entry_sizes(bytes: &mut [u8], entry_index: usize, size: u64) {
     let positions = bytes
         .windows(4)
@@ -144,13 +191,34 @@ fn set_central_entry_sizes(bytes: &mut [u8], entry_index: usize, size: u64) {
     bytes[position + 24..position + 28].copy_from_slice(&size);
 }
 
-fn replace_last_central_name(bytes: &mut [u8], replacement: &[u8]) {
+fn set_central_uncompressed_size(bytes: &mut [u8], entry_index: usize, size: u64) {
+    let positions = bytes
+        .windows(4)
+        .enumerate()
+        .filter_map(|(index, value)| (value == b"PK\x01\x02").then_some(index))
+        .collect::<Vec<_>>();
+    let position = positions[entry_index];
+    let size = u32::try_from(size).unwrap().to_le_bytes();
+    bytes[position + 24..position + 28].copy_from_slice(&size);
+}
+
+fn set_local_entry_sizes(bytes: &mut [u8], entry_index: usize, size: u64) {
+    let position = bytes
+        .windows(4)
+        .enumerate()
+        .filter_map(|(index, value)| (value == b"PK\x03\x04").then_some(index))
+        .collect::<Vec<_>>()[entry_index];
+    let size = u32::try_from(size).unwrap().to_le_bytes();
+    bytes[position + 18..position + 22].copy_from_slice(&size);
+    bytes[position + 22..position + 26].copy_from_slice(&size);
+}
+
+fn replace_central_name(bytes: &mut [u8], entry_index: usize, replacement: &[u8]) {
     let position = bytes
         .windows(4)
         .enumerate()
         .filter_map(|(index, value)| (value == b"PK\x01\x02").then_some(index))
-        .next_back()
-        .unwrap();
+        .collect::<Vec<_>>()[entry_index];
     let name_length = u16::from_le_bytes([bytes[position + 28], bytes[position + 29]]) as usize;
     assert_eq!(name_length, replacement.len());
     bytes[position + 46..position + 46 + name_length].copy_from_slice(replacement);
@@ -489,7 +557,7 @@ fn archive_topology_names_formats_and_integrity_fail_without_panic() {
             zip::CompressionMethod::Stored,
         ),
     ]);
-    replace_last_central_name(&mut duplicate, b"sources/source-1.svg");
+    replace_central_name(&mut duplicate, 1, b"sources/source-1.svg");
     assert_load_error(&duplicate, |e| matches!(e, LoadError::EntryTopology { .. }));
     for unsafe_name in [
         "/sources/source-1.svg",
@@ -513,13 +581,6 @@ fn archive_topology_names_formats_and_integrity_fail_without_panic() {
         |e| matches!(e, LoadError::Json { .. }),
     );
     assert_load_error(b"not a zip", |e| matches!(e, LoadError::Archive { .. }));
-    assert_load_error(
-        &archive_from_entries(&[
-            ("document.json", &json, zip::CompressionMethod::Deflated),
-            (&source_name, &source, zip::CompressionMethod::Stored),
-        ]),
-        |e| matches!(e, LoadError::Archive { .. }),
-    );
     let mut changed = json.clone();
     changed[0] = b'!';
     assert_load_error(
@@ -528,6 +589,85 @@ fn archive_topology_names_formats_and_integrity_fail_without_panic() {
             (&source_name, &source, zip::CompressionMethod::Stored),
         ]),
         |e| matches!(e, LoadError::Json { .. }),
+    );
+}
+
+#[test]
+fn v1_reader_accepts_deflated_files_and_optional_sources_directory_marker() {
+    let (document, sources) = legacy_document();
+    let (json, source_name, source) = saved_parts(&document, &sources);
+    for document_method in [
+        zip::CompressionMethod::Stored,
+        zip::CompressionMethod::Deflated,
+    ] {
+        for source_method in [
+            zip::CompressionMethod::Stored,
+            zip::CompressionMethod::Deflated,
+        ] {
+            let bytes = archive_from_entries(&[
+                ("document.json", &json, document_method),
+                (&source_name, &source, source_method),
+            ]);
+            let path = write_bytes(&bytes);
+            let loaded = load(&path).unwrap();
+            assert_eq!(loaded.document(), &document);
+            assert_eq!(loaded.sources(), &sources);
+            fs::remove_file(path).unwrap();
+
+            let marked = archive_with_sources_marker(
+                (&json, document_method),
+                &source_name,
+                (&source, source_method),
+            );
+            let path = write_bytes(&marked);
+            let loaded = load(&path).unwrap();
+            assert_eq!(loaded.document(), &document);
+            assert_eq!(loaded.sources(), &sources);
+            fs::remove_file(path).unwrap();
+        }
+    }
+}
+
+#[test]
+fn v1_reader_rejects_noncanonical_directory_topology_and_compression() {
+    let (document, sources) = legacy_document();
+    let (json, source_name, source) = saved_parts(&document, &sources);
+    for directory in ["source/", "metadata/"] {
+        assert_load_error(
+            &archive_with_directory_and_files(directory, &json, &source_name, &source),
+            |error| matches!(error, LoadError::EntryTopology { .. }),
+        );
+    }
+    let mut nonempty_marker = archive_with_sources_marker(
+        (&json, zip::CompressionMethod::Stored),
+        &source_name,
+        (&source, zip::CompressionMethod::Stored),
+    );
+    set_central_entry_sizes(&mut nonempty_marker, 1, 1);
+    set_local_entry_sizes(&mut nonempty_marker, 1, 1);
+    assert_load_error(
+        &nonempty_marker,
+        |error| matches!(error, LoadError::EntryTopology { context } if context.contains("sources/")),
+    );
+    let mut unsupported = archive_from_entries(&[
+        ("document.json", &json, zip::CompressionMethod::Stored),
+        (&source_name, &source, zip::CompressionMethod::Stored),
+    ]);
+    let local = unsupported
+        .windows(4)
+        .enumerate()
+        .find_map(|(index, value)| (value == b"PK\x03\x04").then_some(index))
+        .unwrap();
+    unsupported[local + 8..local + 10].copy_from_slice(&12_u16.to_le_bytes());
+    let central = unsupported
+        .windows(4)
+        .enumerate()
+        .find_map(|(index, value)| (value == b"PK\x01\x02").then_some(index))
+        .unwrap();
+    unsupported[central + 10..central + 12].copy_from_slice(&12_u16.to_le_bytes());
+    assert_load_error(
+        &unsupported,
+        |error| matches!(error, LoadError::Archive { context } if context.contains("document.json") && context.contains("Unsupported(12)")),
     );
 }
 
@@ -655,6 +795,26 @@ fn entry_limits_are_checked_from_zip_metadata_before_reading_payloads() {
         MAX_DOCUMENT_BYTES + MAX_SOURCE_BYTES,
         132 * 1024 * 1024,
         "the two-entry v1 aggregate limit is exactly its individually allowed boundary"
+    );
+}
+
+#[test]
+fn deflated_document_with_understated_metadata_is_limited_while_reading() {
+    let (document, sources) = legacy_document();
+    let (_, source_name, source) = saved_parts(&document, &sources);
+    let oversized_document = vec![b' '; usize::try_from(MAX_DOCUMENT_BYTES + 1).unwrap()];
+    let mut bytes = archive_from_entries(&[
+        (
+            "document.json",
+            &oversized_document,
+            zip::CompressionMethod::Deflated,
+        ),
+        (&source_name, &source, zip::CompressionMethod::Stored),
+    ]);
+    set_central_uncompressed_size(&mut bytes, 0, 1);
+    assert_load_error(
+        &bytes,
+        |error| matches!(error, LoadError::Limits { context } if context.contains("document.json")),
     );
 }
 

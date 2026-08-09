@@ -12,6 +12,7 @@ glib = "0.22.0"
 gio = "0.22.0"
 toniator-domain = { path = "../toniator-domain" }
 toniator-engine = { path = "../toniator-engine" }
+toniator-io = { path = "../toniator-io" }
 
 [build-dependencies]
 glib-build-tools = "0.22.0"

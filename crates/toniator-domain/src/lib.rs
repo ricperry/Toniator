@@ -463,6 +463,53 @@ enum ChannelConfiguration {
 }
 
 impl Document {
+    /// Builds the accepted default document directly, without a
+    /// command transition.  Frontends use this for new and direct-source
+    /// workspaces so their `DocumentSession`/`DocumentHistory` begins at
+    /// revision zero. The fixed template stays encapsulated in the headless
+    /// document layer rather than requiring caller-side construction details.
+    pub fn new_default_document(
+        canvas: CanvasSpec,
+        source: SourceReference,
+    ) -> Result<Self, ValidationError> {
+        let layout = ChannelPatternLayout {
+            density: DensityMetric2D {
+                across_x: canvas.width / 10.0,
+                across_y: canvas.height / 10.0,
+                aspect_locked: true,
+            },
+            rotation_degrees: 0.0,
+            translation_x: 0.0,
+            translation_y: 0.0,
+        };
+        let response = MarkGeometryResponse {
+            minimum_size: 2.0,
+            maximum_size: 9.0,
+        };
+        let definition = PatternDefinition {
+            id: PatternDefinitionId(1),
+            name: "Straight circular marks".to_owned(),
+            structure: PatternStructure::StraightGrid,
+            output: PatternOutput::CircularMarks,
+            guard_steps: 2,
+            maximum_support_radius: 4.5,
+        };
+        let template = ChannelTopologyTemplate {
+            pattern_definition_id: definition.id,
+            layout,
+            mark_geometry_response: response,
+        };
+        let topology = ChannelTopology::canonical(HalftoneChannelModel::Rgb, template)?;
+        Self::with_source_and_topology(
+            DocumentId(1),
+            canvas,
+            source,
+            vec![definition],
+            HalftoneChannelModel::Rgb,
+            topology,
+        )
+    }
+
     /// Constructs and validates a document with an unassigned source reference.
     pub fn new(
         id: DocumentId,
