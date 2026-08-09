@@ -58,6 +58,9 @@ location, title, and savepoint only after IO succeeds. Load/save errors and
 generic migration information are reported in-window. GTK delegates default
 document construction to the headless factory and remains ignorant of pattern
 internals; channel/pattern controls and GTK undo controls remain out of scope.
+The separately accepted app-only reentrancy correction at `02bc2c9` preserves
+this lifecycle behavior while preventing nested model-selector and window-close
+callbacks; it is not part of the Stage 14 schema checkpoint.
 
 Stage 13B is complete at checkpoint `2a773a3`. Direct-source `toniator render`
 uses decoded PNG dimensions or resolved SVG intrinsic/`viewBox` dimensions by
@@ -80,8 +83,23 @@ moire diagnostic; AA-off edge stepping remains the intentional hard-edge
 consumer policy. The checkpoint records automated GTK snapshot coverage and
 native artifact inspection; it does not claim exhaustive manual dialog,
 accessibility, or interactive GTK acceptance.
-Stage 14 remains planned for the typed pattern-definition authority and v1-to-v2
-migration; it does not change the accepted meaning of v1 files.
+
+Stage 14 is complete at implementation checkpoint `88fc6dd`. The headless
+domain now owns one-root typed pattern definitions with document-wide stable
+definition, mechanism, and output-layer IDs and deterministic ordering.
+`DocumentHistory` is the sole authority for atomic definition add, duplicate,
+retarget, unreferenced removal, selected-channel copy-on-edit, and explicit
+shared-definition edits, including exact stale-base, invalidation,
+affected-channel, undo, and redo behavior. The immutable private v1 parser is
+unchanged: container layout remains v1, loading dispatches through the v1 DTO
+and deterministic v1-to-v2 migration, and current or migrated documents save
+as schema v2 only. Embedded source bytes remain exact, and the supported typed
+configuration preserves accepted RGB, CMYK, and SourceColorAlpha geometry,
+raster, PNG, and editable SVG parity across both frozen v1 containers and
+equivalent v2 documents. Native artifacts were inspected as raw RGBA and
+editable SVG; this does not claim exhaustive manual GTK dialog,
+accessibility, or interactive acceptance. Stage 15 generalized evaluation and
+GTK pattern-editor architecture remain planned.
 
 ## Build and run
 

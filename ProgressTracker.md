@@ -180,7 +180,10 @@ and filesystem source paths are not serialized.
 **Stage 13A — Complete at commit `36c7b44`.** Add GTK New/Open/Save/Save As/Close, exact content-based
 dirty/savepoint tracking, history state, direct-source/container opening, title
 identity, and atomic error handling. GTK delegates default document creation
-and remains completely ignorant of pattern internals.
+and remains completely ignorant of pattern internals. The separately accepted
+app-only reentrancy correction at `02bc2c9` preserves this lifecycle behavior
+while preventing nested model-selector and window-close callbacks; it is not
+part of the Stage 14 schema checkpoint.
 
 **Stage 13B — Complete at commit `2a773a3`.** Add the dedicated final-consumer
 output slice: direct-source CLI intrinsic PNG/SVG sizing with optional explicit
@@ -196,11 +199,21 @@ diagnostic, while AA-off hard edges remain intentional. Automated GTK snapshot
 coverage and native artifact inspection are recorded without claiming
 exhaustive manual GTK dialog/accessibility acceptance.
 
-**Stage 14 — Implemented awaiting review.** Add the one-root mechanism-agnostic typed pattern schema,
-stable document/mechanism IDs, atomic definition CRUD, selected-channel
-copy-on-edit, explicit shared-definition editing, immutable-v1 document-schema
-migration to v2, and exact accepted-output parity. No named artistic pattern
-branches or GTK controls.
+**Stage 14 — Complete at commit `88fc6dd`.** Add the one-root
+mechanism-agnostic typed pattern schema with document-wide stable
+definition/mechanism/output-layer IDs and deterministic ordering. Definition
+add, duplicate, retarget, unreferenced removal, selected-channel
+copy-on-edit, and explicit shared-definition editing remain atomic
+`DocumentHistory` commands with exact stale-base, invalidation,
+affected-channel, undo, and redo behavior. Immutable private v1 parsing and
+container layout v1 remain unchanged; loading migrates deterministically to
+typed document schema v2 and current/migrated documents write v2 only with
+exact embedded source bytes. The supported typed configuration preserves
+accepted RGB/CMYK/SourceColorAlpha geometry, raster, PNG, and editable SVG
+parity across frozen v1 and equivalent v2 documents. Native raw-RGBA and
+editable-SVG inspection is recorded without claiming exhaustive manual GTK
+acceptance. No named artistic pattern branches or GTK controls; Stage 15
+generalized evaluation remains planned.
 
 **Stage 15 — Planned.** Generalize the headless family-to-modulation-to-ordered-
 output-to-canonical-geometry pipeline, cache identity, support/coverage,

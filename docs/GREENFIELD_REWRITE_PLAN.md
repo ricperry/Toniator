@@ -1316,7 +1316,10 @@ lifecycle or the v1-to-v2 migration automatically.
 ## Stage 13A — GTK document lifecycle
 
 **Status: Complete at commit `36c7b44`.** Add document lifecycle around Stage 11 history and Stage
-12 persistence while remaining completely ignorant of pattern internals.
+12 persistence while remaining completely ignorant of pattern internals. The
+separately accepted app-only reentrancy correction at `02bc2c9` preserves this
+lifecycle behavior while preventing nested model-selector and window-close
+callbacks; it is not part of the Stage 14 schema checkpoint.
 
 - Add New, Open, Save, Save As, and Close plus close-with-unsaved-work
   confirmation, stable title/document identity, in-window errors, and generic
@@ -1383,13 +1386,22 @@ SVG antialiasing behavior, implicit flattening/checkerboards, or editor work.
 
 **Stop condition (complete):** The user accepted native CLI/app PNG and SVG
 output across both baseline sources and all three models. The implementation
-checkpoint is `2a773a3`; Stage 14 remains planned.
+checkpoint is `2a773a3`; Stage 14 is recorded below as complete at `88fc6dd`.
 
 ## Stage 14 — Typed pattern-definition authority and v1-to-v2 migration
 
-**Status: Implemented awaiting review.** Replace the bounded v1 `PatternStructure`/`PatternOutput`
-metadata with a generator/mechanism-agnostic typed schema without changing the
-accepted meaning of v1 files.
+**Status: Complete at commit `88fc6dd`.** The bounded v1
+`PatternStructure`/`PatternOutput` metadata is replaced by a
+generator/mechanism-agnostic typed schema without changing the accepted
+meaning of v1 files. The implementation checkpoint verifies the one-root
+definition authority, document-wide stable IDs and ordering,
+`DocumentHistory`-only definition commands, immutable v1 parsing,
+deterministic v1-to-v2 migration, v2-only saves within container layout v1,
+exact embedded source bytes, and accepted RGB/CMYK/SourceColorAlpha output
+parity. Native artifact inspection used raw RGBA and editable SVG; it does not
+claim exhaustive manual GTK dialog, accessibility, or interactive acceptance.
+The separate accepted app-only lifecycle correction is checkpointed at
+`02bc2c9`; Stage 15 remains planned.
 
 ### Stage 14 schema boundary
 
@@ -1439,8 +1451,10 @@ Forbidden: GTK controls, named artistic pattern variants, presets, new family
 algorithms, arbitrary graphs, source/output policy changes, or modification of
 the accepted v1 parser/fixtures.
 
-**Stop condition:** Accept the v2 authority, atomic sharing semantics, frozen-v1
-migration, and exact accepted-output parity before generalizing evaluation.
+**Stop condition (complete):** The v2 authority, atomic sharing semantics,
+frozen-v1 migration, deterministic v2 persistence, and exact accepted-output
+parity were accepted at implementation checkpoint `88fc6dd`. Generalized
+evaluation remains deferred to Stage 15.
 
 ## Stage 15 — Generic pattern evaluation pipeline
 
