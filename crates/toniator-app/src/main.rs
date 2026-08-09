@@ -320,6 +320,59 @@ enum LifecycleAction {
     WindowClose,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct WindowCloseController {
+    requested: bool,
+    deferred: bool,
+    allowed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WindowCloseRequest {
+    Dispatch,
+    Ignore,
+    Proceed,
+}
+
+impl WindowCloseController {
+    fn request(&mut self) -> WindowCloseRequest {
+        if self.allowed {
+            WindowCloseRequest::Proceed
+        } else if self.requested {
+            WindowCloseRequest::Ignore
+        } else {
+            self.requested = true;
+            WindowCloseRequest::Dispatch
+        }
+    }
+
+    fn cancel(&mut self) {
+        if !self.allowed {
+            self.requested = false;
+            self.deferred = false;
+        }
+    }
+
+    fn defer(&mut self) -> bool {
+        if self.requested && !self.deferred && !self.allowed {
+            self.deferred = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn accept_deferred(&mut self) -> bool {
+        if self.requested && self.deferred && !self.allowed {
+            self.deferred = false;
+            self.allowed = true;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UnsavedDecision {
     Cancel,
@@ -533,7 +586,7 @@ struct AppState {
     preview_submission: Option<PreviewSubmission>,
     model: PreviewModel,
     syncing_model: bool,
-    allow_window_close: bool,
+    window_close: WindowCloseController,
     actions: Actions,
     window: adw::ApplicationWindow,
     window_title: adw::WindowTitle,
@@ -667,7 +720,7 @@ fn build_window(app: &adw::Application, initial_path: Option<PathBuf>) {
         preview_submission: None,
         model: PreviewModel::Rgb,
         syncing_model: false,
-        allow_window_close: false,
+        window_close: WindowCloseController::default(),
         actions,
         window: window.clone(),
         window_title,
@@ -694,11 +747,19 @@ fn build_window(app: &adw::Application, initial_path: Option<PathBuf>) {
     {
         let state = Rc::clone(&state);
         window.connect_close_request(move |_| {
-            if state.borrow().allow_window_close {
-                return glib::Propagation::Proceed;
+            let request = {
+                let mut state = state.borrow_mut();
+                let busy = lifecycle_is_busy(&state);
+                request_window_close(&mut state.window_close, busy)
+            };
+            match request {
+                WindowCloseRequest::Proceed => glib::Propagation::Proceed,
+                WindowCloseRequest::Ignore => glib::Propagation::Stop,
+                WindowCloseRequest::Dispatch => {
+                    request_lifecycle(&state, LifecycleAction::WindowClose);
+                    glib::Propagation::Stop
+                }
             }
-            request_lifecycle(&state, LifecycleAction::WindowClose);
-            glib::Propagation::Stop
         });
     }
     {
@@ -766,7 +827,7 @@ fn status_page(message: &str) -> gtk::Box {
 }
 
 fn request_lifecycle(state: &Rc<RefCell<AppState>>, action: LifecycleAction) {
-    if state.borrow().pending_load.is_some() || state.borrow().pending_save.is_some() {
+    if lifecycle_is_busy(&state.borrow()) {
         return;
     }
     let dirty = state
@@ -804,7 +865,9 @@ fn choose_unsaved_resolution(state: &Rc<RefCell<AppState>>, action: LifecycleAct
         ) {
             LifecycleDisposition::Execute(action) => execute_lifecycle(&state, action),
             LifecycleDisposition::SaveThen(action) => start_save(&state, Some(action)),
-            LifecycleDisposition::Noop => {}
+            LifecycleDisposition::Noop => {
+                cancel_window_close_after(&mut state.borrow_mut(), Some(action));
+            }
             LifecycleDisposition::Prompt(_) => unreachable!("decision resolution is terminal"),
         }
     });
@@ -813,16 +876,50 @@ fn choose_unsaved_resolution(state: &Rc<RefCell<AppState>>, action: LifecycleAct
 fn execute_lifecycle(state: &Rc<RefCell<AppState>>, action: LifecycleAction) {
     match action {
         LifecycleAction::New => match Workspace::from_new() {
-            Ok(workspace) => install_workspace(&mut state.borrow_mut(), workspace),
+            Ok(workspace) => install_workspace(state, workspace),
             Err(error) => show_error(&mut state.borrow_mut(), error),
         },
         LifecycleAction::Open => choose_open(state),
         LifecycleAction::Close => clear_workspace(&mut state.borrow_mut()),
-        LifecycleAction::WindowClose => {
+        LifecycleAction::WindowClose => defer_window_close(state),
+    }
+}
+
+fn defer_window_close(state: &Rc<RefCell<AppState>>) {
+    if !state.borrow_mut().window_close.defer() {
+        return;
+    }
+    let state = Rc::clone(state);
+    glib::idle_add_local_once(move || {
+        let window = {
             let mut state = state.borrow_mut();
-            state.allow_window_close = true;
-            state.window.close();
-        }
+            if !state.window_close.accept_deferred() {
+                return;
+            }
+            state.window.clone()
+        };
+        window.close();
+    });
+}
+
+fn cancel_window_close_after(state: &mut AppState, after: Option<LifecycleAction>) {
+    if after == Some(LifecycleAction::WindowClose) {
+        state.window_close.cancel();
+    }
+}
+
+fn lifecycle_is_busy(state: &AppState) -> bool {
+    state.pending_load.is_some() || state.pending_save.is_some()
+}
+
+fn request_window_close(
+    controller: &mut WindowCloseController,
+    lifecycle_busy: bool,
+) -> WindowCloseRequest {
+    if lifecycle_busy {
+        WindowCloseRequest::Ignore
+    } else {
+        controller.request()
     }
 }
 
@@ -867,10 +964,12 @@ fn choose_save_as(state: &Rc<RefCell<AppState>>, after: Option<LifecycleAction>)
         .as_ref()
         .is_some_and(Workspace::can_save)
     {
+        let mut state = state.borrow_mut();
         show_error(
-            &mut state.borrow_mut(),
+            &mut state,
             "Save requires PNG or SVG source artwork.".to_owned(),
         );
+        cancel_window_close_after(&mut state, after);
         return;
     }
     let dialog = gtk::FileDialog::new();
@@ -891,6 +990,8 @@ fn choose_save_as(state: &Rc<RefCell<AppState>>, after: Option<LifecycleAction>)
             && let Some(path) = file.path()
         {
             start_save_to(&state, with_toniator_extension(path), after);
+        } else {
+            cancel_window_close_after(&mut state.borrow_mut(), after);
         }
     });
 }
@@ -1182,10 +1283,14 @@ fn format_hint_for_path(path: &Path) -> Result<SourceFormatHint, String> {
 fn start_save(state: &Rc<RefCell<AppState>>, after: Option<LifecycleAction>) {
     let route = { save_route(state.borrow().workspace.as_ref()) };
     match route {
-        SaveRoute::Unavailable => show_error(
-            &mut state.borrow_mut(),
-            "Save requires PNG or SVG source artwork.".to_owned(),
-        ),
+        SaveRoute::Unavailable => {
+            let mut state = state.borrow_mut();
+            show_error(
+                &mut state,
+                "Save requires PNG or SVG source artwork.".to_owned(),
+            );
+            cancel_window_close_after(&mut state, after);
+        }
         SaveRoute::Existing(path) => start_save_to(state, path, after),
         SaveRoute::SaveAs => choose_save_as(state, after),
     }
@@ -1195,6 +1300,7 @@ fn start_save_to(state: &Rc<RefCell<AppState>>, path: PathBuf, after: Option<Lif
     {
         let mut state = state.borrow_mut();
         let Some(workspace) = state.workspace.as_ref() else {
+            cancel_window_close_after(&mut state, after);
             return;
         };
         let snapshot = workspace.snapshot();
@@ -1388,16 +1494,20 @@ fn poll_load(state: &Rc<RefCell<AppState>>) {
     let Some(pending) = pending else { return };
     match pending.receiver.try_recv() {
         Ok(result) => {
-            let mut state = state.borrow_mut();
-            if let CompletionInstall::Install(result) =
-                lifecycle_completion_policy(state.generation, pending.generation, result)
-            {
+            let completion =
+                lifecycle_completion_policy(state.borrow().generation, pending.generation, result);
+            if let CompletionInstall::Install(result) = completion {
                 match result {
-                    Ok(workspace) => install_workspace(&mut state, workspace),
-                    Err(error) => show_error(&mut state, error),
+                    Ok(workspace) => install_workspace(state, workspace),
+                    Err(error) => {
+                        let mut state = state.borrow_mut();
+                        show_error(&mut state, error);
+                        sync_ui(&mut state);
+                    }
                 }
+            } else {
+                sync_ui(&mut state.borrow_mut());
             }
-            sync_ui(&mut state);
         }
         Err(TryRecvError::Empty) => state.borrow_mut().pending_load = Some(pending),
         Err(TryRecvError::Disconnected) => {
@@ -1437,10 +1547,12 @@ fn poll_save(state: &Rc<RefCell<AppState>>) {
                         }
                         Err(error) => {
                             show_error(&mut app_state, format!("save.failed: {error}"));
+                            cancel_window_close_after(&mut app_state, pending.after);
                             sync_ui(&mut app_state);
                         }
                     }
                 } else {
+                    cancel_window_close_after(&mut app_state, pending.after);
                     sync_ui(&mut app_state);
                 }
                 after_action
@@ -1459,46 +1571,61 @@ fn poll_save(state: &Rc<RefCell<AppState>>) {
             if is_current_generation(state.generation, pending.generation) {
                 show_error(&mut state, "Document save stopped unexpectedly.".to_owned());
             }
+            cancel_window_close_after(&mut state, pending.after);
             sync_ui(&mut state);
         }
     }
 }
 
-fn install_workspace(state: &mut AppState, workspace: Workspace) {
-    state.workspace_generation = state.workspace_generation.saturating_add(1);
-    state.preview_submission = None;
-    state.workspace = Some(workspace);
-    state.model = state
-        .workspace
-        .as_ref()
-        .and_then(|workspace| workspace.document().channel_model())
-        .map(PreviewModel::from_domain)
-        .unwrap_or(PreviewModel::Rgb);
-    state.syncing_model = true;
-    state.selector.set_selected(
-        PreviewModel::ALL
-            .iter()
-            .position(|model| *model == state.model)
-            .unwrap_or(0) as u32,
-    );
-    state.syncing_model = false;
-    update_backdrop(state);
-    clear_preview(state);
-    state.preview_target = None;
-    show_source_diagnostic(state);
-    set_page(
-        state,
-        if state
+fn install_workspace(state: &Rc<RefCell<AppState>>, workspace: Workspace) {
+    let model = {
+        let mut state = state.borrow_mut();
+        state.workspace_generation = state.workspace_generation.saturating_add(1);
+        state.preview_submission = None;
+        state.workspace = Some(workspace);
+        state.model = state
             .workspace
             .as_ref()
-            .is_some_and(|workspace| workspace.source_presentation.is_some())
-        {
-            Page::Loading
-        } else {
-            Page::Empty
-        },
+            .and_then(|workspace| workspace.document().channel_model())
+            .map(PreviewModel::from_domain)
+            .unwrap_or(PreviewModel::Rgb);
+        state.model
+    };
+    sync_model_selector(state, model);
+
+    let mut state = state.borrow_mut();
+    update_backdrop(&mut state);
+    clear_preview(&mut state);
+    state.preview_target = None;
+    show_source_diagnostic(&mut state);
+    let page = if state
+        .workspace
+        .as_ref()
+        .is_some_and(|workspace| workspace.source_presentation.is_some())
+    {
+        Page::Loading
+    } else {
+        Page::Empty
+    };
+    set_page(&mut state, page);
+    sync_ui(&mut state);
+}
+
+/// Synchronize the GTK control without allowing its synchronous notification
+/// to turn a loaded document into a model-edit command.
+fn sync_model_selector(state: &Rc<RefCell<AppState>>, model: PreviewModel) {
+    let selector = {
+        let mut state = state.borrow_mut();
+        state.syncing_model = true;
+        state.selector.clone()
+    };
+    selector.set_selected(
+        PreviewModel::ALL
+            .iter()
+            .position(|candidate| *candidate == model)
+            .unwrap_or(0) as u32,
     );
-    sync_ui(state);
+    state.borrow_mut().syncing_model = false;
 }
 
 fn clear_workspace(state: &mut AppState) {
@@ -1518,15 +1645,22 @@ fn clear_workspace(state: &mut AppState) {
 
 fn change_model(state: &Rc<RefCell<AppState>>, model: PreviewModel) {
     let mut state = state.borrow_mut();
-    if state.syncing_model || state.model == model || state.pending_load.is_some() {
+    if !should_apply_model_change(
+        state.syncing_model,
+        state.model,
+        model,
+        state.pending_load.is_some(),
+        state
+            .workspace
+            .as_ref()
+            .is_some_and(|workspace| workspace.source_presentation.is_some()),
+    ) {
         return;
     }
-    let Some(workspace) = state.workspace.as_mut() else {
-        return;
-    };
-    if workspace.source_presentation.is_none() {
-        return;
-    }
+    let workspace = state
+        .workspace
+        .as_mut()
+        .expect("model change requires a workspace");
     if let Err(error) = replace_model_topology(&mut workspace.history, model) {
         show_error(&mut state, error);
         return;
@@ -1538,6 +1672,16 @@ fn change_model(state: &Rc<RefCell<AppState>>, model: PreviewModel) {
     state.preview_submission = None;
     set_page(&mut state, Page::Loading);
     sync_ui(&mut state);
+}
+
+fn should_apply_model_change(
+    syncing_model: bool,
+    current_model: PreviewModel,
+    selected_model: PreviewModel,
+    loading: bool,
+    has_source_presentation: bool,
+) -> bool {
+    !syncing_model && current_model != selected_model && !loading && has_source_presentation
 }
 
 fn replace_model_topology(
@@ -2071,6 +2215,97 @@ mod tests {
     }
 
     #[test]
+    fn window_close_controller_defers_once_and_releases_cancelled_or_failed_flows() {
+        let mut controller = WindowCloseController::default();
+        assert_eq!(
+            request_window_close(&mut controller, true),
+            WindowCloseRequest::Ignore,
+            "a busy lifecycle cannot leave a close request pending"
+        );
+        assert_eq!(controller, WindowCloseController::default());
+
+        assert_eq!(
+            request_window_close(&mut controller, false),
+            WindowCloseRequest::Dispatch
+        );
+        assert_eq!(
+            begin_lifecycle(false, LifecycleAction::WindowClose),
+            LifecycleDisposition::Execute(LifecycleAction::WindowClose)
+        );
+        assert!(controller.defer());
+        assert_eq!(
+            request_window_close(&mut controller, false),
+            WindowCloseRequest::Ignore,
+            "repeated clean close requests cannot schedule another close"
+        );
+        assert!(!controller.defer());
+        assert!(controller.accept_deferred());
+        assert_eq!(
+            request_window_close(&mut controller, false),
+            WindowCloseRequest::Proceed
+        );
+
+        let mut cancelled = WindowCloseController::default();
+        assert_eq!(
+            request_window_close(&mut cancelled, false),
+            WindowCloseRequest::Dispatch
+        );
+        assert_eq!(
+            begin_lifecycle(true, LifecycleAction::WindowClose),
+            LifecycleDisposition::Prompt(LifecycleAction::WindowClose)
+        );
+        assert_eq!(
+            resolve_unsaved_decision(LifecycleAction::WindowClose, UnsavedDecision::Cancel),
+            LifecycleDisposition::Noop
+        );
+        cancelled.cancel();
+        assert_eq!(
+            request_window_close(&mut cancelled, false),
+            WindowCloseRequest::Dispatch,
+            "Cancel releases the next close request"
+        );
+
+        let mut discard = WindowCloseController::default();
+        assert_eq!(
+            request_window_close(&mut discard, false),
+            WindowCloseRequest::Dispatch
+        );
+        assert_eq!(
+            resolve_unsaved_decision(LifecycleAction::WindowClose, UnsavedDecision::Discard),
+            LifecycleDisposition::Execute(LifecycleAction::WindowClose)
+        );
+        assert!(discard.defer());
+
+        let mut save = WindowCloseController::default();
+        assert_eq!(
+            request_window_close(&mut save, false),
+            WindowCloseRequest::Dispatch
+        );
+        assert_eq!(
+            resolve_unsaved_decision(LifecycleAction::WindowClose, UnsavedDecision::Save),
+            LifecycleDisposition::SaveThen(LifecycleAction::WindowClose)
+        );
+        assert_eq!(
+            request_window_close(&mut save, true),
+            WindowCloseRequest::Ignore,
+            "Save keeps one WindowClose request in flight"
+        );
+        assert!(save.defer(), "successful Save re-enters one deferred close");
+
+        let mut failed_save = WindowCloseController::default();
+        assert_eq!(
+            request_window_close(&mut failed_save, false),
+            WindowCloseRequest::Dispatch
+        );
+        failed_save.cancel();
+        assert_eq!(
+            request_window_close(&mut failed_save, false),
+            WindowCloseRequest::Dispatch,
+            "Save failure, disconnect, stale completion, or Save As cancellation releases retry"
+        );
+    }
+
+    #[test]
     fn container_state_is_not_frontend_defaulted_and_failures_are_candidate_only() {
         let loaded = load_container(&asset("vector-sample-v1.toniator")).unwrap();
         let workspace = Workspace::from_container(&asset("vector-sample-v1.toniator")).unwrap();
@@ -2229,6 +2464,68 @@ mod tests {
             Some(HalftoneChannelModel::Cmyk)
         );
         assert!(!workspace.history.session().accepts_document_evaluation(old));
+    }
+
+    #[test]
+    fn programmatic_model_sync_keeps_loaded_source_color_alpha_clean_and_user_changes_apply() {
+        let mut source_color_alpha = load_workspace(&asset("raster-sample-v1.toniator")).unwrap();
+        replace_model_topology(
+            &mut source_color_alpha.history,
+            PreviewModel::SourceColorAlpha,
+        )
+        .unwrap();
+        let saved = temporary("source-color-alpha-v2").with_extension("toniator");
+        let snapshot = source_color_alpha.snapshot();
+        save_container(&saved, &snapshot.document, &snapshot.sources).unwrap();
+
+        let mut loaded = load_workspace(&saved).unwrap();
+        assert_eq!(
+            loaded.document().channel_model(),
+            Some(HalftoneChannelModel::SourceColorAlpha)
+        );
+        assert_eq!(loaded.history.revision().0, 0);
+        assert!(!loaded.is_dirty());
+        assert!(
+            !should_apply_model_change(
+                true,
+                PreviewModel::SourceColorAlpha,
+                PreviewModel::SourceColorAlpha,
+                false,
+                true,
+            ),
+            "selector synchronization must not apply an authoritative command"
+        );
+        assert!(should_apply_model_change(
+            false,
+            PreviewModel::SourceColorAlpha,
+            PreviewModel::Cmyk,
+            false,
+            true,
+        ));
+        replace_model_topology(&mut loaded.history, PreviewModel::Cmyk).unwrap();
+        assert_eq!(
+            loaded.document().channel_model(),
+            Some(HalftoneChannelModel::Cmyk)
+        );
+        assert!(loaded.is_dirty());
+
+        assert!(should_apply_model_change(
+            false,
+            PreviewModel::Cmyk,
+            PreviewModel::Rgb,
+            false,
+            true,
+        ));
+        replace_model_topology(&mut loaded.history, PreviewModel::Rgb).unwrap();
+        assert_eq!(
+            loaded.document().channel_model(),
+            Some(HalftoneChannelModel::Rgb)
+        );
+        assert!(
+            !should_apply_model_change(false, PreviewModel::Rgb, PreviewModel::Rgb, false, true),
+            "the selected current model remains a no-op"
+        );
+        fs::remove_file(saved).unwrap();
     }
 
     #[test]
