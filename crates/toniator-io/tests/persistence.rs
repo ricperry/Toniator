@@ -9,9 +9,10 @@ use std::{
 use toniator_domain::{
     CanvasSpec, ChannelAppearance, ChannelId, ChannelPaint, ChannelPatternLayout,
     ChannelSourceMapping, ChannelState, ChannelTopology, ChannelTopologyTemplate, ColorValue,
-    DensityMetric2D, Document, DocumentHistory, DocumentId, DocumentSession, HalftoneChannelModel,
-    MarkGeometryResponse, PatternDefinition, PatternDefinitionId, PatternOutput, PatternStructure,
-    SourceComponent, SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId,
+    CoveragePolicy, DensityMetric2D, Document, DocumentHistory, DocumentId, DocumentSession,
+    HalftoneChannelModel, MarkGeometryResponse, PatternDefinition, PatternDefinitionId,
+    PatternMechanismId, PatternOutputLayerId, SourceComponent, SourceMappingComponent,
+    SourcePlacement, SourceReference, SourceReferenceId,
 };
 use toniator_io::{
     CONTAINER_VERSION, DOCUMENT_SCHEMA_VERSION, EmbeddedSource, EmbeddedSourceFormat, LoadError,
@@ -37,14 +38,17 @@ fn legacy_document() -> (Document, SourceBundle) {
             height: 77.5,
         },
         SourceReference::Assigned(id.clone()),
-        vec![PatternDefinition {
-            id: PatternDefinitionId(91),
-            name: "grid".into(),
-            structure: PatternStructure::StraightGrid,
-            output: PatternOutput::CircularMarks,
-            guard_steps: 2,
-            maximum_support_radius: 4.5,
-        }],
+        vec![PatternDefinition::supported_straight_grid(
+            PatternDefinitionId(91),
+            "grid",
+            PatternMechanismId(181),
+            PatternMechanismId(182),
+            PatternOutputLayerId(91),
+            CoveragePolicy {
+                guard_steps: 2,
+                maximum_support_radius: 4.5,
+            },
+        )],
         vec![ChannelState {
             id: ChannelId(55),
             pattern_definition_id: PatternDefinitionId(91),
@@ -428,7 +432,19 @@ fn frozen_fixtures_preserve_committed_baseline_bytes_and_v1_metadata() {
         let loaded = load(&asset(fixture)).unwrap();
         assert_eq!(loaded.versions().container(), 1);
         assert_eq!(loaded.versions().document(), 1);
-        assert!(loaded.migration_report().is_empty());
+        assert!(!loaded.migration_report().is_empty());
+        assert_eq!(
+            loaded.migration_report().generated_definition_ids(),
+            vec![PatternDefinitionId(1)]
+        );
+        assert_eq!(
+            loaded.migration_report().generated_definitions()[0].mechanism_ids,
+            vec![PatternMechanismId(1), PatternMechanismId(2)]
+        );
+        assert_eq!(
+            loaded.migration_report().generated_definitions()[0].output_layer_ids,
+            vec![PatternOutputLayerId(1)]
+        );
         let source = loaded.sources().entries().next().unwrap();
         assert_eq!(source.format(), format);
         assert_eq!(source.bytes(), fs::read(asset(baseline)).unwrap());
@@ -446,6 +462,51 @@ fn frozen_fixtures_preserve_committed_baseline_bytes_and_v1_metadata() {
         .unwrap()
         .contains(">T<")
     );
+}
+
+#[test]
+fn frozen_v1_documents_migrate_to_deterministic_v2_saves_without_transient_state() {
+    let validation = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/validation/stage-14");
+    fs::create_dir_all(&validation).unwrap();
+    for fixture in ["raster-sample-v1.toniator", "vector-sample-v1.toniator"] {
+        let loaded = load(&asset(fixture)).unwrap();
+        assert_eq!(loaded.versions().document(), 1);
+        assert!(!loaded.migration_report().is_empty());
+        let v2 = validation.join(fixture.replace("-v1", "-migrated-v2"));
+        let duplicate = validation.join(fixture.replace("-v1", "-migrated-v2-repeat"));
+        save(&v2, loaded.document(), loaded.sources()).unwrap();
+        save(&duplicate, loaded.document(), loaded.sources()).unwrap();
+        assert_eq!(fs::read(&v2).unwrap(), fs::read(&duplicate).unwrap());
+        let reopened = load(&v2).unwrap();
+        assert_eq!(reopened.versions().document(), 2);
+        assert!(reopened.migration_report().is_empty());
+        assert_eq!(reopened.document(), loaded.document());
+        assert_eq!(
+            reopened.sources().entries().next().unwrap().bytes(),
+            loaded.sources().entries().next().unwrap().bytes()
+        );
+        let (json, _, _) = saved_parts(reopened.document(), reopened.sources());
+        let json = String::from_utf8(json).unwrap();
+        assert!(json.contains("\"document_schema_version\":2"));
+        assert!(json.contains("\"mechanisms\""));
+        assert!(json.contains("\"output_layers\""));
+        for forbidden in [
+            "history",
+            "revision",
+            "dirty",
+            "savepoint",
+            "preview",
+            "export",
+            "original_path",
+            "scheduler",
+            "cache",
+        ] {
+            assert!(
+                !json.contains(&format!("\"{forbidden}\"")),
+                "serialized transient {forbidden}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -682,8 +743,8 @@ fn manifests_versions_and_invalid_domain_are_rejected() {
             "version",
         ),
         (
-            "\"document_schema_version\":1",
             "\"document_schema_version\":2",
+            "\"document_schema_version\":3",
             "version",
         ),
         (

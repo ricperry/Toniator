@@ -6,9 +6,10 @@ use std::{
 
 use toniator_domain::{
     CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternLayout, ChannelSourceMapping,
-    ChannelState, ColorValue, DensityMetric2D, Document, DocumentCommand, DocumentId,
-    DocumentSession, MarkGeometryResponse, PatternDefinition, PatternDefinitionId, PatternOutput,
-    PatternStructure, SourceComponent, SourcePlacement, SourceReference, SourceReferenceId,
+    ChannelState, ColorValue, CoveragePolicy, DensityMetric2D, Document, DocumentCommand,
+    DocumentId, DocumentSession, MarkGeometryResponse, PatternDefinition, PatternDefinitionId,
+    PatternMechanismId, PatternOutputLayerId, SourceComponent, SourcePlacement, SourceReference,
+    SourceReferenceId,
 };
 use toniator_engine::{
     CacheDiagnostics, CacheDisposition, ChannelDiagnosticCompletion, ChannelDiagnosticRequest,
@@ -29,14 +30,17 @@ fn session() -> DocumentSession {
                 height: 600.0,
             },
             SourceReference::Assigned(source_id),
-            vec![PatternDefinition {
-                id: PatternDefinitionId(1),
-                name: "straight-grid".to_owned(),
-                structure: PatternStructure::StraightGrid,
-                output: PatternOutput::CircularMarks,
-                guard_steps: 2,
-                maximum_support_radius: 4.5,
-            }],
+            vec![PatternDefinition::supported_straight_grid(
+                PatternDefinitionId(1),
+                "straight-grid",
+                PatternMechanismId(1),
+                PatternMechanismId(2),
+                PatternOutputLayerId(1),
+                CoveragePolicy {
+                    guard_steps: 2,
+                    maximum_support_radius: 4.5,
+                },
+            )],
             vec![ChannelState {
                 id: CHANNEL_ID,
                 pattern_definition_id: PatternDefinitionId(1),

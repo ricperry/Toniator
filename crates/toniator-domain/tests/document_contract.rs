@@ -1,11 +1,12 @@
 use toniator_domain::{
     CanvasSpec, ChannelAppearance, ChannelId, ChannelPaint, ChannelPatternLayout,
     ChannelSourceMapping, ChannelState, ChannelTopology, ChannelTopologyTemplate, ColorValue,
-    DensityMetric2D, Document, DocumentCommand, DocumentEvaluationToken, DocumentHistory,
-    DocumentId, DocumentSession, HalftoneChannelModel, HalftoneChannelRole, InvalidationLevel,
-    MarkGeometryResponse, ModeledChannelState, PatternDefinition, PatternDefinitionId,
-    PatternOutput, PatternStructure, SourceComponent, SourceMapping, SourceMappingComponent,
-    SourcePlacement, SourceReference, SourceReferenceId,
+    CoveragePolicy, DensityMetric2D, Document, DocumentCommand, DocumentEvaluationToken,
+    DocumentHistory, DocumentId, DocumentSession, HalftoneChannelModel, HalftoneChannelRole,
+    InvalidationLevel, MarkGeometryResponse, ModeledChannelState, PatternDefinition,
+    PatternDefinitionDraft, PatternDefinitionId, PatternMechanism, PatternMechanismId,
+    PatternOutputLayerId, SourceComponent, SourceMapping, SourceMappingComponent, SourcePlacement,
+    SourceReference, SourceReferenceId,
 };
 
 const CHANNEL_ID: ChannelId = ChannelId(7);
@@ -54,14 +55,17 @@ fn channel() -> ChannelState {
 }
 
 fn definition() -> PatternDefinition {
-    PatternDefinition {
-        id: PATTERN_ID,
-        name: "minimal".to_owned(),
-        structure: PatternStructure::StraightGrid,
-        output: PatternOutput::CircularMarks,
-        guard_steps: 2,
-        maximum_support_radius: 4.5,
-    }
+    PatternDefinition::supported_straight_grid(
+        PATTERN_ID,
+        "minimal",
+        PatternMechanismId(5),
+        PatternMechanismId(6),
+        PatternOutputLayerId(3),
+        CoveragePolicy {
+            guard_steps: 2,
+            maximum_support_radius: 4.5,
+        },
+    )
 }
 
 fn document_with(
@@ -91,10 +95,9 @@ fn default_document_factory_builds_the_accepted_modeled_document_at_revision_zer
     assert_eq!(document.channel_model(), Some(HalftoneChannelModel::Rgb));
     assert_eq!(document.pattern_definitions().len(), 1);
     let definition = &document.pattern_definitions()[0];
-    assert_eq!(definition.structure, PatternStructure::StraightGrid);
-    assert_eq!(definition.output, PatternOutput::CircularMarks);
-    assert_eq!(definition.guard_steps, 2);
-    assert_eq!(definition.maximum_support_radius, 4.5);
+    assert!(definition.supported_straight_grid_compatibility().is_some());
+    assert_eq!(definition.coverage.guard_steps, 2);
+    assert_eq!(definition.coverage.maximum_support_radius, 4.5);
     for channel in document.channel_topology().unwrap().channels() {
         assert_eq!(channel.layout.density.across_x, 102.4);
         assert_eq!(channel.layout.density.across_y, 62.0);
@@ -221,6 +224,163 @@ fn accepts_the_required_900_by_600_density_document() {
             .across_y,
         60.0
     );
+}
+
+#[test]
+fn typed_pattern_roots_require_unique_ordered_mechanisms_layers_and_finite_coverage() {
+    let valid = definition();
+    assert!(valid.supported_straight_grid_compatibility().is_some());
+    let mut duplicate_mechanism = valid.clone();
+    duplicate_mechanism.mechanisms[1] = PatternMechanism::GuideIntersections {
+        id: PatternMechanismId(5),
+        guide_mechanism_id: PatternMechanismId(5),
+    };
+    assert_path(
+        document_with(canvas(), vec![duplicate_mechanism], vec![channel()]),
+        "pattern_definitions.mechanisms",
+    );
+    let mut wrong_order = valid.clone();
+    wrong_order.mechanisms.swap(0, 1);
+    assert_path(
+        document_with(canvas(), vec![wrong_order], vec![channel()]),
+        "pattern_definitions.family",
+    );
+    let mut invalid_coverage = valid;
+    invalid_coverage.coverage.maximum_support_radius = f64::INFINITY;
+    assert_path(
+        document_with(canvas(), vec![invalid_coverage], vec![channel()]),
+        "pattern_definitions.coverage.maximum_support_radius",
+    );
+
+    let first = definition();
+    let mut second_channel = channel();
+    second_channel.id = ChannelId(8);
+    second_channel.pattern_definition_id = PatternDefinitionId(4);
+    let colliding_mechanisms = PatternDefinition::supported_straight_grid(
+        PatternDefinitionId(4),
+        "other",
+        PatternMechanismId(5),
+        PatternMechanismId(6),
+        PatternOutputLayerId(4),
+        CoveragePolicy {
+            guard_steps: 2,
+            maximum_support_radius: 4.5,
+        },
+    );
+    assert_path(
+        document_with(
+            canvas(),
+            vec![first.clone(), colliding_mechanisms],
+            vec![channel(), second_channel.clone()],
+        ),
+        "pattern_definitions.mechanisms",
+    );
+    let colliding_output = PatternDefinition::supported_straight_grid(
+        PatternDefinitionId(4),
+        "other",
+        PatternMechanismId(7),
+        PatternMechanismId(8),
+        PatternOutputLayerId(3),
+        CoveragePolicy {
+            guard_steps: 2,
+            maximum_support_radius: 4.5,
+        },
+    );
+    assert_path(
+        document_with(
+            canvas(),
+            vec![first, colliding_output],
+            vec![channel(), second_channel],
+        ),
+        "pattern_definitions.output_layers",
+    );
+}
+
+#[test]
+fn definition_allocation_rejects_invalid_drafts_and_each_exhausted_id_space_atomically() {
+    for draft in [
+        PatternDefinitionDraft {
+            name: " ".into(),
+            coverage: CoveragePolicy {
+                guard_steps: 2,
+                maximum_support_radius: 4.5,
+            },
+        },
+        PatternDefinitionDraft {
+            name: "invalid".into(),
+            coverage: CoveragePolicy {
+                guard_steps: 2,
+                maximum_support_radius: f64::NAN,
+            },
+        },
+    ] {
+        let mut history = DocumentHistory::new(DocumentSession::new(valid_document()).unwrap());
+        let before = history.document().clone();
+        let revision = history.revision();
+        assert!(
+            history
+                .apply(&DocumentCommand::AddPatternDefinition { definition: draft })
+                .is_err()
+        );
+        assert_eq!(history.document(), &before);
+        assert_eq!(history.revision(), revision);
+    }
+    let cases = [
+        PatternDefinition::supported_straight_grid(
+            PatternDefinitionId(u64::MAX),
+            "definition max",
+            PatternMechanismId(5),
+            PatternMechanismId(6),
+            PatternOutputLayerId(3),
+            CoveragePolicy {
+                guard_steps: 2,
+                maximum_support_radius: 4.5,
+            },
+        ),
+        PatternDefinition::supported_straight_grid(
+            PATTERN_ID,
+            "mechanism max",
+            PatternMechanismId(u64::MAX - 1),
+            PatternMechanismId(u64::MAX),
+            PatternOutputLayerId(3),
+            CoveragePolicy {
+                guard_steps: 2,
+                maximum_support_radius: 4.5,
+            },
+        ),
+        PatternDefinition::supported_straight_grid(
+            PATTERN_ID,
+            "output max",
+            PatternMechanismId(5),
+            PatternMechanismId(6),
+            PatternOutputLayerId(u64::MAX),
+            CoveragePolicy {
+                guard_steps: 2,
+                maximum_support_radius: 4.5,
+            },
+        ),
+    ];
+    for definition in cases {
+        let mut only = channel();
+        only.pattern_definition_id = definition.id;
+        let document = document_with(canvas(), vec![definition], vec![only]).unwrap();
+        let mut history = DocumentHistory::new(DocumentSession::new(document).unwrap());
+        let before = history.document().clone();
+        assert!(
+            history
+                .apply(&DocumentCommand::AddPatternDefinition {
+                    definition: PatternDefinitionDraft {
+                        name: "new".into(),
+                        coverage: CoveragePolicy {
+                            guard_steps: 2,
+                            maximum_support_radius: 4.5
+                        },
+                    },
+                })
+                .is_err()
+        );
+        assert_eq!(history.document(), &before);
+    }
 }
 
 #[test]
@@ -599,24 +759,27 @@ fn stage_six_source_reference_snapshot_and_diameter_contracts_are_authoritative(
         "channel.pattern.mark_geometry_response.maximum_size",
     );
     let mut larger_definition = definition();
-    larger_definition.maximum_support_radius = 6.0;
+    larger_definition.coverage.maximum_support_radius = 6.0;
     let mut above_baseline = channel();
     above_baseline.mark_geometry_response.minimum_size = 10.0;
     above_baseline.mark_geometry_response.maximum_size = 12.0;
     assert!(document_with(canvas(), vec![larger_definition], vec![above_baseline]).is_ok());
 
     let mut invalid_capability = definition();
-    invalid_capability.maximum_support_radius = f64::NAN;
+    invalid_capability.coverage.maximum_support_radius = f64::NAN;
     assert_path(
         document_with(canvas(), vec![invalid_capability], vec![channel()]),
-        "pattern_definitions.maximum_support_radius",
+        "pattern_definitions.coverage.maximum_support_radius",
     );
 
     let mut unsupported = definition();
-    unsupported.structure = PatternStructure::Unsupported;
+    unsupported.mechanisms[0] = PatternMechanism::GuideIntersections {
+        id: PatternMechanismId(5),
+        guide_mechanism_id: PatternMechanismId(6),
+    };
     assert_path(
         document_with(canvas(), vec![unsupported], vec![channel()]),
-        "pattern_definitions.structure",
+        "pattern_definitions.family",
     );
 }
 

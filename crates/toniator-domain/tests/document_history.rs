@@ -1,9 +1,10 @@
 use toniator_domain::{
     CanvasSpec, ChannelAppearance, ChannelId, ChannelPaint, ChannelPatternLayout,
     ChannelSourceMapping, ChannelState, ChannelTopology, ChannelTopologyTemplate, ColorValue,
-    DensityMetric2D, Document, DocumentCommand, DocumentHistory, DocumentId, DocumentSession,
-    HalftoneChannelModel, HalftoneChannelRole, MarkGeometryResponse, ModeledChannelState,
-    PatternDefinition, PatternDefinitionId, PatternOutput, PatternStructure, Revision,
+    CoveragePolicy, DensityMetric2D, Document, DocumentCommand, DocumentHistory, DocumentId,
+    DocumentSession, DocumentSessionError, HalftoneChannelModel, HalftoneChannelRole,
+    MarkGeometryResponse, ModeledChannelState, PatternDefinition, PatternDefinitionDraft,
+    PatternDefinitionEdit, PatternDefinitionId, PatternMechanismId, PatternOutputLayerId, Revision,
     SourceComponent, SourceMapping, SourceMappingComponent, SourcePlacement, SourceReference,
     SourceReferenceId,
 };
@@ -19,17 +20,403 @@ fn document() -> Document {
             height: 600.0,
         },
         SourceReference::Assigned(SourceReferenceId::new("before-source").unwrap()),
-        vec![PatternDefinition {
-            id: PATTERN_ID,
-            name: "grid".into(),
-            structure: PatternStructure::StraightGrid,
-            output: PatternOutput::CircularMarks,
-            guard_steps: 2,
-            maximum_support_radius: 5.0,
-        }],
+        vec![PatternDefinition::supported_straight_grid(
+            PATTERN_ID,
+            "grid",
+            PatternMechanismId(5),
+            PatternMechanismId(6),
+            PatternOutputLayerId(3),
+            CoveragePolicy {
+                guard_steps: 2,
+                maximum_support_radius: 5.0,
+            },
+        )],
         vec![legacy_channel()],
     )
     .unwrap()
+}
+
+fn shared_history() -> DocumentHistory {
+    let mut second = legacy_channel();
+    second.id = ChannelId(8);
+    let document = Document::with_source(
+        DocumentId(2),
+        CanvasSpec {
+            width: 900.0,
+            height: 600.0,
+        },
+        SourceReference::Assigned(SourceReferenceId::new("shared-source").unwrap()),
+        vec![PatternDefinition::supported_straight_grid(
+            PATTERN_ID,
+            "shared grid",
+            PatternMechanismId(5),
+            PatternMechanismId(6),
+            PatternOutputLayerId(3),
+            CoveragePolicy {
+                guard_steps: 2,
+                maximum_support_radius: 5.0,
+            },
+        )],
+        vec![legacy_channel(), second],
+    )
+    .unwrap();
+    DocumentHistory::new(DocumentSession::new(document).unwrap())
+}
+
+#[test]
+fn definition_commands_require_history_and_history_records_their_exact_inverse() {
+    let source = shared_history().document().clone();
+    let base = source.pattern_definitions()[0].clone();
+    let commands = vec![
+        DocumentCommand::AddPatternDefinition {
+            definition: PatternDefinitionDraft {
+                name: "history only".into(),
+                coverage: CoveragePolicy {
+                    guard_steps: 2,
+                    maximum_support_radius: 5.0,
+                },
+            },
+        },
+        DocumentCommand::DuplicatePatternDefinition {
+            definition_id: PATTERN_ID,
+        },
+        DocumentCommand::RetargetChannelPatternDefinition {
+            channel_id: CHANNEL_ID,
+            definition_id: PATTERN_ID,
+        },
+        DocumentCommand::RemoveUnreferencedPatternDefinition {
+            definition_id: PATTERN_ID,
+        },
+        DocumentCommand::EditSelectedChannelPatternDefinition {
+            channel_id: CHANNEL_ID,
+            base_definition: base.clone(),
+            edit: PatternDefinitionEdit::SetCoverage {
+                coverage: CoveragePolicy {
+                    guard_steps: 3,
+                    maximum_support_radius: 5.0,
+                },
+            },
+        },
+        DocumentCommand::EditSharedPatternDefinition {
+            definition_id: PATTERN_ID,
+            base_definition: base,
+            edit: PatternDefinitionEdit::SetCoverage {
+                coverage: CoveragePolicy {
+                    guard_steps: 3,
+                    maximum_support_radius: 5.0,
+                },
+            },
+        },
+    ];
+    let mut session = DocumentSession::new(source.clone()).unwrap();
+    for command in &commands {
+        assert_eq!(
+            session.apply(command),
+            Err(DocumentSessionError::HistoryRequired)
+        );
+        assert_eq!(session.document(), &source);
+        assert_eq!(session.revision(), Revision(0));
+    }
+
+    let mut history = DocumentHistory::new(DocumentSession::new(source.clone()).unwrap());
+    let result = history.apply(&commands[0]).unwrap();
+    let after = history.document().clone();
+    assert_eq!(history.revision(), Revision(1));
+    assert!(history.can_undo());
+    assert!(!history.can_redo());
+    assert_eq!(history.undo().unwrap(), Some(result.clone()));
+    assert_eq!(history.document(), &source);
+    assert_eq!(history.revision(), Revision(2));
+    assert_eq!(history.redo().unwrap(), Some(result));
+    assert_eq!(history.document(), &after);
+    assert_eq!(history.revision(), Revision(3));
+}
+
+#[test]
+fn typed_definition_commands_allocate_copy_share_and_history_atomically() {
+    let mut history = shared_history();
+    let original = history.document().clone();
+    let add = DocumentCommand::AddPatternDefinition {
+        definition: PatternDefinitionDraft {
+            name: "independent".into(),
+            coverage: CoveragePolicy {
+                guard_steps: 4,
+                maximum_support_radius: 6.0,
+            },
+        },
+    };
+    let add_result = history.apply(&add).unwrap();
+    assert_eq!(
+        add_result.invalidation,
+        toniator_domain::InvalidationLevel::Family
+    );
+    assert!(add_result.affected_channels.is_empty());
+    let added = history.document().pattern_definitions().last().unwrap();
+    assert_eq!(added.id, PatternDefinitionId(4));
+    assert_eq!(added.mechanisms[0].id(), PatternMechanismId(7));
+    assert_eq!(added.mechanisms[1].id(), PatternMechanismId(8));
+    assert_eq!(added.output_layers[0].id(), PatternOutputLayerId(4));
+
+    let duplicate_result = history
+        .apply(&DocumentCommand::DuplicatePatternDefinition {
+            definition_id: PATTERN_ID,
+        })
+        .unwrap();
+    assert!(duplicate_result.affected_channels.is_empty());
+    let duplicate = history.document().pattern_definitions().last().unwrap();
+    assert_eq!(duplicate.id, PatternDefinitionId(5));
+    assert_ne!(
+        duplicate.mechanisms,
+        original.pattern_definitions()[0].mechanisms
+    );
+    assert_eq!(duplicate.mechanisms[0].id(), PatternMechanismId(9));
+    assert_eq!(duplicate.mechanisms[1].id(), PatternMechanismId(10));
+    assert_eq!(duplicate.name, original.pattern_definitions()[0].name);
+    assert_eq!(
+        duplicate.coverage,
+        original.pattern_definitions()[0].coverage
+    );
+    assert_eq!(duplicate.output_layers.len(), 1);
+    assert_eq!(duplicate.output_layers[0].id(), PatternOutputLayerId(5));
+    assert!(duplicate.supported_straight_grid_compatibility().is_some());
+
+    let before_failure = history.document().clone();
+    let before_revision = history.revision();
+    assert!(
+        history
+            .apply(&DocumentCommand::RemoveUnreferencedPatternDefinition {
+                definition_id: PATTERN_ID
+            })
+            .is_err()
+    );
+    assert_eq!(history.document(), &before_failure);
+    assert_eq!(history.revision(), before_revision);
+
+    let copy_result = history
+        .apply(&DocumentCommand::EditSelectedChannelPatternDefinition {
+            channel_id: CHANNEL_ID,
+            base_definition: history.document().pattern_definitions()[0].clone(),
+            edit: PatternDefinitionEdit::SetCoverage {
+                coverage: CoveragePolicy {
+                    guard_steps: 3,
+                    maximum_support_radius: 5.0,
+                },
+            },
+        })
+        .unwrap();
+    assert_eq!(copy_result.affected_channels, vec![CHANNEL_ID]);
+    let selected = history.document().channel(CHANNEL_ID).unwrap();
+    assert_eq!(selected.pattern_definition_id, PatternDefinitionId(6));
+    assert_eq!(
+        history
+            .document()
+            .channel(ChannelId(8))
+            .unwrap()
+            .pattern_definition_id,
+        PATTERN_ID
+    );
+    assert_eq!(
+        history.document().pattern_definitions()[0],
+        original.pattern_definitions()[0]
+    );
+
+    let shared_result = history
+        .apply(&DocumentCommand::EditSharedPatternDefinition {
+            definition_id: PATTERN_ID,
+            base_definition: history.document().pattern_definitions()[0].clone(),
+            edit: PatternDefinitionEdit::SetCoverage {
+                coverage: CoveragePolicy {
+                    guard_steps: 3,
+                    maximum_support_radius: 5.0,
+                },
+            },
+        })
+        .unwrap();
+    assert_eq!(shared_result.affected_channels, vec![ChannelId(8)]);
+    let after = history.document().clone();
+    assert_eq!(history.undo().unwrap(), Some(shared_result.clone()));
+    assert_eq!(history.redo().unwrap(), Some(shared_result));
+    assert_eq!(history.document(), &after);
+
+    let stale_before = history.document().clone();
+    assert!(
+        history
+            .apply(&DocumentCommand::EditSelectedChannelPatternDefinition {
+                channel_id: CHANNEL_ID,
+                base_definition: original.pattern_definitions()[0].clone(),
+                edit: PatternDefinitionEdit::SetCoverage {
+                    coverage: CoveragePolicy {
+                        guard_steps: 4,
+                        maximum_support_radius: 5.0,
+                    },
+                },
+            })
+            .is_err()
+    );
+    assert_eq!(history.document(), &stale_before);
+}
+
+#[test]
+fn definition_commands_cover_retarget_remove_unshared_stale_and_semantic_noops() {
+    let mut history = shared_history();
+    history
+        .apply(&DocumentCommand::AddPatternDefinition {
+            definition: PatternDefinitionDraft {
+                name: "other".into(),
+                coverage: CoveragePolicy {
+                    guard_steps: 2,
+                    maximum_support_radius: 5.0,
+                },
+            },
+        })
+        .unwrap();
+    let other = PatternDefinitionId(4);
+    history
+        .apply(&DocumentCommand::AddPatternDefinition {
+            definition: PatternDefinitionDraft {
+                name: "too-small-support".into(),
+                coverage: CoveragePolicy {
+                    guard_steps: 2,
+                    maximum_support_radius: 4.0,
+                },
+            },
+        })
+        .unwrap();
+    let incompatible_before = history.document().clone();
+    assert!(
+        history
+            .apply(&DocumentCommand::RetargetChannelPatternDefinition {
+                channel_id: ChannelId(8),
+                definition_id: PatternDefinitionId(5),
+            })
+            .is_err()
+    );
+    assert_eq!(history.document(), &incompatible_before);
+    let retarget = history
+        .apply(&DocumentCommand::RetargetChannelPatternDefinition {
+            channel_id: ChannelId(8),
+            definition_id: other,
+        })
+        .unwrap();
+    assert_eq!(retarget.affected_channels, vec![ChannelId(8)]);
+    let before_fail = history.document().clone();
+    let revision = history.revision();
+    for command in [
+        DocumentCommand::RetargetChannelPatternDefinition {
+            channel_id: ChannelId(8),
+            definition_id: other,
+        },
+        DocumentCommand::RetargetChannelPatternDefinition {
+            channel_id: ChannelId(8),
+            definition_id: PatternDefinitionId(99),
+        },
+        DocumentCommand::RemoveUnreferencedPatternDefinition {
+            definition_id: PATTERN_ID,
+        },
+        DocumentCommand::RemoveUnreferencedPatternDefinition {
+            definition_id: PatternDefinitionId(99),
+        },
+    ] {
+        assert!(history.apply(&command).is_err());
+        assert_eq!(history.document(), &before_fail);
+        assert_eq!(history.revision(), revision);
+    }
+    history
+        .apply(&DocumentCommand::RetargetChannelPatternDefinition {
+            channel_id: CHANNEL_ID,
+            definition_id: other,
+        })
+        .unwrap();
+    let removed = history
+        .apply(&DocumentCommand::RemoveUnreferencedPatternDefinition {
+            definition_id: PATTERN_ID,
+        })
+        .unwrap();
+    assert!(removed.affected_channels.is_empty());
+    assert_eq!(history.undo().unwrap(), Some(removed.clone()));
+    history
+        .apply(&DocumentCommand::AddPatternDefinition {
+            definition: PatternDefinitionDraft {
+                name: "branch".into(),
+                coverage: CoveragePolicy {
+                    guard_steps: 2,
+                    maximum_support_radius: 5.0,
+                },
+            },
+        })
+        .unwrap();
+    assert!(!history.can_redo());
+
+    let mut unshared = DocumentHistory::new(DocumentSession::new(document()).unwrap());
+    let base = unshared.document().pattern_definitions()[0].clone();
+    unshared
+        .apply(&DocumentCommand::EditSelectedChannelPatternDefinition {
+            channel_id: CHANNEL_ID,
+            base_definition: base.clone(),
+            edit: PatternDefinitionEdit::SetCoverage {
+                coverage: CoveragePolicy {
+                    guard_steps: 3,
+                    maximum_support_radius: 5.0,
+                },
+            },
+        })
+        .unwrap();
+    assert_eq!(unshared.document().pattern_definitions().len(), 1);
+    assert_eq!(unshared.document().pattern_definitions()[0].id, PATTERN_ID);
+    let unchanged = unshared.document().clone();
+    let unchanged_revision = unshared.revision();
+    assert!(
+        unshared
+            .apply(&DocumentCommand::EditSelectedChannelPatternDefinition {
+                channel_id: CHANNEL_ID,
+                base_definition: unshared.document().pattern_definitions()[0].clone(),
+                edit: PatternDefinitionEdit::SetCoverage {
+                    coverage: unshared.document().pattern_definitions()[0]
+                        .coverage
+                        .clone(),
+                },
+            })
+            .is_err()
+    );
+    assert_eq!(unshared.document(), &unchanged);
+    assert_eq!(unshared.revision(), unchanged_revision);
+
+    let mut shared = shared_history();
+    let stale_base = shared.document().pattern_definitions()[0].clone();
+    let shared_result = shared
+        .apply(&DocumentCommand::EditSharedPatternDefinition {
+            definition_id: PATTERN_ID,
+            base_definition: stale_base.clone(),
+            edit: PatternDefinitionEdit::SetCoverage {
+                coverage: CoveragePolicy {
+                    guard_steps: 3,
+                    maximum_support_radius: 5.0,
+                },
+            },
+        })
+        .unwrap();
+    assert_eq!(
+        shared_result.affected_channels,
+        vec![CHANNEL_ID, ChannelId(8)]
+    );
+    let stale_document = shared.document().clone();
+    let stale_revision = shared.revision();
+    assert!(
+        shared
+            .apply(&DocumentCommand::EditSharedPatternDefinition {
+                definition_id: PATTERN_ID,
+                base_definition: stale_base,
+                edit: PatternDefinitionEdit::SetCoverage {
+                    coverage: CoveragePolicy {
+                        guard_steps: 4,
+                        maximum_support_radius: 5.0,
+                    },
+                },
+            })
+            .is_err()
+    );
+    assert_eq!(shared.document(), &stale_document);
+    assert_eq!(shared.revision(), stale_revision);
 }
 
 fn legacy_channel() -> ChannelState {

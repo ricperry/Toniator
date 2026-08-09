@@ -1,17 +1,22 @@
-use std::time::{Duration, Instant};
+use std::{
+    fs,
+    path::Path,
+    time::{Duration, Instant},
+};
 use toniator_domain::{
     CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternLayout, ChannelSourceMapping,
-    ChannelState, ChannelTopology, ChannelTopologyTemplate, ColorValue, DensityMetric2D, Document,
-    DocumentCommand, DocumentHistory, DocumentId, DocumentSession, HalftoneChannelModel,
-    HalftoneChannelRole, MarkGeometryResponse, PatternDefinition, PatternDefinitionId,
-    PatternOutput, PatternStructure, SourceComponent, SourceMapping, SourceMappingComponent,
-    SourcePlacement, SourceReference, SourceReferenceId,
+    ChannelState, ChannelTopology, ChannelTopologyTemplate, ColorValue, CoveragePolicy,
+    DensityMetric2D, Document, DocumentCommand, DocumentHistory, DocumentId, DocumentSession,
+    HalftoneChannelModel, HalftoneChannelRole, MarkGeometryResponse, PatternDefinition,
+    PatternDefinitionId, PatternMechanismId, PatternOutputLayerId, SourceComponent, SourceMapping,
+    SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId,
 };
 use toniator_engine::{
     CacheDisposition, EvaluationCompletion, EvaluationLimits, EvaluationRequest,
-    EvaluationScheduler, PreviewRasterTarget, ResolvedSource, SourceFormatHint, evaluate,
-    evaluate_with_limits, write_svg,
+    EvaluationScheduler, PreviewRasterTarget, ResolvedSource, SourceFormatHint, encode_png,
+    evaluate, evaluate_with_limits, write_svg,
 };
+use toniator_io::{load, save};
 
 fn wait_for_latest(scheduler: &EvaluationScheduler) -> EvaluationCompletion {
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -53,14 +58,17 @@ fn session(model: HalftoneChannelModel) -> DocumentSession {
 }
 
 fn session_with_canvas(model: HalftoneChannelModel, width: f64, height: f64) -> DocumentSession {
-    let definition = PatternDefinition {
-        id: PatternDefinitionId(1),
-        name: "grid".into(),
-        structure: PatternStructure::StraightGrid,
-        output: PatternOutput::CircularMarks,
-        guard_steps: 2,
-        maximum_support_radius: 4.5,
-    };
+    let definition = PatternDefinition::supported_straight_grid(
+        PatternDefinitionId(1),
+        "grid",
+        PatternMechanismId(1),
+        PatternMechanismId(2),
+        PatternOutputLayerId(1),
+        CoveragePolicy {
+            guard_steps: 2,
+            maximum_support_radius: 4.5,
+        },
+    );
     let channel = ChannelState {
         id: ChannelId(1),
         pattern_definition_id: definition.id,
@@ -504,6 +512,121 @@ fn scheduler_rebuilds_families_and_realizations_when_canvas_changes() {
     }));
 
     scheduler.shutdown().unwrap();
+}
+
+#[test]
+fn frozen_v1_migration_and_saved_v2_preserve_accepted_outputs_for_every_model() {
+    let validation = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/validation/stage-14");
+    fs::create_dir_all(&validation).unwrap();
+    for (fixture, source_format) in [
+        ("raster-sample-v1.toniator", SourceFormatHint::Png),
+        ("vector-sample-v1.toniator", SourceFormatHint::Svg),
+    ] {
+        let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets")
+            .join(fixture);
+        let migrated = load(&fixture_path).unwrap();
+        let source = migrated.sources().entries().next().unwrap();
+        let original_session = DocumentSession::new(migrated.document().clone()).unwrap();
+        let original = evaluate_with_limits(
+            EvaluationRequest::new(
+                original_session.document_evaluation_snapshot(),
+                ResolvedSource::new(source.id().clone(), source.bytes().to_vec(), source_format)
+                    .unwrap(),
+            ),
+            EvaluationLimits::default(),
+        )
+        .unwrap();
+        let seed = migrated.document().channel_topology().unwrap().channels()[0].clone();
+        for model in [
+            HalftoneChannelModel::Rgb,
+            HalftoneChannelModel::Cmyk,
+            HalftoneChannelModel::SourceColorAlpha,
+        ] {
+            let topology = migrated
+                .document()
+                .canonical_channel_topology(
+                    model,
+                    ChannelTopologyTemplate {
+                        pattern_definition_id: seed.pattern_definition_id,
+                        layout: seed.layout.clone(),
+                        mark_geometry_response: seed.mark_geometry_response.clone(),
+                    },
+                )
+                .unwrap();
+            let document = Document::with_source_and_topology(
+                migrated.document().id(),
+                migrated.document().canvas().clone(),
+                migrated.document().source().clone(),
+                migrated.document().pattern_definitions().to_vec(),
+                model,
+                topology,
+            )
+            .unwrap();
+            let current_session = DocumentSession::new(document.clone()).unwrap();
+            let current = evaluate_with_limits(
+                EvaluationRequest::new(
+                    current_session.document_evaluation_snapshot(),
+                    ResolvedSource::new(
+                        source.id().clone(),
+                        source.bytes().to_vec(),
+                        source_format,
+                    )
+                    .unwrap(),
+                ),
+                EvaluationLimits::default(),
+            )
+            .unwrap();
+            if model == HalftoneChannelModel::Rgb {
+                assert_eq!(current.channels(), original.channels());
+                assert_eq!(current.scene().identity(), original.scene().identity());
+                assert_eq!(current.raster().pixels(), original.raster().pixels());
+                assert_eq!(write_svg(current.scene()), write_svg(original.scene()));
+            }
+            let label = fixture.trim_end_matches(".toniator");
+            fs::write(
+                validation.join(format!("{label}-{model:?}-migrated-v2.png")),
+                encode_png(current.raster()).unwrap(),
+            )
+            .unwrap();
+            fs::write(
+                validation.join(format!("{label}-{model:?}-migrated-v2.svg")),
+                write_svg(current.scene()),
+            )
+            .unwrap();
+            let saved = validation.join(format!(
+                "{}-{model:?}-saved-v2.toniator",
+                fixture.trim_end_matches(".toniator")
+            ));
+            save(&saved, &document, migrated.sources()).unwrap();
+            let reopened = load(&saved).unwrap();
+            assert_eq!(reopened.versions().document(), 2);
+            let reopened_session = DocumentSession::new(reopened.document().clone()).unwrap();
+            let reopened_result = evaluate_with_limits(
+                EvaluationRequest::new(
+                    reopened_session.document_evaluation_snapshot(),
+                    ResolvedSource::new(
+                        source.id().clone(),
+                        source.bytes().to_vec(),
+                        source_format,
+                    )
+                    .unwrap(),
+                ),
+                EvaluationLimits::default(),
+            )
+            .unwrap();
+            assert_eq!(reopened_result.channels(), current.channels());
+            assert_eq!(
+                reopened_result.scene().identity(),
+                current.scene().identity()
+            );
+            assert_eq!(reopened_result.raster().pixels(), current.raster().pixels());
+            assert_eq!(
+                write_svg(reopened_result.scene()),
+                write_svg(current.scene())
+            );
+        }
+    }
 }
 
 #[test]

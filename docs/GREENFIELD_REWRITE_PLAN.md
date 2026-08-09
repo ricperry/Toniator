@@ -1387,7 +1387,7 @@ checkpoint is `2a773a3`; Stage 14 remains planned.
 
 ## Stage 14 — Typed pattern-definition authority and v1-to-v2 migration
 
-**Status: Planned.** Replace the bounded v1 `PatternStructure`/`PatternOutput`
+**Status: Implemented awaiting review.** Replace the bounded v1 `PatternStructure`/`PatternOutput`
 metadata with a generator/mechanism-agnostic typed schema without changing the
 accepted meaning of v1 files.
 

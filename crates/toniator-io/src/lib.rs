@@ -18,16 +18,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use toniator_domain::{
     CanvasSpec, ChannelAppearance, ChannelId, ChannelPaint, ChannelPatternLayout,
-    ChannelSourceMapping, ChannelState, ChannelTopology, ColorValue, DensityMetric2D, Document,
-    DocumentId, HalftoneChannelModel, HalftoneChannelRole, MarkGeometryResponse,
-    ModeledChannelState, PatternDefinition, PatternDefinitionId, PatternOutput, PatternStructure,
-    SourceComponent, SourceMapping, SourceMappingComponent, SourcePlacement, SourceReference,
-    SourceReferenceId, ValidationError,
+    ChannelSourceMapping, ChannelState, ChannelTopology, ColorValue, CoveragePolicy,
+    DensityMetric2D, Document, DocumentId, HalftoneChannelModel, HalftoneChannelRole,
+    MarkGeometryResponse, ModeledChannelState, PatternDefinition, PatternDefinitionId,
+    PatternMechanismId, PatternOutputLayerId, SourceComponent, SourceMapping,
+    SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId, ValidationError,
 };
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 pub const CONTAINER_VERSION: u32 = 1;
-pub const DOCUMENT_SCHEMA_VERSION: u32 = 1;
+pub const DOCUMENT_SCHEMA_VERSION: u32 = 2;
+const DOCUMENT_SCHEMA_VERSION_V1: u32 = 1;
 pub const MAX_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_DOCUMENT_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_SOURCE_BYTES: u64 = 128 * 1024 * 1024;
@@ -166,11 +167,30 @@ impl StoredVersions {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MigrationReport {
-    _private: (),
+    migrated_v1: bool,
+    generated_definitions: Vec<MigrationDefinitionReport>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MigrationDefinitionReport {
+    pub definition_id: PatternDefinitionId,
+    pub mechanism_ids: Vec<PatternMechanismId>,
+    pub output_layer_ids: Vec<PatternOutputLayerId>,
 }
 impl MigrationReport {
     pub const fn is_empty(&self) -> bool {
-        true
+        !self.migrated_v1
+    }
+    pub fn generated_definition_ids(&self) -> Vec<PatternDefinitionId> {
+        // Kept as a compact convenience projection for lifecycle diagnostics.
+        // Detailed generated addresses are available below.
+        // The report remains lifecycle data and is never serialized.
+        self.generated_definitions
+            .iter()
+            .map(|definition| definition.definition_id)
+            .collect()
+    }
+    pub fn generated_definitions(&self) -> &[MigrationDefinitionReport] {
+        &self.generated_definitions
     }
 }
 
@@ -433,19 +453,70 @@ pub fn load(path: &Path) -> Result<LoadedDocument, LoadError> {
             ),
         });
     }
-    if envelope.document_schema_version != DOCUMENT_SCHEMA_VERSION {
-        return Err(LoadError::Version {
-            context: format!(
-                "unsupported document schema version {}",
-                envelope.document_schema_version
-            ),
-        });
-    }
-    let stored: StoredDocumentDtoV1 =
-        serde_json::from_slice(&document_bytes).map_err(|error| LoadError::Json {
-            context: error.to_string(),
-        })?;
-    let manifest = &stored.source;
+    let (current, manifest, report) = match envelope.document_schema_version {
+        DOCUMENT_SCHEMA_VERSION_V1 => {
+            // This private parser is intentionally immutable Stage 12 input.
+            let stored: StoredDocumentDtoV1 =
+                serde_json::from_slice(&document_bytes).map_err(|error| LoadError::Json {
+                    context: error.to_string(),
+                })?;
+            let manifest = stored.source.clone();
+            let current = migrate_v1(stored)?;
+            let generated_definitions = current
+                .document
+                .pattern_definitions
+                .iter()
+                .map(|definition| MigrationDefinitionReport {
+                    definition_id: PatternDefinitionId(definition.id),
+                    mechanism_ids: definition
+                        .mechanisms
+                        .iter()
+                        .map(|mechanism| match mechanism {
+                            PatternMechanismDtoV2::StraightGuides { id }
+                            | PatternMechanismDtoV2::GuideIntersections { id, .. } => {
+                                PatternMechanismId(*id)
+                            }
+                        })
+                        .collect(),
+                    output_layer_ids: definition
+                        .output_layers
+                        .iter()
+                        .map(|layer| match layer {
+                            PatternOutputLayerDtoV2::CircularMarks { id, .. } => {
+                                PatternOutputLayerId(*id)
+                            }
+                        })
+                        .collect(),
+                })
+                .collect();
+            (
+                current,
+                manifest,
+                MigrationReport {
+                    migrated_v1: true,
+                    generated_definitions,
+                },
+            )
+        }
+        DOCUMENT_SCHEMA_VERSION => {
+            let stored: StoredDocumentDtoV2 =
+                serde_json::from_slice(&document_bytes).map_err(|error| LoadError::Json {
+                    context: error.to_string(),
+                })?;
+            (
+                CurrentDocumentDto {
+                    document: stored.document,
+                },
+                stored.source,
+                MigrationReport::default(),
+            )
+        }
+        value => {
+            return Err(LoadError::Version {
+                context: format!("unsupported document schema version {value}"),
+            });
+        }
+    };
     let source_id = dto_source_id(&manifest.id).map_err(domain_error)?;
     validate_source_id(&source_id).map_err(|error| LoadError::EntryTopology {
         context: error.to_string(),
@@ -496,7 +567,6 @@ pub fn load(path: &Path) -> Result<LoadedDocument, LoadError> {
     let sources = SourceBundle::new([source]).map_err(|error| LoadError::EntryTopology {
         context: error.to_string(),
     })?;
-    let current = migrate_v1(stored)?;
     let document = current.document.into_domain().map_err(domain_error)?;
     match document.source() {
         SourceReference::Assigned(id) if id == &source_id => {}
@@ -509,8 +579,8 @@ pub fn load(path: &Path) -> Result<LoadedDocument, LoadError> {
     Ok(LoadedDocument {
         document,
         sources,
-        versions: StoredVersions::new(CONTAINER_VERSION, DOCUMENT_SCHEMA_VERSION),
-        report: MigrationReport::default(),
+        versions: StoredVersions::new(CONTAINER_VERSION, envelope.document_schema_version),
+        report,
     })
 }
 
@@ -531,20 +601,21 @@ fn ensure_supported_file_compression(
     })
 }
 
-/// Saves one fully source-backed current document using deterministic v1 bytes.
+/// Saves one fully source-backed current document using deterministic v2 JSON
+/// inside the immutable v1 ZIP container layout.
 pub fn save(path: &Path, document: &Document, sources: &SourceBundle) -> Result<(), SaveError> {
     document.validate().map_err(save_domain_error)?;
     let source_id = match document.source() {
         SourceReference::Assigned(id) => id,
         SourceReference::Unassigned => {
             return Err(SaveError::SourceDocumentMismatch {
-                context: "v1 saving requires an assigned document source".into(),
+                context: "v2 saving requires an assigned document source".into(),
             });
         }
     };
     if sources.len() != 1 {
         return Err(SaveError::SourceDocumentMismatch {
-            context: "v1 saving requires exactly one embedded source".into(),
+            context: "v2 saving requires exactly one embedded source".into(),
         });
     }
     let source = sources
@@ -557,14 +628,14 @@ pub fn save(path: &Path, document: &Document, sources: &SourceBundle) -> Result<
             context: error.context().into(),
         }
     })?;
-    let dto = StoredDocumentDtoV1::from_domain(document, source, entry_name.clone())?;
+    let dto = StoredDocumentDtoV2::from_domain(document, source, entry_name.clone())?;
     let mut document_json = serde_json::to_vec(&dto).map_err(|error| SaveError::Archive {
         context: error.to_string(),
     })?;
     document_json.push(b'\n');
     if document_json.len() as u64 > MAX_DOCUMENT_BYTES {
         return Err(SaveError::Limits {
-            context: "document.json exceeds the 4 MiB v1 limit".into(),
+            context: "document.json exceeds the 4 MiB container limit".into(),
         });
     }
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -736,12 +807,16 @@ fn save_domain_error(error: ValidationError) -> SaveError {
 }
 
 fn migrate_v1(stored: StoredDocumentDtoV1) -> Result<CurrentDocumentDto, LoadError> {
+    // The envelope was dispatched before this immutable parser; retaining these
+    // reads keeps its complete v1 DTO interpretation explicit.
+    let _container_version = stored.container_version;
+    let _document_schema_version = stored.document_schema_version;
     Ok(CurrentDocumentDto {
-        document: stored.document,
+        document: stored.document.migrate()?,
     })
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct StoredDocumentDtoV1 {
     container_version: u32,
     document_schema_version: u32,
@@ -753,7 +828,7 @@ struct VersionEnvelope {
     container_version: u32,
     document_schema_version: u32,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct SourceManifestDtoV1 {
     id: String,
     entry_name: String,
@@ -763,11 +838,18 @@ struct SourceManifestDtoV1 {
     display_name: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
+struct StoredDocumentDtoV2 {
+    container_version: u32,
+    document_schema_version: u32,
+    document: DocumentDtoV2,
+    source: SourceManifestDtoV1,
+}
+#[derive(Serialize, Deserialize)]
 struct CurrentDocumentDto {
-    document: DocumentDtoV1,
+    document: DocumentDtoV2,
 }
 
-impl StoredDocumentDtoV1 {
+impl StoredDocumentDtoV2 {
     fn from_domain(
         document: &Document,
         source: &EmbeddedSource,
@@ -776,7 +858,7 @@ impl StoredDocumentDtoV1 {
         Ok(Self {
             container_version: CONTAINER_VERSION,
             document_schema_version: DOCUMENT_SCHEMA_VERSION,
-            document: DocumentDtoV1::from_domain(document)?,
+            document: DocumentDtoV2::from_domain(document)?,
             source: SourceManifestDtoV1 {
                 id: source.id().as_str().into(),
                 entry_name,
@@ -798,6 +880,14 @@ struct DocumentDtoV1 {
     channel_configuration: ChannelConfigurationDto,
 }
 #[derive(Serialize, Deserialize)]
+struct DocumentDtoV2 {
+    id: u64,
+    canvas: CanvasDto,
+    source_reference_id: String,
+    pattern_definitions: Vec<PatternDefinitionDtoV2>,
+    channel_configuration: ChannelConfigurationDto,
+}
+#[derive(Serialize, Deserialize)]
 struct CanvasDto {
     width: f64,
     height: f64,
@@ -808,6 +898,42 @@ struct PatternDefinitionDto {
     name: String,
     structure: PatternStructureDto,
     output: PatternOutputDto,
+    guard_steps: u32,
+    maximum_support_radius: f64,
+}
+#[derive(Serialize, Deserialize)]
+struct PatternDefinitionDtoV2 {
+    id: u64,
+    name: String,
+    family: PatternFamilyDtoV2,
+    mechanisms: Vec<PatternMechanismDtoV2>,
+    output_layers: Vec<PatternOutputLayerDtoV2>,
+    modulation: PatternModulationDtoV2,
+    coverage: CoverageDtoV2,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum PatternFamilyDtoV2 {
+    GuideIntersections {
+        guide_mechanism_id: u64,
+        site_mechanism_id: u64,
+    },
+}
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum PatternMechanismDtoV2 {
+    StraightGuides { id: u64 },
+    GuideIntersections { id: u64, guide_mechanism_id: u64 },
+}
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum PatternOutputLayerDtoV2 {
+    CircularMarks { id: u64, site_mechanism_id: u64 },
+}
+#[derive(Serialize, Deserialize)]
+struct PatternModulationDtoV2 {}
+#[derive(Serialize, Deserialize)]
+struct CoverageDtoV2 {
     guard_steps: u32,
     maximum_support_radius: f64,
 }
@@ -921,20 +1047,18 @@ macro_rules! dto_enum { ($dto:ident, $domain:ident { $($variant:ident),+ $(,)? }
     impl From<$domain> for $dto { fn from(value: $domain) -> Self { match value { $($domain::$variant => Self::$variant),+ } } }
     impl From<$dto> for $domain { fn from(value: $dto) -> Self { match value { $($dto::$variant => Self::$variant),+ } } }
 }; }
-dto_enum!(
-    PatternStructureDto,
-    PatternStructure {
-        StraightGrid,
-        Unsupported
-    }
-);
-dto_enum!(
-    PatternOutputDto,
-    PatternOutput {
-        CircularMarks,
-        Unsupported
-    }
-);
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PatternStructureDto {
+    StraightGrid,
+    Unsupported,
+}
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PatternOutputDto {
+    CircularMarks,
+    Unsupported,
+}
 dto_enum!(
     HalftoneChannelModelDto,
     HalftoneChannelModel {
@@ -974,12 +1098,78 @@ dto_enum!(
 );
 
 impl DocumentDtoV1 {
+    fn migrate(self) -> Result<DocumentDtoV2, LoadError> {
+        let mut definitions = Vec::with_capacity(self.pattern_definitions.len());
+        for definition in self.pattern_definitions {
+            if !matches!(definition.structure, PatternStructureDto::StraightGrid)
+                || !matches!(definition.output, PatternOutputDto::CircularMarks)
+            {
+                return Err(LoadError::DomainValidation {
+                    context: "v1 definition does not map to the supported typed v2 mechanisms"
+                        .into(),
+                });
+            }
+            let guide_mechanism_id = definition
+                .id
+                .checked_mul(2)
+                .and_then(|value| value.checked_sub(1))
+                .ok_or_else(|| LoadError::DomainValidation {
+                    context: "v1 definition ID cannot allocate deterministic typed mechanism IDs"
+                        .into(),
+                })?;
+            let site_mechanism_id =
+                definition
+                    .id
+                    .checked_mul(2)
+                    .ok_or_else(|| LoadError::DomainValidation {
+                        context:
+                            "v1 definition ID cannot allocate deterministic typed mechanism IDs"
+                                .into(),
+                    })?;
+            definitions.push(PatternDefinitionDtoV2 {
+                id: definition.id,
+                name: definition.name,
+                family: PatternFamilyDtoV2::GuideIntersections {
+                    guide_mechanism_id,
+                    site_mechanism_id,
+                },
+                mechanisms: vec![
+                    PatternMechanismDtoV2::StraightGuides {
+                        id: guide_mechanism_id,
+                    },
+                    PatternMechanismDtoV2::GuideIntersections {
+                        id: site_mechanism_id,
+                        guide_mechanism_id,
+                    },
+                ],
+                output_layers: vec![PatternOutputLayerDtoV2::CircularMarks {
+                    id: definition.id,
+                    site_mechanism_id,
+                }],
+                modulation: PatternModulationDtoV2 {},
+                coverage: CoverageDtoV2 {
+                    guard_steps: definition.guard_steps,
+                    maximum_support_radius: definition.maximum_support_radius,
+                },
+            });
+        }
+        Ok(DocumentDtoV2 {
+            id: self.id,
+            canvas: self.canvas,
+            source_reference_id: self.source_reference_id,
+            pattern_definitions: definitions,
+            channel_configuration: self.channel_configuration,
+        })
+    }
+}
+
+impl DocumentDtoV2 {
     fn from_domain(document: &Document) -> Result<Self, SaveError> {
         let source_reference_id = match document.source() {
             SourceReference::Assigned(id) => id.as_str().to_owned(),
             SourceReference::Unassigned => {
                 return Err(SaveError::SourceDocumentMismatch {
-                    context: "v1 saving requires an assigned document source".into(),
+                    context: "v2 saving requires an assigned document source".into(),
                 });
             }
         };
@@ -1015,7 +1205,7 @@ impl DocumentDtoV1 {
             pattern_definitions: document
                 .pattern_definitions()
                 .iter()
-                .map(PatternDefinitionDto::from_domain)
+                .map(PatternDefinitionDtoV2::from_domain)
                 .collect(),
             channel_configuration,
         })
@@ -1025,7 +1215,7 @@ impl DocumentDtoV1 {
         let definitions = self
             .pattern_definitions
             .into_iter()
-            .map(PatternDefinitionDto::into_domain)
+            .map(PatternDefinitionDtoV2::into_domain)
             .collect();
         match self.channel_configuration {
             ChannelConfigurationDto::Legacy { channels } => Document::with_source(
@@ -1062,25 +1252,127 @@ impl DocumentDtoV1 {
         }
     }
 }
-impl PatternDefinitionDto {
+impl PatternDefinitionDtoV2 {
     fn from_domain(value: &PatternDefinition) -> Self {
         Self {
             id: value.id.0,
             name: value.name.clone(),
-            structure: value.structure.into(),
-            output: value.output.into(),
-            guard_steps: value.guard_steps,
-            maximum_support_radius: value.maximum_support_radius,
+            family: PatternFamilyDtoV2::from_domain(&value.family),
+            mechanisms: value
+                .mechanisms
+                .iter()
+                .map(PatternMechanismDtoV2::from_domain)
+                .collect(),
+            output_layers: value
+                .output_layers
+                .iter()
+                .map(PatternOutputLayerDtoV2::from_domain)
+                .collect(),
+            modulation: PatternModulationDtoV2 {},
+            coverage: CoverageDtoV2 {
+                guard_steps: value.coverage.guard_steps,
+                maximum_support_radius: value.coverage.maximum_support_radius,
+            },
         }
     }
     fn into_domain(self) -> PatternDefinition {
         PatternDefinition {
             id: PatternDefinitionId(self.id),
             name: self.name,
-            structure: self.structure.into(),
-            output: self.output.into(),
-            guard_steps: self.guard_steps,
-            maximum_support_radius: self.maximum_support_radius,
+            family: self.family.into_domain(),
+            mechanisms: self
+                .mechanisms
+                .into_iter()
+                .map(PatternMechanismDtoV2::into_domain)
+                .collect(),
+            output_layers: self
+                .output_layers
+                .into_iter()
+                .map(PatternOutputLayerDtoV2::into_domain)
+                .collect(),
+            modulation: toniator_domain::PatternModulation,
+            coverage: CoveragePolicy {
+                guard_steps: self.coverage.guard_steps,
+                maximum_support_radius: self.coverage.maximum_support_radius,
+            },
+        }
+    }
+}
+impl PatternFamilyDtoV2 {
+    fn from_domain(value: &toniator_domain::PatternFamily) -> Self {
+        match value {
+            toniator_domain::PatternFamily::GuideIntersections {
+                guide_mechanism_id,
+                site_mechanism_id,
+            } => Self::GuideIntersections {
+                guide_mechanism_id: guide_mechanism_id.0,
+                site_mechanism_id: site_mechanism_id.0,
+            },
+        }
+    }
+    fn into_domain(self) -> toniator_domain::PatternFamily {
+        match self {
+            Self::GuideIntersections {
+                guide_mechanism_id,
+                site_mechanism_id,
+            } => toniator_domain::PatternFamily::GuideIntersections {
+                guide_mechanism_id: PatternMechanismId(guide_mechanism_id),
+                site_mechanism_id: PatternMechanismId(site_mechanism_id),
+            },
+        }
+    }
+}
+impl PatternMechanismDtoV2 {
+    fn from_domain(value: &toniator_domain::PatternMechanism) -> Self {
+        match value {
+            toniator_domain::PatternMechanism::StraightGuides { id } => {
+                Self::StraightGuides { id: id.0 }
+            }
+            toniator_domain::PatternMechanism::GuideIntersections {
+                id,
+                guide_mechanism_id,
+            } => Self::GuideIntersections {
+                id: id.0,
+                guide_mechanism_id: guide_mechanism_id.0,
+            },
+        }
+    }
+    fn into_domain(self) -> toniator_domain::PatternMechanism {
+        match self {
+            Self::StraightGuides { id } => toniator_domain::PatternMechanism::StraightGuides {
+                id: PatternMechanismId(id),
+            },
+            Self::GuideIntersections {
+                id,
+                guide_mechanism_id,
+            } => toniator_domain::PatternMechanism::GuideIntersections {
+                id: PatternMechanismId(id),
+                guide_mechanism_id: PatternMechanismId(guide_mechanism_id),
+            },
+        }
+    }
+}
+impl PatternOutputLayerDtoV2 {
+    fn from_domain(value: &toniator_domain::PatternOutputLayer) -> Self {
+        match value {
+            toniator_domain::PatternOutputLayer::CircularMarks {
+                id,
+                site_mechanism_id,
+            } => Self::CircularMarks {
+                id: id.0,
+                site_mechanism_id: site_mechanism_id.0,
+            },
+        }
+    }
+    fn into_domain(self) -> toniator_domain::PatternOutputLayer {
+        match self {
+            Self::CircularMarks {
+                id,
+                site_mechanism_id,
+            } => toniator_domain::PatternOutputLayer::CircularMarks {
+                id: PatternOutputLayerId(id),
+                site_mechanism_id: PatternMechanismId(site_mechanism_id),
+            },
         }
     }
 }

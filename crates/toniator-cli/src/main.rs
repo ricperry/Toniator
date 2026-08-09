@@ -6,10 +6,10 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use toniator_domain::{
     CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternLayout, ChannelSourceMapping,
-    ChannelState, ChannelTopologyTemplate, ColorValue, DensityMetric2D, Document, DocumentCommand,
-    DocumentId, DocumentSession, HalftoneChannelModel, MarkGeometryResponse, PatternDefinition,
-    PatternDefinitionId, PatternOutput, PatternStructure, SourceComponent, SourcePlacement,
-    SourceReference, SourceReferenceId, ValidationError,
+    ChannelState, ChannelTopologyTemplate, ColorValue, CoveragePolicy, DensityMetric2D, Document,
+    DocumentCommand, DocumentId, DocumentSession, HalftoneChannelModel, MarkGeometryResponse,
+    PatternDefinition, PatternDefinitionId, PatternMechanismId, PatternOutputLayerId,
+    SourceComponent, SourcePlacement, SourceReference, SourceReferenceId, ValidationError,
 };
 use toniator_engine::{
     CanonicalCircleMark, EvaluationLimits, GridError, GridInspectRequest, MarkResponse,
@@ -441,14 +441,17 @@ fn build_document(
         DocumentId(1),
         canvas,
         SourceReference::Assigned(source_reference),
-        vec![PatternDefinition {
-            id: PatternDefinitionId(1),
-            name: "straight-grid".to_owned(),
-            structure: PatternStructure::StraightGrid,
-            output: PatternOutput::CircularMarks,
-            guard_steps,
-            maximum_support_radius: 4.5,
-        }],
+        vec![PatternDefinition::supported_straight_grid(
+            PatternDefinitionId(1),
+            "straight-grid",
+            PatternMechanismId(1),
+            PatternMechanismId(2),
+            PatternOutputLayerId(1),
+            CoveragePolicy {
+                guard_steps,
+                maximum_support_radius: 4.5,
+            },
+        )],
         vec![ChannelState {
             id: ChannelId(1),
             pattern_definition_id: PatternDefinitionId(1),
@@ -956,11 +959,17 @@ fn validate(arguments: ValidateArgs) -> Result<(), CliError> {
         let loaded =
             load_document(&input).map_err(|error| CliError::new(error.path(), error.context()))?;
         let session = DocumentSession::new(loaded.document().clone())?;
+        let migrations = if loaded.migration_report().is_empty() {
+            "empty"
+        } else {
+            "v1-to-v2"
+        };
         println!(
-            "valid document (revision {}, container v{}, document v{}, migrations: empty)",
+            "valid document (revision {}, container v{}, document v{}, migrations: {})",
             session.revision().0,
             loaded.versions().container(),
-            loaded.versions().document()
+            loaded.versions().document(),
+            migrations,
         );
         return Ok(());
     }
@@ -982,14 +991,17 @@ fn validate(arguments: ValidateArgs) -> Result<(), CliError> {
     let document = Document::new(
         DocumentId(1),
         canvas,
-        vec![PatternDefinition {
-            id: PatternDefinitionId(1),
-            name: "minimal".to_owned(),
-            structure: PatternStructure::StraightGrid,
-            output: PatternOutput::CircularMarks,
-            guard_steps: 2,
-            maximum_support_radius: 4.5,
-        }],
+        vec![PatternDefinition::supported_straight_grid(
+            PatternDefinitionId(1),
+            "minimal",
+            PatternMechanismId(1),
+            PatternMechanismId(2),
+            PatternOutputLayerId(1),
+            CoveragePolicy {
+                guard_steps: 2,
+                maximum_support_radius: 4.5,
+            },
+        )],
         vec![ChannelState {
             id: ChannelId(1),
             pattern_definition_id: PatternDefinitionId(1),
@@ -1094,6 +1106,10 @@ impl From<toniator_domain::DocumentSessionError> for CliError {
             toniator_domain::DocumentSessionError::RevisionExhausted => {
                 Self::new("document.revision", "document revision is exhausted")
             }
+            toniator_domain::DocumentSessionError::HistoryRequired => Self::new(
+                "document.history",
+                "pattern definition commands require document history",
+            ),
         }
     }
 }

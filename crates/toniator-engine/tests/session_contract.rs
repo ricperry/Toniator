@@ -1,8 +1,8 @@
 use toniator_domain::{
     CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternLayout, ChannelSourceMapping,
-    ChannelState, ColorValue, DensityMetric2D, Document, DocumentCommand, DocumentId,
-    DocumentSession, InvalidationLevel, MarkGeometryResponse, PatternDefinition,
-    PatternDefinitionId, PatternOutput, PatternStructure, Revision, SourceComponent,
+    ChannelState, ColorValue, CoveragePolicy, DensityMetric2D, Document, DocumentCommand,
+    DocumentId, DocumentSession, InvalidationLevel, MarkGeometryResponse, PatternDefinition,
+    PatternDefinitionId, PatternMechanismId, PatternOutputLayerId, Revision, SourceComponent,
     SourcePlacement,
 };
 
@@ -15,14 +15,17 @@ fn session() -> DocumentSession {
             width: 900.0,
             height: 600.0,
         },
-        vec![PatternDefinition {
-            id: PatternDefinitionId(1),
-            name: "minimal".to_owned(),
-            structure: PatternStructure::StraightGrid,
-            output: PatternOutput::CircularMarks,
-            guard_steps: 2,
-            maximum_support_radius: 4.5,
-        }],
+        vec![PatternDefinition::supported_straight_grid(
+            PatternDefinitionId(1),
+            "minimal",
+            PatternMechanismId(1),
+            PatternMechanismId(2),
+            PatternOutputLayerId(1),
+            CoveragePolicy {
+                guard_steps: 2,
+                maximum_support_radius: 4.5,
+            },
+        )],
         vec![ChannelState {
             id: CHANNEL_ID,
             pattern_definition_id: PatternDefinitionId(1),

@@ -6,10 +6,10 @@ use std::{
 };
 use toniator_domain::{
     CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternLayout, ChannelSourceMapping,
-    ChannelState, ChannelTopologyTemplate, ColorValue, DensityMetric2D, Document, DocumentId,
-    DocumentSession, HalftoneChannelModel, MarkGeometryResponse, PatternDefinition,
-    PatternDefinitionId, PatternOutput, PatternStructure, SourceComponent, SourcePlacement,
-    SourceReference, SourceReferenceId,
+    ChannelState, ChannelTopologyTemplate, ColorValue, CoveragePolicy, DensityMetric2D, Document,
+    DocumentId, DocumentSession, HalftoneChannelModel, MarkGeometryResponse, PatternDefinition,
+    PatternDefinitionId, PatternMechanismId, PatternOutputLayerId, SourceComponent,
+    SourcePlacement, SourceReference, SourceReferenceId,
 };
 use toniator_engine::{
     EvaluationLimits, EvaluationRequest, ResolvedSource, SourceFormatHint, evaluate_with_limits,
@@ -657,14 +657,17 @@ fn parity_document(
         DocumentId(1),
         CanvasSpec { width, height },
         SourceReference::Assigned(source_id.clone()),
-        vec![PatternDefinition {
-            id: PatternDefinitionId(1),
-            name: "straight-grid".into(),
-            structure: PatternStructure::StraightGrid,
-            output: PatternOutput::CircularMarks,
-            guard_steps: 2,
-            maximum_support_radius: 4.5,
-        }],
+        vec![PatternDefinition::supported_straight_grid(
+            PatternDefinitionId(1),
+            "straight-grid",
+            PatternMechanismId(1),
+            PatternMechanismId(2),
+            PatternOutputLayerId(1),
+            CoveragePolicy {
+                guard_steps: 2,
+                maximum_support_radius: 4.5,
+            },
+        )],
         vec![ChannelState {
             id: ChannelId(1),
             pattern_definition_id: PatternDefinitionId(1),
@@ -990,7 +993,7 @@ fn portable_document_create_validate_render_and_argument_matrix() {
     assert!(validated.status.success());
     assert!(
         String::from_utf8_lossy(&validated.stdout)
-            .contains("container v1, document v1, migrations: empty")
+            .contains("container v1, document v2, migrations: empty")
     );
     let mutual = Command::new(env!("CARGO_BIN_EXE_toniator"))
         .args([

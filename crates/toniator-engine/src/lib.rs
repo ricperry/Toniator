@@ -23,8 +23,9 @@ pub use scheduler::{
 };
 
 use toniator_domain::{
-    CanvasSpec, ChannelId, EvaluationSnapshot, EvaluationToken, PatternOutput, PatternStructure,
-    SourceComponent, SourcePlacement, SourceReference, SourceReferenceId,
+    CanvasSpec, ChannelId, EvaluationSnapshot, EvaluationToken, PatternDefinition,
+    PatternMechanism, PatternOutputLayer, SourceComponent, SourcePlacement, SourceReference,
+    SourceReferenceId,
 };
 use toniator_domain::{
     ChannelPaint, DocumentEvaluationSnapshot, DocumentEvaluationToken, DocumentSession,
@@ -260,10 +261,15 @@ struct FamilyCacheKey {
     rotation: u64,
     translation: (u64, u64),
     guard_steps: u32,
-    structure: u8,
-    output: u8,
+    definition: TypedDefinitionKey,
     maximum_support_radius: u64,
     max_family_candidates: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TypedDefinitionKey {
+    mechanisms: Vec<PatternMechanism>,
+    output_layers: Vec<PatternOutputLayer>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -628,20 +634,13 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
             "evaluation.pattern_definition",
             "channel references a missing pattern definition",
         ))?;
-    if definition.structure != PatternStructure::StraightGrid {
-        return Err(EvaluationError::new(
-            "evaluation.pattern_definition.structure",
-            "unsupported pattern structure",
-        )
-        .into());
-    }
-    if definition.output != PatternOutput::CircularMarks {
-        return Err(EvaluationError::new(
-            "evaluation.pattern_definition.output",
-            "unsupported pattern output",
-        )
-        .into());
-    }
+    let coverage =
+        definition
+            .supported_straight_grid_compatibility()
+            .ok_or(EvaluationError::new(
+                "evaluation.pattern_definition.output",
+                "unsupported typed pattern definition",
+            ))?;
     let response = MarkResponse {
         minimum_size: channel.mark_geometry_response.minimum_size,
         maximum_size: channel.mark_geometry_response.maximum_size,
@@ -679,10 +678,9 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
             channel.layout.translation_x.to_bits(),
             channel.layout.translation_y.to_bits(),
         ),
-        guard_steps: definition.guard_steps,
-        structure: structure_key(definition.structure),
-        output: output_key(definition.output),
-        maximum_support_radius: definition.maximum_support_radius.to_bits(),
+        guard_steps: coverage.guard_steps,
+        definition: typed_definition_key(definition),
+        maximum_support_radius: coverage.maximum_support_radius.to_bits(),
         max_family_candidates: limits.max_family_candidates(),
     };
     let grid = GridInspectRequest {
@@ -691,8 +689,8 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
         rotation_degrees: channel.layout.rotation_degrees,
         translation_x: channel.layout.translation_x,
         translation_y: channel.layout.translation_y,
-        guard_steps: definition.guard_steps,
-        support_radius: definition.maximum_support_radius,
+        guard_steps: coverage.guard_steps,
+        support_radius: coverage.maximum_support_radius,
         max_family_candidates: limits.max_family_candidates(),
     };
     let (family, family_disposition) =
@@ -842,17 +840,10 @@ fn canvas_key(canvas: &CanvasSpec) -> (u64, u64) {
     (canvas.width.to_bits(), canvas.height.to_bits())
 }
 
-fn structure_key(value: PatternStructure) -> u8 {
-    match value {
-        PatternStructure::StraightGrid => 1,
-        PatternStructure::Unsupported => 255,
-    }
-}
-
-fn output_key(value: PatternOutput) -> u8 {
-    match value {
-        PatternOutput::CircularMarks => 1,
-        PatternOutput::Unsupported => 255,
+fn typed_definition_key(value: &PatternDefinition) -> TypedDefinitionKey {
+    TypedDefinitionKey {
+        mechanisms: value.mechanisms.clone(),
+        output_layers: value.output_layers.clone(),
     }
 }
 
@@ -1532,9 +1523,7 @@ fn evaluate_cached_document_impl(
                 "evaluation.pattern_definition",
                 "channel references a missing pattern definition",
             ))?;
-        if definition.structure != PatternStructure::StraightGrid
-            || definition.output != PatternOutput::CircularMarks
-        {
+        if definition.supported_straight_grid_compatibility().is_none() {
             return Err(EvaluationError::new(
                 "evaluation.pattern_definition",
                 "unsupported pattern structure or output",
@@ -1589,15 +1578,15 @@ fn evaluate_cached_document_impl(
                 "evaluation.pattern_definition",
                 "channel references a missing pattern definition",
             ))?;
-        if definition.structure != PatternStructure::StraightGrid
-            || definition.output != PatternOutput::CircularMarks
-        {
+        let coverage = if let Some(coverage) = definition.supported_straight_grid_compatibility() {
+            coverage
+        } else {
             return Err(EvaluationError::new(
                 "evaluation.pattern_definition",
                 "unsupported pattern structure or output",
             )
             .into());
-        }
+        };
         let key = document_family_cache_key(document.canvas(), definition, channel, limits);
         let (family, disposition) = match accepted
             .families
@@ -1616,8 +1605,8 @@ fn evaluate_cached_document_impl(
                             rotation_degrees: channel.layout.rotation_degrees,
                             translation_x: channel.layout.translation_x,
                             translation_y: channel.layout.translation_y,
-                            guard_steps: definition.guard_steps,
-                            support_radius: definition.maximum_support_radius,
+                            guard_steps: coverage.guard_steps,
+                            support_radius: coverage.maximum_support_radius,
                             max_family_candidates: limits.max_family_candidates(),
                         })
                         .map_err(EvaluationError::from_grid)
@@ -1893,8 +1882,7 @@ struct DocumentFamilyContentKey {
     translation: (u64, u64),
     guard_steps: u32,
     support_radius: u64,
-    structure: PatternStructure,
-    output: PatternOutput,
+    definition: TypedDefinitionKey,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1921,10 +1909,9 @@ fn document_family_cache_key(
                 channel.layout.translation_x.to_bits(),
                 channel.layout.translation_y.to_bits(),
             ),
-            guard_steps: definition.guard_steps,
-            support_radius: definition.maximum_support_radius.to_bits(),
-            structure: definition.structure,
-            output: definition.output,
+            guard_steps: definition.coverage.guard_steps,
+            support_radius: definition.coverage.maximum_support_radius.to_bits(),
+            definition: typed_definition_key(definition),
         },
         candidate_limit: limits.max_family_candidates(),
     }
@@ -1993,10 +1980,10 @@ pub(crate) mod test_support {
 
     use toniator_domain::{
         CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternLayout, ChannelSourceMapping,
-        ChannelState, ChannelTopologyTemplate, ColorValue, DensityMetric2D, Document,
-        DocumentCommand, DocumentId, DocumentSession, HalftoneChannelModel, MarkGeometryResponse,
-        PatternDefinition, PatternDefinitionId, PatternOutput, PatternStructure, SourceComponent,
-        SourcePlacement, SourceReference, SourceReferenceId,
+        ChannelState, ChannelTopologyTemplate, ColorValue, CoveragePolicy, DensityMetric2D,
+        Document, DocumentCommand, DocumentId, DocumentSession, HalftoneChannelModel,
+        MarkGeometryResponse, PatternDefinition, PatternDefinitionId, PatternMechanismId,
+        PatternOutputLayerId, SourceComponent, SourcePlacement, SourceReference, SourceReferenceId,
     };
 
     use super::*;
@@ -2023,14 +2010,17 @@ pub(crate) mod test_support {
                 height: 600.0,
             },
             SourceReference::Assigned(source_id.clone()),
-            vec![PatternDefinition {
-                id: PatternDefinitionId(1),
-                name: "straight-grid".to_owned(),
-                structure: PatternStructure::StraightGrid,
-                output: PatternOutput::CircularMarks,
-                guard_steps: 2,
-                maximum_support_radius: 4.5,
-            }],
+            vec![PatternDefinition::supported_straight_grid(
+                PatternDefinitionId(1),
+                "straight-grid",
+                PatternMechanismId(1),
+                PatternMechanismId(2),
+                PatternOutputLayerId(1),
+                CoveragePolicy {
+                    guard_steps: 2,
+                    maximum_support_radius: 4.5,
+                },
+            )],
             vec![ChannelState {
                 id: CHANNEL_ID,
                 pattern_definition_id: PatternDefinitionId(1),
@@ -2407,8 +2397,10 @@ mod cache_key_tests {
             rotation: 17.0_f64.to_bits(),
             translation: (3.25_f64.to_bits(), (-4.5_f64).to_bits()),
             guard_steps: 2,
-            structure: 1,
-            output: 1,
+            definition: TypedDefinitionKey {
+                mechanisms: vec![],
+                output_layers: vec![],
+            },
             maximum_support_radius: 4.5_f64.to_bits(),
             max_family_candidates: EvaluationLimits::DEFAULT_MAX_FAMILY_CANDIDATES,
         };
@@ -2488,8 +2480,10 @@ mod cache_key_tests {
                     rotation: 1,
                     translation: (1, 1),
                     guard_steps: 2,
-                    structure: 1,
-                    output: 1,
+                    definition: TypedDefinitionKey {
+                        mechanisms: vec![],
+                        output_layers: vec![]
+                    },
                     maximum_support_radius: 1,
                     max_family_candidates: 1,
                 },
@@ -2502,8 +2496,10 @@ mod cache_key_tests {
                     rotation: 1,
                     translation: (1, 1),
                     guard_steps: 2,
-                    structure: 1,
-                    output: 1,
+                    definition: TypedDefinitionKey {
+                        mechanisms: vec![],
+                        output_layers: vec![]
+                    },
                     maximum_support_radius: 1,
                     max_family_candidates: 1,
                 },

@@ -14,6 +14,15 @@ pub struct DocumentId(pub u64);
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PatternDefinitionId(pub u64);
 
+/// A stable address for a typed structural mechanism.  These IDs are owned by
+/// the document rather than by an evaluator or a UI draft.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PatternMechanismId(pub u64);
+
+/// A stable address for one ordered typed output layer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PatternOutputLayerId(pub u64);
+
 /// A stable identifier for one structural guide dimension.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GuideDimensionId(pub u64);
@@ -395,33 +404,135 @@ impl ColorValue {
     }
 }
 
-/// The bounded structural family supported by the Stage 3–6 pipeline.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PatternStructure {
-    StraightGrid,
-    /// Reserved malformed/external data case; no evaluator supports it.
-    Unsupported,
+/// Exactly one structural root for a pattern definition.  The currently
+/// supported root deliberately names mechanisms rather than a named artistic
+/// result; later roots are data additions, not renderer branches.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PatternFamily {
+    GuideIntersections {
+        guide_mechanism_id: PatternMechanismId,
+        site_mechanism_id: PatternMechanismId,
+    },
 }
 
-/// The bounded canonical output declaration supported by this pipeline.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PatternOutput {
-    CircularMarks,
-    /// Reserved malformed/external data case; no evaluator supports it.
-    Unsupported,
+/// A typed reusable structural mechanism.  Stage 14 retains only the accepted
+/// straight-guide/intersection meaning; it is intentionally not a node graph.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PatternMechanism {
+    StraightGuides {
+        id: PatternMechanismId,
+    },
+    GuideIntersections {
+        id: PatternMechanismId,
+        guide_mechanism_id: PatternMechanismId,
+    },
 }
 
-/// Structural pattern metadata owned by the authoritative document.
+impl PatternMechanism {
+    pub const fn id(&self) -> PatternMechanismId {
+        match self {
+            Self::StraightGuides { id } | Self::GuideIntersections { id, .. } => *id,
+        }
+    }
+}
+
+/// One ordered typed output layer.  Additional layer variants are deferred;
+/// their absence is a capability failure, never a legacy fallback.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PatternOutputLayer {
+    CircularMarks {
+        id: PatternOutputLayerId,
+        site_mechanism_id: PatternMechanismId,
+    },
+}
+
+impl PatternOutputLayer {
+    pub const fn id(&self) -> PatternOutputLayerId {
+        match self {
+            Self::CircularMarks { id, .. } => *id,
+        }
+    }
+}
+
+/// Structural modulation is a separate typed top-level slot.  The accepted
+/// v1 configuration has no modulation; later additions must remain typed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PatternModulation;
+
+/// Structural coverage planning.  Canvas boundaries remain final-consumer
+/// clipping and are never topology input.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CoveragePolicy {
+    pub guard_steps: u32,
+    pub maximum_support_radius: f64,
+}
+
+/// Structural pattern authority owned by the document.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PatternDefinition {
     pub id: PatternDefinitionId,
     pub name: String,
-    pub structure: PatternStructure,
-    pub output: PatternOutput,
-    pub guard_steps: u32,
-    /// The largest canonical mark radius this structural definition can cover.
-    /// It is a capability, not a transient response default.
-    pub maximum_support_radius: f64,
+    pub family: PatternFamily,
+    pub mechanisms: Vec<PatternMechanism>,
+    pub output_layers: Vec<PatternOutputLayer>,
+    pub modulation: PatternModulation,
+    pub coverage: CoveragePolicy,
+}
+
+impl PatternDefinition {
+    /// Builds the sole Stage 14 adapter configuration.  It is data only: the
+    /// engine asks this definition for typed capability, never for a preset or
+    /// legacy name.
+    pub fn supported_straight_grid(
+        id: PatternDefinitionId,
+        name: impl Into<String>,
+        guide_id: PatternMechanismId,
+        intersections_id: PatternMechanismId,
+        output_id: PatternOutputLayerId,
+        coverage: CoveragePolicy,
+    ) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            family: PatternFamily::GuideIntersections {
+                guide_mechanism_id: guide_id,
+                site_mechanism_id: intersections_id,
+            },
+            mechanisms: vec![
+                PatternMechanism::StraightGuides { id: guide_id },
+                PatternMechanism::GuideIntersections {
+                    id: intersections_id,
+                    guide_mechanism_id: guide_id,
+                },
+            ],
+            output_layers: vec![PatternOutputLayer::CircularMarks {
+                id: output_id,
+                site_mechanism_id: intersections_id,
+            }],
+            modulation: PatternModulation,
+            coverage,
+        }
+    }
+
+    /// The narrow, headless, temporary Stage 14 seam into the accepted
+    /// straight-guide/circular-mark evaluator.  Stage 15 owns generalization.
+    pub fn supported_straight_grid_compatibility(&self) -> Option<&CoveragePolicy> {
+        let PatternFamily::GuideIntersections {
+            guide_mechanism_id,
+            site_mechanism_id: root_site_id,
+        } = self.family;
+        let guides = self.mechanisms.iter().any(|mechanism| {
+            matches!(mechanism, PatternMechanism::StraightGuides { id } if *id == guide_mechanism_id)
+        });
+        let intersections = self.mechanisms.iter().any(|mechanism| {
+            matches!(mechanism, PatternMechanism::GuideIntersections { id, guide_mechanism_id: parent } if *id == root_site_id && *parent == guide_mechanism_id)
+        });
+        let output = self.output_layers.as_slice().iter().all(|layer| {
+            matches!(layer, PatternOutputLayer::CircularMarks { site_mechanism_id, .. } if *site_mechanism_id == root_site_id)
+        });
+        (guides && intersections && output && self.output_layers.len() == 1)
+            .then_some(&self.coverage)
+    }
 }
 
 /// Source state owned by the document, never a filesystem path.
@@ -486,14 +597,17 @@ impl Document {
             minimum_size: 2.0,
             maximum_size: 9.0,
         };
-        let definition = PatternDefinition {
-            id: PatternDefinitionId(1),
-            name: "Straight circular marks".to_owned(),
-            structure: PatternStructure::StraightGrid,
-            output: PatternOutput::CircularMarks,
-            guard_steps: 2,
-            maximum_support_radius: 4.5,
-        };
+        let definition = PatternDefinition::supported_straight_grid(
+            PatternDefinitionId(1),
+            "Straight circular marks",
+            PatternMechanismId(1),
+            PatternMechanismId(2),
+            PatternOutputLayerId(1),
+            CoveragePolicy {
+                guard_steps: 2,
+                maximum_support_radius: 4.5,
+            },
+        );
         let template = ChannelTopologyTemplate {
             pattern_definition_id: definition.id,
             layout,
@@ -666,6 +780,127 @@ impl Document {
         }
     }
 
+    fn definition(&self, id: PatternDefinitionId) -> Option<&PatternDefinition> {
+        self.pattern_definitions
+            .iter()
+            .find(|definition| definition.id == id)
+    }
+
+    fn linked_channels(&self, definition_id: PatternDefinitionId) -> Vec<ChannelId> {
+        match &self.channel_configuration {
+            ChannelConfiguration::Legacy(channels) => channels
+                .iter()
+                .filter(|channel| channel.pattern_definition_id == definition_id)
+                .map(|channel| channel.id)
+                .collect(),
+            ChannelConfiguration::Topology { topology, .. } => topology
+                .channels
+                .iter()
+                .filter(|channel| channel.pattern_definition_id == definition_id)
+                .map(|channel| channel.id)
+                .collect(),
+        }
+    }
+
+    fn allocate_definition_id(&self) -> Result<PatternDefinitionId, ValidationError> {
+        next_id(
+            self.pattern_definitions
+                .iter()
+                .map(|definition| definition.id.0),
+            "pattern_definitions.id",
+        )
+        .map(PatternDefinitionId)
+    }
+
+    fn allocate_mechanism_id(&self) -> Result<PatternMechanismId, ValidationError> {
+        next_id(
+            self.pattern_definitions.iter().flat_map(|definition| {
+                definition
+                    .mechanisms
+                    .iter()
+                    .map(|mechanism| mechanism.id().0)
+            }),
+            "pattern_definitions.mechanisms.id",
+        )
+        .map(PatternMechanismId)
+    }
+
+    fn allocate_output_layer_id(&self) -> Result<PatternOutputLayerId, ValidationError> {
+        next_id(
+            self.pattern_definitions
+                .iter()
+                .flat_map(|definition| definition.output_layers.iter().map(|layer| layer.id().0)),
+            "pattern_definitions.output_layers.id",
+        )
+        .map(PatternOutputLayerId)
+    }
+
+    fn allocate_definition_from_draft(
+        &self,
+        draft: &PatternDefinitionDraft,
+    ) -> Result<PatternDefinition, ValidationError> {
+        validate_definition_draft(draft)?;
+        let id = self.allocate_definition_id()?;
+        let guide_id = self.allocate_mechanism_id()?;
+        let intersection_id = PatternMechanismId(guide_id.0.checked_add(1).ok_or_else(|| {
+            ValidationError::new(
+                "pattern_definitions.mechanisms.id",
+                "document mechanism ID space is exhausted",
+            )
+        })?);
+        if self
+            .pattern_definitions
+            .iter()
+            .flat_map(|definition| definition.mechanisms.iter())
+            .any(|mechanism| mechanism.id() == intersection_id)
+        {
+            return Err(ValidationError::new(
+                "pattern_definitions.mechanisms.id",
+                "document mechanism ID allocation collided",
+            ));
+        }
+        let output_id = self.allocate_output_layer_id()?;
+        Ok(PatternDefinition::supported_straight_grid(
+            id,
+            draft.name.clone(),
+            guide_id,
+            intersection_id,
+            output_id,
+            draft.coverage.clone(),
+        ))
+    }
+
+    fn duplicate_definition(
+        &self,
+        source: &PatternDefinition,
+    ) -> Result<PatternDefinition, ValidationError> {
+        let draft = PatternDefinitionDraft {
+            name: source.name.clone(),
+            coverage: source.coverage.clone(),
+        };
+        self.allocate_definition_from_draft(&draft)
+    }
+
+    fn retarget_channel(&mut self, channel_id: ChannelId, definition_id: PatternDefinitionId) {
+        match &mut self.channel_configuration {
+            ChannelConfiguration::Legacy(channels) => {
+                channels
+                    .iter_mut()
+                    .find(|channel| channel.id == channel_id)
+                    .expect("validated channel")
+                    .pattern_definition_id = definition_id
+            }
+            ChannelConfiguration::Topology { topology, .. } => {
+                topology
+                    .channels
+                    .iter_mut()
+                    .find(|channel| channel.id == channel_id)
+                    .expect("validated channel")
+                    .pattern_definition_id = definition_id
+            }
+        }
+    }
+
     fn legacy_channel_mut(&mut self, channel_id: ChannelId) -> Option<&mut ChannelState> {
         match &mut self.channel_configuration {
             ChannelConfiguration::Legacy(channels) => {
@@ -681,6 +916,8 @@ impl Document {
         validate_positive_finite(self.canvas.height, "canvas.height")?;
 
         let mut definition_ids = HashSet::new();
+        let mut mechanism_ids = HashSet::new();
+        let mut output_layer_ids = HashSet::new();
         for definition in &self.pattern_definitions {
             if !definition_ids.insert(definition.id) {
                 return Err(ValidationError::new(
@@ -694,22 +931,23 @@ impl Document {
                     "pattern definition name must not be empty",
                 ));
             }
-            if definition.structure == PatternStructure::Unsupported {
-                return Err(ValidationError::new(
-                    "pattern_definitions.structure",
-                    "unsupported pattern structure",
-                ));
+            validate_definition(definition)?;
+            for mechanism in &definition.mechanisms {
+                if !mechanism_ids.insert(mechanism.id()) {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.mechanisms",
+                        "mechanism IDs must be unique document-wide",
+                    ));
+                }
             }
-            if definition.output == PatternOutput::Unsupported {
-                return Err(ValidationError::new(
-                    "pattern_definitions.output",
-                    "unsupported pattern output",
-                ));
+            for layer in &definition.output_layers {
+                if !output_layer_ids.insert(layer.id()) {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.output_layers",
+                        "output layer IDs must be unique document-wide",
+                    ));
+                }
             }
-            validate_nonnegative_finite(
-                definition.maximum_support_radius,
-                "pattern_definitions.maximum_support_radius",
-            )?;
         }
 
         match &self.channel_configuration {
@@ -756,7 +994,45 @@ impl Document {
         if let DocumentCommand::ReplaceChannelTopology { topology, .. } = command {
             result.affected_channels = affected_topology_channels(self.channel_ids(), topology);
         }
+        if let DocumentCommand::EditSharedPatternDefinition { definition_id, .. } = command {
+            result.affected_channels = self.linked_channels(*definition_id);
+        }
         Ok((candidate, result))
+    }
+}
+
+fn next_id(values: impl Iterator<Item = u64>, path: &'static str) -> Result<u64, ValidationError> {
+    let maximum = values.max().unwrap_or(0);
+    maximum
+        .checked_add(1)
+        .ok_or_else(|| ValidationError::new(path, "document ID space is exhausted"))
+}
+
+fn validate_definition_draft(draft: &PatternDefinitionDraft) -> Result<(), ValidationError> {
+    if draft.name.trim().is_empty() {
+        return Err(ValidationError::new(
+            "pattern_definitions.name",
+            "pattern definition name must not be empty",
+        ));
+    }
+    validate_nonnegative_finite(
+        draft.coverage.maximum_support_radius,
+        "pattern_definitions.coverage.maximum_support_radius",
+    )
+}
+
+fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefinitionEdit) {
+    match edit {
+        PatternDefinitionEdit::SetCoverage { coverage } => definition.coverage = coverage.clone(),
+    }
+}
+
+fn validate_definition_edit(edit: &PatternDefinitionEdit) -> Result<(), ValidationError> {
+    match edit {
+        PatternDefinitionEdit::SetCoverage { coverage } => validate_nonnegative_finite(
+            coverage.maximum_support_radius,
+            "pattern_definitions.coverage.maximum_support_radius",
+        ),
     }
 }
 
@@ -796,8 +1072,54 @@ fn validate_channel(
     validate_unit_component(channel.appearance.opacity, "channel.appearance.opacity")?;
     validate_mark_response(
         &channel.mark_geometry_response,
-        Some(definition.maximum_support_radius),
+        Some(definition.coverage.maximum_support_radius),
     )
+}
+
+fn validate_definition(definition: &PatternDefinition) -> Result<(), ValidationError> {
+    validate_nonnegative_finite(
+        definition.coverage.maximum_support_radius,
+        "pattern_definitions.coverage.maximum_support_radius",
+    )?;
+    let mut mechanism_ids = HashSet::new();
+    for mechanism in &definition.mechanisms {
+        if !mechanism_ids.insert(mechanism.id()) {
+            return Err(ValidationError::new(
+                "pattern_definitions.mechanisms",
+                "mechanism IDs must be unique and deterministically ordered",
+            ));
+        }
+    }
+    let mut output_ids = HashSet::new();
+    for layer in &definition.output_layers {
+        if !output_ids.insert(layer.id()) {
+            return Err(ValidationError::new(
+                "pattern_definitions.output_layers",
+                "output layer IDs must be unique and deterministically ordered",
+            ));
+        }
+    }
+    let PatternFamily::GuideIntersections {
+        guide_mechanism_id,
+        site_mechanism_id: root_site_id,
+    } = definition.family;
+    if !matches!(definition.mechanisms.first(), Some(PatternMechanism::StraightGuides { id }) if *id == guide_mechanism_id)
+        || !matches!(definition.mechanisms.get(1), Some(PatternMechanism::GuideIntersections { id, guide_mechanism_id: parent }) if *id == root_site_id && *parent == guide_mechanism_id)
+        || definition.mechanisms.len() != 2
+    {
+        return Err(ValidationError::new(
+            "pattern_definitions.family",
+            "family root requires ordered straight-guide and intersection mechanisms",
+        ));
+    }
+    if !matches!(definition.output_layers.as_slice(), [PatternOutputLayer::CircularMarks { site_mechanism_id, .. }] if *site_mechanism_id == root_site_id)
+    {
+        return Err(ValidationError::new(
+            "pattern_definitions.output_layers",
+            "ordered circular-mark output requires the family intersection mechanism",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_layout(layout: &ChannelPatternLayout) -> Result<(), ValidationError> {
@@ -882,7 +1204,7 @@ fn validate_topology(
         validate_layout(&channel.layout)?;
         validate_mark_response(
             &channel.mark_geometry_response,
-            Some(definition.maximum_support_radius),
+            Some(definition.coverage.maximum_support_radius),
         )?;
         validate_unit_component(channel.opacity, "channel.appearance.opacity")?;
         validate_source_mapping(channel.mapping)?;
@@ -1004,9 +1326,54 @@ pub struct CommandResult {
     pub invalidation: InvalidationLevel,
 }
 
+/// A typed, ID-free definition proposal.  Stage 14 intentionally exposes only
+/// the accepted mechanism composition; IDs are allocated by the document.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PatternDefinitionDraft {
+    pub name: String,
+    pub coverage: CoveragePolicy,
+}
+
+/// A typed structural edit. It has no UI/editor state and can be applied only
+/// through `DocumentHistory`, which records its exact inverse.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PatternDefinitionEdit {
+    SetCoverage { coverage: CoveragePolicy },
+}
+
 /// Supported channel edits in the Stage 2 authoritative command boundary.
 #[derive(Clone, Debug, PartialEq)]
 pub enum DocumentCommand {
+    AddPatternDefinition {
+        definition: PatternDefinitionDraft,
+    },
+    DuplicatePatternDefinition {
+        definition_id: PatternDefinitionId,
+    },
+    RetargetChannelPatternDefinition {
+        channel_id: ChannelId,
+        definition_id: PatternDefinitionId,
+    },
+    RemoveUnreferencedPatternDefinition {
+        definition_id: PatternDefinitionId,
+    },
+    /// The ordinary selected-channel structural path.  A stale base is
+    /// rejected; shared definitions are cloned and only this channel retargets.
+    EditSelectedChannelPatternDefinition {
+        channel_id: ChannelId,
+        /// Immutable editor base. This is command-only lifecycle input, never
+        /// document/persistence state, and detects same-ID in-place edits.
+        base_definition: PatternDefinition,
+        edit: PatternDefinitionEdit,
+    },
+    /// The deliberate sharing path.  It keeps definition/internal IDs stable
+    /// and reports every linked channel in document order.
+    EditSharedPatternDefinition {
+        definition_id: PatternDefinitionId,
+        /// Immutable editor base; see selected-channel edit above.
+        base_definition: PatternDefinition,
+        edit: PatternDefinitionEdit,
+    },
     SetDensity {
         channel_id: ChannelId,
         density: DensityMetric2D,
@@ -1061,6 +1428,21 @@ pub enum DocumentCommand {
 }
 
 impl DocumentCommand {
+    /// Stage 14 definition transitions require the reversible history owner.
+    /// The public `DocumentSession` surface retains its pre-Stage-14 command
+    /// behavior, while `DocumentHistory` uses its private transition path.
+    fn requires_history(&self) -> bool {
+        matches!(
+            self,
+            Self::AddPatternDefinition { .. }
+                | Self::DuplicatePatternDefinition { .. }
+                | Self::RetargetChannelPatternDefinition { .. }
+                | Self::RemoveUnreferencedPatternDefinition { .. }
+                | Self::EditSelectedChannelPatternDefinition { .. }
+                | Self::EditSharedPatternDefinition { .. }
+        )
+    }
+
     fn channel_id(&self) -> ChannelId {
         match self {
             Self::SetDensity { channel_id, .. }
@@ -1072,15 +1454,27 @@ impl DocumentCommand {
             | Self::SetVisibility { channel_id, .. }
             | Self::SetSourceMapping { channel_id, .. }
             | Self::SetTopologySourceMapping { channel_id, .. }
-            | Self::SetChannelPaint { channel_id, .. } => *channel_id,
-            Self::SetSourceReference { .. } | Self::ReplaceChannelTopology { .. } => ChannelId(0),
+            | Self::SetChannelPaint { channel_id, .. }
+            | Self::RetargetChannelPatternDefinition { channel_id, .. }
+            | Self::EditSelectedChannelPatternDefinition { channel_id, .. } => *channel_id,
+            Self::SetSourceReference { .. }
+            | Self::ReplaceChannelTopology { .. }
+            | Self::AddPatternDefinition { .. }
+            | Self::DuplicatePatternDefinition { .. }
+            | Self::RemoveUnreferencedPatternDefinition { .. }
+            | Self::EditSharedPatternDefinition { .. } => ChannelId(0),
         }
     }
 
     fn validate(&self, document: &Document) -> Result<(), ValidationError> {
         if !matches!(
             self,
-            Self::SetSourceReference { .. } | Self::ReplaceChannelTopology { .. }
+            Self::SetSourceReference { .. }
+                | Self::ReplaceChannelTopology { .. }
+                | Self::AddPatternDefinition { .. }
+                | Self::DuplicatePatternDefinition { .. }
+                | Self::RemoveUnreferencedPatternDefinition { .. }
+                | Self::EditSharedPatternDefinition { .. }
         ) && !document.has_channel(self.channel_id())
         {
             return Err(ValidationError::new(
@@ -1090,6 +1484,107 @@ impl DocumentCommand {
         }
 
         match self {
+            Self::AddPatternDefinition { definition } => {
+                document.allocate_definition_from_draft(definition)?;
+                Ok(())
+            }
+            Self::DuplicatePatternDefinition { definition_id } => {
+                let source = document
+                    .definition(*definition_id)
+                    .ok_or(ValidationError::new(
+                        "pattern_definitions.id",
+                        "definition to duplicate does not exist",
+                    ))?;
+                document.duplicate_definition(source)?;
+                Ok(())
+            }
+            Self::RetargetChannelPatternDefinition {
+                channel_id,
+                definition_id,
+            } => {
+                if document.definition(*definition_id).is_none() {
+                    return Err(ValidationError::new(
+                        "channel.pattern.definition_id",
+                        "channel retargets a missing pattern definition",
+                    ));
+                }
+                if document.pattern_definition_id_for(*channel_id) == Some(*definition_id) {
+                    return Err(ValidationError::new(
+                        "channel.pattern.definition_id",
+                        "definition retarget is a semantic no-op",
+                    ));
+                }
+                Ok(())
+            }
+            Self::RemoveUnreferencedPatternDefinition { definition_id } => {
+                if document.definition(*definition_id).is_none() {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.id",
+                        "definition to remove does not exist",
+                    ));
+                }
+                if !document.linked_channels(*definition_id).is_empty() {
+                    return Err(ValidationError::new(
+                        "pattern_definitions",
+                        "referenced pattern definitions cannot be removed",
+                    ));
+                }
+                Ok(())
+            }
+            Self::EditSelectedChannelPatternDefinition {
+                channel_id,
+                base_definition,
+                edit,
+            } => {
+                if document.pattern_definition_id_for(*channel_id) != Some(base_definition.id)
+                    || document.definition(base_definition.id) != Some(base_definition)
+                {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.base",
+                        "selected-channel definition base is stale",
+                    ));
+                }
+                validate_definition_edit(edit)?;
+                let definition = document
+                    .definition(base_definition.id)
+                    .expect("validated reference");
+                let mut edited = definition.clone();
+                apply_definition_edit(&mut edited, edit);
+                if &edited == definition {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.edit",
+                        "structural edit is a semantic no-op",
+                    ));
+                }
+                validate_definition(&edited)
+            }
+            Self::EditSharedPatternDefinition {
+                definition_id,
+                base_definition,
+                edit,
+            } => {
+                if *definition_id != base_definition.id
+                    || document.definition(*definition_id) != Some(base_definition)
+                {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.base",
+                        "shared definition base is stale",
+                    ));
+                }
+                validate_definition_edit(edit)?;
+                let mut edited = document
+                    .definition(*definition_id)
+                    .expect("validated reference")
+                    .clone();
+                apply_definition_edit(&mut edited, edit);
+                if document.definition(*definition_id) == Some(&edited) {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.edit",
+                        "structural edit is a semantic no-op",
+                    ));
+                }
+                validate_definition(&edited)
+            }
             Self::SetDensity { density, .. } => {
                 validate_positive_finite(
                     density.across_x,
@@ -1137,7 +1632,7 @@ impl DocumentCommand {
                     .iter()
                     .find(|definition| definition.id == pattern_definition_id)
                     .expect("document validation keeps channel definitions valid");
-                if response.maximum_size / 2.0 > definition.maximum_support_radius {
+                if response.maximum_size / 2.0 > definition.coverage.maximum_support_radius {
                     return Err(ValidationError::new(
                         "channel.pattern.mark_geometry_response.maximum_size",
                         "maximum_size exceeds the pattern definition support capability",
@@ -1231,6 +1726,80 @@ impl DocumentCommand {
     }
 
     fn apply_to_valid_document(&self, document: &mut Document) {
+        match self {
+            Self::AddPatternDefinition { definition } => {
+                let definition = document
+                    .allocate_definition_from_draft(definition)
+                    .expect("command validation allocated a definition");
+                document.pattern_definitions.push(definition);
+                return;
+            }
+            Self::DuplicatePatternDefinition { definition_id } => {
+                let source = document
+                    .definition(*definition_id)
+                    .expect("validated definition")
+                    .clone();
+                let definition = document
+                    .duplicate_definition(&source)
+                    .expect("validated duplicate allocation");
+                document.pattern_definitions.push(definition);
+                return;
+            }
+            Self::RetargetChannelPatternDefinition {
+                channel_id,
+                definition_id,
+            } => {
+                document.retarget_channel(*channel_id, *definition_id);
+                return;
+            }
+            Self::RemoveUnreferencedPatternDefinition { definition_id } => {
+                document
+                    .pattern_definitions
+                    .retain(|definition| definition.id != *definition_id);
+                return;
+            }
+            Self::EditSelectedChannelPatternDefinition {
+                channel_id,
+                base_definition,
+                edit,
+            } => {
+                if document.linked_channels(base_definition.id).len() > 1 {
+                    let source = document
+                        .definition(base_definition.id)
+                        .expect("validated definition")
+                        .clone();
+                    let mut clone = document
+                        .duplicate_definition(&source)
+                        .expect("validated clone allocation");
+                    apply_definition_edit(&mut clone, edit);
+                    let clone_id = clone.id;
+                    document.pattern_definitions.push(clone);
+                    document.retarget_channel(*channel_id, clone_id);
+                } else {
+                    let definition = document
+                        .pattern_definitions
+                        .iter_mut()
+                        .find(|definition| definition.id == base_definition.id)
+                        .expect("validated definition");
+                    apply_definition_edit(definition, edit);
+                }
+                return;
+            }
+            Self::EditSharedPatternDefinition {
+                definition_id,
+                edit,
+                ..
+            } => {
+                let definition = document
+                    .pattern_definitions
+                    .iter_mut()
+                    .find(|definition| definition.id == *definition_id)
+                    .expect("validated definition");
+                apply_definition_edit(definition, edit);
+                return;
+            }
+            _ => {}
+        }
         if let Self::SetSourceReference { source } = self {
             document.source = source.clone();
             return;
@@ -1310,6 +1879,12 @@ impl DocumentCommand {
 
     fn result(&self) -> CommandResult {
         let invalidation = match self {
+            Self::AddPatternDefinition { .. }
+            | Self::DuplicatePatternDefinition { .. }
+            | Self::RemoveUnreferencedPatternDefinition { .. } => InvalidationLevel::Family,
+            Self::RetargetChannelPatternDefinition { .. }
+            | Self::EditSelectedChannelPatternDefinition { .. }
+            | Self::EditSharedPatternDefinition { .. } => InvalidationLevel::Family,
             Self::SetDensity { .. } | Self::SetRotation { .. } | Self::SetTranslation { .. } => {
                 InvalidationLevel::Family
             }
@@ -1326,6 +1901,14 @@ impl DocumentCommand {
         };
         CommandResult {
             affected_channels: match self {
+                Self::AddPatternDefinition { .. }
+                | Self::DuplicatePatternDefinition { .. }
+                | Self::RemoveUnreferencedPatternDefinition { .. } => Vec::new(),
+                Self::RetargetChannelPatternDefinition { channel_id, .. }
+                | Self::EditSelectedChannelPatternDefinition { channel_id, .. } => {
+                    vec![*channel_id]
+                }
+                Self::EditSharedPatternDefinition { .. } => Vec::new(),
                 Self::SetSourceReference { .. } => self.channels_for_source_change(),
                 Self::ReplaceChannelTopology { topology, .. } => {
                     topology.channels.iter().map(|channel| channel.id).collect()
@@ -1451,6 +2034,25 @@ impl DocumentSession {
         self.revision
     }
     pub fn apply(
+        &mut self,
+        command: &DocumentCommand,
+    ) -> Result<CommandResult, DocumentSessionError> {
+        if command.requires_history() {
+            return Err(DocumentSessionError::HistoryRequired);
+        }
+        self.apply_authoritative(command)
+    }
+
+    /// Applies a definition or legacy command through the only caller that
+    /// records reversible definition transitions.
+    fn apply_from_history(
+        &mut self,
+        command: &DocumentCommand,
+    ) -> Result<CommandResult, DocumentSessionError> {
+        self.apply_authoritative(command)
+    }
+
+    fn apply_authoritative(
         &mut self,
         command: &DocumentCommand,
     ) -> Result<CommandResult, DocumentSessionError> {
@@ -1594,7 +2196,7 @@ impl DocumentHistory {
         command: &DocumentCommand,
     ) -> Result<CommandResult, DocumentSessionError> {
         let before = self.session.snapshot();
-        let result = self.session.apply(command)?;
+        let result = self.session.apply_from_history(command)?;
         let after = self.session.snapshot();
         self.undo.push(HistoryEntry {
             before,
@@ -1639,6 +2241,9 @@ impl DocumentHistory {
 pub enum DocumentSessionError {
     Validation(ValidationError),
     RevisionExhausted,
+    /// Stage 14 definition commands must retain their inverse in
+    /// `DocumentHistory`; public session application is intentionally refused.
+    HistoryRequired,
 }
 impl From<ValidationError> for DocumentSessionError {
     fn from(value: ValidationError) -> Self {
@@ -1650,6 +2255,9 @@ impl fmt::Display for DocumentSessionError {
         match self {
             Self::Validation(error) => error.fmt(f),
             Self::RevisionExhausted => f.write_str("document revision is exhausted"),
+            Self::HistoryRequired => {
+                f.write_str("pattern definition commands require document history")
+            }
         }
     }
 }
@@ -1660,14 +2268,17 @@ mod history_tests {
     use super::*;
 
     fn history() -> DocumentHistory {
-        let definition = PatternDefinition {
-            id: PatternDefinitionId(1),
-            name: "grid".into(),
-            structure: PatternStructure::StraightGrid,
-            output: PatternOutput::CircularMarks,
-            guard_steps: 0,
-            maximum_support_radius: 5.0,
-        };
+        let definition = PatternDefinition::supported_straight_grid(
+            PatternDefinitionId(1),
+            "grid",
+            PatternMechanismId(1),
+            PatternMechanismId(2),
+            PatternOutputLayerId(1),
+            CoveragePolicy {
+                guard_steps: 0,
+                maximum_support_radius: 5.0,
+            },
+        );
         let document = Document::new(
             DocumentId(1),
             CanvasSpec {

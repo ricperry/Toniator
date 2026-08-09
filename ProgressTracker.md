@@ -196,7 +196,7 @@ diagnostic, while AA-off hard edges remain intentional. Automated GTK snapshot
 coverage and native artifact inspection are recorded without claiming
 exhaustive manual GTK dialog/accessibility acceptance.
 
-**Stage 14 — Planned.** Add the one-root mechanism-agnostic typed pattern schema,
+**Stage 14 — Implemented awaiting review.** Add the one-root mechanism-agnostic typed pattern schema,
 stable document/mechanism IDs, atomic definition CRUD, selected-channel
 copy-on-edit, explicit shared-definition editing, immutable-v1 document-schema
 migration to v2, and exact accepted-output parity. No named artistic pattern
