@@ -168,7 +168,7 @@ and redo each advance authority monotonically; failures and empty operations
 are atomic no-ops, branching clears redo, and GTK/persistence/coalescing remain
 out of scope.
 
-**Stage 12 — Accepted awaiting checkpoint.** Add immutable `.toniator` container/document version 1,
+**Stage 12 — Complete at commit `dd7ca56`.** Add immutable `.toniator` container/document version 1,
 IO-owned version-specific DTOs, exact embedded source bundles, deterministic
 version dispatch with no transforming migration yet, atomic save, CLI
 create/validate/render, and frozen PNG/SVG-backed v1 fixtures for the later

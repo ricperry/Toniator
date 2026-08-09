@@ -31,6 +31,17 @@ exact validated document snapshots and preserves monotonic revision authority
 with stale-result rejection after apply, undo, and redo. GTK undo controls and
 history persistence remain planned.
 
+Stage 12 portable `.toniator` persistence is complete at checkpoint `dd7ca56`.
+The headless `toniator-io` boundary writes and loads deterministic version-1
+ZIP containers containing the complete supported document and the exact
+embedded PNG/SVG source bytes. The CLI supports `document create`, container
+`validate -i`, and container `render -i`; direct-source behavior remains
+available. Loading reconstructs a fresh document/history at revision zero,
+and history, dirty state, and filesystem source paths are not serialized.
+The GTK app remains view-only and its Open action accepts direct PNG/SVG
+sources; GTK container New/Open/Save/Save As lifecycle remains planned for
+Stage 13A.
+
 The headless Stage 9E direct-source CLI still requires an explicit
 `--canvas`; source-native direct-still sizing and PNG antialiasing controls
 remain planned.
