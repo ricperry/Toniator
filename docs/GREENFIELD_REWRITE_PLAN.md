@@ -1004,10 +1004,9 @@ parent’s next-stage authorization.
 
 ## Stage 10 — View-only GTK preview
 
-**Status: Accepted awaiting checkpoint.** The user accepted the bounded native
+**Status: Complete at `980af50`.** The user accepted the bounded native
 GTK/libadwaita preview and its intrinsic-document resolution corrections over
-the locally checkpointed Stage 9E complete-document integration path. The
-local implementation checkpoint is pending.
+the locally checkpointed Stage 9E complete-document integration path.
 
 ### Stage 10 implementation contract
 
@@ -1070,10 +1069,10 @@ Manually inspect every model with both original baseline sources and the small
 Reddit regression inputs for sharp resize fitting, backdrop policy, SVG
 diagnostics, and stale-preview rejection during rapid source/viewport changes.
 
-**Stop condition (accepted):** Parent review, automated verification, and user
-visual acceptance are complete. Create the local implementation and tracker
-closeout checkpoints; do not begin Stage 11 automatically or push without
-explicit authorization.
+**Stop condition (complete):** Parent review, automated verification, user
+visual acceptance, and the local implementation checkpoint at `980af50` are
+complete. Do not begin Stage 11 automatically or push without explicit
+authorization.
 
 ## Stage 11 — Headless undo and redo
 

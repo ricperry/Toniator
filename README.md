@@ -8,7 +8,8 @@ cache, channel-model, compositor, and CLI integration stages. It provides
 authoritative RGB, CMYK, and SourceColorAlpha PNG/SVG rendering over both
 baseline sources, with native review artifacts under `target/validation/`.
 
-The accepted Stage 10 view-only GTK/libadwaita preview opens with
+Stage 10's accepted view-only GTK/libadwaita preview is checkpointed at
+`980af50` and opens with
 `toniator-app [PATH]` (zero or one local PNG/SVG path) or its Open action. PNG
 decoded dimensions and SVG intrinsic/`viewBox` dimensions define the
 authoritative canvas and aspect; the app has no canvas override. A visible

@@ -148,15 +148,14 @@ Its accepted artifact template uses channel opacity `1.0`; SourceColorAlpha
 source alpha changes mark size only, leaving positive-alpha SVG marks opaque
 and PNG mark interiors at alpha `1.0` except for antialiased edge coverage.
 
-**Stage 10 — Accepted awaiting checkpoint.** The accepted implementation keeps
+**Stage 10 — Complete at commit `980af50`.** The accepted implementation keeps
 intrinsic PNG/SVG document dimensions and native export raster bytes intact,
 and adds a renderer/engine-derived fitted preview raster target for the GTK
 viewport. It rerasterizes canonical scene geometry at output-pixel resolution,
 preserves cache authority and stale-ticket rejection, and does not move
 geometry/composition into GTK. The app still accepts only optional `PATH`; it
-has no document/canvas override. Parent review, automated verification, and
-user visual acceptance are complete; the local implementation checkpoint is
-pending.
+has no document/canvas override. Parent review, automated verification, user
+visual acceptance, and the local implementation checkpoint are complete.
 
 The preview final consumer clips supersamples to the fitted authoritative canvas
 rectangle, so guard geometry cannot paint letterbox margins; the tracked splash
