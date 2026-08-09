@@ -14,6 +14,7 @@ use toniator_geometry::CanonicalCircleMark;
 
 const SUBPIXEL_GRID: u32 = 8;
 const MAX_PREVIEW_PIXELS: u64 = 64 * 1024 * 1024;
+const MAX_OUTPUT_PIXELS: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RenderScene {
@@ -488,6 +489,48 @@ pub enum RasterBackground {
     Transparent,
 }
 
+/// Final-consumer raster edge policy. This is deliberately absent from the
+/// canonical scene: it affects only PNG consumption.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RasterAntialiasing {
+    On,
+    Off,
+}
+
+/// Checked pixel extent for a final PNG consumer. It maps canonical document
+/// coordinates to output pixels and never changes the scene canvas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct OutputRasterTarget {
+    width: u32,
+    height: u32,
+}
+
+impl OutputRasterTarget {
+    pub fn new(width: u32, height: u32) -> Result<Self, RenderError> {
+        if width == 0 || height == 0 {
+            return Err(RenderError::new(
+                "output.target",
+                "dimensions must be positive",
+            ));
+        }
+        if u64::from(width) * u64::from(height) > MAX_OUTPUT_PIXELS {
+            return Err(RenderError::new(
+                "output.target",
+                "pixel count exceeds output safety limit",
+            ));
+        }
+        Ok(Self { width, height })
+    }
+
+    pub const fn width(self) -> u32 {
+        self.width
+    }
+
+    pub const fn height(self) -> u32 {
+        self.height
+    }
+}
+
 /// Checked, renderer-owned pixel extent for a derived transparent preview.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PreviewRasterTarget {
@@ -571,12 +614,15 @@ pub fn rasterize(
     scene: &RenderScene,
     background: RasterBackground,
 ) -> Result<RasterSurface, RenderError> {
+    // All native document-canvas rasterization crosses the same checked final
+    // consumer boundary as an explicit output target before allocation.
+    let native_target = native_output_target(scene)?;
     if scene.model.is_none() {
         return rasterize_stage5(scene, background);
     }
 
-    let width = integral_dimension(scene.canvas.width)?;
-    let height = integral_dimension(scene.canvas.height)?;
+    let width = native_target.width;
+    let height = native_target.height;
     let layer_pixels = scene
         .layers
         .iter()
@@ -585,6 +631,75 @@ pub fn rasterize(
     let mut linear_pixels = compose_model(scene.model.expect("modeled scene"), &layer_pixels);
     apply_background(&mut linear_pixels, background);
     pixels_from_linear(width, height, linear_pixels)
+}
+
+/// Rerasterizes immutable canonical geometry for a PNG consumer. The
+/// accepted native call remains [`rasterize`] (no target, antialiasing on), so
+/// existing preview and baseline PNG bytes retain their established path.
+pub fn rasterize_output(
+    scene: &RenderScene,
+    background: RasterBackground,
+    target: Option<OutputRasterTarget>,
+    antialiasing: RasterAntialiasing,
+) -> Result<RasterSurface, RenderError> {
+    if target.is_none() && matches!(antialiasing, RasterAntialiasing::On) {
+        return rasterize(scene, background);
+    }
+    let target = match target {
+        Some(target) => target,
+        None => native_output_target(scene)?,
+    };
+    let transform = OutputTransform::for_scene(scene, target);
+    let layers = scene
+        .layers
+        .iter()
+        .map(|layer| rasterize_layer_for_output(layer, target, transform, antialiasing))
+        .collect::<Vec<_>>();
+    let mut pixels = match scene.model {
+        Some(model) => compose_model(model, &layers),
+        None => {
+            let mut destination = vec![
+                background_pixel(RasterBackground::Transparent);
+                target.width as usize * target.height as usize
+            ];
+            for layer in layers {
+                for (destination_pixel, source) in destination.iter_mut().zip(layer) {
+                    source_over(destination_pixel, source);
+                }
+            }
+            destination
+        }
+    };
+    apply_background(&mut pixels, background);
+    pixels_from_linear(target.width, target.height, pixels)
+}
+
+/// Stable consumer-only identity suitable for a PNG cache. It intentionally
+/// includes no source, document, family, realization, or scene mutation: the
+/// scene fingerprint is the complete immutable canonical input.
+pub fn raster_output_identity(
+    scene: &RenderScene,
+    background: RasterBackground,
+    target: Option<OutputRasterTarget>,
+    antialiasing: RasterAntialiasing,
+) -> String {
+    let background = match background {
+        RasterBackground::OpaqueBlack => "black",
+        RasterBackground::OpaqueWhite => "white",
+        RasterBackground::Transparent => "transparent",
+    };
+    let target = target.map_or_else(
+        || "native".to_owned(),
+        |target| format!("{}x{}", target.width, target.height),
+    );
+    let antialiasing = match antialiasing {
+        RasterAntialiasing::On => "on",
+        RasterAntialiasing::Off => "off",
+    };
+    format!(
+        "{}:toniator-raster-output-v1:{background}:{target}:{antialiasing}",
+        scene.identity.scene_fingerprint
+    )
 }
 
 /// Rerasterizes canonical scene geometry into a transparent fitted target.
@@ -650,8 +765,9 @@ fn rasterize_stage5(
     scene: &RenderScene,
     background: RasterBackground,
 ) -> Result<RasterSurface, RenderError> {
-    let width = integral_dimension(scene.canvas.width)?;
-    let height = integral_dimension(scene.canvas.height)?;
+    let target = native_output_target(scene)?;
+    let width = target.width;
+    let height = target.height;
     let background = background_pixel(background);
     let mut linear_pixels = vec![background; width as usize * height as usize];
     for layer in &scene.layers {
@@ -671,6 +787,13 @@ fn rasterize_stage5(
         }
     }
     pixels_from_linear(width, height, linear_pixels)
+}
+
+fn native_output_target(scene: &RenderScene) -> Result<OutputRasterTarget, RenderError> {
+    OutputRasterTarget::new(
+        integral_dimension(scene.canvas.width)?,
+        integral_dimension(scene.canvas.height)?,
+    )
 }
 
 fn background_pixel(background: RasterBackground) -> PremultipliedLinearPixel {
@@ -737,6 +860,52 @@ fn rasterize_layer_with_transform(
             layer.mark_paint(index),
             layer.opacity,
             transform,
+        );
+    }
+    pixels
+}
+
+#[derive(Clone, Copy)]
+struct OutputTransform {
+    scale_x: f64,
+    scale_y: f64,
+}
+
+impl OutputTransform {
+    fn for_scene(scene: &RenderScene, target: OutputRasterTarget) -> Self {
+        Self {
+            scale_x: f64::from(target.width) / scene.canvas.width,
+            scale_y: f64::from(target.height) / scene.canvas.height,
+        }
+    }
+}
+
+fn rasterize_layer_for_output(
+    layer: &RenderLayer,
+    target: OutputRasterTarget,
+    transform: OutputTransform,
+    antialiasing: RasterAntialiasing,
+) -> Vec<PremultipliedLinearPixel> {
+    let mut pixels = vec![
+        background_pixel(RasterBackground::Transparent);
+        target.width as usize * target.height as usize
+    ];
+    if !layer.visible {
+        return pixels;
+    }
+    let GeometryOutput::CircularMarks(marks) = &layer.geometry;
+    for (index, mark) in marks.iter().enumerate() {
+        composite_ellipse(
+            &mut pixels,
+            target.width,
+            target.height,
+            mark.center.x * transform.scale_x,
+            mark.center.y * transform.scale_y,
+            mark.radius * transform.scale_x,
+            mark.radius * transform.scale_y,
+            layer.mark_paint(index),
+            layer.opacity,
+            antialiasing,
         );
     }
     pixels
@@ -898,6 +1067,72 @@ fn composite_circle(
             destination.alpha = source_alpha + destination.alpha * remaining;
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn composite_ellipse(
+    pixels: &mut [PremultipliedLinearPixel],
+    width: u32,
+    height: u32,
+    center_x: f64,
+    center_y: f64,
+    radius_x: f64,
+    radius_y: f64,
+    color: &ColorValue,
+    opacity: f64,
+    antialiasing: RasterAntialiasing,
+) {
+    let min_x = (center_x - radius_x - 1.0).floor().max(0.0) as u32;
+    let min_y = (center_y - radius_y - 1.0).floor().max(0.0) as u32;
+    let max_x = (center_x + radius_x + 1.0).ceil().min(f64::from(width)) as u32;
+    let max_y = (center_y + radius_y + 1.0).ceil().min(f64::from(height)) as u32;
+    for y in min_y..max_y {
+        for x in min_x..max_x {
+            let coverage =
+                ellipse_coverage(center_x, center_y, radius_x, radius_y, x, y, antialiasing);
+            if coverage == 0.0 {
+                continue;
+            }
+            let source_alpha = (color.alpha * opacity * coverage).clamp(0.0, 1.0);
+            let destination = &mut pixels[y as usize * width as usize + x as usize];
+            let remaining = 1.0 - source_alpha;
+            destination.red = color.red * source_alpha + destination.red * remaining;
+            destination.green = color.green * source_alpha + destination.green * remaining;
+            destination.blue = color.blue * source_alpha + destination.blue * remaining;
+            destination.alpha = source_alpha + destination.alpha * remaining;
+        }
+    }
+}
+
+fn ellipse_coverage(
+    center_x: f64,
+    center_y: f64,
+    radius_x: f64,
+    radius_y: f64,
+    x: u32,
+    y: u32,
+    antialiasing: RasterAntialiasing,
+) -> f64 {
+    if radius_x <= 0.0 || radius_y <= 0.0 {
+        return 0.0;
+    }
+    let samples = match antialiasing {
+        RasterAntialiasing::On => SUBPIXEL_GRID,
+        RasterAntialiasing::Off => 1,
+    };
+    let mut inside = 0_u32;
+    for sample_y in 0..samples {
+        for sample_x in 0..samples {
+            let point_x = f64::from(x) + (f64::from(sample_x) + 0.5) / f64::from(samples);
+            let point_y = f64::from(y) + (f64::from(sample_y) + 0.5) / f64::from(samples);
+            let dx = (point_x - center_x) / radius_x;
+            let dy = (point_y - center_y) / radius_y;
+            if dx.mul_add(dx, dy * dy) <= 1.0 {
+                inside += 1;
+            }
+        }
+    }
+    f64::from(inside) / f64::from(samples * samples)
 }
 
 fn circle_coverage(mark: &CanonicalCircleMark, x: u32, y: u32) -> f64 {

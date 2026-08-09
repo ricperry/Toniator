@@ -40,8 +40,9 @@ use toniator_patterns::{
     realize_source_color_circular_marks,
 };
 pub use toniator_render::{
-    GeometryOutput, PreviewRasterTarget, RasterBackground, RasterSurface, RenderError, RenderLayer,
-    RenderScene, SceneIdentity, encode_png, linear_to_srgb, rasterize, rasterize_preview,
+    GeometryOutput, OutputRasterTarget, PreviewRasterTarget, RasterAntialiasing, RasterBackground,
+    RasterSurface, RenderError, RenderLayer, RenderScene, SceneIdentity, encode_png,
+    linear_to_srgb, raster_output_identity, rasterize, rasterize_output, rasterize_preview,
     srgb_to_linear, write_svg,
 };
 use toniator_sampling::decode_source;

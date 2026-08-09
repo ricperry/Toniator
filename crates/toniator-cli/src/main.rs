@@ -13,9 +13,10 @@ use toniator_domain::{
 };
 use toniator_engine::{
     CanonicalCircleMark, EvaluationLimits, GridError, GridInspectRequest, MarkResponse,
-    MarksInspectError, MarksInspectRequest, Point2, RasterBackground, ResolvedSource, SiteId,
-    SiteScope, SourceFormat, SourceFormatHint, SvgTextDiagnostic, encode_png, evaluate_with_limits,
-    inspect_circular_marks, inspect_straight_grid, write_svg,
+    MarksInspectError, MarksInspectRequest, Point2, RasterAntialiasing, RasterBackground,
+    ResolvedSource, SiteId, SiteScope, SourceFormat, SourceFormatHint, SvgTextDiagnostic,
+    encode_png, evaluate_with_limits, inspect_circular_marks, inspect_straight_grid,
+    resolve_source_identity, write_svg,
 };
 use toniator_io::{
     EmbeddedSource, EmbeddedSourceFormat, SourceBundle, load as load_document,
@@ -212,6 +213,9 @@ struct RenderArgs {
     /// Consumer-only PNG backing. SVG remains transparent.
     #[arg(long, value_enum, default_value_t = CliBackground::Transparent)]
     background: CliBackground,
+    /// PNG edge rasterization. This never affects document evaluation or SVG.
+    #[arg(long, value_enum, default_value_t = CliAntialiasing::On)]
+    antialiasing: CliAntialiasing,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -249,12 +253,27 @@ enum CliBackground {
     White,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CliAntialiasing {
+    On,
+    Off,
+}
+
 impl From<CliBackground> for RasterBackground {
     fn from(value: CliBackground) -> Self {
         match value {
             CliBackground::Transparent => Self::Transparent,
             CliBackground::Black => Self::OpaqueBlack,
             CliBackground::White => Self::OpaqueWhite,
+        }
+    }
+}
+
+impl From<CliAntialiasing> for RasterAntialiasing {
+    fn from(value: CliAntialiasing) -> Self {
+        match value {
+            CliAntialiasing::On => Self::On,
+            CliAntialiasing::Off => Self::Off,
         }
     }
 }
@@ -558,17 +577,29 @@ fn render(arguments: RenderArgs) -> Result<(), CliError> {
             ),
             EvaluationLimits::new(arguments.max_family_candidates)?,
         )?;
-        return write_render_result(&arguments.output, format, arguments.background, &result);
+        return write_render_result(
+            &arguments.output,
+            format,
+            arguments.background,
+            arguments.antialiasing.into(),
+            &result,
+        );
     }
     let source_format = source_hint(&arguments.input)?;
     let source_bytes = std::fs::read(&arguments.input)
         .map_err(|_| CliError::new("source", "could not read source file"))?;
+    let source_identity = resolve_source_identity(&source_bytes, source_format)?;
     let source_reference = SourceReferenceId::new("cli-input-1")?;
+    let canvas = match arguments.canvas.as_deref() {
+        Some(value) => parse_canvas(value)?,
+        None => CanvasSpec {
+            width: f64::from(source_identity.width),
+            height: f64::from(source_identity.height),
+        },
+    };
     let document = build_document(
         source_reference.clone(),
-        parse_canvas(arguments.canvas.as_deref().ok_or_else(|| {
-            CliError::new("canvas", "--canvas is required for direct-source rendering")
-        })?)?,
+        canvas,
         arguments
             .channel_model
             .ok_or_else(|| {
@@ -636,22 +667,32 @@ fn render(arguments: RenderArgs) -> Result<(), CliError> {
         ),
         EvaluationLimits::new(arguments.max_family_candidates)?,
     )?;
-    write_render_result(&arguments.output, format, arguments.background, &result)
+    write_render_result(
+        &arguments.output,
+        format,
+        arguments.background,
+        arguments.antialiasing.into(),
+        &result,
+    )
 }
 
 fn write_render_result(
     output: &PathBuf,
     format: OutputFormat,
     background: CliBackground,
+    antialiasing: RasterAntialiasing,
     result: &toniator_engine::EvaluationResult,
 ) -> Result<(), CliError> {
     match format {
         OutputFormat::Png => {
             let background = background.into();
-            let raster = if matches!(background, RasterBackground::Transparent) {
+            let raster = if matches!(background, RasterBackground::Transparent)
+                && matches!(antialiasing, RasterAntialiasing::On)
+            {
                 result.raster().clone()
             } else {
-                toniator_engine::rasterize(result.scene(), background).map_err(render_error)?
+                toniator_engine::rasterize_output(result.scene(), background, None, antialiasing)
+                    .map_err(render_error)?
             };
             let png = encode_png(&raster).map_err(render_error)?;
             std::fs::write(output, png)

@@ -23,8 +23,10 @@ use toniator_domain::{
     DocumentSession, HalftoneChannelModel, SourceReference, SourceReferenceId,
 };
 use toniator_engine::{
-    EvaluationRequest, EvaluationScheduler, RasterSurface, ResolvedSource, SourceFormatHint,
-    SourceIdentity, resolve_source_identity,
+    EvaluationLimits, EvaluationRequest, EvaluationScheduler, OutputRasterTarget,
+    RasterAntialiasing, RasterBackground, RasterSurface, ResolvedSource, SourceFormatHint,
+    SourceIdentity, encode_png, evaluate_with_limits, rasterize_output, resolve_source_identity,
+    write_svg,
 };
 use toniator_io::{
     EmbeddedSource, EmbeddedSourceFormat, SourceBundle, load as load_container,
@@ -43,11 +45,13 @@ const OPEN_FILTER_LABELS: [&str; 3] = [
     "SVG artwork",
 ];
 const SAVE_FILTER_LABEL: &str = "Toniator documents (.toniator)";
-const LIFECYCLE_BUTTONS: [(&str, &str, &str); 5] = [
+const EXPORT_FILTER_LABELS: [&str; 2] = ["PNG image", "SVG vector image"];
+const LIFECYCLE_BUTTONS: [(&str, &str, &str); 6] = [
     ("_New", "app.new", "New document (Ctrl+N)"),
     ("_Open", "app.open", "Open a document or artwork (Ctrl+O)"),
     ("_Save", "app.save", "Save document (Ctrl+S)"),
     ("Save _As", "app.save-as", "Save document as (Ctrl+Shift+S)"),
+    ("_Export", "app.export", "Export PNG or SVG (Ctrl+E)"),
     ("_Close", "app.close", "Close document (Ctrl+W)"),
 ];
 
@@ -357,6 +361,7 @@ struct UiPolicy {
     close_enabled: bool,
     save_enabled: bool,
     save_as_enabled: bool,
+    export_enabled: bool,
     selector_enabled: bool,
     title: String,
 }
@@ -366,6 +371,20 @@ enum SaveRoute {
     Unavailable,
     Existing(PathBuf),
     SaveAs,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExportFormat {
+    Png,
+    Svg,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ExportSettings {
+    format: ExportFormat,
+    background: RasterBackground,
+    antialiasing: RasterAntialiasing,
+    output_target: Option<OutputRasterTarget>,
 }
 
 fn save_route(workspace: Option<&Workspace>) -> SaveRoute {
@@ -378,8 +397,13 @@ fn save_route(workspace: Option<&Workspace>) -> SaveRoute {
     }
 }
 
-fn ui_policy(workspace: Option<&Workspace>, loading: bool, saving: bool) -> UiPolicy {
-    let busy = loading || saving;
+fn ui_policy(
+    workspace: Option<&Workspace>,
+    loading: bool,
+    saving: bool,
+    exporting: bool,
+) -> UiPolicy {
+    let busy = loading || saving || exporting;
     let can_save = workspace.is_some_and(Workspace::can_save) && !busy;
     UiPolicy {
         new_enabled: !busy,
@@ -387,7 +411,9 @@ fn ui_policy(workspace: Option<&Workspace>, loading: bool, saving: bool) -> UiPo
         close_enabled: workspace.is_some() && !busy,
         save_enabled: can_save,
         save_as_enabled: can_save,
+        export_enabled: can_save,
         selector_enabled: !loading
+            && !exporting
             && workspace.is_some_and(|workspace| workspace.source_presentation.is_some()),
         title: workspace.map_or_else(|| "Toniator".to_owned(), Workspace::title),
     }
@@ -442,6 +468,12 @@ struct PendingSave {
     after: Option<LifecycleAction>,
 }
 
+struct PendingExport {
+    generation: u64,
+    workspace_generation: u64,
+    receiver: Receiver<Result<(), String>>,
+}
+
 /// App-owned lifecycle identity paired with an engine scheduler ticket.  The
 /// scheduler remains authoritative for ticket/revision/cache acceptance; this
 /// merely prevents two distinct revision-zero workspaces from looking equal to
@@ -486,6 +518,7 @@ struct Actions {
     open: gio::SimpleAction,
     save: gio::SimpleAction,
     save_as: gio::SimpleAction,
+    export: gio::SimpleAction,
     close: gio::SimpleAction,
 }
 
@@ -494,6 +527,7 @@ struct AppState {
     workspace: Option<Workspace>,
     pending_load: Option<PendingLoad>,
     pending_save: Option<PendingSave>,
+    pending_export: Option<PendingExport>,
     generation: u64,
     workspace_generation: u64,
     preview_submission: Option<PreviewSubmission>,
@@ -603,6 +637,7 @@ fn build_window(app: &adw::Application, initial_path: Option<PathBuf>) {
         open: gio::SimpleAction::new("open", None),
         save: gio::SimpleAction::new("save", None),
         save_as: gio::SimpleAction::new("save-as", None),
+        export: gio::SimpleAction::new("export", None),
         close: gio::SimpleAction::new("close", None),
     };
     for action in [
@@ -610,6 +645,7 @@ fn build_window(app: &adw::Application, initial_path: Option<PathBuf>) {
         &actions.open,
         &actions.save,
         &actions.save_as,
+        &actions.export,
         &actions.close,
     ] {
         app.add_action(action);
@@ -618,12 +654,14 @@ fn build_window(app: &adw::Application, initial_path: Option<PathBuf>) {
     app.set_accels_for_action("app.open", &["<Primary>o"]);
     app.set_accels_for_action("app.save", &["<Primary>s"]);
     app.set_accels_for_action("app.save-as", &["<Primary><Shift>s"]);
+    app.set_accels_for_action("app.export", &["<Primary>e"]);
     app.set_accels_for_action("app.close", &["<Primary>w"]);
     let state = Rc::new(RefCell::new(AppState {
         scheduler: EvaluationScheduler::new().expect("failed to start evaluation scheduler"),
         workspace: None,
         pending_load: None,
         pending_save: None,
+        pending_export: None,
         generation: 0,
         workspace_generation: 0,
         preview_submission: None,
@@ -692,6 +730,11 @@ fn connect_actions(state: &Rc<RefCell<AppState>>) {
         let state = Rc::clone(state);
         let action = state.borrow().actions.save_as.clone();
         action.connect_activate(move |_, _| choose_save_as(&state, None));
+    }
+    {
+        let state = Rc::clone(state);
+        let action = state.borrow().actions.export.clone();
+        action.connect_activate(move |_, _| choose_export(&state));
     }
 }
 
@@ -861,6 +904,204 @@ fn save_filters() -> gio::ListStore {
     filters
 }
 
+fn choose_export(state: &Rc<RefCell<AppState>>) {
+    if !state
+        .borrow()
+        .workspace
+        .as_ref()
+        .is_some_and(Workspace::can_save)
+    {
+        show_error(
+            &mut state.borrow_mut(),
+            "Export requires an open source-backed document.".to_owned(),
+        );
+        return;
+    }
+    let dialog = gtk::FileDialog::new();
+    dialog.set_title("Export final consumer output");
+    dialog.set_filters(Some(&export_filters()));
+    let initial_name = suggested_export_filename(
+        state
+            .borrow()
+            .workspace
+            .as_ref()
+            .expect("checked workspace"),
+        ExportFormat::Png,
+    );
+    dialog.set_initial_name(Some(&initial_name));
+    let state = Rc::clone(state);
+    let window = state.borrow().window.clone();
+    dialog.save(Some(&window), None::<&gio::Cancellable>, move |result| {
+        let Ok(file) = result else { return };
+        let Some(path) = file.path() else { return };
+        let format = match export_format_for_path(&path) {
+            Ok(format) => format,
+            Err(error) => {
+                show_error(&mut state.borrow_mut(), error);
+                return;
+            }
+        };
+        match format {
+            ExportFormat::Png => choose_png_export_options(&state, path),
+            ExportFormat::Svg => start_export(
+                &state,
+                path,
+                ExportSettings {
+                    format,
+                    background: RasterBackground::Transparent,
+                    antialiasing: RasterAntialiasing::On,
+                    output_target: None,
+                },
+            ),
+        }
+    });
+}
+
+fn export_filters() -> gio::ListStore {
+    let png = gtk::FileFilter::new();
+    png.set_name(Some(EXPORT_FILTER_LABELS[0]));
+    png.add_mime_type("image/png");
+    png.add_pattern("*.png");
+    let svg = gtk::FileFilter::new();
+    svg.set_name(Some(EXPORT_FILTER_LABELS[1]));
+    svg.add_mime_type("image/svg+xml");
+    svg.add_pattern("*.svg");
+    let filters = gio::ListStore::new::<gtk::FileFilter>();
+    filters.append(&png);
+    filters.append(&svg);
+    filters
+}
+
+#[allow(deprecated)] // GTK 4.10's lightweight custom-content dialog remains available on Fedora.
+fn choose_png_export_options(state: &Rc<RefCell<AppState>>, path: PathBuf) {
+    let dialog = gtk::Dialog::builder()
+        .title("PNG export options")
+        .modal(true)
+        .transient_for(&state.borrow().window)
+        .build();
+    dialog.add_button("_Cancel", gtk::ResponseType::Cancel);
+    dialog.add_button("_Export", gtk::ResponseType::Accept);
+    dialog.set_default_response(gtk::ResponseType::Accept);
+    let content = dialog.content_area();
+    content.set_spacing(12);
+    content.set_margin_top(18);
+    content.set_margin_bottom(18);
+    content.set_margin_start(18);
+    content.set_margin_end(18);
+    let grid = gtk::Grid::builder()
+        .row_spacing(12)
+        .column_spacing(12)
+        .build();
+    let background_label = gtk::Label::new(Some("_Background"));
+    background_label.set_use_underline(true);
+    background_label.set_halign(gtk::Align::Start);
+    let background = gtk::DropDown::from_strings(&["Transparent", "Black", "White"]);
+    background.set_tooltip_text(Some("PNG-only final-consumer backing"));
+    background_label.set_mnemonic_widget(Some(&background));
+    let antialiasing_label = gtk::Label::new(Some("_Antialiasing"));
+    antialiasing_label.set_use_underline(true);
+    antialiasing_label.set_halign(gtk::Align::Start);
+    let antialiasing = gtk::DropDown::from_strings(&["On", "Off"]);
+    antialiasing.set_tooltip_text(Some("PNG edge rasterization"));
+    antialiasing_label.set_mnemonic_widget(Some(&antialiasing));
+    let dimensions_label = gtk::Label::new(Some("Output _size"));
+    dimensions_label.set_use_underline(true);
+    dimensions_label.set_halign(gtk::Align::Start);
+    let dimensions = gtk::Entry::new();
+    dimensions.set_placeholder_text(Some("Document canvas (for example 1200x800)"));
+    dimensions.set_tooltip_text(Some("Optional PNG pixel dimensions"));
+    dimensions_label.set_mnemonic_widget(Some(&dimensions));
+    grid.attach(&background_label, 0, 0, 1, 1);
+    grid.attach(&background, 1, 0, 1, 1);
+    grid.attach(&antialiasing_label, 0, 1, 1, 1);
+    grid.attach(&antialiasing, 1, 1, 1, 1);
+    grid.attach(&dimensions_label, 0, 2, 1, 1);
+    grid.attach(&dimensions, 1, 2, 1, 1);
+    content.append(&grid);
+    let state = Rc::clone(state);
+    dialog.connect_response(move |dialog, response| {
+        if response == gtk::ResponseType::Accept {
+            let output_target = match parse_output_target(dimensions.text().as_str()) {
+                Ok(target) => target,
+                Err(error) => {
+                    show_error(&mut state.borrow_mut(), error);
+                    dialog.close();
+                    return;
+                }
+            };
+            let background = match background.selected() {
+                1 => RasterBackground::OpaqueBlack,
+                2 => RasterBackground::OpaqueWhite,
+                _ => RasterBackground::Transparent,
+            };
+            let antialiasing = if antialiasing.selected() == 1 {
+                RasterAntialiasing::Off
+            } else {
+                RasterAntialiasing::On
+            };
+            start_export(
+                &state,
+                path.clone(),
+                ExportSettings {
+                    format: ExportFormat::Png,
+                    background,
+                    antialiasing,
+                    output_target,
+                },
+            );
+        }
+        dialog.close();
+    });
+    dialog.present();
+}
+
+fn suggested_export_filename(workspace: &Workspace, format: ExportFormat) -> String {
+    let stem = workspace
+        .display_name
+        .strip_suffix(".toniator")
+        .or_else(|| {
+            workspace
+                .display_name
+                .rsplit_once('.')
+                .map(|(stem, _)| stem)
+        })
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or("Untitled");
+    let extension = match format {
+        ExportFormat::Png => "png",
+        ExportFormat::Svg => "svg",
+    };
+    format!("{stem}.{extension}")
+}
+
+fn export_format_for_path(path: &Path) -> Result<ExportFormat, String> {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some(extension) if extension.eq_ignore_ascii_case("png") => Ok(ExportFormat::Png),
+        Some(extension) if extension.eq_ignore_ascii_case("svg") => Ok(ExportFormat::Svg),
+        _ => Err("export.format: choose a .png or .svg filename".to_owned()),
+    }
+}
+
+fn parse_output_target(value: &str) -> Result<Option<OutputRasterTarget>, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let (width, height) = value
+        .split_once('x')
+        .or_else(|| value.split_once('X'))
+        .ok_or_else(|| "export.dimensions: use WIDTHxHEIGHT".to_owned())?;
+    let width = width
+        .parse::<u32>()
+        .map_err(|_| "export.dimensions: width must be a positive integer".to_owned())?;
+    let height = height
+        .parse::<u32>()
+        .map_err(|_| "export.dimensions: height must be a positive integer".to_owned())?;
+    OutputRasterTarget::new(width, height)
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
 fn suggested_filename(workspace: &Workspace) -> String {
     let stem = workspace
         .display_name
@@ -978,9 +1219,87 @@ fn start_save_to(state: &Rc<RefCell<AppState>>, path: PathBuf, after: Option<Lif
     }
 }
 
+fn start_export(state: &Rc<RefCell<AppState>>, path: PathBuf, settings: ExportSettings) {
+    let (snapshot, presentation, generation, workspace_generation) = {
+        let mut state = state.borrow_mut();
+        if state.pending_export.is_some() {
+            return;
+        }
+        let Some(workspace) = state.workspace.as_ref() else {
+            return;
+        };
+        let Some(presentation) = workspace.source_presentation.clone() else {
+            show_error(&mut state, "Export requires an active source.".to_owned());
+            return;
+        };
+        (
+            workspace.snapshot(),
+            presentation,
+            state.generation,
+            state.workspace_generation,
+        )
+    };
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = sender.send(export_snapshot(snapshot, presentation, path, settings));
+    });
+    let mut state = state.borrow_mut();
+    state.pending_export = Some(PendingExport {
+        generation,
+        workspace_generation,
+        receiver,
+    });
+    sync_ui(&mut state);
+}
+
+fn export_snapshot(
+    snapshot: SavedContent,
+    presentation: SourcePresentation,
+    path: PathBuf,
+    settings: ExportSettings,
+) -> Result<(), String> {
+    let source = snapshot
+        .sources
+        .get(&presentation.id)
+        .ok_or_else(|| "source.document: source bundle is missing the active source".to_owned())?;
+    let session = DocumentSession::new(snapshot.document).map_err(|error| error.to_string())?;
+    let result = evaluate_with_limits(
+        EvaluationRequest::new(
+            session.document_evaluation_snapshot(),
+            ResolvedSource::new(
+                presentation.id,
+                Arc::<[u8]>::from(source.bytes()),
+                presentation.format,
+            )
+            .map_err(|error| error.to_string())?,
+        ),
+        EvaluationLimits::default(),
+    )
+    .map_err(|error| error.to_string())?;
+    match settings.format {
+        ExportFormat::Png => {
+            let surface = rasterize_output(
+                result.scene(),
+                settings.background,
+                settings.output_target,
+                settings.antialiasing,
+            )
+            .map_err(|error| error.to_string())?;
+            fs::write(
+                &path,
+                encode_png(&surface).map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| format!("output.write: could not write {}: {error}", path.display()))
+        }
+        ExportFormat::Svg => fs::write(&path, write_svg(result.scene()))
+            .map_err(|error| format!("output.write: could not write {}: {error}", path.display())),
+    }
+}
+
 fn poll(state: &Rc<RefCell<AppState>>) -> glib::ControlFlow {
     poll_load(state);
     poll_save(state);
+    poll_export(state);
     {
         let mut state = state.borrow_mut();
         if state
@@ -1035,6 +1354,33 @@ fn poll(state: &Rc<RefCell<AppState>>) -> glib::ControlFlow {
         Err(error) => show_error(&mut state.borrow_mut(), error.to_string()),
     }
     glib::ControlFlow::Continue
+}
+
+fn poll_export(state: &Rc<RefCell<AppState>>) {
+    let pending = state.borrow_mut().pending_export.take();
+    let Some(pending) = pending else { return };
+    match pending.receiver.try_recv() {
+        Ok(result) => {
+            let mut state = state.borrow_mut();
+            if is_current_generation(state.generation, pending.generation)
+                && is_current_generation(state.workspace_generation, pending.workspace_generation)
+                && let Err(error) = result
+            {
+                show_error(&mut state, format!("export.failed: {error}"));
+            }
+            sync_ui(&mut state);
+        }
+        Err(TryRecvError::Empty) => state.borrow_mut().pending_export = Some(pending),
+        Err(TryRecvError::Disconnected) => {
+            let mut state = state.borrow_mut();
+            if is_current_generation(state.generation, pending.generation)
+                && is_current_generation(state.workspace_generation, pending.workspace_generation)
+            {
+                show_error(&mut state, "Export stopped unexpectedly.".to_owned());
+            }
+            sync_ui(&mut state);
+        }
+    }
 }
 
 fn poll_load(state: &Rc<RefCell<AppState>>) {
@@ -1162,6 +1508,7 @@ fn clear_workspace(state: &mut AppState) {
     state.workspace = None;
     state.pending_load = None;
     state.pending_save = None;
+    state.pending_export = None;
     clear_preview(state);
     state.preview_target = None;
     state.banner.set_revealed(false);
@@ -1390,12 +1737,14 @@ fn sync_ui(state: &mut AppState) {
         state.workspace.as_ref(),
         state.pending_load.is_some(),
         state.pending_save.is_some(),
+        state.pending_export.is_some(),
     );
     state.actions.new.set_enabled(policy.new_enabled);
     state.actions.open.set_enabled(policy.open_enabled);
     state.actions.close.set_enabled(policy.close_enabled);
     state.actions.save.set_enabled(policy.save_enabled);
     state.actions.save_as.set_enabled(policy.save_as_enabled);
+    state.actions.export.set_enabled(policy.export_enabled);
     state.selector.set_sensitive(policy.selector_enabled);
     state.window.set_title(Some(&policy.title));
     state
@@ -1758,9 +2107,10 @@ mod tests {
             ]
         );
         assert_eq!(SAVE_FILTER_LABEL, "Toniator documents (.toniator)");
+        assert_eq!(EXPORT_FILTER_LABELS, ["PNG image", "SVG vector image"]);
         assert_eq!(
             LIFECYCLE_BUTTONS.map(|(label, _, _)| label),
-            ["_New", "_Open", "_Save", "Save _As", "_Close"]
+            ["_New", "_Open", "_Save", "Save _As", "_Export", "_Close"]
         );
         let surface = RasterSurface::new(2, 1, vec![1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
         assert_eq!(
@@ -1776,13 +2126,14 @@ mod tests {
         let untitled = Workspace::from_new().unwrap();
         assert_eq!(untitled.title(), "Untitled — Toniator");
         assert_eq!(
-            ui_policy(None, false, false),
+            ui_policy(None, false, false, false),
             UiPolicy {
                 new_enabled: true,
                 open_enabled: true,
                 close_enabled: false,
                 save_enabled: false,
                 save_as_enabled: false,
+                export_enabled: false,
                 selector_enabled: false,
                 title: "Toniator".into(),
             }
@@ -1794,11 +2145,39 @@ mod tests {
             "raster.png".into(),
         )
         .unwrap();
-        let ready = ui_policy(Some(&direct), false, false);
+        let ready = ui_policy(Some(&direct), false, false, false);
         assert!(ready.save_enabled && ready.save_as_enabled && ready.selector_enabled);
         assert_eq!(ready.title, "raster.png* — Toniator");
-        let saving = ui_policy(Some(&direct), false, true);
+        let saving = ui_policy(Some(&direct), false, true, false);
         assert!(!saving.save_enabled && !saving.save_as_enabled && saving.selector_enabled);
+        let exporting = ui_policy(Some(&direct), false, false, true);
+        assert!(
+            !exporting.new_enabled
+                && !exporting.open_enabled
+                && !exporting.close_enabled
+                && !exporting.save_enabled
+                && !exporting.save_as_enabled
+                && !exporting.export_enabled
+                && !exporting.selector_enabled
+        );
+        assert_eq!(
+            suggested_export_filename(&direct, ExportFormat::Png),
+            "raster.png"
+        );
+        assert_eq!(
+            suggested_export_filename(&direct, ExportFormat::Svg),
+            "raster.svg"
+        );
+        assert_eq!(
+            export_format_for_path(Path::new("output.PNG")),
+            Ok(ExportFormat::Png)
+        );
+        assert_eq!(
+            export_format_for_path(Path::new("output.svg")),
+            Ok(ExportFormat::Svg)
+        );
+        assert!(parse_output_target("96x64").unwrap().is_some());
+        assert!(parse_output_target("96").is_err());
         assert!(matches!(save_route(Some(&direct)), SaveRoute::SaveAs));
         let mut container = load_workspace(&asset("raster-sample-v1.toniator")).unwrap();
         assert_eq!(container.title(), "raster-sample-v1.toniator — Toniator");
@@ -1850,5 +2229,168 @@ mod tests {
             Some(HalftoneChannelModel::Cmyk)
         );
         assert!(!workspace.history.session().accepts_document_evaluation(old));
+    }
+
+    #[test]
+    fn export_uses_immutable_workspace_snapshots_and_keeps_lifecycle_state_unchanged() {
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/validation/stage-13b/app-tests");
+        fs::create_dir_all(&directory).unwrap();
+        for entry in fs::read_dir(&directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_file() {
+                fs::remove_file(path).unwrap();
+            }
+        }
+        for input in [
+            "raster-sample.png",
+            "vector-sample.svg",
+            "raster-sample-v1.toniator",
+            "vector-sample-v1.toniator",
+        ] {
+            for model in PreviewModel::ALL {
+                let mut workspace = load_workspace(&asset(input)).unwrap();
+                if workspace.source_presentation.is_some() {
+                    replace_model_topology(&mut workspace.history, model).unwrap();
+                }
+                let before = probe(&workspace);
+                let presentation = workspace.source_presentation.clone().unwrap();
+                let source_name = match input {
+                    "raster-sample.png" => "raster-direct",
+                    "vector-sample.svg" => "vector-direct",
+                    "raster-sample-v1.toniator" => "raster-v1",
+                    "vector-sample-v1.toniator" => "vector-v1",
+                    _ => unreachable!("fixed app-test input"),
+                };
+                let model_name = match model {
+                    PreviewModel::Rgb => "rgb",
+                    PreviewModel::Cmyk => "cmyk",
+                    PreviewModel::SourceColorAlpha => "source-color-alpha",
+                };
+                let base = format!("{source_name}-{model_name}");
+                let width = workspace.document().canvas().width as u32;
+                let height = workspace.document().canvas().height as u32;
+                assert_eq!(f64::from(width), workspace.document().canvas().width);
+                assert_eq!(f64::from(height), workspace.document().canvas().height);
+                assert!(width.max(height) >= 900);
+                let target = OutputRasterTarget::new(width, height).unwrap();
+                let png = directory.join(format!("{base}-aa-off.png"));
+                export_snapshot(
+                    workspace.snapshot(),
+                    presentation.clone(),
+                    png.clone(),
+                    ExportSettings {
+                        format: ExportFormat::Png,
+                        background: RasterBackground::Transparent,
+                        antialiasing: RasterAntialiasing::Off,
+                        output_target: Some(target),
+                    },
+                )
+                .unwrap();
+                let bytes = fs::read(&png).unwrap();
+                assert_eq!(png_dimensions(&bytes), (width, height));
+                assert_eq!(probe(&workspace), before);
+
+                if input == "raster-sample.png" {
+                    let aa_on = directory.join(format!("{base}-aa-on.png"));
+                    export_snapshot(
+                        workspace.snapshot(),
+                        presentation.clone(),
+                        aa_on.clone(),
+                        ExportSettings {
+                            format: ExportFormat::Png,
+                            background: RasterBackground::Transparent,
+                            antialiasing: RasterAntialiasing::On,
+                            output_target: Some(target),
+                        },
+                    )
+                    .unwrap();
+                    assert_eq!(png_dimensions(&fs::read(aa_on).unwrap()), (1024, 1024));
+                    assert_eq!(probe(&workspace), before);
+                }
+
+                let svg = directory.join(format!("{base}.svg"));
+                export_snapshot(
+                    workspace.snapshot(),
+                    presentation,
+                    svg.clone(),
+                    ExportSettings {
+                        format: ExportFormat::Svg,
+                        background: RasterBackground::Transparent,
+                        antialiasing: RasterAntialiasing::On,
+                        output_target: None,
+                    },
+                )
+                .unwrap();
+                let svg = fs::read_to_string(svg).unwrap();
+                assert!(svg.contains("<circle "));
+                assert!(svg.contains("<clipPath"));
+                assert_eq!(probe(&workspace), before);
+            }
+        }
+
+        let workspace = load_workspace(&asset("raster-sample-v1.toniator")).unwrap();
+        let before = probe(&workspace);
+        let failure = export_snapshot(
+            workspace.snapshot(),
+            workspace.source_presentation.clone().unwrap(),
+            directory.join("missing-parent/output.png"),
+            ExportSettings {
+                format: ExportFormat::Png,
+                background: RasterBackground::Transparent,
+                antialiasing: RasterAntialiasing::On,
+                output_target: None,
+            },
+        );
+        assert!(failure.is_err());
+        assert_eq!(probe(&workspace), before, "failed export is a no-op");
+        assert!(matches!(
+            lifecycle_completion_policy(9, 8, ()),
+            CompletionInstall::Preserve
+        ));
+
+        let workspace = load_workspace(&asset("vector-sample.svg")).unwrap();
+        let before = probe(&workspace);
+        let default_png = directory.join("default-native.png");
+        export_snapshot(
+            workspace.snapshot(),
+            workspace.source_presentation.clone().unwrap(),
+            default_png.clone(),
+            ExportSettings {
+                format: ExportFormat::Png,
+                background: RasterBackground::OpaqueBlack,
+                antialiasing: RasterAntialiasing::On,
+                output_target: None,
+            },
+        )
+        .unwrap();
+        let default_bytes = fs::read(default_png).unwrap();
+        assert_eq!(png_dimensions(&default_bytes), (900, 620));
+        assert_eq!(probe(&workspace), before);
+        let persisted = directory.join("export-state-absent.toniator");
+        let snapshot = workspace.snapshot();
+        save_container(&persisted, &snapshot.document, &snapshot.sources).unwrap();
+        let persisted_bytes = fs::read(persisted).unwrap();
+        let serialized = String::from_utf8_lossy(&persisted_bytes);
+        for forbidden in [
+            "export",
+            "antialias",
+            "output_target",
+            "preview",
+            "original_path",
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "v1 document JSON must not persist {forbidden}"
+            );
+        }
+    }
+
+    fn png_dimensions(bytes: &[u8]) -> (u32, u32) {
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+        (
+            u32::from_be_bytes(bytes[16..20].try_into().unwrap()),
+            u32::from_be_bytes(bytes[20..24].try_into().unwrap()),
+        )
     }
 }

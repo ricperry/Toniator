@@ -404,6 +404,219 @@ fn render_command(source: &str, output: &std::path::Path, model: &str) -> Comman
     command
 }
 
+fn direct_render_without_canvas(source: &str, output: &Path, model: &str) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_toniator"));
+    command.args([
+        "render",
+        "--input",
+        source,
+        "--output",
+        output.to_str().unwrap(),
+        "--channel-model",
+        model,
+        "--density-x",
+        "90",
+        "--density-y",
+        "60",
+        "--rotation",
+        "17",
+        "--offset-x",
+        "3.25",
+        "--offset-y",
+        "-4.5",
+        "--guard-steps",
+        "2",
+        "--size-min",
+        "2",
+        "--size-max",
+        "9",
+    ]);
+    command
+}
+
+fn png_dimensions(bytes: &[u8]) -> (u32, u32) {
+    assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+    (
+        u32::from_be_bytes(bytes[16..20].try_into().unwrap()),
+        u32::from_be_bytes(bytes[20..24].try_into().unwrap()),
+    )
+}
+
+#[test]
+fn direct_source_intrinsic_canvas_and_png_antialiasing_are_consumer_only() {
+    let directory = temporary_directory("stage-13b-cli");
+    let raster_default = directory.join("raster-default.png");
+    let vector_default = directory.join("vector-default.png");
+    let vector_svg = directory.join("vector-default.svg");
+    for (source, output, dimensions) in [
+        (
+            "../../assets/raster-sample.png",
+            &raster_default,
+            (1024, 1024),
+        ),
+        (
+            "../../assets/vector-sample.svg",
+            &vector_default,
+            (900, 620),
+        ),
+    ] {
+        let output = direct_render_without_canvas(source, output, "rgb")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            png_dimensions(
+                &fs::read(if source.ends_with("png") {
+                    &raster_default
+                } else {
+                    &vector_default
+                })
+                .unwrap()
+            ),
+            dimensions
+        );
+    }
+    let output = direct_render_without_canvas("../../assets/vector-sample.svg", &vector_svg, "rgb")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let svg = fs::read_to_string(&vector_svg).unwrap();
+    assert!(svg.contains("width=\"900\" height=\"620\" viewBox=\"0 0 900 620\""));
+
+    let overridden = directory.join("raster-overridden.png");
+    let mut command =
+        direct_render_without_canvas("../../assets/raster-sample.png", &overridden, "rgb");
+    command.args(["--canvas", "320x180"]);
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(png_dimensions(&fs::read(&overridden).unwrap()), (320, 180));
+
+    let default_aa = directory.join("aa-default.png");
+    let explicit_aa = directory.join("aa-on.png");
+    let hard_edges = directory.join("aa-off.png");
+    for (path, mode) in [
+        (&default_aa, None),
+        (&explicit_aa, Some("on")),
+        (&hard_edges, Some("off")),
+    ] {
+        let mut command = direct_render_without_canvas(
+            "../../assets/raster-sample.png",
+            path,
+            "source-color-alpha",
+        );
+        if let Some(mode) = mode {
+            command.args(["--antialiasing", mode]);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_eq!(
+        fs::read(&default_aa).unwrap(),
+        fs::read(&explicit_aa).unwrap()
+    );
+    assert_ne!(
+        fs::read(&default_aa).unwrap(),
+        fs::read(&hard_edges).unwrap()
+    );
+    let invalid = direct_render_without_canvas(
+        "../../assets/raster-sample.png",
+        &directory.join("invalid.png"),
+        "rgb",
+    )
+    .args(["--antialiasing", "soft"])
+    .output()
+    .unwrap();
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("antialiasing"));
+    let unsafe_output = directory.join("unsafe-output.png");
+    let unsafe_canvas = Command::new(env!("CARGO_BIN_EXE_toniator"))
+        .args([
+            "render",
+            "--input",
+            "../../assets/raster-sample.png",
+            "--output",
+            unsafe_output.to_str().unwrap(),
+            "--channel-model",
+            "rgb",
+            "--canvas",
+            "67108865x1",
+            "--density-x",
+            "1",
+            "--density-y",
+            "1",
+            "--rotation",
+            "0",
+            "--offset-x",
+            "0",
+            "--offset-y",
+            "0",
+            "--guard-steps",
+            "0",
+            "--size-min",
+            "2",
+            "--size-max",
+            "2",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(unsafe_canvas.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&unsafe_canvas.stderr).contains("output.target"),
+        "{}",
+        String::from_utf8_lossy(&unsafe_canvas.stderr)
+    );
+    assert!(!unsafe_output.exists(), "unsafe output must not be created");
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn container_render_uses_its_stored_canvas_not_direct_source_defaulting() {
+    let directory = temporary_directory("stage-13b-container");
+    for fixture in ["raster-sample-v1.toniator", "vector-sample-v1.toniator"] {
+        let output_path = directory.join(format!("{fixture}.png"));
+        let output = Command::new(env!("CARGO_BIN_EXE_toniator"))
+            .args([
+                "render",
+                "--input",
+                &format!("../../assets/{fixture}"),
+                "--output",
+                output_path.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let loaded = load(&baseline_path(fixture)).unwrap();
+        assert_eq!(
+            png_dimensions(&fs::read(output_path).unwrap()),
+            (
+                loaded.document().canvas().width as u32,
+                loaded.document().canvas().height as u32,
+            )
+        );
+    }
+    fs::remove_dir_all(directory).unwrap();
+}
+
 fn temporary_directory(label: &str) -> std::path::PathBuf {
     let directory = std::env::temp_dir().join(format!(
         "toniator-{label}-{}",

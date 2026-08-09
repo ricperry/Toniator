@@ -1346,7 +1346,7 @@ frozen v1 containers. Checkpoint Stage 13A independently.
 
 ## Stage 13B — Dedicated output and export parity
 
-**Status: Planned.** Resolve the two deferred final-consumer requirements after
+**Status: Accepted awaiting checkpoint.** Resolve the two deferred final-consumer requirements after
 document lifecycle and before generalized pattern architecture.
 
 - Direct-source CLI rendering uses decoded/intrinsic PNG dimensions or resolved

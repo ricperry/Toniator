@@ -182,7 +182,7 @@ dirty/savepoint tracking, history state, direct-source/container opening, title
 identity, and atomic error handling. GTK delegates default document creation
 and remains completely ignorant of pattern internals.
 
-**Stage 13B — Planned.** Add the dedicated final-consumer output slice: native
+**Stage 13B — Accepted awaiting checkpoint.** Add the dedicated final-consumer output slice: native
 direct-source CLI sizing with optional explicit canvas, PNG antialiasing on/off,
 and matching GTK PNG/SVG export controls without changing document, preview
 canvas, family, realization, or scene authority.

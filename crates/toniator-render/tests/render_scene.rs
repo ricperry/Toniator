@@ -9,8 +9,9 @@ use toniator_geometry::{
     CanonicalCircleMark, GuideInstanceId, GuideIntersectionProvenance, Point2, SiteId, SiteScope,
 };
 use toniator_render::{
-    GeometryOutput, PreviewRasterTarget, RasterBackground, RasterSurface, RenderLayer, RenderScene,
-    SourceColorCircle, encode_png, linear_to_srgb, rasterize, rasterize_preview, srgb_to_linear,
+    GeometryOutput, OutputRasterTarget, PreviewRasterTarget, RasterAntialiasing, RasterBackground,
+    RasterSurface, RenderLayer, RenderScene, SourceColorCircle, encode_png, linear_to_srgb,
+    raster_output_identity, rasterize, rasterize_output, rasterize_preview, srgb_to_linear,
     write_svg,
 };
 
@@ -153,6 +154,87 @@ fn preview_target_rerasterizes_geometry_without_changing_native_raster() {
     assert!(
         fractional > 0 && fractional < 600,
         "output-space AA must remain a narrow edge band"
+    );
+}
+
+#[test]
+fn png_antialiasing_and_output_target_are_final_consumer_only() {
+    let scene = scene(true, color(1.0, 0.0, 0.0, 1.0), 1.0);
+    let identity = scene.identity().clone();
+    let svg = write_svg(&scene);
+    let accepted = rasterize(&scene, RasterBackground::Transparent).unwrap();
+    let explicit_on = rasterize_output(
+        &scene,
+        RasterBackground::Transparent,
+        None,
+        RasterAntialiasing::On,
+    )
+    .unwrap();
+    let hard_edges = rasterize_output(
+        &scene,
+        RasterBackground::Transparent,
+        None,
+        RasterAntialiasing::Off,
+    )
+    .unwrap();
+    let resized = rasterize_output(
+        &scene,
+        RasterBackground::Transparent,
+        Some(OutputRasterTarget::new(20, 16).unwrap()),
+        RasterAntialiasing::On,
+    )
+    .unwrap();
+    assert_eq!(accepted, explicit_on, "on is the accepted native result");
+    assert_ne!(accepted, hard_edges, "off changes only the final PNG bytes");
+    assert_ne!(
+        raster_output_identity(
+            &scene,
+            RasterBackground::Transparent,
+            None,
+            RasterAntialiasing::On,
+        ),
+        raster_output_identity(
+            &scene,
+            RasterBackground::Transparent,
+            None,
+            RasterAntialiasing::Off,
+        ),
+        "antialiasing is isolated to raster-output cache identity"
+    );
+    assert!(
+        hard_edges
+            .pixels()
+            .chunks_exact(4)
+            .all(|pixel| matches!(pixel[3], 0 | 255)),
+        "off has no fractional edge coverage"
+    );
+    assert_eq!((resized.width(), resized.height()), (20, 16));
+    assert_eq!(scene.identity(), &identity);
+    assert_eq!(write_svg(&scene), svg);
+    assert_eq!(
+        rasterize(&scene, RasterBackground::Transparent).unwrap(),
+        accepted
+    );
+    assert_eq!(
+        OutputRasterTarget::new(0, 1).unwrap_err().path(),
+        "output.target"
+    );
+    let unsafe_native = RenderScene::new(
+        CanvasSpec {
+            width: 67_108_865.0,
+            height: 1.0,
+        },
+        "family".into(),
+        "realization".into(),
+        vec![scene.layers()[0].clone()],
+    )
+    .unwrap();
+    assert_eq!(
+        rasterize(&unsafe_native, RasterBackground::Transparent)
+            .unwrap_err()
+            .path(),
+        "output.target",
+        "native document-canvas rasterization is checked before allocation"
     );
 }
 
