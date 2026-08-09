@@ -1346,8 +1346,10 @@ frozen v1 containers. Checkpoint Stage 13A independently.
 
 ## Stage 13B — Dedicated output and export parity
 
-**Status: Accepted awaiting checkpoint.** Resolve the two deferred final-consumer requirements after
-document lifecycle and before generalized pattern architecture.
+**Status: Complete at `2a773a3`.** The user accepted the corrected native
+output review after the implementation and final automated gate. This stage
+resolves the deferred final-consumer requirements after document lifecycle and
+before generalized pattern architecture.
 
 - Direct-source CLI rendering uses decoded/intrinsic PNG dimensions or resolved
   SVG intrinsic/`viewBox` dimensions by default. An explicit `--canvas` remains
@@ -1361,12 +1363,27 @@ document lifecycle and before generalized pattern architecture.
   antialiasing option.
 - Save remains `.toniator` persistence and Export remains output generation;
   neither operation mutates the authoritative document.
+- Native and explicit output targets pass through the checked renderer safety
+  limit before allocation. PNG background, target dimensions, and
+  antialiasing remain final-consumer choices outside source, family,
+  realization, scene, and persistence identity.
+- GTK export evaluates an immutable workspace snapshot and accepts completion
+  only for the current lifecycle/workspace generation. Pending export disables
+  conflicting lifecycle actions; success does not install document or preview
+  state, and failed, cancelled, or stale work preserves the workspace.
+- The corrected app-test matrix uses each source's native aspect and output
+  size: 1024×1024 for the raster baseline and 900×620 for the vector baseline.
+  The earlier 96×64 app-test comparison was a display-scale moire diagnostic,
+  not renderer-defect evidence. This stage records native artifact inspection
+  and automated GTK snapshot coverage, without claiming exhaustive manual
+  dialog, accessibility, or interactive GTK acceptance.
 
 Forbidden: pattern schema or evaluator changes, document-owned export state,
 SVG antialiasing behavior, implicit flattening/checkerboards, or editor work.
 
-**Stop condition:** User inspects native CLI/app PNG and SVG output across both
-baseline sources and all three models. Checkpoint Stage 13B independently.
+**Stop condition (complete):** The user accepted native CLI/app PNG and SVG
+output across both baseline sources and all three models. The implementation
+checkpoint is `2a773a3`; Stage 14 remains planned.
 
 ## Stage 14 — Typed pattern-definition authority and v1-to-v2 migration
 

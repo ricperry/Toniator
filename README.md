@@ -59,10 +59,27 @@ generic migration information are reported in-window. GTK delegates default
 document construction to the headless factory and remains ignorant of pattern
 internals; channel/pattern controls and GTK undo controls remain out of scope.
 
-Stage 13B remains planned: direct-source CLI rendering will gain intrinsic PNG/
-SVG sizing by default while retaining explicit `--canvas`, PNG antialiasing
-control, and GTK Export for native PNG/SVG outputs. Export remains separate
-from `.toniator` Save and must not mutate document or preview-canvas authority.
+Stage 13B is complete at checkpoint `2a773a3`. Direct-source `toniator render`
+uses decoded PNG dimensions or resolved SVG intrinsic/`viewBox` dimensions by
+default; an explicit `--canvas` remains a direct-source-only override, while
+containers keep their stored canvas. PNG output accepts `--antialiasing
+on|off` (default `on`); `off` is intentionally hard-edged, and SVG output is
+unaffected.
+
+The GTK Export action writes native PNG or editable SVG. PNG options are
+consumer-only transparent/black/white backing, antialiasing, and an optional
+`WIDTHxHEIGHT` output target; SVG remains transparent semantic vector output.
+Output targets are checked against the renderer's allocation safety limit.
+Exports rerasterize the unchanged canonical scene and do not resize the
+authoritative document or preview canvas, or mutate document, source,
+history, revision, savepoint, location, title, dirty state, or preview state.
+
+The accepted native app-test outputs use source-native aspect and resolution
+(1024×1024 raster, 900×620 vector). This corrected the earlier tiny-output
+moire diagnostic; AA-off edge stepping remains the intentional hard-edge
+consumer policy. The checkpoint records automated GTK snapshot coverage and
+native artifact inspection; it does not claim exhaustive manual dialog,
+accessibility, or interactive GTK acceptance.
 Stage 14 remains planned for the typed pattern-definition authority and v1-to-v2
 migration; it does not change the accepted meaning of v1 files.
 

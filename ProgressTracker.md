@@ -1,6 +1,6 @@
 # Toniator Progress Tracker
 
-Last updated: **2026-08-08**. The durable execution contract is
+Last updated: **2026-08-09**. The durable execution contract is
 [GREENFIELD_REWRITE_PLAN.md](docs/GREENFIELD_REWRITE_PLAN.md). Normative
 architecture remains in the five protected [Project Specification files](Project%20Specification/Addendum.md).
 
@@ -182,10 +182,19 @@ dirty/savepoint tracking, history state, direct-source/container opening, title
 identity, and atomic error handling. GTK delegates default document creation
 and remains completely ignorant of pattern internals.
 
-**Stage 13B — Accepted awaiting checkpoint.** Add the dedicated final-consumer output slice: native
-direct-source CLI sizing with optional explicit canvas, PNG antialiasing on/off,
-and matching GTK PNG/SVG export controls without changing document, preview
-canvas, family, realization, or scene authority.
+**Stage 13B — Complete at commit `2a773a3`.** Add the dedicated final-consumer
+output slice: direct-source CLI intrinsic PNG/SVG sizing with optional explicit
+canvas, PNG antialiasing on/off, checked output-target allocation, and matching
+GTK PNG/SVG export controls without changing document, preview canvas, family,
+realization, or scene authority. PNG backing, dimensions, and antialiasing are
+consumer-only choices; containers retain their stored canvas. GTK export uses
+immutable workspace snapshots and lifecycle-generation gating, so pending,
+failed, cancelled, and stale exports preserve lifecycle and document state.
+The accepted app-test outputs were regenerated at native dimensions (raster
+1024×1024; vector 900×620); the earlier tiny-output moire was a display-scale
+diagnostic, while AA-off hard edges remain intentional. Automated GTK snapshot
+coverage and native artifact inspection are recorded without claiming
+exhaustive manual GTK dialog/accessibility acceptance.
 
 **Stage 14 — Planned.** Add the one-root mechanism-agnostic typed pattern schema,
 stable document/mechanism IDs, atomic definition CRUD, selected-channel
