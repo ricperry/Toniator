@@ -42,7 +42,10 @@ recorded in the Stage 2 checkpoint. Verified summary:
 `assets/video-sample0001-0010.mp4` is reserved for future multiframe and
 animation validation. Relevant approved stages must use their applicable
 baselines without modifying them; derived artifacts belong under
-`target/validation/`.
+`target/validation/`. Low-resolution tests may supplement fast coverage, but
+future source/sampling/render/preview/export stages must also exercise the PNG
+at its natural 1024×1024 size and the SVG at its natural 900×620 size through
+the applicable canonical consumer boundary.
 
 ### Stage 3 — straight-guide family output
 
@@ -228,10 +231,13 @@ migration, deterministic v2 persistence, scheduler acceptance, CLI/preview,
 renderers, and corrected GTK lifecycle behavior remain unchanged. Stage 16
 expanded mechanisms remain planned.
 
-**Stage 16A — Planned.** Add generalized one-to-four-dimension straight-guide
+**Stage 16A — Complete at commit `ccec466`.** Add generalized one-to-four-dimension straight-guide
 mechanisms, independent angles/phase, intersections and along-guide sites,
 reusable mark prototypes, and complete transformed guard coverage without named
-rectangular/triangular branches.
+rectangular/triangular branches. The user provisionally accepted the stage on
+2026-08-09 and required natural-resolution PNG/SVG validation in addition to
+low-resolution tests for every future applicable stage. The implementation is
+checkpointed at `ccec466`.
 
 **Stage 16B — Planned.** Immediately prove the framework is not grid-shaped by
 adding deterministic raw/even/exclusion, clustered, and source-weighted site

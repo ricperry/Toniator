@@ -80,6 +80,13 @@ addition to any smaller synthetic fixtures. The PNG is a 1024×1024 RGBA image
 with nontrivial alpha. The 900×620 SVG contains gradients, transparency, a
 stroked path, and a live `<text>` element.
 
+Low-resolution fixtures and outputs may supplement fast or isolated tests,
+but they never satisfy the native-output gate by themselves. Every future
+stage that exercises source loading, sampling, rendering, preview, or export
+must also test both baselines at their natural source dimensions (1024×1024
+for the PNG and 900×620 for the SVG) through the applicable canonical
+consumer boundary.
+
 Keep these inputs byte-stable and write derived output under
 `target/validation/`. Their verified properties and SHA-256 values are
 recorded in `assets/README.md`. Replacing either baseline requires explicit
@@ -1498,7 +1505,7 @@ accepted at implementation checkpoint `711058b`. Stage 16 remains planned.
 
 ## Stage 16A — Generalized straight-guide mechanisms
 
-**Status: Planned.** Add reusable straight-guide vocabulary through the generic
+**Status: Complete at commit `ccec466`.** Add reusable straight-guide vocabulary through the generic
 pipeline, never named rectangular/triangular pattern branches.
 
 - Support one to four ordered straight-guide dimensions with independent stable
@@ -1517,6 +1524,11 @@ schema data. Names are test descriptions, not evaluator discriminants.
 
 **Stop condition:** User accepts native outputs and generalized coverage before
 random/site-distribution mechanisms begin.
+
+The user provisionally accepted Stage 16A on 2026-08-09, and the implementation
+is checkpointed at `ccec466`. The acceptance does not retroactively replace the
+recorded 90×60 generalized review artifacts, but establishes the cross-stage
+natural-resolution rule above for all future applicable tests.
 
 ## Stage 16B — Random and site-distribution mechanisms
 

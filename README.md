@@ -115,8 +115,37 @@ parity. Frozen v1 containers migrated, saved as v2, reopened, and rendered
 with byte-identical PNG/SVG results across all three models; v1/v2 persistence,
 `DocumentHistory`, renderer, app, and GTK lifecycle behavior remain unchanged.
 Native artifacts and bounded app launches are liveness/review evidence, not
-exhaustive manual visual, interactive, or accessibility acceptance. Stage 16+
-family expansion and GTK pattern/channel editing remain planned.
+exhaustive manual visual, interactive, or accessibility acceptance. Stage 16A
+was provisionally accepted on 2026-08-09 and is implemented at checkpoint
+`ccec466`; the remaining Stage 16B distribution work and GTK pattern/channel
+editing remain planned.
+
+Stage 16A generalizes the typed straight-guide family through the same generic
+headless pipeline. A definition may contain one to four ordered straight-guide
+dimensions with document-wide stable IDs, independent finite baseline angles,
+phase and repetition state, and the shared channel transform. Explicit
+intersection products evaluate selected dimensions, deterministically merge
+coincident multiway intersections, and retain every contributing guide. Along-
+guide products use regular arc-length sampling over an explicit dimension
+selection and retain stable guide, sequence, absolute/local arc-position, and
+Canvas/Guard provenance. Both products are typed, addressable mechanisms; no
+consumer reconstructs guides or sites.
+
+Typed circle mark prototypes and fixed or contributing-guide orientation rules
+are validated as part of realization identity without renderer pattern dispatch.
+Analytical transformed coverage, guard support, checked candidate limits,
+cancellation, transactional scheduling, and family/realization/scene/raster
+cache boundaries remain generic. The accepted two-guide/intersection/circle
+configuration retains its Stage 15 geometry and RGB/CMYK/SourceColorAlpha
+parity. The private immutable v1 parser and migration remain unchanged; new
+definitions use only additive current-v2 DTO variants and deterministically
+save and reopen without evaluator or cache state.
+
+Low-resolution fixtures and outputs are supplementary only. Every future stage
+that exercises source loading, sampling, rendering, preview, or export must
+also test the immutable PNG at its natural 1024×1024 dimensions and the SVG at
+its natural 900×620 dimensions through the applicable canonical consumer
+boundary.
 
 ## Build and run
 
