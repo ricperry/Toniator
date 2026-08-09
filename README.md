@@ -25,6 +25,12 @@ PNG encoding, premultiplication, flattening, checkerboarding, or channel
 recomposition. Persistence, command-bound editing, and later app/CLI export
 controls remain planned.
 
+Stage 11 headless undo and redo are complete at checkpoint `341ad8e` through
+`DocumentHistory`, an accepted wrapper around `DocumentSession` that stores
+exact validated document snapshots and preserves monotonic revision authority
+with stale-result rejection after apply, undo, and redo. GTK undo controls and
+history persistence remain planned.
+
 The headless Stage 9E direct-source CLI still requires an explicit
 `--canvas`; source-native direct-still sizing and PNG antialiasing controls
 remain planned.

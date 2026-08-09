@@ -161,7 +161,7 @@ The preview final consumer clips supersamples to the fitted authoritative canvas
 rectangle, so guard geometry cannot paint letterbox margins; the tracked splash
 regression verifies 1280×640 into 960×720 rows 120..600.
 
-**Stage 11 — Accepted awaiting checkpoint.** Add unbounded session-lifetime headless undo and redo
+**Stage 11 — Complete at commit `341ad8e`.** Add unbounded session-lifetime headless undo and redo
 around `DocumentSession`, storing exact validated before/after documents and
 the original invalidation result for every successful command. Apply, undo,
 and redo each advance authority monotonically; failures and empty operations

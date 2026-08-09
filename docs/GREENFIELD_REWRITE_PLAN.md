@@ -1076,7 +1076,7 @@ authorization.
 
 ## Stage 11 — Headless undo and redo
 
-**Status: Accepted awaiting checkpoint.** Make authoritative commands reversible independently of
+**Status: Complete at commit `341ad8e`.** Make authoritative commands reversible independently of
 GTK widget state.
 
 ### Stage 11 public contract
