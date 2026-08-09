@@ -6,9 +6,9 @@ use std::{error::Error, fmt};
 
 use serde::Serialize;
 use toniator_domain::{
-    CanvasSpec, DensityMetric2D, GuideDimensionId, PatternDefinition, PatternFamily,
-    PatternMechanism, PatternMechanismId, PatternModulation, PatternOutputLayer,
-    PatternOutputLayerId, SourceMapping,
+    CanvasSpec, DensityMetric2D, GuideDimensionId, MarkOrientation, MarkPrototype,
+    PatternDefinition, PatternFamily, PatternMechanism, PatternMechanismId, PatternModulation,
+    PatternOutputLayer, PatternOutputLayerId, SourceMapping, StraightGuideDimension,
 };
 pub use toniator_geometry::{
     AffineTransform2D, Bounds, CanonicalCircleMark, GuideInstanceId, GuideIntersectionProvenance,
@@ -31,6 +31,7 @@ pub const SECOND_DIMENSION_ID: GuideDimensionId = GuideDimensionId(2);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StructuralProductCapability {
     GuideIntersections,
+    AlongGuideSites,
 }
 
 /// A stable record of the typed mechanisms that produced a structural product.
@@ -44,10 +45,15 @@ pub struct StructuralProductProvenance {
 }
 
 /// A reusable family contract resolved from the document's typed definition.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FamilyCapability {
     pub product: StructuralProductCapability,
     pub provenance: StructuralProductProvenance,
+    pub dimensions: Vec<StraightGuideDimension>,
+    pub site_selection: Vec<GuideDimensionId>,
+    pub merge_epsilon: Option<f64>,
+    pub along_interval_multiplier: Option<f64>,
+    pub along_phase: Option<f64>,
 }
 
 /// A reusable ordered realization contract. A realizer can consume only the
@@ -56,12 +62,14 @@ pub struct FamilyCapability {
 pub struct OutputCapability {
     pub layer_id: PatternOutputLayerId,
     pub consumes: StructuralProductCapability,
+    pub prototype: MarkPrototype,
+    pub orientation: MarkOrientation,
 }
 
 /// Typed family/modulation/output plan. Modulation has no variants in the
 /// accepted schema, but remains an explicit stage instead of a hidden no-op in
 /// family or renderer code.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PatternPipelinePlan {
     pub family: FamilyCapability,
     pub modulation: PatternModulation,
@@ -76,24 +84,32 @@ pub enum TypedFamilyOutput {
         family: FamilyCapability,
         output: GridFamilyOutput,
     },
+    GeneralizedStraightGuides {
+        family: FamilyCapability,
+        output: GridFamilyOutput,
+        product_provenance: Vec<GeneralizedSiteProvenance>,
+    },
 }
 
 impl TypedFamilyOutput {
     pub fn family(&self) -> &FamilyCapability {
         match self {
-            Self::GuideIntersections { family, .. } => family,
+            Self::GuideIntersections { family, .. }
+            | Self::GeneralizedStraightGuides { family, .. } => family,
         }
     }
 
     pub fn family_fingerprint(&self) -> &str {
         match self {
-            Self::GuideIntersections { output, .. } => &output.family_fingerprint,
+            Self::GuideIntersections { output, .. }
+            | Self::GeneralizedStraightGuides { output, .. } => &output.family_fingerprint,
         }
     }
 
     pub fn grid(&self) -> &GridFamilyOutput {
         match self {
-            Self::GuideIntersections { output, .. } => output,
+            Self::GuideIntersections { output, .. }
+            | Self::GeneralizedStraightGuides { output, .. } => output,
         }
     }
 }
@@ -105,6 +121,11 @@ pub struct TypedRealizationProvenance {
     pub structural: StructuralProductProvenance,
     pub modulation: PatternModulation,
     pub ordered_output_layer_ids: Vec<PatternOutputLayerId>,
+    pub ordered_output_prototypes: Vec<MarkPrototype>,
+    pub ordered_output_orientations: Vec<MarkOrientation>,
+    /// Exact generalized product provenance retained beside the canonical
+    /// circle adapter; no realizer reconstructs it from finite guides.
+    pub site_product_provenance: Vec<GeneralizedSiteProvenance>,
 }
 
 /// A realization plus its typed provenance. Renderers consume `output` only.
@@ -155,7 +176,15 @@ pub fn resolve_pattern_pipeline(
         guide_mechanism_id,
         site_mechanism_id,
     } = definition.family;
-    let ordered_mechanisms = match definition.mechanisms.as_slice() {
+    let (
+        ordered_mechanisms,
+        product,
+        dimensions,
+        site_selection,
+        merge_epsilon,
+        along_interval_multiplier,
+        along_phase,
+    ) = match definition.mechanisms.as_slice() {
         [
             PatternMechanism::StraightGuides { id },
             PatternMechanism::GuideIntersections {
@@ -166,7 +195,77 @@ pub fn resolve_pattern_pipeline(
             && *intersection_id == site_mechanism_id
             && *parent_id == guide_mechanism_id =>
         {
-            vec![*id, *intersection_id]
+            (
+                vec![*id, *intersection_id],
+                StructuralProductCapability::GuideIntersections,
+                vec![
+                    StraightGuideDimension {
+                        id: FIRST_DIMENSION_ID,
+                        baseline_angle_degrees: 0.0,
+                        phase: 0.0,
+                        repetition: toniator_domain::StraightGuideRepetition {
+                            spacing_multiplier: 1.0,
+                        },
+                    },
+                    StraightGuideDimension {
+                        id: SECOND_DIMENSION_ID,
+                        baseline_angle_degrees: 90.0,
+                        phase: 0.0,
+                        repetition: toniator_domain::StraightGuideRepetition {
+                            spacing_multiplier: 1.0,
+                        },
+                    },
+                ],
+                vec![FIRST_DIMENSION_ID, SECOND_DIMENSION_ID],
+                Some(0.0),
+                None,
+                None,
+            )
+        }
+        [
+            PatternMechanism::StraightGuideDimensions { id, dimensions },
+            PatternMechanism::SelectedGuideIntersections {
+                id: site_id,
+                guide_mechanism_id: parent_id,
+                dimensions: selected,
+                merge_epsilon,
+            },
+        ] if *id == guide_mechanism_id
+            && *site_id == site_mechanism_id
+            && *parent_id == guide_mechanism_id =>
+        {
+            (
+                vec![*id, *site_id],
+                StructuralProductCapability::GuideIntersections,
+                dimensions.clone(),
+                selected.clone(),
+                Some(*merge_epsilon),
+                None,
+                None,
+            )
+        }
+        [
+            PatternMechanism::StraightGuideDimensions { id, dimensions },
+            PatternMechanism::AlongGuideSites {
+                id: site_id,
+                guide_mechanism_id: parent_id,
+                dimensions: selected,
+                interval_multiplier,
+                phase,
+            },
+        ] if *id == guide_mechanism_id
+            && *site_id == site_mechanism_id
+            && *parent_id == guide_mechanism_id =>
+        {
+            (
+                vec![*id, *site_id],
+                StructuralProductCapability::AlongGuideSites,
+                dimensions.clone(),
+                selected.clone(),
+                None,
+                Some(*interval_multiplier),
+                Some(*phase),
+            )
         }
         _ => {
             return Err(PatternPipelineError::new(
@@ -183,7 +282,20 @@ pub fn resolve_pattern_pipeline(
                 site_mechanism_id: source_id,
             } if *source_id == site_mechanism_id => ordered_outputs.push(OutputCapability {
                 layer_id: *id,
-                consumes: StructuralProductCapability::GuideIntersections,
+                consumes: product,
+                prototype: MarkPrototype::Circle,
+                orientation: MarkOrientation::Fixed,
+            }),
+            PatternOutputLayer::MarkPrototype {
+                id,
+                site_mechanism_id: source_id,
+                prototype: toniator_domain::MarkPrototype::Circle,
+                orientation,
+            } if *source_id == site_mechanism_id => ordered_outputs.push(OutputCapability {
+                layer_id: *id,
+                consumes: product,
+                prototype: MarkPrototype::Circle,
+                orientation: orientation.clone(),
             }),
             _ => {
                 return Err(PatternPipelineError::new(
@@ -201,12 +313,17 @@ pub fn resolve_pattern_pipeline(
     }
     Ok(PatternPipelinePlan {
         family: FamilyCapability {
-            product: StructuralProductCapability::GuideIntersections,
+            product,
             provenance: StructuralProductProvenance {
                 definition_id: definition.id.0,
-                family_capability: StructuralProductCapability::GuideIntersections,
+                family_capability: product,
                 mechanism_ids: ordered_mechanisms,
             },
+            dimensions,
+            site_selection,
+            merge_epsilon,
+            along_interval_multiplier,
+            along_phase,
         },
         modulation: definition.modulation.clone(),
         ordered_outputs,
@@ -244,12 +361,119 @@ pub fn evaluate_typed_family_product_cancellable(
     request: &GridInspectRequest,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<TypedFamilyOutput, PatternPipelineError> {
+    let legacy_dimensions = family.dimensions.as_slice()
+        == [
+            StraightGuideDimension {
+                id: FIRST_DIMENSION_ID,
+                baseline_angle_degrees: 0.0,
+                phase: 0.0,
+                repetition: toniator_domain::StraightGuideRepetition {
+                    spacing_multiplier: 1.0,
+                },
+            },
+            StraightGuideDimension {
+                id: SECOND_DIMENSION_ID,
+                baseline_angle_degrees: 90.0,
+                phase: 0.0,
+                repetition: toniator_domain::StraightGuideRepetition {
+                    spacing_multiplier: 1.0,
+                },
+            },
+        ]
+        && family.product == StructuralProductCapability::GuideIntersections;
+    if !legacy_dimensions {
+        let output = evaluate_generalized_straight_guides_cancellable(
+            family,
+            &StraightGuideInspectRequest {
+                canvas: request.canvas.clone(),
+                density: request.density.clone(),
+                rotation_degrees: request.rotation_degrees,
+                translation_x: request.translation_x,
+                translation_y: request.translation_y,
+                guard_steps: request.guard_steps,
+                support_radius: request.support_radius,
+                max_family_candidates: request.max_family_candidates,
+            },
+            is_cancelled,
+        )
+        .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
+        let product_provenance = output
+            .sites
+            .iter()
+            .map(|site| site.provenance.clone())
+            .collect();
+        return Ok(TypedFamilyOutput::GeneralizedStraightGuides {
+            family: family.clone(),
+            output: generalized_as_grid_output(output, request.support_radius, request.guard_steps),
+            product_provenance,
+        });
+    }
     let output = evaluate_straight_grid_cancellable(request, is_cancelled)
         .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
     Ok(TypedFamilyOutput::GuideIntersections {
         family: family.clone(),
         output,
     })
+}
+
+fn generalized_as_grid_output(
+    output: GeneralizedStraightGuideOutput,
+    support_radius: f64,
+    guard_steps: u32,
+) -> GridFamilyOutput {
+    let sites = output
+        .sites
+        .into_iter()
+        .map(|site| {
+            let (first, second, contributors) = match site.provenance {
+                GeneralizedSiteProvenance::Intersection { contributors } => {
+                    let first = contributors
+                        .first()
+                        .copied()
+                        .expect("intersection provenance has contributors");
+                    let second = contributors.get(1).copied().unwrap_or(first);
+                    (first, second, contributors)
+                }
+                GeneralizedSiteProvenance::AlongGuide {
+                    guide_id, sequence, ..
+                } => (
+                    guide_id,
+                    GuideInstanceId {
+                        dimension_id: guide_id.dimension_id,
+                        index: sequence,
+                    },
+                    vec![guide_id],
+                ),
+            };
+            IntersectionSite {
+                id: SiteId {
+                    first_dimension_id: first.dimension_id,
+                    first_index: first.index,
+                    second_dimension_id: second.dimension_id,
+                    second_index: second.index,
+                },
+                position: site.position,
+                scope: site.scope,
+                provenance: GuideIntersectionProvenance { contributors },
+            }
+        })
+        .collect();
+    GridFamilyOutput {
+        family_fingerprint: output.family_fingerprint,
+        guard_steps,
+        support_radius,
+        antialias_margin: ANTIALIAS_MARGIN,
+        generation_domain: Bounds::from_points(
+            output
+                .guides
+                .iter()
+                .flat_map(|guide| [guide.start, guide.end]),
+        )
+        .expect("generalized finite guides produce bounds"),
+        coverage: output.coverage,
+        guides: output.guides,
+        sites,
+    }
 }
 
 /// Ordered scalar-field output realization through the declared typed layer.
@@ -265,7 +489,11 @@ pub fn realize_typed_mapped_outputs(
 ) -> Result<TypedRealization<MappedCircularMarkRealization>, PatternPipelineError> {
     let provenance = realization_provenance(family, plan)?;
     realize_mapped_circular_marks(family.grid(), source, canvas, mapping, response)
-        .map(|output| TypedRealization { provenance, output })
+        .map(|mut output| {
+            output.realization_fingerprint =
+                orientation_identity(&output.realization_fingerprint, family, &provenance);
+            TypedRealization { provenance, output }
+        })
         .map_err(|error| PatternPipelineError::new(error.path(), error.message()))
 }
 
@@ -280,7 +508,11 @@ pub fn realize_typed_source_color_outputs(
 ) -> Result<TypedRealization<SourceColorCircularMarkRealization>, PatternPipelineError> {
     let provenance = realization_provenance(family, plan)?;
     realize_source_color_circular_marks(family.grid(), source, canvas, mapping, response)
-        .map(|output| TypedRealization { provenance, output })
+        .map(|mut output| {
+            output.realization_fingerprint =
+                orientation_identity(&output.realization_fingerprint, family, &provenance);
+            TypedRealization { provenance, output }
+        })
         .map_err(|error| PatternPipelineError::new(error.path(), error.message()))
 }
 
@@ -304,8 +536,53 @@ pub fn realize_typed_diagnostic_outputs(
         component,
         response,
     )
-    .map(|output| TypedRealization { provenance, output })
+    .map(|mut output| {
+        output.realization_fingerprint =
+            orientation_identity(&output.realization_fingerprint, family, &provenance);
+        TypedRealization { provenance, output }
+    })
     .map_err(|error| PatternPipelineError::new(error.path(), error.message()))
+}
+
+fn orientation_identity(
+    legacy_identity: &str,
+    family: &TypedFamilyOutput,
+    provenance: &TypedRealizationProvenance,
+) -> String {
+    if matches!(family, TypedFamilyOutput::GuideIntersections { .. }) {
+        return legacy_identity.to_owned();
+    }
+    let mut bytes = legacy_identity.as_bytes().to_vec();
+    bytes.extend(b"toniator-stage-16a-realization-contract-v2");
+    // The accepted modulation type is intentionally unit-like today.  It is
+    // nevertheless tagged here so a future typed variant cannot silently
+    // share a realization identity with the no-modulation contract.
+    match &provenance.modulation {
+        PatternModulation => bytes.push(1),
+    }
+    for ((layer_id, prototype), orientation) in provenance
+        .ordered_output_layer_ids
+        .iter()
+        .zip(&provenance.ordered_output_prototypes)
+        .zip(&provenance.ordered_output_orientations)
+    {
+        bytes.extend(layer_id.0.to_le_bytes());
+        bytes.push(match prototype {
+            MarkPrototype::Circle => 1,
+        });
+        match orientation {
+            MarkOrientation::Fixed => bytes.push(1),
+            MarkOrientation::GuideTangent { dimension_id } => {
+                bytes.push(2);
+                bytes.extend(dimension_id.0.to_le_bytes());
+            }
+            MarkOrientation::GuideNormal { dimension_id } => {
+                bytes.push(3);
+                bytes.extend(dimension_id.0.to_le_bytes());
+            }
+        }
+    }
+    fnv1a64(bytes)
 }
 
 fn realization_provenance(
@@ -319,20 +596,33 @@ fn realization_provenance(
         ));
     }
     match plan.ordered_outputs.as_slice() {
-        [
-            OutputCapability {
-                consumes: StructuralProductCapability::GuideIntersections,
-                ..
-            },
-        ] => Ok(TypedRealizationProvenance {
-            structural: family.family().provenance.clone(),
-            modulation: plan.modulation.clone(),
-            ordered_output_layer_ids: plan
-                .ordered_outputs
-                .iter()
-                .map(|output| output.layer_id)
-                .collect(),
-        }),
+        [OutputCapability { consumes, .. }] if *consumes == family.family().product => {
+            Ok(TypedRealizationProvenance {
+                structural: family.family().provenance.clone(),
+                modulation: plan.modulation.clone(),
+                ordered_output_layer_ids: plan
+                    .ordered_outputs
+                    .iter()
+                    .map(|output| output.layer_id)
+                    .collect(),
+                ordered_output_prototypes: plan
+                    .ordered_outputs
+                    .iter()
+                    .map(|output| output.prototype.clone())
+                    .collect(),
+                ordered_output_orientations: plan
+                    .ordered_outputs
+                    .iter()
+                    .map(|output| output.orientation.clone())
+                    .collect(),
+                site_product_provenance: match family {
+                    TypedFamilyOutput::GuideIntersections { .. } => Vec::new(),
+                    TypedFamilyOutput::GeneralizedStraightGuides {
+                        product_provenance, ..
+                    } => product_provenance.clone(),
+                },
+            })
+        }
         _ => Err(PatternPipelineError::new(
             "pattern.output_layers.capability",
             "ordered output realization has no compatible circular-mark layer",
@@ -376,9 +666,614 @@ pub struct GridFamilyOutput {
     pub support_radius: f64,
     pub antialias_margin: f64,
     pub generation_domain: Bounds,
-    pub coverage: [GuideCoverage; 2],
+    pub coverage: Vec<GuideCoverage>,
     pub guides: Vec<StraightGuide>,
     pub sites: Vec<IntersectionSite>,
+}
+
+/// Generic Stage 16A structural planning input.  It uses the existing shared
+/// channel density and transform while the definition supplies independent
+/// dimension angle/phase/repetition state.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StraightGuideInspectRequest {
+    pub canvas: CanvasSpec,
+    pub density: DensityMetric2D,
+    pub rotation_degrees: f64,
+    pub translation_x: f64,
+    pub translation_y: f64,
+    pub guard_steps: u32,
+    pub support_radius: f64,
+    pub max_family_candidates: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub enum GeneralizedSiteProvenance {
+    Intersection {
+        contributors: Vec<GuideInstanceId>,
+    },
+    AlongGuide {
+        guide_id: GuideInstanceId,
+        guide_order: usize,
+        sequence: i64,
+        absolute_arc_position_bits: u64,
+        local_arc_position_bits: u64,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct GeneralizedSite {
+    pub sequence: usize,
+    pub position: Point2,
+    pub scope: SiteScope,
+    pub provenance: GeneralizedSiteProvenance,
+}
+
+/// Structural products are kept separate from canonical realization.  Output
+/// layers address exactly one declared product and never reconstruct guides.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct GeneralizedStraightGuideOutput {
+    pub family_fingerprint: String,
+    pub coverage: Vec<GuideCoverage>,
+    pub guides: Vec<StraightGuide>,
+    pub sites: Vec<GeneralizedSite>,
+}
+
+/// Evaluate a selected generalized product with bounded cancellation points.
+/// It is intentionally independent of source/modulation/output presentation.
+pub fn evaluate_generalized_straight_guides_cancellable(
+    family: &FamilyCapability,
+    request: &StraightGuideInspectRequest,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<GeneralizedStraightGuideOutput, GridError> {
+    if is_cancelled() {
+        return Err(GridError::new(
+            "evaluation.cancelled",
+            "evaluation was cancelled",
+        ));
+    }
+    validate_straight_request(request)?;
+    if family.dimensions.is_empty() || family.dimensions.len() > 4 {
+        return Err(GridError::new(
+            "pattern.family.dimensions",
+            "straight-guide family requires one through four dimensions",
+        ));
+    }
+    let transform = AffineTransform2D::rotate_about_then_translate(
+        Point2::new(request.canvas.width / 2.0, request.canvas.height / 2.0),
+        request.rotation_degrees,
+        Vector2::new(request.translation_x, request.translation_y),
+    )
+    .ok_or(GridError::new(
+        "channel.pattern.layout",
+        "transform is not finite",
+    ))?;
+    let canvas = Bounds::new(
+        Point2::new(0.0, 0.0),
+        Point2::new(request.canvas.width, request.canvas.height),
+    )
+    .expect("validated canvas bounds");
+    let maximum_spacing = family
+        .dimensions
+        .iter()
+        .try_fold(0.0_f64, |maximum, dimension| {
+            let radians = dimension.baseline_angle_degrees.to_radians();
+            let normal = Vector2::new(radians.cos(), radians.sin());
+            let value = directional_spacing(&request.canvas, &request.density, normal)?
+                * dimension.repetition.spacing_multiplier;
+            (value.is_finite() && value > 0.0)
+                .then_some(maximum.max(value))
+                .ok_or(GridError::new(
+                    "pattern.family.dimensions.repetition",
+                    "spacing multiplier must resolve to a positive finite interval",
+                ))
+        })?;
+    let margin = request.support_radius
+        + ANTIALIAS_MARGIN
+        + f64::from(request.guard_steps) * maximum_spacing;
+    let domain = transform
+        .inverse_bounds(canvas.expanded(margin).expect("finite margin"))
+        .ok_or(GridError::new(
+            "coverage",
+            "inverse transform produced non-finite bounds",
+        ))?;
+    let mut coverage = Vec::with_capacity(family.dimensions.len());
+    let mut plans = Vec::with_capacity(family.dimensions.len());
+    let mut guide_total = 0_usize;
+    for dimension in &family.dimensions {
+        if is_cancelled() {
+            return Err(GridError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        if !dimension.baseline_angle_degrees.is_finite()
+            || !dimension.phase.is_finite()
+            || dimension.id.0 == 0
+        {
+            return Err(GridError::new(
+                "pattern.family.dimensions",
+                "dimension values must be finite with nonzero stable IDs",
+            ));
+        }
+        let radians = dimension.baseline_angle_degrees.to_radians();
+        let normal = Vector2::new(radians.cos(), radians.sin());
+        let spacing = directional_spacing(&request.canvas, &request.density, normal)?
+            * dimension.repetition.spacing_multiplier;
+        let plan = DimensionPlan::new(dimension.id, normal, spacing, dimension.phase);
+        let item = plan.coverage(
+            domain,
+            transform,
+            &GridInspectRequest {
+                canvas: request.canvas.clone(),
+                density: request.density.clone(),
+                rotation_degrees: request.rotation_degrees,
+                translation_x: request.translation_x,
+                translation_y: request.translation_y,
+                guard_steps: request.guard_steps,
+                support_radius: request.support_radius,
+                max_family_candidates: request.max_family_candidates,
+            },
+        )?;
+        guide_total = guide_total
+            .checked_add(guide_range_count(item)?)
+            .ok_or(GridError::new(
+                "coverage.candidate_limit",
+                "guide-range candidate count overflowed",
+            ))?;
+        coverage.push(item);
+        plans.push(plan);
+    }
+    if guide_total > request.max_family_candidates {
+        return Err(GridError::new(
+            "coverage.candidate_limit",
+            "guide-range candidate count exceeds the configured limit",
+        ));
+    }
+    let selected: Vec<usize> = family
+        .site_selection
+        .iter()
+        .map(|id| {
+            family
+                .dimensions
+                .iter()
+                .position(|dimension| dimension.id == *id)
+                .ok_or(GridError::new(
+                    "pattern.family.selection",
+                    "selection references a missing dimension ID",
+                ))
+        })
+        .collect::<Result<_, _>>()?;
+    if family.product == StructuralProductCapability::GuideIntersections {
+        let mut selected_pair_count = 0_usize;
+        let mut selected_pair_candidates = 0_usize;
+        for (offset, &left) in selected.iter().enumerate() {
+            for &right in &selected[offset + 1..] {
+                if is_cancelled() {
+                    return Err(GridError::new(
+                        "evaluation.cancelled",
+                        "evaluation was cancelled",
+                    ));
+                }
+                selected_pair_count = selected_pair_count.checked_add(1).ok_or(GridError::new(
+                    "coverage.intersections.selected_pairs",
+                    "selected dimension-pair count overflowed",
+                ))?;
+                let candidates = guide_range_count(coverage[left])?
+                    .checked_mul(guide_range_count(coverage[right])?)
+                    .ok_or(GridError::new(
+                        "coverage.intersections.pairwise_limit",
+                        "pairwise intersection count overflowed",
+                    ))?;
+                selected_pair_candidates =
+                    selected_pair_candidates
+                        .checked_add(candidates)
+                        .ok_or(GridError::new(
+                            "coverage.intersections.selected_pairs",
+                            "selected pair count overflowed",
+                        ))?;
+            }
+        }
+        if selected_pair_count > request.max_family_candidates {
+            return Err(GridError::new(
+                "coverage.intersections.selected_pairs",
+                "selected dimension-pair count exceeds the configured limit",
+            ));
+        }
+        if selected_pair_candidates > request.max_family_candidates {
+            return Err(GridError::new(
+                "coverage.intersections.pairwise_limit",
+                "pairwise intersection count exceeds the configured limit",
+            ));
+        }
+        // Sorting and adjacent merging have separately bounded work.  Account
+        // for both the raw records and the merge pass before any guide/site
+        // allocation so a configured work limit is never discovered late.
+        let merge_work = selected_pair_candidates
+            .checked_mul(2)
+            .ok_or(GridError::new(
+                "coverage.intersections.merge_limit",
+                "coincident merge work overflowed",
+            ))?;
+        if merge_work > request.max_family_candidates {
+            return Err(GridError::new(
+                "coverage.intersections.merge_limit",
+                "coincident merge work exceeds the configured limit",
+            ));
+        }
+    }
+    let extension = margin;
+    let mut guides = Vec::with_capacity(guide_total);
+    let mut grouped = Vec::with_capacity(plans.len());
+    for (plan, item) in plans.iter().zip(&coverage) {
+        if is_cancelled() {
+            return Err(GridError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        let range = plan.guides(*item, domain, transform, extension);
+        grouped.push(range.clone());
+        guides.extend(range);
+    }
+    let sites = match family.product {
+        StructuralProductCapability::GuideIntersections => generalized_intersections(
+            &grouped,
+            &selected,
+            family.merge_epsilon.unwrap_or(0.0),
+            canvas,
+            margin,
+            request.max_family_candidates,
+            is_cancelled,
+        )?,
+        StructuralProductCapability::AlongGuideSites => generalized_along_guides(
+            &grouped,
+            &selected,
+            selected.iter().try_fold(0.0_f64, |sum, &index| {
+                let next = sum + plans[index].spacing;
+                next.is_finite().then_some(next).ok_or(GridError::new(
+                    "coverage.along_guides.interval",
+                    "selected guide interval overflowed",
+                ))
+            })? / selected.len() as f64
+                * family.along_interval_multiplier.unwrap_or(1.0),
+            family.along_phase.unwrap_or(0.0),
+            canvas,
+            margin,
+            request.max_family_candidates,
+            is_cancelled,
+        )?,
+    };
+    Ok(GeneralizedStraightGuideOutput {
+        family_fingerprint: generalized_fingerprint(family, request),
+        coverage,
+        guides,
+        sites,
+    })
+}
+
+fn generalized_intersections(
+    grouped: &[Vec<StraightGuide>],
+    selected: &[usize],
+    epsilon: f64,
+    canvas: Bounds,
+    margin: f64,
+    limit: usize,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<GeneralizedSite>, GridError> {
+    if selected.len() < 2 {
+        return Err(GridError::new(
+            "pattern.family.intersections.dimensions",
+            "intersection selection requires at least two dimensions",
+        ));
+    }
+    if !epsilon.is_finite() || epsilon < 0.0 {
+        return Err(GridError::new(
+            "pattern.family.intersections.merge_epsilon",
+            "merge epsilon must be finite and nonnegative",
+        ));
+    }
+    let mut raw: Vec<(Point2, Vec<GuideInstanceId>)> = Vec::new();
+    for (left_offset, &left) in selected.iter().enumerate() {
+        for &right in &selected[left_offset + 1..] {
+            if cancelled() {
+                return Err(GridError::new(
+                    "evaluation.cancelled",
+                    "evaluation was cancelled",
+                ));
+            }
+            let representative_left = grouped[left].first().ok_or(GridError::new(
+                "coverage",
+                "selected dimension produced no guides",
+            ))?;
+            let representative_right = grouped[right].first().ok_or(GridError::new(
+                "coverage",
+                "selected dimension produced no guides",
+            ))?;
+            let normal_cross = representative_left.normal.x.mul_add(
+                representative_right.normal.y,
+                -representative_left.normal.y * representative_right.normal.x,
+            );
+            if normal_cross.abs() <= 1e-10 {
+                continue;
+            }
+            let pairs = grouped[left]
+                .len()
+                .checked_mul(grouped[right].len())
+                .ok_or(GridError::new(
+                    "coverage.candidate_limit",
+                    "pairwise-intersection count overflowed",
+                ))?;
+            if raw
+                .len()
+                .checked_add(pairs)
+                .is_none_or(|value| value > limit)
+            {
+                return Err(GridError::new(
+                    "coverage.candidate_limit",
+                    "pairwise-intersection count exceeds the configured limit",
+                ));
+            }
+            for guide_a in &grouped[left] {
+                if cancelled() {
+                    return Err(GridError::new(
+                        "evaluation.cancelled",
+                        "evaluation was cancelled",
+                    ));
+                }
+                for guide_b in &grouped[right] {
+                    if let Some(point) = line_intersection(guide_a, guide_b)
+                        && distance_to_canvas(point, canvas) <= margin
+                    {
+                        raw.push((point, vec![guide_a.id, guide_b.id]));
+                    }
+                }
+            }
+        }
+    }
+    if raw.is_empty() {
+        return Err(GridError::new(
+            "pattern.family.intersections",
+            "selected parallel or coincident dimensions cannot produce intersections",
+        ));
+    }
+    raw.sort_by(|a, b| {
+        a.0.x
+            .total_cmp(&b.0.x)
+            .then(a.0.y.total_cmp(&b.0.y))
+            .then(a.1.cmp(&b.1))
+    });
+    let mut sites: Vec<GeneralizedSite> = Vec::with_capacity(raw.len());
+    for (point, contributors) in raw {
+        if cancelled() {
+            return Err(GridError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        if let Some(existing) = sites
+            .last_mut()
+            .filter(|site| distance(site.position, point) <= epsilon)
+        {
+            let GeneralizedSiteProvenance::Intersection {
+                contributors: existing_contributors,
+            } = &mut existing.provenance
+            else {
+                unreachable!()
+            };
+            existing_contributors.extend(contributors);
+            existing_contributors.sort();
+            existing_contributors.dedup();
+            continue;
+        }
+        let mut contributors = contributors;
+        contributors.sort();
+        contributors.dedup();
+        let scope = if canvas.contains(point) {
+            SiteScope::Canvas
+        } else {
+            SiteScope::Guard
+        };
+        sites.push(GeneralizedSite {
+            sequence: sites.len(),
+            position: point,
+            scope,
+            provenance: GeneralizedSiteProvenance::Intersection { contributors },
+        });
+    }
+    Ok(sites)
+}
+
+#[allow(clippy::too_many_arguments)] // Explicit structural inputs keep this product independent of render state.
+fn generalized_along_guides(
+    grouped: &[Vec<StraightGuide>],
+    selected: &[usize],
+    interval: f64,
+    phase: f64,
+    canvas: Bounds,
+    margin: f64,
+    limit: usize,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<GeneralizedSite>, GridError> {
+    if selected.is_empty() {
+        return Err(GridError::new(
+            "pattern.family.along_guides.dimensions",
+            "along-guide selection must not be empty",
+        ));
+    }
+    if !interval.is_finite() || interval <= 0.0 || !phase.is_finite() {
+        return Err(GridError::new(
+            "pattern.family.along_guides",
+            "arc-length interval and phase must be finite",
+        ));
+    }
+    let mut sites = Vec::new();
+    let mut guide_order = 0;
+    for &dimension in selected {
+        for guide in &grouped[dimension] {
+            if cancelled() {
+                return Err(GridError::new(
+                    "evaluation.cancelled",
+                    "evaluation was cancelled",
+                ));
+            }
+            let start_arc = Vector2::new(
+                guide.start.x - guide.anchor.x,
+                guide.start.y - guide.anchor.y,
+            )
+            .dot(guide.tangent);
+            let end_arc = Vector2::new(guide.end.x - guide.anchor.x, guide.end.y - guide.anchor.y)
+                .dot(guide.tangent);
+            let minimum = start_arc.min(end_arc);
+            let maximum = start_arc.max(end_arc);
+            let first_sequence = checked_index(((minimum - phase) / interval).ceil())?;
+            let last_sequence = checked_index(((maximum - phase) / interval).floor())?;
+            let count = last_sequence
+                .checked_sub(first_sequence)
+                .and_then(|span| span.checked_add(1))
+                .ok_or(GridError::new(
+                    "coverage.along_guides.count",
+                    "along-guide sequence range overflowed",
+                ))?;
+            let count = usize::try_from(count).map_err(|_| {
+                GridError::new(
+                    "coverage.along_guides.count",
+                    "along-guide sequence range overflowed",
+                )
+            })?;
+            if sites
+                .len()
+                .checked_add(count)
+                .is_none_or(|value| value > limit)
+            {
+                return Err(GridError::new(
+                    "coverage.candidate_limit",
+                    "along-guide site count exceeds the configured limit",
+                ));
+            }
+            for sequence in first_sequence..=last_sequence {
+                if cancelled() {
+                    return Err(GridError::new(
+                        "evaluation.cancelled",
+                        "evaluation was cancelled",
+                    ));
+                }
+                let absolute = phase + sequence as f64 * interval;
+                // Both positions use the guide's stable anchor frame.  The
+                // finite coverage segment selects which lattice members are
+                // emitted; it never becomes a provenance origin.
+                let local = absolute;
+                let point = Point2::new(
+                    guide.anchor.x + guide.tangent.x * absolute,
+                    guide.anchor.y + guide.tangent.y * absolute,
+                );
+                if distance_to_canvas(point, canvas) > margin {
+                    continue;
+                }
+                let scope = if canvas.contains(point) {
+                    SiteScope::Canvas
+                } else {
+                    SiteScope::Guard
+                };
+                sites.push(GeneralizedSite {
+                    sequence: sites.len(),
+                    position: point,
+                    scope,
+                    provenance: GeneralizedSiteProvenance::AlongGuide {
+                        guide_id: guide.id,
+                        guide_order,
+                        sequence,
+                        absolute_arc_position_bits: absolute.to_bits(),
+                        local_arc_position_bits: local.to_bits(),
+                    },
+                });
+            }
+            guide_order += 1;
+        }
+    }
+    Ok(sites)
+}
+
+fn line_intersection(a: &StraightGuide, b: &StraightGuide) -> Option<Point2> {
+    let r = Vector2::new(a.end.x - a.start.x, a.end.y - a.start.y);
+    let s = Vector2::new(b.end.x - b.start.x, b.end.y - b.start.y);
+    let cross = r.x.mul_add(s.y, -r.y * s.x);
+    if cross.abs() <= 1e-12 {
+        return None;
+    }
+    let delta = Vector2::new(b.start.x - a.start.x, b.start.y - a.start.y);
+    let t = delta.x.mul_add(s.y, -delta.y * s.x) / cross;
+    let point = Point2::new(a.start.x + t * r.x, a.start.y + t * r.y);
+    point.is_finite().then_some(point)
+}
+
+fn distance(a: Point2, b: Point2) -> f64 {
+    let dx = a.x - b.x;
+    let dy = a.y - b.y;
+    (dx * dx + dy * dy).sqrt()
+}
+
+fn validate_straight_request(request: &StraightGuideInspectRequest) -> Result<(), GridError> {
+    validate(&GridInspectRequest {
+        canvas: request.canvas.clone(),
+        density: request.density.clone(),
+        rotation_degrees: request.rotation_degrees,
+        translation_x: request.translation_x,
+        translation_y: request.translation_y,
+        guard_steps: request.guard_steps,
+        support_radius: request.support_radius,
+        max_family_candidates: request.max_family_candidates,
+    })
+}
+
+fn generalized_fingerprint(
+    family: &FamilyCapability,
+    request: &StraightGuideInspectRequest,
+) -> String {
+    let mut bytes = b"toniator-stage-16a-straight-guide-family-v1".to_vec();
+    bytes.extend(family.provenance.definition_id.to_le_bytes());
+    for mechanism_id in &family.provenance.mechanism_ids {
+        bytes.extend(mechanism_id.0.to_le_bytes());
+    }
+    for dimension in &family.dimensions {
+        bytes.extend(dimension.id.0.to_le_bytes());
+        bytes.extend(dimension.baseline_angle_degrees.to_bits().to_le_bytes());
+        bytes.extend(dimension.phase.to_bits().to_le_bytes());
+        bytes.extend(
+            dimension
+                .repetition
+                .spacing_multiplier
+                .to_bits()
+                .to_le_bytes(),
+        );
+    }
+    for id in &family.site_selection {
+        bytes.extend(id.0.to_le_bytes());
+    }
+    bytes.push(match family.product {
+        StructuralProductCapability::GuideIntersections => 1,
+        StructuralProductCapability::AlongGuideSites => 2,
+    });
+    bytes.extend(family.merge_epsilon.unwrap_or(0.0).to_bits().to_le_bytes());
+    bytes.extend(
+        family
+            .along_interval_multiplier
+            .unwrap_or(0.0)
+            .to_bits()
+            .to_le_bytes(),
+    );
+    bytes.extend(family.along_phase.unwrap_or(0.0).to_bits().to_le_bytes());
+    bytes.extend(request.canvas.width.to_bits().to_le_bytes());
+    bytes.extend(request.canvas.height.to_bits().to_le_bytes());
+    bytes.extend(request.density.across_x.to_bits().to_le_bytes());
+    bytes.extend(request.density.across_y.to_bits().to_le_bytes());
+    bytes.push(u8::from(request.density.aspect_locked));
+    bytes.extend(request.rotation_degrees.to_bits().to_le_bytes());
+    bytes.extend(request.translation_x.to_bits().to_le_bytes());
+    bytes.extend(request.translation_y.to_bits().to_le_bytes());
+    bytes.extend(request.guard_steps.to_le_bytes());
+    bytes.extend(request.support_radius.to_bits().to_le_bytes());
+    bytes.extend(request.max_family_candidates.to_le_bytes());
+    fnv1a64(bytes)
 }
 
 /// Immutable, renderer-independent circular realization of an existing family.
@@ -1544,6 +2439,7 @@ impl GridFamilyOutput {
                     && guide.tangent.x.is_finite()
                     && guide.tangent.y.is_finite()
                     && guide.offset.is_finite()
+                    && guide.anchor.is_finite()
                     && guide.start.is_finite()
                     && guide.end.is_finite()
             })
@@ -1635,8 +2531,8 @@ pub fn evaluate_straight_grid_cancellable(
             ))?;
 
     let dimensions = [
-        DimensionPlan::new(FIRST_DIMENSION_ID, Vector2::new(1.0, 0.0), spacing_x),
-        DimensionPlan::new(SECOND_DIMENSION_ID, Vector2::new(0.0, 1.0), spacing_y),
+        DimensionPlan::new(FIRST_DIMENSION_ID, Vector2::new(1.0, 0.0), spacing_x, 0.0),
+        DimensionPlan::new(SECOND_DIMENSION_ID, Vector2::new(0.0, 1.0), spacing_y, 0.0),
     ];
     let plans = [
         dimensions[0].coverage(generation_domain, transform, request)?,
@@ -1712,7 +2608,7 @@ pub fn evaluate_straight_grid_cancellable(
                     SiteScope::Guard
                 },
                 provenance: GuideIntersectionProvenance {
-                    contributors: [first, second],
+                    contributors: vec![first, second],
                 },
             });
         }
@@ -1724,7 +2620,7 @@ pub fn evaluate_straight_grid_cancellable(
         support_radius: request.support_radius,
         antialias_margin: ANTIALIAS_MARGIN,
         generation_domain,
-        coverage: plans,
+        coverage: plans.to_vec(),
         guides,
         sites,
     };
@@ -1744,15 +2640,17 @@ struct DimensionPlan {
     normal: Vector2,
     tangent: Vector2,
     spacing: f64,
+    phase: f64,
 }
 
 impl DimensionPlan {
-    fn new(id: GuideDimensionId, normal: Vector2, spacing: f64) -> Self {
+    fn new(id: GuideDimensionId, normal: Vector2, spacing: f64, phase: f64) -> Self {
         Self {
             id,
             normal,
             tangent: normal.perpendicular(),
             spacing,
+            phase,
         }
     }
 
@@ -1764,8 +2662,8 @@ impl DimensionPlan {
     ) -> Result<GuideCoverage, GridError> {
         let (minimum, maximum) = projection_range(domain.corners(), self.normal)
             .ok_or(GridError::new("coverage", "could not project local domain"))?;
-        let first_index = checked_index((minimum / self.spacing).floor())?;
-        let last_index = checked_index((maximum / self.spacing).ceil())?;
+        let first_index = checked_index(((minimum - self.phase) / self.spacing).floor())?;
+        let last_index = checked_index(((maximum - self.phase) / self.spacing).ceil())?;
         let document_normal = transform.apply_vector(self.normal);
         let translated_phase = request
             .translation_x
@@ -1773,7 +2671,7 @@ impl DimensionPlan {
         Ok(GuideCoverage {
             dimension_id: self.id.0,
             spacing: self.spacing,
-            normalized_phase: translated_phase.rem_euclid(self.spacing),
+            normalized_phase: (self.phase + translated_phase).rem_euclid(self.spacing),
             first_index,
             last_index,
         })
@@ -1790,7 +2688,7 @@ impl DimensionPlan {
             projection_range(domain.corners(), self.tangent).expect("finite domain projects");
         (coverage.first_index..=coverage.last_index)
             .map(|index| {
-                let offset = index as f64 * self.spacing;
+                let offset = index as f64 * self.spacing + self.phase;
                 let start_local = point_on_line(
                     self.normal,
                     self.tangent,
@@ -1808,6 +2706,12 @@ impl DimensionPlan {
                     normal: transform.apply_vector(self.normal),
                     tangent: transform.apply_vector(self.tangent),
                     offset,
+                    anchor: transform.apply_point(point_on_line(
+                        self.normal,
+                        self.tangent,
+                        offset,
+                        0.0,
+                    )),
                     start: transform.apply_point(start_local),
                     end: transform.apply_point(end_local),
                 }
@@ -2116,5 +3020,520 @@ mod typed_pipeline_tests {
         .unwrap_err();
         assert_eq!(error.path(), "evaluation.cancelled");
         assert!(checks.get() >= 5);
+    }
+}
+
+#[cfg(test)]
+mod generalized_straight_guide_tests {
+    use super::*;
+    use toniator_domain::{
+        CoveragePolicy, GeneralizedSiteProduct, MarkOrientation, PatternDefinitionId,
+        PatternMechanismId, PatternOutputLayerId, StraightGuideRepetition,
+    };
+    use toniator_sampling::{SourceFormatHint, decode_source};
+
+    fn dimension(id: u64, angle: f64) -> StraightGuideDimension {
+        StraightGuideDimension {
+            id: GuideDimensionId(id),
+            baseline_angle_degrees: angle,
+            phase: 0.0,
+            repetition: StraightGuideRepetition {
+                spacing_multiplier: 1.0,
+            },
+        }
+    }
+    fn request() -> StraightGuideInspectRequest {
+        StraightGuideInspectRequest {
+            canvas: CanvasSpec {
+                width: 120.0,
+                height: 80.0,
+            },
+            density: DensityMetric2D {
+                across_x: 12.0,
+                across_y: 8.0,
+                aspect_locked: true,
+            },
+            rotation_degrees: 17.0,
+            translation_x: 3.25,
+            translation_y: -4.5,
+            guard_steps: 2,
+            support_radius: 4.5,
+            max_family_candidates: 100_000,
+        }
+    }
+    fn intersections(
+        dimensions: Vec<StraightGuideDimension>,
+        selected: Vec<GuideDimensionId>,
+    ) -> PatternDefinition {
+        PatternDefinition::generalized_straight_guides(
+            PatternDefinitionId(7),
+            "not-a-name-dispatch",
+            PatternMechanismId(11),
+            PatternMechanismId(12),
+            PatternOutputLayerId(13),
+            dimensions,
+            GeneralizedSiteProduct::Intersections {
+                dimensions: selected,
+                merge_epsilon: 1e-9,
+            },
+            MarkOrientation::GuideTangent {
+                dimension_id: GuideDimensionId(1),
+            },
+            CoveragePolicy {
+                guard_steps: 2,
+                maximum_support_radius: 4.5,
+            },
+        )
+    }
+
+    #[test]
+    fn one_through_four_dimensions_validate_with_explicit_ordered_intersection_provenance() {
+        for count in 1..=4 {
+            let dimensions: Vec<_> = [0.0, 47.0, 90.0, 137.0]
+                .into_iter()
+                .take(count)
+                .enumerate()
+                .map(|(index, angle)| dimension((index + 1) as u64, angle))
+                .collect();
+            let selection: Vec<_> = dimensions
+                .iter()
+                .take(2.min(count))
+                .map(|dimension| dimension.id)
+                .collect();
+            let definition = intersections(dimensions, selection);
+            if count == 1 {
+                assert!(toniator_domain::validate_pattern_definition(&definition).is_err());
+                continue;
+            }
+            toniator_domain::validate_pattern_definition(&definition).unwrap();
+            let plan = resolve_pattern_pipeline(&definition).unwrap();
+            let output =
+                evaluate_generalized_straight_guides_cancellable(&plan.family, &request(), &|| {
+                    false
+                })
+                .unwrap();
+            assert!(output.guides.windows(2).all(|pair| pair[0].id <= pair[1].id
+                || pair[0].id.dimension_id != pair[1].id.dimension_id));
+            assert!(output.sites.iter().all(|site| matches!(&site.provenance, GeneralizedSiteProvenance::Intersection { contributors } if contributors.len() >= 2)));
+        }
+    }
+
+    #[test]
+    fn multiway_intersections_merge_all_contributors_and_along_guides_keep_arc_provenance() {
+        let dimensions = vec![dimension(1, 0.0), dimension(2, 90.0), dimension(3, 45.0)];
+        let definition = intersections(
+            dimensions.clone(),
+            vec![
+                GuideDimensionId(1),
+                GuideDimensionId(2),
+                GuideDimensionId(3),
+            ],
+        );
+        let plan = resolve_pattern_pipeline(&definition).unwrap();
+        let output =
+            evaluate_generalized_straight_guides_cancellable(&plan.family, &request(), &|| false)
+                .unwrap();
+        assert!(output.sites.iter().any(|site| matches!(&site.provenance, GeneralizedSiteProvenance::Intersection { contributors } if contributors.len() >= 3)));
+        let along = PatternDefinition::generalized_straight_guides(
+            PatternDefinitionId(8),
+            "along",
+            PatternMechanismId(21),
+            PatternMechanismId(22),
+            PatternOutputLayerId(23),
+            dimensions,
+            GeneralizedSiteProduct::AlongGuides {
+                dimensions: vec![GuideDimensionId(1), GuideDimensionId(2)],
+                interval_multiplier: 0.5,
+                phase: 1.0,
+            },
+            MarkOrientation::Fixed,
+            CoveragePolicy {
+                guard_steps: 2,
+                maximum_support_radius: 4.5,
+            },
+        );
+        toniator_domain::validate_pattern_definition(&along).unwrap();
+        let plan = resolve_pattern_pipeline(&along).unwrap();
+        let output =
+            evaluate_generalized_straight_guides_cancellable(&plan.family, &request(), &|| false)
+                .unwrap();
+        assert!(output.sites.iter().all(|site| matches!(
+            site.provenance,
+            GeneralizedSiteProvenance::AlongGuide { .. }
+        )));
+        assert!(
+            output
+                .sites
+                .iter()
+                .any(|site| matches!(site.scope, SiteScope::Guard))
+        );
+    }
+
+    #[test]
+    fn invalid_selection_parallel_products_limits_and_cancellation_are_stable() {
+        let mut definition = intersections(
+            vec![dimension(1, 0.0), dimension(2, 90.0)],
+            vec![GuideDimensionId(2), GuideDimensionId(1)],
+        );
+        assert_eq!(
+            toniator_domain::validate_pattern_definition(&definition)
+                .unwrap_err()
+                .path(),
+            "pattern_definitions.mechanisms.intersections.dimensions"
+        );
+        definition = intersections(
+            vec![dimension(1, 0.0), dimension(2, 0.0)],
+            vec![GuideDimensionId(1), GuideDimensionId(2)],
+        );
+        let plan = resolve_pattern_pipeline(&definition).unwrap();
+        assert_eq!(
+            evaluate_generalized_straight_guides_cancellable(&plan.family, &request(), &|| false)
+                .unwrap_err()
+                .path(),
+            "pattern.family.intersections"
+        );
+        let mut limited = request();
+        limited.max_family_candidates = 1;
+        assert_eq!(
+            evaluate_generalized_straight_guides_cancellable(&plan.family, &limited, &|| false)
+                .unwrap_err()
+                .path(),
+            "coverage.candidate_limit"
+        );
+        assert_eq!(
+            evaluate_generalized_straight_guides_cancellable(&plan.family, &request(), &|| true)
+                .unwrap_err()
+                .path(),
+            "evaluation.cancelled"
+        );
+    }
+
+    #[test]
+    fn anisotropic_phase_and_along_arc_anchor_are_structural_inputs() {
+        let mut dimensions = vec![dimension(1, 17.0), dimension(2, 89.5)];
+        dimensions[0].phase = 2.5;
+        dimensions[1].phase = 23.0;
+        let definition = intersections(
+            dimensions.clone(),
+            vec![GuideDimensionId(1), GuideDimensionId(2)],
+        );
+        let plan = resolve_pattern_pipeline(&definition).unwrap();
+        let mut anisotropic = request();
+        anisotropic.density.across_x = 24.0;
+        anisotropic.density.across_y = 4.0;
+        let output =
+            evaluate_generalized_straight_guides_cancellable(&plan.family, &anisotropic, &|| false)
+                .unwrap();
+        assert_ne!(output.coverage[0].spacing, output.coverage[1].spacing);
+        assert!(
+            output
+                .coverage
+                .iter()
+                .all(|coverage| coverage.normalized_phase.is_finite())
+        );
+        assert_eq!(
+            output
+                .guides
+                .iter()
+                .find(|guide| guide.id == GuideInstanceId::new(GuideDimensionId(1), 0))
+                .unwrap()
+                .offset,
+            2.5
+        );
+        assert_eq!(
+            output
+                .guides
+                .iter()
+                .find(|guide| guide.id == GuideInstanceId::new(GuideDimensionId(2), 0))
+                .unwrap()
+                .offset,
+            23.0
+        );
+
+        let along = PatternDefinition::generalized_straight_guides(
+            PatternDefinitionId(9),
+            "arc",
+            PatternMechanismId(31),
+            PatternMechanismId(32),
+            PatternOutputLayerId(33),
+            dimensions,
+            GeneralizedSiteProduct::AlongGuides {
+                dimensions: vec![GuideDimensionId(1)],
+                interval_multiplier: 0.5,
+                phase: 1.25,
+            },
+            MarkOrientation::Fixed,
+            CoveragePolicy {
+                guard_steps: 2,
+                maximum_support_radius: 4.5,
+            },
+        );
+        let plan = resolve_pattern_pipeline(&along).unwrap();
+        let first =
+            evaluate_generalized_straight_guides_cancellable(&plan.family, &anisotropic, &|| false)
+                .unwrap();
+        let mut resized = anisotropic.clone();
+        resized.canvas.width = 240.0;
+        let second =
+            evaluate_generalized_straight_guides_cancellable(&plan.family, &resized, &|| false)
+                .unwrap();
+        let first_positions: Vec<_> = first
+            .sites
+            .iter()
+            .filter_map(|site| match site.provenance {
+                GeneralizedSiteProvenance::AlongGuide {
+                    absolute_arc_position_bits,
+                    local_arc_position_bits,
+                    ..
+                } => Some((absolute_arc_position_bits, local_arc_position_bits)),
+                _ => None,
+            })
+            .collect();
+        let second_positions: Vec<_> = second
+            .sites
+            .iter()
+            .filter_map(|site| match site.provenance {
+                GeneralizedSiteProvenance::AlongGuide {
+                    absolute_arc_position_bits,
+                    local_arc_position_bits,
+                    ..
+                } => Some((absolute_arc_position_bits, local_arc_position_bits)),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            first_positions
+                .iter()
+                .any(|value| second_positions.contains(value))
+        );
+    }
+
+    #[test]
+    fn dimension_count_duplicate_and_missing_ids_have_stable_validation_paths() {
+        for count in [0_usize, 5] {
+            let dimensions = (0..count)
+                .map(|index| dimension((index + 1) as u64, index as f64 * 30.0))
+                .collect();
+            let definition =
+                intersections(dimensions, vec![GuideDimensionId(1), GuideDimensionId(2)]);
+            assert_eq!(
+                toniator_domain::validate_pattern_definition(&definition)
+                    .unwrap_err()
+                    .path(),
+                "pattern_definitions.mechanisms.dimensions"
+            );
+        }
+        let duplicate = intersections(
+            vec![dimension(1, 0.0), dimension(1, 90.0)],
+            vec![GuideDimensionId(1), GuideDimensionId(1)],
+        );
+        assert_eq!(
+            toniator_domain::validate_pattern_definition(&duplicate)
+                .unwrap_err()
+                .path(),
+            "pattern_definitions.mechanisms.dimensions"
+        );
+        let missing = intersections(
+            vec![dimension(1, 0.0), dimension(2, 90.0)],
+            vec![GuideDimensionId(1), GuideDimensionId(9)],
+        );
+        assert_eq!(
+            toniator_domain::validate_pattern_definition(&missing)
+                .unwrap_err()
+                .path(),
+            "pattern_definitions.mechanisms.intersections.dimensions"
+        );
+        let along = PatternDefinition::generalized_straight_guides(
+            PatternDefinitionId(10),
+            "one",
+            PatternMechanismId(41),
+            PatternMechanismId(42),
+            PatternOutputLayerId(43),
+            vec![dimension(1, 0.0)],
+            GeneralizedSiteProduct::AlongGuides {
+                dimensions: vec![GuideDimensionId(1)],
+                interval_multiplier: 1.0,
+                phase: 0.0,
+            },
+            MarkOrientation::Fixed,
+            CoveragePolicy {
+                guard_steps: 2,
+                maximum_support_radius: 4.5,
+            },
+        );
+        toniator_domain::validate_pattern_definition(&along).unwrap();
+    }
+
+    #[test]
+    fn generalized_identity_covers_family_and_realization_contract_inputs() {
+        let definition = intersections(
+            vec![dimension(1, 0.0), dimension(2, 67.0), dimension(3, 121.0)],
+            vec![
+                GuideDimensionId(1),
+                GuideDimensionId(2),
+                GuideDimensionId(3),
+            ],
+        );
+        let fingerprint = |definition: &PatternDefinition,
+                           request: &StraightGuideInspectRequest| {
+            let plan = resolve_pattern_pipeline(definition).unwrap();
+            evaluate_generalized_straight_guides_cancellable(&plan.family, request, &|| false)
+                .unwrap()
+                .family_fingerprint
+        };
+        let baseline = fingerprint(&definition, &request());
+
+        let mut changed_mechanism_ids = definition.clone();
+        changed_mechanism_ids.family = PatternFamily::GuideIntersections {
+            guide_mechanism_id: PatternMechanismId(71),
+            site_mechanism_id: PatternMechanismId(72),
+        };
+        let PatternMechanism::StraightGuideDimensions { id, .. } =
+            &mut changed_mechanism_ids.mechanisms[0]
+        else {
+            unreachable!()
+        };
+        *id = PatternMechanismId(71);
+        let PatternMechanism::SelectedGuideIntersections {
+            id,
+            guide_mechanism_id,
+            ..
+        } = &mut changed_mechanism_ids.mechanisms[1]
+        else {
+            unreachable!()
+        };
+        *id = PatternMechanismId(72);
+        *guide_mechanism_id = PatternMechanismId(71);
+        let PatternOutputLayer::MarkPrototype {
+            site_mechanism_id, ..
+        } = &mut changed_mechanism_ids.output_layers[0]
+        else {
+            unreachable!()
+        };
+        *site_mechanism_id = PatternMechanismId(72);
+        assert_ne!(baseline, fingerprint(&changed_mechanism_ids, &request()));
+        let mut aspect = request();
+        aspect.density.aspect_locked = false;
+        assert_ne!(baseline, fingerprint(&definition, &aspect));
+        let mut changed_phase = definition.clone();
+        let PatternMechanism::StraightGuideDimensions { dimensions, .. } =
+            &mut changed_phase.mechanisms[0]
+        else {
+            unreachable!()
+        };
+        dimensions[0].phase = 2.5;
+        assert_ne!(baseline, fingerprint(&changed_phase, &request()));
+        let mut changed_selection = definition.clone();
+        let PatternMechanism::SelectedGuideIntersections { dimensions, .. } =
+            &mut changed_selection.mechanisms[1]
+        else {
+            unreachable!()
+        };
+        *dimensions = vec![GuideDimensionId(1), GuideDimensionId(3)];
+        assert_ne!(baseline, fingerprint(&changed_selection, &request()));
+        let mut changed_merge = definition.clone();
+        let PatternMechanism::SelectedGuideIntersections { merge_epsilon, .. } =
+            &mut changed_merge.mechanisms[1]
+        else {
+            unreachable!()
+        };
+        *merge_epsilon = 0.25;
+        assert_ne!(baseline, fingerprint(&changed_merge, &request()));
+
+        let family = evaluate_typed_family(
+            &definition,
+            &GridInspectRequest {
+                canvas: request().canvas,
+                density: request().density,
+                rotation_degrees: request().rotation_degrees,
+                translation_x: request().translation_x,
+                translation_y: request().translation_y,
+                guard_steps: request().guard_steps,
+                support_radius: request().support_radius,
+                max_family_candidates: request().max_family_candidates,
+            },
+        )
+        .unwrap();
+        let mut fixed = definition.clone();
+        let PatternOutputLayer::MarkPrototype { orientation, .. } = &mut fixed.output_layers[0]
+        else {
+            unreachable!()
+        };
+        *orientation = MarkOrientation::Fixed;
+        let image = image::RgbaImage::from_raw(1, 1, vec![255, 0, 0, 255]).unwrap();
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        let source = decode_source(&bytes, SourceFormatHint::Png).unwrap();
+        let grid_request = GridInspectRequest {
+            canvas: request().canvas,
+            density: request().density,
+            rotation_degrees: request().rotation_degrees,
+            translation_x: request().translation_x,
+            translation_y: request().translation_y,
+            guard_steps: request().guard_steps,
+            support_radius: request().support_radius,
+            max_family_candidates: request().max_family_candidates,
+        };
+        let tangent = realize_typed_mapped_outputs(
+            &family,
+            &resolve_pattern_pipeline(&definition).unwrap(),
+            &source,
+            &grid_request.canvas,
+            SourceMapping::canonical(SourceMappingComponent::Red),
+            MarkResponse {
+                minimum_size: 2.0,
+                maximum_size: 9.0,
+            },
+        )
+        .unwrap();
+        let mut different_layer = fixed.clone();
+        let PatternOutputLayer::MarkPrototype { id, .. } = &mut different_layer.output_layers[0]
+        else {
+            unreachable!()
+        };
+        *id = PatternOutputLayerId(99);
+        let fixed = realize_typed_mapped_outputs(
+            &family,
+            &resolve_pattern_pipeline(&fixed).unwrap(),
+            &source,
+            &grid_request.canvas,
+            SourceMapping::canonical(SourceMappingComponent::Red),
+            MarkResponse {
+                minimum_size: 2.0,
+                maximum_size: 9.0,
+            },
+        )
+        .unwrap();
+        let different_layer = realize_typed_mapped_outputs(
+            &family,
+            &resolve_pattern_pipeline(&different_layer).unwrap(),
+            &source,
+            &grid_request.canvas,
+            SourceMapping::canonical(SourceMappingComponent::Red),
+            MarkResponse {
+                minimum_size: 2.0,
+                maximum_size: 9.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(tangent.output.marks, fixed.output.marks);
+        assert_ne!(
+            tangent.output.realization_fingerprint,
+            fixed.output.realization_fingerprint
+        );
+        assert_eq!(
+            tangent.provenance.ordered_output_prototypes,
+            vec![MarkPrototype::Circle]
+        );
+        assert_eq!(fixed.output.marks, different_layer.output.marks);
+        assert_ne!(
+            fixed.output.realization_fingerprint,
+            different_layer.output.realization_fingerprint
+        );
     }
 }

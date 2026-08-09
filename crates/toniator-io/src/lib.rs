@@ -19,10 +19,11 @@ use sha2::{Digest, Sha256};
 use toniator_domain::{
     CanvasSpec, ChannelAppearance, ChannelId, ChannelPaint, ChannelPatternLayout,
     ChannelSourceMapping, ChannelState, ChannelTopology, ColorValue, CoveragePolicy,
-    DensityMetric2D, Document, DocumentId, HalftoneChannelModel, HalftoneChannelRole,
-    MarkGeometryResponse, ModeledChannelState, PatternDefinition, PatternDefinitionId,
-    PatternMechanismId, PatternOutputLayerId, SourceComponent, SourceMapping,
-    SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId, ValidationError,
+    DensityMetric2D, Document, DocumentId, GuideDimensionId, HalftoneChannelModel,
+    HalftoneChannelRole, MarkGeometryResponse, MarkOrientation, MarkPrototype, ModeledChannelState,
+    PatternDefinition, PatternDefinitionId, PatternMechanismId, PatternOutputLayerId,
+    SourceComponent, SourceMapping, SourceMappingComponent, SourcePlacement, SourceReference,
+    SourceReferenceId, StraightGuideDimension, StraightGuideRepetition, ValidationError,
 };
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
@@ -473,7 +474,10 @@ pub fn load(path: &Path) -> Result<LoadedDocument, LoadError> {
                         .iter()
                         .map(|mechanism| match mechanism {
                             PatternMechanismDtoV2::StraightGuides { id }
-                            | PatternMechanismDtoV2::GuideIntersections { id, .. } => {
+                            | PatternMechanismDtoV2::GuideIntersections { id, .. }
+                            | PatternMechanismDtoV2::StraightGuideDimensions { id, .. }
+                            | PatternMechanismDtoV2::SelectedGuideIntersections { id, .. }
+                            | PatternMechanismDtoV2::AlongGuideSites { id, .. } => {
                                 PatternMechanismId(*id)
                             }
                         })
@@ -482,7 +486,8 @@ pub fn load(path: &Path) -> Result<LoadedDocument, LoadError> {
                         .output_layers
                         .iter()
                         .map(|layer| match layer {
-                            PatternOutputLayerDtoV2::CircularMarks { id, .. } => {
+                            PatternOutputLayerDtoV2::CircularMarks { id, .. }
+                            | PatternOutputLayerDtoV2::MarkPrototype { id, .. } => {
                                 PatternOutputLayerId(*id)
                             }
                         })
@@ -922,13 +927,63 @@ enum PatternFamilyDtoV2 {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum PatternMechanismDtoV2 {
-    StraightGuides { id: u64 },
-    GuideIntersections { id: u64, guide_mechanism_id: u64 },
+    StraightGuides {
+        id: u64,
+    },
+    GuideIntersections {
+        id: u64,
+        guide_mechanism_id: u64,
+    },
+    StraightGuideDimensions {
+        id: u64,
+        dimensions: Vec<StraightGuideDimensionDtoV2>,
+    },
+    SelectedGuideIntersections {
+        id: u64,
+        guide_mechanism_id: u64,
+        dimensions: Vec<u64>,
+        merge_epsilon: f64,
+    },
+    AlongGuideSites {
+        id: u64,
+        guide_mechanism_id: u64,
+        dimensions: Vec<u64>,
+        interval_multiplier: f64,
+        phase: f64,
+    },
+}
+#[derive(Serialize, Deserialize)]
+struct StraightGuideDimensionDtoV2 {
+    id: u64,
+    baseline_angle_degrees: f64,
+    phase: f64,
+    spacing_multiplier: f64,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum PatternOutputLayerDtoV2 {
-    CircularMarks { id: u64, site_mechanism_id: u64 },
+    CircularMarks {
+        id: u64,
+        site_mechanism_id: u64,
+    },
+    MarkPrototype {
+        id: u64,
+        site_mechanism_id: u64,
+        prototype: MarkPrototypeDtoV2,
+        orientation: MarkOrientationDtoV2,
+    },
+}
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MarkPrototypeDtoV2 {
+    Circle,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum MarkOrientationDtoV2 {
+    Fixed,
+    GuideTangent { dimension_id: u64 },
+    GuideNormal { dimension_id: u64 },
 }
 #[derive(Serialize, Deserialize)]
 struct PatternModulationDtoV2 {}
@@ -1335,6 +1390,39 @@ impl PatternMechanismDtoV2 {
                 id: id.0,
                 guide_mechanism_id: guide_mechanism_id.0,
             },
+            toniator_domain::PatternMechanism::StraightGuideDimensions { id, dimensions } => {
+                Self::StraightGuideDimensions {
+                    id: id.0,
+                    dimensions: dimensions
+                        .iter()
+                        .map(StraightGuideDimensionDtoV2::from_domain)
+                        .collect(),
+                }
+            }
+            toniator_domain::PatternMechanism::SelectedGuideIntersections {
+                id,
+                guide_mechanism_id,
+                dimensions,
+                merge_epsilon,
+            } => Self::SelectedGuideIntersections {
+                id: id.0,
+                guide_mechanism_id: guide_mechanism_id.0,
+                dimensions: dimensions.iter().map(|id| id.0).collect(),
+                merge_epsilon: *merge_epsilon,
+            },
+            toniator_domain::PatternMechanism::AlongGuideSites {
+                id,
+                guide_mechanism_id,
+                dimensions,
+                interval_multiplier,
+                phase,
+            } => Self::AlongGuideSites {
+                id: id.0,
+                guide_mechanism_id: guide_mechanism_id.0,
+                dimensions: dimensions.iter().map(|id| id.0).collect(),
+                interval_multiplier: *interval_multiplier,
+                phase: *phase,
+            },
         }
     }
     fn into_domain(self) -> toniator_domain::PatternMechanism {
@@ -1349,6 +1437,39 @@ impl PatternMechanismDtoV2 {
                 id: PatternMechanismId(id),
                 guide_mechanism_id: PatternMechanismId(guide_mechanism_id),
             },
+            Self::StraightGuideDimensions { id, dimensions } => {
+                toniator_domain::PatternMechanism::StraightGuideDimensions {
+                    id: PatternMechanismId(id),
+                    dimensions: dimensions
+                        .into_iter()
+                        .map(StraightGuideDimensionDtoV2::into_domain)
+                        .collect(),
+                }
+            }
+            Self::SelectedGuideIntersections {
+                id,
+                guide_mechanism_id,
+                dimensions,
+                merge_epsilon,
+            } => toniator_domain::PatternMechanism::SelectedGuideIntersections {
+                id: PatternMechanismId(id),
+                guide_mechanism_id: PatternMechanismId(guide_mechanism_id),
+                dimensions: dimensions.into_iter().map(GuideDimensionId).collect(),
+                merge_epsilon,
+            },
+            Self::AlongGuideSites {
+                id,
+                guide_mechanism_id,
+                dimensions,
+                interval_multiplier,
+                phase,
+            } => toniator_domain::PatternMechanism::AlongGuideSites {
+                id: PatternMechanismId(id),
+                guide_mechanism_id: PatternMechanismId(guide_mechanism_id),
+                dimensions: dimensions.into_iter().map(GuideDimensionId).collect(),
+                interval_multiplier,
+                phase,
+            },
         }
     }
 }
@@ -1362,6 +1483,17 @@ impl PatternOutputLayerDtoV2 {
                 id: id.0,
                 site_mechanism_id: site_mechanism_id.0,
             },
+            toniator_domain::PatternOutputLayer::MarkPrototype {
+                id,
+                site_mechanism_id,
+                prototype,
+                orientation,
+            } => Self::MarkPrototype {
+                id: id.0,
+                site_mechanism_id: site_mechanism_id.0,
+                prototype: MarkPrototypeDtoV2::from_domain(prototype),
+                orientation: MarkOrientationDtoV2::from_domain(orientation),
+            },
         }
     }
     fn into_domain(self) -> toniator_domain::PatternOutputLayer {
@@ -1372,6 +1504,74 @@ impl PatternOutputLayerDtoV2 {
             } => toniator_domain::PatternOutputLayer::CircularMarks {
                 id: PatternOutputLayerId(id),
                 site_mechanism_id: PatternMechanismId(site_mechanism_id),
+            },
+            Self::MarkPrototype {
+                id,
+                site_mechanism_id,
+                prototype,
+                orientation,
+            } => toniator_domain::PatternOutputLayer::MarkPrototype {
+                id: PatternOutputLayerId(id),
+                site_mechanism_id: PatternMechanismId(site_mechanism_id),
+                prototype: prototype.into_domain(),
+                orientation: orientation.into_domain(),
+            },
+        }
+    }
+}
+
+impl StraightGuideDimensionDtoV2 {
+    fn from_domain(value: &StraightGuideDimension) -> Self {
+        Self {
+            id: value.id.0,
+            baseline_angle_degrees: value.baseline_angle_degrees,
+            phase: value.phase,
+            spacing_multiplier: value.repetition.spacing_multiplier,
+        }
+    }
+    fn into_domain(self) -> StraightGuideDimension {
+        StraightGuideDimension {
+            id: GuideDimensionId(self.id),
+            baseline_angle_degrees: self.baseline_angle_degrees,
+            phase: self.phase,
+            repetition: StraightGuideRepetition {
+                spacing_multiplier: self.spacing_multiplier,
+            },
+        }
+    }
+}
+impl MarkPrototypeDtoV2 {
+    fn from_domain(value: &MarkPrototype) -> Self {
+        match value {
+            MarkPrototype::Circle => Self::Circle,
+        }
+    }
+    fn into_domain(self) -> MarkPrototype {
+        match self {
+            Self::Circle => MarkPrototype::Circle,
+        }
+    }
+}
+impl MarkOrientationDtoV2 {
+    fn from_domain(value: &MarkOrientation) -> Self {
+        match value {
+            MarkOrientation::Fixed => Self::Fixed,
+            MarkOrientation::GuideTangent { dimension_id } => Self::GuideTangent {
+                dimension_id: dimension_id.0,
+            },
+            MarkOrientation::GuideNormal { dimension_id } => Self::GuideNormal {
+                dimension_id: dimension_id.0,
+            },
+        }
+    }
+    fn into_domain(self) -> MarkOrientation {
+        match self {
+            Self::Fixed => MarkOrientation::Fixed,
+            Self::GuideTangent { dimension_id } => MarkOrientation::GuideTangent {
+                dimension_id: GuideDimensionId(dimension_id),
+            },
+            Self::GuideNormal { dimension_id } => MarkOrientation::GuideNormal {
+                dimension_id: GuideDimensionId(dimension_id),
             },
         }
     }

@@ -1,3 +1,4 @@
+use sha2::{Digest, Sha256};
 use std::{
     fs,
     path::Path,
@@ -7,16 +8,18 @@ use toniator_domain::{
     CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternLayout, ChannelSourceMapping,
     ChannelState, ChannelTopology, ChannelTopologyTemplate, ColorValue, CoveragePolicy,
     DensityMetric2D, Document, DocumentCommand, DocumentHistory, DocumentId, DocumentSession,
-    HalftoneChannelModel, HalftoneChannelRole, MarkGeometryResponse, PatternDefinition,
-    PatternDefinitionId, PatternMechanismId, PatternOutputLayerId, SourceComponent, SourceMapping,
-    SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId,
+    GeneralizedSiteProduct, GuideDimensionId, HalftoneChannelModel, HalftoneChannelRole,
+    MarkGeometryResponse, MarkOrientation, PatternDefinition, PatternDefinitionEdit,
+    PatternDefinitionId, PatternMechanism, PatternMechanismId, PatternOutputLayer,
+    PatternOutputLayerId, SourceComponent, SourceMapping, SourceMappingComponent, SourcePlacement,
+    SourceReference, SourceReferenceId, StraightGuideDimension, StraightGuideRepetition,
 };
 use toniator_engine::{
     CacheDisposition, EvaluationCompletion, EvaluationLimits, EvaluationRequest,
     EvaluationScheduler, PreviewRasterTarget, ResolvedSource, SourceFormatHint, encode_png,
     evaluate, evaluate_with_limits, write_svg,
 };
-use toniator_io::{load, save};
+use toniator_io::{EmbeddedSource, EmbeddedSourceFormat, SourceBundle, load, save};
 
 fn wait_for_latest(scheduler: &EvaluationScheduler) -> EvaluationCompletion {
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -134,6 +137,272 @@ fn session_with_canvas(model: HalftoneChannelModel, width: f64, height: f64) -> 
         .apply(&DocumentCommand::ReplaceChannelTopology { model, topology })
         .unwrap();
     session
+}
+
+fn generalized_session(model: HalftoneChannelModel, along: bool) -> DocumentSession {
+    generalized_session_named(
+        model,
+        if along {
+            GeneralizedConfiguration::AlongGuide
+        } else {
+            GeneralizedConfiguration::ThreeDirection
+        },
+    )
+}
+
+#[derive(Clone, Copy)]
+enum GeneralizedConfiguration {
+    Orthogonal,
+    Nonorthogonal,
+    ThreeDirection,
+    FourDirection,
+    ParallelAlong,
+    AlongGuide,
+}
+
+impl GeneralizedConfiguration {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Orthogonal => "orthogonal",
+            Self::Nonorthogonal => "nonorthogonal",
+            Self::ThreeDirection => "three-direction",
+            Self::FourDirection => "four-direction",
+            Self::ParallelAlong => "parallel-one-dimension",
+            Self::AlongGuide => "along-guide",
+        }
+    }
+}
+
+fn generalized_session_named(
+    model: HalftoneChannelModel,
+    configuration: GeneralizedConfiguration,
+) -> DocumentSession {
+    let dimensions = vec![
+        StraightGuideDimension {
+            id: GuideDimensionId(11),
+            baseline_angle_degrees: 17.0,
+            phase: 1.25,
+            repetition: StraightGuideRepetition {
+                spacing_multiplier: 1.0,
+            },
+        },
+        StraightGuideDimension {
+            id: GuideDimensionId(12),
+            baseline_angle_degrees: 89.5,
+            phase: -2.5,
+            repetition: StraightGuideRepetition {
+                spacing_multiplier: 0.75,
+            },
+        },
+        StraightGuideDimension {
+            id: GuideDimensionId(13),
+            baseline_angle_degrees: 137.0,
+            phase: 0.0,
+            repetition: StraightGuideRepetition {
+                spacing_multiplier: 1.0,
+            },
+        },
+    ];
+    let (dimensions, product, orientation) = match configuration {
+        GeneralizedConfiguration::Orthogonal => {
+            let mut dimensions = dimensions[..2].to_vec();
+            dimensions[0].baseline_angle_degrees = 0.0;
+            dimensions[1].baseline_angle_degrees = 90.0;
+            (
+                dimensions,
+                GeneralizedSiteProduct::Intersections {
+                    dimensions: vec![GuideDimensionId(11), GuideDimensionId(12)],
+                    merge_epsilon: 1e-9,
+                },
+                MarkOrientation::Fixed,
+            )
+        }
+        GeneralizedConfiguration::Nonorthogonal => {
+            let mut dimensions = dimensions[..2].to_vec();
+            dimensions[1].baseline_angle_degrees = 77.0;
+            (
+                dimensions,
+                GeneralizedSiteProduct::Intersections {
+                    dimensions: vec![GuideDimensionId(11), GuideDimensionId(12)],
+                    merge_epsilon: 1e-9,
+                },
+                MarkOrientation::GuideNormal {
+                    dimension_id: GuideDimensionId(12),
+                },
+            )
+        }
+        GeneralizedConfiguration::ThreeDirection => (
+            dimensions[..3].to_vec(),
+            GeneralizedSiteProduct::Intersections {
+                dimensions: vec![
+                    GuideDimensionId(11),
+                    GuideDimensionId(12),
+                    GuideDimensionId(13),
+                ],
+                merge_epsilon: 1e-9,
+            },
+            MarkOrientation::GuideTangent {
+                dimension_id: GuideDimensionId(11),
+            },
+        ),
+        GeneralizedConfiguration::FourDirection => {
+            let mut dimensions = dimensions;
+            dimensions.push(StraightGuideDimension {
+                id: GuideDimensionId(14),
+                baseline_angle_degrees: 45.0,
+                phase: 0.75,
+                repetition: StraightGuideRepetition {
+                    spacing_multiplier: 1.25,
+                },
+            });
+            (
+                dimensions,
+                GeneralizedSiteProduct::Intersections {
+                    dimensions: vec![
+                        GuideDimensionId(11),
+                        GuideDimensionId(12),
+                        GuideDimensionId(13),
+                        GuideDimensionId(14),
+                    ],
+                    merge_epsilon: 1e-9,
+                },
+                MarkOrientation::GuideTangent {
+                    dimension_id: GuideDimensionId(14),
+                },
+            )
+        }
+        GeneralizedConfiguration::ParallelAlong => (
+            vec![StraightGuideDimension {
+                id: GuideDimensionId(11),
+                baseline_angle_degrees: 17.0,
+                phase: 1.25,
+                repetition: StraightGuideRepetition {
+                    spacing_multiplier: 1.0,
+                },
+            }],
+            GeneralizedSiteProduct::AlongGuides {
+                dimensions: vec![GuideDimensionId(11)],
+                interval_multiplier: 0.75,
+                phase: 0.5,
+            },
+            MarkOrientation::GuideNormal {
+                dimension_id: GuideDimensionId(11),
+            },
+        ),
+        GeneralizedConfiguration::AlongGuide => (
+            dimensions[..3].to_vec(),
+            GeneralizedSiteProduct::AlongGuides {
+                dimensions: vec![GuideDimensionId(11), GuideDimensionId(13)],
+                interval_multiplier: 0.75,
+                phase: 0.5,
+            },
+            MarkOrientation::GuideTangent {
+                dimension_id: GuideDimensionId(11),
+            },
+        ),
+    };
+    let definition = PatternDefinition::generalized_straight_guides(
+        PatternDefinitionId(1),
+        "data-only",
+        PatternMechanismId(1),
+        PatternMechanismId(2),
+        PatternOutputLayerId(1),
+        dimensions,
+        product,
+        orientation,
+        CoveragePolicy {
+            guard_steps: 2,
+            maximum_support_radius: 4.5,
+        },
+    );
+    let source = SourceReferenceId::new("fixture-source").unwrap();
+    let channel = ChannelState {
+        id: ChannelId(1),
+        pattern_definition_id: definition.id,
+        layout: ChannelPatternLayout {
+            density: DensityMetric2D {
+                across_x: 9.0,
+                across_y: 6.0,
+                aspect_locked: false,
+            },
+            rotation_degrees: 17.0,
+            translation_x: 3.25,
+            translation_y: -4.5,
+        },
+        appearance: ChannelAppearance {
+            visible: true,
+            color: ColorValue {
+                red: 1.0,
+                green: 0.0,
+                blue: 0.0,
+                alpha: 1.0,
+            },
+            opacity: 1.0,
+        },
+        mark_geometry_response: MarkGeometryResponse {
+            minimum_size: 2.0,
+            maximum_size: 9.0,
+        },
+        source_mapping: ChannelSourceMapping {
+            component: SourceComponent::Luminance,
+            placement: SourcePlacement::StretchToCanvas,
+        },
+    };
+    let document = Document::with_source(
+        DocumentId(1),
+        CanvasSpec {
+            width: 90.0,
+            height: 60.0,
+        },
+        SourceReference::Assigned(source),
+        vec![definition],
+        vec![channel],
+    )
+    .unwrap();
+    let mut session = DocumentSession::new(document).unwrap();
+    let template = ChannelTopologyTemplate {
+        pattern_definition_id: PatternDefinitionId(1),
+        layout: session
+            .document()
+            .channel(ChannelId(1))
+            .unwrap()
+            .layout
+            .clone(),
+        mark_geometry_response: session
+            .document()
+            .channel(ChannelId(1))
+            .unwrap()
+            .mark_geometry_response
+            .clone(),
+    };
+    let topology = session
+        .document()
+        .canonical_channel_topology(model, template)
+        .unwrap();
+    session
+        .apply(&DocumentCommand::ReplaceChannelTopology { model, topology })
+        .unwrap();
+    session
+}
+
+fn generalized_session_with_definition(
+    model: HalftoneChannelModel,
+    configuration: GeneralizedConfiguration,
+    definition: PatternDefinition,
+    source: SourceReference,
+    canvas: CanvasSpec,
+) -> DocumentSession {
+    let base = generalized_session_named(model, configuration);
+    let document = Document::with_source_and_topology(
+        base.document().id(),
+        canvas,
+        source,
+        vec![definition],
+        model,
+        base.document().channel_topology().unwrap().clone(),
+    )
+    .unwrap();
+    DocumentSession::new(document).unwrap()
 }
 
 #[test]
@@ -601,6 +870,32 @@ fn frozen_v1_migration_and_saved_v2_preserve_accepted_outputs_for_every_model() 
                 fixture.trim_end_matches(".toniator")
             ));
             save(&saved, &document, migrated.sources()).unwrap();
+            let expected_archive_hash = match (fixture, model) {
+                ("raster-sample-v1.toniator", HalftoneChannelModel::Rgb) => {
+                    "7135531041b8a4f9136731267b356ce4b3acbdb74c6e12c6670817e0613436cf"
+                }
+                ("raster-sample-v1.toniator", HalftoneChannelModel::Cmyk) => {
+                    "9aa1ec4c5fe5fca6b023278719ebe56160ec526617ec46eb2f4864277c3ea588"
+                }
+                ("raster-sample-v1.toniator", HalftoneChannelModel::SourceColorAlpha) => {
+                    "1137a5bd4ccc0905087081ff62aa70feb0bf195a7c10272b12bfc323760db6d2"
+                }
+                ("vector-sample-v1.toniator", HalftoneChannelModel::Rgb) => {
+                    "b2d6f3116d9b5aa4bef37d89268be5aa6092a9eb195b33049d53ecad7e910d97"
+                }
+                ("vector-sample-v1.toniator", HalftoneChannelModel::Cmyk) => {
+                    "9424c9d9278fe0e4780a1b4c2ba7688a8b46292c1be7e24144fb3ce1ae81041a"
+                }
+                ("vector-sample-v1.toniator", HalftoneChannelModel::SourceColorAlpha) => {
+                    "419e16a7e8b6de45799dd3780e8c2a781e5050ede74dfd2a33cb114097e0b515"
+                }
+                _ => unreachable!("fixed frozen-v1/model matrix"),
+            };
+            assert_eq!(
+                format!("{:x}", Sha256::digest(fs::read(&saved).unwrap())),
+                expected_archive_hash,
+                "additive current-v2 DTO variants must not alter saved Stage 15 bytes"
+            );
             let reopened = load(&saved).unwrap();
             assert_eq!(reopened.versions().document(), 2);
             let reopened_session = DocumentSession::new(reopened.document().clone()).unwrap();
@@ -979,6 +1274,471 @@ fn scheduler_commits_then_reuses_the_accepted_complete_document_cache() {
     );
 
     scheduler.shutdown().unwrap();
+}
+
+#[test]
+fn generalized_intersection_and_along_products_share_the_complete_cache_and_consumer_boundary() {
+    let source_id = SourceReferenceId::new("fixture-source").unwrap();
+    let source_bytes = std::fs::read("../../assets/raster-sample.png").unwrap();
+    for along in [false, true] {
+        let session = generalized_session(HalftoneChannelModel::Rgb, along);
+        let scheduler = EvaluationScheduler::new().unwrap();
+        let first = submit_and_accept(
+            &scheduler,
+            &session,
+            EvaluationRequest::new(
+                session.document_evaluation_snapshot(),
+                ResolvedSource::new(
+                    source_id.clone(),
+                    source_bytes.clone(),
+                    SourceFormatHint::Png,
+                )
+                .unwrap(),
+            ),
+        );
+        let first_result = first.result().unwrap().clone();
+        let repeated = submit_and_accept(
+            &scheduler,
+            &session,
+            EvaluationRequest::new(
+                session.document_evaluation_snapshot(),
+                ResolvedSource::new(
+                    source_id.clone(),
+                    source_bytes.clone(),
+                    SourceFormatHint::Png,
+                )
+                .unwrap(),
+            ),
+        );
+        assert_eq!(
+            repeated.cache_diagnostics().unwrap().aggregate.family,
+            CacheDisposition::Hit
+        );
+        assert_eq!(
+            repeated.cache_diagnostics().unwrap().aggregate.realization,
+            CacheDisposition::Hit
+        );
+        assert_eq!(repeated.result().unwrap().scene(), first_result.scene());
+        assert_eq!(repeated.result().unwrap().raster(), first_result.raster());
+        assert_eq!(
+            write_svg(repeated.result().unwrap().scene()),
+            write_svg(first_result.scene())
+        );
+        scheduler.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn generalized_history_and_scheduler_keep_authority_and_reject_stale_publication() {
+    let source_id = SourceReferenceId::new("fixture-source").unwrap();
+    let bytes = fs::read("../../assets/raster-sample.png").unwrap();
+    let mut history = DocumentHistory::new(generalized_session_named(
+        HalftoneChannelModel::Rgb,
+        GeneralizedConfiguration::AlongGuide,
+    ));
+    let original = evaluate(EvaluationRequest::new(
+        history.session().document_evaluation_snapshot(),
+        ResolvedSource::new(source_id.clone(), bytes.clone(), SourceFormatHint::Png).unwrap(),
+    ))
+    .unwrap();
+    let scheduler = EvaluationScheduler::new().unwrap();
+    let ticket = scheduler
+        .submit(EvaluationRequest::new(
+            history.session().document_evaluation_snapshot(),
+            ResolvedSource::new(source_id.clone(), bytes.clone(), SourceFormatHint::Png).unwrap(),
+        ))
+        .unwrap();
+    let completion = wait_for_latest(&scheduler);
+    assert_eq!(completion.ticket(), ticket);
+
+    let base = history
+        .session()
+        .document()
+        .pattern_definitions()
+        .iter()
+        .find(|definition| definition.id == PatternDefinitionId(1))
+        .unwrap()
+        .clone();
+    history
+        .apply(&DocumentCommand::EditSharedPatternDefinition {
+            definition_id: PatternDefinitionId(1),
+            base_definition: base,
+            edit: PatternDefinitionEdit::SetCoverage {
+                coverage: CoveragePolicy {
+                    guard_steps: 3,
+                    maximum_support_radius: 4.5,
+                },
+            },
+        })
+        .unwrap();
+    assert!(
+        !scheduler
+            .accept_completion(&completion, history.session())
+            .unwrap()
+    );
+    history.undo().unwrap();
+    let restored = evaluate(EvaluationRequest::new(
+        history.session().document_evaluation_snapshot(),
+        ResolvedSource::new(source_id.clone(), bytes.clone(), SourceFormatHint::Png).unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(restored.channels(), original.channels());
+    assert_eq!(restored.scene().identity(), original.scene().identity());
+    assert_eq!(restored.raster().pixels(), original.raster().pixels());
+    history.redo().unwrap();
+    history.undo().unwrap();
+
+    let accepted = submit_and_accept(
+        &scheduler,
+        history.session(),
+        EvaluationRequest::new(
+            history.session().document_evaluation_snapshot(),
+            ResolvedSource::new(source_id, bytes, SourceFormatHint::Png).unwrap(),
+        ),
+    );
+    assert!(accepted.result().is_some());
+    scheduler.shutdown().unwrap();
+}
+
+#[test]
+fn generalized_scheduler_supersession_and_failure_preserve_the_last_accepted_cache() {
+    let source_id = SourceReferenceId::new("fixture-source").unwrap();
+    let bytes = fs::read("../../assets/raster-sample.png").unwrap();
+    for along in [false, true] {
+        let session = generalized_session(HalftoneChannelModel::Rgb, along);
+        let scheduler = EvaluationScheduler::new().unwrap();
+        submit_and_accept(
+            &scheduler,
+            &session,
+            EvaluationRequest::new(
+                session.document_evaluation_snapshot(),
+                ResolvedSource::new(source_id.clone(), bytes.clone(), SourceFormatHint::Png)
+                    .unwrap(),
+            ),
+        );
+        let failed_ticket = scheduler
+            .submit(EvaluationRequest::new(
+                session.document_evaluation_snapshot(),
+                ResolvedSource::new(
+                    SourceReferenceId::new("different-logical-source").unwrap(),
+                    bytes.clone(),
+                    SourceFormatHint::Png,
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+        let failed = wait_for_latest(&scheduler);
+        assert_eq!(failed.ticket(), failed_ticket);
+        assert_eq!(
+            failed.error().unwrap().path(),
+            "evaluation.source_reference"
+        );
+        assert!(scheduler.accept_completion(&failed, &session).unwrap());
+
+        let superseded = scheduler
+            .submit(EvaluationRequest::new(
+                session.document_evaluation_snapshot(),
+                ResolvedSource::new(source_id.clone(), bytes.clone(), SourceFormatHint::Png)
+                    .unwrap(),
+            ))
+            .unwrap();
+        let newest = scheduler
+            .submit(EvaluationRequest::new(
+                session.document_evaluation_snapshot(),
+                ResolvedSource::new(source_id.clone(), bytes.clone(), SourceFormatHint::Png)
+                    .unwrap(),
+            ))
+            .unwrap();
+        assert!(!scheduler.is_latest(superseded));
+        assert!(scheduler.is_latest(newest));
+        let completion = wait_for_latest(&scheduler);
+        assert_eq!(completion.ticket(), newest);
+        assert!(scheduler.accept_completion(&completion, &session).unwrap());
+        let diagnostics = completion.cache_diagnostics().unwrap();
+        assert_eq!(diagnostics.aggregate.decoded_source, CacheDisposition::Hit);
+        assert_eq!(diagnostics.aggregate.family, CacheDisposition::Hit);
+        assert_eq!(diagnostics.aggregate.realization, CacheDisposition::Hit);
+        assert_eq!(diagnostics.aggregate.scene, CacheDisposition::Hit);
+        assert_eq!(diagnostics.aggregate.raster, CacheDisposition::Hit);
+        scheduler.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn generalized_cache_identity_matrix_misses_at_the_first_authoritative_layer() {
+    let source_id = SourceReferenceId::new("fixture-source").unwrap();
+    let raster = fs::read("../../assets/raster-sample.png").unwrap();
+    let vector = fs::read("../../assets/vector-sample.svg").unwrap();
+    let configuration = GeneralizedConfiguration::ThreeDirection;
+    let session = generalized_session_named(HalftoneChannelModel::Rgb, configuration);
+    let scheduler = EvaluationScheduler::new().unwrap();
+    let baseline = submit_and_accept(
+        &scheduler,
+        &session,
+        EvaluationRequest::new(
+            session.document_evaluation_snapshot(),
+            ResolvedSource::new(source_id.clone(), raster.clone(), SourceFormatHint::Png).unwrap(),
+        ),
+    );
+    let baseline_identity = baseline.result().unwrap().channels()[0]
+        .realization_identity()
+        .to_owned();
+    let definition = session.document().pattern_definitions()[0].clone();
+
+    let mut phase_definition = definition.clone();
+    let PatternMechanism::StraightGuideDimensions { dimensions, .. } =
+        &mut phase_definition.mechanisms[0]
+    else {
+        unreachable!()
+    };
+    dimensions[0].phase += 0.25;
+    let phase_session = generalized_session_with_definition(
+        HalftoneChannelModel::Rgb,
+        configuration,
+        phase_definition,
+        SourceReference::Assigned(source_id.clone()),
+        session.document().canvas().clone(),
+    );
+    let phase = submit_and_accept(
+        &scheduler,
+        &phase_session,
+        EvaluationRequest::new(
+            phase_session.document_evaluation_snapshot(),
+            ResolvedSource::new(source_id.clone(), raster.clone(), SourceFormatHint::Png).unwrap(),
+        ),
+    );
+    assert_eq!(
+        phase.cache_diagnostics().unwrap().aggregate.family,
+        CacheDisposition::Miss
+    );
+
+    // The accepted cache keeps one last-successful transaction. Restore the
+    // unchanged structural key before asserting that an output-only edit is a
+    // family hit and realization miss.
+    submit_and_accept(
+        &scheduler,
+        &session,
+        EvaluationRequest::new(
+            session.document_evaluation_snapshot(),
+            ResolvedSource::new(source_id.clone(), raster.clone(), SourceFormatHint::Png).unwrap(),
+        ),
+    );
+
+    let mut orientation_definition = definition.clone();
+    let PatternOutputLayer::MarkPrototype { orientation, .. } =
+        &mut orientation_definition.output_layers[0]
+    else {
+        unreachable!()
+    };
+    *orientation = MarkOrientation::Fixed;
+    let orientation_session = generalized_session_with_definition(
+        HalftoneChannelModel::Rgb,
+        configuration,
+        orientation_definition,
+        SourceReference::Assigned(source_id.clone()),
+        session.document().canvas().clone(),
+    );
+    let orientation = submit_and_accept(
+        &scheduler,
+        &orientation_session,
+        EvaluationRequest::new(
+            orientation_session.document_evaluation_snapshot(),
+            ResolvedSource::new(source_id.clone(), raster.clone(), SourceFormatHint::Png).unwrap(),
+        ),
+    );
+    let orientation_diagnostics = orientation.cache_diagnostics().unwrap();
+    assert_eq!(
+        orientation_diagnostics.aggregate.family,
+        CacheDisposition::Hit
+    );
+    assert_eq!(
+        orientation_diagnostics.aggregate.realization,
+        CacheDisposition::Miss
+    );
+    assert_ne!(
+        orientation.result().unwrap().channels()[0].realization_identity(),
+        baseline_identity
+    );
+
+    submit_and_accept(
+        &scheduler,
+        &session,
+        EvaluationRequest::new(
+            session.document_evaluation_snapshot(),
+            ResolvedSource::new(source_id.clone(), raster.clone(), SourceFormatHint::Png).unwrap(),
+        ),
+    );
+
+    let alternate_id = SourceReferenceId::new("same-content-other-reference").unwrap();
+    let alternate_source_session = generalized_session_with_definition(
+        HalftoneChannelModel::Rgb,
+        configuration,
+        definition.clone(),
+        SourceReference::Assigned(alternate_id.clone()),
+        session.document().canvas().clone(),
+    );
+    let alternate_source = submit_and_accept(
+        &scheduler,
+        &alternate_source_session,
+        EvaluationRequest::new(
+            alternate_source_session.document_evaluation_snapshot(),
+            ResolvedSource::new(alternate_id, raster.clone(), SourceFormatHint::Png).unwrap(),
+        ),
+    );
+    let alternate_diagnostics = alternate_source.cache_diagnostics().unwrap();
+    assert_eq!(
+        alternate_diagnostics.aggregate.decoded_source,
+        CacheDisposition::Miss
+    );
+    assert_eq!(
+        alternate_diagnostics.aggregate.family,
+        CacheDisposition::Hit
+    );
+    assert_eq!(
+        alternate_diagnostics.aggregate.realization,
+        CacheDisposition::Hit
+    );
+
+    let decoded_changed = submit_and_accept(
+        &scheduler,
+        &session,
+        EvaluationRequest::new(
+            session.document_evaluation_snapshot(),
+            ResolvedSource::new(source_id.clone(), vector, SourceFormatHint::Svg).unwrap(),
+        ),
+    );
+    let decoded_diagnostics = decoded_changed.cache_diagnostics().unwrap();
+    assert_eq!(
+        decoded_diagnostics.aggregate.decoded_source,
+        CacheDisposition::Miss
+    );
+    assert_eq!(decoded_diagnostics.aggregate.family, CacheDisposition::Hit);
+    assert_eq!(
+        decoded_diagnostics.aggregate.realization,
+        CacheDisposition::Miss
+    );
+
+    submit_and_accept(
+        &scheduler,
+        &session,
+        EvaluationRequest::new(
+            session.document_evaluation_snapshot(),
+            ResolvedSource::new(source_id.clone(), raster.clone(), SourceFormatHint::Png).unwrap(),
+        ),
+    );
+
+    let mut presentation_session =
+        generalized_session_named(HalftoneChannelModel::Rgb, configuration);
+    presentation_session
+        .apply(&DocumentCommand::SetOpacity {
+            channel_id: ChannelId(1),
+            opacity: 0.5,
+        })
+        .unwrap();
+    let presentation = submit_and_accept(
+        &scheduler,
+        &presentation_session,
+        EvaluationRequest::new(
+            presentation_session.document_evaluation_snapshot(),
+            ResolvedSource::new(source_id, raster, SourceFormatHint::Png).unwrap(),
+        ),
+    );
+    let presentation_diagnostics = presentation.cache_diagnostics().unwrap();
+    assert_eq!(
+        presentation_diagnostics.aggregate.family,
+        CacheDisposition::Hit
+    );
+    assert_eq!(
+        presentation_diagnostics.aggregate.realization,
+        CacheDisposition::Hit
+    );
+    assert_eq!(
+        presentation_diagnostics.aggregate.scene,
+        CacheDisposition::Miss
+    );
+    assert_eq!(
+        presentation_diagnostics.aggregate.raster,
+        CacheDisposition::Miss
+    );
+    scheduler.shutdown().unwrap();
+}
+
+#[test]
+fn generalized_saved_v2_documents_reopen_with_identical_complete_outputs() {
+    let validation =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/validation/stage-16a");
+    fs::create_dir_all(&validation).unwrap();
+    for configuration in [
+        GeneralizedConfiguration::Orthogonal,
+        GeneralizedConfiguration::Nonorthogonal,
+        GeneralizedConfiguration::ThreeDirection,
+        GeneralizedConfiguration::FourDirection,
+        GeneralizedConfiguration::ParallelAlong,
+        GeneralizedConfiguration::AlongGuide,
+    ] {
+        let product_label = configuration.label();
+        for (source_label, source_format, source_path, embedded_format) in [
+            (
+                "raster",
+                SourceFormatHint::Png,
+                "../../assets/raster-sample.png",
+                EmbeddedSourceFormat::Png,
+            ),
+            (
+                "vector",
+                SourceFormatHint::Svg,
+                "../../assets/vector-sample.svg",
+                EmbeddedSourceFormat::Svg,
+            ),
+        ] {
+            let bytes = fs::read(source_path).unwrap();
+            let source_id = SourceReferenceId::new("fixture-source").unwrap();
+            let bundle = SourceBundle::new([EmbeddedSource::new(
+                source_id.clone(),
+                embedded_format,
+                bytes.clone(),
+                None,
+            )
+            .unwrap()])
+            .unwrap();
+            for model in [
+                HalftoneChannelModel::Rgb,
+                HalftoneChannelModel::Cmyk,
+                HalftoneChannelModel::SourceColorAlpha,
+            ] {
+                let base = generalized_session_named(model, configuration);
+                let original = evaluate(EvaluationRequest::new(
+                    base.document_evaluation_snapshot(),
+                    ResolvedSource::new(source_id.clone(), bytes.clone(), source_format).unwrap(),
+                ))
+                .unwrap();
+                let path =
+                    validation.join(format!("{product_label}-{source_label}-{model:?}.toniator"));
+                save(&path, base.document(), &bundle).unwrap();
+                let reopened = load(&path).unwrap();
+                let reopened_session = DocumentSession::new(reopened.document().clone()).unwrap();
+                let current = evaluate(EvaluationRequest::new(
+                    reopened_session.document_evaluation_snapshot(),
+                    ResolvedSource::new(source_id.clone(), bytes.clone(), source_format).unwrap(),
+                ))
+                .unwrap();
+                assert_eq!(current.channels(), original.channels());
+                assert_eq!(current.scene().identity(), original.scene().identity());
+                assert_eq!(current.raster().pixels(), original.raster().pixels());
+                assert_eq!(write_svg(current.scene()), write_svg(original.scene()));
+                fs::write(
+                    validation.join(format!("{product_label}-{source_label}-{model:?}.png")),
+                    encode_png(current.raster()).unwrap(),
+                )
+                .unwrap();
+                fs::write(
+                    validation.join(format!("{product_label}-{source_label}-{model:?}.svg")),
+                    write_svg(current.scene()),
+                )
+                .unwrap();
+            }
+        }
+    }
 }
 
 #[test]

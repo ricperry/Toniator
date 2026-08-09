@@ -198,6 +198,10 @@ pub struct StraightGuide {
     pub normal: Vector2,
     pub tangent: Vector2,
     pub offset: f64,
+    /// Stable transformed local tangent origin.  Finite start/end coverage is
+    /// presentation only; along-guide sequences are anchored here.
+    #[serde(skip)]
+    pub anchor: Point2,
     pub start: Point2,
     pub end: Point2,
 }
@@ -214,7 +218,7 @@ pub struct SiteId {
 /// Required provenance for a straight-guide intersection site.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct GuideIntersectionProvenance {
-    pub contributors: [GuideInstanceId; 2],
+    pub contributors: Vec<GuideInstanceId>,
 }
 
 /// A scope marker based only on the final canvas, never topology construction.

@@ -27,6 +27,43 @@ pub struct PatternOutputLayerId(pub u64);
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GuideDimensionId(pub u64);
 
+/// A finite, independently-addressable repeated straight-guide dimension.
+/// `baseline_angle_degrees` describes the local-space normal; the channel
+/// layout transform is applied by family planning, never after a finite set of
+/// guides has been generated.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StraightGuideDimension {
+    pub id: GuideDimensionId,
+    pub baseline_angle_degrees: f64,
+    pub phase: f64,
+    pub repetition: StraightGuideRepetition,
+}
+
+/// The deliberately small Stage 16A repetition vocabulary.  The spacing is a
+/// multiplier of the resolved channel density, so authored density remains a
+/// channel concern rather than becoming a second structural density system.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StraightGuideRepetition {
+    pub spacing_multiplier: f64,
+}
+
+/// Stable typed orientation for a mark prototype.  Circle rendering remains
+/// visually invariant, but orientation is still part of the realization
+/// contract so later compatible prototypes do not require renderer dispatch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MarkOrientation {
+    Fixed,
+    GuideTangent { dimension_id: GuideDimensionId },
+    GuideNormal { dimension_id: GuideDimensionId },
+}
+
+/// The only Stage 16A prototype.  It is intentionally explicit rather than
+/// relying on a renderer-specific "circle" fallback.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MarkPrototype {
+    Circle,
+}
+
 /// A stable identifier for a channel owned by a document.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ChannelId(pub u64);
@@ -417,7 +454,7 @@ pub enum PatternFamily {
 
 /// A typed reusable structural mechanism.  Stage 14 retains only the accepted
 /// straight-guide/intersection meaning; it is intentionally not a node graph.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum PatternMechanism {
     StraightGuides {
         id: PatternMechanismId,
@@ -426,12 +463,38 @@ pub enum PatternMechanism {
         id: PatternMechanismId,
         guide_mechanism_id: PatternMechanismId,
     },
+    /// Generalized ordered straight dimensions.  The legacy `StraightGuides`
+    /// form remains readable/writable for exact existing-v2 bytes.
+    StraightGuideDimensions {
+        id: PatternMechanismId,
+        dimensions: Vec<StraightGuideDimension>,
+    },
+    /// An explicit selected intersection product; selections are stable IDs,
+    /// not positional aliases.
+    SelectedGuideIntersections {
+        id: PatternMechanismId,
+        guide_mechanism_id: PatternMechanismId,
+        dimensions: Vec<GuideDimensionId>,
+        merge_epsilon: f64,
+    },
+    /// Regular arc-length sites along explicitly selected guides.
+    AlongGuideSites {
+        id: PatternMechanismId,
+        guide_mechanism_id: PatternMechanismId,
+        dimensions: Vec<GuideDimensionId>,
+        interval_multiplier: f64,
+        phase: f64,
+    },
 }
 
 impl PatternMechanism {
     pub const fn id(&self) -> PatternMechanismId {
         match self {
-            Self::StraightGuides { id } | Self::GuideIntersections { id, .. } => *id,
+            Self::StraightGuides { id }
+            | Self::GuideIntersections { id, .. }
+            | Self::StraightGuideDimensions { id, .. }
+            | Self::SelectedGuideIntersections { id, .. }
+            | Self::AlongGuideSites { id, .. } => *id,
         }
     }
 }
@@ -444,12 +507,18 @@ pub enum PatternOutputLayer {
         id: PatternOutputLayerId,
         site_mechanism_id: PatternMechanismId,
     },
+    MarkPrototype {
+        id: PatternOutputLayerId,
+        site_mechanism_id: PatternMechanismId,
+        prototype: MarkPrototype,
+        orientation: MarkOrientation,
+    },
 }
 
 impl PatternOutputLayer {
     pub const fn id(&self) -> PatternOutputLayerId {
         match self {
-            Self::CircularMarks { id, .. } => *id,
+            Self::CircularMarks { id, .. } | Self::MarkPrototype { id, .. } => *id,
         }
     }
 }
@@ -513,6 +582,81 @@ impl PatternDefinition {
             coverage,
         }
     }
+
+    /// Constructs an explicit generalized straight-guide definition without a
+    /// named pattern/preset discriminator.  Selection IDs must appear in the
+    /// stored dimension order and are validated with the document.
+    #[allow(clippy::too_many_arguments)] // Stable IDs are intentionally explicit at the schema boundary.
+    pub fn generalized_straight_guides(
+        id: PatternDefinitionId,
+        name: impl Into<String>,
+        guide_id: PatternMechanismId,
+        site_id: PatternMechanismId,
+        output_id: PatternOutputLayerId,
+        dimensions: Vec<StraightGuideDimension>,
+        product: GeneralizedSiteProduct,
+        orientation: MarkOrientation,
+        coverage: CoveragePolicy,
+    ) -> Self {
+        let site = match product {
+            GeneralizedSiteProduct::Intersections {
+                dimensions,
+                merge_epsilon,
+            } => PatternMechanism::SelectedGuideIntersections {
+                id: site_id,
+                guide_mechanism_id: guide_id,
+                dimensions,
+                merge_epsilon,
+            },
+            GeneralizedSiteProduct::AlongGuides {
+                dimensions,
+                interval_multiplier,
+                phase,
+            } => PatternMechanism::AlongGuideSites {
+                id: site_id,
+                guide_mechanism_id: guide_id,
+                dimensions,
+                interval_multiplier,
+                phase,
+            },
+        };
+        Self {
+            id,
+            name: name.into(),
+            family: PatternFamily::GuideIntersections {
+                guide_mechanism_id: guide_id,
+                site_mechanism_id: site_id,
+            },
+            mechanisms: vec![
+                PatternMechanism::StraightGuideDimensions {
+                    id: guide_id,
+                    dimensions,
+                },
+                site,
+            ],
+            output_layers: vec![PatternOutputLayer::MarkPrototype {
+                id: output_id,
+                site_mechanism_id: site_id,
+                prototype: MarkPrototype::Circle,
+                orientation,
+            }],
+            modulation: PatternModulation,
+            coverage,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum GeneralizedSiteProduct {
+    Intersections {
+        dimensions: Vec<GuideDimensionId>,
+        merge_epsilon: f64,
+    },
+    AlongGuides {
+        dimensions: Vec<GuideDimensionId>,
+        interval_multiplier: f64,
+        phase: f64,
+    },
 }
 
 /// Source state owned by the document, never a filesystem path.
@@ -815,6 +959,23 @@ impl Document {
         .map(PatternOutputLayerId)
     }
 
+    fn allocate_dimension_id(&self) -> Result<GuideDimensionId, ValidationError> {
+        next_id(
+            self.pattern_definitions
+                .iter()
+                .flat_map(|definition| definition.mechanisms.iter())
+                .flat_map(|mechanism| match mechanism {
+                    PatternMechanism::StraightGuideDimensions { dimensions, .. } => dimensions
+                        .iter()
+                        .map(|dimension| dimension.id.0)
+                        .collect::<Vec<_>>(),
+                    _ => Vec::new(),
+                }),
+            "pattern_definitions.mechanisms.dimensions.id",
+        )
+        .map(GuideDimensionId)
+    }
+
     fn allocate_definition_from_draft(
         &self,
         draft: &PatternDefinitionDraft,
@@ -854,6 +1015,115 @@ impl Document {
         &self,
         source: &PatternDefinition,
     ) -> Result<PatternDefinition, ValidationError> {
+        if let [
+            PatternMechanism::StraightGuideDimensions { dimensions, .. },
+            site,
+        ] = source.mechanisms.as_slice()
+        {
+            let id = self.allocate_definition_id()?;
+            let guide_id = self.allocate_mechanism_id()?;
+            let site_id = PatternMechanismId(guide_id.0.checked_add(1).ok_or_else(|| {
+                ValidationError::new(
+                    "pattern_definitions.mechanisms.id",
+                    "document mechanism ID space is exhausted",
+                )
+            })?);
+            let output_id = self.allocate_output_layer_id()?;
+            let mut next_dimension = self.allocate_dimension_id()?.0;
+            let mut remapped = Vec::with_capacity(dimensions.len());
+            for dimension in dimensions {
+                let new_id = GuideDimensionId(next_dimension);
+                next_dimension = next_dimension.checked_add(1).ok_or_else(|| {
+                    ValidationError::new(
+                        "pattern_definitions.mechanisms.dimensions.id",
+                        "document dimension ID space is exhausted",
+                    )
+                })?;
+                remapped.push((
+                    dimension.id,
+                    StraightGuideDimension {
+                        id: new_id,
+                        baseline_angle_degrees: dimension.baseline_angle_degrees,
+                        phase: dimension.phase,
+                        repetition: dimension.repetition.clone(),
+                    },
+                ));
+            }
+            let remap = |old: GuideDimensionId| {
+                remapped
+                    .iter()
+                    .find(|(candidate, _)| *candidate == old)
+                    .map(|(_, value)| value.id)
+                    .expect("source selection is validated")
+            };
+            let product = match site {
+                PatternMechanism::SelectedGuideIntersections {
+                    dimensions,
+                    merge_epsilon,
+                    ..
+                } => GeneralizedSiteProduct::Intersections {
+                    dimensions: dimensions.iter().copied().map(remap).collect(),
+                    merge_epsilon: *merge_epsilon,
+                },
+                PatternMechanism::AlongGuideSites {
+                    dimensions,
+                    interval_multiplier,
+                    phase,
+                    ..
+                } => GeneralizedSiteProduct::AlongGuides {
+                    dimensions: dimensions.iter().copied().map(remap).collect(),
+                    interval_multiplier: *interval_multiplier,
+                    phase: *phase,
+                },
+                _ => {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.family",
+                        "generalized definition has an incompatible site mechanism",
+                    ));
+                }
+            };
+            let orientation = match source.output_layers.as_slice() {
+                [
+                    PatternOutputLayer::MarkPrototype {
+                        orientation: MarkOrientation::Fixed,
+                        ..
+                    },
+                ] => MarkOrientation::Fixed,
+                [
+                    PatternOutputLayer::MarkPrototype {
+                        orientation: MarkOrientation::GuideTangent { dimension_id },
+                        ..
+                    },
+                ] => MarkOrientation::GuideTangent {
+                    dimension_id: remap(*dimension_id),
+                },
+                [
+                    PatternOutputLayer::MarkPrototype {
+                        orientation: MarkOrientation::GuideNormal { dimension_id },
+                        ..
+                    },
+                ] => MarkOrientation::GuideNormal {
+                    dimension_id: remap(*dimension_id),
+                },
+                _ => {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.output_layers",
+                        "generalized definition has an incompatible mark prototype",
+                    ));
+                }
+            };
+            return Ok(PatternDefinition::generalized_straight_guides(
+                id,
+                source.name.clone(),
+                guide_id,
+                site_id,
+                output_id,
+                remapped.into_iter().map(|(_, value)| value).collect(),
+                product,
+                orientation,
+                source.coverage.clone(),
+            ));
+        }
         let draft = PatternDefinitionDraft {
             name: source.name.clone(),
             coverage: source.coverage.clone(),
@@ -898,6 +1168,7 @@ impl Document {
         let mut definition_ids = HashSet::new();
         let mut mechanism_ids = HashSet::new();
         let mut output_layer_ids = HashSet::new();
+        let mut dimension_ids = HashSet::new();
         for definition in &self.pattern_definitions {
             if !definition_ids.insert(definition.id) {
                 return Err(ValidationError::new(
@@ -918,6 +1189,16 @@ impl Document {
                         "pattern_definitions.mechanisms",
                         "mechanism IDs must be unique document-wide",
                     ));
+                }
+                if let PatternMechanism::StraightGuideDimensions { dimensions, .. } = mechanism {
+                    for dimension in dimensions {
+                        if !dimension_ids.insert(dimension.id) {
+                            return Err(ValidationError::new(
+                                "pattern_definitions.mechanisms.dimensions",
+                                "straight-guide dimension IDs must be unique document-wide",
+                            ));
+                        }
+                    }
                 }
             }
             for layer in &definition.output_layers {
@@ -1083,6 +1364,22 @@ fn validate_definition(definition: &PatternDefinition) -> Result<(), ValidationE
         guide_mechanism_id,
         site_mechanism_id: root_site_id,
     } = definition.family;
+    if let [
+        PatternMechanism::StraightGuideDimensions { id, dimensions },
+        site,
+    ] = definition.mechanisms.as_slice()
+    {
+        if *id != guide_mechanism_id {
+            return Err(ValidationError::new(
+                "pattern_definitions.family.guide_mechanism_id",
+                "family root must reference the ordered straight-guide mechanism",
+            ));
+        }
+        validate_straight_dimensions(dimensions)?;
+        validate_site_mechanism(site, *id, root_site_id, dimensions)?;
+        validate_generalized_output_layers(&definition.output_layers, root_site_id, dimensions)?;
+        return Ok(());
+    }
     if !matches!(definition.mechanisms.first(), Some(PatternMechanism::StraightGuides { id }) if *id == guide_mechanism_id)
         || !matches!(definition.mechanisms.get(1), Some(PatternMechanism::GuideIntersections { id, guide_mechanism_id: parent }) if *id == root_site_id && *parent == guide_mechanism_id)
         || definition.mechanisms.len() != 2
@@ -1100,6 +1397,176 @@ fn validate_definition(definition: &PatternDefinition) -> Result<(), ValidationE
         ));
     }
     Ok(())
+}
+
+/// Validates one standalone typed definition before it is installed in an
+/// authoritative document.  Document construction additionally validates
+/// document-wide definition/channel references and IDs.
+pub fn validate_pattern_definition(definition: &PatternDefinition) -> Result<(), ValidationError> {
+    validate_definition(definition)
+}
+
+fn validate_straight_dimensions(
+    dimensions: &[StraightGuideDimension],
+) -> Result<(), ValidationError> {
+    if !(1..=4).contains(&dimensions.len()) {
+        return Err(ValidationError::new(
+            "pattern_definitions.mechanisms.dimensions",
+            "straight-guide dimensions must contain one through four entries",
+        ));
+    }
+    let mut ids = HashSet::new();
+    for dimension in dimensions {
+        if !ids.insert(dimension.id) {
+            return Err(ValidationError::new(
+                "pattern_definitions.mechanisms.dimensions",
+                "straight-guide dimension IDs must be unique in stored order",
+            ));
+        }
+        validate_finite(
+            dimension.baseline_angle_degrees,
+            "pattern_definitions.mechanisms.dimensions.baseline_angle_degrees",
+        )?;
+        validate_finite(
+            dimension.phase,
+            "pattern_definitions.mechanisms.dimensions.phase",
+        )?;
+        validate_positive_finite(
+            dimension.repetition.spacing_multiplier,
+            "pattern_definitions.mechanisms.dimensions.repetition.spacing_multiplier",
+        )?;
+        if dimension.id.0 == 0 {
+            return Err(ValidationError::new(
+                "pattern_definitions.mechanisms.dimensions.id",
+                "straight-guide dimension IDs must be nonzero stable IDs",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_selection(
+    selection: &[GuideDimensionId],
+    dimensions: &[StraightGuideDimension],
+    minimum: usize,
+    path: &'static str,
+) -> Result<(), ValidationError> {
+    if selection.len() < minimum {
+        return Err(ValidationError::new(
+            path,
+            "selection has too few dimensions",
+        ));
+    }
+    let expected: Vec<_> = dimensions.iter().map(|dimension| dimension.id).collect();
+    let mut previous = None;
+    for id in selection {
+        let Some(position) = expected.iter().position(|candidate| candidate == id) else {
+            return Err(ValidationError::new(
+                path,
+                "selection references a missing dimension ID",
+            ));
+        };
+        if previous.is_some_and(|value| position <= value) {
+            return Err(ValidationError::new(
+                path,
+                "selection must be unique and follow dimension stored order",
+            ));
+        }
+        previous = Some(position);
+    }
+    Ok(())
+}
+
+fn validate_site_mechanism(
+    mechanism: &PatternMechanism,
+    guide_id: PatternMechanismId,
+    site_id: PatternMechanismId,
+    dimensions: &[StraightGuideDimension],
+) -> Result<(), ValidationError> {
+    match mechanism {
+        PatternMechanism::SelectedGuideIntersections {
+            id,
+            guide_mechanism_id,
+            dimensions: selection,
+            merge_epsilon,
+        } if *id == site_id && *guide_mechanism_id == guide_id => {
+            validate_selection(
+                selection,
+                dimensions,
+                2,
+                "pattern_definitions.mechanisms.intersections.dimensions",
+            )?;
+            validate_nonnegative_finite(
+                *merge_epsilon,
+                "pattern_definitions.mechanisms.intersections.merge_epsilon",
+            )
+        }
+        PatternMechanism::AlongGuideSites {
+            id,
+            guide_mechanism_id,
+            dimensions: selection,
+            interval_multiplier,
+            phase,
+        } if *id == site_id && *guide_mechanism_id == guide_id => {
+            validate_selection(
+                selection,
+                dimensions,
+                1,
+                "pattern_definitions.mechanisms.along_guides.dimensions",
+            )?;
+            validate_positive_finite(
+                *interval_multiplier,
+                "pattern_definitions.mechanisms.along_guides.interval_multiplier",
+            )?;
+            validate_finite(*phase, "pattern_definitions.mechanisms.along_guides.phase")
+        }
+        _ => Err(ValidationError::new(
+            "pattern_definitions.family",
+            "family root requires a compatible declared straight-guide site mechanism",
+        )),
+    }
+}
+
+fn validate_generalized_output_layers(
+    layers: &[PatternOutputLayer],
+    site_id: PatternMechanismId,
+    dimensions: &[StraightGuideDimension],
+) -> Result<(), ValidationError> {
+    let [
+        PatternOutputLayer::MarkPrototype {
+            site_mechanism_id,
+            prototype: MarkPrototype::Circle,
+            orientation,
+            ..
+        },
+    ] = layers
+    else {
+        return Err(ValidationError::new(
+            "pattern_definitions.output_layers",
+            "generalized straight-guide products require exactly one circle mark prototype layer",
+        ));
+    };
+    if *site_mechanism_id != site_id {
+        return Err(ValidationError::new(
+            "pattern_definitions.output_layers.site_mechanism_id",
+            "output layer must consume its declared site product",
+        ));
+    }
+    match orientation {
+        MarkOrientation::Fixed => Ok(()),
+        MarkOrientation::GuideTangent { dimension_id }
+        | MarkOrientation::GuideNormal { dimension_id }
+            if dimensions
+                .iter()
+                .any(|dimension| dimension.id == *dimension_id) =>
+        {
+            Ok(())
+        }
+        _ => Err(ValidationError::new(
+            "pattern_definitions.output_layers.orientation",
+            "orientation references a missing straight-guide dimension",
+        )),
+    }
 }
 
 fn validate_layout(layout: &ChannelPatternLayout) -> Result<(), ValidationError> {

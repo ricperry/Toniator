@@ -11,6 +11,7 @@ toniator-sampling = { path = "../toniator-sampling" }
 toniator-patterns = { path = "../toniator-patterns" }
 toniator-render = { path = "../toniator-render" }
 toniator-io = { path = "../toniator-io" }
+sha2.workspace = true
 
 [lib]
 path = "src/lib.rs"

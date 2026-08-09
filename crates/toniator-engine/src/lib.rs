@@ -252,7 +252,7 @@ struct SourceCacheKey {
     decoder_contract: &'static str,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 struct FamilyCacheKey {
     canvas: (u64, u64),
     density: (u64, u64),
@@ -265,14 +265,14 @@ struct FamilyCacheKey {
     max_family_candidates: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 struct FamilyDefinitionKey {
     definition_id: u64,
     family: toniator_domain::PatternFamily,
     mechanisms: Vec<PatternMechanism>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 struct RealizationContractKey {
     output_layers: Vec<PatternOutputLayer>,
     modulation: toniator_domain::PatternModulation,
@@ -289,7 +289,7 @@ struct RealizationSourceIdentity {
     decoded_pixel_hash: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 struct RealizationCacheKey {
     family: FamilyCacheKey,
     contract: RealizationContractKey,
@@ -300,7 +300,7 @@ struct RealizationCacheKey {
     response: (u64, u64),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 struct SceneCacheKey {
     realization: RealizationCacheKey,
     canvas: (u64, u64),
@@ -310,7 +310,7 @@ struct SceneCacheKey {
     opacity: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 struct RasterCacheKey {
     scene: SceneCacheKey,
     transparent_raster_contract: &'static str,
@@ -1920,7 +1920,7 @@ fn aggregate_document_identity<'a>(
 // Stage 9D keeps exactly five last-successful aggregate cache slots. The two
 // collections deliberately keep entries per channel key so a document edit can
 // reuse unaffected immutable artifacts without making a cache authoritative.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 struct DocumentFamilyContentKey {
     canvas: (u64, u64),
     density: (u64, u64),
@@ -1931,7 +1931,7 @@ struct DocumentFamilyContentKey {
     definition: FamilyDefinitionKey,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 struct DocumentFamilyCacheKey {
     content: DocumentFamilyContentKey,
     candidate_limit: usize,
@@ -1963,7 +1963,7 @@ fn document_family_cache_key(
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 struct DocumentRealizationCacheKey {
     family_content: DocumentFamilyContentKey,
     contract: RealizationContractKey,

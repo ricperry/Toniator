@@ -10,9 +10,10 @@ use toniator_domain::{
     CanvasSpec, ChannelAppearance, ChannelId, ChannelPaint, ChannelPatternLayout,
     ChannelSourceMapping, ChannelState, ChannelTopology, ChannelTopologyTemplate, ColorValue,
     CoveragePolicy, DensityMetric2D, Document, DocumentHistory, DocumentId, DocumentSession,
-    HalftoneChannelModel, MarkGeometryResponse, PatternDefinition, PatternDefinitionId,
-    PatternMechanismId, PatternOutputLayerId, SourceComponent, SourceMappingComponent,
-    SourcePlacement, SourceReference, SourceReferenceId,
+    GeneralizedSiteProduct, GuideDimensionId, HalftoneChannelModel, MarkGeometryResponse,
+    MarkOrientation, PatternDefinition, PatternDefinitionId, PatternMechanismId,
+    PatternOutputLayerId, SourceComponent, SourceMappingComponent, SourcePlacement,
+    SourceReference, SourceReferenceId, StraightGuideDimension, StraightGuideRepetition,
 };
 use toniator_io::{
     CONTAINER_VERSION, DOCUMENT_SCHEMA_VERSION, EmbeddedSource, EmbeddedSourceFormat, LoadError,
@@ -92,6 +93,69 @@ fn legacy_document() -> (Document, SourceBundle) {
     .unwrap()])
     .unwrap();
     (document, bundle)
+}
+
+#[test]
+fn generalized_v2_definition_round_trips_without_serializing_runtime_state() {
+    let (mut document, sources) = legacy_document();
+    let definition = PatternDefinition::generalized_straight_guides(
+        PatternDefinitionId(91),
+        "typed",
+        PatternMechanismId(181),
+        PatternMechanismId(182),
+        PatternOutputLayerId(91),
+        vec![
+            StraightGuideDimension {
+                id: GuideDimensionId(1),
+                baseline_angle_degrees: 0.0,
+                phase: 0.0,
+                repetition: StraightGuideRepetition {
+                    spacing_multiplier: 1.0,
+                },
+            },
+            StraightGuideDimension {
+                id: GuideDimensionId(2),
+                baseline_angle_degrees: 60.0,
+                phase: 0.25,
+                repetition: StraightGuideRepetition {
+                    spacing_multiplier: 1.0,
+                },
+            },
+            StraightGuideDimension {
+                id: GuideDimensionId(3),
+                baseline_angle_degrees: 120.0,
+                phase: 0.5,
+                repetition: StraightGuideRepetition {
+                    spacing_multiplier: 0.75,
+                },
+            },
+        ],
+        GeneralizedSiteProduct::AlongGuides {
+            dimensions: vec![GuideDimensionId(1), GuideDimensionId(3)],
+            interval_multiplier: 0.5,
+            phase: 1.25,
+        },
+        MarkOrientation::GuideTangent {
+            dimension_id: GuideDimensionId(3),
+        },
+        CoveragePolicy {
+            guard_steps: 2,
+            maximum_support_radius: 4.5,
+        },
+    );
+    document = Document::with_source(
+        DocumentId(81),
+        document.canvas().clone(),
+        document.source().clone(),
+        vec![definition],
+        document.channels().unwrap().to_vec(),
+    )
+    .unwrap();
+    let path = temporary("stage16a-generalized.toniator");
+    save(&path, &document, &sources).unwrap();
+    let loaded = load(&path).unwrap();
+    fs::remove_file(path).unwrap();
+    assert_eq!(loaded.document(), &document);
 }
 
 fn asset(name: &str) -> PathBuf {
