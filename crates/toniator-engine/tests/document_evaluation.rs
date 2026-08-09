@@ -2,10 +2,10 @@ use std::time::{Duration, Instant};
 use toniator_domain::{
     CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternLayout, ChannelSourceMapping,
     ChannelState, ChannelTopology, ChannelTopologyTemplate, ColorValue, DensityMetric2D, Document,
-    DocumentCommand, DocumentId, DocumentSession, HalftoneChannelModel, HalftoneChannelRole,
-    MarkGeometryResponse, PatternDefinition, PatternDefinitionId, PatternOutput, PatternStructure,
-    SourceComponent, SourceMapping, SourceMappingComponent, SourcePlacement, SourceReference,
-    SourceReferenceId,
+    DocumentCommand, DocumentHistory, DocumentId, DocumentSession, HalftoneChannelModel,
+    HalftoneChannelRole, MarkGeometryResponse, PatternDefinition, PatternDefinitionId,
+    PatternOutput, PatternStructure, SourceComponent, SourceMapping, SourceMappingComponent,
+    SourcePlacement, SourceReference, SourceReferenceId,
 };
 use toniator_engine::{
     CacheDisposition, EvaluationCompletion, EvaluationLimits, EvaluationRequest,
@@ -299,6 +299,72 @@ fn cached_document_results_match_uncached_results_for_both_immutable_baselines()
         );
 
         scheduler.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn history_undo_restores_all_models_and_baselines_and_rejects_held_completions() {
+    let source_id = SourceReferenceId::new("fixture-source").unwrap();
+    for model in [
+        HalftoneChannelModel::Rgb,
+        HalftoneChannelModel::Cmyk,
+        HalftoneChannelModel::SourceColorAlpha,
+    ] {
+        for (path, format) in [
+            ("../../assets/raster-sample.png", SourceFormatHint::Png),
+            ("../../assets/vector-sample.svg", SourceFormatHint::Svg),
+        ] {
+            let bytes = std::fs::read(path).unwrap();
+            let mut history = DocumentHistory::new(session(model));
+            let baseline = evaluate(EvaluationRequest::new(
+                history.session().document_evaluation_snapshot(),
+                ResolvedSource::new(source_id.clone(), bytes.clone(), format).unwrap(),
+            ))
+            .unwrap();
+
+            let scheduler = EvaluationScheduler::new().unwrap();
+            let held_ticket = scheduler
+                .submit(EvaluationRequest::new(
+                    history.session().document_evaluation_snapshot(),
+                    ResolvedSource::new(source_id.clone(), bytes.clone(), format).unwrap(),
+                ))
+                .unwrap();
+            let held = wait_for_latest(&scheduler);
+            assert_eq!(held.ticket(), held_ticket);
+
+            let channel_id = baseline.channels()[0].channel_id();
+            history
+                .apply(&DocumentCommand::SetVisibility {
+                    channel_id,
+                    visible: false,
+                })
+                .unwrap();
+            assert!(
+                !scheduler
+                    .accept_completion(&held, history.session())
+                    .unwrap(),
+                "{model:?} {path} held completion must be stale after history apply"
+            );
+            history.undo().unwrap();
+
+            let restored = evaluate(EvaluationRequest::new(
+                history.session().document_evaluation_snapshot(),
+                ResolvedSource::new(source_id.clone(), bytes, format).unwrap(),
+            ))
+            .unwrap();
+            assert_eq!(restored.scene(), baseline.scene(), "{model:?} {path}");
+            assert_eq!(
+                restored.raster().pixels(),
+                baseline.raster().pixels(),
+                "{model:?} {path}"
+            );
+            assert_eq!(
+                write_svg(restored.scene()),
+                write_svg(baseline.scene()),
+                "{model:?} {path}"
+            );
+            scheduler.shutdown().unwrap();
+        }
     }
 }
 

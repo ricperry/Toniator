@@ -161,19 +161,72 @@ The preview final consumer clips supersamples to the fitted authoritative canvas
 rectangle, so guard geometry cannot paint letterbox margins; the tracked splash
 regression verifies 1280×640 into 960×720 rows 120..600.
 
-**Stage 11 — Planned.** Add headless undo and redo, including atomic channel
-model/topology transitions.
+**Stage 11 — Accepted awaiting checkpoint.** Add unbounded session-lifetime headless undo and redo
+around `DocumentSession`, storing exact validated before/after documents and
+the original invalidation result for every successful command. Apply, undo,
+and redo each advance authority monotonically; failures and empty operations
+are atomic no-ops, branching clears redo, and GTK/persistence/coalescing remain
+out of scope.
 
-**Stage 12 — Planned.** Add the portable `.toniator` container for complete
-authoritative documents and embedded source bytes.
+**Stage 12 — Planned.** Add immutable `.toniator` container/document version 1,
+IO-owned version-specific DTOs, exact embedded source bundles, deterministic
+version dispatch with no transforming migration yet, atomic save, CLI
+create/validate/render, and frozen PNG/SVG-backed v1 fixtures for the later
+v1-to-v2 migration gate. History, dirty state, and filesystem source paths are
+not serialized.
 
-**Stage 13+ — Planned.** Add GTK document actions and command-bound editors in
-later separately authorized stages. A future export stage will add app and CLI
-PNG antialiasing control (`--antialiasing on|off`, default `on`; `off` is
-hard-edged/non-antialiased; SVG is unaffected) with raster output/cache
-identity impact only. A future CLI/native-sizing slice will add the same
-source-native direct-still sizing default; neither requirement is implemented
-in Stage 9E.
+**Stage 13A — Planned.** Add GTK New/Open/Save/Save As/Close, exact content-based
+dirty/savepoint tracking, history state, direct-source/container opening, title
+identity, and atomic error handling. GTK delegates default document creation
+and remains completely ignorant of pattern internals.
+
+**Stage 13B — Planned.** Add the dedicated final-consumer output slice: native
+direct-source CLI sizing with optional explicit canvas, PNG antialiasing on/off,
+and matching GTK PNG/SVG export controls without changing document, preview
+canvas, family, realization, or scene authority.
+
+**Stage 14 — Planned.** Add the one-root mechanism-agnostic typed pattern schema,
+stable document/mechanism IDs, atomic definition CRUD, selected-channel
+copy-on-edit, explicit shared-definition editing, immutable-v1 document-schema
+migration to v2, and exact accepted-output parity. No named artistic pattern
+branches or GTK controls.
+
+**Stage 15 — Planned.** Generalize the headless family-to-modulation-to-ordered-
+output-to-canonical-geometry pipeline, cache identity, support/coverage,
+provenance, limits, and cancellation before adding new mechanisms.
+
+**Stage 16A — Planned.** Add generalized one-to-four-dimension straight-guide
+mechanisms, independent angles/phase, intersections and along-guide sites,
+reusable mark prototypes, and complete transformed guard coverage without named
+rectangular/triangular branches.
+
+**Stage 16B — Planned.** Immediately prove the framework is not grid-shaped by
+adding deterministic raw/even/exclusion, clustered, and source-weighted site
+distributions with `u32` seeds, spacing guarantees, achieved-density
+diagnostics, and the same downstream output machinery.
+
+**Stage 17 — Planned.** Complete typed headless pattern/channel commands and
+schema-derived property/capability descriptors, exact invalidation, stable-ID
+allocation, copy/shared semantics, undo/redo, and rendered restoration before
+any GTK inspector controls.
+
+**Stage 18 — Planned.** Add the descriptor-driven GTK channel inspector over
+`DocumentHistory`, with progressive disclosure and no hidden values, ID
+allocation, pattern mathematics, validation, or alternate schema in GTK.
+
+**Stage 19A — Planned.** Add the versioned headless pure-schema preset registry
+and reconstruction gates; preset names remain metadata and never evaluator
+branches.
+
+**Stage 19B — Planned.** Add the separate descriptor-driven structural Pattern
+Editor, defaulting shared definitions to atomic copy-on-edit and exposing
+deliberate affected-channel **Edit Shared Definition** behavior.
+
+**Stage 20+ — Planned.** Add curved/procedural guides, connected/network output,
+regions/Voronoi and reusable offsetting, composite output mechanisms,
+user-authored structures, multiframe sources, and transitions only through the
+typed schema, generic evaluator, headless commands/descriptors, canonical
+geometry, and final-consumer clipping.
 
 ## Maintenance rules
 

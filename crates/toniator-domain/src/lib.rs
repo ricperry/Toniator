@@ -1384,12 +1384,7 @@ impl DocumentSession {
         &mut self,
         command: &DocumentCommand,
     ) -> Result<CommandResult, DocumentSessionError> {
-        let next_revision = self
-            .revision
-            .0
-            .checked_add(1)
-            .map(Revision)
-            .ok_or(DocumentSessionError::RevisionExhausted)?;
+        let next_revision = self.next_revision()?;
         let (candidate, mut result) = self.document.apply_command(command)?;
         if matches!(command, DocumentCommand::SetSourceReference { .. }) {
             result.affected_channels = candidate.channel_ids();
@@ -1397,6 +1392,25 @@ impl DocumentSession {
         self.document = candidate;
         self.revision = next_revision;
         Ok(result)
+    }
+
+    /// Installs an already-validated authoritative snapshot while advancing the
+    /// session revision. This is deliberately private: `DocumentHistory` is
+    /// the only caller and records the snapshots from successful session
+    /// transitions itself.
+    fn restore_history_snapshot(&mut self, document: Document) -> Result<(), DocumentSessionError> {
+        let next_revision = self.next_revision()?;
+        self.document = document;
+        self.revision = next_revision;
+        Ok(())
+    }
+
+    fn next_revision(&self) -> Result<Revision, DocumentSessionError> {
+        self.revision
+            .0
+            .checked_add(1)
+            .map(Revision)
+            .ok_or(DocumentSessionError::RevisionExhausted)
     }
     pub fn evaluation_snapshot(
         &self,
@@ -1457,6 +1471,100 @@ impl DocumentSession {
     }
 }
 
+/// Session-lifetime reversible authoritative document transitions.
+///
+/// The history owns no source bytes, evaluator state, caches, or UI state.
+/// Entries retain complete validated document snapshots so future document
+/// fields participate automatically without history-specific reconstruction.
+#[derive(Debug)]
+pub struct DocumentHistory {
+    session: DocumentSession,
+    undo: Vec<HistoryEntry>,
+    redo: Vec<HistoryEntry>,
+}
+
+#[derive(Clone, Debug)]
+struct HistoryEntry {
+    before: Document,
+    after: Document,
+    result: CommandResult,
+}
+
+impl DocumentHistory {
+    pub fn new(session: DocumentSession) -> Self {
+        Self {
+            session,
+            undo: Vec::new(),
+            redo: Vec::new(),
+        }
+    }
+
+    pub fn session(&self) -> &DocumentSession {
+        &self.session
+    }
+
+    pub fn document(&self) -> &Document {
+        self.session.document()
+    }
+
+    pub fn revision(&self) -> Revision {
+        self.session.revision()
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
+    pub fn apply(
+        &mut self,
+        command: &DocumentCommand,
+    ) -> Result<CommandResult, DocumentSessionError> {
+        let before = self.session.snapshot();
+        let result = self.session.apply(command)?;
+        let after = self.session.snapshot();
+        self.undo.push(HistoryEntry {
+            before,
+            after,
+            result: result.clone(),
+        });
+        self.redo.clear();
+        Ok(result)
+    }
+
+    pub fn undo(&mut self) -> Result<Option<CommandResult>, DocumentSessionError> {
+        let Some(entry) = self.undo.last() else {
+            return Ok(None);
+        };
+        self.session
+            .restore_history_snapshot(entry.before.clone())?;
+        let entry = self
+            .undo
+            .pop()
+            .expect("history entry remains present after successful restoration");
+        let result = entry.result.clone();
+        self.redo.push(entry);
+        Ok(Some(result))
+    }
+
+    pub fn redo(&mut self) -> Result<Option<CommandResult>, DocumentSessionError> {
+        let Some(entry) = self.redo.last() else {
+            return Ok(None);
+        };
+        self.session.restore_history_snapshot(entry.after.clone())?;
+        let entry = self
+            .redo
+            .pop()
+            .expect("history entry remains present after successful restoration");
+        let result = entry.result.clone();
+        self.undo.push(entry);
+        Ok(Some(result))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DocumentSessionError {
     Validation(ValidationError),
@@ -1476,3 +1584,91 @@ impl fmt::Display for DocumentSessionError {
     }
 }
 impl Error for DocumentSessionError {}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    fn history() -> DocumentHistory {
+        let definition = PatternDefinition {
+            id: PatternDefinitionId(1),
+            name: "grid".into(),
+            structure: PatternStructure::StraightGrid,
+            output: PatternOutput::CircularMarks,
+            guard_steps: 0,
+            maximum_support_radius: 5.0,
+        };
+        let document = Document::new(
+            DocumentId(1),
+            CanvasSpec {
+                width: 10.0,
+                height: 10.0,
+            },
+            vec![definition],
+            vec![ChannelState {
+                id: ChannelId(1),
+                pattern_definition_id: PatternDefinitionId(1),
+                layout: ChannelPatternLayout {
+                    density: DensityMetric2D {
+                        across_x: 1.0,
+                        across_y: 1.0,
+                        aspect_locked: true,
+                    },
+                    rotation_degrees: 0.0,
+                    translation_x: 0.0,
+                    translation_y: 0.0,
+                },
+                appearance: ChannelAppearance {
+                    visible: true,
+                    color: ColorValue {
+                        red: 0.0,
+                        green: 0.0,
+                        blue: 0.0,
+                        alpha: 1.0,
+                    },
+                    opacity: 1.0,
+                },
+                mark_geometry_response: MarkGeometryResponse {
+                    minimum_size: 0.0,
+                    maximum_size: 10.0,
+                },
+                source_mapping: ChannelSourceMapping {
+                    component: SourceComponent::Luminance,
+                    placement: SourcePlacement::StretchToCanvas,
+                },
+            }],
+        )
+        .unwrap();
+        DocumentHistory::new(DocumentSession::new(document).unwrap())
+    }
+
+    #[test]
+    fn history_revision_exhaustion_keeps_document_and_stacks_atomic() {
+        let mut history = history();
+        history
+            .apply(&DocumentCommand::SetVisibility {
+                channel_id: ChannelId(1),
+                visible: false,
+            })
+            .unwrap();
+        let before_document = history.document().clone();
+        history.session.revision = Revision(u64::MAX);
+
+        assert_eq!(history.undo(), Err(DocumentSessionError::RevisionExhausted));
+        assert_eq!(history.document(), &before_document);
+        assert_eq!(history.revision(), Revision(u64::MAX));
+        assert!(history.can_undo());
+        assert!(!history.can_redo());
+
+        assert_eq!(
+            history.apply(&DocumentCommand::SetVisibility {
+                channel_id: ChannelId(1),
+                visible: true,
+            }),
+            Err(DocumentSessionError::RevisionExhausted)
+        );
+        assert_eq!(history.document(), &before_document);
+        assert!(history.can_undo());
+        assert!(!history.can_redo());
+    }
+}

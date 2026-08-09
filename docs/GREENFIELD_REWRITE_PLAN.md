@@ -1076,45 +1076,124 @@ authorization.
 
 ## Stage 11 — Headless undo and redo
 
-**Status: Planned.** Make authoritative commands reversible independently of
+**Status: Accepted awaiting checkpoint.** Make authoritative commands reversible independently of
 GTK widget state.
 
 ### Stage 11 public contract
 
-- Add `DocumentHistory` around `DocumentSession`.
-- Successful commands record authoritative before/after states and invalidation
-  results, including atomic model/topology replacement.
-- `undo()` and `redo()` each advance the current revision exactly once; old
-  revision numbers are never restored.
-- Undo/redo report the same affected channels and invalidation level as the
-  original transition.
-- Failed commands create no history.
-- A new successful command after undo clears redo.
-- Command coalescing is deferred.
+- Add `DocumentHistory` in `toniator-domain` as the sole mutable wrapper around
+  one owned `DocumentSession`:
+
+  ```rust
+  pub struct DocumentHistory { /* private */ }
+
+  impl DocumentHistory {
+      pub fn new(session: DocumentSession) -> Self;
+      pub fn session(&self) -> &DocumentSession;
+      pub fn document(&self) -> &Document;
+      pub fn revision(&self) -> Revision;
+      pub fn can_undo(&self) -> bool;
+      pub fn can_redo(&self) -> bool;
+      pub fn apply(
+          &mut self,
+          command: &DocumentCommand,
+      ) -> Result<CommandResult, DocumentSessionError>;
+      pub fn undo(
+          &mut self,
+      ) -> Result<Option<CommandResult>, DocumentSessionError>;
+      pub fn redo(
+          &mut self,
+      ) -> Result<Option<CommandResult>, DocumentSessionError>;
+  }
+  ```
+
+- Do not expose mutable access to the wrapped session. Existing evaluators and
+  schedulers receive `history.session()` and continue to validate its current
+  session-minted tokens.
+- Each successful command records one private entry containing the exact
+  validated before/after `Document` snapshots and the original
+  `CommandResult`. The session retains every entry for its lifetime; Stage 11
+  has no capacity limit, truncation policy, disk spill, or coalescing.
+- `undo()` installs the before snapshot and `redo()` installs the after
+  snapshot. Both advance the current revision exactly once rather than
+  restoring an old revision, and both return the original affected-channel
+  ordering and invalidation level.
+- A successful new command after undo clears redo. A failed command changes no
+  document, revision, undo stack, or redo stack and does not clear redo.
+- Empty undo/redo return `Ok(None)` without advancing revision. Revision
+  exhaustion is atomic and retains the document and both stacks unchanged.
+- Existing successful semantic no-op commands retain their current authority:
+  they advance revision and create one history entry.
+- History stores authoritative document state only. It never owns source bytes,
+  decoded pixels, derived caches, scheduler work, or GTK state.
+- History treats `Document` as an opaque validated snapshot. Future typed
+  pattern definitions, internal mechanism IDs, and shared-definition references
+  automatically participate in history without adding pattern-aware undo code.
+
+### Stage 11 implementation boundary
+
+- Use exact snapshots instead of manufacturing inverse commands; undo must not
+  re-run command validation against a later schema or reconstruct topology.
+- Add only a private `DocumentSession` restoration seam for internally recorded,
+  already-validated snapshots. It must check the next revision before changing
+  either state or history.
+- Cover every current `DocumentCommand`: density, rotation, translation, mark
+  response, color, opacity, visibility, source reference, legacy source
+  mapping, complete topology replacement, modeled source mapping, and modeled
+  paint.
+- No current domain command, invalidation classification, engine cache key,
+  scheduler API, renderer, CLI command, or GTK behavior changes in this stage.
 
 ### Stage 11 tests
 
-- Round-trip every supported command, including source assignment, mapping,
-  and complete model/topology replacement.
-- Restore exact channel model, ordered roles/IDs/mappings/paint, values, and
-  pattern-definition references.
-- Verify monotonic revisions and stale-token rejection.
-- Verify empty undo/redo and failed commands are no-ops.
-- Verify branching clears redo.
-- Render both baselines after state restoration.
+- Round-trip every supported command through apply, undo, and redo in its valid
+  legacy or modeled document context. Assert exact before/after `Document`
+  equality, including channel model, ordered roles/IDs, mappings, paint,
+  layout, response, appearance, source reference, and pattern-definition
+  references.
+- Assert undo and redo return the exact original `CommandResult`, including the
+  deterministic affected-channel order of atomic topology replacement and
+  complete-document source assignment.
+- Exercise multi-command stack ordering, repeated undo/redo, empty stacks,
+  branching, a failed command while redo is available, successful semantic
+  no-ops, and atomic revision exhaustion.
+- Prove legacy channel tokens and complete-document tokens become stale after
+  apply, undo, and redo while newly minted tokens remain current.
+- In engine integration tests, evaluate both immutable baseline sources under
+  RGB, CMYK, and SourceColorAlpha, mutate and undo authoritative state, and
+  compare restored scene identity, straight RGBA raster bytes, and SVG bytes
+  exactly with the pre-edit result. Reject held scheduler completions after a
+  history revision change.
 
-Forbidden: GTK bindings, persistence, serialized history, coalescing, or editor
-controls.
+Allowed: `toniator-domain` implementation and focused history tests,
+`toniator-engine` integration tests only, plan/tracker transitions, Stage 11
+evidence, and ordinary build artifacts under `target/`.
 
-**Stop condition:** Accept the headless history contract before persistence
-begins.
+Forbidden: engine implementation changes, GTK bindings, CLI behavior,
+persistence, serialized history, source-byte ownership, cache-policy changes,
+coalescing, capacity settings, editor controls, new dependencies, Legacy work,
+or protected specification edits.
+
+### Stage 11 verification and stop
+
+Run focused domain and engine tests, then workspace formatting/check/strict
+Clippy/all-target tests, architecture validation, protected-tree checks,
+baseline hashes, SVG XML validation, and `git diff --check`. Stage 11 is
+headless and must leave rendered outputs byte-identical, so it requires no new
+visual artifacts or visual-acceptance claim.
+
+Stop uncommitted at **Implemented awaiting review** and request user technical
+acceptance. Do not begin persistence, GTK editing, Stage 12, or later roadmap
+implementation automatically.
 
 ## Stage 12 — Portable `.toniator` container
 
 **Status: Planned.** Save the complete supported document and its exact source
-artwork in one portable file, then load and render it through the shared engine.
+artwork in one portable file, establish immutable version-1 interpretation and
+the migration dispatch boundary, then load and render through the shared
+engine.
 
-### Stage 12 container format
+### Stage 12 container and version contract
 
 `.toniator` is a deterministic ZIP container, not plain JSON. Required entries
 are:
@@ -1133,7 +1212,13 @@ sources/<source-id>.svg
 
 Rules:
 
-- `document.json` is versioned UTF-8 JSON with discrete `u32` schema versions.
+- Container-layout version and document-schema version are separate discrete
+  `u32` values. Stage 12 accepts container version 1 and document schema version
+  1; a future document-schema change does not rename or reinterpret container
+  version 1 unless the ZIP layout itself changes.
+- `document.json` is versioned UTF-8 JSON parsed into an IO-owned
+  `DocumentDtoV1`. Never deserialize archive data directly into private domain
+  structs or derive the persisted interpretation from current field layout.
 - Source entries contain the exact original PNG or SVG bytes without decoding
   or recompression.
 - The manifest records source ID, entry name, format, byte length, SHA-256, and
@@ -1148,17 +1233,38 @@ Rules:
   archives.
 - Read named entries directly; never extract archive paths to the filesystem.
 - Limit version-1 source and archive sizes to a documented safe boundary.
-- Unknown container or document versions fail clearly; migrations are not
-  implemented yet.
+- Unknown container or document versions fail clearly.
+- Loading always follows the version boundary, even while version 1 is current:
+
+  ```text
+  ZIP/container version dispatch
+  -> version-specific document parser
+  -> stored document DTO
+  -> deterministic migration dispatcher
+  -> current DTO
+  -> validated authoritative Document
+  ```
+
+  Stage 12 registers no transforming migration: v1 is already current. Stage
+  14 adds the first explicit v1-to-v2 document migration without changing the
+  accepted v1 parser or embedded source interpretation.
 
 ### Stage 12 IO and CLI behavior
 
-- `toniator-io` owns ZIP layout, JSON DTO conversion, validation, and atomic
-  saving.
-- Loading returns a validated `Document` plus immutable embedded source bytes
-  matched to its `SourceReferenceId`.
+- `toniator-io` owns ZIP layout, version-specific DTOs, deterministic migration
+  dispatch, DTO/domain conversion, validation, and atomic saving.
+- Loading returns a validated `Document`, an immutable `SourceBundle` keyed by
+  `SourceReferenceId`, the stored version information, and a migration report
+  which is empty for accepted v1 files. Missing, duplicate, unreferenced, or
+  format/hash-mismatched source entries fail before evaluation.
+- Saving writes only the current accepted schema version. Stage 12 writes v1;
+  it provides no downgrade or alternate interpretation.
 - Saving writes to a same-directory temporary file, flushes it, and atomically
   renames it.
+- Loading is not a document edit. A loaded document creates a new
+  `DocumentSession`/`DocumentHistory` at revision zero with empty undo and redo
+  stacks. History, revision progress, dirty state, window state, filesystem
+  paths, and recovery state are never serialized.
 - Add `toniator document create`.
 - Add `toniator validate -i file.toniator`.
 - Add `toniator render -i file.toniator -o output.png` and
@@ -1184,35 +1290,306 @@ Rules:
   identities and rendered output.
 - SVG font-dependent decoded pixels remain environment-sensitive, but the
   embedded original SVG bytes remain exact.
+- Commit deterministic immutable v1 fixtures
+  `assets/raster-sample-v1.toniator` and
+  `assets/vector-sample-v1.toniator`, document their hashes, and exercise them
+  as the permanent Stage 14 migration inputs. Future tests must not regenerate
+  a purported v1 fixture with a later writer.
+- Prove the version dispatcher takes the v1 path, returns an empty migration
+  report, and rejects unknown container/document versions without consulting UI
+  defaults.
 
 Forbidden: external source references, GTK Open/Save integration, presets,
-migrations, recovery/recent files, legacy import, arbitrary attachments, or
-broad compatibility.
+transforming migrations, serialized history, recovery/recent files, legacy
+import, arbitrary attachments, direct domain serde coupling, or broad
+compatibility.
 
 **Stop condition:** User inspects both `.toniator` containers and their
-rendered PNG/SVG outputs. GTK document actions and editors require a separately
-approved Stage 13 plan.
+rendered PNG/SVG outputs and accepts v1 as immutable. Do not begin GTK document
+lifecycle or the v1-to-v2 migration automatically.
 
-## Stage 13+ — GTK document actions and command-bound editors
+## Stage 13A — GTK document lifecycle
 
-Stage 13 and later work is deliberately deferred. GTK Open/Save integration,
-document actions, command-bound pattern and channel editors, generalized
-families, connected and region output, multiframe evaluation, and simple
-transitions require separately scoped and approved short-stage contracts.
+**Status: Planned.** Add document lifecycle around Stage 11 history and Stage
+12 persistence while remaining completely ignorant of pattern internals.
 
-### Planned export and direct-source CLI contract
+- Add New, Open, Save, Save As, and Close plus close-with-unsaved-work
+  confirmation, stable title/document identity, in-window errors, and generic
+  migration diagnostics.
+- Open either a direct PNG/SVG source or a `.toniator` container. Delegate
+  direct-source/default-document construction to a headless factory; GTK must
+  not construct or inspect the current straight-grid/circular-mark definition.
+- One app-owned document workspace contains `DocumentHistory`, immutable source
+  bundle, optional container location, display metadata, and an exact saved
+  content baseline. It is lifecycle/controller state, not a second document.
+- Dirty state compares current authoritative document plus source-bundle
+  identity with the accepted savepoint. It is not `revision != saved_revision`,
+  so undoing to saved content and successful semantic no-ops behave correctly.
+- New and load create a fresh history at revision zero with empty stacks. Save
+  updates the location/savepoint only after atomic IO success; failure preserves
+  the current document, location, history, and dirty state.
+- Existing asynchronous evaluation, accepted-ticket/revision gating, intrinsic
+  preview sizing, raw RGBA presentation, and model-specific viewer backdrops
+  remain authoritative.
 
-A future explicitly approved export stage must add equivalent app and CLI PNG
-antialiasing controls (`--antialiasing on|off`, default `on`; `off` produces
-hard-edged/non-antialiased rasterization). The option is a PNG raster
-consumer/export choice, affects raster output/cache identity where applicable,
-and leaves SVG and document/family/realization/scene authority unchanged.
+Forbidden: channel or pattern controls, temporary editors for the v1 schema,
+pattern-aware GTK branches, export UI, recent files, autosave/recovery systems,
+presets, or Stage 14 schema work.
 
-A future explicitly approved CLI/native-sizing stage must make direct still
-rendering use decoded/intrinsic source dimensions by default, with resolved
-intrinsic/`viewBox` dimensions for SVG, preserving aspect ratio when no
-`--canvas` override is supplied. Explicit canvas sizing remains available.
-These controls are planned and are not implemented in Stage 9E.
+**Stop condition:** User accepts lifecycle behavior for direct sources and both
+frozen v1 containers. Checkpoint Stage 13A independently.
+
+## Stage 13B — Dedicated output and export parity
+
+**Status: Planned.** Resolve the two deferred final-consumer requirements after
+document lifecycle and before generalized pattern architecture.
+
+- Direct-source CLI rendering uses decoded/intrinsic PNG dimensions or resolved
+  SVG intrinsic/`viewBox` dimensions by default. An explicit `--canvas` remains
+  available and overrides only the direct-source default.
+- Add `--antialiasing on|off` to PNG rasterization, default `on`; `off` is
+  hard-edged. The choice participates only in raster output/cache identity.
+- Add GTK Export for native PNG/SVG outputs with the existing consumer-only
+  background policy, PNG antialiasing, and an explicit PNG output-dimension
+  override. Export dimensions rerasterize canonical geometry but never resize
+  the authoritative document or preview canvas. SVG is unaffected by the
+  antialiasing option.
+- Save remains `.toniator` persistence and Export remains output generation;
+  neither operation mutates the authoritative document.
+
+Forbidden: pattern schema or evaluator changes, document-owned export state,
+SVG antialiasing behavior, implicit flattening/checkerboards, or editor work.
+
+**Stop condition:** User inspects native CLI/app PNG and SVG output across both
+baseline sources and all three models. Checkpoint Stage 13B independently.
+
+## Stage 14 — Typed pattern-definition authority and v1-to-v2 migration
+
+**Status: Planned.** Replace the bounded v1 `PatternStructure`/`PatternOutput`
+metadata with a generator/mechanism-agnostic typed schema without changing the
+accepted meaning of v1 files.
+
+### Stage 14 schema boundary
+
+- Each definition retains exactly one typed structural family root, consistent
+  with the normative pattern model. The family owns reusable typed mechanism
+  substructures and may later gain composite/hybrid variants; Stage 14 does not
+  introduce an arbitrary node DAG, stringly typed property bag, plugin ABI, or
+  GTK metadata.
+- The top level separates structural family, ordered output layers, modulation,
+  and coverage. It can host future guide/site generators, curves, paths,
+  segments, faces, networks, regions, and hybrids without naming artistic
+  results or changing document/channel authority.
+- Definitions and addressable internal mechanisms/output layers use stable
+  domain-owned IDs and deterministic ordering. Discrete counts and seeds use
+  discrete types (`u32` or appropriate stable IDs); continuous authored values
+  remain `f64`.
+- Pattern definitions remain structural. Density, channel transform, geometry
+  response, mapping, paint, opacity, and visibility remain channel-instance
+  state.
+- Schema validation owns legal structure and capability compatibility. Canvas
+  boundaries never generate sites, close faces, or form topology; they remain
+  final-consumer clipping only.
+
+### Stage 14 definition commands and migration
+
+- Add document-owned collision-checked ID allocation and atomic commands to add,
+  duplicate, edit, reference, and remove unreferenced definitions.
+- Ordinary selected-channel structural editing is one copy-on-edit command: if
+  shared, allocate a fresh definition ID, clone and apply the typed edit, and
+  retarget only that channel in one validated history transition. Other
+  channels retain the original definition.
+- A separate explicit shared-edit command mutates the referenced definition and
+  reports every linked channel in deterministic document order. Stale editor
+  bases, ID exhaustion/collision, invalid edits, and removal of referenced
+  definitions fail atomically.
+- Introduce document schema v2 while retaining container layout v1. Parse the
+  frozen v1 DTO with the accepted Stage 12 parser, migrate deterministically to
+  the typed v2 representation, and write only v2 thereafter. No downgrade is
+  required.
+- The v1 straight-grid/intersection/circular-mark definition maps to ordinary
+  typed v2 mechanisms with deterministic internal IDs. Route that supported v2
+  configuration through the accepted evaluator and prove exact geometry,
+  raster, and SVG parity; do not add a preset-name branch or hidden legacy
+  interpretation.
+
+Forbidden: GTK controls, named artistic pattern variants, presets, new family
+algorithms, arbitrary graphs, source/output policy changes, or modification of
+the accepted v1 parser/fixtures.
+
+**Stop condition:** Accept the v2 authority, atomic sharing semantics, frozen-v1
+migration, and exact accepted-output parity before generalizing evaluation.
+
+## Stage 15 — Generic pattern evaluation pipeline
+
+**Status: Planned.** Generalize engine dispatch and cache identity around the
+typed mechanism contract before adding another family.
+
+```text
+typed PatternDefinition
+-> family evaluation
+-> modulation
+-> ordered output realization
+-> canonical geometry
+-> final-consumer canvas clipping
+```
+
+- Families alone generate structural guides/sites or later structural products.
+  Modulation and output realizers consume declared products; renderers never
+  regenerate them or inspect pattern names.
+- Define reusable typed family/output capability interfaces, provenance,
+  support-envelope planning, candidate limits, deterministic identities, and
+  cancellation boundaries. Unsupported mechanism variants fail before partial
+  output.
+- Generalize family/realization/scene/raster cache keys so properties invalidate
+  the earliest affected stage and matching artifacts remain reusable.
+- Preserve the v2 straight-guide/intersection/circle configuration through the
+  generic path with exact geometry and rendered parity.
+
+Forbidden: GTK, presets, new grid/random vocabulary, canvas topology, or
+renderer-owned pattern dispatch.
+
+**Stop condition:** Accept the generic headless pipeline and parity before the
+first expanded family mechanism.
+
+## Stage 16A — Generalized straight-guide mechanisms
+
+**Status: Planned.** Add reusable straight-guide vocabulary through the generic
+pipeline, never named rectangular/triangular pattern branches.
+
+- Support one to four ordered straight-guide dimensions with independent stable
+  IDs, baseline angles, phase/repetition, and shared channel transform handling.
+- Generate intersection sites for declared dimension selections and regular
+  arc-length sites along guides where valid, retaining stable provenance and
+  guard structure.
+- Add reusable typed mark prototypes and orientation rules through the same
+  output machinery; channel size response remains independent of family sites.
+- Extend analytical inverse-domain coverage to every supported dimension and
+  transformation without finite-grid-then-rotate shortcuts.
+
+Acceptance configurations include orthogonal, nonorthogonal, three-direction,
+four-direction, parallel-guide, and along-guide results expressed solely as
+schema data. Names are test descriptions, not evaluator discriminants.
+
+**Stop condition:** User accepts native outputs and generalized coverage before
+random/site-distribution mechanisms begin.
+
+## Stage 16B — Random and site-distribution mechanisms
+
+**Status: Planned.** Immediately prove the Stage 14–15 architecture is not
+grid-shaped by adding reusable deterministic site distributions.
+
+- Add raw uniform random, genuinely even/exclusion-based placement, clustered
+  placement, and source-weighted placement with stable `u32` seeds.
+- Support minimum center spacing, visible-mark exclusion margin, deterministic
+  achieved-density diagnostics when a request is unsatisfiable, and bounded
+  candidate/work policies.
+- Reuse the same modulation, mark/output realization, channel response,
+  canonical geometry, clipping, cache, preview, PNG, and SVG machinery used by
+  Stage 16A.
+- Treat Poisson-disk methods or blue-noise measurements as defined reusable
+  constructions/quality evidence, never unexplained named generator branches.
+
+**Stop condition:** Accept deterministic distribution distinctions, exclusion
+guarantees, weighted sampling, and native output parity before editor commands.
+
+## Stage 17 — Headless pattern/channel editing and capabilities
+
+**Status: Planned.** Complete the authoritative command and introspection
+surface before creating GTK controls.
+
+- Add typed commands for every supported channel property and structural edit,
+  including density-axis/aspect behavior, transform/phase, geometry response,
+  mapping, presentation, definition selection, mechanism configuration,
+  output-layer ordering, copy-on-edit, and explicit shared editing.
+- Every command validates atomically, reports deterministic affected channels,
+  and returns the earliest correct invalidation level: Presentation,
+  Realization, Family, Source, or ChannelTopology.
+- Provide schema-derived read-only capability/property descriptors containing
+  stable typed field IDs, value kinds, legal enum choices, bounds, units,
+  dependencies/visibility, structural support, and invalidation metadata.
+- Descriptors never own values, validation, serialization, commands, UI labels,
+  widget layout, fallback behavior, or alternate pattern interpretation. A
+  descriptor/schema mismatch is a test failure.
+- Every future GUI edit must already be reproducible through the same headless
+  command/capability surface used by tests and CLI-oriented tooling.
+
+**Stop condition:** Accept command completeness, descriptor derivation,
+copy/shared semantics, undo/redo, exact invalidation, and restored render parity
+before GTK inspector work.
+
+## Stage 18 — Descriptor-driven GTK channel inspector
+
+**Status: Planned.** Add channel selection and per-channel editing over Stage
+17 authority without structural pattern mathematics in GTK.
+
+- Present channel appearance, source mapping, definition selection/sharing
+  state, family-appropriate density, layout, and output-compatible geometry
+  response from authoritative descriptors.
+- Use progressive disclosure: common compatible controls first; advanced
+  anisotropy, seeds, exclusion, and mechanism-specific parameters only when the
+  active descriptor exposes them.
+- GTK renders widgets, parses transient text, and dispatches typed commands
+  through `DocumentHistory`. It never mutates definitions, allocates IDs,
+  computes pattern geometry, or maintains hidden authoritative values.
+- Preserve asynchronous revision/ticket rejection under rapid editing and keep
+  the preview a raw-RGBA final consumer.
+
+Structural Pattern Editor controls and preset authoring remain Stage 19.
+
+**Stop condition:** User accepts channel workflow, undo/redo, focus/accessibility,
+stale-preview rejection, and all supported model/source combinations.
+
+## Stage 19A — Pure-schema preset registry
+
+**Status: Planned.** Add a versioned headless preset registry whose entries are
+ordinary typed pattern definitions using only exposed mechanisms.
+
+- Applying a preset creates an independent document-owned definition by
+  default. Updating an existing shared definition requires an explicit shared
+  operation and affected-channel disclosure.
+- Preset names, categories, and thumbnails are metadata only. Removing a preset
+  removes the shortcut, not evaluator capability; no evaluator/cache/renderer
+  branch may inspect a preset name.
+- Reconstruction tests build every bundled preset from a blank definition using
+  exposed typed controls, serialize/reload it, and compare canonical output.
+
+**Stop condition:** Accept headless preset reconstruction and versioning before
+GTK preset/pattern editing.
+
+## Stage 19B — Structural GTK Pattern Editor
+
+**Status: Planned.** Add a separate structural editor launched from selected
+channel context and driven by Stage 17 descriptors.
+
+- Default ordinary editing uses the atomic copy-on-edit command when the
+  selected definition is shared. A separate deliberate **Edit Shared
+  Definition** operation shows every affected channel before dispatch.
+- Edit the typed family, mechanisms, modulation, coverage, and ordered output
+  layers supported by the current evaluator. Raw schema JSON is not the primary
+  workflow, and unsupported future mechanisms are not exposed.
+- Transient widget/draft text is non-authoritative. Valid edits commit through
+  typed commands, history, exact invalidation, and the shared scheduler/preview.
+- Preset application creates an independent definition by default; deliberate
+  shared replacement remains explicit.
+
+**Stop condition:** User constructs, saves, reloads, edits, shares/copies, undoes,
+and renders representative grid and random definitions without hidden or
+named-pattern behavior.
+
+## Stage 20+ — Advanced reusable mechanisms
+
+**Status: Planned.** Continue through separately approved headless mechanism
+and GTK exposure checkpoints: curved/procedural guide generators and coverage,
+connected/network topology, regions and ordinary Voronoi, reusable region
+offset/collapse behavior, composite output mechanisms, user-authored paths or
+structures, multiframe sources, and simple transitions.
+
+Every mechanism must enter through the Stage 14 typed schema, Stage 15 generic
+pipeline, Stage 17 command/descriptor contract, canonical geometry, and
+final-consumer clipping. Artistic names remain pure-schema presets and adequacy
+tests; they never become private variables, renderer branches, or alternate
+evaluation paths.
 
 ## Common validation and Git gates
 
