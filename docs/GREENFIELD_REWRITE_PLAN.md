@@ -1401,7 +1401,7 @@ exact embedded source bytes, and accepted RGB/CMYK/SourceColorAlpha output
 parity. Native artifact inspection used raw RGBA and editable SVG; it does not
 claim exhaustive manual GTK dialog, accessibility, or interactive acceptance.
 The separate accepted app-only lifecycle correction is checkpointed at
-`02bc2c9`; Stage 15 remains planned.
+`02bc2c9`; Stage 15 is complete below at `711058b`.
 
 ### Stage 14 schema boundary
 
@@ -1453,13 +1453,19 @@ the accepted v1 parser/fixtures.
 
 **Stop condition (complete):** The v2 authority, atomic sharing semantics,
 frozen-v1 migration, deterministic v2 persistence, and exact accepted-output
-parity were accepted at implementation checkpoint `88fc6dd`. Generalized
-evaluation remains deferred to Stage 15.
+parity were accepted at implementation checkpoint `88fc6dd`. Generic
+evaluation is recorded below as complete at `711058b`.
 
 ## Stage 15 — Generic pattern evaluation pipeline
 
-**Status: Planned.** Generalize engine dispatch and cache identity around the
-typed mechanism contract before adding another family.
+**Status: Complete at commit `711058b`.** Engine dispatch and cache identity
+now use the typed mechanism contract before any expanded family vocabulary.
+The accepted straight-guide/intersection/circular-mark configuration evaluates
+through one generic family-to-modulation-to-ordered-realization path with
+stable structural and realization provenance, exact cache invalidation/reuse,
+bounded candidate/cancellation checks, transactional scheduler acceptance, and
+unchanged canonical geometry, raster, PNG, SVG, preview, CLI, persistence, and
+GTK behavior.
 
 ```text
 typed PatternDefinition
@@ -1485,8 +1491,10 @@ typed PatternDefinition
 Forbidden: GTK, presets, new grid/random vocabulary, canvas topology, or
 renderer-owned pattern dispatch.
 
-**Stop condition:** Accept the generic headless pipeline and parity before the
-first expanded family mechanism.
+**Stop condition (complete):** The generic headless pipeline, capability and
+provenance validation, exact identity/reuse boundaries, cancellation and
+failure atomicity, and frozen-v1/saved-v2 RGB/CMYK/SourceColorAlpha parity were
+accepted at implementation checkpoint `711058b`. Stage 16 remains planned.
 
 ## Stage 16A — Generalized straight-guide mechanisms
 

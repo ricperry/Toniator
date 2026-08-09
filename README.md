@@ -98,8 +98,25 @@ configuration preserves accepted RGB, CMYK, and SourceColorAlpha geometry,
 raster, PNG, and editable SVG parity across both frozen v1 containers and
 equivalent v2 documents. Native artifacts were inspected as raw RGBA and
 editable SVG; this does not claim exhaustive manual GTK dialog,
-accessibility, or interactive acceptance. Stage 15 generalized evaluation and
-GTK pattern-editor architecture remain planned.
+accessibility, or interactive acceptance.
+
+Stage 15 generic pattern evaluation is complete at implementation checkpoint
+`711058b`. Typed capability validation now resolves the supported family,
+explicit modulation, ordered output realization, canonical geometry, and
+final-consumer clipping without renderer-owned pattern dispatch. Stable
+definition, mechanism, and output-layer provenance is retained; family,
+realization, source/decode, scene, and raster identities now invalidate and
+reuse at their respective boundaries. Structural planning is bounded by
+candidate limits and cancellation, unsupported combinations fail before
+partial output, and scheduler cache publication remains transactional for
+accepted current work. The supported straight-guide/intersection/circular
+configuration preserves exact geometry and RGB/CMYK/SourceColorAlpha output
+parity. Frozen v1 containers migrated, saved as v2, reopened, and rendered
+with byte-identical PNG/SVG results across all three models; v1/v2 persistence,
+`DocumentHistory`, renderer, app, and GTK lifecycle behavior remain unchanged.
+Native artifacts and bounded app launches are liveness/review evidence, not
+exhaustive manual visual, interactive, or accessibility acceptance. Stage 16+
+family expansion and GTK pattern/channel editing remain planned.
 
 ## Build and run
 

@@ -213,11 +213,20 @@ accepted RGB/CMYK/SourceColorAlpha geometry, raster, PNG, and editable SVG
 parity across frozen v1 and equivalent v2 documents. Native raw-RGBA and
 editable-SVG inspection is recorded without claiming exhaustive manual GTK
 acceptance. No named artistic pattern branches or GTK controls; Stage 15
-generalized evaluation remains planned.
+generic evaluation is complete below at `711058b`.
 
-**Stage 15 — Planned.** Generalize the headless family-to-modulation-to-ordered-
-output-to-canonical-geometry pipeline, cache identity, support/coverage,
-provenance, limits, and cancellation before adding new mechanisms.
+**Stage 15 — Complete at commit `711058b`.** Generalize the typed headless
+family-to-modulation-to-ordered-realization pipeline without adding mechanism
+vocabulary. Typed capability planning and stable definition/mechanism/layer
+provenance now cross the existing support-envelope, candidate-limit, and
+cancellation boundaries; unsupported compositions fail before source decode or
+partial cache publication. Family, realization, scene, and raster identities
+reuse only matching authoritative inputs while the current supported
+configuration preserves exact canonical geometry and frozen-v1/saved-v2
+RGB/CMYK/SourceColorAlpha PNG/SVG parity. DocumentHistory, immutable v1
+migration, deterministic v2 persistence, scheduler acceptance, CLI/preview,
+renderers, and corrected GTK lifecycle behavior remain unchanged. Stage 16
+expanded mechanisms remain planned.
 
 **Stage 16A — Planned.** Add generalized one-to-four-dimension straight-guide
 mechanisms, independent angles/phase, intersections and along-guide sites,
