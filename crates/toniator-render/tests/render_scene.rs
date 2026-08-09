@@ -9,8 +9,9 @@ use toniator_geometry::{
     CanonicalCircleMark, GuideInstanceId, GuideIntersectionProvenance, Point2, SiteId, SiteScope,
 };
 use toniator_render::{
-    GeometryOutput, RasterBackground, RasterSurface, RenderLayer, RenderScene, SourceColorCircle,
-    encode_png, linear_to_srgb, rasterize, srgb_to_linear, write_svg,
+    GeometryOutput, PreviewRasterTarget, RasterBackground, RasterSurface, RenderLayer, RenderScene,
+    SourceColorCircle, encode_png, linear_to_srgb, rasterize, rasterize_preview, srgb_to_linear,
+    write_svg,
 };
 
 fn mark(x: f64, y: f64, radius: f64, scope: SiteScope) -> CanonicalCircleMark {
@@ -125,6 +126,89 @@ fn color(red: f64, green: f64, blue: f64, alpha: f64) -> ColorValue {
         green,
         blue,
         alpha,
+    }
+}
+
+#[test]
+fn preview_target_rerasterizes_geometry_without_changing_native_raster() {
+    let scene = scene(true, color(1.0, 0.0, 0.0, 1.0), 1.0);
+    let native_before = rasterize(&scene, RasterBackground::Transparent).unwrap();
+    let target = PreviewRasterTarget::new(100, 100).unwrap();
+    let preview = rasterize_preview(&scene, target).unwrap();
+    let native_after = rasterize(&scene, RasterBackground::Transparent).unwrap();
+    assert_eq!((preview.width(), preview.height()), (100, 100));
+    assert_eq!(native_before, native_after);
+    assert_eq!(preview.pixels().len(), 100 * 100 * 4);
+    assert_eq!(&preview.pixels()[0..4], &[0, 0, 0, 0]);
+    let alpha = preview
+        .pixels()
+        .chunks_exact(4)
+        .map(|pixel| pixel[3])
+        .collect::<Vec<_>>();
+    let fractional = alpha
+        .iter()
+        .filter(|&&value| value > 0 && value < 255)
+        .count();
+    assert!(alpha.contains(&255));
+    assert!(
+        fractional > 0 && fractional < 600,
+        "output-space AA must remain a narrow edge band"
+    );
+}
+
+#[test]
+fn preview_target_rejects_invalid_or_unsafe_extents() {
+    assert_eq!(
+        PreviewRasterTarget::new(0, 1).unwrap_err().path(),
+        "preview.target"
+    );
+    assert_eq!(
+        PreviewRasterTarget::new(8193, 8193).unwrap_err().path(),
+        "preview.target"
+    );
+}
+
+#[test]
+fn preview_letterbox_clips_crossing_guard_marks_to_transformed_canvas_for_all_models() {
+    for model in [
+        HalftoneChannelModel::Rgb,
+        HalftoneChannelModel::Cmyk,
+        HalftoneChannelModel::SourceColorAlpha,
+    ] {
+        let geometry = GeometryOutput::CircularMarks(vec![mark(5.0, -0.5, 1.5, SiteScope::Guard)]);
+        let layer = match model {
+            HalftoneChannelModel::SourceColorAlpha => RenderLayer::new_source_color(
+                ChannelId(8),
+                true,
+                1.0,
+                vec![SourceColorCircle {
+                    mark: mark(5.0, -0.5, 1.5, SiteScope::Guard),
+                    paint: color(1.0, 0.0, 0.0, 1.0),
+                }],
+            )
+            .unwrap(),
+            _ => RenderLayer::new(ChannelId(1), true, color(1.0, 0.0, 0.0, 1.0), 1.0, geometry)
+                .unwrap(),
+        };
+        let scene = modeled_with_canvas(model, 10.0, 5.0, vec![layer]);
+        let native = rasterize(&scene, RasterBackground::Transparent).unwrap();
+        let preview = rasterize_preview(&scene, PreviewRasterTarget::new(10, 10).unwrap()).unwrap();
+        assert_eq!(
+            native,
+            rasterize(&scene, RasterBackground::Transparent).unwrap()
+        );
+        for y in 0..2 {
+            assert!(
+                preview.pixels()[y * 10 * 4..(y + 1) * 10 * 4]
+                    .chunks_exact(4)
+                    .all(|p| p[3] == 0)
+            );
+        }
+        assert!(
+            preview.pixels()[2 * 10 * 4..5 * 10 * 4]
+                .chunks_exact(4)
+                .any(|p| p[3] > 0)
+        );
     }
 }
 

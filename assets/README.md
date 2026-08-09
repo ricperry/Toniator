@@ -18,6 +18,18 @@ The video fixture is not part of the current still-image Stage 6 evaluation
 gate. Exercise it only in a later explicitly approved multiframe or animation
 stage.
 
+## Stage 10 small-preview regressions
+
+`Reddit.png` and `Reddit.svg` are user-provided small-preview regression inputs,
+not replacements for the immutable project-wide baselines above. Keep their
+bytes unchanged. `Reddit.png` is 128×128 RGBA with SHA-256
+`83842723c8cfdf3bda1a4f76bfcde13175a623123380ce155de932dd319cd185`.
+`Reddit.svg` declares 13.509999×13.509999 with viewBox 123.51999×123.51999,
+and has SHA-256
+`f37963d793f17ca381e7d356ca1a0af1c85c548ccf5522a1c0a425e3b97acb45`.
+The accepted decoder resolves that SVG to a 14×14 source identity; tests must
+not reinterpret its declared sizing or use font-dependent pixel goldens.
+
 Tests using the SVG must prove that live text is accepted and handled by the
 declared text/font policy. Do not use exact text raster pixels as a portable
 golden until the test supplies a deterministic font; system font fallback can

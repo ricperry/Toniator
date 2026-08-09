@@ -13,6 +13,7 @@ use toniator_domain::{CanvasSpec, ChannelId, ColorValue, HalftoneChannelModel};
 use toniator_geometry::CanonicalCircleMark;
 
 const SUBPIXEL_GRID: u32 = 8;
+const MAX_PREVIEW_PIXELS: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RenderScene {
@@ -487,6 +488,37 @@ pub enum RasterBackground {
     Transparent,
 }
 
+/// Checked, renderer-owned pixel extent for a derived transparent preview.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PreviewRasterTarget {
+    width: u32,
+    height: u32,
+}
+
+impl PreviewRasterTarget {
+    pub fn new(width: u32, height: u32) -> Result<Self, RenderError> {
+        if width == 0 || height == 0 {
+            return Err(RenderError::new(
+                "preview.target",
+                "dimensions must be positive",
+            ));
+        }
+        if u64::from(width) * u64::from(height) > MAX_PREVIEW_PIXELS {
+            return Err(RenderError::new(
+                "preview.target",
+                "pixel count exceeds preview safety limit",
+            ));
+        }
+        Ok(Self { width, height })
+    }
+    pub const fn width(self) -> u32 {
+        self.width
+    }
+    pub const fn height(self) -> u32 {
+        self.height
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RasterSurface {
     width: u32,
@@ -553,6 +585,63 @@ pub fn rasterize(
     let mut linear_pixels = compose_model(scene.model.expect("modeled scene"), &layer_pixels);
     apply_background(&mut linear_pixels, background);
     pixels_from_linear(width, height, linear_pixels)
+}
+
+/// Rerasterizes canonical scene geometry into a transparent fitted target.
+/// This is intentionally not a resample of [`RasterSurface`].
+pub fn rasterize_preview(
+    scene: &RenderScene,
+    target: PreviewRasterTarget,
+) -> Result<RasterSurface, RenderError> {
+    let transform = PreviewTransform::for_scene(scene, target);
+    let width = target.width;
+    let height = target.height;
+    let layers = scene
+        .layers
+        .iter()
+        .map(|layer| rasterize_layer_with_transform(layer, width, height, transform))
+        .collect::<Vec<_>>();
+    let mut pixels = match scene.model {
+        Some(model) => compose_model(model, &layers),
+        None => {
+            let mut destination = vec![
+                background_pixel(RasterBackground::Transparent);
+                width as usize * height as usize
+            ];
+            for layer in layers {
+                for (destination_pixel, source) in destination.iter_mut().zip(layer) {
+                    source_over(destination_pixel, source);
+                }
+            }
+            destination
+        }
+    };
+    apply_background(&mut pixels, RasterBackground::Transparent);
+    pixels_from_linear(width, height, pixels)
+}
+
+#[derive(Clone, Copy)]
+struct PreviewTransform {
+    scale: f64,
+    offset_x: f64,
+    offset_y: f64,
+    right: f64,
+    bottom: f64,
+}
+impl PreviewTransform {
+    fn for_scene(scene: &RenderScene, target: PreviewRasterTarget) -> Self {
+        let scale = (f64::from(target.width) / scene.canvas.width)
+            .min(f64::from(target.height) / scene.canvas.height);
+        let offset_x = (f64::from(target.width) - scene.canvas.width * scale) / 2.0;
+        let offset_y = (f64::from(target.height) - scene.canvas.height * scale) / 2.0;
+        Self {
+            scale,
+            offset_x,
+            offset_y,
+            right: offset_x + scene.canvas.width * scale,
+            bottom: offset_y + scene.canvas.height * scale,
+        }
+    }
 }
 
 /// Retains the accepted Stage 5 raster path byte-for-byte for callers which
@@ -622,6 +711,32 @@ fn rasterize_layer(layer: &RenderLayer, width: u32, height: u32) -> Vec<Premulti
             mark,
             layer.mark_paint(index),
             layer.opacity,
+        );
+    }
+    pixels
+}
+
+fn rasterize_layer_with_transform(
+    layer: &RenderLayer,
+    width: u32,
+    height: u32,
+    transform: PreviewTransform,
+) -> Vec<PremultipliedLinearPixel> {
+    let mut pixels =
+        vec![background_pixel(RasterBackground::Transparent); width as usize * height as usize];
+    if !layer.visible {
+        return pixels;
+    }
+    let GeometryOutput::CircularMarks(marks) = &layer.geometry;
+    for (index, mark) in marks.iter().enumerate() {
+        composite_circle_transformed(
+            &mut pixels,
+            width,
+            height,
+            mark,
+            layer.mark_paint(index),
+            layer.opacity,
+            transform,
         );
     }
     pixels
@@ -786,14 +901,91 @@ fn composite_circle(
 }
 
 fn circle_coverage(mark: &CanonicalCircleMark, x: u32, y: u32) -> f64 {
+    circle_coverage_at(mark.center.x, mark.center.y, mark.radius, x, y)
+}
+
+fn composite_circle_transformed(
+    pixels: &mut [PremultipliedLinearPixel],
+    width: u32,
+    height: u32,
+    mark: &CanonicalCircleMark,
+    color: &ColorValue,
+    opacity: f64,
+    transform: PreviewTransform,
+) {
+    let center_x = transform.offset_x + mark.center.x * transform.scale;
+    let center_y = transform.offset_y + mark.center.y * transform.scale;
+    let radius = mark.radius * transform.scale;
+    let min_x = (center_x - radius - 1.0)
+        .floor()
+        .max(transform.offset_x.floor())
+        .max(0.0) as u32;
+    let min_y = (center_y - radius - 1.0)
+        .floor()
+        .max(transform.offset_y.floor())
+        .max(0.0) as u32;
+    let max_x = (center_x + radius + 1.0)
+        .ceil()
+        .min(transform.right.ceil())
+        .min(f64::from(width)) as u32;
+    let max_y = (center_y + radius + 1.0)
+        .ceil()
+        .min(transform.bottom.ceil())
+        .min(f64::from(height)) as u32;
+    for y in min_y..max_y {
+        for x in min_x..max_x {
+            let coverage = circle_coverage_clipped(center_x, center_y, radius, x, y, transform);
+            if coverage == 0.0 {
+                continue;
+            }
+            let source_alpha = (color.alpha * opacity * coverage).clamp(0.0, 1.0);
+            let destination = &mut pixels[y as usize * width as usize + x as usize];
+            let remaining = 1.0 - source_alpha;
+            destination.red = color.red * source_alpha + destination.red * remaining;
+            destination.green = color.green * source_alpha + destination.green * remaining;
+            destination.blue = color.blue * source_alpha + destination.blue * remaining;
+            destination.alpha = source_alpha + destination.alpha * remaining;
+        }
+    }
+}
+
+fn circle_coverage_at(center_x: f64, center_y: f64, radius: f64, x: u32, y: u32) -> f64 {
     let mut inside = 0_u32;
     for sample_y in 0..SUBPIXEL_GRID {
         for sample_x in 0..SUBPIXEL_GRID {
             let point_x = f64::from(x) + (f64::from(sample_x) + 0.5) / f64::from(SUBPIXEL_GRID);
             let point_y = f64::from(y) + (f64::from(sample_y) + 0.5) / f64::from(SUBPIXEL_GRID);
-            let dx = point_x - mark.center.x;
-            let dy = point_y - mark.center.y;
-            if dx.mul_add(dx, dy * dy) <= mark.radius * mark.radius {
+            let dx = point_x - center_x;
+            let dy = point_y - center_y;
+            if dx.mul_add(dx, dy * dy) <= radius * radius {
+                inside += 1;
+            }
+        }
+    }
+    f64::from(inside) / f64::from(SUBPIXEL_GRID * SUBPIXEL_GRID)
+}
+
+fn circle_coverage_clipped(
+    center_x: f64,
+    center_y: f64,
+    radius: f64,
+    x: u32,
+    y: u32,
+    transform: PreviewTransform,
+) -> f64 {
+    let mut inside = 0_u32;
+    for sample_y in 0..SUBPIXEL_GRID {
+        for sample_x in 0..SUBPIXEL_GRID {
+            let point_x = f64::from(x) + (f64::from(sample_x) + 0.5) / f64::from(SUBPIXEL_GRID);
+            let point_y = f64::from(y) + (f64::from(sample_y) + 0.5) / f64::from(SUBPIXEL_GRID);
+            let dx = point_x - center_x;
+            let dy = point_y - center_y;
+            if point_x >= transform.offset_x
+                && point_x < transform.right
+                && point_y >= transform.offset_y
+                && point_y < transform.bottom
+                && dx.mul_add(dx, dy * dy) <= radius * radius
+            {
                 inside += 1;
             }
         }

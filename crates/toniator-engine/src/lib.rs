@@ -40,8 +40,9 @@ use toniator_patterns::{
     realize_source_color_circular_marks,
 };
 pub use toniator_render::{
-    GeometryOutput, RasterBackground, RasterSurface, RenderError, RenderLayer, RenderScene,
-    SceneIdentity, encode_png, linear_to_srgb, rasterize, srgb_to_linear, write_svg,
+    GeometryOutput, PreviewRasterTarget, RasterBackground, RasterSurface, RenderError, RenderLayer,
+    RenderScene, SceneIdentity, encode_png, linear_to_srgb, rasterize, rasterize_preview,
+    srgb_to_linear, write_svg,
 };
 use toniator_sampling::decode_source;
 pub use toniator_sampling::{
@@ -50,6 +51,21 @@ pub use toniator_sampling::{
 };
 
 pub use toniator_patterns::{GridError, GridInspectRequest};
+
+/// Resolves source identity through the accepted sampling decoder.
+///
+/// This deliberately performs no format parsing, dimension extraction, or
+/// sizing policy of its own. Frontends may use it for preflight while the
+/// authoritative evaluator performs its normal decode when scheduled.
+pub fn resolve_source_identity(
+    bytes: &[u8],
+    format_hint: SourceFormatHint,
+) -> Result<SourceIdentity, EvaluationError> {
+    Ok(decode_source(bytes, format_hint)
+        .map_err(EvaluationError::from_sampling)?
+        .identity()
+        .clone())
+}
 
 /// Runs the bounded Stage 3 family evaluation through the shared headless boundary.
 pub fn inspect_straight_grid(request: &GridInspectRequest) -> Result<GridFamilyOutput, GridError> {
@@ -957,11 +973,30 @@ impl Error for MarksInspectError {}
 pub struct EvaluationRequest {
     snapshot: DocumentEvaluationSnapshot,
     source: ResolvedSource,
+    preview_target: Option<PreviewRasterTarget>,
 }
 
 impl EvaluationRequest {
     pub fn new(snapshot: DocumentEvaluationSnapshot, source: ResolvedSource) -> Self {
-        Self { snapshot, source }
+        Self {
+            snapshot,
+            source,
+            preview_target: None,
+        }
+    }
+
+    /// Keeps the authoritative document/scene native while deriving only the
+    /// transparent preview raster at this checked output target.
+    pub fn with_preview_target(
+        snapshot: DocumentEvaluationSnapshot,
+        source: ResolvedSource,
+        preview_target: PreviewRasterTarget,
+    ) -> Self {
+        Self {
+            snapshot,
+            source,
+            preview_target: Some(preview_target),
+        }
     }
 }
 
@@ -1670,10 +1705,18 @@ fn evaluate_cached_document_impl(
         Some((key, value)) if *key == scene_key => (Arc::clone(value), CacheDisposition::Hit),
         _ => (Arc::new(built_scene), CacheDisposition::Miss),
     };
-    let raster_key = format!(
-        "{}:{TRANSPARENT_RASTER_CONTRACT_ID}:{model:?}",
-        scene.identity().scene_fingerprint()
-    );
+    let raster_key = match request.preview_target {
+        Some(target) => format!(
+            "{}:{TRANSPARENT_RASTER_CONTRACT_ID}:preview-v1:{model:?}:{}x{}",
+            scene.identity().scene_fingerprint(),
+            target.width(),
+            target.height()
+        ),
+        None => format!(
+            "{}:{TRANSPARENT_RASTER_CONTRACT_ID}:{model:?}",
+            scene.identity().scene_fingerprint()
+        ),
+    };
     let (raster, raster_disposition) = match &accepted.raster {
         Some((key, value)) if *key == raster_key => (Arc::clone(value), CacheDisposition::Hit),
         _ => (
@@ -1681,8 +1724,11 @@ fn evaluate_cached_document_impl(
                 EvaluationStage::Raster,
                 cancellation,
                 || {
-                    rasterize(&scene, RasterBackground::Transparent)
-                        .map_err(EvaluationError::from_render)
+                    match request.preview_target {
+                        Some(target) => rasterize_preview(&scene, target),
+                        None => rasterize(&scene, RasterBackground::Transparent),
+                    }
+                    .map_err(EvaluationError::from_render)
                 },
             )?),
             CacheDisposition::Miss,

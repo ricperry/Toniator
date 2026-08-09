@@ -148,13 +148,19 @@ Its accepted artifact template uses channel opacity `1.0`; SourceColorAlpha
 source alpha changes mark size only, leaving positive-alpha SVG marks opaque
 and PNG mark interiors at alpha `1.0` except for antialiased edge coverage.
 
-**Stage 10 — Planned.** Add the first view-only GTK preview only after Stage 9E
-and the Stage 9 umbrella are accepted and locally checkpointed. Opening a
-direct still source without an explicit canvas override will use decoded/
-intrinsic source dimensions (resolved intrinsic/`viewBox` dimensions for SVG)
-while preserving aspect ratio; explicit canvas override remains available.
-Ordinary acceptance commands omit pixel dimensions, with dimensions appearing
-only in tests that deliberately exercise override behavior.
+**Stage 10 — Accepted awaiting checkpoint.** The accepted implementation keeps
+intrinsic PNG/SVG document dimensions and native export raster bytes intact,
+and adds a renderer/engine-derived fitted preview raster target for the GTK
+viewport. It rerasterizes canonical scene geometry at output-pixel resolution,
+preserves cache authority and stale-ticket rejection, and does not move
+geometry/composition into GTK. The app still accepts only optional `PATH`; it
+has no document/canvas override. Parent review, automated verification, and
+user visual acceptance are complete; the local implementation checkpoint is
+pending.
+
+The preview final consumer clips supersamples to the fitted authoritative canvas
+rectangle, so guard geometry cannot paint letterbox margins; the tracked splash
+regression verifies 1280×640 into 960×720 rows 120..600.
 
 **Stage 11 — Planned.** Add headless undo and redo, including atomic channel
 model/topology transitions.

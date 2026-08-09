@@ -9,8 +9,8 @@ use toniator_domain::{
 };
 use toniator_engine::{
     CacheDisposition, EvaluationCompletion, EvaluationLimits, EvaluationRequest,
-    EvaluationScheduler, ResolvedSource, SourceFormatHint, evaluate, evaluate_with_limits,
-    write_svg,
+    EvaluationScheduler, PreviewRasterTarget, ResolvedSource, SourceFormatHint, evaluate,
+    evaluate_with_limits, write_svg,
 };
 
 fn wait_for_latest(scheduler: &EvaluationScheduler) -> EvaluationCompletion {
@@ -66,8 +66,8 @@ fn session_with_canvas(model: HalftoneChannelModel, width: f64, height: f64) -> 
         pattern_definition_id: definition.id,
         layout: ChannelPatternLayout {
             density: DensityMetric2D {
-                across_x: 9.0,
-                across_y: 6.0,
+                across_x: width / 10.0,
+                across_y: height / 10.0,
                 aspect_locked: true,
             },
             rotation_degrees: 0.0,
@@ -438,6 +438,202 @@ fn scheduler_rebuilds_families_and_realizations_when_canvas_changes() {
     }));
 
     scheduler.shutdown().unwrap();
+}
+
+#[test]
+fn preview_target_changes_reuse_scene_and_miss_only_raster_then_repeat_hits() {
+    let session = session(HalftoneChannelModel::Rgb);
+    let scheduler = EvaluationScheduler::new().unwrap();
+    let bytes = std::fs::read("../../assets/raster-sample.png").unwrap();
+    let source = || {
+        ResolvedSource::new(
+            SourceReferenceId::new("fixture-source").unwrap(),
+            bytes.clone(),
+            SourceFormatHint::Png,
+        )
+        .unwrap()
+    };
+    let first = submit_and_accept(
+        &scheduler,
+        &session,
+        EvaluationRequest::with_preview_target(
+            session.document_evaluation_snapshot(),
+            source(),
+            PreviewRasterTarget::new(320, 180).unwrap(),
+        ),
+    );
+    assert_eq!(
+        (
+            first.result().unwrap().raster().width(),
+            first.result().unwrap().raster().height()
+        ),
+        (320, 180)
+    );
+    let changed = submit_and_accept(
+        &scheduler,
+        &session,
+        EvaluationRequest::with_preview_target(
+            session.document_evaluation_snapshot(),
+            source(),
+            PreviewRasterTarget::new(480, 270).unwrap(),
+        ),
+    );
+    let diagnostics = changed.cache_diagnostics().unwrap();
+    assert_eq!(diagnostics.aggregate.decoded_source, CacheDisposition::Hit);
+    assert_eq!(diagnostics.aggregate.family, CacheDisposition::Hit);
+    assert_eq!(diagnostics.aggregate.realization, CacheDisposition::Hit);
+    assert_eq!(diagnostics.aggregate.scene, CacheDisposition::Hit);
+    assert_eq!(diagnostics.aggregate.raster, CacheDisposition::Miss);
+    let repeated = submit_and_accept(
+        &scheduler,
+        &session,
+        EvaluationRequest::with_preview_target(
+            session.document_evaluation_snapshot(),
+            source(),
+            PreviewRasterTarget::new(480, 270).unwrap(),
+        ),
+    );
+    assert_eq!(
+        repeated.cache_diagnostics().unwrap().aggregate.raster,
+        CacheDisposition::Hit
+    );
+    scheduler.shutdown().unwrap();
+}
+
+#[test]
+fn reddit_inputs_evaluate_intrinsically_to_large_preview_targets_for_every_model() {
+    for (path, format, width, height) in [
+        (
+            "../../assets/Reddit.png",
+            SourceFormatHint::Png,
+            128.0,
+            128.0,
+        ),
+        ("../../assets/Reddit.svg", SourceFormatHint::Svg, 14.0, 14.0),
+    ] {
+        let bytes = std::fs::read(path).unwrap();
+        for model in [
+            HalftoneChannelModel::Rgb,
+            HalftoneChannelModel::Cmyk,
+            HalftoneChannelModel::SourceColorAlpha,
+        ] {
+            let session = session_with_canvas(model, width, height);
+            let channel = &session.document().channel_topology().unwrap().channels()[0];
+            assert_eq!(channel.layout.density.across_x, width / 10.0);
+            assert_eq!(channel.layout.density.across_y, height / 10.0);
+            let request = EvaluationRequest::with_preview_target(
+                session.document_evaluation_snapshot(),
+                ResolvedSource::new(
+                    SourceReferenceId::new("fixture-source").unwrap(),
+                    bytes.clone(),
+                    format,
+                )
+                .unwrap(),
+                PreviewRasterTarget::new(512, 512).unwrap(),
+            );
+            let result = evaluate(request).unwrap();
+            assert_eq!(result.scene().canvas(), &CanvasSpec { width, height });
+            assert_eq!(
+                (result.raster().width(), result.raster().height()),
+                (512, 512)
+            );
+            assert_eq!(result.raster().pixels().len(), 512 * 512 * 4);
+        }
+    }
+}
+
+#[test]
+fn newer_preview_target_ticket_rejects_held_older_completion() {
+    let session = session(HalftoneChannelModel::Rgb);
+    let scheduler = EvaluationScheduler::new().unwrap();
+    let bytes = std::fs::read("../../assets/raster-sample.png").unwrap();
+    let request = |target| {
+        EvaluationRequest::with_preview_target(
+            session.document_evaluation_snapshot(),
+            ResolvedSource::new(
+                SourceReferenceId::new("fixture-source").unwrap(),
+                bytes.clone(),
+                SourceFormatHint::Png,
+            )
+            .unwrap(),
+            PreviewRasterTarget::new(target, target).unwrap(),
+        )
+    };
+    let ticket_a = scheduler.submit(request(256)).unwrap();
+    let completion_a = wait_for_latest(&scheduler);
+    assert_eq!(completion_a.ticket(), ticket_a);
+    let ticket_b = scheduler.submit(request(512)).unwrap();
+    assert!(
+        !scheduler
+            .accept_completion(&completion_a, &session)
+            .unwrap()
+    );
+    let completion_b = wait_for_latest(&scheduler);
+    assert_eq!(completion_b.ticket(), ticket_b);
+    assert!(
+        scheduler
+            .accept_completion(&completion_b, &session)
+            .unwrap()
+    );
+    assert_eq!(
+        (
+            completion_b.result().unwrap().raster().width(),
+            completion_b.result().unwrap().raster().height()
+        ),
+        (512, 512)
+    );
+    scheduler.shutdown().unwrap();
+}
+
+#[test]
+fn splash_preview_clips_letterbox_rows_for_all_models() {
+    let bytes = std::fs::read("../../assets/splash.png").unwrap();
+    for model in [
+        HalftoneChannelModel::Rgb,
+        HalftoneChannelModel::Cmyk,
+        HalftoneChannelModel::SourceColorAlpha,
+    ] {
+        let session = session_with_canvas(model, 1280.0, 640.0);
+        let result = evaluate(EvaluationRequest::with_preview_target(
+            session.document_evaluation_snapshot(),
+            ResolvedSource::new(
+                SourceReferenceId::new("fixture-source").unwrap(),
+                bytes.clone(),
+                SourceFormatHint::Png,
+            )
+            .unwrap(),
+            PreviewRasterTarget::new(960, 720).unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(
+            result.scene().canvas(),
+            &CanvasSpec {
+                width: 1280.0,
+                height: 640.0
+            }
+        );
+        let raster = result.raster();
+        assert_eq!((raster.width(), raster.height()), (960, 720));
+        for y in 0..120 {
+            assert!(
+                raster.pixels()[y * 960 * 4..(y + 1) * 960 * 4]
+                    .chunks_exact(4)
+                    .all(|p| p[3] == 0)
+            );
+        }
+        for y in 600..720 {
+            assert!(
+                raster.pixels()[y * 960 * 4..(y + 1) * 960 * 4]
+                    .chunks_exact(4)
+                    .all(|p| p[3] == 0)
+            );
+        }
+        assert!(
+            raster.pixels()[120 * 960 * 4..600 * 960 * 4]
+                .chunks_exact(4)
+                .any(|p| p[3] > 0)
+        );
+    }
 }
 
 #[test]

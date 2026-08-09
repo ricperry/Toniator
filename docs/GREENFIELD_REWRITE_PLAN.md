@@ -1004,26 +1004,38 @@ parent’s next-stage authorization.
 
 ## Stage 10 — View-only GTK preview
 
-**Status: Planned.** Provide the first native GTK/libadwaita frontend only over
-the accepted, locally checkpointed Stage 9E complete-document integration
-path.
+**Status: Accepted awaiting checkpoint.** The user accepted the bounded native
+GTK/libadwaita preview and its intrinsic-document resolution corrections over
+the locally checkpointed Stage 9E complete-document integration path. The
+local implementation checkpoint is pending.
 
 ### Stage 10 implementation contract
 
 - Add GTK4/libadwaita dependencies only to `toniator-app`.
 - Use tracked Blueprint sources and GResource; generated `.ui` files remain in
   Cargo `OUT_DIR`.
-- Create an `AdwApplicationWindow` with header bar, Open action, empty state,
-  loading state, error display, and fit-to-window canvas.
-- Support a normal file chooser and `toniator-app [PATH]`.
+- Create an `AdwApplicationWindow` with header bar, Open action, visible model
+  selector, empty/loading/error/success states, and a fit-to-window canvas.
+- Support a normal file chooser and `toniator-app [PATH]`; the app accepts no
+  canvas, model, edit, save, or export arguments.
 - Opening artwork commits a new authoritative source reference, constructs the
   requested canonical Stage 9 topology, and schedules complete-document
   evaluation.
-- When opening a direct still source without an explicit canvas override, use
-  the decoded/intrinsic source width and height, or the resolved intrinsic/
-  `viewBox` dimensions for SVG, while preserving aspect ratio. Keep an
-  explicit canvas override available.
+- Decoded PNG dimensions and resolved SVG intrinsic/`viewBox` dimensions always
+  define the authoritative preview `CanvasSpec` and aspect. The view-only app
+  has no document/canvas override; a future output-dimension override belongs
+  to PNG export and never resizes preview.
 - Display only a completion accepted by the current document revision.
+- A renderer-owned preview target rerasterizes the unchanged scene into the
+  fitted output pixel dimensions. It preserves aspect/centering and output
+  pixel antialiasing, but never changes authoritative `CanvasSpec`, canonical
+  geometry, native raster/export behavior, or CLI semantics. The engine keeps
+  source/family/realization/scene caches reusable across target changes and
+  keys only the transparent preview raster by its checked target contract.
+- Final preview sampling clips to the exact transformed document rectangle
+  (left/top inclusive, right/bottom exclusive), preserving guard geometry while
+  preventing it from leaking into letterbox margins; `splash.png` verifies the
+  1280×640 canvas at fitted rows 120..600 of a 960×720 preview.
 - Wrap the exact straight-sRGBA `RasterSurface` in a GDK memory texture. Do not
   PNG-encode, flatten, checkerboard, recompose channels, or alter pixels.
 - Use viewer-only backdrop defaults: RGB black, CMYK white, and
@@ -1032,8 +1044,11 @@ path.
 - Surface SVG live-text/system-font diagnostics.
 
 Allowed: `toniator-app`, Blueprint/GResource/build files, workspace dependency
-declarations, architecture validation, future plan/tracker text, and Stage 10
-validation artifacts.
+declarations, the renderer-owned `toniator-render` preview-target raster API
+and tests, `toniator-engine` preview requests/raster-cache tests and the
+focused identity helper, user-provided Reddit preview regression assets and
+their README records, architecture validation, future plan/tracker text, and
+Stage 10 validation artifacts.
 
 Forbidden: pattern/channel editing, undo, save, export UI, recent files,
 drag-and-drop, zoom tools, GTK geometry/composition, or alternate rendering.
@@ -1048,15 +1063,17 @@ GDK_BACKEND=wayland cargo run --bin toniator-app -- assets/vector-sample.svg
 ```
 
 Ordinary Stage 10 acceptance commands intentionally omit pixel dimensions.
-Tests that exercise the explicit canvas override provide dimensions only in
-those override cases.
+The app does not implement a canvas override; preview dimensions are always
+source-intrinsic.
 
-Manually inspect every model with both sources for Stage 9 pixel identity,
-backdrop policy, resize fitting, SVG diagnostics, and stale-preview rejection
-during rapid source changes.
+Manually inspect every model with both original baseline sources and the small
+Reddit regression inputs for sharp resize fitting, backdrop policy, SVG
+diagnostics, and stale-preview rejection during rapid source/viewport changes.
 
-**Stop condition:** User visual acceptance is required. Do not begin Stage 11
-automatically.
+**Stop condition (accepted):** Parent review, automated verification, and user
+visual acceptance are complete. Create the local implementation and tracker
+closeout checkpoints; do not begin Stage 11 automatically or push without
+explicit authorization.
 
 ## Stage 11 — Headless undo and redo
 

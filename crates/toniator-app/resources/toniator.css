@@ -1,0 +1,8 @@
+.toniator-viewer {
+  min-width: 1px;
+  min-height: 1px;
+}
+
+.toniator-viewer-rgb { background: #000000; }
+.toniator-viewer-cmyk { background: #ffffff; }
+.toniator-viewer-source-color-alpha { background: #808080; }
