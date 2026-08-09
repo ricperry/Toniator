@@ -18,6 +18,20 @@ The video fixture is not part of the current still-image Stage 6 evaluation
 gate. Exercise it only in a later explicitly approved multiframe or animation
 stage.
 
+## Immutable Stage 12 v1 persistence fixtures
+
+`raster-sample-v1.toniator` and `vector-sample-v1.toniator` are permanent,
+byte-for-byte v1 migration inputs. They were written by the accepted Stage 12
+writer from the two immutable still-image baselines with their intrinsic
+canvases and the 10-pixel nominal-spacing RGB template. Future migration tests
+must consume these committed bytes and must never regenerate purported v1
+fixtures with a later writer.
+
+| File | SHA-256 |
+| --- | --- |
+| `raster-sample-v1.toniator` | `9efac3250e2c4a6650648fd2f5c3820283ea0bf5703459ea996204197aee2a8f` |
+| `vector-sample-v1.toniator` | `34fc138e8d194c57dc239986da2df73f603fb4f51adaa5e7698170582bf6e4ea` |
+
 ## Stage 10 small-preview regressions
 
 `Reddit.png` and `Reddit.svg` are user-provided small-preview regression inputs,

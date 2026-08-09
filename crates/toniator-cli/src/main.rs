@@ -17,6 +17,10 @@ use toniator_engine::{
     SiteScope, SourceFormat, SourceFormatHint, SvgTextDiagnostic, encode_png, evaluate_with_limits,
     inspect_circular_marks, inspect_straight_grid, write_svg,
 };
+use toniator_io::{
+    EmbeddedSource, EmbeddedSourceFormat, SourceBundle, load as load_document,
+    save as save_document,
+};
 
 /// Headless Toniator command-line frontend.
 #[derive(Debug, Parser)]
@@ -34,19 +38,62 @@ enum Command {
     Inspect(InspectArgs),
     /// Render a complete authoritative document to PNG or SVG.
     Render(RenderArgs),
+    /// Create one portable source-backed `.toniator` document.
+    Document(DocumentArgs),
 }
 
 #[derive(Debug, clap::Args)]
 struct ValidateArgs {
+    #[arg(short = 'i', long)]
+    input: Option<PathBuf>,
     /// Canvas dimensions, in WIDTHxHEIGHT form.
+    #[arg(long)]
+    canvas: Option<String>,
+    #[arg(long)]
+    density_x: Option<f64>,
+    #[arg(long)]
+    density_y: Option<f64>,
+    #[arg(long)]
+    opacity: Option<f64>,
+}
+
+#[derive(Debug, clap::Args)]
+struct DocumentArgs {
+    #[command(subcommand)]
+    command: DocumentCommandArgs,
+}
+#[derive(Debug, Subcommand)]
+enum DocumentCommandArgs {
+    Create(DocumentCreateArgs),
+}
+#[derive(Debug, clap::Args)]
+struct DocumentCreateArgs {
+    #[arg(short = 'i', long)]
+    input: PathBuf,
+    #[arg(short, long)]
+    output: PathBuf,
+    #[arg(long, value_enum)]
+    channel_model: CliChannelModel,
     #[arg(long)]
     canvas: String,
     #[arg(long)]
     density_x: f64,
     #[arg(long)]
     density_y: f64,
+    #[arg(long, allow_hyphen_values = true)]
+    rotation: f64,
+    #[arg(long, allow_hyphen_values = true)]
+    offset_x: f64,
+    #[arg(long, allow_hyphen_values = true)]
+    offset_y: f64,
     #[arg(long)]
-    opacity: f64,
+    guard_steps: u32,
+    #[arg(long)]
+    size_min: f64,
+    #[arg(long)]
+    size_max: f64,
+    #[arg(long)]
+    opacity: Option<f64>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -138,27 +185,27 @@ struct RenderArgs {
     output: PathBuf,
     /// Authoritative ordered halftone channel topology for a direct source.
     #[arg(long, value_enum)]
-    channel_model: CliChannelModel,
+    channel_model: Option<CliChannelModel>,
     #[arg(long)]
-    canvas: String,
+    canvas: Option<String>,
     #[arg(long)]
-    density_x: f64,
+    density_x: Option<f64>,
     #[arg(long)]
-    density_y: f64,
+    density_y: Option<f64>,
     #[arg(long, allow_hyphen_values = true)]
-    rotation: f64,
+    rotation: Option<f64>,
     #[arg(long, allow_hyphen_values = true)]
-    offset_x: f64,
+    offset_x: Option<f64>,
     #[arg(long, allow_hyphen_values = true)]
-    offset_y: f64,
+    offset_y: Option<f64>,
     #[arg(long)]
-    guard_steps: u32,
+    guard_steps: Option<u32>,
     #[arg(long, default_value_t = 1_048_576)]
     max_family_candidates: usize,
     #[arg(long)]
-    size_min: f64,
+    size_min: Option<f64>,
     #[arg(long)]
-    size_max: f64,
+    size_max: Option<f64>,
     /// Override opacity for every canonical channel in the selected topology.
     #[arg(long)]
     opacity: Option<f64>,
@@ -286,60 +333,115 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<(), CliError> {
     match cli.command {
-        Some(Command::Validate(arguments)) => validate(arguments).map_err(CliError::from),
+        Some(Command::Validate(arguments)) => validate(arguments),
         Some(Command::Inspect(arguments)) => inspect(arguments),
         Some(Command::Render(arguments)) => render(arguments),
+        Some(Command::Document(arguments)) => document_command(arguments),
         None => Ok(()),
     }
 }
 
-fn render(arguments: RenderArgs) -> Result<(), CliError> {
-    let format = output_format(&arguments.output)?;
-    if matches!(format, OutputFormat::Svg)
-        && !matches!(arguments.background, CliBackground::Transparent)
+fn document_command(arguments: DocumentArgs) -> Result<(), CliError> {
+    match arguments.command {
+        DocumentCommandArgs::Create(arguments) => document_create(arguments),
+    }
+}
+
+fn document_create(arguments: DocumentCreateArgs) -> Result<(), CliError> {
+    if arguments
+        .output
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+        != Some("toniator")
     {
         return Err(CliError::new(
-            "render.background",
-            "SVG output supports only a transparent background",
+            "document.output",
+            "document output extension must be .toniator",
         ));
     }
-    if let Some(opacity) = arguments.opacity
-        && (!opacity.is_finite() || !(0.0..=1.0).contains(&opacity))
-    {
-        return Err(CliError::new(
-            "presentation.opacity",
-            "opacity must be within 0.0..=1.0",
-        ));
-    }
-    let source_format = source_hint(&arguments.input)?;
-    let source_bytes = std::fs::read(&arguments.input)
+    let format = source_hint(&arguments.input)?;
+    let bytes = std::fs::read(&arguments.input)
         .map_err(|_| CliError::new("source", "could not read source file"))?;
-    let source_reference = SourceReferenceId::new("cli-input-1")?;
-    let template_channel_id = ChannelId(1);
-    let document = Document::with_source(
-        DocumentId(1),
+    let source_id = SourceReferenceId::new("source-1")?;
+    let document = build_document(
+        source_id.clone(),
         parse_canvas(&arguments.canvas)?,
-        SourceReference::Assigned(source_reference.clone()),
+        arguments.channel_model.into(),
+        arguments.density_x,
+        arguments.density_y,
+        arguments.rotation,
+        arguments.offset_x,
+        arguments.offset_y,
+        arguments.guard_steps,
+        arguments.size_min,
+        arguments.size_max,
+        arguments.opacity,
+    )?;
+    let embedded = EmbeddedSource::new(
+        source_id,
+        match format {
+            SourceFormatHint::Png => EmbeddedSourceFormat::Png,
+            SourceFormatHint::Svg => EmbeddedSourceFormat::Svg,
+            SourceFormatHint::Unsupported => unreachable!(),
+        },
+        bytes,
+        arguments
+            .input
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned),
+    )
+    .map_err(|error| CliError::new(error.path(), error.context()))?;
+    save_document(
+        &arguments.output,
+        &document,
+        &SourceBundle::new([embedded])
+            .map_err(|error| CliError::new(error.path(), error.context()))?,
+    )
+    .map_err(|error| CliError::new(error.path(), error.context()))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_document(
+    source_reference: SourceReferenceId,
+    canvas: CanvasSpec,
+    model: HalftoneChannelModel,
+    density_x: f64,
+    density_y: f64,
+    rotation: f64,
+    offset_x: f64,
+    offset_y: f64,
+    guard_steps: u32,
+    size_min: f64,
+    size_max: f64,
+    opacity: Option<f64>,
+) -> Result<Document, CliError> {
+    let legacy = Document::with_source(
+        DocumentId(1),
+        canvas,
+        SourceReference::Assigned(source_reference),
         vec![PatternDefinition {
             id: PatternDefinitionId(1),
             name: "straight-grid".to_owned(),
             structure: PatternStructure::StraightGrid,
             output: PatternOutput::CircularMarks,
-            guard_steps: arguments.guard_steps,
+            guard_steps,
             maximum_support_radius: 4.5,
         }],
         vec![ChannelState {
-            id: template_channel_id,
+            id: ChannelId(1),
             pattern_definition_id: PatternDefinitionId(1),
             layout: ChannelPatternLayout {
                 density: DensityMetric2D {
-                    across_x: arguments.density_x,
-                    across_y: arguments.density_y,
+                    across_x: density_x,
+                    across_y: density_y,
                     aspect_locked: true,
                 },
-                rotation_degrees: arguments.rotation,
-                translation_x: arguments.offset_x,
-                translation_y: arguments.offset_y,
+                rotation_degrees: rotation,
+                translation_x: offset_x,
+                translation_y: offset_y,
             },
             appearance: ChannelAppearance {
                 visible: true,
@@ -352,8 +454,8 @@ fn render(arguments: RenderArgs) -> Result<(), CliError> {
                 opacity: 1.0,
             },
             mark_geometry_response: MarkGeometryResponse {
-                minimum_size: arguments.size_min,
-                maximum_size: arguments.size_max,
+                minimum_size: size_min,
+                maximum_size: size_max,
             },
             source_mapping: ChannelSourceMapping {
                 component: SourceComponent::Luminance,
@@ -361,35 +463,34 @@ fn render(arguments: RenderArgs) -> Result<(), CliError> {
             },
         }],
     )?;
-    let mut session = DocumentSession::new(document)?;
-    let model: HalftoneChannelModel = arguments.channel_model.into();
-    let topology = session.document().canonical_channel_topology(
+    let topology = legacy.canonical_channel_topology(
         model,
         ChannelTopologyTemplate {
             pattern_definition_id: PatternDefinitionId(1),
             layout: ChannelPatternLayout {
                 density: DensityMetric2D {
-                    across_x: arguments.density_x,
-                    across_y: arguments.density_y,
+                    across_x: density_x,
+                    across_y: density_y,
                     aspect_locked: true,
                 },
-                rotation_degrees: arguments.rotation,
-                translation_x: arguments.offset_x,
-                translation_y: arguments.offset_y,
+                rotation_degrees: rotation,
+                translation_x: offset_x,
+                translation_y: offset_y,
             },
             mark_geometry_response: MarkGeometryResponse {
-                minimum_size: arguments.size_min,
-                maximum_size: arguments.size_max,
+                minimum_size: size_min,
+                maximum_size: size_max,
             },
         },
     )?;
+    let mut session = DocumentSession::new(legacy)?;
     let channel_ids = topology
         .channels()
         .iter()
         .map(|channel| channel.id)
         .collect::<Vec<_>>();
     session.apply(&DocumentCommand::ReplaceChannelTopology { model, topology })?;
-    if let Some(opacity) = arguments.opacity {
+    if let Some(opacity) = opacity {
         for channel_id in channel_ids {
             session.apply(&DocumentCommand::SetOpacity {
                 channel_id,
@@ -397,6 +498,137 @@ fn render(arguments: RenderArgs) -> Result<(), CliError> {
             })?;
         }
     }
+    Ok(session.snapshot())
+}
+
+fn render(arguments: RenderArgs) -> Result<(), CliError> {
+    let format = output_format(&arguments.output)?;
+    if matches!(format, OutputFormat::Svg)
+        && !matches!(arguments.background, CliBackground::Transparent)
+    {
+        return Err(CliError::new(
+            "render.background",
+            "SVG output supports only a transparent background",
+        ));
+    }
+    if is_toniator_path(&arguments.input) {
+        if arguments.channel_model.is_some()
+            || arguments.canvas.is_some()
+            || arguments.density_x.is_some()
+            || arguments.density_y.is_some()
+            || arguments.rotation.is_some()
+            || arguments.offset_x.is_some()
+            || arguments.offset_y.is_some()
+            || arguments.guard_steps.is_some()
+            || arguments.size_min.is_some()
+            || arguments.size_max.is_some()
+            || arguments.opacity.is_some()
+        {
+            return Err(CliError::new(
+                "render.arguments",
+                "container rendering does not accept document override flags",
+            ));
+        }
+        let loaded = load_document(&arguments.input)
+            .map_err(|error| CliError::new(error.path(), error.context()))?;
+        let source_id = match loaded.document().source() {
+            SourceReference::Assigned(id) => id,
+            SourceReference::Unassigned => {
+                return Err(CliError::new(
+                    "source.document",
+                    "container document has no assigned source",
+                ));
+            }
+        };
+        let source = loaded.sources().get(source_id).ok_or_else(|| {
+            CliError::new(
+                "source.document",
+                "container source bundle does not match document",
+            )
+        })?;
+        let hint = match source.format() {
+            EmbeddedSourceFormat::Png => SourceFormatHint::Png,
+            EmbeddedSourceFormat::Svg => SourceFormatHint::Svg,
+        };
+        let session = DocumentSession::new(loaded.document().clone())?;
+        let result = evaluate_with_limits(
+            toniator_engine::EvaluationRequest::new(
+                session.document_evaluation_snapshot(),
+                ResolvedSource::new(source_id.clone(), source.bytes().to_vec(), hint)?,
+            ),
+            EvaluationLimits::new(arguments.max_family_candidates)?,
+        )?;
+        return write_render_result(&arguments.output, format, arguments.background, &result);
+    }
+    let source_format = source_hint(&arguments.input)?;
+    let source_bytes = std::fs::read(&arguments.input)
+        .map_err(|_| CliError::new("source", "could not read source file"))?;
+    let source_reference = SourceReferenceId::new("cli-input-1")?;
+    let document = build_document(
+        source_reference.clone(),
+        parse_canvas(arguments.canvas.as_deref().ok_or_else(|| {
+            CliError::new("canvas", "--canvas is required for direct-source rendering")
+        })?)?,
+        arguments
+            .channel_model
+            .ok_or_else(|| {
+                CliError::new(
+                    "channel_model",
+                    "--channel-model is required for direct-source rendering",
+                )
+            })?
+            .into(),
+        arguments.density_x.ok_or_else(|| {
+            CliError::new(
+                "density_x",
+                "--density-x is required for direct-source rendering",
+            )
+        })?,
+        arguments.density_y.ok_or_else(|| {
+            CliError::new(
+                "density_y",
+                "--density-y is required for direct-source rendering",
+            )
+        })?,
+        arguments.rotation.ok_or_else(|| {
+            CliError::new(
+                "rotation",
+                "--rotation is required for direct-source rendering",
+            )
+        })?,
+        arguments.offset_x.ok_or_else(|| {
+            CliError::new(
+                "offset_x",
+                "--offset-x is required for direct-source rendering",
+            )
+        })?,
+        arguments.offset_y.ok_or_else(|| {
+            CliError::new(
+                "offset_y",
+                "--offset-y is required for direct-source rendering",
+            )
+        })?,
+        arguments.guard_steps.ok_or_else(|| {
+            CliError::new(
+                "guard_steps",
+                "--guard-steps is required for direct-source rendering",
+            )
+        })?,
+        arguments.size_min.ok_or_else(|| {
+            CliError::new(
+                "size_min",
+                "--size-min is required for direct-source rendering",
+            )
+        })?,
+        arguments.size_max.ok_or_else(|| {
+            CliError::new(
+                "size_max",
+                "--size-max is required for direct-source rendering",
+            )
+        })?,
+        arguments.opacity,
+    )?;
+    let session = DocumentSession::new(document)?;
     let result = evaluate_with_limits(
         toniator_engine::EvaluationRequest::new(
             session.document_evaluation_snapshot(),
@@ -404,24 +636,41 @@ fn render(arguments: RenderArgs) -> Result<(), CliError> {
         ),
         EvaluationLimits::new(arguments.max_family_candidates)?,
     )?;
+    write_render_result(&arguments.output, format, arguments.background, &result)
+}
+
+fn write_render_result(
+    output: &PathBuf,
+    format: OutputFormat,
+    background: CliBackground,
+    result: &toniator_engine::EvaluationResult,
+) -> Result<(), CliError> {
     match format {
         OutputFormat::Png => {
-            let background = arguments.background.into();
+            let background = background.into();
             let raster = if matches!(background, RasterBackground::Transparent) {
                 result.raster().clone()
             } else {
                 toniator_engine::rasterize(result.scene(), background).map_err(render_error)?
             };
             let png = encode_png(&raster).map_err(render_error)?;
-            std::fs::write(&arguments.output, png)
+            std::fs::write(output, png)
                 .map_err(|_| CliError::new("output", "could not write PNG output"))?;
         }
         OutputFormat::Svg => {
-            std::fs::write(&arguments.output, write_svg(result.scene()))
+            std::fs::write(output, write_svg(result.scene()))
                 .map_err(|_| CliError::new("output", "could not write SVG output"))?;
         }
     }
     Ok(())
+}
+
+fn is_toniator_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+        == Some("toniator")
 }
 
 fn inspect(arguments: InspectArgs) -> Result<(), CliError> {
@@ -651,8 +900,44 @@ fn inspect_grid(arguments: GridArgs) -> Result<(), CliError> {
     Ok(())
 }
 
-fn validate(arguments: ValidateArgs) -> Result<(), ValidationError> {
-    let canvas = parse_canvas(&arguments.canvas)?;
+fn validate(arguments: ValidateArgs) -> Result<(), CliError> {
+    if let Some(input) = arguments.input {
+        if arguments.canvas.is_some()
+            || arguments.density_x.is_some()
+            || arguments.density_y.is_some()
+            || arguments.opacity.is_some()
+        {
+            return Err(CliError::new(
+                "validate.arguments",
+                "--input cannot be combined with document construction arguments",
+            ));
+        }
+        let loaded =
+            load_document(&input).map_err(|error| CliError::new(error.path(), error.context()))?;
+        let session = DocumentSession::new(loaded.document().clone())?;
+        println!(
+            "valid document (revision {}, container v{}, document v{}, migrations: empty)",
+            session.revision().0,
+            loaded.versions().container(),
+            loaded.versions().document()
+        );
+        return Ok(());
+    }
+    let canvas = parse_canvas(
+        arguments
+            .canvas
+            .as_deref()
+            .ok_or_else(|| CliError::new("canvas", "--canvas is required without --input"))?,
+    )?;
+    let density_x = arguments
+        .density_x
+        .ok_or_else(|| CliError::new("density_x", "--density-x is required without --input"))?;
+    let density_y = arguments
+        .density_y
+        .ok_or_else(|| CliError::new("density_y", "--density-y is required without --input"))?;
+    let opacity = arguments
+        .opacity
+        .ok_or_else(|| CliError::new("opacity", "--opacity is required without --input"))?;
     let document = Document::new(
         DocumentId(1),
         canvas,
@@ -669,8 +954,8 @@ fn validate(arguments: ValidateArgs) -> Result<(), ValidationError> {
             pattern_definition_id: PatternDefinitionId(1),
             layout: ChannelPatternLayout {
                 density: DensityMetric2D {
-                    across_x: arguments.density_x,
-                    across_y: arguments.density_y,
+                    across_x: density_x,
+                    across_y: density_y,
                     aspect_locked: true,
                 },
                 rotation_degrees: 0.0,
@@ -685,7 +970,7 @@ fn validate(arguments: ValidateArgs) -> Result<(), ValidationError> {
                     blue: 0.0,
                     alpha: 1.0,
                 },
-                opacity: arguments.opacity,
+                opacity,
             },
             mark_geometry_response: MarkGeometryResponse {
                 minimum_size: 2.0,
@@ -718,21 +1003,24 @@ fn parse_canvas(value: &str) -> Result<CanvasSpec, ValidationError> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CliError {
-    path: &'static str,
-    message: &'static str,
+    path: String,
+    message: String,
 }
 
 impl CliError {
-    const fn new(path: &'static str, message: &'static str) -> Self {
-        Self { path, message }
+    fn new(path: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            message: message.into(),
+        }
     }
 
-    const fn path(&self) -> &'static str {
-        self.path
+    fn path(&self) -> &str {
+        &self.path
     }
 
-    const fn message(&self) -> &'static str {
-        self.message
+    fn message(&self) -> &str {
+        &self.message
     }
 }
 

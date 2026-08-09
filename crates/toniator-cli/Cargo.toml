@@ -15,3 +15,4 @@ serde_json.workspace = true
 serde.workspace = true
 toniator-domain = { path = "../toniator-domain" }
 toniator-engine = { path = "../toniator-engine" }
+toniator-io = { path = "../toniator-io" }

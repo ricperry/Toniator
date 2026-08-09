@@ -1188,7 +1188,7 @@ implementation automatically.
 
 ## Stage 12 — Portable `.toniator` container
 
-**Status: Planned.** Save the complete supported document and its exact source
+**Status: Accepted awaiting checkpoint.** Save the complete supported document and its exact source
 artwork in one portable file, establish immutable version-1 interpretation and
 the migration dispatch boundary, then load and render through the shared
 engine.

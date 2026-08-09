@@ -1,8 +1,21 @@
 use std::process::Command;
 use std::{
     fs,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
+use toniator_domain::{
+    CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternLayout, ChannelSourceMapping,
+    ChannelState, ChannelTopologyTemplate, ColorValue, DensityMetric2D, Document, DocumentId,
+    DocumentSession, HalftoneChannelModel, MarkGeometryResponse, PatternDefinition,
+    PatternDefinitionId, PatternOutput, PatternStructure, SourceComponent, SourcePlacement,
+    SourceReference, SourceReferenceId,
+};
+use toniator_engine::{
+    EvaluationLimits, EvaluationRequest, ResolvedSource, SourceFormatHint, evaluate_with_limits,
+    write_svg,
+};
+use toniator_io::{EmbeddedSource, EmbeddedSourceFormat, SourceBundle, load, save};
 
 #[test]
 fn valid_document_exits_zero_and_reports_success() {
@@ -403,6 +416,155 @@ fn temporary_directory(label: &str) -> std::path::PathBuf {
     directory
 }
 
+fn baseline_path(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets")
+        .join(name)
+}
+
+fn parity_document(
+    bytes: Vec<u8>,
+    format: EmbeddedSourceFormat,
+    width: f64,
+    height: f64,
+    model: HalftoneChannelModel,
+) -> (Document, SourceBundle) {
+    let source_id = SourceReferenceId::new("source-1").unwrap();
+    let layout = ChannelPatternLayout {
+        density: DensityMetric2D {
+            across_x: width / 10.0,
+            across_y: height / 10.0,
+            aspect_locked: true,
+        },
+        rotation_degrees: 0.0,
+        translation_x: 0.0,
+        translation_y: 0.0,
+    };
+    let legacy = Document::with_source(
+        DocumentId(1),
+        CanvasSpec { width, height },
+        SourceReference::Assigned(source_id.clone()),
+        vec![PatternDefinition {
+            id: PatternDefinitionId(1),
+            name: "straight-grid".into(),
+            structure: PatternStructure::StraightGrid,
+            output: PatternOutput::CircularMarks,
+            guard_steps: 2,
+            maximum_support_radius: 4.5,
+        }],
+        vec![ChannelState {
+            id: ChannelId(1),
+            pattern_definition_id: PatternDefinitionId(1),
+            layout: layout.clone(),
+            appearance: ChannelAppearance {
+                visible: true,
+                color: ColorValue {
+                    red: 0.0,
+                    green: 0.0,
+                    blue: 0.0,
+                    alpha: 1.0,
+                },
+                opacity: 1.0,
+            },
+            mark_geometry_response: MarkGeometryResponse {
+                minimum_size: 2.0,
+                maximum_size: 9.0,
+            },
+            source_mapping: ChannelSourceMapping {
+                component: SourceComponent::Luminance,
+                placement: SourcePlacement::StretchToCanvas,
+            },
+        }],
+    )
+    .unwrap();
+    let topology = legacy
+        .canonical_channel_topology(
+            model,
+            ChannelTopologyTemplate {
+                pattern_definition_id: PatternDefinitionId(1),
+                layout,
+                mark_geometry_response: MarkGeometryResponse {
+                    minimum_size: 2.0,
+                    maximum_size: 9.0,
+                },
+            },
+        )
+        .unwrap();
+    let document = Document::with_source_and_topology(
+        legacy.id(),
+        legacy.canvas().clone(),
+        legacy.source().clone(),
+        legacy.pattern_definitions().to_vec(),
+        model,
+        topology,
+    )
+    .unwrap();
+    let bundle =
+        SourceBundle::new([EmbeddedSource::new(source_id, format, bytes, None).unwrap()]).unwrap();
+    (document, bundle)
+}
+
+fn evaluate_parity(
+    document: &Document,
+    source: &EmbeddedSource,
+) -> toniator_engine::EvaluationResult {
+    let session = DocumentSession::new(document.clone()).unwrap();
+    let format = match source.format() {
+        EmbeddedSourceFormat::Png => SourceFormatHint::Png,
+        EmbeddedSourceFormat::Svg => SourceFormatHint::Svg,
+    };
+    evaluate_with_limits(
+        EvaluationRequest::new(
+            session.document_evaluation_snapshot(),
+            ResolvedSource::new(source.id().clone(), source.bytes().to_vec(), format).unwrap(),
+        ),
+        EvaluationLimits::default(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn direct_and_container_evaluation_are_identical_for_both_baselines_and_all_models() {
+    for (baseline, format, width, height) in [
+        (
+            "raster-sample.png",
+            EmbeddedSourceFormat::Png,
+            1024.0,
+            1024.0,
+        ),
+        ("vector-sample.svg", EmbeddedSourceFormat::Svg, 900.0, 620.0),
+    ] {
+        for model in [
+            HalftoneChannelModel::Rgb,
+            HalftoneChannelModel::Cmyk,
+            HalftoneChannelModel::SourceColorAlpha,
+        ] {
+            let (document, sources) = parity_document(
+                fs::read(baseline_path(baseline)).unwrap(),
+                format,
+                width,
+                height,
+                model,
+            );
+            let direct = evaluate_parity(&document, sources.entries().next().unwrap());
+            let directory = temporary_directory("stage-12-parity");
+            let path = directory.join("document.toniator");
+            save(&path, &document, &sources).unwrap();
+            let loaded = load(&path).unwrap();
+            let container = evaluate_parity(
+                loaded.document(),
+                loaded.sources().entries().next().unwrap(),
+            );
+            assert_eq!(container.source_identity(), direct.source_identity());
+            assert_eq!(container.channels(), direct.channels());
+            assert_eq!(container.scene().identity(), direct.scene().identity());
+            assert_eq!(container.raster().pixels(), direct.raster().pixels());
+            assert_eq!(write_svg(container.scene()), write_svg(direct.scene()));
+            fs::remove_dir_all(directory).unwrap();
+        }
+    }
+}
+
 #[test]
 fn render_uses_authoritative_document_models_for_both_immutable_sources() {
     let directory = temporary_directory("stage-9e-models");
@@ -555,5 +717,184 @@ fn render_requires_channel_model_and_rejects_obsolete_render_options() {
             .contains("output extension must be .png or .svg")
     );
 
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn portable_document_create_validate_render_and_argument_matrix() {
+    let directory = temporary_directory("stage-12-document-cli");
+    let source = directory.join("temporary-source.png");
+    fs::copy("../../assets/raster-sample.png", &source).unwrap();
+    let document = directory.join("created.toniator");
+    let create = Command::new(env!("CARGO_BIN_EXE_toniator"))
+        .args([
+            "document",
+            "create",
+            "-i",
+            source.to_str().unwrap(),
+            "-o",
+            document.to_str().unwrap(),
+            "--channel-model",
+            "rgb",
+            "--canvas",
+            "1024x1024",
+            "--density-x",
+            "102.4",
+            "--density-y",
+            "102.4",
+            "--rotation",
+            "0",
+            "--offset-x",
+            "0",
+            "--offset-y",
+            "0",
+            "--guard-steps",
+            "2",
+            "--size-min",
+            "2",
+            "--size-max",
+            "9",
+            "--opacity",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        create.status.success(),
+        "{}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+    assert!(document.exists());
+    assert_eq!(
+        fs::read_dir(&directory).unwrap().count(),
+        2,
+        "create must not render as a side effect"
+    );
+    let validated = Command::new(env!("CARGO_BIN_EXE_toniator"))
+        .args(["validate", "-i", document.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(validated.status.success());
+    assert!(
+        String::from_utf8_lossy(&validated.stdout)
+            .contains("container v1, document v1, migrations: empty")
+    );
+    let mutual = Command::new(env!("CARGO_BIN_EXE_toniator"))
+        .args([
+            "validate",
+            "-i",
+            document.to_str().unwrap(),
+            "--canvas",
+            "1x1",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(mutual.status.code(), Some(2));
+    assert_eq!(String::from_utf8_lossy(&mutual.stdout), "");
+    let moved = directory.join("moved.toniator");
+    fs::rename(&document, &moved).unwrap();
+    fs::remove_file(&source).unwrap();
+    let rendered = directory.join("rendered.png");
+    let render = Command::new(env!("CARGO_BIN_EXE_toniator"))
+        .args([
+            "render",
+            "-i",
+            moved.to_str().unwrap(),
+            "-o",
+            rendered.to_str().unwrap(),
+            "--background",
+            "black",
+            "--max-family-candidates",
+            "1048576",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        render.status.success(),
+        "{}",
+        String::from_utf8_lossy(&render.stderr)
+    );
+    assert!(rendered.exists());
+    let override_failure = Command::new(env!("CARGO_BIN_EXE_toniator"))
+        .args([
+            "render",
+            "-i",
+            moved.to_str().unwrap(),
+            "-o",
+            rendered.to_str().unwrap(),
+            "--canvas",
+            "1x1",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(override_failure.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&override_failure.stderr)
+            .contains("container rendering does not accept document override flags")
+    );
+    let bad_create_input = Command::new(env!("CARGO_BIN_EXE_toniator"))
+        .args([
+            "document",
+            "create",
+            "-i",
+            "../../assets/README.md",
+            "-o",
+            directory.join("bad.toniator").to_str().unwrap(),
+            "--channel-model",
+            "rgb",
+            "--canvas",
+            "1x1",
+            "--density-x",
+            "1",
+            "--density-y",
+            "1",
+            "--rotation",
+            "0",
+            "--offset-x",
+            "0",
+            "--offset-y",
+            "0",
+            "--guard-steps",
+            "2",
+            "--size-min",
+            "0",
+            "--size-max",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(bad_create_input.status.code(), Some(2));
+    let bad_create_output = Command::new(env!("CARGO_BIN_EXE_toniator"))
+        .args([
+            "document",
+            "create",
+            "-i",
+            "../../assets/raster-sample.png",
+            "-o",
+            directory.join("bad.txt").to_str().unwrap(),
+            "--channel-model",
+            "rgb",
+            "--canvas",
+            "1x1",
+            "--density-x",
+            "1",
+            "--density-y",
+            "1",
+            "--rotation",
+            "0",
+            "--offset-x",
+            "0",
+            "--offset-y",
+            "0",
+            "--guard-steps",
+            "2",
+            "--size-min",
+            "0",
+            "--size-max",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(bad_create_output.status.code(), Some(2));
     fs::remove_dir_all(directory).unwrap();
 }

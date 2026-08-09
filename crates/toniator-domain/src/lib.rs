@@ -498,6 +498,29 @@ impl Document {
         Ok(document)
     }
 
+    /// Constructs a complete modeled document from an explicit, already
+    /// ordered topology. This is intentionally the narrow construction seam
+    /// used by persistence to rebuild a validated authoritative document; it
+    /// does not expose the private channel-configuration representation.
+    pub fn with_source_and_topology(
+        id: DocumentId,
+        canvas: CanvasSpec,
+        source: SourceReference,
+        pattern_definitions: Vec<PatternDefinition>,
+        model: HalftoneChannelModel,
+        topology: ChannelTopology,
+    ) -> Result<Self, ValidationError> {
+        let document = Self {
+            id,
+            canvas,
+            source,
+            pattern_definitions,
+            channel_configuration: ChannelConfiguration::Topology { model, topology },
+        };
+        document.validate()?;
+        Ok(document)
+    }
+
     pub fn id(&self) -> DocumentId {
         self.id
     }
