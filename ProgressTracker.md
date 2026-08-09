@@ -177,7 +177,7 @@ archives; the reader also tolerates Deflated required files and one exact empty
 `sources/` directory marker from benign manual repacks. History, dirty state,
 and filesystem source paths are not serialized.
 
-**Stage 13A — Accepted awaiting checkpoint.** Add GTK New/Open/Save/Save As/Close, exact content-based
+**Stage 13A — Complete at commit `36c7b44`.** Add GTK New/Open/Save/Save As/Close, exact content-based
 dirty/savepoint tracking, history state, direct-source/container opening, title
 identity, and atomic error handling. GTK delegates default document creation
 and remains completely ignorant of pattern internals.

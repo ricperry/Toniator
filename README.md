@@ -34,17 +34,37 @@ history persistence remain planned.
 Stage 12 portable `.toniator` persistence is complete at checkpoint `dd7ca56`.
 The headless `toniator-io` boundary writes and loads deterministic version-1
 ZIP containers containing the complete supported document and the exact
-embedded PNG/SVG source bytes. The CLI supports `document create`, container
+embedded PNG/SVG source bytes. Canonical v1 saves contain exactly
+`document.json` and one embedded source entry in normalized, uncompressed
+Stored form; the reader also tolerates Deflated required files and one exact
+empty `sources/` directory marker from a benign manual repack. Other topology
+or compression remains invalid. The CLI supports `document create`, container
 `validate -i`, and container `render -i`; direct-source behavior remains
 available. Loading reconstructs a fresh document/history at revision zero,
 and history, dirty state, and filesystem source paths are not serialized.
-The GTK app remains view-only and its Open action accepts direct PNG/SVG
-sources; GTK container New/Open/Save/Save As lifecycle remains planned for
-Stage 13A.
 
-The headless Stage 9E direct-source CLI still requires an explicit
-`--canvas`; source-native direct-still sizing and PNG antialiasing controls
-remain planned.
+Stage 13A GTK document lifecycle is complete at checkpoint `36c7b44`.
+`toniator-app [PATH]` accepts zero or one local PNG, SVG, or `.toniator` path at
+startup. New creates an untitled, unsourced document; Open accepts direct
+PNG/SVG artwork or a `.toniator` container; Save and Save As write `.toniator`
+documents (direct artwork uses Save As); and Close plus window close share a
+Cancel/Discard/Save confirmation when work is unsaved. The app-owned workspace
+keeps the headless history and immutable source bundle, while dirty state
+compares the exact current document plus source-bundle content and identity
+with the accepted savepoint rather than revision numbers, so undoing to saved
+content and semantic no-ops are clean. Atomic save failures preserve the
+current content, history, location, title, and dirty state; successful saves update the
+location, title, and savepoint only after IO succeeds. Load/save errors and
+generic migration information are reported in-window. GTK delegates default
+document construction to the headless factory and remains ignorant of pattern
+internals; channel/pattern controls and GTK undo controls remain out of scope.
+
+Stage 13B remains planned: direct-source CLI rendering will gain intrinsic PNG/
+SVG sizing by default while retaining explicit `--canvas`, PNG antialiasing
+control, and GTK Export for native PNG/SVG outputs. Export remains separate
+from `.toniator` Save and must not mutate document or preview-canvas authority.
+Stage 14 remains planned for the typed pattern-definition authority and v1-to-v2
+migration; it does not change the accepted meaning of v1 files.
 
 ## Build and run
 

@@ -1315,7 +1315,7 @@ lifecycle or the v1-to-v2 migration automatically.
 
 ## Stage 13A — GTK document lifecycle
 
-**Status: Accepted awaiting checkpoint.** Add document lifecycle around Stage 11 history and Stage
+**Status: Complete at commit `36c7b44`.** Add document lifecycle around Stage 11 history and Stage
 12 persistence while remaining completely ignorant of pattern internals.
 
 - Add New, Open, Save, Save As, and Close plus close-with-unsaved-work
