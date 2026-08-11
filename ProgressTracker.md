@@ -254,7 +254,7 @@ SVG resolution with high-density raw/native artifacts and save/reopen parity.
 Automated/native evidence and bounded app liveness are recorded without claiming
 separate manual visual, interactive, or accessibility acceptance.
 
-**Stage 17 — Planned.** Complete typed headless pattern/channel commands and
+**Stage 17 — Implemented awaiting review.** Complete typed headless pattern/channel commands and
 schema-derived property/capability descriptors, exact invalidation, stable-ID
 allocation, copy/shared semantics, undo/redo, and rendered restoration before
 any GTK inspector controls.

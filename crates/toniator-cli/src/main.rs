@@ -41,6 +41,18 @@ enum Command {
     Render(RenderArgs),
     /// Create one portable source-backed `.toniator` document.
     Document(DocumentArgs),
+    /// Verify and summarize the schema-derived headless capability surface.
+    Capabilities(CapabilitiesArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct CapabilitiesArgs {
+    /// Existing authoritative `.toniator` document to describe.
+    #[arg(short = 'i', long)]
+    input: Option<PathBuf>,
+    /// Canvas dimensions used to construct the immutable diagnostic document.
+    #[arg(long, default_value = "900x600")]
+    canvas: String,
 }
 
 #[derive(Debug, clap::Args)]
@@ -356,8 +368,43 @@ fn run(cli: Cli) -> Result<(), CliError> {
         Some(Command::Inspect(arguments)) => inspect(arguments),
         Some(Command::Render(arguments)) => render(arguments),
         Some(Command::Document(arguments)) => document_command(arguments),
+        Some(Command::Capabilities(arguments)) => capabilities(arguments),
         None => Ok(()),
     }
+}
+
+fn capabilities(arguments: CapabilitiesArgs) -> Result<(), CliError> {
+    let document = match arguments.input {
+        Some(path) => load_document(&path)
+            .map_err(|error| CliError::new("capabilities.input", error.to_string()))?
+            .document()
+            .clone(),
+        None => Document::new_default_document(
+            parse_canvas(&arguments.canvas)?,
+            SourceReference::Unassigned,
+        )?,
+    };
+    document.validate_property_descriptors()?;
+    let descriptors = document.property_descriptors();
+    println!("capabilities-v1\tcount={}", descriptors.len());
+    for descriptor in descriptors {
+        println!(
+            "field={:?}\ttarget={:?}\tcommand={:?}\tkind={:?}\tchoices={:?}\tbounds={:?}\treference={:?}\tunit={:?}\tdependency={:?}\tsupport={:?}\tinvalidation={:?}\tcopy_escalates={}",
+            descriptor.field,
+            descriptor.target,
+            descriptor.command_kind(),
+            descriptor.value_kind,
+            descriptor.choices,
+            descriptor.bounds,
+            descriptor.reference_constraint,
+            descriptor.unit,
+            descriptor.dependency,
+            descriptor.structural_support,
+            descriptor.invalidation,
+            descriptor.copy_on_edit_escalates_to_family,
+        );
+    }
+    Ok(())
 }
 
 fn document_command(arguments: DocumentArgs) -> Result<(), CliError> {
@@ -512,7 +559,7 @@ fn build_document(
         .map(|channel| channel.id)
         .collect::<Vec<_>>();
     session.apply(&DocumentCommand::ReplaceChannelTopology { model, topology })?;
-    if let Some(opacity) = opacity {
+    if let Some(opacity) = opacity.filter(|value| *value != 1.0) {
         for channel_id in channel_ids {
             session.apply(&DocumentCommand::SetOpacity {
                 channel_id,

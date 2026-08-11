@@ -1575,8 +1575,8 @@ editor commands remain planned.
 
 ## Stage 17 — Headless pattern/channel editing and capabilities
 
-**Status: Planned.** Complete the authoritative command and introspection
-surface before creating GTK controls.
+**Status: Implemented awaiting review.** Complete the authoritative command and
+introspection surface before creating GTK controls.
 
 - Add typed commands for every supported channel property and structural edit,
   including density-axis/aspect behavior, transform/phase, geometry response,

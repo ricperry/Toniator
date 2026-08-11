@@ -68,13 +68,10 @@ fn successful_commands_mutate_once_and_advance_revision_once() {
     let mut session = session();
     let commands = [
         (
-            DocumentCommand::SetDensity {
+            DocumentCommand::SetDensityAxis {
                 channel_id: CHANNEL_ID,
-                density: DensityMetric2D {
-                    across_x: 70.0,
-                    across_y: 40.0,
-                    aspect_locked: false,
-                },
+                edited_axis: toniator_domain::DensityEditedAxis::AcrossX,
+                value: 70.0,
             },
             InvalidationLevel::Family,
         ),
@@ -86,32 +83,25 @@ fn successful_commands_mutate_once_and_advance_revision_once() {
             InvalidationLevel::Family,
         ),
         (
-            DocumentCommand::SetTranslation {
+            DocumentCommand::SetTranslationAxis {
                 channel_id: CHANNEL_ID,
-                translation_x: 2.0,
-                translation_y: -4.0,
+                edited_axis: toniator_domain::TranslationEditedAxis::X,
+                value: 2.0,
             },
             InvalidationLevel::Family,
         ),
         (
-            DocumentCommand::SetMarkGeometryResponse {
+            DocumentCommand::SetMarkGeometryField {
                 channel_id: CHANNEL_ID,
-                response: MarkGeometryResponse {
-                    minimum_size: 2.0,
-                    maximum_size: 8.5,
-                },
+                edit: toniator_domain::MarkGeometryFieldEdit::MaximumSize(8.5),
             },
             InvalidationLevel::Realization,
         ),
         (
-            DocumentCommand::SetColor {
+            DocumentCommand::SetColorComponent {
                 channel_id: CHANNEL_ID,
-                color: ColorValue {
-                    red: 0.2,
-                    green: 0.4,
-                    blue: 0.6,
-                    alpha: 0.8,
-                },
+                component: toniator_domain::ColorComponent::Blue,
+                value: 0.6,
             },
             InvalidationLevel::Presentation,
         ),
@@ -144,7 +134,8 @@ fn successful_commands_mutate_once_and_advance_revision_once() {
         .expect("channel exists");
     assert_eq!(channel.layout.density.across_x, 70.0);
     assert_eq!(channel.layout.rotation_degrees, 20.0);
-    assert_eq!(channel.layout.translation_y, -4.0);
+    assert_eq!(channel.layout.translation_x, 2.0);
+    assert_eq!(channel.layout.translation_y, 0.0);
     assert_eq!(channel.mark_geometry_response.maximum_size, 8.5);
     assert_eq!(channel.appearance.color.blue, 0.6);
     assert_eq!(channel.appearance.opacity, 0.4);
@@ -158,38 +149,28 @@ fn failed_commands_preserve_exact_document_and_revision() {
     let original_revision = session.revision();
 
     for command in [
-        DocumentCommand::SetDensity {
+        DocumentCommand::SetDensityAxis {
             channel_id: CHANNEL_ID,
-            density: DensityMetric2D {
-                across_x: 0.0,
-                across_y: 60.0,
-                aspect_locked: false,
-            },
+            edited_axis: toniator_domain::DensityEditedAxis::AcrossX,
+            value: 0.0,
         },
         DocumentCommand::SetRotation {
             channel_id: CHANNEL_ID,
             rotation_degrees: f64::NAN,
         },
-        DocumentCommand::SetTranslation {
+        DocumentCommand::SetTranslationAxis {
             channel_id: CHANNEL_ID,
-            translation_x: f64::INFINITY,
-            translation_y: 0.0,
+            edited_axis: toniator_domain::TranslationEditedAxis::X,
+            value: f64::INFINITY,
         },
-        DocumentCommand::SetMarkGeometryResponse {
+        DocumentCommand::SetMarkGeometryField {
             channel_id: CHANNEL_ID,
-            response: MarkGeometryResponse {
-                minimum_size: -1.0,
-                maximum_size: 2.0,
-            },
+            edit: toniator_domain::MarkGeometryFieldEdit::MinimumSize(-1.0),
         },
-        DocumentCommand::SetColor {
+        DocumentCommand::SetColorComponent {
             channel_id: CHANNEL_ID,
-            color: ColorValue {
-                red: 1.1,
-                green: 0.0,
-                blue: 0.0,
-                alpha: 1.0,
-            },
+            component: toniator_domain::ColorComponent::Red,
+            value: 1.1,
         },
         DocumentCommand::SetOpacity {
             channel_id: CHANNEL_ID,

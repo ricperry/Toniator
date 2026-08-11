@@ -618,13 +618,10 @@ fn rejects_every_stage_two_document_validation_rule() {
 fn commands_return_the_required_invalidation_and_affected_channel() {
     let cases = vec![
         (
-            DocumentCommand::SetDensity {
+            DocumentCommand::SetDensityAxis {
                 channel_id: CHANNEL_ID,
-                density: DensityMetric2D {
-                    across_x: 80.0,
-                    across_y: 50.0,
-                    aspect_locked: false,
-                },
+                edited_axis: toniator_domain::DensityEditedAxis::AcrossX,
+                value: 80.0,
             },
             InvalidationLevel::Family,
         ),
@@ -636,42 +633,32 @@ fn commands_return_the_required_invalidation_and_affected_channel() {
             InvalidationLevel::Family,
         ),
         (
-            DocumentCommand::SetTranslation {
+            DocumentCommand::SetTranslationAxis {
                 channel_id: CHANNEL_ID,
-                translation_x: 2.0,
-                translation_y: -3.0,
+                edited_axis: toniator_domain::TranslationEditedAxis::X,
+                value: 2.0,
             },
             InvalidationLevel::Family,
         ),
         (
-            DocumentCommand::SetMarkGeometryResponse {
+            DocumentCommand::SetMarkGeometryField {
                 channel_id: CHANNEL_ID,
-                response: MarkGeometryResponse {
-                    minimum_size: 2.0,
-                    maximum_size: 8.5,
-                },
+                edit: toniator_domain::MarkGeometryFieldEdit::MaximumSize(8.5),
             },
             InvalidationLevel::Realization,
         ),
         (
-            DocumentCommand::SetSourceMapping {
+            DocumentCommand::SetLegacyMappingField {
                 channel_id: CHANNEL_ID,
-                mapping: ChannelSourceMapping {
-                    component: SourceComponent::Alpha,
-                    placement: SourcePlacement::StretchToCanvas,
-                },
+                edit: toniator_domain::LegacyMappingFieldEdit::Component(SourceComponent::Alpha),
             },
             InvalidationLevel::Realization,
         ),
         (
-            DocumentCommand::SetColor {
+            DocumentCommand::SetColorComponent {
                 channel_id: CHANNEL_ID,
-                color: ColorValue {
-                    red: 0.9,
-                    green: 0.8,
-                    blue: 0.7,
-                    alpha: 0.6,
-                },
+                component: toniator_domain::ColorComponent::Red,
+                value: 0.9,
             },
             InvalidationLevel::Presentation,
         ),
@@ -830,10 +817,10 @@ fn commands_reject_missing_channels_and_nonfinite_transforms_before_mutation() {
             channel_id: CHANNEL_ID,
             rotation_degrees: f64::NAN,
         },
-        DocumentCommand::SetTranslation {
+        DocumentCommand::SetTranslationAxis {
             channel_id: CHANNEL_ID,
-            translation_x: f64::INFINITY,
-            translation_y: 0.0,
+            edited_axis: toniator_domain::TranslationEditedAxis::X,
+            value: f64::INFINITY,
         },
     ] {
         let document = valid_document();
@@ -1277,12 +1264,21 @@ fn complete_mapping_validates_numeric_fields_and_uses_the_authoritative_transfor
         SourceMappingComponent::Alpha,
         SourceMappingComponent::Luminance,
     ] {
-        session
-            .apply(&DocumentCommand::SetTopologySourceMapping {
-                channel_id: ChannelId(10),
-                mapping: SourceMapping::canonical(component),
-            })
-            .expect("closed component and placement are supported");
+        let command = DocumentCommand::SetModeledMappingField {
+            channel_id: ChannelId(10),
+            edit: toniator_domain::ModeledMappingFieldEdit::Component(component),
+        };
+        if session
+            .document()
+            .modeled_channel(ChannelId(10))
+            .expect("modeled channel")
+            .mapping
+            != SourceMapping::canonical(component)
+        {
+            session
+                .apply(&command)
+                .expect("closed component and placement are supported");
+        }
         let mapping = session
             .document()
             .modeled_channel(ChannelId(10))
@@ -1316,9 +1312,13 @@ fn complete_mapping_validates_numeric_fields_and_uses_the_authoritative_transfor
             .expect("valid replacement");
         assert!(
             session
-                .apply(&DocumentCommand::SetTopologySourceMapping {
+                .apply(&DocumentCommand::SetModeledMappingField {
                     channel_id: ChannelId(10),
-                    mapping,
+                    edit: if !mapping.gain.is_finite() || mapping.gain < 0.0 {
+                        toniator_domain::ModeledMappingFieldEdit::Gain(mapping.gain)
+                    } else {
+                        toniator_domain::ModeledMappingFieldEdit::Bias(mapping.bias)
+                    }
                 })
                 .is_err()
         );
@@ -1345,13 +1345,10 @@ fn paint_model_compatibility_and_per_channel_invalidation_are_enforced() {
     );
     assert_eq!(
         session
-            .apply(&DocumentCommand::SetDensity {
+            .apply(&DocumentCommand::SetDensityAxis {
                 channel_id: ChannelId(10),
-                density: DensityMetric2D {
-                    across_x: 80.0,
-                    across_y: 50.0,
-                    aspect_locked: false,
-                },
+                edited_axis: toniator_domain::DensityEditedAxis::AcrossX,
+                value: 80.0,
             })
             .expect("modeled layout edit")
             .invalidation,
@@ -1359,10 +1356,10 @@ fn paint_model_compatibility_and_per_channel_invalidation_are_enforced() {
     );
     assert_eq!(
         session
-            .apply(&DocumentCommand::SetTranslation {
+            .apply(&DocumentCommand::SetTranslationAxis {
                 channel_id: ChannelId(10),
-                translation_x: 3.0,
-                translation_y: -2.0,
+                edited_axis: toniator_domain::TranslationEditedAxis::X,
+                value: 3.0,
             })
             .expect("modeled layout edit")
             .invalidation,
@@ -1374,12 +1371,14 @@ fn paint_model_compatibility_and_per_channel_invalidation_are_enforced() {
         .expect("modeled channel")
         .layout;
     assert_eq!(layout.density.across_x, 80.0);
-    assert_eq!((layout.translation_x, layout.translation_y), (3.0, -2.0));
+    assert_eq!((layout.translation_x, layout.translation_y), (3.0, 0.0));
     assert_eq!(
         session
-            .apply(&DocumentCommand::SetTopologySourceMapping {
+            .apply(&DocumentCommand::SetModeledMappingField {
                 channel_id: ChannelId(10),
-                mapping: SourceMapping::canonical(SourceMappingComponent::Alpha),
+                edit: toniator_domain::ModeledMappingFieldEdit::Component(
+                    SourceMappingComponent::Alpha
+                ),
             })
             .expect("valid full mapping")
             .invalidation,
@@ -1405,12 +1404,9 @@ fn paint_model_compatibility_and_per_channel_invalidation_are_enforced() {
     );
     assert_eq!(
         session
-            .apply(&DocumentCommand::SetMarkGeometryResponse {
+            .apply(&DocumentCommand::SetMarkGeometryField {
                 channel_id: ChannelId(10),
-                response: MarkGeometryResponse {
-                    minimum_size: 2.0,
-                    maximum_size: 8.0
-                },
+                edit: toniator_domain::MarkGeometryFieldEdit::MaximumSize(8.0),
             })
             .expect("valid response")
             .invalidation,
@@ -1450,14 +1446,10 @@ fn paint_model_compatibility_and_per_channel_invalidation_are_enforced() {
     }
     assert_eq!(
         session
-            .apply(&DocumentCommand::SetColor {
+            .apply(&DocumentCommand::SetColorComponent {
                 channel_id: ChannelId(10),
-                color: ColorValue {
-                    red: 0.6,
-                    green: 0.5,
-                    blue: 0.4,
-                    alpha: 1.0,
-                },
+                component: toniator_domain::ColorComponent::Red,
+                value: 0.6,
             })
             .expect("ordinary solid color")
             .invalidation,

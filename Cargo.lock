@@ -1348,6 +1348,7 @@ dependencies = [
  "clap",
  "serde",
  "serde_json",
+ "sha2",
  "toniator-domain",
  "toniator-engine",
  "toniator-io",

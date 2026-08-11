@@ -90,22 +90,12 @@ fn definition_commands_require_history_and_history_records_their_exact_inverse()
         DocumentCommand::EditSelectedChannelPatternDefinition {
             channel_id: CHANNEL_ID,
             base_definition: base.clone(),
-            edit: PatternDefinitionEdit::SetCoverage {
-                coverage: CoveragePolicy {
-                    guard_steps: 3,
-                    maximum_support_radius: 5.0,
-                },
-            },
+            edit: PatternDefinitionEdit::SetCoverageGuardSteps { guard_steps: 3 },
         },
         DocumentCommand::EditSharedPatternDefinition {
             definition_id: PATTERN_ID,
             base_definition: base,
-            edit: PatternDefinitionEdit::SetCoverage {
-                coverage: CoveragePolicy {
-                    guard_steps: 3,
-                    maximum_support_radius: 5.0,
-                },
-            },
+            edit: PatternDefinitionEdit::SetCoverageGuardSteps { guard_steps: 3 },
         },
     ];
     let mut session = DocumentSession::new(source.clone()).unwrap();
@@ -196,12 +186,7 @@ fn typed_definition_commands_allocate_copy_share_and_history_atomically() {
         .apply(&DocumentCommand::EditSelectedChannelPatternDefinition {
             channel_id: CHANNEL_ID,
             base_definition: history.document().pattern_definitions()[0].clone(),
-            edit: PatternDefinitionEdit::SetCoverage {
-                coverage: CoveragePolicy {
-                    guard_steps: 3,
-                    maximum_support_radius: 5.0,
-                },
-            },
+            edit: PatternDefinitionEdit::SetCoverageGuardSteps { guard_steps: 3 },
         })
         .unwrap();
     assert_eq!(copy_result.affected_channels, vec![CHANNEL_ID]);
@@ -224,12 +209,7 @@ fn typed_definition_commands_allocate_copy_share_and_history_atomically() {
         .apply(&DocumentCommand::EditSharedPatternDefinition {
             definition_id: PATTERN_ID,
             base_definition: history.document().pattern_definitions()[0].clone(),
-            edit: PatternDefinitionEdit::SetCoverage {
-                coverage: CoveragePolicy {
-                    guard_steps: 3,
-                    maximum_support_radius: 5.0,
-                },
-            },
+            edit: PatternDefinitionEdit::SetCoverageGuardSteps { guard_steps: 3 },
         })
         .unwrap();
     assert_eq!(shared_result.affected_channels, vec![ChannelId(8)]);
@@ -244,12 +224,7 @@ fn typed_definition_commands_allocate_copy_share_and_history_atomically() {
             .apply(&DocumentCommand::EditSelectedChannelPatternDefinition {
                 channel_id: CHANNEL_ID,
                 base_definition: original.pattern_definitions()[0].clone(),
-                edit: PatternDefinitionEdit::SetCoverage {
-                    coverage: CoveragePolicy {
-                        guard_steps: 4,
-                        maximum_support_radius: 5.0,
-                    },
-                },
+                edit: PatternDefinitionEdit::SetCoverageGuardSteps { guard_steps: 4 },
             })
             .is_err()
     );
@@ -353,12 +328,7 @@ fn definition_commands_cover_retarget_remove_unshared_stale_and_semantic_noops()
         .apply(&DocumentCommand::EditSelectedChannelPatternDefinition {
             channel_id: CHANNEL_ID,
             base_definition: base.clone(),
-            edit: PatternDefinitionEdit::SetCoverage {
-                coverage: CoveragePolicy {
-                    guard_steps: 3,
-                    maximum_support_radius: 5.0,
-                },
-            },
+            edit: PatternDefinitionEdit::SetCoverageGuardSteps { guard_steps: 3 },
         })
         .unwrap();
     assert_eq!(unshared.document().pattern_definitions().len(), 1);
@@ -370,10 +340,10 @@ fn definition_commands_cover_retarget_remove_unshared_stale_and_semantic_noops()
             .apply(&DocumentCommand::EditSelectedChannelPatternDefinition {
                 channel_id: CHANNEL_ID,
                 base_definition: unshared.document().pattern_definitions()[0].clone(),
-                edit: PatternDefinitionEdit::SetCoverage {
-                    coverage: unshared.document().pattern_definitions()[0]
+                edit: PatternDefinitionEdit::SetCoverageGuardSteps {
+                    guard_steps: unshared.document().pattern_definitions()[0]
                         .coverage
-                        .clone(),
+                        .guard_steps,
                 },
             })
             .is_err()
@@ -387,12 +357,7 @@ fn definition_commands_cover_retarget_remove_unshared_stale_and_semantic_noops()
         .apply(&DocumentCommand::EditSharedPatternDefinition {
             definition_id: PATTERN_ID,
             base_definition: stale_base.clone(),
-            edit: PatternDefinitionEdit::SetCoverage {
-                coverage: CoveragePolicy {
-                    guard_steps: 3,
-                    maximum_support_radius: 5.0,
-                },
-            },
+            edit: PatternDefinitionEdit::SetCoverageGuardSteps { guard_steps: 3 },
         })
         .unwrap();
     assert_eq!(
@@ -406,12 +371,7 @@ fn definition_commands_cover_retarget_remove_unshared_stale_and_semantic_noops()
             .apply(&DocumentCommand::EditSharedPatternDefinition {
                 definition_id: PATTERN_ID,
                 base_definition: stale_base,
-                edit: PatternDefinitionEdit::SetCoverage {
-                    coverage: CoveragePolicy {
-                        guard_steps: 4,
-                        maximum_support_radius: 5.0,
-                    },
-                },
+                edit: PatternDefinitionEdit::SetCoverageGuardSteps { guard_steps: 4 },
             })
             .is_err()
     );
@@ -548,13 +508,10 @@ fn history_round_trips_every_command_with_exact_documents_and_results() {
     let mut history = history();
     round_trip(
         &mut history,
-        DocumentCommand::SetDensity {
+        DocumentCommand::SetDensityAxis {
             channel_id: CHANNEL_ID,
-            density: DensityMetric2D {
-                across_x: 80.0,
-                across_y: 50.0,
-                aspect_locked: false,
-            },
+            edited_axis: toniator_domain::DensityEditedAxis::AcrossX,
+            value: 80.0,
         },
     );
     round_trip(
@@ -566,27 +523,25 @@ fn history_round_trips_every_command_with_exact_documents_and_results() {
     );
     round_trip(
         &mut history,
-        DocumentCommand::SetTranslation {
+        DocumentCommand::SetTranslationAxis {
             channel_id: CHANNEL_ID,
-            translation_x: 3.0,
-            translation_y: -2.0,
+            edited_axis: toniator_domain::TranslationEditedAxis::X,
+            value: 3.0,
         },
     );
     round_trip(
         &mut history,
-        DocumentCommand::SetMarkGeometryResponse {
+        DocumentCommand::SetMarkGeometryField {
             channel_id: CHANNEL_ID,
-            response: MarkGeometryResponse {
-                minimum_size: 1.0,
-                maximum_size: 8.0,
-            },
+            edit: toniator_domain::MarkGeometryFieldEdit::MaximumSize(8.0),
         },
     );
     round_trip(
         &mut history,
-        DocumentCommand::SetColor {
+        DocumentCommand::SetColorComponent {
             channel_id: CHANNEL_ID,
-            color: color(0.6, 0.5, 0.4),
+            component: toniator_domain::ColorComponent::Red,
+            value: 0.6,
         },
     );
     round_trip(
@@ -611,12 +566,9 @@ fn history_round_trips_every_command_with_exact_documents_and_results() {
     );
     round_trip(
         &mut history,
-        DocumentCommand::SetSourceMapping {
+        DocumentCommand::SetLegacyMappingField {
             channel_id: CHANNEL_ID,
-            mapping: ChannelSourceMapping {
-                component: SourceComponent::Alpha,
-                placement: SourcePlacement::StretchToCanvas,
-            },
+            edit: toniator_domain::LegacyMappingFieldEdit::Component(SourceComponent::Alpha),
         },
     );
 
@@ -635,15 +587,9 @@ fn history_round_trips_every_command_with_exact_documents_and_results() {
 
     round_trip(
         &mut history,
-        DocumentCommand::SetTopologySourceMapping {
+        DocumentCommand::SetModeledMappingField {
             channel_id: ChannelId(1),
-            mapping: SourceMapping {
-                component: SourceMappingComponent::Red,
-                placement: SourcePlacement::StretchToCanvas,
-                inverted: true,
-                gain: 0.8,
-                bias: 0.1,
-            },
+            edit: toniator_domain::ModeledMappingFieldEdit::Inverted(true),
         },
     );
     round_trip(
@@ -747,16 +693,16 @@ fn history_stack_order_empty_branching_failures_and_noops_are_atomic() {
 
     let no_op_before = history.document().clone();
     let no_op_revision = history.revision();
-    let no_op = history
-        .apply(&DocumentCommand::SetOpacity {
-            channel_id: CHANNEL_ID,
-            opacity: 0.5,
-        })
-        .unwrap();
+    assert!(
+        history
+            .apply(&DocumentCommand::SetOpacity {
+                channel_id: CHANNEL_ID,
+                opacity: 0.5,
+            })
+            .is_err()
+    );
     assert_eq!(history.document(), &no_op_before);
-    assert_eq!(history.revision(), Revision(no_op_revision.0 + 1));
-    assert_eq!(history.undo().unwrap(), Some(no_op));
-    assert_eq!(history.document(), &no_op_before);
+    assert_eq!(history.revision(), no_op_revision);
 }
 
 #[test]

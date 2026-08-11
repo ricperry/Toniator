@@ -16,3 +16,6 @@ serde.workspace = true
 toniator-domain = { path = "../toniator-domain" }
 toniator-engine = { path = "../toniator-engine" }
 toniator-io = { path = "../toniator-io" }
+
+[dev-dependencies]
+sha2.workspace = true

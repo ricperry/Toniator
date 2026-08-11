@@ -1689,6 +1689,12 @@ fn replace_model_topology(
     model: PreviewModel,
 ) -> Result<(), String> {
     let document = history.document();
+    if document.channel_model() == Some(model.domain()) {
+        // A command semantic no-op must not manufacture a history revision.
+        // The selector already avoids this path for interaction; this also
+        // protects programmatic synchronization and lifecycle tests.
+        return Ok(());
+    }
     let channel = document
         .channel_topology()
         .and_then(|topology| topology.channels().first())
@@ -2039,18 +2045,24 @@ mod tests {
     }
 
     #[test]
-    fn semantic_noop_remains_clean_even_when_history_revision_advances() {
+    fn semantic_noop_leaves_workspace_lifecycle_state_unchanged() {
         let mut workspace = load_workspace(&asset("raster-sample-v1.toniator")).unwrap();
         let id = workspace.document().channel_topology().unwrap().channels()[0].id;
-        let revision = workspace.history.revision();
-        workspace
-            .history
-            .apply(&DocumentCommand::SetVisibility {
-                channel_id: id,
-                visible: true,
-            })
-            .unwrap();
-        assert!(workspace.history.revision() > revision);
+        let before = probe(&workspace);
+        let can_undo = workspace.history.can_undo();
+        let can_redo = workspace.history.can_redo();
+        assert!(
+            workspace
+                .history
+                .apply(&DocumentCommand::SetVisibility {
+                    channel_id: id,
+                    visible: true,
+                })
+                .is_err()
+        );
+        assert_eq!(probe(&workspace), before);
+        assert_eq!(workspace.history.can_undo(), can_undo);
+        assert_eq!(workspace.history.can_redo(), can_redo);
         assert!(!workspace.is_dirty());
     }
 

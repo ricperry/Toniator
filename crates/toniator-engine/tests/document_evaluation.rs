@@ -1,5 +1,6 @@
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeSet,
     fs,
     path::Path,
     time::{Duration, Instant},
@@ -9,12 +10,14 @@ use toniator_domain::{
     ChannelSourceMapping, ChannelState, ChannelTopology, ChannelTopologyTemplate, ColorValue,
     CoveragePolicy, DensityMetric2D, Document, DocumentCommand, DocumentHistory, DocumentId,
     DocumentSession, GeneralizedSiteProduct, GuideDimensionId, HalftoneChannelModel,
-    HalftoneChannelRole, MarkGeometryResponse, MarkOrientation, PatternDefinition,
-    PatternDefinitionEdit, PatternDefinitionId, PatternMechanism, PatternMechanismId,
-    PatternOutputLayer, PatternOutputLayerId, RandomSiteCharacter, SiteDensityModulation,
+    HalftoneChannelRole, InvalidationLevel, MarkGeometryFieldEdit, MarkGeometryResponse,
+    MarkOrientation, PROPERTY_FIELD_IDS, PatternDefinition, PatternDefinitionEdit,
+    PatternDefinitionId, PatternMechanism, PatternMechanismId, PatternOutputLayer,
+    PatternOutputLayerId, PropertyFieldId, RandomSiteCharacter, SiteDensityModulation,
     SiteExclusionPolicy, SourceComponent, SourceMapping, SourceMappingComponent, SourcePlacement,
     SourceReference, SourceReferenceId, StraightGuideDimension, StraightGuideRepetition,
-    VisibleMarkSizingPolicy,
+    TranslationEditedAxis, VisibleMarkSizingPolicy, property_field_contract,
+    property_field_contracts,
 };
 use toniator_engine::{
     CacheDisposition, EvaluationCompletion, EvaluationLimits, EvaluationRequest,
@@ -56,6 +59,1051 @@ fn assert_presentation_reuse(completion: &EvaluationCompletion) {
     assert!(diagnostics.channels.iter().all(|channel| {
         channel.family == CacheDisposition::Hit && channel.realization == CacheDisposition::Hit
     }));
+}
+
+#[test]
+fn stage17_history_command_cache_matrix_preserves_earliest_layers_and_restoration() {
+    let source_id = SourceReferenceId::new("fixture-source").unwrap();
+    let bytes = fs::read("../../assets/raster-sample.png").unwrap();
+    let mut history = DocumentHistory::new(session(HalftoneChannelModel::Rgb));
+    let scheduler = EvaluationScheduler::new().unwrap();
+    let request = |history: &DocumentHistory| {
+        EvaluationRequest::new(
+            history.session().document_evaluation_snapshot(),
+            ResolvedSource::new(source_id.clone(), bytes.clone(), SourceFormatHint::Png).unwrap(),
+        )
+    };
+    let baseline = submit_and_accept(&scheduler, history.session(), request(&history));
+    let baseline_result = baseline.result().unwrap().clone();
+    let baseline_document = history.document().clone();
+
+    let presentation = history
+        .apply(&DocumentCommand::SetOpacity {
+            channel_id: ChannelId(1),
+            opacity: 0.5,
+        })
+        .unwrap();
+    assert_eq!(presentation.affected_channels, vec![ChannelId(1)]);
+    assert_eq!(presentation.invalidation, InvalidationLevel::Presentation);
+    let presentation_completion =
+        submit_and_accept(&scheduler, history.session(), request(&history));
+    assert_presentation_reuse(&presentation_completion);
+
+    let realization = history
+        .apply(&DocumentCommand::SetMarkGeometryField {
+            channel_id: ChannelId(1),
+            edit: MarkGeometryFieldEdit::MinimumSize(1.0),
+        })
+        .unwrap();
+    assert_eq!(realization.invalidation, InvalidationLevel::Realization);
+    let realization_completion =
+        submit_and_accept(&scheduler, history.session(), request(&history));
+    let realization_diagnostics = realization_completion.cache_diagnostics().unwrap();
+    assert_eq!(
+        realization_diagnostics.aggregate.family,
+        CacheDisposition::Hit
+    );
+    assert_eq!(
+        realization_diagnostics.aggregate.realization,
+        CacheDisposition::Miss
+    );
+
+    let family = history
+        .apply(&DocumentCommand::SetTranslationAxis {
+            channel_id: ChannelId(1),
+            edited_axis: TranslationEditedAxis::X,
+            value: 1.0,
+        })
+        .unwrap();
+    assert_eq!(family.invalidation, InvalidationLevel::Family);
+    let family_completion = submit_and_accept(&scheduler, history.session(), request(&history));
+    assert_eq!(
+        family_completion
+            .cache_diagnostics()
+            .unwrap()
+            .aggregate
+            .family,
+        CacheDisposition::Miss
+    );
+
+    history.undo().unwrap();
+    history.undo().unwrap();
+    history.undo().unwrap();
+    assert_eq!(history.document(), &baseline_document);
+    let restored = submit_and_accept(&scheduler, history.session(), request(&history));
+    assert_eq!(
+        restored.result().unwrap().channels(),
+        baseline_result.channels()
+    );
+    assert_eq!(
+        restored.result().unwrap().scene().identity(),
+        baseline_result.scene().identity()
+    );
+    assert_eq!(
+        restored.result().unwrap().raster().pixels(),
+        baseline_result.raster().pixels()
+    );
+    assert!(
+        history
+            .apply(&DocumentCommand::SetOpacity {
+                channel_id: ChannelId(1),
+                opacity: 1.0,
+            })
+            .is_err()
+    );
+    scheduler.shutdown().unwrap();
+}
+
+#[test]
+fn stage17_shared_output_edits_disclose_copy_escalation_and_restore_cache_authority() {
+    let source_id = SourceReferenceId::new("fixture-source").unwrap();
+    let bytes = fs::read("../../assets/raster-sample.png").unwrap();
+    let mut history = DocumentHistory::new(generalized_session_named(
+        HalftoneChannelModel::Rgb,
+        GeneralizedConfiguration::ThreeDirection,
+    ));
+    let scheduler = EvaluationScheduler::new().unwrap();
+    let request = |history: &DocumentHistory| {
+        EvaluationRequest::new(
+            history.session().document_evaluation_snapshot(),
+            ResolvedSource::new(source_id.clone(), bytes.clone(), SourceFormatHint::Png).unwrap(),
+        )
+    };
+    let baseline = submit_and_accept(&scheduler, history.session(), request(&history));
+    let original = history.document().clone();
+    let base = original.pattern_definitions()[0].clone();
+    let selected = history
+        .apply(&DocumentCommand::EditSelectedChannelPatternDefinition {
+            channel_id: ChannelId(1),
+            base_definition: base.clone(),
+            edit: PatternDefinitionEdit::SetOutputOrientation {
+                output_layer_id: PatternOutputLayerId(1),
+                orientation: MarkOrientation::Fixed,
+            },
+        })
+        .unwrap();
+    assert_eq!(selected.affected_channels, vec![ChannelId(1)]);
+    assert_eq!(selected.invalidation, InvalidationLevel::Family);
+    assert_ne!(history.document(), &original);
+    assert_ne!(
+        history
+            .document()
+            .modeled_channel(ChannelId(1))
+            .unwrap()
+            .pattern_definition_id,
+        original
+            .modeled_channel(ChannelId(1))
+            .unwrap()
+            .pattern_definition_id
+    );
+    let copied = submit_and_accept(&scheduler, history.session(), request(&history));
+    let copied_diagnostics = copied.cache_diagnostics().unwrap();
+    assert_eq!(copied_diagnostics.aggregate.family, CacheDisposition::Miss);
+    assert_eq!(
+        copied_diagnostics.aggregate.realization,
+        CacheDisposition::Miss
+    );
+    history.undo().unwrap();
+    assert_eq!(history.document(), &original);
+    let restored = submit_and_accept(&scheduler, history.session(), request(&history));
+    assert_eq!(
+        restored.result().unwrap().channels(),
+        baseline.result().unwrap().channels()
+    );
+    history.redo().unwrap();
+    assert_eq!(history.document(), history.document());
+    history.undo().unwrap();
+
+    let shared = history
+        .apply(&DocumentCommand::EditSharedPatternDefinition {
+            definition_id: PatternDefinitionId(1),
+            base_definition: base,
+            edit: PatternDefinitionEdit::SetOutputOrientation {
+                output_layer_id: PatternOutputLayerId(1),
+                orientation: MarkOrientation::Fixed,
+            },
+        })
+        .unwrap();
+    assert_eq!(
+        shared.affected_channels,
+        vec![ChannelId(1), ChannelId(2), ChannelId(3)]
+    );
+    assert_eq!(shared.invalidation, InvalidationLevel::Realization);
+    let shared_completion = submit_and_accept(&scheduler, history.session(), request(&history));
+    assert_eq!(
+        shared_completion
+            .cache_diagnostics()
+            .unwrap()
+            .aggregate
+            .family,
+        CacheDisposition::Hit
+    );
+    assert_eq!(
+        shared_completion
+            .cache_diagnostics()
+            .unwrap()
+            .aggregate
+            .realization,
+        CacheDisposition::Miss
+    );
+    scheduler.shutdown().unwrap();
+}
+
+#[test]
+fn stage17_source_and_topology_commands_disclose_complete_order_and_restore_history() {
+    let source_id = SourceReferenceId::new("fixture-source").unwrap();
+    let replacement_id = SourceReferenceId::new("replacement-source").unwrap();
+    let bytes = fs::read("../../assets/raster-sample.png").unwrap();
+    let mut history = DocumentHistory::new(session(HalftoneChannelModel::Rgb));
+    let scheduler = EvaluationScheduler::new().unwrap();
+    let request = |history: &DocumentHistory, id: SourceReferenceId| {
+        EvaluationRequest::new(
+            history.session().document_evaluation_snapshot(),
+            ResolvedSource::new(id, bytes.clone(), SourceFormatHint::Png).unwrap(),
+        )
+    };
+    let baseline = submit_and_accept(
+        &scheduler,
+        history.session(),
+        request(&history, source_id.clone()),
+    );
+    let baseline_document = history.document().clone();
+    let source = history
+        .apply(&DocumentCommand::SetSourceReference {
+            source: SourceReference::Assigned(replacement_id.clone()),
+        })
+        .unwrap();
+    assert_eq!(
+        source.affected_channels,
+        vec![ChannelId(1), ChannelId(2), ChannelId(3)]
+    );
+    assert_eq!(source.invalidation, InvalidationLevel::Source);
+    let source_completion = submit_and_accept(
+        &scheduler,
+        history.session(),
+        request(&history, replacement_id.clone()),
+    );
+    let source_diagnostics = source_completion.cache_diagnostics().unwrap();
+    assert_eq!(
+        source_diagnostics.aggregate.decoded_source,
+        CacheDisposition::Miss
+    );
+    assert_eq!(source_diagnostics.aggregate.family, CacheDisposition::Hit);
+    // Logical lookup identity is a Source command result, while the accepted
+    // realization key uses decoder-owned bytes; unchanged bytes therefore
+    // retain the realization layer.
+    assert_eq!(
+        source_diagnostics.aggregate.realization,
+        CacheDisposition::Hit
+    );
+    history.undo().unwrap();
+    assert_eq!(history.document(), &baseline_document);
+    let restored_source = submit_and_accept(
+        &scheduler,
+        history.session(),
+        request(&history, source_id.clone()),
+    );
+    assert_eq!(
+        restored_source.result().unwrap().scene().identity(),
+        baseline.result().unwrap().scene().identity()
+    );
+    history.redo().unwrap();
+    history.undo().unwrap();
+
+    let mut channels = history
+        .document()
+        .channel_topology()
+        .unwrap()
+        .channels()
+        .to_vec();
+    channels[1].id = ChannelId(22);
+    channels[2].id = ChannelId(23);
+    let topology = ChannelTopology::new(channels);
+    let topology_result = history
+        .apply(&DocumentCommand::ReplaceChannelTopology {
+            model: HalftoneChannelModel::Rgb,
+            topology,
+        })
+        .unwrap();
+    assert_eq!(
+        topology_result.affected_channels,
+        vec![
+            ChannelId(1),
+            ChannelId(2),
+            ChannelId(3),
+            ChannelId(22),
+            ChannelId(23)
+        ]
+    );
+    assert_eq!(
+        topology_result.invalidation,
+        InvalidationLevel::ChannelTopology
+    );
+    let topology_completion = submit_and_accept(
+        &scheduler,
+        history.session(),
+        request(&history, source_id.clone()),
+    );
+    let topology_diagnostics = topology_completion.cache_diagnostics().unwrap();
+    assert_eq!(
+        topology_diagnostics.aggregate.decoded_source,
+        CacheDisposition::Hit
+    );
+    assert_eq!(topology_diagnostics.aggregate.family, CacheDisposition::Hit);
+    assert_eq!(
+        topology_diagnostics.aggregate.realization,
+        CacheDisposition::Hit
+    );
+    assert_eq!(topology_diagnostics.aggregate.scene, CacheDisposition::Miss);
+    assert_eq!(
+        topology_diagnostics.aggregate.raster,
+        CacheDisposition::Miss
+    );
+    let topology_document = history.document().clone();
+    history.undo().unwrap();
+    assert_eq!(history.document(), &baseline_document);
+    history.redo().unwrap();
+    assert_eq!(history.document(), &topology_document);
+    scheduler.shutdown().unwrap();
+}
+
+#[test]
+fn stage17_contract_invalidation_matrix_and_descriptor_reads_are_cache_inert() {
+    // Each field-contract invalidation class is represented by one typed
+    // command exercised in this Stage 17 engine matrix. ChannelTopology is
+    // intentionally command-only rather than a field contract.
+    let represented = [
+        (InvalidationLevel::Presentation, "SetOpacity"),
+        (InvalidationLevel::Realization, "SetMarkGeometryField"),
+        (InvalidationLevel::Family, "SetTranslationAxis"),
+        (InvalidationLevel::Source, "SetSourceReference"),
+    ];
+    let contract_levels: BTreeSet<_> = property_field_contracts()
+        .map(|contract| format!("{:?}", contract.invalidation))
+        .collect();
+    let represented_levels: BTreeSet<_> = represented
+        .iter()
+        .map(|(level, _)| format!("{:?}", level))
+        .collect();
+    assert_eq!(contract_levels, represented_levels);
+    assert!(represented.iter().all(|(_, command)| !command.is_empty()));
+
+    let source_id = SourceReferenceId::new("fixture-source").unwrap();
+    let bytes = fs::read("../../assets/raster-sample.png").unwrap();
+    let history = DocumentHistory::new(session(HalftoneChannelModel::Rgb));
+    let scheduler = EvaluationScheduler::new().unwrap();
+    let request = || {
+        EvaluationRequest::new(
+            history.session().document_evaluation_snapshot(),
+            ResolvedSource::new(source_id.clone(), bytes.clone(), SourceFormatHint::Png).unwrap(),
+        )
+    };
+    let baseline = submit_and_accept(&scheduler, history.session(), request());
+    let baseline_result = baseline.result().unwrap();
+    let baseline_svg = write_svg(baseline_result.scene());
+    let baseline_hash = Sha256::digest(baseline_result.raster().pixels());
+    let revision = history.revision();
+    let document = history.document().clone();
+
+    let first = history.document().property_descriptors();
+    let second = history.document().property_descriptors();
+    assert_eq!(first, second);
+    assert!(
+        first
+            .iter()
+            .all(|descriptor| descriptor.field != PropertyFieldId::RandomClusterDensity)
+    );
+    assert!(
+        first
+            .iter()
+            .all(|descriptor| descriptor.field != PropertyFieldId::VisibleMarkMargin)
+    );
+    assert_eq!(history.revision(), revision);
+    assert_eq!(history.document(), &document);
+    let repeated = submit_and_accept(&scheduler, history.session(), request());
+    let diagnostics = repeated.cache_diagnostics().unwrap();
+    assert_eq!(diagnostics.aggregate.decoded_source, CacheDisposition::Hit);
+    assert_eq!(diagnostics.aggregate.family, CacheDisposition::Hit);
+    assert_eq!(diagnostics.aggregate.realization, CacheDisposition::Hit);
+    assert_eq!(diagnostics.aggregate.scene, CacheDisposition::Hit);
+    assert_eq!(diagnostics.aggregate.raster, CacheDisposition::Hit);
+    let repeated_result = repeated.result().unwrap();
+    assert_eq!(write_svg(repeated_result.scene()), baseline_svg);
+    assert_eq!(
+        Sha256::digest(repeated_result.raster().pixels()),
+        baseline_hash
+    );
+    scheduler.shutdown().unwrap();
+}
+
+#[derive(Clone, Copy)]
+enum Stage17StructuralFixture {
+    Intersections,
+    AlongGuides,
+    RawRandom,
+    EvenRandom,
+    ClusteredRandom,
+    WeightedRandom,
+    MinimumCenterRandom,
+    VisibleMarginRandom,
+}
+
+fn stage17_structural_session(fixture: Stage17StructuralFixture) -> DocumentSession {
+    match fixture {
+        Stage17StructuralFixture::Intersections => generalized_session_named(
+            HalftoneChannelModel::Rgb,
+            GeneralizedConfiguration::ThreeDirection,
+        ),
+        Stage17StructuralFixture::AlongGuides => generalized_session_named(
+            HalftoneChannelModel::Rgb,
+            GeneralizedConfiguration::AlongGuide,
+        ),
+        Stage17StructuralFixture::RawRandom => random_session(
+            HalftoneChannelModel::Rgb,
+            90.0,
+            60.0,
+            random_definition(
+                RandomSiteCharacter::RawUniform,
+                SiteDensityModulation::Uniform,
+                SiteExclusionPolicy::None,
+                64,
+            ),
+        ),
+        Stage17StructuralFixture::EvenRandom => random_session(
+            HalftoneChannelModel::Rgb,
+            90.0,
+            60.0,
+            random_definition(
+                RandomSiteCharacter::Even {
+                    minimum_center_distance: 6.0,
+                },
+                SiteDensityModulation::Uniform,
+                SiteExclusionPolicy::None,
+                64,
+            ),
+        ),
+        Stage17StructuralFixture::ClusteredRandom => random_session(
+            HalftoneChannelModel::Rgb,
+            90.0,
+            60.0,
+            random_definition(
+                RandomSiteCharacter::Clustered {
+                    cluster_density: 0.02,
+                    cluster_spread: 4.0,
+                    cluster_strength: 0.5,
+                },
+                SiteDensityModulation::Uniform,
+                SiteExclusionPolicy::None,
+                64,
+            ),
+        ),
+        Stage17StructuralFixture::WeightedRandom => random_session(
+            HalftoneChannelModel::Rgb,
+            90.0,
+            60.0,
+            random_definition(
+                RandomSiteCharacter::RawUniform,
+                SiteDensityModulation::ArtworkWeighted {
+                    mapping: SourceMapping::canonical(SourceMappingComponent::Luminance),
+                    strength: 0.5,
+                    response: ArtworkWeightResponse::Smoothstep,
+                },
+                SiteExclusionPolicy::None,
+                64,
+            ),
+        ),
+        Stage17StructuralFixture::MinimumCenterRandom => random_session(
+            HalftoneChannelModel::Rgb,
+            90.0,
+            60.0,
+            random_definition(
+                RandomSiteCharacter::RawUniform,
+                SiteDensityModulation::Uniform,
+                SiteExclusionPolicy::MinimumCenterDistance { minimum: 4.0 },
+                64,
+            ),
+        ),
+        Stage17StructuralFixture::VisibleMarginRandom => random_session(
+            HalftoneChannelModel::Rgb,
+            90.0,
+            60.0,
+            random_definition(
+                RandomSiteCharacter::RawUniform,
+                SiteDensityModulation::Uniform,
+                SiteExclusionPolicy::VisibleMarkMargin {
+                    margin: 0.5,
+                    sizing: VisibleMarkSizingPolicy::MaximumSupportRadius,
+                },
+                64,
+            ),
+        ),
+    }
+}
+
+fn is_pattern_definition_leaf(field: PropertyFieldId) -> bool {
+    match field {
+        PropertyFieldId::CoverageGuardSteps
+        | PropertyFieldId::CoverageMaximumSupportRadius
+        | PropertyFieldId::GuideBaselineAngle
+        | PropertyFieldId::GuidePhase
+        | PropertyFieldId::GuideSpacingMultiplier
+        | PropertyFieldId::IntersectionDimensions
+        | PropertyFieldId::IntersectionMergeEpsilon
+        | PropertyFieldId::AlongGuideDimensions
+        | PropertyFieldId::AlongGuideIntervalMultiplier
+        | PropertyFieldId::AlongGuidePhase
+        | PropertyFieldId::RandomCharacter
+        | PropertyFieldId::RandomEvenMinimumCenterDistance
+        | PropertyFieldId::RandomClusterDensity
+        | PropertyFieldId::RandomClusterSpread
+        | PropertyFieldId::RandomClusterStrength
+        | PropertyFieldId::RandomSeed
+        | PropertyFieldId::RandomDensityModulation
+        | PropertyFieldId::ArtworkWeightMappingComponent
+        | PropertyFieldId::ArtworkWeightMappingPlacement
+        | PropertyFieldId::ArtworkWeightMappingInverted
+        | PropertyFieldId::ArtworkWeightMappingGain
+        | PropertyFieldId::ArtworkWeightMappingBias
+        | PropertyFieldId::ArtworkWeightStrength
+        | PropertyFieldId::ArtworkWeightResponse
+        | PropertyFieldId::RandomExclusion
+        | PropertyFieldId::ExclusionMinimumCenterDistance
+        | PropertyFieldId::VisibleMarkMargin
+        | PropertyFieldId::VisibleMarkSizingPolicy
+        | PropertyFieldId::RandomMaximumAttempts
+        | PropertyFieldId::RandomMaximumNeighborChecks
+        | PropertyFieldId::OutputSiteProduct
+        | PropertyFieldId::OutputPrototype
+        | PropertyFieldId::OutputOrientation
+        | PropertyFieldId::OutputOrientationDimension => true,
+        PropertyFieldId::SourceReference
+        | PropertyFieldId::DensityAcrossX
+        | PropertyFieldId::DensityAcrossY
+        | PropertyFieldId::DensityAspectLocked
+        | PropertyFieldId::RotationDegrees
+        | PropertyFieldId::TranslationX
+        | PropertyFieldId::TranslationY
+        | PropertyFieldId::MarkMinimumSize
+        | PropertyFieldId::MarkMaximumSize
+        | PropertyFieldId::LegacyMappingComponent
+        | PropertyFieldId::LegacyMappingPlacement
+        | PropertyFieldId::ModeledMappingComponent
+        | PropertyFieldId::ModeledMappingPlacement
+        | PropertyFieldId::ModeledMappingInverted
+        | PropertyFieldId::ModeledMappingGain
+        | PropertyFieldId::ModeledMappingBias
+        | PropertyFieldId::Paint
+        | PropertyFieldId::ColorRed
+        | PropertyFieldId::ColorGreen
+        | PropertyFieldId::ColorBlue
+        | PropertyFieldId::ColorAlpha
+        | PropertyFieldId::Opacity
+        | PropertyFieldId::Visibility
+        | PropertyFieldId::DefinitionSelection => false,
+    }
+}
+
+#[test]
+fn stage17_every_pattern_definition_leaf_obeys_its_cache_contract() {
+    struct Case {
+        name: &'static str,
+        field: PropertyFieldId,
+        fixture: Stage17StructuralFixture,
+        edit: PatternDefinitionEdit,
+        accepts_transition: bool,
+    }
+
+    let cases = vec![
+        Case {
+            name: "coverage guard",
+            field: PropertyFieldId::CoverageGuardSteps,
+            fixture: Stage17StructuralFixture::Intersections,
+            edit: PatternDefinitionEdit::SetCoverageGuardSteps { guard_steps: 3 },
+            accepts_transition: true,
+        },
+        Case {
+            name: "coverage support",
+            field: PropertyFieldId::CoverageMaximumSupportRadius,
+            fixture: Stage17StructuralFixture::Intersections,
+            edit: PatternDefinitionEdit::SetCoverageMaximumSupportRadius {
+                maximum_support_radius: 5.0,
+            },
+            accepts_transition: true,
+        },
+        Case {
+            name: "guide angle",
+            field: PropertyFieldId::GuideBaselineAngle,
+            fixture: Stage17StructuralFixture::Intersections,
+            edit: PatternDefinitionEdit::SetGuideBaselineAngle {
+                mechanism_id: PatternMechanismId(1),
+                dimension_id: GuideDimensionId(11),
+                baseline_angle_degrees: 18.0,
+            },
+            accepts_transition: true,
+        },
+        Case {
+            name: "guide phase",
+            field: PropertyFieldId::GuidePhase,
+            fixture: Stage17StructuralFixture::Intersections,
+            edit: PatternDefinitionEdit::SetGuidePhase {
+                mechanism_id: PatternMechanismId(1),
+                dimension_id: GuideDimensionId(11),
+                phase: 1.5,
+            },
+            accepts_transition: true,
+        },
+        Case {
+            name: "guide spacing",
+            field: PropertyFieldId::GuideSpacingMultiplier,
+            fixture: Stage17StructuralFixture::Intersections,
+            edit: PatternDefinitionEdit::SetGuideSpacingMultiplier {
+                mechanism_id: PatternMechanismId(1),
+                dimension_id: GuideDimensionId(11),
+                spacing_multiplier: 1.1,
+            },
+            accepts_transition: true,
+        },
+        Case {
+            name: "intersection dimensions",
+            field: PropertyFieldId::IntersectionDimensions,
+            fixture: Stage17StructuralFixture::Intersections,
+            edit: PatternDefinitionEdit::SetIntersectionDimensions {
+                mechanism_id: PatternMechanismId(2),
+                dimensions: vec![GuideDimensionId(11), GuideDimensionId(12)],
+            },
+            accepts_transition: true,
+        },
+        Case {
+            name: "intersection epsilon",
+            field: PropertyFieldId::IntersectionMergeEpsilon,
+            fixture: Stage17StructuralFixture::Intersections,
+            edit: PatternDefinitionEdit::SetIntersectionMergeEpsilon {
+                mechanism_id: PatternMechanismId(2),
+                merge_epsilon: 0.1,
+            },
+            accepts_transition: true,
+        },
+        Case {
+            name: "along dimensions",
+            field: PropertyFieldId::AlongGuideDimensions,
+            fixture: Stage17StructuralFixture::AlongGuides,
+            edit: PatternDefinitionEdit::SetAlongGuideDimensions {
+                mechanism_id: PatternMechanismId(2),
+                dimensions: vec![GuideDimensionId(11)],
+            },
+            accepts_transition: true,
+        },
+        Case {
+            name: "along interval",
+            field: PropertyFieldId::AlongGuideIntervalMultiplier,
+            fixture: Stage17StructuralFixture::AlongGuides,
+            edit: PatternDefinitionEdit::SetAlongGuideIntervalMultiplier {
+                mechanism_id: PatternMechanismId(2),
+                interval_multiplier: 1.0,
+            },
+            accepts_transition: true,
+        },
+        Case {
+            name: "along phase",
+            field: PropertyFieldId::AlongGuidePhase,
+            fixture: Stage17StructuralFixture::AlongGuides,
+            edit: PatternDefinitionEdit::SetAlongGuidePhase {
+                mechanism_id: PatternMechanismId(2),
+                phase: 0.75,
+            },
+            accepts_transition: true,
+        },
+        Case {
+            name: "random character",
+            field: PropertyFieldId::RandomCharacter,
+            fixture: Stage17StructuralFixture::RawRandom,
+            edit: PatternDefinitionEdit::SetRandomCharacter {
+                mechanism_id: PatternMechanismId(101),
+                character: RandomSiteCharacter::Even {
+                    minimum_center_distance: 5.0,
+                },
+            },
+            accepts_transition: true,
+        },
+        Case {
+            name: "random seed",
+            field: PropertyFieldId::RandomSeed,
+            fixture: Stage17StructuralFixture::RawRandom,
+            edit: PatternDefinitionEdit::SetRandomSeed {
+                mechanism_id: PatternMechanismId(101),
+                seed: 9,
+            },
+            accepts_transition: true,
+        },
+        Case {
+            name: "even separation",
+            field: PropertyFieldId::RandomEvenMinimumCenterDistance,
+            fixture: Stage17StructuralFixture::EvenRandom,
+            edit: PatternDefinitionEdit::SetRandomEvenMinimumCenterDistance {
+                mechanism_id: PatternMechanismId(101),
+                minimum_center_distance: 7.0,
+            },
+            accepts_transition: true,
+        },
+        Case {
+            name: "cluster density",
+            field: PropertyFieldId::RandomClusterDensity,
+            fixture: Stage17StructuralFixture::ClusteredRandom,
+            edit: PatternDefinitionEdit::SetRandomClusterDensity {
+                mechanism_id: PatternMechanismId(101),
+                cluster_density: 0.03,
+            },
+            accepts_transition: true,
+        },
+        Case {
+            name: "cluster spread",
+            field: PropertyFieldId::RandomClusterSpread,
+            fixture: Stage17StructuralFixture::ClusteredRandom,
+            edit: PatternDefinitionEdit::SetRandomClusterSpread {
+                mechanism_id: PatternMechanismId(101),
+                cluster_spread: 5.0,
+            },
+            accepts_transition: true,
+        },
+        Case {
+            name: "cluster strength",
+            field: PropertyFieldId::RandomClusterStrength,
+            fixture: Stage17StructuralFixture::ClusteredRandom,
+            edit: PatternDefinitionEdit::SetRandomClusterStrength {
+                mechanism_id: PatternMechanismId(101),
+                cluster_strength: 0.6,
+            },
+            accepts_transition: true,
+        },
+        Case {
+            name: "density variant",
+            field: PropertyFieldId::RandomDensityModulation,
+            fixture: Stage17StructuralFixture::RawRandom,
+            edit: PatternDefinitionEdit::SetDensityModulationVariant {
+                mechanism_id: PatternMechanismId(102),
+                modulation: SiteDensityModulation::ArtworkWeighted {
+                    mapping: SourceMapping::canonical(SourceMappingComponent::Luminance),
+                    strength: 0.5,
+                    response: ArtworkWeightResponse::Smoothstep,
+                },
+            },
+            accepts_transition: true,
+        },
+        Case {
+            name: "artwork component",
+            field: PropertyFieldId::ArtworkWeightMappingComponent,
+            fixture: Stage17StructuralFixture::WeightedRandom,
+            edit: PatternDefinitionEdit::SetArtworkWeightMappingComponent {
+                mechanism_id: PatternMechanismId(102),
+                component: SourceMappingComponent::Red,
+            },
+            accepts_transition: true,
+        },
+        Case {
+            name: "artwork placement no-op",
+            field: PropertyFieldId::ArtworkWeightMappingPlacement,
+            fixture: Stage17StructuralFixture::WeightedRandom,
+            edit: PatternDefinitionEdit::SetArtworkWeightMappingPlacement {
+                mechanism_id: PatternMechanismId(102),
+                placement: SourcePlacement::StretchToCanvas,
+            },
+            accepts_transition: false,
+        },
+        Case {
+            name: "artwork inverted",
+            field: PropertyFieldId::ArtworkWeightMappingInverted,
+            fixture: Stage17StructuralFixture::WeightedRandom,
+            edit: PatternDefinitionEdit::SetArtworkWeightMappingInverted {
+                mechanism_id: PatternMechanismId(102),
+                inverted: true,
+            },
+            accepts_transition: true,
+        },
+        Case {
+            name: "artwork gain",
+            field: PropertyFieldId::ArtworkWeightMappingGain,
+            fixture: Stage17StructuralFixture::WeightedRandom,
+            edit: PatternDefinitionEdit::SetArtworkWeightMappingGain {
+                mechanism_id: PatternMechanismId(102),
+                gain: 0.5,
+            },
+            accepts_transition: true,
+        },
+        Case {
+            name: "artwork bias",
+            field: PropertyFieldId::ArtworkWeightMappingBias,
+            fixture: Stage17StructuralFixture::WeightedRandom,
+            edit: PatternDefinitionEdit::SetArtworkWeightMappingBias {
+                mechanism_id: PatternMechanismId(102),
+                bias: 0.1,
+            },
+            accepts_transition: true,
+        },
+        Case {
+            name: "artwork strength",
+            field: PropertyFieldId::ArtworkWeightStrength,
+            fixture: Stage17StructuralFixture::WeightedRandom,
+            edit: PatternDefinitionEdit::SetArtworkWeightStrength {
+                mechanism_id: PatternMechanismId(102),
+                strength: 0.6,
+            },
+            accepts_transition: true,
+        },
+        Case {
+            name: "artwork response",
+            field: PropertyFieldId::ArtworkWeightResponse,
+            fixture: Stage17StructuralFixture::WeightedRandom,
+            edit: PatternDefinitionEdit::SetArtworkWeightResponse {
+                mechanism_id: PatternMechanismId(102),
+                response: ArtworkWeightResponse::Linear,
+            },
+            accepts_transition: true,
+        },
+        Case {
+            name: "exclusion variant",
+            field: PropertyFieldId::RandomExclusion,
+            fixture: Stage17StructuralFixture::RawRandom,
+            edit: PatternDefinitionEdit::SetExclusionVariant {
+                mechanism_id: PatternMechanismId(103),
+                policy: SiteExclusionPolicy::MinimumCenterDistance { minimum: 4.0 },
+            },
+            accepts_transition: true,
+        },
+        Case {
+            name: "minimum center",
+            field: PropertyFieldId::ExclusionMinimumCenterDistance,
+            fixture: Stage17StructuralFixture::MinimumCenterRandom,
+            edit: PatternDefinitionEdit::SetExclusionMinimumCenterDistance {
+                mechanism_id: PatternMechanismId(103),
+                minimum_center_distance: 5.0,
+            },
+            accepts_transition: true,
+        },
+        Case {
+            name: "visible margin",
+            field: PropertyFieldId::VisibleMarkMargin,
+            fixture: Stage17StructuralFixture::VisibleMarginRandom,
+            edit: PatternDefinitionEdit::SetVisibleMarkMargin {
+                mechanism_id: PatternMechanismId(103),
+                margin: 0.75,
+            },
+            accepts_transition: true,
+        },
+        Case {
+            name: "visible sizing no-op",
+            field: PropertyFieldId::VisibleMarkSizingPolicy,
+            fixture: Stage17StructuralFixture::VisibleMarginRandom,
+            edit: PatternDefinitionEdit::SetVisibleMarkSizingPolicy {
+                mechanism_id: PatternMechanismId(103),
+                sizing: VisibleMarkSizingPolicy::MaximumSupportRadius,
+            },
+            accepts_transition: false,
+        },
+        Case {
+            name: "attempts",
+            field: PropertyFieldId::RandomMaximumAttempts,
+            fixture: Stage17StructuralFixture::RawRandom,
+            edit: PatternDefinitionEdit::SetRandomMaximumAttempts {
+                mechanism_id: PatternMechanismId(104),
+                maximum_attempts: 65,
+            },
+            accepts_transition: true,
+        },
+        Case {
+            name: "neighbor checks",
+            field: PropertyFieldId::RandomMaximumNeighborChecks,
+            fixture: Stage17StructuralFixture::RawRandom,
+            edit: PatternDefinitionEdit::SetRandomMaximumNeighborChecks {
+                mechanism_id: PatternMechanismId(104),
+                maximum_neighbor_checks: 15_999_999,
+            },
+            accepts_transition: true,
+        },
+        Case {
+            name: "output site product no-op",
+            field: PropertyFieldId::OutputSiteProduct,
+            fixture: Stage17StructuralFixture::Intersections,
+            edit: PatternDefinitionEdit::SetOutputSiteProduct {
+                output_layer_id: PatternOutputLayerId(1),
+                site_mechanism_id: PatternMechanismId(2),
+            },
+            accepts_transition: false,
+        },
+        Case {
+            name: "output prototype no-op",
+            field: PropertyFieldId::OutputPrototype,
+            fixture: Stage17StructuralFixture::Intersections,
+            edit: PatternDefinitionEdit::SetOutputMarkPrototype {
+                output_layer_id: PatternOutputLayerId(1),
+                prototype: toniator_domain::MarkPrototype::Circle,
+            },
+            accepts_transition: false,
+        },
+        Case {
+            name: "output orientation",
+            field: PropertyFieldId::OutputOrientation,
+            fixture: Stage17StructuralFixture::Intersections,
+            edit: PatternDefinitionEdit::SetOutputOrientation {
+                output_layer_id: PatternOutputLayerId(1),
+                orientation: MarkOrientation::GuideNormal {
+                    dimension_id: GuideDimensionId(11),
+                },
+            },
+            accepts_transition: true,
+        },
+        Case {
+            name: "output orientation dimension",
+            field: PropertyFieldId::OutputOrientationDimension,
+            fixture: Stage17StructuralFixture::Intersections,
+            edit: PatternDefinitionEdit::SetOutputOrientationDimension {
+                output_layer_id: PatternOutputLayerId(1),
+                dimension_id: GuideDimensionId(12),
+            },
+            accepts_transition: true,
+        },
+    ];
+
+    let expected: BTreeSet<_> = PROPERTY_FIELD_IDS
+        .iter()
+        .copied()
+        .filter(|field| is_pattern_definition_leaf(*field))
+        .collect();
+    let listed: BTreeSet<_> = cases.iter().map(|case| case.field).collect();
+    assert_eq!(
+        listed, expected,
+        "every structural field has one cache case"
+    );
+
+    let bytes = fs::read("../../assets/raster-sample.png").unwrap();
+    let source_id = SourceReferenceId::new("fixture-source").unwrap();
+    for case in cases {
+        let mut history = DocumentHistory::new(stage17_structural_session(case.fixture));
+        let scheduler = EvaluationScheduler::new().unwrap();
+        let request = |history: &DocumentHistory| {
+            EvaluationRequest::new(
+                history.session().document_evaluation_snapshot(),
+                ResolvedSource::new(source_id.clone(), bytes.clone(), SourceFormatHint::Png)
+                    .unwrap(),
+            )
+        };
+        submit_and_accept(&scheduler, history.session(), request(&history));
+        let before = history.document().clone();
+        let revision = history.revision();
+        let command = DocumentCommand::EditSharedPatternDefinition {
+            definition_id: PatternDefinitionId(1),
+            base_definition: before.pattern_definitions()[0].clone(),
+            edit: case.edit,
+        };
+        assert_eq!(
+            command.field_projections()[0].field,
+            case.field,
+            "{}",
+            case.name
+        );
+        let contract = property_field_contract(case.field);
+        if case.accepts_transition {
+            let result = history
+                .apply(&command)
+                .unwrap_or_else(|error| panic!("{}: {error}", case.name));
+            assert_eq!(
+                result.affected_channels,
+                vec![ChannelId(1), ChannelId(2), ChannelId(3)],
+                "{}",
+                case.name
+            );
+            assert_eq!(result.invalidation, contract.invalidation, "{}", case.name);
+            let completion = submit_and_accept(&scheduler, history.session(), request(&history));
+            let diagnostics = completion.cache_diagnostics().unwrap();
+            assert_eq!(
+                diagnostics.aggregate.decoded_source,
+                CacheDisposition::Hit,
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                diagnostics.aggregate.scene,
+                CacheDisposition::Miss,
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                diagnostics.aggregate.raster,
+                CacheDisposition::Miss,
+                "{}",
+                case.name
+            );
+            match contract.invalidation {
+                InvalidationLevel::Family => {
+                    assert_eq!(
+                        diagnostics.aggregate.family,
+                        CacheDisposition::Miss,
+                        "{}",
+                        case.name
+                    );
+                    assert_eq!(
+                        diagnostics.aggregate.realization,
+                        CacheDisposition::Miss,
+                        "{}",
+                        case.name
+                    );
+                }
+                InvalidationLevel::Realization => {
+                    assert_eq!(
+                        diagnostics.aggregate.family,
+                        CacheDisposition::Hit,
+                        "{}",
+                        case.name
+                    );
+                    assert_eq!(
+                        diagnostics.aggregate.realization,
+                        CacheDisposition::Miss,
+                        "{}",
+                        case.name
+                    );
+                }
+                other => panic!(
+                    "unexpected structural invalidation {other:?} for {}",
+                    case.name
+                ),
+            }
+        } else {
+            assert!(
+                history.apply(&command).is_err(),
+                "{} must reject a semantic no-op",
+                case.name
+            );
+            assert_eq!(history.document(), &before, "{}", case.name);
+            assert_eq!(history.revision(), revision, "{}", case.name);
+            assert!(!history.can_undo(), "{}", case.name);
+            let completion = submit_and_accept(&scheduler, history.session(), request(&history));
+            let diagnostics = completion.cache_diagnostics().unwrap();
+            assert_eq!(
+                diagnostics.aggregate.family,
+                CacheDisposition::Hit,
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                diagnostics.aggregate.realization,
+                CacheDisposition::Hit,
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                diagnostics.aggregate.scene,
+                CacheDisposition::Hit,
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                diagnostics.aggregate.raster,
+                CacheDisposition::Hit,
+                "{}",
+                case.name
+            );
+        }
+        scheduler.shutdown().unwrap();
+    }
 }
 
 fn session(model: HalftoneChannelModel) -> DocumentSession {
@@ -1365,12 +2413,7 @@ fn generalized_history_and_scheduler_keep_authority_and_reject_stale_publication
         .apply(&DocumentCommand::EditSharedPatternDefinition {
             definition_id: PatternDefinitionId(1),
             base_definition: base,
-            edit: PatternDefinitionEdit::SetCoverage {
-                coverage: CoveragePolicy {
-                    guard_steps: 3,
-                    maximum_support_radius: 4.5,
-                },
-            },
+            edit: PatternDefinitionEdit::SetCoverageGuardSteps { guard_steps: 3 },
         })
         .unwrap();
     assert!(
@@ -2313,15 +3356,9 @@ fn scheduler_reuses_all_but_the_edited_mapping_realization() {
         ),
     );
     session
-        .apply(&DocumentCommand::SetTopologySourceMapping {
+        .apply(&DocumentCommand::SetModeledMappingField {
             channel_id: ChannelId(1),
-            mapping: SourceMapping {
-                component: SourceMappingComponent::Red,
-                placement: SourcePlacement::StretchToCanvas,
-                inverted: true,
-                gain: 1.0,
-                bias: 0.0,
-            },
+            edit: toniator_domain::ModeledMappingFieldEdit::Inverted(true),
         })
         .unwrap();
 
@@ -2378,14 +3415,10 @@ fn scheduler_reuses_derived_channels_for_a_presentation_only_edit() {
         ),
     );
     session
-        .apply(&DocumentCommand::SetColor {
+        .apply(&DocumentCommand::SetColorComponent {
             channel_id: ChannelId(1),
-            color: ColorValue {
-                red: 0.25,
-                green: 0.5,
-                blue: 0.75,
-                alpha: 1.0,
-            },
+            component: toniator_domain::ColorComponent::Red,
+            value: 0.25,
         })
         .unwrap();
     let color_completion = submit_and_accept(
@@ -2468,10 +3501,10 @@ fn scheduler_rebuilds_only_the_structurally_edited_channel() {
         ),
     );
     session
-        .apply(&DocumentCommand::SetTranslation {
+        .apply(&DocumentCommand::SetTranslationAxis {
             channel_id: ChannelId(2),
-            translation_x: 1.0,
-            translation_y: 0.0,
+            edited_axis: toniator_domain::TranslationEditedAxis::X,
+            value: 1.0,
         })
         .unwrap();
 
@@ -2834,20 +3867,17 @@ fn scheduler_never_commits_partially_staged_channels_from_a_failed_document() {
         ),
     );
     session
-        .apply(&DocumentCommand::SetTranslation {
+        .apply(&DocumentCommand::SetTranslationAxis {
             channel_id: ChannelId(1),
-            translation_x: 1.0,
-            translation_y: 0.0,
+            edited_axis: toniator_domain::TranslationEditedAxis::X,
+            value: 1.0,
         })
         .unwrap();
     session
-        .apply(&DocumentCommand::SetDensity {
+        .apply(&DocumentCommand::SetDensityAxis {
             channel_id: ChannelId(2),
-            density: DensityMetric2D {
-                across_x: 10_000.0,
-                across_y: 10_000.0,
-                aspect_locked: true,
-            },
+            edited_axis: toniator_domain::DensityEditedAxis::AcrossX,
+            value: 10_000.0,
         })
         .unwrap();
     let failed_ticket = scheduler
@@ -2867,13 +3897,10 @@ fn scheduler_never_commits_partially_staged_channels_from_a_failed_document() {
     assert!(scheduler.accept_completion(&failed, &session).unwrap());
 
     session
-        .apply(&DocumentCommand::SetDensity {
+        .apply(&DocumentCommand::SetDensityAxis {
             channel_id: ChannelId(2),
-            density: DensityMetric2D {
-                across_x: 9.0,
-                across_y: 6.0,
-                aspect_locked: true,
-            },
+            edited_axis: toniator_domain::DensityEditedAxis::AcrossX,
+            value: 9.0,
         })
         .unwrap();
     let completion = submit_and_accept(
@@ -2919,15 +3946,9 @@ fn scheduler_never_commits_a_success_that_becomes_stale_before_acceptance() {
         ),
     );
     session
-        .apply(&DocumentCommand::SetTopologySourceMapping {
+        .apply(&DocumentCommand::SetModeledMappingField {
             channel_id: ChannelId(1),
-            mapping: SourceMapping {
-                component: SourceMappingComponent::Red,
-                placement: SourcePlacement::StretchToCanvas,
-                inverted: true,
-                gain: 1.0,
-                bias: 0.0,
-            },
+            edit: toniator_domain::ModeledMappingFieldEdit::Inverted(true),
         })
         .unwrap();
     let stale_ticket = scheduler
@@ -3001,15 +4022,9 @@ fn scheduler_coalesces_rapid_document_submissions_to_the_newest_ticket() {
     assert_eq!(stale_completion.ticket(), first_ticket);
 
     session
-        .apply(&DocumentCommand::SetTopologySourceMapping {
+        .apply(&DocumentCommand::SetModeledMappingField {
             channel_id: ChannelId(1),
-            mapping: SourceMapping {
-                component: SourceMappingComponent::Red,
-                placement: SourcePlacement::StretchToCanvas,
-                inverted: true,
-                gain: 1.0,
-                bias: 0.0,
-            },
+            edit: toniator_domain::ModeledMappingFieldEdit::Inverted(true),
         })
         .unwrap();
     let second_ticket = scheduler

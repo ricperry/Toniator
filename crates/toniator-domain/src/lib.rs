@@ -133,6 +133,14 @@ pub struct ColorValue {
     pub alpha: f64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColorComponent {
+    Red,
+    Green,
+    Blue,
+    Alpha,
+}
+
 /// Presentation settings that do not alter canonical geometry.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChannelAppearance {
@@ -146,6 +154,11 @@ pub struct ChannelAppearance {
 pub struct MarkGeometryResponse {
     pub minimum_size: f64,
     pub maximum_size: f64,
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MarkGeometryFieldEdit {
+    MinimumSize(f64),
+    MaximumSize(f64),
 }
 
 /// The source component selected by a channel's authoritative source mapping.
@@ -169,6 +182,11 @@ pub enum SourcePlacement {
 pub struct ChannelSourceMapping {
     pub component: SourceComponent,
     pub placement: SourcePlacement,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LegacyMappingFieldEdit {
+    Component(SourceComponent),
+    Placement(SourcePlacement),
 }
 
 /// The fixed set of authoritative complete-document channel arrangements.
@@ -235,6 +253,14 @@ pub struct SourceMapping {
     pub inverted: bool,
     pub gain: f64,
     pub bias: f64,
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ModeledMappingFieldEdit {
+    Component(SourceMappingComponent),
+    Placement(SourcePlacement),
+    Inverted(bool),
+    Gain(f64),
+    Bias(f64),
 }
 
 impl SourceMapping {
@@ -491,7 +517,7 @@ pub enum SiteDensityModulation {
 }
 
 /// Typed response applied at the decoder-owned artwork density field boundary.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArtworkWeightResponse {
     Linear,
     /// A fixed IEEE-arithmetic curve: `x * x * (3 - 2 * x)` for clamped x.
@@ -1034,6 +1060,311 @@ impl Document {
             .find(|channel| channel.id == channel_id)
     }
 
+    /// Returns deterministic schema-derived descriptors from the exhaustive
+    /// field contract. Only the three state-dependent capability predicates
+    /// supply runtime context; no static metadata is repeated here.
+    pub fn property_descriptors(&self) -> Vec<PropertyDescriptor> {
+        let mut descriptors = vec![descriptor_from_contract(
+            PropertyFieldId::SourceReference,
+            PropertyTarget::Document,
+        )];
+        for channel_id in self.channel_ids() {
+            let target = PropertyTarget::Channel(channel_id);
+            for field in [
+                PropertyFieldId::DensityAcrossX,
+                PropertyFieldId::DensityAcrossY,
+                PropertyFieldId::DensityAspectLocked,
+                PropertyFieldId::RotationDegrees,
+                PropertyFieldId::TranslationX,
+                PropertyFieldId::TranslationY,
+                PropertyFieldId::MarkMinimumSize,
+                PropertyFieldId::MarkMaximumSize,
+                PropertyFieldId::Opacity,
+                PropertyFieldId::Visibility,
+                PropertyFieldId::DefinitionSelection,
+            ] {
+                descriptors.push(descriptor_from_contract(field, target));
+            }
+            if let Some(model) = self.channel_model() {
+                for field in [
+                    PropertyFieldId::ModeledMappingComponent,
+                    PropertyFieldId::ModeledMappingPlacement,
+                    PropertyFieldId::ModeledMappingInverted,
+                    PropertyFieldId::ModeledMappingGain,
+                    PropertyFieldId::ModeledMappingBias,
+                ] {
+                    descriptors.push(descriptor_from_contract(field, target));
+                }
+                let context = if model == HalftoneChannelModel::SourceColorAlpha {
+                    DescriptorRuntimeContext::Paint {
+                        choices: SAMPLED_PAINT_CHOICES,
+                        dependency: PropertyDependency::SampledPaint,
+                    }
+                } else {
+                    DescriptorRuntimeContext::Paint {
+                        choices: SOLID_PAINT_CHOICES,
+                        dependency: PropertyDependency::SolidPaint,
+                    }
+                };
+                descriptors.push(descriptor_with_runtime_context(
+                    PropertyFieldId::Paint,
+                    target,
+                    context,
+                ));
+                if model != HalftoneChannelModel::SourceColorAlpha {
+                    for field in [
+                        PropertyFieldId::ColorRed,
+                        PropertyFieldId::ColorGreen,
+                        PropertyFieldId::ColorBlue,
+                        PropertyFieldId::ColorAlpha,
+                    ] {
+                        descriptors.push(descriptor_from_contract(field, target));
+                    }
+                }
+            } else {
+                for field in [
+                    PropertyFieldId::LegacyMappingComponent,
+                    PropertyFieldId::LegacyMappingPlacement,
+                    PropertyFieldId::ColorRed,
+                    PropertyFieldId::ColorGreen,
+                    PropertyFieldId::ColorBlue,
+                    PropertyFieldId::ColorAlpha,
+                ] {
+                    descriptors.push(descriptor_from_contract(field, target));
+                }
+            }
+        }
+        for definition in &self.pattern_definitions {
+            let definition_target = PropertyTarget::Definition(definition.id);
+            for field in [
+                PropertyFieldId::CoverageGuardSteps,
+                PropertyFieldId::CoverageMaximumSupportRadius,
+            ] {
+                descriptors.push(descriptor_from_contract(field, definition_target));
+            }
+            for mechanism in &definition.mechanisms {
+                let target = PropertyTarget::Mechanism(definition.id, mechanism.id());
+                match mechanism {
+                    PatternMechanism::StraightGuideDimensions { dimensions, .. } => {
+                        for dimension in dimensions {
+                            let target = PropertyTarget::GuideDimension(
+                                definition.id,
+                                mechanism.id(),
+                                dimension.id,
+                            );
+                            for field in [
+                                PropertyFieldId::GuideBaselineAngle,
+                                PropertyFieldId::GuidePhase,
+                                PropertyFieldId::GuideSpacingMultiplier,
+                            ] {
+                                descriptors.push(descriptor_from_contract(field, target));
+                            }
+                        }
+                    }
+                    PatternMechanism::SelectedGuideIntersections { .. } => {
+                        for field in [
+                            PropertyFieldId::IntersectionDimensions,
+                            PropertyFieldId::IntersectionMergeEpsilon,
+                        ] {
+                            descriptors.push(descriptor_from_contract(field, target));
+                        }
+                    }
+                    PatternMechanism::AlongGuideSites { .. } => {
+                        for field in [
+                            PropertyFieldId::AlongGuideDimensions,
+                            PropertyFieldId::AlongGuideIntervalMultiplier,
+                            PropertyFieldId::AlongGuidePhase,
+                        ] {
+                            descriptors.push(descriptor_from_contract(field, target));
+                        }
+                    }
+                    PatternMechanism::RandomSiteProcess { character, .. } => {
+                        for field in [
+                            PropertyFieldId::RandomCharacter,
+                            PropertyFieldId::RandomSeed,
+                        ] {
+                            descriptors.push(descriptor_from_contract(field, target));
+                        }
+                        match character {
+                            RandomSiteCharacter::RawUniform => {}
+                            RandomSiteCharacter::Even { .. } => {
+                                descriptors.push(descriptor_from_contract(
+                                    PropertyFieldId::RandomEvenMinimumCenterDistance,
+                                    target,
+                                ))
+                            }
+                            RandomSiteCharacter::Clustered { .. } => {
+                                for field in [
+                                    PropertyFieldId::RandomClusterDensity,
+                                    PropertyFieldId::RandomClusterSpread,
+                                    PropertyFieldId::RandomClusterStrength,
+                                ] {
+                                    descriptors.push(descriptor_from_contract(field, target));
+                                }
+                            }
+                        }
+                    }
+                    PatternMechanism::SiteDensityModulation { modulation, .. } => {
+                        descriptors.push(descriptor_with_runtime_context(
+                            PropertyFieldId::RandomDensityModulation,
+                            target,
+                            DescriptorRuntimeContext::DensityModulation {
+                                dependency: if matches!(
+                                    modulation,
+                                    SiteDensityModulation::ArtworkWeighted { .. }
+                                ) {
+                                    PropertyDependency::ArtworkWeightedDensity
+                                } else {
+                                    PropertyDependency::RandomProcess
+                                },
+                            },
+                        ));
+                        if matches!(modulation, SiteDensityModulation::ArtworkWeighted { .. }) {
+                            for field in [
+                                PropertyFieldId::ArtworkWeightMappingComponent,
+                                PropertyFieldId::ArtworkWeightMappingPlacement,
+                                PropertyFieldId::ArtworkWeightMappingInverted,
+                                PropertyFieldId::ArtworkWeightMappingGain,
+                                PropertyFieldId::ArtworkWeightMappingBias,
+                                PropertyFieldId::ArtworkWeightStrength,
+                                PropertyFieldId::ArtworkWeightResponse,
+                            ] {
+                                descriptors.push(descriptor_from_contract(field, target));
+                            }
+                        }
+                    }
+                    PatternMechanism::SiteExclusion { policy, .. } => {
+                        let visible =
+                            matches!(policy, SiteExclusionPolicy::VisibleMarkMargin { .. });
+                        descriptors.push(descriptor_with_runtime_context(
+                            PropertyFieldId::RandomExclusion,
+                            target,
+                            DescriptorRuntimeContext::Exclusion {
+                                dependency: if visible { PropertyDependency::VisibleMarkExclusion } else { PropertyDependency::RandomProcess },
+                                support: if visible { StructuralSupportConstraint::VisibleMarkMarginUsesMaximumSupportRadius } else { StructuralSupportConstraint::None },
+                            },
+                        ));
+                        match policy {
+                            SiteExclusionPolicy::None => {}
+                            SiteExclusionPolicy::MinimumCenterDistance { .. } => {
+                                descriptors.push(descriptor_from_contract(
+                                    PropertyFieldId::ExclusionMinimumCenterDistance,
+                                    target,
+                                ))
+                            }
+                            SiteExclusionPolicy::VisibleMarkMargin { .. } => {
+                                for field in [
+                                    PropertyFieldId::VisibleMarkMargin,
+                                    PropertyFieldId::VisibleMarkSizingPolicy,
+                                ] {
+                                    descriptors.push(descriptor_from_contract(field, target));
+                                }
+                            }
+                        }
+                    }
+                    PatternMechanism::RandomSiteProduct { .. } => {
+                        for field in [
+                            PropertyFieldId::RandomMaximumAttempts,
+                            PropertyFieldId::RandomMaximumNeighborChecks,
+                        ] {
+                            descriptors.push(descriptor_from_contract(field, target));
+                        }
+                    }
+                    PatternMechanism::StraightGuides { .. }
+                    | PatternMechanism::GuideIntersections { .. } => {}
+                }
+            }
+            for layer in &definition.output_layers {
+                let target = PropertyTarget::OutputLayer(definition.id, layer.id());
+                descriptors.push(descriptor_from_contract(
+                    PropertyFieldId::OutputSiteProduct,
+                    target,
+                ));
+                if let PatternOutputLayer::MarkPrototype { orientation, .. } = layer {
+                    for field in [
+                        PropertyFieldId::OutputPrototype,
+                        PropertyFieldId::OutputOrientation,
+                    ] {
+                        descriptors.push(descriptor_from_contract(field, target));
+                    }
+                    if matches!(
+                        orientation,
+                        MarkOrientation::GuideTangent { .. } | MarkOrientation::GuideNormal { .. }
+                    ) {
+                        descriptors.push(descriptor_from_contract(
+                            PropertyFieldId::OutputOrientationDimension,
+                            target,
+                        ));
+                    }
+                }
+            }
+        }
+        descriptors
+    }
+
+    /// Mechanical bidirectional completeness gate for the active schema.
+    pub fn validate_property_descriptors(&self) -> Result<(), ValidationError> {
+        let descriptors = self.property_descriptors();
+        let mut seen = HashSet::new();
+        for descriptor in &descriptors {
+            if !seen.insert((descriptor.field, descriptor.target)) {
+                return Err(ValidationError::new(
+                    "capabilities.descriptors",
+                    "duplicate descriptor field target",
+                ));
+            }
+            let contract = property_field_contract(descriptor.field);
+            if descriptor.command_kind() != contract.command_kind
+                || descriptor.value_kind != contract.value_kind
+                || descriptor.bounds != contract.bounds
+                || descriptor.unit != contract.unit
+                || descriptor.invalidation != contract.invalidation
+                || descriptor.copy_on_edit_escalates_to_family
+                    != contract.copy_on_edit_escalates_to_family
+                || descriptor.reference_constraint != contract.reference_constraint
+                || descriptor.choice_policy != contract.choice_policy
+            {
+                return Err(ValidationError::new(
+                    "capabilities.descriptors",
+                    "descriptor diverges from its field contract",
+                ));
+            }
+            if contract.choice_policy == PropertyChoicePolicy::Static
+                && descriptor.choices != contract.choices
+            {
+                return Err(ValidationError::new(
+                    "capabilities.descriptors",
+                    "descriptor choices diverge from its field contract",
+                ));
+            }
+            if !matches!(
+                contract.applicability,
+                PropertyApplicability::CurrentExclusion
+            ) && descriptor.structural_support != contract.structural_support
+            {
+                return Err(ValidationError::new(
+                    "capabilities.descriptors",
+                    "descriptor structural support diverges from its field contract",
+                ));
+            }
+            if dependency_for_contract(contract.applicability, descriptor.dependency)
+                != descriptor.dependency
+            {
+                return Err(ValidationError::new(
+                    "capabilities.descriptors",
+                    "descriptor dependency diverges from its field contract",
+                ));
+            }
+        }
+        if descriptors != self.property_descriptors() {
+            return Err(ValidationError::new(
+                "capabilities.descriptors",
+                "descriptor order is nondeterministic",
+            ));
+        }
+        Ok(())
+    }
+
     fn channel_ids(&self) -> Vec<ChannelId> {
         match &self.channel_configuration {
             ChannelConfiguration::Legacy(channels) => {
@@ -1047,6 +1378,33 @@ impl Document {
 
     fn has_channel(&self, channel_id: ChannelId) -> bool {
         self.channel_ids().contains(&channel_id)
+    }
+
+    fn channel_layout(&self, channel_id: ChannelId) -> Option<&ChannelPatternLayout> {
+        match &self.channel_configuration {
+            ChannelConfiguration::Legacy(channels) => channels
+                .iter()
+                .find(|channel| channel.id == channel_id)
+                .map(|channel| &channel.layout),
+            ChannelConfiguration::Topology { topology, .. } => topology
+                .channels
+                .iter()
+                .find(|channel| channel.id == channel_id)
+                .map(|channel| &channel.layout),
+        }
+    }
+    fn channel_mark_response(&self, channel_id: ChannelId) -> Option<&MarkGeometryResponse> {
+        match &self.channel_configuration {
+            ChannelConfiguration::Legacy(channels) => channels
+                .iter()
+                .find(|channel| channel.id == channel_id)
+                .map(|channel| &channel.mark_geometry_response),
+            ChannelConfiguration::Topology { topology, .. } => topology
+                .channels
+                .iter()
+                .find(|channel| channel.id == channel_id)
+                .map(|channel| &channel.mark_geometry_response),
+        }
     }
 
     fn pattern_definition_id_for(&self, channel_id: ChannelId) -> Option<PatternDefinitionId> {
@@ -1283,6 +1641,64 @@ impl Document {
                 source.coverage.clone(),
             ));
         }
+        if let PatternFamily::RandomSites { .. } = source.family {
+            let id = self.allocate_definition_id()?;
+            let base_id = self.allocate_mechanism_id()?;
+            let modulation_id = PatternMechanismId(base_id.0.checked_add(1).ok_or_else(|| {
+                ValidationError::new(
+                    "pattern_definitions.mechanisms.id",
+                    "document mechanism ID space is exhausted",
+                )
+            })?);
+            let exclusion_id =
+                PatternMechanismId(modulation_id.0.checked_add(1).ok_or_else(|| {
+                    ValidationError::new(
+                        "pattern_definitions.mechanisms.id",
+                        "document mechanism ID space is exhausted",
+                    )
+                })?);
+            let site_id = PatternMechanismId(exclusion_id.0.checked_add(1).ok_or_else(|| {
+                ValidationError::new(
+                    "pattern_definitions.mechanisms.id",
+                    "document mechanism ID space is exhausted",
+                )
+            })?);
+            let output_id = self.allocate_output_layer_id()?;
+            let [
+                PatternMechanism::RandomSiteProcess {
+                    character, seed, ..
+                },
+                PatternMechanism::SiteDensityModulation { modulation, .. },
+                PatternMechanism::SiteExclusion { policy, .. },
+                PatternMechanism::RandomSiteProduct {
+                    maximum_attempts,
+                    maximum_neighbor_checks,
+                    ..
+                },
+            ] = source.mechanisms.as_slice()
+            else {
+                return Err(ValidationError::new(
+                    "pattern_definitions.family",
+                    "random definition has an incompatible mechanism chain",
+                ));
+            };
+            return Ok(PatternDefinition::random_sites(
+                id,
+                source.name.clone(),
+                base_id,
+                modulation_id,
+                exclusion_id,
+                site_id,
+                output_id,
+                character.clone(),
+                *seed,
+                modulation.clone(),
+                policy.clone(),
+                *maximum_attempts,
+                *maximum_neighbor_checks,
+                source.coverage.clone(),
+            ));
+        }
         let draft = PatternDefinitionDraft {
             name: source.name.clone(),
             coverage: source.coverage.clone(),
@@ -1410,12 +1826,39 @@ impl Document {
         let mut candidate = self.clone();
         command.apply_to_valid_document(&mut candidate);
         candidate.validate()?;
-        let mut result = command.result();
-        if let DocumentCommand::ReplaceChannelTopology { topology, .. } = command {
-            result.affected_channels = affected_topology_channels(self.channel_ids(), topology);
+        if candidate == *self {
+            return Err(ValidationError::new(
+                "command",
+                "command is a semantic no-op",
+            ));
         }
+        let mut result = command.result_for_transition(self, &candidate);
         if let DocumentCommand::EditSharedPatternDefinition { definition_id, .. } = command {
             result.affected_channels = self.linked_channels(*definition_id);
+        }
+        if let DocumentCommand::EditSelectedChannelPatternDefinition {
+            channel_id,
+            base_definition,
+            edit,
+        } = command
+            && self.linked_channels(base_definition.id).len() > 1
+            && definition_edit_invalidation(edit) == InvalidationLevel::Realization
+        {
+            // Copy-on-edit changes definition and internal stable IDs, so its
+            // family key necessarily changes even for an output-only field.
+            result.affected_channels = vec![*channel_id];
+            result.invalidation = InvalidationLevel::Family;
+        } else if matches!(
+            command,
+            DocumentCommand::EditSelectedChannelPatternDefinition { .. }
+        ) || matches!(command, DocumentCommand::EditSharedPatternDefinition { .. })
+        {
+            let edit = match command {
+                DocumentCommand::EditSelectedChannelPatternDefinition { edit, .. }
+                | DocumentCommand::EditSharedPatternDefinition { edit, .. } => edit,
+                _ => unreachable!(),
+            };
+            result.invalidation = definition_edit_invalidation(edit);
         }
         Ok((candidate, result))
     }
@@ -1443,17 +1886,1509 @@ fn validate_definition_draft(draft: &PatternDefinitionDraft) -> Result<(), Valid
 
 fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefinitionEdit) {
     match edit {
-        PatternDefinitionEdit::SetCoverage { coverage } => definition.coverage = coverage.clone(),
+        PatternDefinitionEdit::SetCoverageGuardSteps { guard_steps } => {
+            definition.coverage.guard_steps = *guard_steps
+        }
+        PatternDefinitionEdit::SetCoverageMaximumSupportRadius {
+            maximum_support_radius,
+        } => definition.coverage.maximum_support_radius = *maximum_support_radius,
+        PatternDefinitionEdit::SetGuideBaselineAngle {
+            mechanism_id,
+            dimension_id,
+            baseline_angle_degrees,
+        } => {
+            if let Some(PatternMechanism::StraightGuideDimensions { dimensions, .. }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+                && let Some(existing) = dimensions
+                    .iter_mut()
+                    .find(|value| value.id == *dimension_id)
+            {
+                existing.baseline_angle_degrees = *baseline_angle_degrees;
+            }
+        }
+        PatternDefinitionEdit::SetGuidePhase {
+            mechanism_id,
+            dimension_id,
+            phase,
+        } => {
+            if let Some(PatternMechanism::StraightGuideDimensions { dimensions, .. }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+                && let Some(existing) = dimensions
+                    .iter_mut()
+                    .find(|value| value.id == *dimension_id)
+            {
+                existing.phase = *phase;
+            }
+        }
+        PatternDefinitionEdit::SetGuideSpacingMultiplier {
+            mechanism_id,
+            dimension_id,
+            spacing_multiplier,
+        } => {
+            if let Some(PatternMechanism::StraightGuideDimensions { dimensions, .. }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+                && let Some(existing) = dimensions
+                    .iter_mut()
+                    .find(|value| value.id == *dimension_id)
+            {
+                existing.repetition.spacing_multiplier = *spacing_multiplier;
+            }
+        }
+        PatternDefinitionEdit::SetIntersectionDimensions {
+            mechanism_id,
+            dimensions,
+        } => {
+            if let Some(PatternMechanism::SelectedGuideIntersections {
+                dimensions: current,
+                ..
+            }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                *current = dimensions.clone();
+            }
+        }
+        PatternDefinitionEdit::SetIntersectionMergeEpsilon {
+            mechanism_id,
+            merge_epsilon,
+        } => {
+            if let Some(PatternMechanism::SelectedGuideIntersections {
+                merge_epsilon: current,
+                ..
+            }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                *current = *merge_epsilon;
+            }
+        }
+        PatternDefinitionEdit::SetAlongGuideDimensions {
+            mechanism_id,
+            dimensions,
+        } => {
+            if let Some(PatternMechanism::AlongGuideSites {
+                dimensions: current,
+                ..
+            }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                *current = dimensions.clone();
+            }
+        }
+        PatternDefinitionEdit::SetAlongGuideIntervalMultiplier {
+            mechanism_id,
+            interval_multiplier,
+        } => {
+            if let Some(PatternMechanism::AlongGuideSites {
+                interval_multiplier: current,
+                ..
+            }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                *current = *interval_multiplier;
+            }
+        }
+        PatternDefinitionEdit::SetAlongGuidePhase {
+            mechanism_id,
+            phase,
+        } => {
+            if let Some(PatternMechanism::AlongGuideSites { phase: current, .. }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                *current = *phase;
+            }
+        }
+        PatternDefinitionEdit::SetRandomCharacter {
+            mechanism_id,
+            character,
+        } => {
+            if let Some(PatternMechanism::RandomSiteProcess {
+                character: current, ..
+            }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                *current = character.clone();
+            }
+        }
+        PatternDefinitionEdit::SetRandomSeed { mechanism_id, seed } => {
+            if let Some(PatternMechanism::RandomSiteProcess { seed: current, .. }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                *current = *seed;
+            }
+        }
+        PatternDefinitionEdit::SetRandomEvenMinimumCenterDistance {
+            mechanism_id,
+            minimum_center_distance,
+        } => {
+            if let Some(PatternMechanism::RandomSiteProcess {
+                character:
+                    RandomSiteCharacter::Even {
+                        minimum_center_distance: current,
+                    },
+                ..
+            }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                *current = *minimum_center_distance;
+            }
+        }
+        PatternDefinitionEdit::SetRandomClusterDensity {
+            mechanism_id,
+            cluster_density,
+        } => {
+            if let Some(PatternMechanism::RandomSiteProcess {
+                character:
+                    RandomSiteCharacter::Clustered {
+                        cluster_density: current,
+                        ..
+                    },
+                ..
+            }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                *current = *cluster_density;
+            }
+        }
+        PatternDefinitionEdit::SetRandomClusterSpread {
+            mechanism_id,
+            cluster_spread,
+        } => {
+            if let Some(PatternMechanism::RandomSiteProcess {
+                character:
+                    RandomSiteCharacter::Clustered {
+                        cluster_spread: current,
+                        ..
+                    },
+                ..
+            }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                *current = *cluster_spread;
+            }
+        }
+        PatternDefinitionEdit::SetRandomClusterStrength {
+            mechanism_id,
+            cluster_strength,
+        } => {
+            if let Some(PatternMechanism::RandomSiteProcess {
+                character:
+                    RandomSiteCharacter::Clustered {
+                        cluster_strength: current,
+                        ..
+                    },
+                ..
+            }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                *current = *cluster_strength;
+            }
+        }
+        PatternDefinitionEdit::SetDensityModulationVariant {
+            mechanism_id,
+            modulation,
+        } => {
+            if let Some(PatternMechanism::SiteDensityModulation {
+                modulation: current,
+                ..
+            }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                *current = modulation.clone();
+            }
+        }
+        PatternDefinitionEdit::SetArtworkWeightMappingComponent {
+            mechanism_id,
+            component,
+        } => {
+            if let Some(PatternMechanism::SiteDensityModulation {
+                modulation:
+                    SiteDensityModulation::ArtworkWeighted {
+                        mapping: current, ..
+                    },
+                ..
+            }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                current.component = *component;
+            }
+        }
+        PatternDefinitionEdit::SetArtworkWeightMappingPlacement {
+            mechanism_id,
+            placement,
+        } => {
+            if let Some(PatternMechanism::SiteDensityModulation {
+                modulation:
+                    SiteDensityModulation::ArtworkWeighted {
+                        mapping: current, ..
+                    },
+                ..
+            }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                current.placement = *placement;
+            }
+        }
+        PatternDefinitionEdit::SetArtworkWeightMappingInverted {
+            mechanism_id,
+            inverted,
+        } => {
+            if let Some(PatternMechanism::SiteDensityModulation {
+                modulation:
+                    SiteDensityModulation::ArtworkWeighted {
+                        mapping: current, ..
+                    },
+                ..
+            }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                current.inverted = *inverted;
+            }
+        }
+        PatternDefinitionEdit::SetArtworkWeightMappingGain { mechanism_id, gain } => {
+            if let Some(PatternMechanism::SiteDensityModulation {
+                modulation:
+                    SiteDensityModulation::ArtworkWeighted {
+                        mapping: current, ..
+                    },
+                ..
+            }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                current.gain = *gain;
+            }
+        }
+        PatternDefinitionEdit::SetArtworkWeightMappingBias { mechanism_id, bias } => {
+            if let Some(PatternMechanism::SiteDensityModulation {
+                modulation:
+                    SiteDensityModulation::ArtworkWeighted {
+                        mapping: current, ..
+                    },
+                ..
+            }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                current.bias = *bias;
+            }
+        }
+        PatternDefinitionEdit::SetArtworkWeightStrength {
+            mechanism_id,
+            strength,
+        } => {
+            if let Some(PatternMechanism::SiteDensityModulation {
+                modulation:
+                    SiteDensityModulation::ArtworkWeighted {
+                        strength: current, ..
+                    },
+                ..
+            }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                *current = *strength;
+            }
+        }
+        PatternDefinitionEdit::SetArtworkWeightResponse {
+            mechanism_id,
+            response,
+        } => {
+            if let Some(PatternMechanism::SiteDensityModulation {
+                modulation:
+                    SiteDensityModulation::ArtworkWeighted {
+                        response: current, ..
+                    },
+                ..
+            }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                *current = *response;
+            }
+        }
+        PatternDefinitionEdit::SetExclusionVariant {
+            mechanism_id,
+            policy,
+        } => {
+            if let Some(PatternMechanism::SiteExclusion {
+                policy: current, ..
+            }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                *current = policy.clone();
+            }
+        }
+        PatternDefinitionEdit::SetExclusionMinimumCenterDistance {
+            mechanism_id,
+            minimum_center_distance,
+        } => {
+            if let Some(PatternMechanism::SiteExclusion {
+                policy: SiteExclusionPolicy::MinimumCenterDistance { minimum: current },
+                ..
+            }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                *current = *minimum_center_distance;
+            }
+        }
+        PatternDefinitionEdit::SetVisibleMarkMargin {
+            mechanism_id,
+            margin,
+        } => {
+            if let Some(PatternMechanism::SiteExclusion {
+                policy:
+                    SiteExclusionPolicy::VisibleMarkMargin {
+                        margin: current, ..
+                    },
+                ..
+            }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                *current = *margin;
+            }
+        }
+        PatternDefinitionEdit::SetVisibleMarkSizingPolicy {
+            mechanism_id,
+            sizing,
+        } => {
+            if let Some(PatternMechanism::SiteExclusion {
+                policy:
+                    SiteExclusionPolicy::VisibleMarkMargin {
+                        sizing: current, ..
+                    },
+                ..
+            }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                *current = *sizing;
+            }
+        }
+        PatternDefinitionEdit::SetRandomMaximumAttempts {
+            mechanism_id,
+            maximum_attempts,
+        } => {
+            if let Some(PatternMechanism::RandomSiteProduct {
+                maximum_attempts: current_attempts,
+                ..
+            }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                *current_attempts = *maximum_attempts;
+            }
+        }
+        PatternDefinitionEdit::SetRandomMaximumNeighborChecks {
+            mechanism_id,
+            maximum_neighbor_checks,
+        } => {
+            if let Some(PatternMechanism::RandomSiteProduct {
+                maximum_neighbor_checks: current_checks,
+                ..
+            }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                *current_checks = *maximum_neighbor_checks;
+            }
+        }
+        PatternDefinitionEdit::SetOutputSiteProduct {
+            output_layer_id,
+            site_mechanism_id,
+        } => {
+            if let Some(
+                PatternOutputLayer::CircularMarks {
+                    site_mechanism_id: current,
+                    ..
+                }
+                | PatternOutputLayer::MarkPrototype {
+                    site_mechanism_id: current,
+                    ..
+                },
+            ) = definition
+                .output_layers
+                .iter_mut()
+                .find(|layer| layer.id() == *output_layer_id)
+            {
+                *current = *site_mechanism_id;
+            }
+        }
+        PatternDefinitionEdit::SetOutputMarkPrototype {
+            output_layer_id,
+            prototype,
+        } => {
+            if let Some(PatternOutputLayer::MarkPrototype {
+                prototype: current, ..
+            }) = definition
+                .output_layers
+                .iter_mut()
+                .find(|layer| layer.id() == *output_layer_id)
+            {
+                *current = prototype.clone();
+            }
+        }
+        PatternDefinitionEdit::SetOutputOrientation {
+            output_layer_id,
+            orientation,
+        } => {
+            if let Some(PatternOutputLayer::MarkPrototype {
+                orientation: current,
+                ..
+            }) = definition
+                .output_layers
+                .iter_mut()
+                .find(|layer| layer.id() == *output_layer_id)
+            {
+                *current = orientation.clone();
+            }
+        }
+        PatternDefinitionEdit::SetOutputOrientationDimension {
+            output_layer_id,
+            dimension_id,
+        } => {
+            if let Some(PatternOutputLayer::MarkPrototype { orientation, .. }) = definition
+                .output_layers
+                .iter_mut()
+                .find(|layer| layer.id() == *output_layer_id)
+            {
+                match orientation {
+                    MarkOrientation::GuideTangent {
+                        dimension_id: current,
+                    }
+                    | MarkOrientation::GuideNormal {
+                        dimension_id: current,
+                    } => *current = *dimension_id,
+                    MarkOrientation::Fixed => {}
+                }
+            }
+        }
     }
 }
 
-fn validate_definition_edit(edit: &PatternDefinitionEdit) -> Result<(), ValidationError> {
+fn remap_definition_edit_for_duplicate(
+    source: &PatternDefinition,
+    duplicate: &PatternDefinition,
+    edit: &PatternDefinitionEdit,
+) -> PatternDefinitionEdit {
+    let mechanism = |id| remap_mechanism_id(source, duplicate, id);
+    let dimension = |id| remap_dimension_id(source, duplicate, id);
     match edit {
-        PatternDefinitionEdit::SetCoverage { coverage } => validate_nonnegative_finite(
-            coverage.maximum_support_radius,
+        PatternDefinitionEdit::SetCoverageGuardSteps { guard_steps } => {
+            PatternDefinitionEdit::SetCoverageGuardSteps {
+                guard_steps: *guard_steps,
+            }
+        }
+        PatternDefinitionEdit::SetCoverageMaximumSupportRadius {
+            maximum_support_radius,
+        } => PatternDefinitionEdit::SetCoverageMaximumSupportRadius {
+            maximum_support_radius: *maximum_support_radius,
+        },
+        PatternDefinitionEdit::SetGuideBaselineAngle {
+            mechanism_id,
+            dimension_id,
+            baseline_angle_degrees,
+        } => PatternDefinitionEdit::SetGuideBaselineAngle {
+            mechanism_id: mechanism(*mechanism_id),
+            dimension_id: dimension(*dimension_id),
+            baseline_angle_degrees: *baseline_angle_degrees,
+        },
+        PatternDefinitionEdit::SetGuidePhase {
+            mechanism_id,
+            dimension_id,
+            phase,
+        } => PatternDefinitionEdit::SetGuidePhase {
+            mechanism_id: mechanism(*mechanism_id),
+            dimension_id: dimension(*dimension_id),
+            phase: *phase,
+        },
+        PatternDefinitionEdit::SetGuideSpacingMultiplier {
+            mechanism_id,
+            dimension_id,
+            spacing_multiplier,
+        } => PatternDefinitionEdit::SetGuideSpacingMultiplier {
+            mechanism_id: mechanism(*mechanism_id),
+            dimension_id: dimension(*dimension_id),
+            spacing_multiplier: *spacing_multiplier,
+        },
+        PatternDefinitionEdit::SetIntersectionDimensions {
+            mechanism_id,
+            dimensions,
+        } => PatternDefinitionEdit::SetIntersectionDimensions {
+            mechanism_id: mechanism(*mechanism_id),
+            dimensions: dimensions.iter().copied().map(dimension).collect(),
+        },
+        PatternDefinitionEdit::SetIntersectionMergeEpsilon {
+            mechanism_id,
+            merge_epsilon,
+        } => PatternDefinitionEdit::SetIntersectionMergeEpsilon {
+            mechanism_id: mechanism(*mechanism_id),
+            merge_epsilon: *merge_epsilon,
+        },
+        PatternDefinitionEdit::SetAlongGuideDimensions {
+            mechanism_id,
+            dimensions,
+        } => PatternDefinitionEdit::SetAlongGuideDimensions {
+            mechanism_id: mechanism(*mechanism_id),
+            dimensions: dimensions.iter().copied().map(dimension).collect(),
+        },
+        PatternDefinitionEdit::SetAlongGuideIntervalMultiplier {
+            mechanism_id,
+            interval_multiplier,
+        } => PatternDefinitionEdit::SetAlongGuideIntervalMultiplier {
+            mechanism_id: mechanism(*mechanism_id),
+            interval_multiplier: *interval_multiplier,
+        },
+        PatternDefinitionEdit::SetAlongGuidePhase {
+            mechanism_id,
+            phase,
+        } => PatternDefinitionEdit::SetAlongGuidePhase {
+            mechanism_id: mechanism(*mechanism_id),
+            phase: *phase,
+        },
+        PatternDefinitionEdit::SetRandomCharacter {
+            mechanism_id,
+            character,
+        } => PatternDefinitionEdit::SetRandomCharacter {
+            mechanism_id: mechanism(*mechanism_id),
+            character: character.clone(),
+        },
+        PatternDefinitionEdit::SetRandomSeed { mechanism_id, seed } => {
+            PatternDefinitionEdit::SetRandomSeed {
+                mechanism_id: mechanism(*mechanism_id),
+                seed: *seed,
+            }
+        }
+        PatternDefinitionEdit::SetRandomEvenMinimumCenterDistance {
+            mechanism_id,
+            minimum_center_distance,
+        } => PatternDefinitionEdit::SetRandomEvenMinimumCenterDistance {
+            mechanism_id: mechanism(*mechanism_id),
+            minimum_center_distance: *minimum_center_distance,
+        },
+        PatternDefinitionEdit::SetRandomClusterDensity {
+            mechanism_id,
+            cluster_density,
+        } => PatternDefinitionEdit::SetRandomClusterDensity {
+            mechanism_id: mechanism(*mechanism_id),
+            cluster_density: *cluster_density,
+        },
+        PatternDefinitionEdit::SetRandomClusterSpread {
+            mechanism_id,
+            cluster_spread,
+        } => PatternDefinitionEdit::SetRandomClusterSpread {
+            mechanism_id: mechanism(*mechanism_id),
+            cluster_spread: *cluster_spread,
+        },
+        PatternDefinitionEdit::SetRandomClusterStrength {
+            mechanism_id,
+            cluster_strength,
+        } => PatternDefinitionEdit::SetRandomClusterStrength {
+            mechanism_id: mechanism(*mechanism_id),
+            cluster_strength: *cluster_strength,
+        },
+        PatternDefinitionEdit::SetDensityModulationVariant {
+            mechanism_id,
+            modulation,
+        } => PatternDefinitionEdit::SetDensityModulationVariant {
+            mechanism_id: mechanism(*mechanism_id),
+            modulation: modulation.clone(),
+        },
+        PatternDefinitionEdit::SetArtworkWeightMappingComponent {
+            mechanism_id,
+            component,
+        } => PatternDefinitionEdit::SetArtworkWeightMappingComponent {
+            mechanism_id: mechanism(*mechanism_id),
+            component: *component,
+        },
+        PatternDefinitionEdit::SetArtworkWeightMappingPlacement {
+            mechanism_id,
+            placement,
+        } => PatternDefinitionEdit::SetArtworkWeightMappingPlacement {
+            mechanism_id: mechanism(*mechanism_id),
+            placement: *placement,
+        },
+        PatternDefinitionEdit::SetArtworkWeightMappingInverted {
+            mechanism_id,
+            inverted,
+        } => PatternDefinitionEdit::SetArtworkWeightMappingInverted {
+            mechanism_id: mechanism(*mechanism_id),
+            inverted: *inverted,
+        },
+        PatternDefinitionEdit::SetArtworkWeightMappingGain { mechanism_id, gain } => {
+            PatternDefinitionEdit::SetArtworkWeightMappingGain {
+                mechanism_id: mechanism(*mechanism_id),
+                gain: *gain,
+            }
+        }
+        PatternDefinitionEdit::SetArtworkWeightMappingBias { mechanism_id, bias } => {
+            PatternDefinitionEdit::SetArtworkWeightMappingBias {
+                mechanism_id: mechanism(*mechanism_id),
+                bias: *bias,
+            }
+        }
+        PatternDefinitionEdit::SetArtworkWeightStrength {
+            mechanism_id,
+            strength,
+        } => PatternDefinitionEdit::SetArtworkWeightStrength {
+            mechanism_id: mechanism(*mechanism_id),
+            strength: *strength,
+        },
+        PatternDefinitionEdit::SetArtworkWeightResponse {
+            mechanism_id,
+            response,
+        } => PatternDefinitionEdit::SetArtworkWeightResponse {
+            mechanism_id: mechanism(*mechanism_id),
+            response: *response,
+        },
+        PatternDefinitionEdit::SetExclusionVariant {
+            mechanism_id,
+            policy,
+        } => PatternDefinitionEdit::SetExclusionVariant {
+            mechanism_id: mechanism(*mechanism_id),
+            policy: policy.clone(),
+        },
+        PatternDefinitionEdit::SetExclusionMinimumCenterDistance {
+            mechanism_id,
+            minimum_center_distance,
+        } => PatternDefinitionEdit::SetExclusionMinimumCenterDistance {
+            mechanism_id: mechanism(*mechanism_id),
+            minimum_center_distance: *minimum_center_distance,
+        },
+        PatternDefinitionEdit::SetVisibleMarkMargin {
+            mechanism_id,
+            margin,
+        } => PatternDefinitionEdit::SetVisibleMarkMargin {
+            mechanism_id: mechanism(*mechanism_id),
+            margin: *margin,
+        },
+        PatternDefinitionEdit::SetVisibleMarkSizingPolicy {
+            mechanism_id,
+            sizing,
+        } => PatternDefinitionEdit::SetVisibleMarkSizingPolicy {
+            mechanism_id: mechanism(*mechanism_id),
+            sizing: *sizing,
+        },
+        PatternDefinitionEdit::SetRandomMaximumAttempts {
+            mechanism_id,
+            maximum_attempts,
+        } => PatternDefinitionEdit::SetRandomMaximumAttempts {
+            mechanism_id: mechanism(*mechanism_id),
+            maximum_attempts: *maximum_attempts,
+        },
+        PatternDefinitionEdit::SetRandomMaximumNeighborChecks {
+            mechanism_id,
+            maximum_neighbor_checks,
+        } => PatternDefinitionEdit::SetRandomMaximumNeighborChecks {
+            mechanism_id: mechanism(*mechanism_id),
+            maximum_neighbor_checks: *maximum_neighbor_checks,
+        },
+        PatternDefinitionEdit::SetOutputSiteProduct {
+            output_layer_id,
+            site_mechanism_id,
+        } => PatternDefinitionEdit::SetOutputSiteProduct {
+            output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
+            site_mechanism_id: mechanism(*site_mechanism_id),
+        },
+        PatternDefinitionEdit::SetOutputMarkPrototype {
+            output_layer_id,
+            prototype,
+        } => PatternDefinitionEdit::SetOutputMarkPrototype {
+            output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
+            prototype: prototype.clone(),
+        },
+        PatternDefinitionEdit::SetOutputOrientation {
+            output_layer_id,
+            orientation,
+        } => PatternDefinitionEdit::SetOutputOrientation {
+            output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
+            orientation: remap_orientation(source, duplicate, orientation),
+        },
+        PatternDefinitionEdit::SetOutputOrientationDimension {
+            output_layer_id,
+            dimension_id,
+        } => PatternDefinitionEdit::SetOutputOrientationDimension {
+            output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
+            dimension_id: dimension(*dimension_id),
+        },
+    }
+}
+
+fn remap_mechanism_id(
+    source: &PatternDefinition,
+    duplicate: &PatternDefinition,
+    mechanism_id: PatternMechanismId,
+) -> PatternMechanismId {
+    let index = source
+        .mechanisms
+        .iter()
+        .position(|mechanism| mechanism.id() == mechanism_id)
+        .expect("validated edit references a source mechanism");
+    duplicate.mechanisms[index].id()
+}
+
+fn remap_dimension_id(
+    source: &PatternDefinition,
+    duplicate: &PatternDefinition,
+    dimension_id: GuideDimensionId,
+) -> GuideDimensionId {
+    for (source_mechanism, duplicate_mechanism) in
+        source.mechanisms.iter().zip(&duplicate.mechanisms)
+    {
+        let (
+            PatternMechanism::StraightGuideDimensions {
+                dimensions: source_dimensions,
+                ..
+            },
+            PatternMechanism::StraightGuideDimensions {
+                dimensions: duplicate_dimensions,
+                ..
+            },
+        ) = (source_mechanism, duplicate_mechanism)
+        else {
+            continue;
+        };
+        if let Some(index) = source_dimensions
+            .iter()
+            .position(|dimension| dimension.id == dimension_id)
+        {
+            return duplicate_dimensions[index].id;
+        }
+    }
+    panic!("validated edit references a source guide dimension")
+}
+
+fn remap_output_layer_id(
+    source: &PatternDefinition,
+    duplicate: &PatternDefinition,
+    output_layer_id: PatternOutputLayerId,
+) -> PatternOutputLayerId {
+    let index = source
+        .output_layers
+        .iter()
+        .position(|layer| layer.id() == output_layer_id)
+        .expect("validated edit references a source output layer");
+    duplicate.output_layers[index].id()
+}
+
+fn remap_orientation(
+    source: &PatternDefinition,
+    duplicate: &PatternDefinition,
+    orientation: &MarkOrientation,
+) -> MarkOrientation {
+    match orientation {
+        MarkOrientation::Fixed => MarkOrientation::Fixed,
+        MarkOrientation::GuideTangent { dimension_id } => MarkOrientation::GuideTangent {
+            dimension_id: remap_dimension_id(source, duplicate, *dimension_id),
+        },
+        MarkOrientation::GuideNormal { dimension_id } => MarkOrientation::GuideNormal {
+            dimension_id: remap_dimension_id(source, duplicate, *dimension_id),
+        },
+    }
+}
+
+fn validate_definition_edit(
+    definition: &PatternDefinition,
+    edit: &PatternDefinitionEdit,
+) -> Result<(), ValidationError> {
+    validate_property_field_projection(edit.field_projection())?;
+    match edit {
+        PatternDefinitionEdit::SetCoverageGuardSteps { .. } => Ok(()),
+        PatternDefinitionEdit::SetCoverageMaximumSupportRadius {
+            maximum_support_radius,
+        } => validate_nonnegative_finite(
+            *maximum_support_radius,
             "pattern_definitions.coverage.maximum_support_radius",
         ),
+        PatternDefinitionEdit::SetGuideBaselineAngle {
+            mechanism_id,
+            dimension_id,
+            baseline_angle_degrees,
+        } => {
+            validate_guide_dimension_target(definition, *mechanism_id, *dimension_id)?;
+            validate_finite(
+                *baseline_angle_degrees,
+                "pattern_definitions.mechanisms.dimensions.baseline_angle_degrees",
+            )
+        }
+        PatternDefinitionEdit::SetGuidePhase {
+            mechanism_id,
+            dimension_id,
+            phase,
+        } => {
+            validate_guide_dimension_target(definition, *mechanism_id, *dimension_id)?;
+            validate_finite(*phase, "pattern_definitions.mechanisms.dimensions.phase")
+        }
+        PatternDefinitionEdit::SetGuideSpacingMultiplier {
+            mechanism_id,
+            dimension_id,
+            spacing_multiplier,
+        } => {
+            validate_guide_dimension_target(definition, *mechanism_id, *dimension_id)?;
+            validate_positive_finite(
+                *spacing_multiplier,
+                "pattern_definitions.mechanisms.dimensions.repetition.spacing_multiplier",
+            )
+        }
+        PatternDefinitionEdit::SetIntersectionDimensions {
+            mechanism_id,
+            dimensions,
+        } => {
+            let available = validate_selected_intersection_target(definition, *mechanism_id)?;
+            validate_selection(
+                dimensions,
+                available,
+                2,
+                "pattern_definitions.mechanisms.intersections.dimensions",
+            )
+        }
+        PatternDefinitionEdit::SetIntersectionMergeEpsilon {
+            mechanism_id,
+            merge_epsilon,
+        } => {
+            validate_selected_intersection_target(definition, *mechanism_id)?;
+            validate_nonnegative_finite(
+                *merge_epsilon,
+                "pattern_definitions.mechanisms.intersections.merge_epsilon",
+            )
+        }
+        PatternDefinitionEdit::SetAlongGuideDimensions {
+            mechanism_id,
+            dimensions,
+        } => {
+            let available = validate_along_guide_target(definition, *mechanism_id)?;
+            validate_selection(
+                dimensions,
+                available,
+                1,
+                "pattern_definitions.mechanisms.along_guides.dimensions",
+            )
+        }
+        PatternDefinitionEdit::SetAlongGuideIntervalMultiplier {
+            mechanism_id,
+            interval_multiplier,
+        } => {
+            validate_along_guide_target(definition, *mechanism_id)?;
+            validate_positive_finite(
+                *interval_multiplier,
+                "pattern_definitions.mechanisms.along_guides.interval_multiplier",
+            )
+        }
+        PatternDefinitionEdit::SetAlongGuidePhase {
+            mechanism_id,
+            phase,
+        } => {
+            validate_along_guide_target(definition, *mechanism_id)?;
+            validate_finite(*phase, "pattern_definitions.mechanisms.along_guides.phase")
+        }
+        PatternDefinitionEdit::SetRandomCharacter {
+            mechanism_id,
+            character,
+        } => {
+            validate_random_process_target(definition, *mechanism_id)?;
+            validate_random_character(character)
+        }
+        PatternDefinitionEdit::SetRandomSeed { mechanism_id, .. } => {
+            validate_random_process_target(definition, *mechanism_id).map(|_| ())
+        }
+        PatternDefinitionEdit::SetRandomEvenMinimumCenterDistance {
+            mechanism_id,
+            minimum_center_distance,
+        } => match validate_random_process_target(definition, *mechanism_id)? {
+            RandomSiteCharacter::Even { .. } => validate_positive_finite(
+                *minimum_center_distance,
+                "pattern_definitions.mechanisms.random_sites.minimum_center_distance",
+            ),
+            _ => Err(ValidationError::new(
+                "pattern_definitions.mechanisms.random_sites.minimum_center_distance",
+                "field is inactive for the current random character",
+            )),
+        },
+        PatternDefinitionEdit::SetRandomClusterDensity {
+            mechanism_id,
+            cluster_density,
+        } => match validate_random_process_target(definition, *mechanism_id)? {
+            RandomSiteCharacter::Clustered { .. } => validate_positive_finite(
+                *cluster_density,
+                "pattern_definitions.mechanisms.random_sites.cluster_density",
+            ),
+            _ => Err(ValidationError::new(
+                "pattern_definitions.mechanisms.random_sites.cluster_density",
+                "field is inactive for the current random character",
+            )),
+        },
+        PatternDefinitionEdit::SetRandomClusterSpread {
+            mechanism_id,
+            cluster_spread,
+        } => match validate_random_process_target(definition, *mechanism_id)? {
+            RandomSiteCharacter::Clustered { .. } => validate_positive_finite(
+                *cluster_spread,
+                "pattern_definitions.mechanisms.random_sites.cluster_spread",
+            ),
+            _ => Err(ValidationError::new(
+                "pattern_definitions.mechanisms.random_sites.cluster_spread",
+                "field is inactive for the current random character",
+            )),
+        },
+        PatternDefinitionEdit::SetRandomClusterStrength {
+            mechanism_id,
+            cluster_strength,
+        } => match validate_random_process_target(definition, *mechanism_id)? {
+            RandomSiteCharacter::Clustered { .. } => validate_unit_component(
+                *cluster_strength,
+                "pattern_definitions.mechanisms.random_sites.cluster_strength",
+            ),
+            _ => Err(ValidationError::new(
+                "pattern_definitions.mechanisms.random_sites.cluster_strength",
+                "field is inactive for the current random character",
+            )),
+        },
+        PatternDefinitionEdit::SetDensityModulationVariant {
+            mechanism_id,
+            modulation,
+        } => {
+            validate_density_modulation_target(definition, *mechanism_id)?;
+            validate_site_density_modulation(modulation)
+        }
+        PatternDefinitionEdit::SetArtworkWeightMappingComponent { mechanism_id, .. }
+        | PatternDefinitionEdit::SetArtworkWeightMappingPlacement { mechanism_id, .. }
+        | PatternDefinitionEdit::SetArtworkWeightMappingInverted { mechanism_id, .. } => {
+            validate_artwork_weighted_target(definition, *mechanism_id).map(|_| ())
+        }
+        PatternDefinitionEdit::SetArtworkWeightMappingGain { mechanism_id, gain } => {
+            validate_artwork_weighted_target(definition, *mechanism_id)?;
+            validate_nonnegative_finite(
+                *gain,
+                "pattern_definitions.mechanisms.site_density.mapping.gain",
+            )
+        }
+        PatternDefinitionEdit::SetArtworkWeightMappingBias { mechanism_id, bias } => {
+            validate_artwork_weighted_target(definition, *mechanism_id)?;
+            validate_finite(
+                *bias,
+                "pattern_definitions.mechanisms.site_density.mapping.bias",
+            )
+        }
+        PatternDefinitionEdit::SetArtworkWeightStrength {
+            mechanism_id,
+            strength,
+        } => {
+            validate_artwork_weighted_target(definition, *mechanism_id)?;
+            validate_unit_component(
+                *strength,
+                "pattern_definitions.mechanisms.site_density.strength",
+            )
+        }
+        PatternDefinitionEdit::SetArtworkWeightResponse { mechanism_id, .. } => {
+            validate_artwork_weighted_target(definition, *mechanism_id).map(|_| ())
+        }
+        PatternDefinitionEdit::SetExclusionVariant {
+            mechanism_id,
+            policy,
+        } => {
+            validate_exclusion_target(definition, *mechanism_id)?;
+            validate_site_exclusion(policy)
+        }
+        PatternDefinitionEdit::SetExclusionMinimumCenterDistance {
+            mechanism_id,
+            minimum_center_distance,
+        } => match validate_exclusion_target(definition, *mechanism_id)? {
+            SiteExclusionPolicy::MinimumCenterDistance { .. } => validate_positive_finite(
+                *minimum_center_distance,
+                "pattern_definitions.mechanisms.site_exclusion.minimum",
+            ),
+            _ => Err(ValidationError::new(
+                "pattern_definitions.mechanisms.site_exclusion.minimum",
+                "field is inactive for the current exclusion policy",
+            )),
+        },
+        PatternDefinitionEdit::SetVisibleMarkMargin {
+            mechanism_id,
+            margin,
+        } => match validate_exclusion_target(definition, *mechanism_id)? {
+            SiteExclusionPolicy::VisibleMarkMargin { .. } => validate_nonnegative_finite(
+                *margin,
+                "pattern_definitions.mechanisms.site_exclusion.margin",
+            ),
+            _ => Err(ValidationError::new(
+                "pattern_definitions.mechanisms.site_exclusion.margin",
+                "field is inactive for the current exclusion policy",
+            )),
+        },
+        PatternDefinitionEdit::SetVisibleMarkSizingPolicy { mechanism_id, .. } => {
+            match validate_exclusion_target(definition, *mechanism_id)? {
+                SiteExclusionPolicy::VisibleMarkMargin { .. } => Ok(()),
+                _ => Err(ValidationError::new(
+                    "pattern_definitions.mechanisms.site_exclusion.sizing",
+                    "field is inactive for the current exclusion policy",
+                )),
+            }
+        }
+        PatternDefinitionEdit::SetRandomMaximumAttempts {
+            mechanism_id,
+            maximum_attempts,
+        } => {
+            validate_random_product_target(definition, *mechanism_id)?;
+            if *maximum_attempts > 0 {
+                Ok(())
+            } else {
+                Err(ValidationError::new(
+                    "pattern_definitions.mechanisms.random_sites.maximum_attempts",
+                    "random product work limits must be nonzero",
+                ))
+            }
+        }
+        PatternDefinitionEdit::SetRandomMaximumNeighborChecks {
+            mechanism_id,
+            maximum_neighbor_checks,
+        } => {
+            validate_random_product_target(definition, *mechanism_id)?;
+            if *maximum_neighbor_checks > 0 {
+                Ok(())
+            } else {
+                Err(ValidationError::new(
+                    "pattern_definitions.mechanisms.random_sites.maximum_neighbor_checks",
+                    "random product work limits must be nonzero",
+                ))
+            }
+        }
+        PatternDefinitionEdit::SetOutputSiteProduct {
+            output_layer_id,
+            site_mechanism_id,
+        } => {
+            validate_output_layer_target(definition, *output_layer_id)?;
+            if definition
+                .mechanisms
+                .iter()
+                .any(|mechanism| mechanism.id() == *site_mechanism_id)
+            {
+                Ok(())
+            } else {
+                Err(ValidationError::new(
+                    "pattern_definitions.output_layers.site_mechanism_id",
+                    "command references a missing site mechanism",
+                ))
+            }
+        }
+        PatternDefinitionEdit::SetOutputMarkPrototype {
+            output_layer_id,
+            prototype,
+        } => {
+            validate_mark_prototype_output_target(definition, *output_layer_id)?;
+            if matches!(prototype, MarkPrototype::Circle) {
+                Ok(())
+            } else {
+                Err(ValidationError::new(
+                    "pattern_definitions.output_layers.prototype",
+                    "unsupported mark prototype",
+                ))
+            }
+        }
+        PatternDefinitionEdit::SetOutputOrientation {
+            output_layer_id,
+            orientation,
+        } => {
+            validate_mark_prototype_output_target(definition, *output_layer_id)?;
+            validate_output_orientation(definition, orientation)
+        }
+        PatternDefinitionEdit::SetOutputOrientationDimension {
+            output_layer_id,
+            dimension_id,
+        } => match validate_mark_prototype_output_target(definition, *output_layer_id)? {
+            PatternOutputLayer::MarkPrototype {
+                orientation:
+                    MarkOrientation::GuideTangent { .. } | MarkOrientation::GuideNormal { .. },
+                ..
+            } => validate_output_orientation(
+                definition,
+                &MarkOrientation::GuideTangent {
+                    dimension_id: *dimension_id,
+                },
+            ),
+            _ => Err(ValidationError::new(
+                "pattern_definitions.output_layers.orientation.dimension_id",
+                "field is inactive for fixed output orientation",
+            )),
+        },
     }
+}
+
+fn validate_property_field_projection(
+    projection: PropertyCommandFieldProjection,
+) -> Result<(), ValidationError> {
+    let contract = property_field_contract(projection.field);
+    let kind_matches = matches!(
+        (contract.value_kind, projection.value),
+        (
+            PropertyValueKind::FiniteF64,
+            PropertyFieldValue::FiniteF64(_)
+        ) | (PropertyValueKind::U32, PropertyFieldValue::U32(_))
+            | (PropertyValueKind::Boolean, PropertyFieldValue::Boolean(_))
+            | (
+                PropertyValueKind::StableIdReference,
+                PropertyFieldValue::StableIdReference
+            )
+            | (
+                PropertyValueKind::StableIdReference,
+                PropertyFieldValue::StableIdReferenceCollection(_)
+            )
+            | (
+                PropertyValueKind::EnumChoice,
+                PropertyFieldValue::EnumChoice(_)
+            )
+    );
+    if !kind_matches {
+        return Err(ValidationError::new(
+            "command.field",
+            "command value does not match its field contract",
+        ));
+    }
+    let value = match projection.value {
+        PropertyFieldValue::FiniteF64(value) => {
+            if !value.is_finite() {
+                return Err(ValidationError::new(
+                    "command.field",
+                    "value must be finite",
+                ));
+            }
+            value
+        }
+        PropertyFieldValue::U32(value) => value as f64,
+        PropertyFieldValue::EnumChoice(choice) => {
+            if !contract.choices.is_empty() && !contract.choices.contains(&choice) {
+                return Err(ValidationError::new(
+                    "command.field",
+                    "value is not a legal field enum choice",
+                ));
+            }
+            return Ok(());
+        }
+        PropertyFieldValue::StableIdReferenceCollection(count) => {
+            let PropertyReferenceConstraint::OrderedUniqueCollection {
+                minimum_items,
+                maximum_items,
+            } = contract.reference_constraint
+            else {
+                return Err(ValidationError::new(
+                    "command.field",
+                    "field does not accept a reference collection",
+                ));
+            };
+            if count < minimum_items as usize || count > maximum_items as usize {
+                return Err(ValidationError::new(
+                    "command.field",
+                    "reference collection violates field cardinality",
+                ));
+            }
+            return Ok(());
+        }
+        PropertyFieldValue::Boolean(_) | PropertyFieldValue::StableIdReference => return Ok(()),
+    };
+    if let Some(bounds) = contract.bounds {
+        if let Some(minimum) = bounds.minimum
+            && (value < minimum || (!bounds.minimum_inclusive && value == minimum))
+        {
+            return Err(ValidationError::new(
+                "command.field",
+                "value is below field minimum",
+            ));
+        }
+        if let Some(maximum) = bounds.maximum
+            && (value > maximum || (!bounds.maximum_inclusive && value == maximum))
+        {
+            return Err(ValidationError::new(
+                "command.field",
+                "value is above field maximum",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_guide_dimension_target(
+    definition: &PatternDefinition,
+    mechanism_id: PatternMechanismId,
+    dimension_id: GuideDimensionId,
+) -> Result<(), ValidationError> {
+    match definition
+        .mechanisms
+        .iter()
+        .find(|mechanism| mechanism.id() == mechanism_id)
+    {
+        Some(PatternMechanism::StraightGuideDimensions { dimensions, .. })
+            if dimensions
+                .iter()
+                .any(|dimension| dimension.id == dimension_id) =>
+        {
+            Ok(())
+        }
+        Some(PatternMechanism::StraightGuideDimensions { .. }) => Err(ValidationError::new(
+            "pattern_definitions.mechanisms.dimensions.id",
+            "command targets a missing guide dimension",
+        )),
+        Some(_) => Err(ValidationError::new(
+            "pattern_definitions.mechanisms.dimensions",
+            "command targets an incompatible guide mechanism",
+        )),
+        None => Err(ValidationError::new(
+            "pattern_definitions.mechanisms.id",
+            "command targets a missing guide mechanism",
+        )),
+    }
+}
+
+fn straight_guide_root_dimensions(
+    definition: &PatternDefinition,
+) -> Result<&[StraightGuideDimension], ValidationError> {
+    match definition.mechanisms.first() {
+        Some(PatternMechanism::StraightGuideDimensions { dimensions, .. }) => Ok(dimensions),
+        _ => Err(ValidationError::new(
+            "pattern_definitions.family",
+            "definition has no straight guide root",
+        )),
+    }
+}
+
+fn validate_selected_intersection_target(
+    definition: &PatternDefinition,
+    mechanism_id: PatternMechanismId,
+) -> Result<&[StraightGuideDimension], ValidationError> {
+    let available = straight_guide_root_dimensions(definition)?;
+    match definition
+        .mechanisms
+        .iter()
+        .find(|mechanism| mechanism.id() == mechanism_id)
+    {
+        Some(PatternMechanism::SelectedGuideIntersections { .. }) => Ok(available),
+        Some(_) => Err(ValidationError::new(
+            "pattern_definitions.mechanisms.id",
+            "command targets an incompatible intersection mechanism",
+        )),
+        None => Err(ValidationError::new(
+            "pattern_definitions.mechanisms.id",
+            "command targets a missing intersection mechanism",
+        )),
+    }
+}
+
+fn validate_along_guide_target(
+    definition: &PatternDefinition,
+    mechanism_id: PatternMechanismId,
+) -> Result<&[StraightGuideDimension], ValidationError> {
+    let available = straight_guide_root_dimensions(definition)?;
+    match definition
+        .mechanisms
+        .iter()
+        .find(|mechanism| mechanism.id() == mechanism_id)
+    {
+        Some(PatternMechanism::AlongGuideSites { .. }) => Ok(available),
+        Some(_) => Err(ValidationError::new(
+            "pattern_definitions.mechanisms.id",
+            "command targets an incompatible along-guide mechanism",
+        )),
+        None => Err(ValidationError::new(
+            "pattern_definitions.mechanisms.id",
+            "command targets a missing along-guide mechanism",
+        )),
+    }
+}
+
+fn validate_random_process_target(
+    definition: &PatternDefinition,
+    mechanism_id: PatternMechanismId,
+) -> Result<&RandomSiteCharacter, ValidationError> {
+    match definition
+        .mechanisms
+        .iter()
+        .find(|mechanism| mechanism.id() == mechanism_id)
+    {
+        Some(PatternMechanism::RandomSiteProcess { character, .. }) => Ok(character),
+        Some(_) => Err(ValidationError::new(
+            "pattern_definitions.mechanisms.id",
+            "command targets an incompatible random process",
+        )),
+        None => Err(ValidationError::new(
+            "pattern_definitions.mechanisms.id",
+            "command targets a missing random process",
+        )),
+    }
+}
+
+fn validate_density_modulation_target(
+    definition: &PatternDefinition,
+    mechanism_id: PatternMechanismId,
+) -> Result<&SiteDensityModulation, ValidationError> {
+    match definition
+        .mechanisms
+        .iter()
+        .find(|mechanism| mechanism.id() == mechanism_id)
+    {
+        Some(PatternMechanism::SiteDensityModulation { modulation, .. }) => Ok(modulation),
+        Some(_) => Err(ValidationError::new(
+            "pattern_definitions.mechanisms.id",
+            "command targets an incompatible density modulation",
+        )),
+        None => Err(ValidationError::new(
+            "pattern_definitions.mechanisms.id",
+            "command targets a missing density modulation",
+        )),
+    }
+}
+
+fn validate_artwork_weighted_target(
+    definition: &PatternDefinition,
+    mechanism_id: PatternMechanismId,
+) -> Result<&SourceMapping, ValidationError> {
+    match validate_density_modulation_target(definition, mechanism_id)? {
+        SiteDensityModulation::ArtworkWeighted { mapping, .. } => Ok(mapping),
+        SiteDensityModulation::Uniform => Err(ValidationError::new(
+            "pattern_definitions.mechanisms.site_density",
+            "field is inactive for uniform density modulation",
+        )),
+    }
+}
+
+fn validate_exclusion_target(
+    definition: &PatternDefinition,
+    mechanism_id: PatternMechanismId,
+) -> Result<&SiteExclusionPolicy, ValidationError> {
+    match definition
+        .mechanisms
+        .iter()
+        .find(|mechanism| mechanism.id() == mechanism_id)
+    {
+        Some(PatternMechanism::SiteExclusion { policy, .. }) => Ok(policy),
+        Some(_) => Err(ValidationError::new(
+            "pattern_definitions.mechanisms.id",
+            "command targets an incompatible exclusion mechanism",
+        )),
+        None => Err(ValidationError::new(
+            "pattern_definitions.mechanisms.id",
+            "command targets a missing exclusion mechanism",
+        )),
+    }
+}
+
+fn validate_random_product_target(
+    definition: &PatternDefinition,
+    mechanism_id: PatternMechanismId,
+) -> Result<(), ValidationError> {
+    match definition
+        .mechanisms
+        .iter()
+        .find(|mechanism| mechanism.id() == mechanism_id)
+    {
+        Some(PatternMechanism::RandomSiteProduct { .. }) => Ok(()),
+        Some(_) => Err(ValidationError::new(
+            "pattern_definitions.mechanisms.id",
+            "command targets an incompatible random product",
+        )),
+        None => Err(ValidationError::new(
+            "pattern_definitions.mechanisms.id",
+            "command targets a missing random product",
+        )),
+    }
+}
+
+fn validate_output_layer_target(
+    definition: &PatternDefinition,
+    output_layer_id: PatternOutputLayerId,
+) -> Result<&PatternOutputLayer, ValidationError> {
+    definition
+        .output_layers
+        .iter()
+        .find(|layer| layer.id() == output_layer_id)
+        .ok_or_else(|| {
+            ValidationError::new(
+                "pattern_definitions.output_layers.id",
+                "command targets a missing output layer",
+            )
+        })
+}
+
+fn validate_mark_prototype_output_target(
+    definition: &PatternDefinition,
+    output_layer_id: PatternOutputLayerId,
+) -> Result<&PatternOutputLayer, ValidationError> {
+    match validate_output_layer_target(definition, output_layer_id)? {
+        layer @ PatternOutputLayer::MarkPrototype { .. } => Ok(layer),
+        PatternOutputLayer::CircularMarks { .. } => Err(ValidationError::new(
+            "pattern_definitions.output_layers",
+            "command targets an output without a mark-prototype configuration",
+        )),
+    }
+}
+
+fn validate_output_orientation(
+    definition: &PatternDefinition,
+    orientation: &MarkOrientation,
+) -> Result<(), ValidationError> {
+    match orientation {
+        MarkOrientation::Fixed => Ok(()),
+        MarkOrientation::GuideTangent { dimension_id }
+        | MarkOrientation::GuideNormal { dimension_id }
+            if definition.mechanisms.iter().any(|mechanism| {
+                matches!(mechanism, PatternMechanism::StraightGuideDimensions { dimensions, .. } if dimensions.iter().any(|dimension| dimension.id == *dimension_id))
+            }) =>
+        {
+            Ok(())
+        }
+        _ => Err(ValidationError::new(
+            "pattern_definitions.output_layers.orientation",
+            "orientation is incompatible with definition dimensions",
+        )),
+    }
+}
+
+fn definition_edit_invalidation(edit: &PatternDefinitionEdit) -> InvalidationLevel {
+    property_field_contract(edit.field_projection().field).invalidation
 }
 
 fn affected_topology_channels(
@@ -1899,6 +3834,50 @@ fn validate_generalized_output_layers(
     }
 }
 
+fn derive_density_axis(
+    canvas: &CanvasSpec,
+    authoritative_value: f64,
+    edited_axis: DensityEditedAxis,
+) -> Result<f64, ValidationError> {
+    validate_positive_finite(authoritative_value, "channel.pattern.layout.density")?;
+    validate_positive_finite(canvas.width, "canvas.width")?;
+    validate_positive_finite(canvas.height, "canvas.height")?;
+    let result = match edited_axis {
+        DensityEditedAxis::AcrossX => authoritative_value * canvas.height / canvas.width,
+        DensityEditedAxis::AcrossY => authoritative_value * canvas.width / canvas.height,
+    };
+    validate_positive_finite(result, "channel.pattern.layout.density.derived_axis")?;
+    Ok(result)
+}
+
+fn set_density_axis(
+    density: &mut DensityMetric2D,
+    canvas: &CanvasSpec,
+    edited_axis: DensityEditedAxis,
+    value: f64,
+) -> Result<(), ValidationError> {
+    let paired = if density.aspect_locked {
+        Some(derive_density_axis(canvas, value, edited_axis)?)
+    } else {
+        None
+    };
+    match edited_axis {
+        DensityEditedAxis::AcrossX => {
+            density.across_x = value;
+            if let Some(value) = paired {
+                density.across_y = value;
+            }
+        }
+        DensityEditedAxis::AcrossY => {
+            density.across_y = value;
+            if let Some(value) = paired {
+                density.across_x = value;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_layout(layout: &ChannelPatternLayout) -> Result<(), ValidationError> {
     validate_positive_finite(
         layout.density.across_x,
@@ -2057,6 +4036,15 @@ fn validate_unit_component(value: f64, path: &'static str) -> Result<(), Validat
     }
 }
 
+fn set_color_component(color: &mut ColorValue, component: ColorComponent, value: f64) {
+    match component {
+        ColorComponent::Red => color.red = value,
+        ColorComponent::Green => color.green = value,
+        ColorComponent::Blue => color.blue = value,
+        ColorComponent::Alpha => color.alpha = value,
+    }
+}
+
 /// A schema-scoped validation failure suitable for a frontend error display.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidationError {
@@ -2103,6 +4091,960 @@ pub struct CommandResult {
     pub invalidation: InvalidationLevel,
 }
 
+/// The explicit density control which supplied a replacement value.  Keeping
+/// this intent in the command (rather than inferring it from two values) is
+/// what makes aspect-locked updates deterministic and replayable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DensityEditedAxis {
+    AcrossX,
+    AcrossY,
+}
+
+/// The explicit translation coordinate supplied by a channel-frame edit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TranslationEditedAxis {
+    X,
+    Y,
+}
+
+/// A compact, schema-only capability vocabulary.  It deliberately contains
+/// neither current values nor UI policy: callers read those from `Document`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PropertyFieldId {
+    SourceReference,
+    DensityAcrossX,
+    DensityAcrossY,
+    DensityAspectLocked,
+    RotationDegrees,
+    TranslationX,
+    TranslationY,
+    MarkMinimumSize,
+    MarkMaximumSize,
+    LegacyMappingComponent,
+    LegacyMappingPlacement,
+    ModeledMappingComponent,
+    ModeledMappingPlacement,
+    ModeledMappingInverted,
+    ModeledMappingGain,
+    ModeledMappingBias,
+    Paint,
+    ColorRed,
+    ColorGreen,
+    ColorBlue,
+    ColorAlpha,
+    Opacity,
+    Visibility,
+    DefinitionSelection,
+    CoverageGuardSteps,
+    CoverageMaximumSupportRadius,
+    GuideBaselineAngle,
+    GuidePhase,
+    GuideSpacingMultiplier,
+    IntersectionDimensions,
+    IntersectionMergeEpsilon,
+    AlongGuideDimensions,
+    AlongGuideIntervalMultiplier,
+    AlongGuidePhase,
+    RandomCharacter,
+    RandomEvenMinimumCenterDistance,
+    RandomClusterDensity,
+    RandomClusterSpread,
+    RandomClusterStrength,
+    RandomSeed,
+    RandomDensityModulation,
+    ArtworkWeightMappingComponent,
+    ArtworkWeightMappingPlacement,
+    ArtworkWeightMappingInverted,
+    ArtworkWeightMappingGain,
+    ArtworkWeightMappingBias,
+    ArtworkWeightStrength,
+    ArtworkWeightResponse,
+    RandomExclusion,
+    ExclusionMinimumCenterDistance,
+    VisibleMarkMargin,
+    VisibleMarkSizingPolicy,
+    RandomMaximumAttempts,
+    RandomMaximumNeighborChecks,
+    OutputSiteProduct,
+    OutputPrototype,
+    OutputOrientation,
+    OutputOrientationDimension,
+}
+
+/// The authoritative descriptor order.  Keeping this list beside the field
+/// enum makes missing or duplicate command-facing schema fields testable
+/// without deriving any ordering from frontend state or allocation order.
+pub const PROPERTY_FIELD_IDS: &[PropertyFieldId] = &[
+    PropertyFieldId::SourceReference,
+    PropertyFieldId::DensityAcrossX,
+    PropertyFieldId::DensityAcrossY,
+    PropertyFieldId::DensityAspectLocked,
+    PropertyFieldId::RotationDegrees,
+    PropertyFieldId::TranslationX,
+    PropertyFieldId::TranslationY,
+    PropertyFieldId::MarkMinimumSize,
+    PropertyFieldId::MarkMaximumSize,
+    PropertyFieldId::LegacyMappingComponent,
+    PropertyFieldId::LegacyMappingPlacement,
+    PropertyFieldId::ModeledMappingComponent,
+    PropertyFieldId::ModeledMappingPlacement,
+    PropertyFieldId::ModeledMappingInverted,
+    PropertyFieldId::ModeledMappingGain,
+    PropertyFieldId::ModeledMappingBias,
+    PropertyFieldId::Paint,
+    PropertyFieldId::ColorRed,
+    PropertyFieldId::ColorGreen,
+    PropertyFieldId::ColorBlue,
+    PropertyFieldId::ColorAlpha,
+    PropertyFieldId::Opacity,
+    PropertyFieldId::Visibility,
+    PropertyFieldId::DefinitionSelection,
+    PropertyFieldId::CoverageGuardSteps,
+    PropertyFieldId::CoverageMaximumSupportRadius,
+    PropertyFieldId::GuideBaselineAngle,
+    PropertyFieldId::GuidePhase,
+    PropertyFieldId::GuideSpacingMultiplier,
+    PropertyFieldId::IntersectionDimensions,
+    PropertyFieldId::IntersectionMergeEpsilon,
+    PropertyFieldId::AlongGuideDimensions,
+    PropertyFieldId::AlongGuideIntervalMultiplier,
+    PropertyFieldId::AlongGuidePhase,
+    PropertyFieldId::RandomCharacter,
+    PropertyFieldId::RandomEvenMinimumCenterDistance,
+    PropertyFieldId::RandomClusterDensity,
+    PropertyFieldId::RandomClusterSpread,
+    PropertyFieldId::RandomClusterStrength,
+    PropertyFieldId::RandomSeed,
+    PropertyFieldId::RandomDensityModulation,
+    PropertyFieldId::ArtworkWeightMappingComponent,
+    PropertyFieldId::ArtworkWeightMappingPlacement,
+    PropertyFieldId::ArtworkWeightMappingInverted,
+    PropertyFieldId::ArtworkWeightMappingGain,
+    PropertyFieldId::ArtworkWeightMappingBias,
+    PropertyFieldId::ArtworkWeightStrength,
+    PropertyFieldId::ArtworkWeightResponse,
+    PropertyFieldId::RandomExclusion,
+    PropertyFieldId::ExclusionMinimumCenterDistance,
+    PropertyFieldId::VisibleMarkMargin,
+    PropertyFieldId::VisibleMarkSizingPolicy,
+    PropertyFieldId::RandomMaximumAttempts,
+    PropertyFieldId::RandomMaximumNeighborChecks,
+    PropertyFieldId::OutputSiteProduct,
+    PropertyFieldId::OutputPrototype,
+    PropertyFieldId::OutputOrientation,
+    PropertyFieldId::OutputOrientationDimension,
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PropertyTarget {
+    Document,
+    Channel(ChannelId),
+    Definition(PatternDefinitionId),
+    Mechanism(PatternDefinitionId, PatternMechanismId),
+    OutputLayer(PatternDefinitionId, PatternOutputLayerId),
+    GuideDimension(PatternDefinitionId, PatternMechanismId, GuideDimensionId),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PropertyValueKind {
+    FiniteF64,
+    U32,
+    Boolean,
+    StableIdReference,
+    EnumChoice,
+}
+
+/// Stable finite discriminants for descriptor enum fields. Payload values are
+/// addressed by their own descriptors and never encoded as display strings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PropertyEnumChoice {
+    SourceMappingComponent(SourceMappingComponent),
+    SourcePlacement(SourcePlacement),
+    Paint(PaintKind),
+    RandomCharacter(RandomCharacterKind),
+    DensityModulation(DensityModulationKind),
+    ArtworkWeightResponse(ArtworkWeightResponse),
+    Exclusion(ExclusionKind),
+    VisibleMarkSizingPolicy(VisibleMarkSizingPolicy),
+    MarkPrototype(MarkPrototypeKind),
+    MarkOrientation(MarkOrientationKind),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaintKind {
+    Solid,
+    SampledSource,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RandomCharacterKind {
+    RawUniform,
+    Even,
+    Clustered,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DensityModulationKind {
+    Uniform,
+    ArtworkWeighted,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExclusionKind {
+    None,
+    MinimumCenterDistance,
+    VisibleMarkMargin,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkPrototypeKind {
+    Circle,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkOrientationKind {
+    Fixed,
+    GuideTangent,
+    GuideNormal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PropertyBounds {
+    pub minimum: Option<f64>,
+    pub minimum_inclusive: bool,
+    pub maximum: Option<f64>,
+    pub maximum_inclusive: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PropertyUnit {
+    None,
+    Density,
+    Degrees,
+    Phase,
+    DocumentDistance,
+    NormalizedComponent,
+    Count,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PropertyDependency {
+    Always,
+    ModeledChannel,
+    SolidPaint,
+    SampledPaint,
+    StraightGuideDimension,
+    IntersectionProduct,
+    AlongGuideProduct,
+    RandomProcess,
+    EvenRandomProcess,
+    ClusteredRandomProcess,
+    ArtworkWeightedDensity,
+    MinimumCenterExclusion,
+    VisibleMarkExclusion,
+    MarkPrototypeOutput,
+    GuidedOutputOrientation,
+}
+
+/// The schema predicate that decides whether an otherwise stable field is
+/// active.  This is capability metadata, not a stored value or UI policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PropertyApplicability {
+    Always,
+    ModeledChannel,
+    SolidPaint,
+    StraightGuideDimension,
+    IntersectionProduct,
+    AlongGuideProduct,
+    RandomProcess,
+    EvenRandomProcess,
+    ClusteredRandomProcess,
+    ArtworkWeightedDensity,
+    MinimumCenterExclusion,
+    VisibleMarkExclusion,
+    MarkPrototypeOutput,
+    GuidedOutputOrientation,
+    CurrentPaint,
+    CurrentDensityModulation,
+    CurrentExclusion,
+}
+
+/// Schema constraint explanation only; this never calculates geometry or
+/// captures a persisted value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StructuralSupportConstraint {
+    None,
+    /// This field declares the definition-wide maximum support envelope that
+    /// mark response and conservative visible-mark exclusion must respect.
+    DefinesMaximumMarkSupportRadius,
+    MarkResponseMustFitDefinitionMaximumSupport,
+    VisibleMarkMarginUsesMaximumSupportRadius,
+}
+
+/// Validation shape for stable references. Collection fields carry their
+/// cardinality here; exact ID existence, canonical stored order, and
+/// duplicate rejection remain document-relative typed validation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PropertyReferenceConstraint {
+    NotReference,
+    Singular,
+    OrderedUniqueCollection {
+        minimum_items: u8,
+        maximum_items: u8,
+    },
+}
+
+/// Choice resolution is explicit when legal choices depend on the active
+/// channel model/role; all other enum fields use `PropertyFieldContract::choices`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PropertyChoicePolicy {
+    Static,
+    ModelRolePaint,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PropertyCommandKind {
+    SetSourceReference,
+    SetDensityAxis,
+    SetDensityAspectLock,
+    SetRotation,
+    SetTranslationAxis,
+    SetMarkGeometryField,
+    SetLegacyMappingField,
+    SetModeledMappingField,
+    SetPaint,
+    SetColorComponent,
+    SetOpacity,
+    SetVisibility,
+    RetargetDefinition,
+    SetGuideBaselineAngle,
+    SetGuidePhase,
+    SetGuideSpacingMultiplier,
+    SetIntersectionDimensions,
+    SetIntersectionMergeEpsilon,
+    SetAlongGuideDimensions,
+    SetAlongGuideIntervalMultiplier,
+    SetAlongGuidePhase,
+    SetRandomCharacter,
+    SetRandomSeed,
+    SetRandomEvenMinimumCenterDistance,
+    SetRandomClusterDensity,
+    SetRandomClusterSpread,
+    SetRandomClusterStrength,
+    SetDensityModulationVariant,
+    SetArtworkWeightMappingComponent,
+    SetArtworkWeightMappingPlacement,
+    SetArtworkWeightMappingInverted,
+    SetArtworkWeightMappingGain,
+    SetArtworkWeightMappingBias,
+    SetArtworkWeightStrength,
+    SetArtworkWeightResponse,
+    SetExclusionVariant,
+    SetExclusionMinimumCenterDistance,
+    SetVisibleMarkMargin,
+    SetVisibleMarkSizingPolicy,
+    SetRandomMaximumAttempts,
+    SetRandomMaximumNeighborChecks,
+    SetOutputSiteProduct,
+    SetOutputMarkPrototype,
+    SetOutputOrientation,
+    SetOutputOrientationDimension,
+    SetCoverageGuardSteps,
+    SetCoverageMaximumSupportRadius,
+}
+
+/// A deterministic read-only descriptor derived from the validated current
+/// schema. `choices` uses stable discriminants, never localized labels.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PropertyDescriptor {
+    pub field: PropertyFieldId,
+    pub target: PropertyTarget,
+    pub value_kind: PropertyValueKind,
+    pub choices: &'static [PropertyEnumChoice],
+    pub bounds: Option<PropertyBounds>,
+    pub unit: PropertyUnit,
+    pub dependency: PropertyDependency,
+    pub invalidation: InvalidationLevel,
+    pub copy_on_edit_escalates_to_family: bool,
+    pub structural_support: StructuralSupportConstraint,
+    pub reference_constraint: PropertyReferenceConstraint,
+    pub choice_policy: PropertyChoicePolicy,
+}
+
+/// Exhaustive command-facing schema contract for one editable field.  It is
+/// intentionally value-free; descriptors supply active-variant applicability,
+/// while command validation uses the same field identity and invalidation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PropertyFieldContract {
+    pub field: PropertyFieldId,
+    pub command_kind: PropertyCommandKind,
+    pub value_kind: PropertyValueKind,
+    pub choices: &'static [PropertyEnumChoice],
+    pub bounds: Option<PropertyBounds>,
+    pub unit: PropertyUnit,
+    pub applicability: PropertyApplicability,
+    pub invalidation: InvalidationLevel,
+    pub copy_on_edit_escalates_to_family: bool,
+    pub structural_support: StructuralSupportConstraint,
+    pub reference_constraint: PropertyReferenceConstraint,
+    pub choice_policy: PropertyChoicePolicy,
+}
+
+pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldContract {
+    PropertyFieldContract {
+        field,
+        command_kind: match field {
+            PropertyFieldId::SourceReference => PropertyCommandKind::SetSourceReference,
+            PropertyFieldId::DensityAcrossX | PropertyFieldId::DensityAcrossY => {
+                PropertyCommandKind::SetDensityAxis
+            }
+            PropertyFieldId::DensityAspectLocked => PropertyCommandKind::SetDensityAspectLock,
+            PropertyFieldId::RotationDegrees => PropertyCommandKind::SetRotation,
+            PropertyFieldId::TranslationX | PropertyFieldId::TranslationY => {
+                PropertyCommandKind::SetTranslationAxis
+            }
+            PropertyFieldId::MarkMinimumSize | PropertyFieldId::MarkMaximumSize => {
+                PropertyCommandKind::SetMarkGeometryField
+            }
+            PropertyFieldId::LegacyMappingComponent | PropertyFieldId::LegacyMappingPlacement => {
+                PropertyCommandKind::SetLegacyMappingField
+            }
+            PropertyFieldId::ModeledMappingComponent
+            | PropertyFieldId::ModeledMappingPlacement
+            | PropertyFieldId::ModeledMappingInverted
+            | PropertyFieldId::ModeledMappingGain
+            | PropertyFieldId::ModeledMappingBias => PropertyCommandKind::SetModeledMappingField,
+            PropertyFieldId::Paint => PropertyCommandKind::SetPaint,
+            PropertyFieldId::ColorRed
+            | PropertyFieldId::ColorGreen
+            | PropertyFieldId::ColorBlue
+            | PropertyFieldId::ColorAlpha => PropertyCommandKind::SetColorComponent,
+            PropertyFieldId::Opacity => PropertyCommandKind::SetOpacity,
+            PropertyFieldId::Visibility => PropertyCommandKind::SetVisibility,
+            PropertyFieldId::DefinitionSelection => PropertyCommandKind::RetargetDefinition,
+            PropertyFieldId::GuideBaselineAngle => PropertyCommandKind::SetGuideBaselineAngle,
+            PropertyFieldId::GuidePhase => PropertyCommandKind::SetGuidePhase,
+            PropertyFieldId::GuideSpacingMultiplier => {
+                PropertyCommandKind::SetGuideSpacingMultiplier
+            }
+            PropertyFieldId::IntersectionDimensions => {
+                PropertyCommandKind::SetIntersectionDimensions
+            }
+            PropertyFieldId::IntersectionMergeEpsilon => {
+                PropertyCommandKind::SetIntersectionMergeEpsilon
+            }
+            PropertyFieldId::AlongGuideDimensions => PropertyCommandKind::SetAlongGuideDimensions,
+            PropertyFieldId::AlongGuideIntervalMultiplier => {
+                PropertyCommandKind::SetAlongGuideIntervalMultiplier
+            }
+            PropertyFieldId::AlongGuidePhase => PropertyCommandKind::SetAlongGuidePhase,
+            PropertyFieldId::RandomCharacter => PropertyCommandKind::SetRandomCharacter,
+            PropertyFieldId::RandomSeed => PropertyCommandKind::SetRandomSeed,
+            PropertyFieldId::RandomEvenMinimumCenterDistance => {
+                PropertyCommandKind::SetRandomEvenMinimumCenterDistance
+            }
+            PropertyFieldId::RandomClusterDensity => PropertyCommandKind::SetRandomClusterDensity,
+            PropertyFieldId::RandomClusterSpread => PropertyCommandKind::SetRandomClusterSpread,
+            PropertyFieldId::RandomClusterStrength => PropertyCommandKind::SetRandomClusterStrength,
+            PropertyFieldId::RandomDensityModulation => {
+                PropertyCommandKind::SetDensityModulationVariant
+            }
+            PropertyFieldId::ArtworkWeightMappingComponent => {
+                PropertyCommandKind::SetArtworkWeightMappingComponent
+            }
+            PropertyFieldId::ArtworkWeightMappingPlacement => {
+                PropertyCommandKind::SetArtworkWeightMappingPlacement
+            }
+            PropertyFieldId::ArtworkWeightMappingInverted => {
+                PropertyCommandKind::SetArtworkWeightMappingInverted
+            }
+            PropertyFieldId::ArtworkWeightMappingGain => {
+                PropertyCommandKind::SetArtworkWeightMappingGain
+            }
+            PropertyFieldId::ArtworkWeightMappingBias => {
+                PropertyCommandKind::SetArtworkWeightMappingBias
+            }
+            PropertyFieldId::ArtworkWeightStrength => PropertyCommandKind::SetArtworkWeightStrength,
+            PropertyFieldId::ArtworkWeightResponse => PropertyCommandKind::SetArtworkWeightResponse,
+            PropertyFieldId::RandomExclusion => PropertyCommandKind::SetExclusionVariant,
+            PropertyFieldId::ExclusionMinimumCenterDistance => {
+                PropertyCommandKind::SetExclusionMinimumCenterDistance
+            }
+            PropertyFieldId::VisibleMarkMargin => PropertyCommandKind::SetVisibleMarkMargin,
+            PropertyFieldId::VisibleMarkSizingPolicy => {
+                PropertyCommandKind::SetVisibleMarkSizingPolicy
+            }
+            PropertyFieldId::RandomMaximumAttempts => PropertyCommandKind::SetRandomMaximumAttempts,
+            PropertyFieldId::RandomMaximumNeighborChecks => {
+                PropertyCommandKind::SetRandomMaximumNeighborChecks
+            }
+            PropertyFieldId::OutputSiteProduct => PropertyCommandKind::SetOutputSiteProduct,
+            PropertyFieldId::OutputPrototype => PropertyCommandKind::SetOutputMarkPrototype,
+            PropertyFieldId::OutputOrientation => PropertyCommandKind::SetOutputOrientation,
+            PropertyFieldId::OutputOrientationDimension => {
+                PropertyCommandKind::SetOutputOrientationDimension
+            }
+            PropertyFieldId::CoverageGuardSteps => PropertyCommandKind::SetCoverageGuardSteps,
+            PropertyFieldId::CoverageMaximumSupportRadius => {
+                PropertyCommandKind::SetCoverageMaximumSupportRadius
+            }
+        },
+        value_kind: match field {
+            PropertyFieldId::SourceReference
+            | PropertyFieldId::DefinitionSelection
+            | PropertyFieldId::IntersectionDimensions
+            | PropertyFieldId::AlongGuideDimensions
+            | PropertyFieldId::OutputSiteProduct
+            | PropertyFieldId::OutputOrientationDimension => PropertyValueKind::StableIdReference,
+            PropertyFieldId::DensityAspectLocked
+            | PropertyFieldId::ModeledMappingInverted
+            | PropertyFieldId::ArtworkWeightMappingInverted
+            | PropertyFieldId::Visibility => PropertyValueKind::Boolean,
+            PropertyFieldId::CoverageGuardSteps
+            | PropertyFieldId::RandomSeed
+            | PropertyFieldId::RandomMaximumAttempts
+            | PropertyFieldId::RandomMaximumNeighborChecks => PropertyValueKind::U32,
+            PropertyFieldId::LegacyMappingComponent
+            | PropertyFieldId::LegacyMappingPlacement
+            | PropertyFieldId::ModeledMappingComponent
+            | PropertyFieldId::ModeledMappingPlacement
+            | PropertyFieldId::Paint
+            | PropertyFieldId::RandomCharacter
+            | PropertyFieldId::RandomDensityModulation
+            | PropertyFieldId::ArtworkWeightMappingComponent
+            | PropertyFieldId::ArtworkWeightMappingPlacement
+            | PropertyFieldId::ArtworkWeightResponse
+            | PropertyFieldId::RandomExclusion
+            | PropertyFieldId::VisibleMarkSizingPolicy
+            | PropertyFieldId::OutputPrototype
+            | PropertyFieldId::OutputOrientation => PropertyValueKind::EnumChoice,
+            _ => PropertyValueKind::FiniteF64,
+        },
+        choices: match field {
+            PropertyFieldId::LegacyMappingComponent => LEGACY_COMPONENT_CHOICES,
+            PropertyFieldId::LegacyMappingPlacement
+            | PropertyFieldId::ModeledMappingPlacement
+            | PropertyFieldId::ArtworkWeightMappingPlacement => SOURCE_PLACEMENT_CHOICES,
+            PropertyFieldId::ModeledMappingComponent
+            | PropertyFieldId::ArtworkWeightMappingComponent => SOURCE_MAPPING_CHOICES,
+            PropertyFieldId::RandomCharacter => RANDOM_CHARACTER_CHOICES,
+            PropertyFieldId::RandomDensityModulation => DENSITY_MODULATION_CHOICES,
+            PropertyFieldId::ArtworkWeightResponse => ARTWORK_RESPONSE_CHOICES,
+            PropertyFieldId::RandomExclusion => EXCLUSION_CHOICES,
+            PropertyFieldId::VisibleMarkSizingPolicy => VISIBLE_MARK_SIZING_POLICY_CHOICES,
+            PropertyFieldId::OutputPrototype => MARK_PROTOTYPE_CHOICES,
+            PropertyFieldId::OutputOrientation => MARK_ORIENTATION_CHOICES,
+            _ => &[],
+        },
+        bounds: match field {
+            PropertyFieldId::DensityAcrossX
+            | PropertyFieldId::DensityAcrossY
+            | PropertyFieldId::GuideSpacingMultiplier
+            | PropertyFieldId::AlongGuideIntervalMultiplier
+            | PropertyFieldId::RandomEvenMinimumCenterDistance
+            | PropertyFieldId::RandomClusterDensity
+            | PropertyFieldId::RandomClusterSpread
+            | PropertyFieldId::ExclusionMinimumCenterDistance
+            | PropertyFieldId::RandomMaximumAttempts
+            | PropertyFieldId::RandomMaximumNeighborChecks => positive_bounds(),
+            PropertyFieldId::MarkMinimumSize
+            | PropertyFieldId::MarkMaximumSize
+            | PropertyFieldId::CoverageMaximumSupportRadius
+            | PropertyFieldId::ModeledMappingGain
+            | PropertyFieldId::ArtworkWeightMappingGain
+            | PropertyFieldId::VisibleMarkMargin
+            | PropertyFieldId::IntersectionMergeEpsilon => nonnegative_bounds(),
+            PropertyFieldId::ColorRed
+            | PropertyFieldId::ColorGreen
+            | PropertyFieldId::ColorBlue
+            | PropertyFieldId::ColorAlpha
+            | PropertyFieldId::Opacity
+            | PropertyFieldId::RandomClusterStrength
+            | PropertyFieldId::ArtworkWeightStrength => unit_bounds(),
+            _ => None,
+        },
+        unit: match field {
+            PropertyFieldId::DensityAcrossX
+            | PropertyFieldId::DensityAcrossY
+            | PropertyFieldId::GuideSpacingMultiplier
+            | PropertyFieldId::AlongGuideIntervalMultiplier
+            | PropertyFieldId::RandomClusterDensity => PropertyUnit::Density,
+            PropertyFieldId::RotationDegrees | PropertyFieldId::GuideBaselineAngle => {
+                PropertyUnit::Degrees
+            }
+            PropertyFieldId::GuidePhase | PropertyFieldId::AlongGuidePhase => PropertyUnit::Phase,
+            PropertyFieldId::TranslationX
+            | PropertyFieldId::TranslationY
+            | PropertyFieldId::MarkMinimumSize
+            | PropertyFieldId::MarkMaximumSize
+            | PropertyFieldId::CoverageMaximumSupportRadius
+            | PropertyFieldId::IntersectionMergeEpsilon
+            | PropertyFieldId::RandomEvenMinimumCenterDistance
+            | PropertyFieldId::RandomClusterSpread
+            | PropertyFieldId::ExclusionMinimumCenterDistance
+            | PropertyFieldId::VisibleMarkMargin => PropertyUnit::DocumentDistance,
+            PropertyFieldId::ColorRed
+            | PropertyFieldId::ColorGreen
+            | PropertyFieldId::ColorBlue
+            | PropertyFieldId::ColorAlpha
+            | PropertyFieldId::Opacity
+            | PropertyFieldId::ModeledMappingGain
+            | PropertyFieldId::ModeledMappingBias
+            | PropertyFieldId::RandomClusterStrength
+            | PropertyFieldId::ArtworkWeightMappingGain
+            | PropertyFieldId::ArtworkWeightMappingBias
+            | PropertyFieldId::ArtworkWeightStrength => PropertyUnit::NormalizedComponent,
+            PropertyFieldId::CoverageGuardSteps
+            | PropertyFieldId::RandomSeed
+            | PropertyFieldId::RandomMaximumAttempts
+            | PropertyFieldId::RandomMaximumNeighborChecks => PropertyUnit::Count,
+            _ => PropertyUnit::None,
+        },
+        applicability: match field {
+            PropertyFieldId::ModeledMappingComponent
+            | PropertyFieldId::ModeledMappingPlacement
+            | PropertyFieldId::ModeledMappingInverted
+            | PropertyFieldId::ModeledMappingGain
+            | PropertyFieldId::ModeledMappingBias => PropertyApplicability::ModeledChannel,
+            PropertyFieldId::Paint => PropertyApplicability::CurrentPaint,
+            PropertyFieldId::ColorRed
+            | PropertyFieldId::ColorGreen
+            | PropertyFieldId::ColorBlue
+            | PropertyFieldId::ColorAlpha => PropertyApplicability::SolidPaint,
+            PropertyFieldId::GuideBaselineAngle
+            | PropertyFieldId::GuidePhase
+            | PropertyFieldId::GuideSpacingMultiplier => {
+                PropertyApplicability::StraightGuideDimension
+            }
+            PropertyFieldId::IntersectionDimensions | PropertyFieldId::IntersectionMergeEpsilon => {
+                PropertyApplicability::IntersectionProduct
+            }
+            PropertyFieldId::AlongGuideDimensions
+            | PropertyFieldId::AlongGuideIntervalMultiplier
+            | PropertyFieldId::AlongGuidePhase => PropertyApplicability::AlongGuideProduct,
+            PropertyFieldId::RandomCharacter | PropertyFieldId::RandomSeed => {
+                PropertyApplicability::RandomProcess
+            }
+            PropertyFieldId::RandomEvenMinimumCenterDistance => {
+                PropertyApplicability::EvenRandomProcess
+            }
+            PropertyFieldId::RandomClusterDensity
+            | PropertyFieldId::RandomClusterSpread
+            | PropertyFieldId::RandomClusterStrength => {
+                PropertyApplicability::ClusteredRandomProcess
+            }
+            PropertyFieldId::RandomDensityModulation => {
+                PropertyApplicability::CurrentDensityModulation
+            }
+            PropertyFieldId::ArtworkWeightMappingComponent
+            | PropertyFieldId::ArtworkWeightMappingPlacement
+            | PropertyFieldId::ArtworkWeightMappingInverted
+            | PropertyFieldId::ArtworkWeightMappingGain
+            | PropertyFieldId::ArtworkWeightMappingBias
+            | PropertyFieldId::ArtworkWeightStrength
+            | PropertyFieldId::ArtworkWeightResponse => {
+                PropertyApplicability::ArtworkWeightedDensity
+            }
+            PropertyFieldId::RandomExclusion => PropertyApplicability::CurrentExclusion,
+            PropertyFieldId::ExclusionMinimumCenterDistance => {
+                PropertyApplicability::MinimumCenterExclusion
+            }
+            PropertyFieldId::VisibleMarkMargin | PropertyFieldId::VisibleMarkSizingPolicy => {
+                PropertyApplicability::VisibleMarkExclusion
+            }
+            PropertyFieldId::RandomMaximumAttempts
+            | PropertyFieldId::RandomMaximumNeighborChecks => PropertyApplicability::RandomProcess,
+            PropertyFieldId::OutputSiteProduct
+            | PropertyFieldId::OutputPrototype
+            | PropertyFieldId::OutputOrientation => PropertyApplicability::MarkPrototypeOutput,
+            PropertyFieldId::OutputOrientationDimension => {
+                PropertyApplicability::GuidedOutputOrientation
+            }
+            _ => PropertyApplicability::Always,
+        },
+        invalidation: match field {
+            PropertyFieldId::SourceReference => InvalidationLevel::Source,
+            PropertyFieldId::MarkMinimumSize
+            | PropertyFieldId::MarkMaximumSize
+            | PropertyFieldId::LegacyMappingComponent
+            | PropertyFieldId::LegacyMappingPlacement
+            | PropertyFieldId::ModeledMappingComponent
+            | PropertyFieldId::ModeledMappingPlacement
+            | PropertyFieldId::ModeledMappingInverted
+            | PropertyFieldId::ModeledMappingGain
+            | PropertyFieldId::ModeledMappingBias
+            | PropertyFieldId::OutputSiteProduct
+            | PropertyFieldId::OutputPrototype
+            | PropertyFieldId::OutputOrientation
+            | PropertyFieldId::OutputOrientationDimension => InvalidationLevel::Realization,
+            PropertyFieldId::Paint
+            | PropertyFieldId::ColorRed
+            | PropertyFieldId::ColorGreen
+            | PropertyFieldId::ColorBlue
+            | PropertyFieldId::ColorAlpha
+            | PropertyFieldId::Opacity
+            | PropertyFieldId::Visibility => InvalidationLevel::Presentation,
+            _ => InvalidationLevel::Family,
+        },
+        copy_on_edit_escalates_to_family: matches!(
+            field,
+            PropertyFieldId::CoverageGuardSteps
+                | PropertyFieldId::CoverageMaximumSupportRadius
+                | PropertyFieldId::GuideBaselineAngle
+                | PropertyFieldId::GuidePhase
+                | PropertyFieldId::GuideSpacingMultiplier
+                | PropertyFieldId::IntersectionDimensions
+                | PropertyFieldId::IntersectionMergeEpsilon
+                | PropertyFieldId::AlongGuideDimensions
+                | PropertyFieldId::AlongGuideIntervalMultiplier
+                | PropertyFieldId::AlongGuidePhase
+                | PropertyFieldId::RandomCharacter
+                | PropertyFieldId::RandomEvenMinimumCenterDistance
+                | PropertyFieldId::RandomClusterDensity
+                | PropertyFieldId::RandomClusterSpread
+                | PropertyFieldId::RandomClusterStrength
+                | PropertyFieldId::RandomSeed
+                | PropertyFieldId::RandomDensityModulation
+                | PropertyFieldId::ArtworkWeightMappingComponent
+                | PropertyFieldId::ArtworkWeightMappingPlacement
+                | PropertyFieldId::ArtworkWeightMappingInverted
+                | PropertyFieldId::ArtworkWeightMappingGain
+                | PropertyFieldId::ArtworkWeightMappingBias
+                | PropertyFieldId::ArtworkWeightStrength
+                | PropertyFieldId::ArtworkWeightResponse
+                | PropertyFieldId::RandomExclusion
+                | PropertyFieldId::ExclusionMinimumCenterDistance
+                | PropertyFieldId::VisibleMarkMargin
+                | PropertyFieldId::VisibleMarkSizingPolicy
+                | PropertyFieldId::RandomMaximumAttempts
+                | PropertyFieldId::RandomMaximumNeighborChecks
+                | PropertyFieldId::OutputSiteProduct
+                | PropertyFieldId::OutputPrototype
+                | PropertyFieldId::OutputOrientation
+                | PropertyFieldId::OutputOrientationDimension
+        ),
+        structural_support: match field {
+            PropertyFieldId::MarkMinimumSize | PropertyFieldId::MarkMaximumSize => {
+                StructuralSupportConstraint::MarkResponseMustFitDefinitionMaximumSupport
+            }
+            PropertyFieldId::CoverageMaximumSupportRadius => {
+                StructuralSupportConstraint::DefinesMaximumMarkSupportRadius
+            }
+            PropertyFieldId::RandomExclusion
+            | PropertyFieldId::VisibleMarkMargin
+            | PropertyFieldId::VisibleMarkSizingPolicy => {
+                StructuralSupportConstraint::VisibleMarkMarginUsesMaximumSupportRadius
+            }
+            _ => StructuralSupportConstraint::None,
+        },
+        reference_constraint: match field {
+            PropertyFieldId::IntersectionDimensions => {
+                PropertyReferenceConstraint::OrderedUniqueCollection {
+                    minimum_items: 2,
+                    maximum_items: 4,
+                }
+            }
+            PropertyFieldId::AlongGuideDimensions => {
+                PropertyReferenceConstraint::OrderedUniqueCollection {
+                    minimum_items: 1,
+                    maximum_items: 4,
+                }
+            }
+            PropertyFieldId::SourceReference
+            | PropertyFieldId::DefinitionSelection
+            | PropertyFieldId::OutputSiteProduct
+            | PropertyFieldId::OutputOrientationDimension => PropertyReferenceConstraint::Singular,
+            _ => PropertyReferenceConstraint::NotReference,
+        },
+        choice_policy: match field {
+            PropertyFieldId::Paint => PropertyChoicePolicy::ModelRolePaint,
+            _ => PropertyChoicePolicy::Static,
+        },
+    }
+}
+
+pub fn property_field_contracts() -> impl ExactSizeIterator<Item = PropertyFieldContract> {
+    PROPERTY_FIELD_IDS
+        .iter()
+        .copied()
+        .map(property_field_contract)
+}
+
+impl PropertyDescriptor {
+    pub const fn command_kind(&self) -> PropertyCommandKind {
+        property_field_contract(self.field).command_kind
+    }
+}
+
+const SOURCE_MAPPING_CHOICES: &[PropertyEnumChoice] = &[
+    PropertyEnumChoice::SourceMappingComponent(SourceMappingComponent::Red),
+    PropertyEnumChoice::SourceMappingComponent(SourceMappingComponent::Green),
+    PropertyEnumChoice::SourceMappingComponent(SourceMappingComponent::Blue),
+    PropertyEnumChoice::SourceMappingComponent(SourceMappingComponent::Cyan),
+    PropertyEnumChoice::SourceMappingComponent(SourceMappingComponent::Magenta),
+    PropertyEnumChoice::SourceMappingComponent(SourceMappingComponent::Yellow),
+    PropertyEnumChoice::SourceMappingComponent(SourceMappingComponent::Black),
+    PropertyEnumChoice::SourceMappingComponent(SourceMappingComponent::Alpha),
+    PropertyEnumChoice::SourceMappingComponent(SourceMappingComponent::Luminance),
+];
+const LEGACY_COMPONENT_CHOICES: &[PropertyEnumChoice] = &[
+    PropertyEnumChoice::SourceMappingComponent(SourceMappingComponent::Luminance),
+    PropertyEnumChoice::SourceMappingComponent(SourceMappingComponent::Alpha),
+];
+const SOURCE_PLACEMENT_CHOICES: &[PropertyEnumChoice] = &[PropertyEnumChoice::SourcePlacement(
+    SourcePlacement::StretchToCanvas,
+)];
+const SOLID_PAINT_CHOICES: &[PropertyEnumChoice] = &[PropertyEnumChoice::Paint(PaintKind::Solid)];
+const SAMPLED_PAINT_CHOICES: &[PropertyEnumChoice] =
+    &[PropertyEnumChoice::Paint(PaintKind::SampledSource)];
+const RANDOM_CHARACTER_CHOICES: &[PropertyEnumChoice] = &[
+    PropertyEnumChoice::RandomCharacter(RandomCharacterKind::RawUniform),
+    PropertyEnumChoice::RandomCharacter(RandomCharacterKind::Even),
+    PropertyEnumChoice::RandomCharacter(RandomCharacterKind::Clustered),
+];
+const DENSITY_MODULATION_CHOICES: &[PropertyEnumChoice] = &[
+    PropertyEnumChoice::DensityModulation(DensityModulationKind::Uniform),
+    PropertyEnumChoice::DensityModulation(DensityModulationKind::ArtworkWeighted),
+];
+const ARTWORK_RESPONSE_CHOICES: &[PropertyEnumChoice] = &[
+    PropertyEnumChoice::ArtworkWeightResponse(ArtworkWeightResponse::Linear),
+    PropertyEnumChoice::ArtworkWeightResponse(ArtworkWeightResponse::Smoothstep),
+];
+const EXCLUSION_CHOICES: &[PropertyEnumChoice] = &[
+    PropertyEnumChoice::Exclusion(ExclusionKind::None),
+    PropertyEnumChoice::Exclusion(ExclusionKind::MinimumCenterDistance),
+    PropertyEnumChoice::Exclusion(ExclusionKind::VisibleMarkMargin),
+];
+const VISIBLE_MARK_SIZING_POLICY_CHOICES: &[PropertyEnumChoice] =
+    &[PropertyEnumChoice::VisibleMarkSizingPolicy(
+        VisibleMarkSizingPolicy::MaximumSupportRadius,
+    )];
+const MARK_PROTOTYPE_CHOICES: &[PropertyEnumChoice] =
+    &[PropertyEnumChoice::MarkPrototype(MarkPrototypeKind::Circle)];
+const MARK_ORIENTATION_CHOICES: &[PropertyEnumChoice] = &[
+    PropertyEnumChoice::MarkOrientation(MarkOrientationKind::Fixed),
+    PropertyEnumChoice::MarkOrientation(MarkOrientationKind::GuideTangent),
+    PropertyEnumChoice::MarkOrientation(MarkOrientationKind::GuideNormal),
+];
+
+const fn dependency_for_contract(
+    applicability: PropertyApplicability,
+    dynamic: PropertyDependency,
+) -> PropertyDependency {
+    match applicability {
+        PropertyApplicability::Always => PropertyDependency::Always,
+        PropertyApplicability::ModeledChannel => PropertyDependency::ModeledChannel,
+        PropertyApplicability::SolidPaint => PropertyDependency::SolidPaint,
+        PropertyApplicability::StraightGuideDimension => PropertyDependency::StraightGuideDimension,
+        PropertyApplicability::IntersectionProduct => PropertyDependency::IntersectionProduct,
+        PropertyApplicability::AlongGuideProduct => PropertyDependency::AlongGuideProduct,
+        PropertyApplicability::RandomProcess => PropertyDependency::RandomProcess,
+        PropertyApplicability::EvenRandomProcess => PropertyDependency::EvenRandomProcess,
+        PropertyApplicability::ClusteredRandomProcess => PropertyDependency::ClusteredRandomProcess,
+        PropertyApplicability::ArtworkWeightedDensity => PropertyDependency::ArtworkWeightedDensity,
+        PropertyApplicability::MinimumCenterExclusion => PropertyDependency::MinimumCenterExclusion,
+        PropertyApplicability::VisibleMarkExclusion => PropertyDependency::VisibleMarkExclusion,
+        PropertyApplicability::MarkPrototypeOutput => PropertyDependency::MarkPrototypeOutput,
+        PropertyApplicability::GuidedOutputOrientation => {
+            PropertyDependency::GuidedOutputOrientation
+        }
+        PropertyApplicability::CurrentPaint
+        | PropertyApplicability::CurrentDensityModulation
+        | PropertyApplicability::CurrentExclusion => dynamic,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum DescriptorRuntimeContext {
+    Paint {
+        choices: &'static [PropertyEnumChoice],
+        dependency: PropertyDependency,
+    },
+    DensityModulation {
+        dependency: PropertyDependency,
+    },
+    Exclusion {
+        dependency: PropertyDependency,
+        support: StructuralSupportConstraint,
+    },
+}
+
+const fn descriptor_from_contract(
+    field: PropertyFieldId,
+    target: PropertyTarget,
+) -> PropertyDescriptor {
+    let contract = property_field_contract(field);
+    PropertyDescriptor {
+        field,
+        target,
+        value_kind: contract.value_kind,
+        choices: contract.choices,
+        bounds: contract.bounds,
+        unit: contract.unit,
+        dependency: dependency_for_contract(contract.applicability, PropertyDependency::Always),
+        invalidation: contract.invalidation,
+        copy_on_edit_escalates_to_family: contract.copy_on_edit_escalates_to_family,
+        structural_support: contract.structural_support,
+        reference_constraint: contract.reference_constraint,
+        choice_policy: contract.choice_policy,
+    }
+}
+
+const fn descriptor_with_runtime_context(
+    field: PropertyFieldId,
+    target: PropertyTarget,
+    context: DescriptorRuntimeContext,
+) -> PropertyDescriptor {
+    let contract = property_field_contract(field);
+    let (choices, dependency, structural_support) = match context {
+        DescriptorRuntimeContext::Paint {
+            choices,
+            dependency,
+        } => (choices, dependency, contract.structural_support),
+        DescriptorRuntimeContext::DensityModulation { dependency } => {
+            (contract.choices, dependency, contract.structural_support)
+        }
+        DescriptorRuntimeContext::Exclusion {
+            dependency,
+            support,
+        } => (contract.choices, dependency, support),
+    };
+    PropertyDescriptor {
+        field,
+        target,
+        value_kind: contract.value_kind,
+        choices,
+        bounds: contract.bounds,
+        unit: contract.unit,
+        dependency,
+        invalidation: contract.invalidation,
+        copy_on_edit_escalates_to_family: contract.copy_on_edit_escalates_to_family,
+        structural_support,
+        reference_constraint: contract.reference_constraint,
+        choice_policy: contract.choice_policy,
+    }
+}
+
+const fn positive_bounds() -> Option<PropertyBounds> {
+    Some(PropertyBounds {
+        minimum: Some(0.0),
+        minimum_inclusive: false,
+        maximum: None,
+        maximum_inclusive: false,
+    })
+}
+const fn nonnegative_bounds() -> Option<PropertyBounds> {
+    Some(PropertyBounds {
+        minimum: Some(0.0),
+        minimum_inclusive: true,
+        maximum: None,
+        maximum_inclusive: false,
+    })
+}
+const fn unit_bounds() -> Option<PropertyBounds> {
+    Some(PropertyBounds {
+        minimum: Some(0.0),
+        minimum_inclusive: true,
+        maximum: Some(1.0),
+        maximum_inclusive: true,
+    })
+}
+
 /// A typed, ID-free definition proposal.  Stage 14 intentionally exposes only
 /// the accepted mechanism composition; IDs are allocated by the document.
 #[derive(Clone, Debug, PartialEq)]
@@ -2115,7 +5057,143 @@ pub struct PatternDefinitionDraft {
 /// through `DocumentHistory`, which records its exact inverse.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PatternDefinitionEdit {
-    SetCoverage { coverage: CoveragePolicy },
+    SetCoverageGuardSteps {
+        guard_steps: u32,
+    },
+    SetCoverageMaximumSupportRadius {
+        maximum_support_radius: f64,
+    },
+    SetGuideBaselineAngle {
+        mechanism_id: PatternMechanismId,
+        dimension_id: GuideDimensionId,
+        baseline_angle_degrees: f64,
+    },
+    SetGuidePhase {
+        mechanism_id: PatternMechanismId,
+        dimension_id: GuideDimensionId,
+        phase: f64,
+    },
+    SetGuideSpacingMultiplier {
+        mechanism_id: PatternMechanismId,
+        dimension_id: GuideDimensionId,
+        spacing_multiplier: f64,
+    },
+    SetIntersectionDimensions {
+        mechanism_id: PatternMechanismId,
+        dimensions: Vec<GuideDimensionId>,
+    },
+    SetIntersectionMergeEpsilon {
+        mechanism_id: PatternMechanismId,
+        merge_epsilon: f64,
+    },
+    SetAlongGuideDimensions {
+        mechanism_id: PatternMechanismId,
+        dimensions: Vec<GuideDimensionId>,
+    },
+    SetAlongGuideIntervalMultiplier {
+        mechanism_id: PatternMechanismId,
+        interval_multiplier: f64,
+    },
+    SetAlongGuidePhase {
+        mechanism_id: PatternMechanismId,
+        phase: f64,
+    },
+    SetRandomCharacter {
+        mechanism_id: PatternMechanismId,
+        character: RandomSiteCharacter,
+    },
+    SetRandomSeed {
+        mechanism_id: PatternMechanismId,
+        seed: u32,
+    },
+    SetRandomEvenMinimumCenterDistance {
+        mechanism_id: PatternMechanismId,
+        minimum_center_distance: f64,
+    },
+    SetRandomClusterDensity {
+        mechanism_id: PatternMechanismId,
+        cluster_density: f64,
+    },
+    SetRandomClusterSpread {
+        mechanism_id: PatternMechanismId,
+        cluster_spread: f64,
+    },
+    SetRandomClusterStrength {
+        mechanism_id: PatternMechanismId,
+        cluster_strength: f64,
+    },
+    SetDensityModulationVariant {
+        mechanism_id: PatternMechanismId,
+        modulation: SiteDensityModulation,
+    },
+    SetArtworkWeightMappingComponent {
+        mechanism_id: PatternMechanismId,
+        component: SourceMappingComponent,
+    },
+    SetArtworkWeightMappingPlacement {
+        mechanism_id: PatternMechanismId,
+        placement: SourcePlacement,
+    },
+    SetArtworkWeightMappingInverted {
+        mechanism_id: PatternMechanismId,
+        inverted: bool,
+    },
+    SetArtworkWeightMappingGain {
+        mechanism_id: PatternMechanismId,
+        gain: f64,
+    },
+    SetArtworkWeightMappingBias {
+        mechanism_id: PatternMechanismId,
+        bias: f64,
+    },
+    SetArtworkWeightStrength {
+        mechanism_id: PatternMechanismId,
+        strength: f64,
+    },
+    SetArtworkWeightResponse {
+        mechanism_id: PatternMechanismId,
+        response: ArtworkWeightResponse,
+    },
+    SetExclusionVariant {
+        mechanism_id: PatternMechanismId,
+        policy: SiteExclusionPolicy,
+    },
+    SetExclusionMinimumCenterDistance {
+        mechanism_id: PatternMechanismId,
+        minimum_center_distance: f64,
+    },
+    SetVisibleMarkMargin {
+        mechanism_id: PatternMechanismId,
+        margin: f64,
+    },
+    SetVisibleMarkSizingPolicy {
+        mechanism_id: PatternMechanismId,
+        sizing: VisibleMarkSizingPolicy,
+    },
+    SetRandomMaximumAttempts {
+        mechanism_id: PatternMechanismId,
+        maximum_attempts: u32,
+    },
+    SetRandomMaximumNeighborChecks {
+        mechanism_id: PatternMechanismId,
+        maximum_neighbor_checks: u32,
+    },
+    SetOutputSiteProduct {
+        output_layer_id: PatternOutputLayerId,
+        site_mechanism_id: PatternMechanismId,
+    },
+    SetOutputMarkPrototype {
+        output_layer_id: PatternOutputLayerId,
+        prototype: MarkPrototype,
+    },
+    SetOutputOrientation {
+        output_layer_id: PatternOutputLayerId,
+        orientation: MarkOrientation,
+    },
+    SetOutputOrientationDimension {
+        output_layer_id: PatternOutputLayerId,
+        dimension_id: GuideDimensionId,
+    },
 }
 
 /// Supported channel edits in the Stage 2 authoritative command boundary.
@@ -2123,6 +5201,20 @@ pub enum PatternDefinitionEdit {
 pub enum DocumentCommand {
     AddPatternDefinition {
         definition: PatternDefinitionDraft,
+    },
+    /// Installs a fully typed, stable-ID structural definition. This is the
+    /// headless construction path for every accepted family; document-wide ID
+    /// collision/order/reference validation still occurs before publication.
+    AddTypedPatternDefinition {
+        definition: PatternDefinition,
+    },
+    /// Atomically introduces a complete, fresh typed definition and retargets
+    /// one selected channel. Family/topology conversion is intentionally not
+    /// represented as a field edit.
+    ReplaceSelectedChannelDefinitionTopology {
+        channel_id: ChannelId,
+        base_definition: PatternDefinition,
+        definition: PatternDefinition,
     },
     DuplicatePatternDefinition {
         definition_id: PatternDefinitionId,
@@ -2151,26 +5243,32 @@ pub enum DocumentCommand {
         base_definition: PatternDefinition,
         edit: PatternDefinitionEdit,
     },
-    SetDensity {
+    SetDensityAxis {
         channel_id: ChannelId,
-        density: DensityMetric2D,
+        edited_axis: DensityEditedAxis,
+        value: f64,
+    },
+    SetDensityAspectLock {
+        channel_id: ChannelId,
+        aspect_locked: bool,
     },
     SetRotation {
         channel_id: ChannelId,
         rotation_degrees: f64,
     },
-    SetTranslation {
+    SetTranslationAxis {
         channel_id: ChannelId,
-        translation_x: f64,
-        translation_y: f64,
+        edited_axis: TranslationEditedAxis,
+        value: f64,
     },
-    SetMarkGeometryResponse {
+    SetMarkGeometryField {
         channel_id: ChannelId,
-        response: MarkGeometryResponse,
+        edit: MarkGeometryFieldEdit,
     },
-    SetColor {
+    SetColorComponent {
         channel_id: ChannelId,
-        color: ColorValue,
+        component: ColorComponent,
+        value: f64,
     },
     SetOpacity {
         channel_id: ChannelId,
@@ -2183,9 +5281,9 @@ pub enum DocumentCommand {
     SetSourceReference {
         source: SourceReference,
     },
-    SetSourceMapping {
+    SetLegacyMappingField {
         channel_id: ChannelId,
-        mapping: ChannelSourceMapping,
+        edit: LegacyMappingFieldEdit,
     },
     /// Replaces the complete model and its ordered channel topology together.
     ReplaceChannelTopology {
@@ -2193,9 +5291,9 @@ pub enum DocumentCommand {
         topology: ChannelTopology,
     },
     /// Replaces the full Stage 9 mapping for one modeled channel.
-    SetTopologySourceMapping {
+    SetModeledMappingField {
         channel_id: ChannelId,
-        mapping: SourceMapping,
+        edit: ModeledMappingFieldEdit,
     },
     /// Replaces ordinary solid paint for a modeled channel.
     SetChannelPaint {
@@ -2204,7 +5302,425 @@ pub enum DocumentCommand {
     },
 }
 
+/// One typed value supplied to a descriptor-backed command leaf.  Structural
+/// references and relational payloads remain typed in their command variants;
+/// this projection exists only to share the scalar/choice contract with the
+/// read-only descriptor surface.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PropertyFieldValue {
+    FiniteF64(f64),
+    U32(u32),
+    Boolean(bool),
+    StableIdReference,
+    StableIdReferenceCollection(usize),
+    EnumChoice(PropertyEnumChoice),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PropertyCommandFieldProjection {
+    pub field: PropertyFieldId,
+    pub value: PropertyFieldValue,
+}
+
+/// Commands that intentionally do not address one editable property field.
+/// These operations have their own typed authority and transition semantics;
+/// keeping them explicit prevents new command variants from being silently
+/// omitted from descriptor/command completeness checks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NonFieldCommandOperation {
+    AddPatternDefinition,
+    AddTypedPatternDefinition,
+    ReplaceSelectedChannelDefinitionTopology,
+    DuplicatePatternDefinition,
+    RemoveUnreferencedPatternDefinition,
+    ReplaceChannelTopology,
+}
+
+/// Exhaustive command classification at the descriptor boundary. A command is
+/// either one or more descriptor-backed field leaves, or an explicitly typed
+/// structural/topology operation. There is deliberately no implicit empty
+/// fallback for future command variants.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DocumentCommandFieldClassification {
+    DescriptorBacked(Vec<PropertyCommandFieldProjection>),
+    NonField(NonFieldCommandOperation),
+}
+
+impl PatternDefinitionEdit {
+    pub fn field_projection(&self) -> PropertyCommandFieldProjection {
+        use PatternDefinitionEdit as Edit;
+        let (field, value) = match self {
+            Edit::SetCoverageGuardSteps { guard_steps } => (
+                PropertyFieldId::CoverageGuardSteps,
+                PropertyFieldValue::U32(*guard_steps),
+            ),
+            Edit::SetCoverageMaximumSupportRadius {
+                maximum_support_radius,
+            } => (
+                PropertyFieldId::CoverageMaximumSupportRadius,
+                PropertyFieldValue::FiniteF64(*maximum_support_radius),
+            ),
+            Edit::SetGuideBaselineAngle {
+                baseline_angle_degrees,
+                ..
+            } => (
+                PropertyFieldId::GuideBaselineAngle,
+                PropertyFieldValue::FiniteF64(*baseline_angle_degrees),
+            ),
+            Edit::SetGuidePhase { phase, .. } => (
+                PropertyFieldId::GuidePhase,
+                PropertyFieldValue::FiniteF64(*phase),
+            ),
+            Edit::SetGuideSpacingMultiplier {
+                spacing_multiplier, ..
+            } => (
+                PropertyFieldId::GuideSpacingMultiplier,
+                PropertyFieldValue::FiniteF64(*spacing_multiplier),
+            ),
+            Edit::SetIntersectionDimensions { dimensions, .. } => (
+                PropertyFieldId::IntersectionDimensions,
+                PropertyFieldValue::StableIdReferenceCollection(dimensions.len()),
+            ),
+            Edit::SetIntersectionMergeEpsilon { merge_epsilon, .. } => (
+                PropertyFieldId::IntersectionMergeEpsilon,
+                PropertyFieldValue::FiniteF64(*merge_epsilon),
+            ),
+            Edit::SetAlongGuideDimensions { dimensions, .. } => (
+                PropertyFieldId::AlongGuideDimensions,
+                PropertyFieldValue::StableIdReferenceCollection(dimensions.len()),
+            ),
+            Edit::SetAlongGuideIntervalMultiplier {
+                interval_multiplier,
+                ..
+            } => (
+                PropertyFieldId::AlongGuideIntervalMultiplier,
+                PropertyFieldValue::FiniteF64(*interval_multiplier),
+            ),
+            Edit::SetAlongGuidePhase { phase, .. } => (
+                PropertyFieldId::AlongGuidePhase,
+                PropertyFieldValue::FiniteF64(*phase),
+            ),
+            Edit::SetRandomCharacter { character, .. } => (
+                PropertyFieldId::RandomCharacter,
+                PropertyFieldValue::EnumChoice(PropertyEnumChoice::RandomCharacter(
+                    match character {
+                        RandomSiteCharacter::RawUniform => RandomCharacterKind::RawUniform,
+                        RandomSiteCharacter::Even { .. } => RandomCharacterKind::Even,
+                        RandomSiteCharacter::Clustered { .. } => RandomCharacterKind::Clustered,
+                    },
+                )),
+            ),
+            Edit::SetRandomSeed { seed, .. } => {
+                (PropertyFieldId::RandomSeed, PropertyFieldValue::U32(*seed))
+            }
+            Edit::SetRandomEvenMinimumCenterDistance {
+                minimum_center_distance,
+                ..
+            } => (
+                PropertyFieldId::RandomEvenMinimumCenterDistance,
+                PropertyFieldValue::FiniteF64(*minimum_center_distance),
+            ),
+            Edit::SetRandomClusterDensity {
+                cluster_density, ..
+            } => (
+                PropertyFieldId::RandomClusterDensity,
+                PropertyFieldValue::FiniteF64(*cluster_density),
+            ),
+            Edit::SetRandomClusterSpread { cluster_spread, .. } => (
+                PropertyFieldId::RandomClusterSpread,
+                PropertyFieldValue::FiniteF64(*cluster_spread),
+            ),
+            Edit::SetRandomClusterStrength {
+                cluster_strength, ..
+            } => (
+                PropertyFieldId::RandomClusterStrength,
+                PropertyFieldValue::FiniteF64(*cluster_strength),
+            ),
+            Edit::SetDensityModulationVariant { modulation, .. } => (
+                PropertyFieldId::RandomDensityModulation,
+                PropertyFieldValue::EnumChoice(PropertyEnumChoice::DensityModulation(
+                    match modulation {
+                        SiteDensityModulation::Uniform => DensityModulationKind::Uniform,
+                        SiteDensityModulation::ArtworkWeighted { .. } => {
+                            DensityModulationKind::ArtworkWeighted
+                        }
+                    },
+                )),
+            ),
+            Edit::SetArtworkWeightMappingComponent { component, .. } => (
+                PropertyFieldId::ArtworkWeightMappingComponent,
+                PropertyFieldValue::EnumChoice(PropertyEnumChoice::SourceMappingComponent(
+                    *component,
+                )),
+            ),
+            Edit::SetArtworkWeightMappingPlacement { placement, .. } => (
+                PropertyFieldId::ArtworkWeightMappingPlacement,
+                PropertyFieldValue::EnumChoice(PropertyEnumChoice::SourcePlacement(*placement)),
+            ),
+            Edit::SetArtworkWeightMappingInverted { inverted, .. } => (
+                PropertyFieldId::ArtworkWeightMappingInverted,
+                PropertyFieldValue::Boolean(*inverted),
+            ),
+            Edit::SetArtworkWeightMappingGain { gain, .. } => (
+                PropertyFieldId::ArtworkWeightMappingGain,
+                PropertyFieldValue::FiniteF64(*gain),
+            ),
+            Edit::SetArtworkWeightMappingBias { bias, .. } => (
+                PropertyFieldId::ArtworkWeightMappingBias,
+                PropertyFieldValue::FiniteF64(*bias),
+            ),
+            Edit::SetArtworkWeightStrength { strength, .. } => (
+                PropertyFieldId::ArtworkWeightStrength,
+                PropertyFieldValue::FiniteF64(*strength),
+            ),
+            Edit::SetArtworkWeightResponse { response, .. } => (
+                PropertyFieldId::ArtworkWeightResponse,
+                PropertyFieldValue::EnumChoice(PropertyEnumChoice::ArtworkWeightResponse(
+                    *response,
+                )),
+            ),
+            Edit::SetExclusionVariant { policy, .. } => (
+                PropertyFieldId::RandomExclusion,
+                PropertyFieldValue::EnumChoice(PropertyEnumChoice::Exclusion(match policy {
+                    SiteExclusionPolicy::None => ExclusionKind::None,
+                    SiteExclusionPolicy::MinimumCenterDistance { .. } => {
+                        ExclusionKind::MinimumCenterDistance
+                    }
+                    SiteExclusionPolicy::VisibleMarkMargin { .. } => {
+                        ExclusionKind::VisibleMarkMargin
+                    }
+                })),
+            ),
+            Edit::SetExclusionMinimumCenterDistance {
+                minimum_center_distance,
+                ..
+            } => (
+                PropertyFieldId::ExclusionMinimumCenterDistance,
+                PropertyFieldValue::FiniteF64(*minimum_center_distance),
+            ),
+            Edit::SetVisibleMarkMargin { margin, .. } => (
+                PropertyFieldId::VisibleMarkMargin,
+                PropertyFieldValue::FiniteF64(*margin),
+            ),
+            Edit::SetVisibleMarkSizingPolicy { sizing, .. } => (
+                PropertyFieldId::VisibleMarkSizingPolicy,
+                PropertyFieldValue::EnumChoice(PropertyEnumChoice::VisibleMarkSizingPolicy(
+                    *sizing,
+                )),
+            ),
+            Edit::SetRandomMaximumAttempts {
+                maximum_attempts, ..
+            } => (
+                PropertyFieldId::RandomMaximumAttempts,
+                PropertyFieldValue::U32(*maximum_attempts),
+            ),
+            Edit::SetRandomMaximumNeighborChecks {
+                maximum_neighbor_checks,
+                ..
+            } => (
+                PropertyFieldId::RandomMaximumNeighborChecks,
+                PropertyFieldValue::U32(*maximum_neighbor_checks),
+            ),
+            Edit::SetOutputSiteProduct { .. } => (
+                PropertyFieldId::OutputSiteProduct,
+                PropertyFieldValue::StableIdReference,
+            ),
+            Edit::SetOutputMarkPrototype { prototype, .. } => (
+                PropertyFieldId::OutputPrototype,
+                PropertyFieldValue::EnumChoice(PropertyEnumChoice::MarkPrototype(
+                    match prototype {
+                        MarkPrototype::Circle => MarkPrototypeKind::Circle,
+                    },
+                )),
+            ),
+            Edit::SetOutputOrientation { orientation, .. } => (
+                PropertyFieldId::OutputOrientation,
+                PropertyFieldValue::EnumChoice(PropertyEnumChoice::MarkOrientation(
+                    match orientation {
+                        MarkOrientation::Fixed => MarkOrientationKind::Fixed,
+                        MarkOrientation::GuideTangent { .. } => MarkOrientationKind::GuideTangent,
+                        MarkOrientation::GuideNormal { .. } => MarkOrientationKind::GuideNormal,
+                    },
+                )),
+            ),
+            Edit::SetOutputOrientationDimension { .. } => (
+                PropertyFieldId::OutputOrientationDimension,
+                PropertyFieldValue::StableIdReference,
+            ),
+        };
+        PropertyCommandFieldProjection { field, value }
+    }
+}
+
 impl DocumentCommand {
+    /// Exhaustively classifies every command at the descriptor boundary.
+    /// Compound coordinate commands deliberately yield one independently
+    /// addressable field leaf.
+    pub fn field_classification(&self) -> DocumentCommandFieldClassification {
+        use DocumentCommand as Command;
+        let one = |field, value| {
+            DocumentCommandFieldClassification::DescriptorBacked(vec![
+                PropertyCommandFieldProjection { field, value },
+            ])
+        };
+        match self {
+            Command::AddPatternDefinition { .. } => DocumentCommandFieldClassification::NonField(
+                NonFieldCommandOperation::AddPatternDefinition,
+            ),
+            Command::AddTypedPatternDefinition { .. } => {
+                DocumentCommandFieldClassification::NonField(
+                    NonFieldCommandOperation::AddTypedPatternDefinition,
+                )
+            }
+            Command::ReplaceSelectedChannelDefinitionTopology { .. } => {
+                DocumentCommandFieldClassification::NonField(
+                    NonFieldCommandOperation::ReplaceSelectedChannelDefinitionTopology,
+                )
+            }
+            Command::DuplicatePatternDefinition { .. } => {
+                DocumentCommandFieldClassification::NonField(
+                    NonFieldCommandOperation::DuplicatePatternDefinition,
+                )
+            }
+            Command::RemoveUnreferencedPatternDefinition { .. } => {
+                DocumentCommandFieldClassification::NonField(
+                    NonFieldCommandOperation::RemoveUnreferencedPatternDefinition,
+                )
+            }
+            Command::ReplaceChannelTopology { .. } => DocumentCommandFieldClassification::NonField(
+                NonFieldCommandOperation::ReplaceChannelTopology,
+            ),
+            Command::SetDensityAxis {
+                edited_axis, value, ..
+            } => one(
+                match edited_axis {
+                    DensityEditedAxis::AcrossX => PropertyFieldId::DensityAcrossX,
+                    DensityEditedAxis::AcrossY => PropertyFieldId::DensityAcrossY,
+                },
+                PropertyFieldValue::FiniteF64(*value),
+            ),
+            Command::SetDensityAspectLock { aspect_locked, .. } => one(
+                PropertyFieldId::DensityAspectLocked,
+                PropertyFieldValue::Boolean(*aspect_locked),
+            ),
+            Command::SetRotation {
+                rotation_degrees, ..
+            } => one(
+                PropertyFieldId::RotationDegrees,
+                PropertyFieldValue::FiniteF64(*rotation_degrees),
+            ),
+            Command::SetTranslationAxis {
+                edited_axis, value, ..
+            } => one(
+                match edited_axis {
+                    TranslationEditedAxis::X => PropertyFieldId::TranslationX,
+                    TranslationEditedAxis::Y => PropertyFieldId::TranslationY,
+                },
+                PropertyFieldValue::FiniteF64(*value),
+            ),
+            Command::SetMarkGeometryField { edit, .. } => one(
+                match edit {
+                    MarkGeometryFieldEdit::MinimumSize(_) => PropertyFieldId::MarkMinimumSize,
+                    MarkGeometryFieldEdit::MaximumSize(_) => PropertyFieldId::MarkMaximumSize,
+                },
+                PropertyFieldValue::FiniteF64(match edit {
+                    MarkGeometryFieldEdit::MinimumSize(value)
+                    | MarkGeometryFieldEdit::MaximumSize(value) => *value,
+                }),
+            ),
+            Command::SetColorComponent {
+                component, value, ..
+            } => one(
+                match component {
+                    ColorComponent::Red => PropertyFieldId::ColorRed,
+                    ColorComponent::Green => PropertyFieldId::ColorGreen,
+                    ColorComponent::Blue => PropertyFieldId::ColorBlue,
+                    ColorComponent::Alpha => PropertyFieldId::ColorAlpha,
+                },
+                PropertyFieldValue::FiniteF64(*value),
+            ),
+            Command::SetOpacity { opacity, .. } => one(
+                PropertyFieldId::Opacity,
+                PropertyFieldValue::FiniteF64(*opacity),
+            ),
+            Command::SetVisibility { visible, .. } => one(
+                PropertyFieldId::Visibility,
+                PropertyFieldValue::Boolean(*visible),
+            ),
+            Command::SetSourceReference { .. } => one(
+                PropertyFieldId::SourceReference,
+                PropertyFieldValue::StableIdReference,
+            ),
+            Command::RetargetChannelPatternDefinition { .. } => one(
+                PropertyFieldId::DefinitionSelection,
+                PropertyFieldValue::StableIdReference,
+            ),
+            Command::SetLegacyMappingField { edit, .. } => one(
+                match edit {
+                    LegacyMappingFieldEdit::Component(_) => PropertyFieldId::LegacyMappingComponent,
+                    LegacyMappingFieldEdit::Placement(_) => PropertyFieldId::LegacyMappingPlacement,
+                },
+                match edit {
+                    LegacyMappingFieldEdit::Component(component) => PropertyFieldValue::EnumChoice(
+                        PropertyEnumChoice::SourceMappingComponent(match component {
+                            SourceComponent::Luminance => SourceMappingComponent::Luminance,
+                            SourceComponent::Alpha => SourceMappingComponent::Alpha,
+                        }),
+                    ),
+                    LegacyMappingFieldEdit::Placement(placement) => PropertyFieldValue::EnumChoice(
+                        PropertyEnumChoice::SourcePlacement(*placement),
+                    ),
+                },
+            ),
+            Command::SetModeledMappingField { edit, .. } => one(
+                match edit {
+                    ModeledMappingFieldEdit::Component(_) => {
+                        PropertyFieldId::ModeledMappingComponent
+                    }
+                    ModeledMappingFieldEdit::Placement(_) => {
+                        PropertyFieldId::ModeledMappingPlacement
+                    }
+                    ModeledMappingFieldEdit::Inverted(_) => PropertyFieldId::ModeledMappingInverted,
+                    ModeledMappingFieldEdit::Gain(_) => PropertyFieldId::ModeledMappingGain,
+                    ModeledMappingFieldEdit::Bias(_) => PropertyFieldId::ModeledMappingBias,
+                },
+                match edit {
+                    ModeledMappingFieldEdit::Component(value) => PropertyFieldValue::EnumChoice(
+                        PropertyEnumChoice::SourceMappingComponent(*value),
+                    ),
+                    ModeledMappingFieldEdit::Placement(value) => {
+                        PropertyFieldValue::EnumChoice(PropertyEnumChoice::SourcePlacement(*value))
+                    }
+                    ModeledMappingFieldEdit::Inverted(value) => PropertyFieldValue::Boolean(*value),
+                    ModeledMappingFieldEdit::Gain(value) | ModeledMappingFieldEdit::Bias(value) => {
+                        PropertyFieldValue::FiniteF64(*value)
+                    }
+                },
+            ),
+            Command::SetChannelPaint { paint, .. } => one(
+                PropertyFieldId::Paint,
+                PropertyFieldValue::EnumChoice(PropertyEnumChoice::Paint(match paint {
+                    ChannelPaint::Solid(_) => PaintKind::Solid,
+                    ChannelPaint::SampledSource => PaintKind::SampledSource,
+                })),
+            ),
+            Command::EditSelectedChannelPatternDefinition { edit, .. }
+            | Command::EditSharedPatternDefinition { edit, .. } => {
+                DocumentCommandFieldClassification::DescriptorBacked(vec![edit.field_projection()])
+            }
+        }
+    }
+
+    /// Projects only descriptor-backed command leaves to their contract
+    /// fields. Non-field structural operations intentionally have no property
+    /// projections, but are exhaustively represented by `field_classification`.
+    pub fn field_projections(&self) -> Vec<PropertyCommandFieldProjection> {
+        match self.field_classification() {
+            DocumentCommandFieldClassification::DescriptorBacked(projections) => projections,
+            DocumentCommandFieldClassification::NonField(_) => Vec::new(),
+        }
+    }
+
     /// Stage 14 definition transitions require the reversible history owner.
     /// The public `DocumentSession` surface retains its pre-Stage-14 command
     /// behavior, while `DocumentHistory` uses its private transition path.
@@ -2212,6 +5728,8 @@ impl DocumentCommand {
         matches!(
             self,
             Self::AddPatternDefinition { .. }
+                | Self::AddTypedPatternDefinition { .. }
+                | Self::ReplaceSelectedChannelDefinitionTopology { .. }
                 | Self::DuplicatePatternDefinition { .. }
                 | Self::RetargetChannelPatternDefinition { .. }
                 | Self::RemoveUnreferencedPatternDefinition { .. }
@@ -2222,21 +5740,24 @@ impl DocumentCommand {
 
     fn channel_id(&self) -> ChannelId {
         match self {
-            Self::SetDensity { channel_id, .. }
+            Self::ReplaceSelectedChannelDefinitionTopology { channel_id, .. }
+            | Self::SetDensityAxis { channel_id, .. }
+            | Self::SetDensityAspectLock { channel_id, .. }
             | Self::SetRotation { channel_id, .. }
-            | Self::SetTranslation { channel_id, .. }
-            | Self::SetMarkGeometryResponse { channel_id, .. }
-            | Self::SetColor { channel_id, .. }
+            | Self::SetTranslationAxis { channel_id, .. }
+            | Self::SetMarkGeometryField { channel_id, .. }
+            | Self::SetColorComponent { channel_id, .. }
             | Self::SetOpacity { channel_id, .. }
             | Self::SetVisibility { channel_id, .. }
-            | Self::SetSourceMapping { channel_id, .. }
-            | Self::SetTopologySourceMapping { channel_id, .. }
+            | Self::SetLegacyMappingField { channel_id, .. }
+            | Self::SetModeledMappingField { channel_id, .. }
             | Self::SetChannelPaint { channel_id, .. }
             | Self::RetargetChannelPatternDefinition { channel_id, .. }
             | Self::EditSelectedChannelPatternDefinition { channel_id, .. } => *channel_id,
             Self::SetSourceReference { .. }
             | Self::ReplaceChannelTopology { .. }
             | Self::AddPatternDefinition { .. }
+            | Self::AddTypedPatternDefinition { .. }
             | Self::DuplicatePatternDefinition { .. }
             | Self::RemoveUnreferencedPatternDefinition { .. }
             | Self::EditSharedPatternDefinition { .. } => ChannelId(0),
@@ -2249,6 +5770,7 @@ impl DocumentCommand {
             Self::SetSourceReference { .. }
                 | Self::ReplaceChannelTopology { .. }
                 | Self::AddPatternDefinition { .. }
+                | Self::AddTypedPatternDefinition { .. }
                 | Self::DuplicatePatternDefinition { .. }
                 | Self::RemoveUnreferencedPatternDefinition { .. }
                 | Self::EditSharedPatternDefinition { .. }
@@ -2260,10 +5782,49 @@ impl DocumentCommand {
             ));
         }
 
+        for projection in self.field_projections() {
+            validate_property_field_projection(projection)?;
+        }
+
         match self {
             Self::AddPatternDefinition { definition } => {
                 document.allocate_definition_from_draft(definition)?;
                 Ok(())
+            }
+            Self::AddTypedPatternDefinition { definition } => {
+                validate_definition(definition)?;
+                if document.definition(definition.id).is_some() {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.id",
+                        "definition ID already exists",
+                    ));
+                }
+                // Candidate validation performs the document-wide collision
+                // check over mechanisms, output layers, and dimensions.
+                Ok(())
+            }
+            Self::ReplaceSelectedChannelDefinitionTopology {
+                channel_id,
+                base_definition,
+                definition,
+            } => {
+                if document.pattern_definition_id_for(*channel_id) != Some(base_definition.id)
+                    || document.definition(base_definition.id) != Some(base_definition)
+                {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.base",
+                        "selected definition base is stale",
+                    ));
+                }
+                if definition.id == base_definition.id
+                    || document.definition(definition.id).is_some()
+                {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.id",
+                        "topology replacement requires a fresh definition ID",
+                    ));
+                }
+                validate_definition(definition)
             }
             Self::DuplicatePatternDefinition { definition_id } => {
                 let source = document
@@ -2321,10 +5882,10 @@ impl DocumentCommand {
                         "selected-channel definition base is stale",
                     ));
                 }
-                validate_definition_edit(edit)?;
                 let definition = document
                     .definition(base_definition.id)
                     .expect("validated reference");
+                validate_definition_edit(definition, edit)?;
                 let mut edited = definition.clone();
                 apply_definition_edit(&mut edited, edit);
                 if &edited == definition {
@@ -2333,7 +5894,21 @@ impl DocumentCommand {
                         "structural edit is a semantic no-op",
                     ));
                 }
-                validate_definition(&edited)
+                validate_definition(&edited)?;
+                if document.linked_channels(base_definition.id).len() > 1 {
+                    // Copy-on-edit must allocate every fresh stable ID before
+                    // publication. Validate the exact duplicate/remapped
+                    // candidate here so exhaustion and remap failures remain
+                    // ordinary atomic command errors rather than apply-time
+                    // assertions.
+                    let duplicate = document.duplicate_definition(definition)?;
+                    let remapped_edit =
+                        remap_definition_edit_for_duplicate(definition, &duplicate, edit);
+                    let mut remapped = duplicate;
+                    apply_definition_edit(&mut remapped, &remapped_edit);
+                    validate_definition(&remapped)?;
+                }
+                Ok(())
             }
             Self::EditSharedPatternDefinition {
                 definition_id,
@@ -2348,11 +5923,11 @@ impl DocumentCommand {
                         "shared definition base is stale",
                     ));
                 }
-                validate_definition_edit(edit)?;
                 let mut edited = document
                     .definition(*definition_id)
                     .expect("validated reference")
                     .clone();
+                validate_definition_edit(&edited, edit)?;
                 apply_definition_edit(&mut edited, edit);
                 if document.definition(*definition_id) == Some(&edited) {
                     return Err(ValidationError::new(
@@ -2362,45 +5937,36 @@ impl DocumentCommand {
                 }
                 validate_definition(&edited)
             }
-            Self::SetDensity { density, .. } => {
-                validate_positive_finite(
-                    density.across_x,
-                    "channel.pattern.layout.density.across_x",
-                )?;
-                validate_positive_finite(
-                    density.across_y,
-                    "channel.pattern.layout.density.across_y",
-                )
+            Self::SetDensityAxis {
+                edited_axis, value, ..
+            } => {
+                validate_positive_finite(*value, "channel.pattern.layout.density")?;
+                let layout = document
+                    .channel_layout(self.channel_id())
+                    .expect("validated channel");
+                if layout.density.aspect_locked {
+                    derive_density_axis(&document.canvas, *value, *edited_axis)?;
+                }
+                Ok(())
+            }
+            Self::SetDensityAspectLock { aspect_locked, .. } => {
+                if *aspect_locked {
+                    let layout = document
+                        .channel_layout(self.channel_id())
+                        .expect("validated channel");
+                    derive_density_axis(
+                        &document.canvas,
+                        layout.density.across_x,
+                        DensityEditedAxis::AcrossX,
+                    )?;
+                }
+                Ok(())
             }
             Self::SetRotation {
                 rotation_degrees, ..
             } => validate_finite(*rotation_degrees, "channel.pattern.layout.rotation_degrees"),
-            Self::SetTranslation {
-                translation_x,
-                translation_y,
-                ..
-            } => {
-                validate_finite(*translation_x, "channel.pattern.layout.translation_x")?;
-                validate_finite(*translation_y, "channel.pattern.layout.translation_y")
-            }
-            Self::SetMarkGeometryResponse {
-                channel_id,
-                response,
-            } => {
-                validate_nonnegative_finite(
-                    response.minimum_size,
-                    "channel.pattern.mark_geometry_response.minimum_size",
-                )?;
-                validate_nonnegative_finite(
-                    response.maximum_size,
-                    "channel.pattern.mark_geometry_response.maximum_size",
-                )?;
-                if response.minimum_size > response.maximum_size {
-                    return Err(ValidationError::new(
-                        "channel.pattern.mark_geometry_response",
-                        "minimum_size must not exceed maximum_size",
-                    ));
-                }
+            Self::SetTranslationAxis { .. } => Ok(()),
+            Self::SetMarkGeometryField { channel_id, edit } => {
                 let pattern_definition_id = document
                     .pattern_definition_id_for(*channel_id)
                     .expect("command channel existence was checked above");
@@ -2409,31 +5975,27 @@ impl DocumentCommand {
                     .iter()
                     .find(|definition| definition.id == pattern_definition_id)
                     .expect("document validation keeps channel definitions valid");
-                if response.maximum_size / 2.0 > definition.coverage.maximum_support_radius {
-                    return Err(ValidationError::new(
-                        "channel.pattern.mark_geometry_response.maximum_size",
-                        "maximum_size exceeds the pattern definition support capability",
-                    ));
+                let mut response = document
+                    .channel_mark_response(*channel_id)
+                    .expect("validated channel")
+                    .clone();
+                match edit {
+                    MarkGeometryFieldEdit::MinimumSize(value) => response.minimum_size = *value,
+                    MarkGeometryFieldEdit::MaximumSize(value) => response.maximum_size = *value,
                 }
-                Ok(())
+                validate_mark_response(&response, Some(definition.coverage.maximum_support_radius))
             }
-            Self::SetColor { channel_id, color } => {
-                validate_unit_component(color.red, "channel.appearance.color.red")?;
-                validate_unit_component(color.green, "channel.appearance.color.green")?;
-                validate_unit_component(color.blue, "channel.appearance.color.blue")?;
-                validate_unit_component(color.alpha, "channel.appearance.color.alpha")?;
-                if let Some(topology) = document.channel_topology() {
-                    let channel = topology
-                        .channels
-                        .iter()
-                        .find(|channel| channel.id == *channel_id)
-                        .expect("modeled topology and document channel IDs validate together");
-                    if !matches!(channel.paint, ChannelPaint::Solid(_)) {
-                        return Err(ValidationError::new(
-                            "channel.paint",
-                            "sampled-source paint cannot be replaced by an ordinary solid color",
-                        ));
-                    }
+            Self::SetColorComponent {
+                channel_id, value, ..
+            } => {
+                validate_unit_component(*value, "channel.appearance.color")?;
+                if let Some(channel) = document.modeled_channel(*channel_id)
+                    && !matches!(channel.paint, ChannelPaint::Solid(_))
+                {
+                    return Err(ValidationError::new(
+                        "channel.paint",
+                        "sampled-source paint has no editable solid components",
+                    ));
                 }
                 Ok(())
             }
@@ -2451,20 +6013,17 @@ impl DocumentCommand {
                 }
                 SourceReference::Assigned(_) => Ok(()),
             },
-            Self::SetSourceMapping { .. } if document.channel_topology().is_some() => {
+            Self::SetLegacyMappingField { .. } if document.channel_topology().is_some() => {
                 Err(ValidationError::new(
                     "channel.source_mapping",
                     "modeled channels require a complete Stage 9 source mapping",
                 ))
             }
-            Self::SetSourceMapping { .. } => Ok(()),
+            Self::SetLegacyMappingField { .. } => Ok(()),
             Self::ReplaceChannelTopology { model, topology } => {
                 validate_topology(*model, topology, &document.pattern_definitions)
             }
-            Self::SetTopologySourceMapping {
-                channel_id,
-                mapping,
-            } => {
+            Self::SetModeledMappingField { channel_id, edit } => {
                 let topology = document.channel_topology().ok_or(ValidationError::new(
                     "channel_topology",
                     "complete source mappings require an installed channel topology",
@@ -2479,7 +6038,20 @@ impl DocumentCommand {
                         "command targets a missing modeled channel",
                     ));
                 }
-                validate_source_mapping(*mapping)
+                let mut mapping = topology
+                    .channels
+                    .iter()
+                    .find(|channel| channel.id == *channel_id)
+                    .expect("validated channel")
+                    .mapping;
+                match edit {
+                    ModeledMappingFieldEdit::Component(value) => mapping.component = *value,
+                    ModeledMappingFieldEdit::Placement(value) => mapping.placement = *value,
+                    ModeledMappingFieldEdit::Inverted(value) => mapping.inverted = *value,
+                    ModeledMappingFieldEdit::Gain(value) => mapping.gain = *value,
+                    ModeledMappingFieldEdit::Bias(value) => mapping.bias = *value,
+                }
+                validate_source_mapping(mapping)
             }
             Self::SetChannelPaint { channel_id, paint } => {
                 let model = document.channel_model().ok_or(ValidationError::new(
@@ -2509,6 +6081,19 @@ impl DocumentCommand {
                     .allocate_definition_from_draft(definition)
                     .expect("command validation allocated a definition");
                 document.pattern_definitions.push(definition);
+                return;
+            }
+            Self::AddTypedPatternDefinition { definition } => {
+                document.pattern_definitions.push(definition.clone());
+                return;
+            }
+            Self::ReplaceSelectedChannelDefinitionTopology {
+                channel_id,
+                definition,
+                ..
+            } => {
+                document.pattern_definitions.push(definition.clone());
+                document.retarget_channel(*channel_id, definition.id);
                 return;
             }
             Self::DuplicatePatternDefinition { definition_id } => {
@@ -2548,7 +6133,8 @@ impl DocumentCommand {
                     let mut clone = document
                         .duplicate_definition(&source)
                         .expect("validated clone allocation");
-                    apply_definition_edit(&mut clone, edit);
+                    let remapped_edit = remap_definition_edit_for_duplicate(&source, &clone, edit);
+                    apply_definition_edit(&mut clone, &remapped_edit);
                     let clone_id = clone.id;
                     document.pattern_definitions.push(clone);
                     document.retarget_channel(*channel_id, clone_id);
@@ -2588,31 +6174,61 @@ impl DocumentCommand {
             };
             return;
         }
+        let canvas = document.canvas.clone();
         match &mut document.channel_configuration {
             ChannelConfiguration::Legacy(_) => {
                 let channel = document
                     .legacy_channel_mut(self.channel_id())
                     .expect("validated command must target an existing legacy channel");
                 match self {
-                    Self::SetDensity { density, .. } => channel.layout.density = density.clone(),
+                    Self::SetDensityAxis {
+                        edited_axis, value, ..
+                    } => {
+                        set_density_axis(&mut channel.layout.density, &canvas, *edited_axis, *value)
+                            .expect("validated density axis")
+                    }
+                    Self::SetDensityAspectLock { aspect_locked, .. } => {
+                        if *aspect_locked {
+                            let paired = derive_density_axis(
+                                &canvas,
+                                channel.layout.density.across_x,
+                                DensityEditedAxis::AcrossX,
+                            )
+                            .expect("validated canvas");
+                            channel.layout.density.across_y = paired;
+                        }
+                        channel.layout.density.aspect_locked = *aspect_locked;
+                    }
                     Self::SetRotation {
                         rotation_degrees, ..
                     } => channel.layout.rotation_degrees = *rotation_degrees,
-                    Self::SetTranslation {
-                        translation_x,
-                        translation_y,
-                        ..
-                    } => {
-                        channel.layout.translation_x = *translation_x;
-                        channel.layout.translation_y = *translation_y;
-                    }
-                    Self::SetMarkGeometryResponse { response, .. } => {
-                        channel.mark_geometry_response = response.clone()
-                    }
-                    Self::SetColor { color, .. } => channel.appearance.color = color.clone(),
+                    Self::SetTranslationAxis {
+                        edited_axis, value, ..
+                    } => match edited_axis {
+                        TranslationEditedAxis::X => channel.layout.translation_x = *value,
+                        TranslationEditedAxis::Y => channel.layout.translation_y = *value,
+                    },
+                    Self::SetMarkGeometryField { edit, .. } => match edit {
+                        MarkGeometryFieldEdit::MinimumSize(value) => {
+                            channel.mark_geometry_response.minimum_size = *value
+                        }
+                        MarkGeometryFieldEdit::MaximumSize(value) => {
+                            channel.mark_geometry_response.maximum_size = *value
+                        }
+                    },
+                    Self::SetColorComponent {
+                        component, value, ..
+                    } => set_color_component(&mut channel.appearance.color, *component, *value),
                     Self::SetOpacity { opacity, .. } => channel.appearance.opacity = *opacity,
                     Self::SetVisibility { visible, .. } => channel.appearance.visible = *visible,
-                    Self::SetSourceMapping { mapping, .. } => channel.source_mapping = *mapping,
+                    Self::SetLegacyMappingField { edit, .. } => match edit {
+                        LegacyMappingFieldEdit::Component(value) => {
+                            channel.source_mapping.component = *value
+                        }
+                        LegacyMappingFieldEdit::Placement(value) => {
+                            channel.source_mapping.placement = *value
+                        }
+                    },
                     _ => unreachable!("modeled-only command was validated against legacy state"),
                 }
             }
@@ -2623,29 +6239,66 @@ impl DocumentCommand {
                     .find(|channel| channel.id == self.channel_id())
                     .expect("validated command must target an existing modeled channel");
                 match self {
-                    Self::SetDensity { density, .. } => channel.layout.density = density.clone(),
+                    Self::SetDensityAxis {
+                        edited_axis, value, ..
+                    } => {
+                        set_density_axis(&mut channel.layout.density, &canvas, *edited_axis, *value)
+                            .expect("validated density axis")
+                    }
+                    Self::SetDensityAspectLock { aspect_locked, .. } => {
+                        if *aspect_locked {
+                            let paired = derive_density_axis(
+                                &canvas,
+                                channel.layout.density.across_x,
+                                DensityEditedAxis::AcrossX,
+                            )
+                            .expect("validated canvas");
+                            channel.layout.density.across_y = paired;
+                        }
+                        channel.layout.density.aspect_locked = *aspect_locked;
+                    }
                     Self::SetRotation {
                         rotation_degrees, ..
                     } => channel.layout.rotation_degrees = *rotation_degrees,
-                    Self::SetTranslation {
-                        translation_x,
-                        translation_y,
-                        ..
+                    Self::SetTranslationAxis {
+                        edited_axis, value, ..
+                    } => match edited_axis {
+                        TranslationEditedAxis::X => channel.layout.translation_x = *value,
+                        TranslationEditedAxis::Y => channel.layout.translation_y = *value,
+                    },
+                    Self::SetMarkGeometryField { edit, .. } => match edit {
+                        MarkGeometryFieldEdit::MinimumSize(value) => {
+                            channel.mark_geometry_response.minimum_size = *value
+                        }
+                        MarkGeometryFieldEdit::MaximumSize(value) => {
+                            channel.mark_geometry_response.maximum_size = *value
+                        }
+                    },
+                    Self::SetColorComponent {
+                        component, value, ..
                     } => {
-                        channel.layout.translation_x = *translation_x;
-                        channel.layout.translation_y = *translation_y;
-                    }
-                    Self::SetMarkGeometryResponse { response, .. } => {
-                        channel.mark_geometry_response = response.clone()
-                    }
-                    Self::SetColor { color, .. } => {
-                        channel.paint = ChannelPaint::Solid(color.clone())
+                        let ChannelPaint::Solid(color) = &mut channel.paint else {
+                            unreachable!("validated solid paint");
+                        };
+                        set_color_component(color, *component, *value);
                     }
                     Self::SetOpacity { opacity, .. } => channel.opacity = *opacity,
                     Self::SetVisibility { visible, .. } => channel.visible = *visible,
-                    Self::SetTopologySourceMapping { mapping, .. } => channel.mapping = *mapping,
+                    Self::SetModeledMappingField { edit, .. } => match edit {
+                        ModeledMappingFieldEdit::Component(value) => {
+                            channel.mapping.component = *value
+                        }
+                        ModeledMappingFieldEdit::Placement(value) => {
+                            channel.mapping.placement = *value
+                        }
+                        ModeledMappingFieldEdit::Inverted(value) => {
+                            channel.mapping.inverted = *value
+                        }
+                        ModeledMappingFieldEdit::Gain(value) => channel.mapping.gain = *value,
+                        ModeledMappingFieldEdit::Bias(value) => channel.mapping.bias = *value,
+                    },
                     Self::SetChannelPaint { paint, .. } => channel.paint = paint.clone(),
-                    Self::SetSourceMapping { .. } => {
+                    Self::SetLegacyMappingField { .. } => {
                         unreachable!("legacy mapping is rejected for modeled state")
                     }
                     _ => unreachable!("handled before configuration mutation"),
@@ -2654,31 +6307,31 @@ impl DocumentCommand {
         }
     }
 
-    fn result(&self) -> CommandResult {
-        let invalidation = match self {
-            Self::AddPatternDefinition { .. }
-            | Self::DuplicatePatternDefinition { .. }
-            | Self::RemoveUnreferencedPatternDefinition { .. } => InvalidationLevel::Family,
-            Self::RetargetChannelPatternDefinition { .. }
-            | Self::EditSelectedChannelPatternDefinition { .. }
-            | Self::EditSharedPatternDefinition { .. } => InvalidationLevel::Family,
-            Self::SetDensity { .. } | Self::SetRotation { .. } | Self::SetTranslation { .. } => {
-                InvalidationLevel::Family
+    fn result_for_transition(&self, before: &Document, after: &Document) -> CommandResult {
+        let invalidation = match self.field_classification() {
+            DocumentCommandFieldClassification::DescriptorBacked(projections) => {
+                let projection = projections
+                    .first()
+                    .expect("descriptor-backed command has one field projection");
+                property_field_contract(projection.field).invalidation
             }
-            Self::SetMarkGeometryResponse { .. } => InvalidationLevel::Realization,
-            Self::SetSourceMapping { .. } | Self::SetTopologySourceMapping { .. } => {
-                InvalidationLevel::Realization
-            }
-            Self::SetSourceReference { .. } => InvalidationLevel::Source,
-            Self::SetColor { .. }
-            | Self::SetOpacity { .. }
-            | Self::SetVisibility { .. }
-            | Self::SetChannelPaint { .. } => InvalidationLevel::Presentation,
-            Self::ReplaceChannelTopology { .. } => InvalidationLevel::ChannelTopology,
+            DocumentCommandFieldClassification::NonField(operation) => match operation {
+                NonFieldCommandOperation::AddPatternDefinition
+                | NonFieldCommandOperation::AddTypedPatternDefinition
+                | NonFieldCommandOperation::ReplaceSelectedChannelDefinitionTopology
+                | NonFieldCommandOperation::DuplicatePatternDefinition
+                | NonFieldCommandOperation::RemoveUnreferencedPatternDefinition => {
+                    InvalidationLevel::Family
+                }
+                NonFieldCommandOperation::ReplaceChannelTopology => {
+                    InvalidationLevel::ChannelTopology
+                }
+            },
         };
         CommandResult {
             affected_channels: match self {
                 Self::AddPatternDefinition { .. }
+                | Self::AddTypedPatternDefinition { .. }
                 | Self::DuplicatePatternDefinition { .. }
                 | Self::RemoveUnreferencedPatternDefinition { .. } => Vec::new(),
                 Self::RetargetChannelPatternDefinition { channel_id, .. }
@@ -2686,22 +6339,14 @@ impl DocumentCommand {
                     vec![*channel_id]
                 }
                 Self::EditSharedPatternDefinition { .. } => Vec::new(),
-                Self::SetSourceReference { .. } => self.channels_for_source_change(),
+                Self::SetSourceReference { .. } => after.channel_ids(),
                 Self::ReplaceChannelTopology { topology, .. } => {
-                    topology.channels.iter().map(|channel| channel.id).collect()
+                    affected_topology_channels(before.channel_ids(), topology)
                 }
                 _ => vec![self.channel_id()],
             },
             invalidation,
         }
-    }
-}
-
-impl DocumentCommand {
-    fn channels_for_source_change(&self) -> Vec<ChannelId> {
-        // Source invalidation applies to the complete document; callers retain
-        // the immutable snapshot to discover the current channel list.
-        Vec::new()
     }
 }
 
@@ -2834,10 +6479,7 @@ impl DocumentSession {
         command: &DocumentCommand,
     ) -> Result<CommandResult, DocumentSessionError> {
         let next_revision = self.next_revision()?;
-        let (candidate, mut result) = self.document.apply_command(command)?;
-        if matches!(command, DocumentCommand::SetSourceReference { .. }) {
-            result.affected_channels = candidate.channel_ids();
-        }
+        let (candidate, result) = self.document.apply_command(command)?;
         self.document = candidate;
         self.revision = next_revision;
         Ok(result)

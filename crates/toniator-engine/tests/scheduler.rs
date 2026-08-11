@@ -224,14 +224,10 @@ fn accepted_cache_obeys_the_complete_reuse_matrix_and_keeps_outputs_exact() {
     assert_eq!(first.result(), exact.result());
 
     session
-        .apply(&DocumentCommand::SetColor {
+        .apply(&DocumentCommand::SetColorComponent {
             channel_id: CHANNEL_ID,
-            color: ColorValue {
-                red: 0.3,
-                green: 0.2,
-                blue: 0.1,
-                alpha: 1.0,
-            },
+            component: toniator_domain::ColorComponent::Red,
+            value: 0.3,
         })
         .unwrap();
     let presentation = submit_and_accept(
@@ -251,12 +247,9 @@ fn accepted_cache_obeys_the_complete_reuse_matrix_and_keeps_outputs_exact() {
     );
 
     session
-        .apply(&DocumentCommand::SetMarkGeometryResponse {
+        .apply(&DocumentCommand::SetMarkGeometryField {
             channel_id: CHANNEL_ID,
-            response: MarkGeometryResponse {
-                minimum_size: 1.0,
-                maximum_size: 8.0,
-            },
+            edit: toniator_domain::MarkGeometryFieldEdit::MaximumSize(8.0),
         })
         .unwrap();
     let response = submit_and_accept(
@@ -276,13 +269,10 @@ fn accepted_cache_obeys_the_complete_reuse_matrix_and_keeps_outputs_exact() {
     );
 
     session
-        .apply(&DocumentCommand::SetDensity {
+        .apply(&DocumentCommand::SetDensityAxis {
             channel_id: CHANNEL_ID,
-            density: DensityMetric2D {
-                across_x: 80.0,
-                across_y: 60.0,
-                aspect_locked: true,
-            },
+            edited_axis: toniator_domain::DensityEditedAxis::AcrossX,
+            value: 80.0,
         })
         .unwrap();
     let family = submit_and_accept(
@@ -302,13 +292,9 @@ fn accepted_cache_obeys_the_complete_reuse_matrix_and_keeps_outputs_exact() {
     );
 
     session
-        .apply(&DocumentCommand::SetDensity {
+        .apply(&DocumentCommand::SetDensityAspectLock {
             channel_id: CHANNEL_ID,
-            density: DensityMetric2D {
-                across_x: 80.0,
-                across_y: 60.0,
-                aspect_locked: false,
-            },
+            aspect_locked: false,
         })
         .unwrap();
     let aspect_only = submit_and_accept(
