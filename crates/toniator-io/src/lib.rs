@@ -17,13 +17,14 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use toniator_domain::{
-    CanvasSpec, ChannelAppearance, ChannelId, ChannelPaint, ChannelPatternLayout,
-    ChannelSourceMapping, ChannelState, ChannelTopology, ColorValue, CoveragePolicy,
-    DensityMetric2D, Document, DocumentId, GuideDimensionId, HalftoneChannelModel,
+    ArtworkWeightResponse, CanvasSpec, ChannelAppearance, ChannelId, ChannelPaint,
+    ChannelPatternLayout, ChannelSourceMapping, ChannelState, ChannelTopology, ColorValue,
+    CoveragePolicy, DensityMetric2D, Document, DocumentId, GuideDimensionId, HalftoneChannelModel,
     HalftoneChannelRole, MarkGeometryResponse, MarkOrientation, MarkPrototype, ModeledChannelState,
     PatternDefinition, PatternDefinitionId, PatternMechanismId, PatternOutputLayerId,
-    SourceComponent, SourceMapping, SourceMappingComponent, SourcePlacement, SourceReference,
-    SourceReferenceId, StraightGuideDimension, StraightGuideRepetition, ValidationError,
+    RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy, SourceComponent,
+    SourceMapping, SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId,
+    StraightGuideDimension, StraightGuideRepetition, ValidationError, VisibleMarkSizingPolicy,
 };
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
@@ -477,7 +478,11 @@ pub fn load(path: &Path) -> Result<LoadedDocument, LoadError> {
                             | PatternMechanismDtoV2::GuideIntersections { id, .. }
                             | PatternMechanismDtoV2::StraightGuideDimensions { id, .. }
                             | PatternMechanismDtoV2::SelectedGuideIntersections { id, .. }
-                            | PatternMechanismDtoV2::AlongGuideSites { id, .. } => {
+                            | PatternMechanismDtoV2::AlongGuideSites { id, .. }
+                            | PatternMechanismDtoV2::RandomSiteProcess { id, .. }
+                            | PatternMechanismDtoV2::SiteDensityModulation { id, .. }
+                            | PatternMechanismDtoV2::SiteExclusion { id, .. }
+                            | PatternMechanismDtoV2::RandomSiteProduct { id, .. } => {
                                 PatternMechanismId(*id)
                             }
                         })
@@ -923,6 +928,12 @@ enum PatternFamilyDtoV2 {
         guide_mechanism_id: u64,
         site_mechanism_id: u64,
     },
+    RandomSites {
+        base_site_process_id: u64,
+        density_modulation_id: u64,
+        exclusion_id: u64,
+        site_product_id: u64,
+    },
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -951,6 +962,79 @@ enum PatternMechanismDtoV2 {
         interval_multiplier: f64,
         phase: f64,
     },
+    RandomSiteProcess {
+        id: u64,
+        character: RandomSiteCharacterDtoV2,
+        seed: u32,
+    },
+    SiteDensityModulation {
+        id: u64,
+        base_site_process_id: u64,
+        modulation: SiteDensityModulationDtoV2,
+    },
+    SiteExclusion {
+        id: u64,
+        density_modulation_id: u64,
+        policy: SiteExclusionPolicyDtoV2,
+    },
+    RandomSiteProduct {
+        id: u64,
+        exclusion_id: u64,
+        maximum_attempts: u32,
+        #[serde(default = "default_random_site_neighbor_checks")]
+        maximum_neighbor_checks: u32,
+    },
+}
+
+const fn default_random_site_neighbor_checks() -> u32 {
+    16_000_000
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum RandomSiteCharacterDtoV2 {
+    RawUniform,
+    Even {
+        minimum_center_distance: f64,
+    },
+    Clustered {
+        cluster_density: f64,
+        cluster_spread: f64,
+        cluster_strength: f64,
+    },
+}
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum SiteDensityModulationDtoV2 {
+    Uniform,
+    ArtworkWeighted {
+        mapping: SourceMappingDto,
+        strength: f64,
+        response: ArtworkWeightResponseDtoV2,
+    },
+}
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ArtworkWeightResponseDtoV2 {
+    Linear,
+    Smoothstep,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum SiteExclusionPolicyDtoV2 {
+    None,
+    MinimumCenterDistance {
+        minimum: f64,
+    },
+    VisibleMarkMargin {
+        margin: f64,
+        sizing: VisibleMarkSizingPolicyDtoV2,
+    },
+}
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum VisibleMarkSizingPolicyDtoV2 {
+    MaximumSupportRadius,
 }
 #[derive(Serialize, Deserialize)]
 struct StraightGuideDimensionDtoV2 {
@@ -1363,6 +1447,17 @@ impl PatternFamilyDtoV2 {
                 guide_mechanism_id: guide_mechanism_id.0,
                 site_mechanism_id: site_mechanism_id.0,
             },
+            toniator_domain::PatternFamily::RandomSites {
+                base_site_process_id,
+                density_modulation_id,
+                exclusion_id,
+                site_product_id,
+            } => Self::RandomSites {
+                base_site_process_id: base_site_process_id.0,
+                density_modulation_id: density_modulation_id.0,
+                exclusion_id: exclusion_id.0,
+                site_product_id: site_product_id.0,
+            },
         }
     }
     fn into_domain(self) -> toniator_domain::PatternFamily {
@@ -1373,6 +1468,17 @@ impl PatternFamilyDtoV2 {
             } => toniator_domain::PatternFamily::GuideIntersections {
                 guide_mechanism_id: PatternMechanismId(guide_mechanism_id),
                 site_mechanism_id: PatternMechanismId(site_mechanism_id),
+            },
+            Self::RandomSites {
+                base_site_process_id,
+                density_modulation_id,
+                exclusion_id,
+                site_product_id,
+            } => toniator_domain::PatternFamily::RandomSites {
+                base_site_process_id: PatternMechanismId(base_site_process_id),
+                density_modulation_id: PatternMechanismId(density_modulation_id),
+                exclusion_id: PatternMechanismId(exclusion_id),
+                site_product_id: PatternMechanismId(site_product_id),
             },
         }
     }
@@ -1423,6 +1529,44 @@ impl PatternMechanismDtoV2 {
                 interval_multiplier: *interval_multiplier,
                 phase: *phase,
             },
+            toniator_domain::PatternMechanism::RandomSiteProcess {
+                id,
+                character,
+                seed,
+            } => Self::RandomSiteProcess {
+                id: id.0,
+                character: RandomSiteCharacterDtoV2::from_domain(character),
+                seed: *seed,
+            },
+            toniator_domain::PatternMechanism::SiteDensityModulation {
+                id,
+                base_site_process_id,
+                modulation,
+            } => Self::SiteDensityModulation {
+                id: id.0,
+                base_site_process_id: base_site_process_id.0,
+                modulation: SiteDensityModulationDtoV2::from_domain(modulation),
+            },
+            toniator_domain::PatternMechanism::SiteExclusion {
+                id,
+                density_modulation_id,
+                policy,
+            } => Self::SiteExclusion {
+                id: id.0,
+                density_modulation_id: density_modulation_id.0,
+                policy: SiteExclusionPolicyDtoV2::from_domain(policy),
+            },
+            toniator_domain::PatternMechanism::RandomSiteProduct {
+                id,
+                exclusion_id,
+                maximum_attempts,
+                maximum_neighbor_checks,
+            } => Self::RandomSiteProduct {
+                id: id.0,
+                exclusion_id: exclusion_id.0,
+                maximum_attempts: *maximum_attempts,
+                maximum_neighbor_checks: *maximum_neighbor_checks,
+            },
         }
     }
     fn into_domain(self) -> toniator_domain::PatternMechanism {
@@ -1470,6 +1614,171 @@ impl PatternMechanismDtoV2 {
                 interval_multiplier,
                 phase,
             },
+            Self::RandomSiteProcess {
+                id,
+                character,
+                seed,
+            } => toniator_domain::PatternMechanism::RandomSiteProcess {
+                id: PatternMechanismId(id),
+                character: character.into_domain(),
+                seed,
+            },
+            Self::SiteDensityModulation {
+                id,
+                base_site_process_id,
+                modulation,
+            } => toniator_domain::PatternMechanism::SiteDensityModulation {
+                id: PatternMechanismId(id),
+                base_site_process_id: PatternMechanismId(base_site_process_id),
+                modulation: modulation.into_domain(),
+            },
+            Self::SiteExclusion {
+                id,
+                density_modulation_id,
+                policy,
+            } => toniator_domain::PatternMechanism::SiteExclusion {
+                id: PatternMechanismId(id),
+                density_modulation_id: PatternMechanismId(density_modulation_id),
+                policy: policy.into_domain(),
+            },
+            Self::RandomSiteProduct {
+                id,
+                exclusion_id,
+                maximum_attempts,
+                maximum_neighbor_checks,
+            } => toniator_domain::PatternMechanism::RandomSiteProduct {
+                id: PatternMechanismId(id),
+                exclusion_id: PatternMechanismId(exclusion_id),
+                maximum_attempts,
+                maximum_neighbor_checks,
+            },
+        }
+    }
+}
+
+impl RandomSiteCharacterDtoV2 {
+    fn from_domain(value: &RandomSiteCharacter) -> Self {
+        match value {
+            RandomSiteCharacter::RawUniform => Self::RawUniform,
+            RandomSiteCharacter::Even {
+                minimum_center_distance,
+            } => Self::Even {
+                minimum_center_distance: *minimum_center_distance,
+            },
+            RandomSiteCharacter::Clustered {
+                cluster_density,
+                cluster_spread,
+                cluster_strength,
+            } => Self::Clustered {
+                cluster_density: *cluster_density,
+                cluster_spread: *cluster_spread,
+                cluster_strength: *cluster_strength,
+            },
+        }
+    }
+    fn into_domain(self) -> RandomSiteCharacter {
+        match self {
+            Self::RawUniform => RandomSiteCharacter::RawUniform,
+            Self::Even {
+                minimum_center_distance,
+            } => RandomSiteCharacter::Even {
+                minimum_center_distance,
+            },
+            Self::Clustered {
+                cluster_density,
+                cluster_spread,
+                cluster_strength,
+            } => RandomSiteCharacter::Clustered {
+                cluster_density,
+                cluster_spread,
+                cluster_strength,
+            },
+        }
+    }
+}
+
+impl SiteDensityModulationDtoV2 {
+    fn from_domain(value: &SiteDensityModulation) -> Self {
+        match value {
+            SiteDensityModulation::Uniform => Self::Uniform,
+            SiteDensityModulation::ArtworkWeighted {
+                mapping,
+                strength,
+                response,
+            } => Self::ArtworkWeighted {
+                mapping: SourceMappingDto::from_domain(*mapping),
+                strength: *strength,
+                response: ArtworkWeightResponseDtoV2::from_domain(response),
+            },
+        }
+    }
+    fn into_domain(self) -> SiteDensityModulation {
+        match self {
+            Self::Uniform => SiteDensityModulation::Uniform,
+            Self::ArtworkWeighted {
+                mapping,
+                strength,
+                response,
+            } => SiteDensityModulation::ArtworkWeighted {
+                mapping: mapping.into_domain(),
+                strength,
+                response: response.into_domain(),
+            },
+        }
+    }
+}
+
+impl ArtworkWeightResponseDtoV2 {
+    fn from_domain(value: &ArtworkWeightResponse) -> Self {
+        match value {
+            ArtworkWeightResponse::Linear => Self::Linear,
+            ArtworkWeightResponse::Smoothstep => Self::Smoothstep,
+        }
+    }
+    fn into_domain(self) -> ArtworkWeightResponse {
+        match self {
+            Self::Linear => ArtworkWeightResponse::Linear,
+            Self::Smoothstep => ArtworkWeightResponse::Smoothstep,
+        }
+    }
+}
+
+impl SiteExclusionPolicyDtoV2 {
+    fn from_domain(value: &SiteExclusionPolicy) -> Self {
+        match value {
+            SiteExclusionPolicy::None => Self::None,
+            SiteExclusionPolicy::MinimumCenterDistance { minimum } => {
+                Self::MinimumCenterDistance { minimum: *minimum }
+            }
+            SiteExclusionPolicy::VisibleMarkMargin { margin, sizing } => Self::VisibleMarkMargin {
+                margin: *margin,
+                sizing: VisibleMarkSizingPolicyDtoV2::from_domain(*sizing),
+            },
+        }
+    }
+    fn into_domain(self) -> SiteExclusionPolicy {
+        match self {
+            Self::None => SiteExclusionPolicy::None,
+            Self::MinimumCenterDistance { minimum } => {
+                SiteExclusionPolicy::MinimumCenterDistance { minimum }
+            }
+            Self::VisibleMarkMargin { margin, sizing } => SiteExclusionPolicy::VisibleMarkMargin {
+                margin,
+                sizing: sizing.into_domain(),
+            },
+        }
+    }
+}
+
+impl VisibleMarkSizingPolicyDtoV2 {
+    fn from_domain(value: VisibleMarkSizingPolicy) -> Self {
+        match value {
+            VisibleMarkSizingPolicy::MaximumSupportRadius => Self::MaximumSupportRadius,
+        }
+    }
+    fn into_domain(self) -> VisibleMarkSizingPolicy {
+        match self {
+            Self::MaximumSupportRadius => VisibleMarkSizingPolicy::MaximumSupportRadius,
         }
     }
 }

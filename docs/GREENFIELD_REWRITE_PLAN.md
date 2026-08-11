@@ -1532,7 +1532,7 @@ natural-resolution rule above for all future applicable tests.
 
 ## Stage 16B — Random and site-distribution mechanisms
 
-**Status: Planned.** Immediately prove the Stage 14–15 architecture is not
+**Status: Accepted awaiting checkpoint.** Immediately prove the Stage 14–15 architecture is not
 grid-shaped by adding reusable deterministic site distributions.
 
 - Add raw uniform random, genuinely even/exclusion-based placement, clustered

@@ -239,7 +239,7 @@ rectangular/triangular branches. The user provisionally accepted the stage on
 low-resolution tests for every future applicable stage. The implementation is
 checkpointed at `ccec466`.
 
-**Stage 16B — Planned.** Immediately prove the framework is not grid-shaped by
+**Stage 16B — Accepted awaiting checkpoint.** Immediately prove the framework is not grid-shaped by
 adding deterministic raw/even/exclusion, clustered, and source-weighted site
 distributions with `u32` seeds, spacing guarantees, achieved-density
 diagnostics, and the same downstream output machinery.

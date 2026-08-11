@@ -1,3 +1,4 @@
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
     fs,
@@ -7,13 +8,15 @@ use std::{
 };
 
 use toniator_domain::{
-    CanvasSpec, ChannelAppearance, ChannelId, ChannelPaint, ChannelPatternLayout,
-    ChannelSourceMapping, ChannelState, ChannelTopology, ChannelTopologyTemplate, ColorValue,
-    CoveragePolicy, DensityMetric2D, Document, DocumentHistory, DocumentId, DocumentSession,
-    GeneralizedSiteProduct, GuideDimensionId, HalftoneChannelModel, MarkGeometryResponse,
-    MarkOrientation, PatternDefinition, PatternDefinitionId, PatternMechanismId,
-    PatternOutputLayerId, SourceComponent, SourceMappingComponent, SourcePlacement,
-    SourceReference, SourceReferenceId, StraightGuideDimension, StraightGuideRepetition,
+    ArtworkWeightResponse, CanvasSpec, ChannelAppearance, ChannelId, ChannelPaint,
+    ChannelPatternLayout, ChannelSourceMapping, ChannelState, ChannelTopology,
+    ChannelTopologyTemplate, ColorValue, CoveragePolicy, DensityMetric2D, Document,
+    DocumentHistory, DocumentId, DocumentSession, GeneralizedSiteProduct, GuideDimensionId,
+    HalftoneChannelModel, MarkGeometryResponse, MarkOrientation, PatternDefinition,
+    PatternDefinitionId, PatternMechanismId, PatternOutputLayerId, RandomSiteCharacter,
+    SiteDensityModulation, SiteExclusionPolicy, SourceComponent, SourceMappingComponent,
+    SourcePlacement, SourceReference, SourceReferenceId, StraightGuideDimension,
+    StraightGuideRepetition, VisibleMarkSizingPolicy,
 };
 use toniator_io::{
     CONTAINER_VERSION, DOCUMENT_SCHEMA_VERSION, EmbeddedSource, EmbeddedSourceFormat, LoadError,
@@ -156,6 +159,81 @@ fn generalized_v2_definition_round_trips_without_serializing_runtime_state() {
     let loaded = load(&path).unwrap();
     fs::remove_file(path).unwrap();
     assert_eq!(loaded.document(), &document);
+}
+
+#[test]
+fn random_site_v2_definition_round_trips_without_changing_existing_v2_forms() {
+    let (document, sources) = legacy_document();
+    let random = PatternDefinition::random_sites(
+        PatternDefinitionId(91),
+        "random typed",
+        PatternMechanismId(181),
+        PatternMechanismId(182),
+        PatternMechanismId(183),
+        PatternMechanismId(184),
+        PatternOutputLayerId(91),
+        RandomSiteCharacter::Clustered {
+            cluster_density: 0.2,
+            cluster_spread: 3.5,
+            cluster_strength: 0.75,
+        },
+        42,
+        SiteDensityModulation::ArtworkWeighted {
+            mapping: toniator_domain::SourceMapping {
+                component: SourceMappingComponent::Luminance,
+                placement: SourcePlacement::StretchToCanvas,
+                inverted: false,
+                gain: 1.0,
+                bias: 0.0,
+            },
+            strength: 0.8,
+            response: ArtworkWeightResponse::Smoothstep,
+        },
+        SiteExclusionPolicy::VisibleMarkMargin {
+            margin: 0.5,
+            sizing: VisibleMarkSizingPolicy::MaximumSupportRadius,
+        },
+        64,
+        16_000_000,
+        CoveragePolicy {
+            guard_steps: 2,
+            maximum_support_radius: 4.5,
+        },
+    );
+    let document = Document::with_source(
+        DocumentId(81),
+        document.canvas().clone(),
+        document.source().clone(),
+        vec![random],
+        document.channels().unwrap().to_vec(),
+    )
+    .unwrap();
+    let first = temporary("stage16b-random-one.toniator");
+    let second = temporary("stage16b-random-two.toniator");
+    save(&first, &document, &sources).unwrap();
+    save(&second, &document, &sources).unwrap();
+    assert_eq!(fs::read(&first).unwrap(), fs::read(&second).unwrap());
+    let loaded = load(&first).unwrap();
+    fs::remove_file(first).unwrap();
+    fs::remove_file(second).unwrap();
+    assert_eq!(loaded.document(), &document);
+}
+
+#[test]
+fn frozen_v1_migrated_old_v2_bytes_remain_at_the_accepted_hash_after_random_dto_additions() {
+    let loaded = load(&asset("raster-sample-v1.toniator")).unwrap();
+    let first = temporary("stage16b-old-v2-first.toniator");
+    let second = temporary("stage16b-old-v2-second.toniator");
+    save(&first, loaded.document(), loaded.sources()).unwrap();
+    save(&second, loaded.document(), loaded.sources()).unwrap();
+    let first_bytes = fs::read(&first).unwrap();
+    assert_eq!(first_bytes, fs::read(&second).unwrap());
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&first_bytes)),
+        "7135531041b8a4f9136731267b356ce4b3acbdb74c6e12c6670817e0613436cf"
+    );
+    fs::remove_file(first).unwrap();
+    fs::remove_file(second).unwrap();
 }
 
 fn asset(name: &str) -> PathBuf {

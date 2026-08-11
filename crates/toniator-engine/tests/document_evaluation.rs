@@ -5,14 +5,16 @@ use std::{
     time::{Duration, Instant},
 };
 use toniator_domain::{
-    CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternLayout, ChannelSourceMapping,
-    ChannelState, ChannelTopology, ChannelTopologyTemplate, ColorValue, CoveragePolicy,
-    DensityMetric2D, Document, DocumentCommand, DocumentHistory, DocumentId, DocumentSession,
-    GeneralizedSiteProduct, GuideDimensionId, HalftoneChannelModel, HalftoneChannelRole,
-    MarkGeometryResponse, MarkOrientation, PatternDefinition, PatternDefinitionEdit,
-    PatternDefinitionId, PatternMechanism, PatternMechanismId, PatternOutputLayer,
-    PatternOutputLayerId, SourceComponent, SourceMapping, SourceMappingComponent, SourcePlacement,
+    ArtworkWeightResponse, CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternLayout,
+    ChannelSourceMapping, ChannelState, ChannelTopology, ChannelTopologyTemplate, ColorValue,
+    CoveragePolicy, DensityMetric2D, Document, DocumentCommand, DocumentHistory, DocumentId,
+    DocumentSession, GeneralizedSiteProduct, GuideDimensionId, HalftoneChannelModel,
+    HalftoneChannelRole, MarkGeometryResponse, MarkOrientation, PatternDefinition,
+    PatternDefinitionEdit, PatternDefinitionId, PatternMechanism, PatternMechanismId,
+    PatternOutputLayer, PatternOutputLayerId, RandomSiteCharacter, SiteDensityModulation,
+    SiteExclusionPolicy, SourceComponent, SourceMapping, SourceMappingComponent, SourcePlacement,
     SourceReference, SourceReferenceId, StraightGuideDimension, StraightGuideRepetition,
+    VisibleMarkSizingPolicy,
 };
 use toniator_engine::{
     CacheDisposition, EvaluationCompletion, EvaluationLimits, EvaluationRequest,
@@ -1738,6 +1740,555 @@ fn generalized_saved_v2_documents_reopen_with_identical_complete_outputs() {
                 .unwrap();
             }
         }
+    }
+}
+
+fn random_definition(
+    character: RandomSiteCharacter,
+    modulation: SiteDensityModulation,
+    exclusion: SiteExclusionPolicy,
+    attempts: u32,
+) -> PatternDefinition {
+    PatternDefinition::random_sites(
+        PatternDefinitionId(1),
+        "site distributions",
+        PatternMechanismId(101),
+        PatternMechanismId(102),
+        PatternMechanismId(103),
+        PatternMechanismId(104),
+        PatternOutputLayerId(105),
+        character,
+        0x1357_9bdf,
+        modulation,
+        exclusion,
+        attempts,
+        16_000_000,
+        CoveragePolicy {
+            guard_steps: 2,
+            maximum_support_radius: 4.5,
+        },
+    )
+}
+
+fn random_session(
+    model: HalftoneChannelModel,
+    width: f64,
+    height: f64,
+    definition: PatternDefinition,
+) -> DocumentSession {
+    let base = session(model);
+    let mut channels = base
+        .document()
+        .channel_topology()
+        .unwrap()
+        .channels()
+        .to_vec();
+    for channel in &mut channels {
+        channel.layout.density = DensityMetric2D {
+            across_x: (width / 10.0).round(),
+            across_y: (height / 10.0).round(),
+            aspect_locked: true,
+        };
+    }
+    let document = Document::with_source_and_topology(
+        base.document().id(),
+        CanvasSpec { width, height },
+        base.document().source().clone(),
+        vec![definition],
+        model,
+        ChannelTopology::new(channels),
+    )
+    .unwrap();
+    DocumentSession::new(document).unwrap()
+}
+
+fn assert_nonempty_random_native_output(result: &toniator_engine::EvaluationResult, label: &str) {
+    let mut positive_marks = 0usize;
+    for layer in result.scene().layers() {
+        assert!(layer.visible(), "{label}: enabled channel was hidden");
+        let toniator_engine::GeometryOutput::CircularMarks(marks) = layer.geometry();
+        assert!(
+            !marks.is_empty(),
+            "{label}: enabled channel had no canonical marks"
+        );
+        assert!(
+            marks.iter().any(|mark| mark.radius > 0.0),
+            "{label}: enabled channel had no positive-radius canonical marks"
+        );
+        positive_marks += marks.iter().filter(|mark| mark.radius > 0.0).count();
+    }
+    assert!(
+        positive_marks > 0,
+        "{label}: no positive-radius canonical marks"
+    );
+    let svg = write_svg(result.scene());
+    assert!(
+        svg.matches("<circle ").count() >= positive_marks,
+        "{label}: SVG circles missing"
+    );
+    assert_eq!(
+        svg.matches("<clipPath id=\"canvas-clip\"").count(),
+        1,
+        "{label}: SVG clip definition"
+    );
+    assert_eq!(
+        svg.matches("clip-path=").count(),
+        1,
+        "{label}: SVG canvas clip use"
+    );
+    assert!(
+        result
+            .raster()
+            .pixels()
+            .chunks_exact(4)
+            .any(|pixel| pixel[3] > 0),
+        "{label}: native PNG raster alpha was entirely zero"
+    );
+}
+
+#[test]
+fn random_site_saved_v2_documents_reopen_with_native_png_svg_and_both_sources() {
+    let validation =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/validation/stage-16b");
+    fs::create_dir_all(&validation).unwrap();
+    let configurations = [
+        (
+            "raw",
+            RandomSiteCharacter::RawUniform,
+            SiteDensityModulation::Uniform,
+            SiteExclusionPolicy::None,
+            32,
+        ),
+        (
+            "even",
+            RandomSiteCharacter::Even {
+                minimum_center_distance: 8.0,
+            },
+            SiteDensityModulation::Uniform,
+            SiteExclusionPolicy::None,
+            32,
+        ),
+        (
+            "clustered",
+            RandomSiteCharacter::Clustered {
+                cluster_density: 0.2,
+                cluster_spread: 12.0,
+                cluster_strength: 0.85,
+            },
+            SiteDensityModulation::Uniform,
+            SiteExclusionPolicy::None,
+            32,
+        ),
+        (
+            "center-excluded",
+            RandomSiteCharacter::RawUniform,
+            SiteDensityModulation::Uniform,
+            SiteExclusionPolicy::MinimumCenterDistance { minimum: 8.0 },
+            32,
+        ),
+        (
+            "visible-mark-excluded",
+            RandomSiteCharacter::RawUniform,
+            SiteDensityModulation::Uniform,
+            SiteExclusionPolicy::VisibleMarkMargin {
+                margin: 0.5,
+                sizing: VisibleMarkSizingPolicy::MaximumSupportRadius,
+            },
+            32,
+        ),
+        (
+            "unsatisfiable",
+            RandomSiteCharacter::Even {
+                minimum_center_distance: 120.0,
+            },
+            SiteDensityModulation::Uniform,
+            SiteExclusionPolicy::None,
+            1,
+        ),
+    ];
+    for (label, character, modulation, exclusion, attempts) in configurations {
+        let session = random_session(
+            HalftoneChannelModel::Rgb,
+            90.0,
+            60.0,
+            random_definition(character, modulation, exclusion, attempts),
+        );
+        let source_id = SourceReferenceId::new("fixture-source").unwrap();
+        let bytes = fs::read("../../assets/raster-sample.png").unwrap();
+        let result = evaluate(EvaluationRequest::new(
+            session.document_evaluation_snapshot(),
+            ResolvedSource::new(source_id.clone(), bytes.clone(), SourceFormatHint::Png).unwrap(),
+        ))
+        .unwrap();
+        if label != "unsatisfiable" {
+            assert_nonempty_random_native_output(&result, label);
+        }
+        let bundle = SourceBundle::new([EmbeddedSource::new(
+            source_id,
+            EmbeddedSourceFormat::Png,
+            bytes,
+            None,
+        )
+        .unwrap()])
+        .unwrap();
+        let document_path = validation.join(format!("{label}-raster-Rgb.toniator"));
+        save(&document_path, session.document(), &bundle).unwrap();
+        let reopened = load(&document_path).unwrap();
+        let reopened_session = DocumentSession::new(reopened.document().clone()).unwrap();
+        let reopened_result = evaluate(EvaluationRequest::new(
+            reopened_session.document_evaluation_snapshot(),
+            ResolvedSource::new(
+                SourceReferenceId::new("fixture-source").unwrap(),
+                reopened
+                    .sources()
+                    .entries()
+                    .next()
+                    .unwrap()
+                    .bytes()
+                    .to_vec(),
+                SourceFormatHint::Png,
+            )
+            .unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(result.channels(), reopened_result.channels());
+        assert_eq!(result.raster().pixels(), reopened_result.raster().pixels());
+        assert_eq!(
+            write_svg(result.scene()),
+            write_svg(reopened_result.scene())
+        );
+        fs::write(
+            validation.join(format!("{label}-raster-Rgb.png")),
+            encode_png(result.raster()).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            validation.join(format!("{label}-raster-Rgb.svg")),
+            write_svg(result.scene()),
+        )
+        .unwrap();
+    }
+    for (source_label, source_format, source_path, embedded_format, width, height) in [
+        (
+            "raster",
+            SourceFormatHint::Png,
+            "../../assets/raster-sample.png",
+            EmbeddedSourceFormat::Png,
+            1024.0,
+            1024.0,
+        ),
+        (
+            "vector",
+            SourceFormatHint::Svg,
+            "../../assets/vector-sample.svg",
+            EmbeddedSourceFormat::Svg,
+            900.0,
+            620.0,
+        ),
+    ] {
+        let bytes = fs::read(source_path).unwrap();
+        for model in [
+            HalftoneChannelModel::Rgb,
+            HalftoneChannelModel::Cmyk,
+            HalftoneChannelModel::SourceColorAlpha,
+        ] {
+            let mapping = SourceMapping {
+                component: SourceMappingComponent::Luminance,
+                placement: SourcePlacement::StretchToCanvas,
+                inverted: false,
+                gain: 1.0,
+                bias: 0.0,
+            };
+            let definition = random_definition(
+                RandomSiteCharacter::RawUniform,
+                SiteDensityModulation::ArtworkWeighted {
+                    mapping,
+                    strength: 0.85,
+                    response: ArtworkWeightResponse::Linear,
+                },
+                SiteExclusionPolicy::MinimumCenterDistance { minimum: 8.0 },
+                32,
+            );
+            let session = random_session(model, width, height, definition);
+            let label = format!("artwork-weighted-{source_label}-{model:?}");
+            let source_id = SourceReferenceId::new("fixture-source").unwrap();
+            let bundle = SourceBundle::new([EmbeddedSource::new(
+                source_id.clone(),
+                embedded_format,
+                bytes.clone(),
+                None,
+            )
+            .unwrap()])
+            .unwrap();
+            let result = evaluate(EvaluationRequest::new(
+                session.document_evaluation_snapshot(),
+                ResolvedSource::new(source_id, bytes.clone(), source_format).unwrap(),
+            ))
+            .unwrap();
+            assert_nonempty_random_native_output(&result, &label);
+            save(
+                &validation.join(format!("{label}.toniator")),
+                session.document(),
+                &bundle,
+            )
+            .unwrap();
+            let reopened = load(&validation.join(format!("{label}.toniator"))).unwrap();
+            let reopened_session = DocumentSession::new(reopened.document().clone()).unwrap();
+            let reopened_result = evaluate(EvaluationRequest::new(
+                reopened_session.document_evaluation_snapshot(),
+                ResolvedSource::new(
+                    SourceReferenceId::new("fixture-source").unwrap(),
+                    reopened
+                        .sources()
+                        .entries()
+                        .next()
+                        .unwrap()
+                        .bytes()
+                        .to_vec(),
+                    source_format,
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+            assert_eq!(result.channels(), reopened_result.channels());
+            assert_eq!(
+                result.scene().identity(),
+                reopened_result.scene().identity()
+            );
+            assert_eq!(result.raster().pixels(), reopened_result.raster().pixels());
+            assert_eq!(
+                write_svg(result.scene()),
+                write_svg(reopened_result.scene())
+            );
+            fs::write(
+                validation.join(format!("{label}.png")),
+                encode_png(result.raster()).unwrap(),
+            )
+            .unwrap();
+            fs::write(
+                validation.join(format!("{label}.svg")),
+                write_svg(result.scene()),
+            )
+            .unwrap();
+        }
+        for (kind, character) in [
+            ("raw", RandomSiteCharacter::RawUniform),
+            (
+                "even",
+                RandomSiteCharacter::Even {
+                    minimum_center_distance: 8.0,
+                },
+            ),
+            (
+                "clustered",
+                RandomSiteCharacter::Clustered {
+                    cluster_density: 0.001,
+                    cluster_spread: 18.0,
+                    cluster_strength: 1.0,
+                },
+            ),
+        ] {
+            let exclusion = if kind == "raw" {
+                SiteExclusionPolicy::None
+            } else {
+                SiteExclusionPolicy::MinimumCenterDistance { minimum: 8.0 }
+            };
+            let session = random_session(
+                HalftoneChannelModel::Rgb,
+                width,
+                height,
+                random_definition(character, SiteDensityModulation::Uniform, exclusion, 32),
+            );
+            let source_id = SourceReferenceId::new("fixture-source").unwrap();
+            let result = evaluate(EvaluationRequest::new(
+                session.document_evaluation_snapshot(),
+                ResolvedSource::new(source_id.clone(), bytes.clone(), source_format).unwrap(),
+            ))
+            .unwrap();
+            let bundle = SourceBundle::new([EmbeddedSource::new(
+                source_id,
+                embedded_format,
+                bytes.clone(),
+                None,
+            )
+            .unwrap()])
+            .unwrap();
+            let label = format!("{kind}-{source_label}-Rgb-natural");
+            save(
+                &validation.join(format!("{label}.toniator")),
+                session.document(),
+                &bundle,
+            )
+            .unwrap();
+            let reopened = load(&validation.join(format!("{label}.toniator"))).unwrap();
+            let reopened_session = DocumentSession::new(reopened.document().clone()).unwrap();
+            let reopened_result = evaluate(EvaluationRequest::new(
+                reopened_session.document_evaluation_snapshot(),
+                ResolvedSource::new(
+                    SourceReferenceId::new("fixture-source").unwrap(),
+                    reopened
+                        .sources()
+                        .entries()
+                        .next()
+                        .unwrap()
+                        .bytes()
+                        .to_vec(),
+                    source_format,
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+            assert_eq!(result.channels(), reopened_result.channels(), "{label}");
+            assert_eq!(
+                result.raster().pixels(),
+                reopened_result.raster().pixels(),
+                "{label}"
+            );
+            assert_eq!(
+                write_svg(result.scene()),
+                write_svg(reopened_result.scene()),
+                "{label}"
+            );
+            assert_nonempty_random_native_output(&result, &label);
+            fs::write(
+                validation.join(format!("{label}.png")),
+                encode_png(result.raster()).unwrap(),
+            )
+            .unwrap();
+            fs::write(
+                validation.join(format!("{label}.svg")),
+                write_svg(result.scene()),
+            )
+            .unwrap();
+        }
+    }
+}
+
+#[test]
+fn random_family_cache_identity_and_scheduler_transactions_are_conditional_on_weighting() {
+    let bytes = fs::read("../../assets/raster-sample.png").unwrap();
+    let changed = fs::read("../../assets/vector-sample.svg").unwrap();
+    for (weighted, expected_changed_family) in [
+        (false, CacheDisposition::Hit),
+        (true, CacheDisposition::Miss),
+    ] {
+        let modulation = if weighted {
+            SiteDensityModulation::ArtworkWeighted {
+                mapping: SourceMapping {
+                    component: SourceMappingComponent::Luminance,
+                    placement: SourcePlacement::StretchToCanvas,
+                    inverted: false,
+                    gain: 1.0,
+                    bias: 0.0,
+                },
+                strength: 0.8,
+                response: ArtworkWeightResponse::Smoothstep,
+            }
+        } else {
+            SiteDensityModulation::Uniform
+        };
+        let mut session = random_session(
+            HalftoneChannelModel::Rgb,
+            90.0,
+            60.0,
+            random_definition(
+                RandomSiteCharacter::Even {
+                    minimum_center_distance: 6.0,
+                },
+                modulation,
+                SiteExclusionPolicy::None,
+                64,
+            ),
+        );
+        let scheduler = EvaluationScheduler::new().unwrap();
+        let first_id = SourceReferenceId::new("fixture-source").unwrap();
+        submit_and_accept(
+            &scheduler,
+            &session,
+            EvaluationRequest::new(
+                session.document_evaluation_snapshot(),
+                ResolvedSource::new(first_id.clone(), bytes.clone(), SourceFormatHint::Png)
+                    .unwrap(),
+            ),
+        );
+        session
+            .apply(&DocumentCommand::SetSourceReference {
+                source: SourceReference::Assigned(
+                    SourceReferenceId::new("same-bytes-new-logical").unwrap(),
+                ),
+            })
+            .unwrap();
+        let same = submit_and_accept(
+            &scheduler,
+            &session,
+            EvaluationRequest::new(
+                session.document_evaluation_snapshot(),
+                ResolvedSource::new(
+                    SourceReferenceId::new("same-bytes-new-logical").unwrap(),
+                    bytes.clone(),
+                    SourceFormatHint::Png,
+                )
+                .unwrap(),
+            ),
+        );
+        let same_diagnostics = same.cache_diagnostics().unwrap();
+        assert_eq!(
+            same_diagnostics.aggregate.decoded_source,
+            CacheDisposition::Miss
+        );
+        assert_eq!(same_diagnostics.aggregate.family, CacheDisposition::Hit);
+        session
+            .apply(&DocumentCommand::SetSourceReference {
+                source: SourceReference::Assigned(
+                    SourceReferenceId::new("changed-source").unwrap(),
+                ),
+            })
+            .unwrap();
+        let changed_completion = submit_and_accept(
+            &scheduler,
+            &session,
+            EvaluationRequest::new(
+                session.document_evaluation_snapshot(),
+                ResolvedSource::new(
+                    SourceReferenceId::new("changed-source").unwrap(),
+                    changed.clone(),
+                    SourceFormatHint::Svg,
+                )
+                .unwrap(),
+            ),
+        );
+        let diagnostics = changed_completion.cache_diagnostics().unwrap();
+        assert_eq!(diagnostics.aggregate.decoded_source, CacheDisposition::Miss);
+        assert_eq!(diagnostics.aggregate.family, expected_changed_family);
+        assert_eq!(diagnostics.aggregate.realization, CacheDisposition::Miss);
+        assert_eq!(diagnostics.aggregate.scene, CacheDisposition::Miss);
+        assert_eq!(diagnostics.aggregate.raster, CacheDisposition::Miss);
+        // Current failure must not disturb the five accepted slots; acceptance remains idempotent.
+        let failed = scheduler
+            .submit(EvaluationRequest::new(
+                session.document_evaluation_snapshot(),
+                ResolvedSource::new(
+                    SourceReferenceId::new("wrong-id").unwrap(),
+                    changed.clone(),
+                    SourceFormatHint::Svg,
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+        let failed_completion = wait_for_latest(&scheduler);
+        assert_eq!(failed_completion.ticket(), failed);
+        assert!(failed_completion.error().is_some());
+        assert!(
+            scheduler
+                .accept_completion(&failed_completion, &session)
+                .unwrap()
+        );
+        assert!(
+            !scheduler
+                .accept_completion(&changed_completion, &session)
+                .unwrap()
+        );
+        scheduler.shutdown().unwrap();
     }
 }
 

@@ -2,13 +2,15 @@
 
 //! Deterministic straight-guide family evaluation.
 
-use std::{error::Error, fmt};
+use std::{collections::BTreeMap, error::Error, fmt};
 
 use serde::Serialize;
 use toniator_domain::{
-    CanvasSpec, DensityMetric2D, GuideDimensionId, MarkOrientation, MarkPrototype,
-    PatternDefinition, PatternFamily, PatternMechanism, PatternMechanismId, PatternModulation,
-    PatternOutputLayer, PatternOutputLayerId, SourceMapping, StraightGuideDimension,
+    ArtworkWeightResponse, CanvasSpec, DensityMetric2D, GuideDimensionId, MarkOrientation,
+    MarkPrototype, PatternDefinition, PatternFamily, PatternMechanism, PatternMechanismId,
+    PatternModulation, PatternOutputLayer, PatternOutputLayerId, RandomSiteCharacter,
+    SiteDensityModulation, SiteExclusionPolicy, SourceMapping, StraightGuideDimension,
+    VisibleMarkSizingPolicy,
 };
 pub use toniator_geometry::{
     AffineTransform2D, Bounds, CanonicalCircleMark, GuideInstanceId, GuideIntersectionProvenance,
@@ -32,6 +34,7 @@ pub const SECOND_DIMENSION_ID: GuideDimensionId = GuideDimensionId(2);
 pub enum StructuralProductCapability {
     GuideIntersections,
     AlongGuideSites,
+    RandomSites,
 }
 
 /// A stable record of the typed mechanisms that produced a structural product.
@@ -54,6 +57,33 @@ pub struct FamilyCapability {
     pub merge_epsilon: Option<f64>,
     pub along_interval_multiplier: Option<f64>,
     pub along_phase: Option<f64>,
+    pub random: Option<RandomSiteCapability>,
+}
+
+/// Resolved Stage 16B structural chain.  The source-dependent modulation is
+/// explicit, keeping independent random/even/clustered families source-free.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RandomSiteCapability {
+    pub character: RandomSiteCharacter,
+    pub seed: u32,
+    pub density_modulation: SiteDensityModulation,
+    pub exclusion: SiteExclusionPolicy,
+    pub maximum_attempts: u32,
+    /// Explicit, persisted bound for deterministic spatial-index neighbor
+    /// checks. It is distinct from candidate generation work.
+    pub maximum_neighbor_checks: u32,
+}
+
+/// Whether the family identity must include decoded source pixels.  Logical
+/// source IDs remain solely at the decoder lookup boundary.
+pub fn family_requires_decoded_source(family: &FamilyCapability) -> bool {
+    matches!(
+        family
+            .random
+            .as_ref()
+            .map(|random| &random.density_modulation),
+        Some(SiteDensityModulation::ArtworkWeighted { .. })
+    )
 }
 
 /// A reusable ordered realization contract. A realizer can consume only the
@@ -89,27 +119,36 @@ pub enum TypedFamilyOutput {
         output: GridFamilyOutput,
         product_provenance: Vec<GeneralizedSiteProvenance>,
     },
+    RandomSites {
+        family: FamilyCapability,
+        output: GridFamilyOutput,
+        product_provenance: Vec<RandomSiteProvenance>,
+        diagnostics: RandomSiteDiagnostics,
+    },
 }
 
 impl TypedFamilyOutput {
     pub fn family(&self) -> &FamilyCapability {
         match self {
             Self::GuideIntersections { family, .. }
-            | Self::GeneralizedStraightGuides { family, .. } => family,
+            | Self::GeneralizedStraightGuides { family, .. }
+            | Self::RandomSites { family, .. } => family,
         }
     }
 
     pub fn family_fingerprint(&self) -> &str {
         match self {
             Self::GuideIntersections { output, .. }
-            | Self::GeneralizedStraightGuides { output, .. } => &output.family_fingerprint,
+            | Self::GeneralizedStraightGuides { output, .. }
+            | Self::RandomSites { output, .. } => &output.family_fingerprint,
         }
     }
 
     pub fn grid(&self) -> &GridFamilyOutput {
         match self {
             Self::GuideIntersections { output, .. }
-            | Self::GeneralizedStraightGuides { output, .. } => output,
+            | Self::GeneralizedStraightGuides { output, .. }
+            | Self::RandomSites { output, .. } => output,
         }
     }
 }
@@ -126,6 +165,9 @@ pub struct TypedRealizationProvenance {
     /// Exact generalized product provenance retained beside the canonical
     /// circle adapter; no realizer reconstructs it from finite guides.
     pub site_product_provenance: Vec<GeneralizedSiteProvenance>,
+    /// Random-site provenance remains adjacent to canonical marks so render
+    /// algorithms do not acquire a source-distribution branch.
+    pub random_site_product_provenance: Vec<RandomSiteProvenance>,
 }
 
 /// A realization plus its typed provenance. Renderers consume `output` only.
@@ -172,10 +214,16 @@ impl Error for PatternPipelineError {}
 pub fn resolve_pattern_pipeline(
     definition: &PatternDefinition,
 ) -> Result<PatternPipelinePlan, PatternPipelineError> {
+    if matches!(definition.family, PatternFamily::RandomSites { .. }) {
+        return resolve_random_site_pipeline(definition);
+    }
     let PatternFamily::GuideIntersections {
         guide_mechanism_id,
         site_mechanism_id,
-    } = definition.family;
+    } = definition.family
+    else {
+        unreachable!("random-site families return through their dedicated resolver");
+    };
     let (
         ordered_mechanisms,
         product,
@@ -324,9 +372,122 @@ pub fn resolve_pattern_pipeline(
             merge_epsilon,
             along_interval_multiplier,
             along_phase,
+            random: None,
         },
         modulation: definition.modulation.clone(),
         ordered_outputs,
+    })
+}
+
+fn resolve_random_site_pipeline(
+    definition: &PatternDefinition,
+) -> Result<PatternPipelinePlan, PatternPipelineError> {
+    let PatternFamily::RandomSites {
+        base_site_process_id,
+        density_modulation_id,
+        exclusion_id,
+        site_product_id,
+    } = definition.family
+    else {
+        unreachable!("random resolver is selected only for random-site families");
+    };
+    let [
+        PatternMechanism::RandomSiteProcess {
+            id: base_id,
+            character,
+            seed,
+        },
+        PatternMechanism::SiteDensityModulation {
+            id: modulation_id,
+            base_site_process_id: parent_base_id,
+            modulation,
+        },
+        PatternMechanism::SiteExclusion {
+            id: declared_exclusion_id,
+            density_modulation_id: parent_modulation_id,
+            policy,
+        },
+        PatternMechanism::RandomSiteProduct {
+            id: declared_site_id,
+            exclusion_id: parent_exclusion_id,
+            maximum_attempts,
+            maximum_neighbor_checks,
+        },
+    ] = definition.mechanisms.as_slice()
+    else {
+        return Err(PatternPipelineError::new(
+            "pattern.family.capability",
+            "typed random-site mechanisms cannot produce the declared structural product",
+        ));
+    };
+    if *base_id != base_site_process_id
+        || *modulation_id != density_modulation_id
+        || *declared_exclusion_id != exclusion_id
+        || *declared_site_id != site_product_id
+        || *parent_base_id != base_site_process_id
+        || *parent_modulation_id != density_modulation_id
+        || *parent_exclusion_id != exclusion_id
+    {
+        return Err(PatternPipelineError::new(
+            "pattern.family.capability",
+            "random-site mechanism references do not match the family root",
+        ));
+    }
+    let [
+        PatternOutputLayer::MarkPrototype {
+            id,
+            site_mechanism_id,
+            prototype: MarkPrototype::Circle,
+            orientation: MarkOrientation::Fixed,
+        },
+    ] = definition.output_layers.as_slice()
+    else {
+        return Err(PatternPipelineError::new(
+            "pattern.output_layers.capability",
+            "random-site products require one fixed circle mark output",
+        ));
+    };
+    if *site_mechanism_id != site_product_id {
+        return Err(PatternPipelineError::new(
+            "pattern.output_layers.capability",
+            "random-site output must consume its declared site product",
+        ));
+    }
+    let product = StructuralProductCapability::RandomSites;
+    Ok(PatternPipelinePlan {
+        family: FamilyCapability {
+            product,
+            provenance: StructuralProductProvenance {
+                definition_id: definition.id.0,
+                family_capability: product,
+                mechanism_ids: vec![
+                    base_site_process_id,
+                    density_modulation_id,
+                    exclusion_id,
+                    site_product_id,
+                ],
+            },
+            dimensions: Vec::new(),
+            site_selection: Vec::new(),
+            merge_epsilon: None,
+            along_interval_multiplier: None,
+            along_phase: None,
+            random: Some(RandomSiteCapability {
+                character: character.clone(),
+                seed: *seed,
+                density_modulation: modulation.clone(),
+                exclusion: policy.clone(),
+                maximum_attempts: *maximum_attempts,
+                maximum_neighbor_checks: *maximum_neighbor_checks,
+            }),
+        },
+        modulation: definition.modulation.clone(),
+        ordered_outputs: vec![OutputCapability {
+            layer_id: *id,
+            consumes: product,
+            prototype: MarkPrototype::Circle,
+            orientation: MarkOrientation::Fixed,
+        }],
     })
 }
 
@@ -361,6 +522,27 @@ pub fn evaluate_typed_family_product_cancellable(
     request: &GridInspectRequest,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<TypedFamilyOutput, PatternPipelineError> {
+    evaluate_typed_family_product_with_source_cancellable(family, request, None, is_cancelled)
+}
+
+/// Evaluates a family with the decoded source only when its declared density
+/// modulation requires it.  Source-independent mechanisms deliberately use
+/// the same path and identity boundary as Stage 15/16A.
+pub fn evaluate_typed_family_product_with_source_cancellable(
+    family: &FamilyCapability,
+    request: &GridInspectRequest,
+    source: Option<&SourceField>,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<TypedFamilyOutput, PatternPipelineError> {
+    if family.product == StructuralProductCapability::RandomSites {
+        let output = evaluate_random_sites_cancellable(family, request, source, is_cancelled)?;
+        return Ok(TypedFamilyOutput::RandomSites {
+            family: family.clone(),
+            product_provenance: output.provenance,
+            diagnostics: output.diagnostics,
+            output: output.grid,
+        });
+    }
     let legacy_dimensions = family.dimensions.as_slice()
         == [
             StraightGuideDimension {
@@ -474,6 +656,617 @@ fn generalized_as_grid_output(
         guides: output.guides,
         sites,
     }
+}
+
+/// Bounded, reproducible structural diagnostics.  The collection contains no
+/// unbounded candidate log: accepted-site provenance carries its candidate
+/// ordinal while aggregate counts make an unsatisfiable request inspectable.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RandomSiteDiagnostics {
+    pub requested_sites: usize,
+    pub achieved_sites: usize,
+    pub candidates_considered: usize,
+    pub rejected_by_density: usize,
+    pub rejected_by_exclusion: usize,
+    pub rejected_outside_envelope: usize,
+    pub canvas_sites: usize,
+    pub guard_sites: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RandomSiteProvenance {
+    pub candidate_ordinal: usize,
+    pub accepted_ordinal: usize,
+    pub scope: SiteScope,
+    pub exclusion_neighbor_ordinal: Option<usize>,
+}
+
+struct RandomSiteEvaluation {
+    grid: GridFamilyOutput,
+    provenance: Vec<RandomSiteProvenance>,
+    diagnostics: RandomSiteDiagnostics,
+}
+
+struct SpatialIndex {
+    cell_size: f64,
+    cells: BTreeMap<(i64, i64), Vec<usize>>,
+    neighbor_work: usize,
+    neighbor_limit: usize,
+}
+
+impl SpatialIndex {
+    fn new(cell_size: f64, neighbor_limit: usize) -> Result<Self, PatternPipelineError> {
+        if !cell_size.is_finite() || cell_size <= 0.0 {
+            return Err(PatternPipelineError::new(
+                "coverage.random_sites.spatial_index",
+                "exclusion cell size must be positive and finite",
+            ));
+        }
+        Ok(Self {
+            cell_size,
+            cells: BTreeMap::new(),
+            neighbor_work: 0,
+            neighbor_limit,
+        })
+    }
+    fn cell(&self, point: Point2) -> Result<(i64, i64), PatternPipelineError> {
+        let x = (point.x / self.cell_size).floor();
+        let y = (point.y / self.cell_size).floor();
+        if !x.is_finite()
+            || !y.is_finite()
+            || x < i64::MIN as f64
+            || x > i64::MAX as f64
+            || y < i64::MIN as f64
+            || y > i64::MAX as f64
+        {
+            return Err(PatternPipelineError::new(
+                "coverage.random_sites.spatial_index",
+                "exclusion cell coordinate is not representable",
+            ));
+        }
+        Ok((x as i64, y as i64))
+    }
+    fn find_conflict(
+        &mut self,
+        point: Point2,
+        accepted: &[(Point2, usize, SiteScope)],
+        distance: f64,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<usize>, PatternPipelineError> {
+        if distance == 0.0 {
+            return Ok(None);
+        }
+        let (x, y) = self.cell(point)?;
+        for dx in -1_i64..=1 {
+            for dy in -1_i64..=1 {
+                if is_cancelled() {
+                    return Err(PatternPipelineError::new(
+                        "evaluation.cancelled",
+                        "evaluation was cancelled",
+                    ));
+                }
+                let key = (
+                    x.checked_add(dx).ok_or(PatternPipelineError::new(
+                        "coverage.random_sites.spatial_index",
+                        "exclusion neighbor coordinate overflowed",
+                    ))?,
+                    y.checked_add(dy).ok_or(PatternPipelineError::new(
+                        "coverage.random_sites.spatial_index",
+                        "exclusion neighbor coordinate overflowed",
+                    ))?,
+                );
+                if let Some(indices) = self.cells.get(&key) {
+                    self.neighbor_work = self.neighbor_work.checked_add(indices.len()).ok_or(
+                        PatternPipelineError::new(
+                            "coverage.random_sites.neighbor_limit",
+                            "exclusion neighbor work overflowed",
+                        ),
+                    )?;
+                    if self.neighbor_work > self.neighbor_limit {
+                        return Err(PatternPipelineError::new(
+                            "coverage.random_sites.neighbor_limit",
+                            "exclusion neighbor work exceeds configured limit",
+                        ));
+                    }
+                    for &index in indices {
+                        // A populated cell can contain bounded-but-large work.
+                        // Poll every deterministic index so cancellation cannot
+                        // be delayed until the next candidate or cell.
+                        if is_cancelled() {
+                            return Err(PatternPipelineError::new(
+                                "evaluation.cancelled",
+                                "evaluation was cancelled",
+                            ));
+                        }
+                        if point_distance(point, accepted[index].0) < distance {
+                            return Ok(Some(index));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+    fn insert(&mut self, point: Point2, index: usize) -> Result<(), PatternPipelineError> {
+        let key = self.cell(point)?;
+        self.cells.entry(key).or_default().push(index);
+        Ok(())
+    }
+}
+
+/// A small, fixed xorshift32 generator.  The sequence is defined entirely by
+/// u32 wrapping operations and so does not inherit platform RNG behavior.
+#[derive(Clone, Copy)]
+struct StablePrng(u32);
+
+impl StablePrng {
+    fn new(seed: u32) -> Self {
+        // xorshift32 has an all-zero absorbing state; map that single user
+        // seed to a documented nonzero state without changing other seeds.
+        Self(if seed == 0 { 0x6d2b_79f5 } else { seed })
+    }
+
+    fn next_u32(&mut self) -> u32 {
+        let mut value = self.0;
+        value ^= value << 13;
+        value ^= value >> 17;
+        value ^= value << 5;
+        self.0 = value;
+        value
+    }
+
+    fn unit(&mut self) -> f64 {
+        f64::from(self.next_u32()) / (f64::from(u32::MAX) + 1.0)
+    }
+
+    /// Fixed twelve-uniform central-limit approximation.  It uses only the
+    /// specified u32 stream and basic IEEE add/subtract operations, avoiding
+    /// platform libm behavior from Box-Muller.
+    fn clustered_offset(&mut self) -> f64 {
+        let mut sum = 0.0;
+        for _ in 0..12 {
+            sum += self.unit();
+        }
+        sum - 6.0
+    }
+}
+
+fn evaluate_random_sites_cancellable(
+    family: &FamilyCapability,
+    request: &GridInspectRequest,
+    source: Option<&SourceField>,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<RandomSiteEvaluation, PatternPipelineError> {
+    if is_cancelled() {
+        return Err(PatternPipelineError::new(
+            "evaluation.cancelled",
+            "evaluation was cancelled",
+        ));
+    }
+    validate_straight_request(&StraightGuideInspectRequest {
+        canvas: request.canvas.clone(),
+        density: request.density.clone(),
+        rotation_degrees: request.rotation_degrees,
+        translation_x: request.translation_x,
+        translation_y: request.translation_y,
+        guard_steps: request.guard_steps,
+        support_radius: request.support_radius,
+        max_family_candidates: request.max_family_candidates,
+    })
+    .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
+    let random = family.random.as_ref().ok_or(PatternPipelineError::new(
+        "pattern.family.random_sites",
+        "random-site capability requires a declared random mechanism chain",
+    ))?;
+    let weighted_source = match &random.density_modulation {
+        SiteDensityModulation::Uniform => None,
+        SiteDensityModulation::ArtworkWeighted { .. } => {
+            Some(source.ok_or(PatternPipelineError::new(
+                "pattern.family.random_sites.source",
+                "artwork-weighted site placement requires decoded source pixels",
+            ))?)
+        }
+    };
+    let canvas = Bounds::new(
+        Point2::new(0.0, 0.0),
+        Point2::new(request.canvas.width, request.canvas.height),
+    )
+    .expect("validated canvas forms finite bounds");
+    let expected_visible = checked_requested_count(request)?;
+    let neighborhood = random_neighborhood(random, request.support_radius);
+    let cluster_guard = match random.character {
+        RandomSiteCharacter::Clustered { cluster_spread, .. } => cluster_spread * 3.0,
+        _ => 0.0,
+    };
+    let guard = request.support_radius.max(neighborhood).max(cluster_guard)
+        + ANTIALIAS_MARGIN
+        + f64::from(request.guard_steps) * neighborhood.max(1.0);
+    if !guard.is_finite() {
+        return Err(PatternPipelineError::new(
+            "pattern.family.random_sites.coverage",
+            "random-site guard envelope must be finite",
+        ));
+    }
+    let padded = canvas
+        .expanded(guard)
+        .expect("validated finite guard expands bounds");
+    let transform = AffineTransform2D::rotate_about_then_translate(
+        Point2::new(request.canvas.width / 2.0, request.canvas.height / 2.0),
+        request.rotation_degrees,
+        Vector2::new(request.translation_x, request.translation_y),
+    )
+    .ok_or(PatternPipelineError::new(
+        "channel.pattern.layout",
+        "transform is not finite",
+    ))?;
+    let local = transform
+        .inverse_bounds(padded)
+        .ok_or(PatternPipelineError::new(
+            "pattern.family.random_sites.coverage",
+            "inverse random-site coverage bounds must be finite",
+        ))?;
+    let visible_area = request.canvas.width * request.canvas.height;
+    let padded_area = (padded.max.x - padded.min.x) * (padded.max.y - padded.min.y);
+    let requested = (expected_visible as f64 * padded_area / visible_area)
+        .ceil()
+        .max(1.0) as usize;
+    if requested > request.max_family_candidates {
+        return Err(PatternPipelineError::new(
+            "coverage.candidate_limit",
+            "random-site requested count exceeds the configured candidate limit",
+        ));
+    }
+    let candidate_budget = usize::try_from(random.maximum_attempts)
+        .ok()
+        .and_then(|attempts| attempts.checked_mul(requested))
+        .ok_or(PatternPipelineError::new(
+            "coverage.random_sites.attempts",
+            "random-site attempt budget overflowed",
+        ))?
+        .min(request.max_family_candidates);
+    if candidate_budget == 0 {
+        return Err(PatternPipelineError::new(
+            "coverage.random_sites.attempts",
+            "random-site attempt budget must be nonzero",
+        ));
+    }
+    let mut prng = StablePrng::new(random.seed);
+    let parents = cluster_parents(&random.character, local, requested, &mut prng);
+    let mut accepted: Vec<(Point2, usize, SiteScope)> = Vec::with_capacity(requested);
+    let exclusion_distance = required_exclusion_distance(random, request.support_radius);
+    let mut spatial_index = (exclusion_distance > 0.0)
+        .then(|| {
+            SpatialIndex::new(
+                exclusion_distance,
+                usize::try_from(random.maximum_neighbor_checks).expect("u32 fits usize"),
+            )
+        })
+        .transpose()?;
+    let mut provenance = Vec::with_capacity(requested);
+    let mut rejected_by_density = 0;
+    let mut rejected_by_exclusion = 0;
+    let mut rejected_outside_envelope = 0;
+    let mut candidates_considered = 0;
+    for candidate_ordinal in 0..candidate_budget {
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        if accepted.len() == requested {
+            break;
+        }
+        candidates_considered = candidate_ordinal + 1;
+        let local_point = random_candidate(&random.character, local, &parents, &mut prng);
+        let point = transform.apply_point(local_point);
+        if !padded.contains(point) {
+            rejected_outside_envelope += 1;
+            continue;
+        }
+        let density_weight = match (&random.density_modulation, weighted_source) {
+            (SiteDensityModulation::Uniform, _) => 1.0,
+            (
+                SiteDensityModulation::ArtworkWeighted {
+                    mapping,
+                    strength,
+                    response,
+                },
+                Some(field),
+            ) => {
+                let sampled = field
+                    .sample_density_weight(point, &request.canvas, *mapping)
+                    .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
+                let shaped = artwork_weight_response(sampled, response);
+                (1.0 - strength) + strength * shaped
+            }
+            _ => unreachable!("weighted source requirement is checked above"),
+        };
+        if prng.unit() > density_weight {
+            rejected_by_density += 1;
+            continue;
+        }
+        // `Option::transpose` here would retain the fact that an index exists
+        // as `Some(None)`.  That is not a collision: only an actual accepted
+        // ordinal rejects the candidate.
+        let conflict = match spatial_index.as_mut() {
+            Some(index) => {
+                index.find_conflict(point, &accepted, exclusion_distance, is_cancelled)?
+            }
+            None => None,
+        };
+        if conflict.is_some() {
+            rejected_by_exclusion += 1;
+            // Rejected candidates are aggregated rather than retained.  The
+            // accepted record remains bounded and identifies its own ordinal.
+            continue;
+        }
+        let scope = if canvas.contains(point) {
+            SiteScope::Canvas
+        } else {
+            SiteScope::Guard
+        };
+        let accepted_ordinal = accepted.len();
+        accepted.push((point, candidate_ordinal, scope));
+        if let Some(index) = &mut spatial_index {
+            index.insert(point, accepted_ordinal)?;
+        }
+        provenance.push(RandomSiteProvenance {
+            candidate_ordinal,
+            accepted_ordinal,
+            scope,
+            exclusion_neighbor_ordinal: None,
+        });
+    }
+    let sites: Vec<_> = accepted
+        .iter()
+        .enumerate()
+        .map(|(index, (point, _, scope))| IntersectionSite {
+            id: SiteId {
+                first_dimension_id: family.provenance.mechanism_ids[3].0,
+                first_index: i64::try_from(index).expect("candidate limit bounds site index"),
+                second_dimension_id: family.provenance.mechanism_ids[0].0,
+                second_index: i64::from(random.seed),
+            },
+            position: *point,
+            scope: *scope,
+            provenance: GuideIntersectionProvenance {
+                contributors: vec![
+                    GuideInstanceId {
+                        dimension_id: family.provenance.mechanism_ids[0].0,
+                        index: i64::from(random.seed),
+                    },
+                    GuideInstanceId {
+                        dimension_id: family.provenance.mechanism_ids[3].0,
+                        index: i64::try_from(index).expect("candidate limit bounds site index"),
+                    },
+                ],
+            },
+        })
+        .collect();
+    let canvas_sites = sites
+        .iter()
+        .filter(|site| site.scope == SiteScope::Canvas)
+        .count();
+    let diagnostics = RandomSiteDiagnostics {
+        requested_sites: requested,
+        achieved_sites: sites.len(),
+        candidates_considered,
+        rejected_by_density,
+        rejected_by_exclusion,
+        rejected_outside_envelope,
+        canvas_sites,
+        guard_sites: sites.len() - canvas_sites,
+    };
+    Ok(RandomSiteEvaluation {
+        grid: GridFamilyOutput {
+            family_fingerprint: random_family_fingerprint(family, request, weighted_source),
+            guard_steps: request.guard_steps,
+            support_radius: request.support_radius,
+            antialias_margin: ANTIALIAS_MARGIN,
+            generation_domain: padded,
+            coverage: Vec::new(),
+            guides: Vec::new(),
+            sites,
+        },
+        provenance,
+        diagnostics,
+    })
+}
+
+fn checked_requested_count(request: &GridInspectRequest) -> Result<usize, PatternPipelineError> {
+    let expected = request.density.across_x * request.density.across_y;
+    if !expected.is_finite() || expected <= 0.0 || expected > usize::MAX as f64 {
+        return Err(PatternPipelineError::new(
+            "channel.pattern.layout.density",
+            "random-site requested count is not representable",
+        ));
+    }
+    Ok(expected.round().max(1.0) as usize)
+}
+
+fn random_neighborhood(random: &RandomSiteCapability, support: f64) -> f64 {
+    let character = match random.character {
+        RandomSiteCharacter::Even {
+            minimum_center_distance,
+        } => minimum_center_distance,
+        _ => 0.0,
+    };
+    character.max(exclusion_distance(&random.exclusion, support))
+}
+
+fn required_exclusion_distance(random: &RandomSiteCapability, support: f64) -> f64 {
+    random_neighborhood(random, support)
+}
+
+fn exclusion_distance(policy: &SiteExclusionPolicy, support: f64) -> f64 {
+    match policy {
+        SiteExclusionPolicy::None => 0.0,
+        SiteExclusionPolicy::MinimumCenterDistance { minimum } => *minimum,
+        SiteExclusionPolicy::VisibleMarkMargin { margin, sizing } => match sizing {
+            VisibleMarkSizingPolicy::MaximumSupportRadius => support * 2.0 + margin,
+        },
+    }
+}
+
+fn cluster_parents(
+    character: &RandomSiteCharacter,
+    bounds: Bounds,
+    requested: usize,
+    prng: &mut StablePrng,
+) -> Vec<Point2> {
+    let RandomSiteCharacter::Clustered {
+        cluster_density, ..
+    } = character
+    else {
+        return Vec::new();
+    };
+    let count = ((requested as f64 * cluster_density).round() as usize).clamp(1, requested.max(1));
+    (0..count)
+        .map(|_| {
+            Point2::new(
+                bounds.min.x + prng.unit() * (bounds.max.x - bounds.min.x),
+                bounds.min.y + prng.unit() * (bounds.max.y - bounds.min.y),
+            )
+        })
+        .collect()
+}
+
+fn random_candidate(
+    character: &RandomSiteCharacter,
+    bounds: Bounds,
+    parents: &[Point2],
+    prng: &mut StablePrng,
+) -> Point2 {
+    if let RandomSiteCharacter::Clustered {
+        cluster_spread,
+        cluster_strength,
+        ..
+    } = character
+        && !parents.is_empty()
+        && prng.unit() < *cluster_strength
+    {
+        let index = (prng.unit() * parents.len() as f64) as usize;
+        let parent = parents[index.min(parents.len() - 1)];
+        return Point2::new(
+            (parent.x + prng.clustered_offset() * cluster_spread).clamp(bounds.min.x, bounds.max.x),
+            (parent.y + prng.clustered_offset() * cluster_spread).clamp(bounds.min.y, bounds.max.y),
+        );
+    }
+    Point2::new(
+        bounds.min.x + prng.unit() * (bounds.max.x - bounds.min.x),
+        bounds.min.y + prng.unit() * (bounds.max.y - bounds.min.y),
+    )
+}
+
+/// Fixed-IEEE response curve for decoder-owned artwork weighting. This avoids
+/// libm so the acceptance decision has no platform math-library dependency.
+fn artwork_weight_response(sampled: f64, response: &ArtworkWeightResponse) -> f64 {
+    match response {
+        ArtworkWeightResponse::Linear => sampled,
+        ArtworkWeightResponse::Smoothstep => {
+            let x = sampled.clamp(0.0, 1.0);
+            x * x * (3.0 - 2.0 * x)
+        }
+    }
+}
+
+fn point_distance(first: Point2, second: Point2) -> f64 {
+    let dx = first.x - second.x;
+    let dy = first.y - second.y;
+    (dx * dx + dy * dy).sqrt()
+}
+
+fn random_family_fingerprint(
+    family: &FamilyCapability,
+    request: &GridInspectRequest,
+    source: Option<&SourceField>,
+) -> String {
+    let random = family
+        .random
+        .as_ref()
+        .expect("random family has random capability");
+    let mut bytes = b"toniator-stage-16b-random-sites-v1".to_vec();
+    bytes.extend(family.provenance.definition_id.to_le_bytes());
+    for id in &family.provenance.mechanism_ids {
+        bytes.extend(id.0.to_le_bytes());
+    }
+    bytes.extend(random.seed.to_le_bytes());
+    match &random.character {
+        RandomSiteCharacter::RawUniform => bytes.push(1),
+        RandomSiteCharacter::Even {
+            minimum_center_distance,
+        } => {
+            bytes.push(2);
+            bytes.extend(minimum_center_distance.to_bits().to_le_bytes());
+        }
+        RandomSiteCharacter::Clustered {
+            cluster_density,
+            cluster_spread,
+            cluster_strength,
+        } => {
+            bytes.push(3);
+            bytes.extend(cluster_density.to_bits().to_le_bytes());
+            bytes.extend(cluster_spread.to_bits().to_le_bytes());
+            bytes.extend(cluster_strength.to_bits().to_le_bytes());
+        }
+    }
+    match &random.density_modulation {
+        SiteDensityModulation::Uniform => bytes.push(1),
+        SiteDensityModulation::ArtworkWeighted {
+            mapping,
+            strength,
+            response,
+        } => {
+            bytes.push(2);
+            bytes.extend(strength.to_bits().to_le_bytes());
+            bytes.push(mapping_component_code(mapping.component));
+            bytes.push(u8::from(mapping.inverted));
+            bytes.extend(mapping.gain.to_bits().to_le_bytes());
+            bytes.extend(mapping.bias.to_bits().to_le_bytes());
+            match response {
+                ArtworkWeightResponse::Linear => bytes.push(1),
+                ArtworkWeightResponse::Smoothstep => bytes.push(2),
+            }
+            let source = source.expect("weighted random family supplies decoded source");
+            bytes.extend(source.identity().content_hash.bytes());
+            bytes.extend(source.identity().decoded_pixel_hash.bytes());
+            bytes.extend(source.identity().width.to_le_bytes());
+            bytes.extend(source.identity().height.to_le_bytes());
+        }
+    }
+    match &random.exclusion {
+        SiteExclusionPolicy::None => bytes.push(1),
+        SiteExclusionPolicy::MinimumCenterDistance { minimum } => {
+            bytes.push(2);
+            bytes.extend(minimum.to_bits().to_le_bytes());
+        }
+        SiteExclusionPolicy::VisibleMarkMargin { margin, sizing } => {
+            bytes.push(3);
+            bytes.extend(margin.to_bits().to_le_bytes());
+            bytes.push(match sizing {
+                VisibleMarkSizingPolicy::MaximumSupportRadius => 1,
+            });
+        }
+    }
+    bytes.extend(random.maximum_attempts.to_le_bytes());
+    bytes.extend(random.maximum_neighbor_checks.to_le_bytes());
+    bytes.extend(request.canvas.width.to_bits().to_le_bytes());
+    bytes.extend(request.canvas.height.to_bits().to_le_bytes());
+    bytes.extend(request.density.across_x.to_bits().to_le_bytes());
+    bytes.extend(request.density.across_y.to_bits().to_le_bytes());
+    bytes.push(u8::from(request.density.aspect_locked));
+    bytes.extend(request.rotation_degrees.to_bits().to_le_bytes());
+    bytes.extend(request.translation_x.to_bits().to_le_bytes());
+    bytes.extend(request.translation_y.to_bits().to_le_bytes());
+    bytes.extend(request.guard_steps.to_le_bytes());
+    bytes.extend(request.support_radius.to_bits().to_le_bytes());
+    bytes.extend(
+        u64::try_from(request.max_family_candidates)
+            .expect("usize fits u64")
+            .to_le_bytes(),
+    );
+    fnv1a64(bytes)
 }
 
 /// Ordered scalar-field output realization through the declared typed layer.
@@ -620,6 +1413,13 @@ fn realization_provenance(
                     TypedFamilyOutput::GeneralizedStraightGuides {
                         product_provenance, ..
                     } => product_provenance.clone(),
+                    TypedFamilyOutput::RandomSites { .. } => Vec::new(),
+                },
+                random_site_product_provenance: match family {
+                    TypedFamilyOutput::RandomSites {
+                        product_provenance, ..
+                    } => product_provenance.clone(),
+                    _ => Vec::new(),
                 },
             })
         }
@@ -942,6 +1742,12 @@ pub fn evaluate_generalized_straight_guides_cancellable(
             request.max_family_candidates,
             is_cancelled,
         )?,
+        StructuralProductCapability::RandomSites => {
+            return Err(GridError::new(
+                "pattern.family.random_sites",
+                "random-site products are evaluated by the random-site family evaluator",
+            ));
+        }
     };
     Ok(GeneralizedStraightGuideOutput {
         family_fingerprint: generalized_fingerprint(family, request),
@@ -1252,6 +2058,7 @@ fn generalized_fingerprint(
     bytes.push(match family.product {
         StructuralProductCapability::GuideIntersections => 1,
         StructuralProductCapability::AlongGuideSites => 2,
+        StructuralProductCapability::RandomSites => 3,
     });
     bytes.extend(family.merge_epsilon.unwrap_or(0.0).to_bits().to_le_bytes());
     bytes.extend(
@@ -1272,7 +2079,11 @@ fn generalized_fingerprint(
     bytes.extend(request.translation_y.to_bits().to_le_bytes());
     bytes.extend(request.guard_steps.to_le_bytes());
     bytes.extend(request.support_radius.to_bits().to_le_bytes());
-    bytes.extend(request.max_family_candidates.to_le_bytes());
+    bytes.extend(
+        u64::try_from(request.max_family_candidates)
+            .expect("usize fits u64")
+            .to_le_bytes(),
+    );
     fnv1a64(bytes)
 }
 
@@ -1777,6 +2588,73 @@ fn fnv1a64(bytes: impl IntoIterator<Item = u8>) -> String {
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     format!("fnv1a64:{hash:016x}")
+}
+
+#[cfg(test)]
+mod random_prng_contract_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn xorshift32_sequence_and_zero_seed_mapping_are_fixed() {
+        let mut seeded = StablePrng::new(1);
+        assert_eq!(seeded.next_u32(), 270_369);
+        assert_eq!(seeded.next_u32(), 67_634_689);
+        assert_eq!(seeded.next_u32(), 2_647_435_461);
+        let mut zero_a = StablePrng::new(0);
+        let mut zero_b = StablePrng::new(0);
+        assert_eq!(zero_a.next_u32(), zero_b.next_u32());
+        assert_ne!(zero_a.next_u32(), seeded.next_u32());
+    }
+
+    #[test]
+    fn populated_spatial_cell_cancels_at_the_per_index_boundary() {
+        let mut index = SpatialIndex::new(10.0, 100).unwrap();
+        let accepted = vec![(Point2::new(1.0, 1.0), 0, SiteScope::Canvas)];
+        index.insert(accepted[0].0, 0).unwrap();
+        let polls = Cell::new(0_u32);
+        let error = index
+            .find_conflict(Point2::new(1.5, 1.5), &accepted, 10.0, &|| {
+                let next = polls.get() + 1;
+                polls.set(next);
+                // Calls 1-5 are candidate-cell polling; call 6 is the first
+                // populated-cell index. Without the per-index poll this would
+                // return a collision instead of cancellation.
+                next >= 6
+            })
+            .unwrap_err();
+        assert_eq!(error.path(), "evaluation.cancelled");
+        assert_eq!(polls.get(), 6);
+        assert_eq!(index.neighbor_work, 1);
+    }
+
+    #[test]
+    fn smoothstep_response_has_fixed_basic_ieee_semantics() {
+        assert_eq!(
+            artwork_weight_response(-1.0, &ArtworkWeightResponse::Smoothstep),
+            0.0
+        );
+        assert_eq!(
+            artwork_weight_response(0.0, &ArtworkWeightResponse::Smoothstep),
+            0.0
+        );
+        assert_eq!(
+            artwork_weight_response(0.25, &ArtworkWeightResponse::Smoothstep),
+            0.15625
+        );
+        assert_eq!(
+            artwork_weight_response(0.5, &ArtworkWeightResponse::Smoothstep),
+            0.5
+        );
+        assert_eq!(
+            artwork_weight_response(1.0, &ArtworkWeightResponse::Smoothstep),
+            1.0
+        );
+        assert_eq!(
+            artwork_weight_response(2.0, &ArtworkWeightResponse::Smoothstep),
+            1.0
+        );
+    }
 }
 
 #[cfg(test)]

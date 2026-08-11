@@ -38,8 +38,9 @@ pub use toniator_patterns::{
 use toniator_patterns::{
     FamilyCapability, GridFamilyOutput, MappedCircularMarkRealization, PatternPipelineError,
     SourceColorCircularMarkRealization, TypedFamilyOutput, TypedRealization,
-    evaluate_straight_grid, evaluate_typed_family_product_cancellable, realize_circular_marks,
-    realize_typed_mapped_outputs, realize_typed_source_color_outputs,
+    evaluate_straight_grid, evaluate_typed_family_product_with_source_cancellable,
+    family_requires_decoded_source, realize_circular_marks, realize_typed_mapped_outputs,
+    realize_typed_source_color_outputs,
 };
 pub use toniator_render::{
     GeometryOutput, OutputRasterTarget, PreviewRasterTarget, RasterAntialiasing, RasterBackground,
@@ -263,6 +264,7 @@ struct FamilyCacheKey {
     definition: FamilyDefinitionKey,
     maximum_support_radius: u64,
     max_family_candidates: usize,
+    structural_source: Option<RealizationSourceIdentity>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -624,11 +626,17 @@ fn evaluate_stage<T>(
 fn evaluate_generic_family_stage(
     family: &FamilyCapability,
     request: &GridInspectRequest,
+    source: &SourceField,
     cancellation: &dyn CancellationProbe,
 ) -> Result<TypedFamilyOutput, EvaluationRunError> {
     match evaluate_stage(EvaluationStage::Family, cancellation, || {
-        evaluate_typed_family_product_cancellable(family, request, &|| cancellation.is_cancelled())
-            .map_err(EvaluationError::from_pipeline)
+        evaluate_typed_family_product_with_source_cancellable(
+            family,
+            request,
+            family_requires_decoded_source(family).then_some(source),
+            &|| cancellation.is_cancelled(),
+        )
+        .map_err(EvaluationError::from_pipeline)
     }) {
         Err(EvaluationRunError::Evaluation(error)) if error.path() == "evaluation.cancelled" => {
             Err(EvaluationRunError::Cancelled)
@@ -721,6 +729,8 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
         definition: family_definition_key(definition),
         maximum_support_radius: definition.coverage.maximum_support_radius.to_bits(),
         max_family_candidates: limits.max_family_candidates(),
+        structural_source: family_requires_decoded_source(&plan.family)
+            .then(|| realization_source_identity(source.identity())),
     };
     let grid = GridInspectRequest {
         canvas: document.canvas().clone(),
@@ -738,6 +748,7 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
             Arc::new(evaluate_generic_family_stage(
                 &plan.family,
                 &grid,
+                &source,
                 cancellation,
             )?),
             CacheDisposition::Miss,
@@ -1631,7 +1642,14 @@ fn evaluate_cached_document_impl(
             ))?;
         let plan = toniator_patterns::resolve_pattern_pipeline(definition)
             .map_err(EvaluationError::from_pipeline)?;
-        let key = document_family_cache_key(document.canvas(), definition, channel, limits);
+        let key = document_family_cache_key(
+            document.canvas(),
+            definition,
+            channel,
+            limits,
+            &plan.family,
+            &source,
+        );
         let (family, disposition) = match accepted
             .families
             .iter()
@@ -1651,6 +1669,7 @@ fn evaluate_cached_document_impl(
                         support_radius: definition.coverage.maximum_support_radius,
                         max_family_candidates: limits.max_family_candidates(),
                     },
+                    &source,
                     cancellation,
                 )?),
                 CacheDisposition::Miss,
@@ -1929,6 +1948,7 @@ struct DocumentFamilyContentKey {
     guard_steps: u32,
     support_radius: u64,
     definition: FamilyDefinitionKey,
+    structural_source: Option<RealizationSourceIdentity>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1942,6 +1962,8 @@ fn document_family_cache_key(
     definition: &toniator_domain::PatternDefinition,
     channel: &ModeledChannelState,
     limits: EvaluationLimits,
+    family: &FamilyCapability,
+    source: &SourceField,
 ) -> DocumentFamilyCacheKey {
     DocumentFamilyCacheKey {
         content: DocumentFamilyContentKey {
@@ -1958,6 +1980,8 @@ fn document_family_cache_key(
             guard_steps: definition.coverage.guard_steps,
             support_radius: definition.coverage.maximum_support_radius.to_bits(),
             definition: family_definition_key(definition),
+            structural_source: family_requires_decoded_source(family)
+                .then(|| realization_source_identity(source.identity())),
         },
         candidate_limit: limits.max_family_candidates(),
     }
@@ -2445,6 +2469,7 @@ mod cache_key_tests {
             },
             maximum_support_radius: 4.5_f64.to_bits(),
             max_family_candidates: EvaluationLimits::DEFAULT_MAX_FAMILY_CANDIDATES,
+            structural_source: None,
         }
     }
 

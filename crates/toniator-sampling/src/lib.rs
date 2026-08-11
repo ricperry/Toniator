@@ -150,6 +150,19 @@ impl SourceField {
         }
     }
 
+    /// Samples the decoder-owned scalar field used by structural
+    /// artwork-weighted site placement.  It intentionally reuses the
+    /// authoritative mapped-response interpolation without adding source
+    /// decoding, identity, or placement policy at the pattern layer.
+    pub fn sample_density_weight(
+        &self,
+        point: Point2,
+        canvas: &CanvasSpec,
+        mapping: SourceMapping,
+    ) -> Result<f64, SamplingError> {
+        self.sample_mapping_response(point, canvas, mapping)
+    }
+
     /// Samples a complete Stage 9 mapping. Color-derived fields are converted
     /// from straight sRGB to linear light, transformed, then associated with
     /// source alpha exactly once before interpolation. Alpha remains an

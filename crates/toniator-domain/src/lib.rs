@@ -450,6 +450,74 @@ pub enum PatternFamily {
         guide_mechanism_id: PatternMechanismId,
         site_mechanism_id: PatternMechanismId,
     },
+    /// A deterministic, site-only family.  Its ordered mechanisms keep the
+    /// base process, density field, collision policy, and published site
+    /// product independently addressable without inventing named patterns.
+    RandomSites {
+        base_site_process_id: PatternMechanismId,
+        density_modulation_id: PatternMechanismId,
+        exclusion_id: PatternMechanismId,
+        site_product_id: PatternMechanismId,
+    },
+}
+
+/// The distinct structural character of an unmodulated candidate process.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RandomSiteCharacter {
+    /// Independent uniform candidates; close neighbors are permitted unless
+    /// the separately declared exclusion mechanism rejects them.
+    RawUniform,
+    /// Sequential dart throwing with a declared center-distance construction.
+    /// This is deliberately not an alias named "BlueNoise" or "Poisson".
+    Even { minimum_center_distance: f64 },
+    /// Parent-centered Gaussian islands mixed with a uniform background.
+    Clustered {
+        cluster_density: f64,
+        cluster_spread: f64,
+        cluster_strength: f64,
+    },
+}
+
+/// Density enters site placement before collision acceptance.  Artwork
+/// weighting is an explicit structural dependency, not mark modulation.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SiteDensityModulation {
+    Uniform,
+    ArtworkWeighted {
+        mapping: SourceMapping,
+        strength: f64,
+        response: ArtworkWeightResponse,
+    },
+}
+
+/// Typed response applied at the decoder-owned artwork density field boundary.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ArtworkWeightResponse {
+    Linear,
+    /// A fixed IEEE-arithmetic curve: `x * x * (3 - 2 * x)` for clamped x.
+    Smoothstep,
+}
+
+/// Size policy used by a visible-mark exclusion constraint.  The current
+/// maximum-support policy is conservative: every realized circle is bounded
+/// by the family support radius, so the stated separation survives realization.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VisibleMarkSizingPolicy {
+    MaximumSupportRadius,
+}
+
+/// Collision behavior remains independent from candidate character and
+/// density modulation.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SiteExclusionPolicy {
+    None,
+    MinimumCenterDistance {
+        minimum: f64,
+    },
+    VisibleMarkMargin {
+        margin: f64,
+        sizing: VisibleMarkSizingPolicy,
+    },
 }
 
 /// A typed reusable structural mechanism.  Stage 14 retains only the accepted
@@ -485,6 +553,30 @@ pub enum PatternMechanism {
         interval_multiplier: f64,
         phase: f64,
     },
+    RandomSiteProcess {
+        id: PatternMechanismId,
+        character: RandomSiteCharacter,
+        seed: u32,
+    },
+    SiteDensityModulation {
+        id: PatternMechanismId,
+        base_site_process_id: PatternMechanismId,
+        modulation: SiteDensityModulation,
+    },
+    SiteExclusion {
+        id: PatternMechanismId,
+        density_modulation_id: PatternMechanismId,
+        policy: SiteExclusionPolicy,
+    },
+    /// The published, reproducible site collection. Work limits are
+    /// definition-owned: attempts bound candidate generation and neighbor
+    /// checks bound deterministic spatial-index exclusion work.
+    RandomSiteProduct {
+        id: PatternMechanismId,
+        exclusion_id: PatternMechanismId,
+        maximum_attempts: u32,
+        maximum_neighbor_checks: u32,
+    },
 }
 
 impl PatternMechanism {
@@ -494,7 +586,11 @@ impl PatternMechanism {
             | Self::GuideIntersections { id, .. }
             | Self::StraightGuideDimensions { id, .. }
             | Self::SelectedGuideIntersections { id, .. }
-            | Self::AlongGuideSites { id, .. } => *id,
+            | Self::AlongGuideSites { id, .. }
+            | Self::RandomSiteProcess { id, .. }
+            | Self::SiteDensityModulation { id, .. }
+            | Self::SiteExclusion { id, .. }
+            | Self::RandomSiteProduct { id, .. } => *id,
         }
     }
 }
@@ -639,6 +735,69 @@ impl PatternDefinition {
                 site_mechanism_id: site_id,
                 prototype: MarkPrototype::Circle,
                 orientation,
+            }],
+            modulation: PatternModulation,
+            coverage,
+        }
+    }
+
+    /// Constructs the bounded Stage 16B random-site mechanism chain.  The
+    /// caller supplies document-wide IDs explicitly; document validation owns
+    /// collision and order checks.
+    #[allow(clippy::too_many_arguments)]
+    pub fn random_sites(
+        id: PatternDefinitionId,
+        name: impl Into<String>,
+        base_id: PatternMechanismId,
+        modulation_id: PatternMechanismId,
+        exclusion_id: PatternMechanismId,
+        site_id: PatternMechanismId,
+        output_id: PatternOutputLayerId,
+        character: RandomSiteCharacter,
+        seed: u32,
+        density_modulation: SiteDensityModulation,
+        exclusion: SiteExclusionPolicy,
+        maximum_attempts: u32,
+        maximum_neighbor_checks: u32,
+        coverage: CoveragePolicy,
+    ) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            family: PatternFamily::RandomSites {
+                base_site_process_id: base_id,
+                density_modulation_id: modulation_id,
+                exclusion_id,
+                site_product_id: site_id,
+            },
+            mechanisms: vec![
+                PatternMechanism::RandomSiteProcess {
+                    id: base_id,
+                    character,
+                    seed,
+                },
+                PatternMechanism::SiteDensityModulation {
+                    id: modulation_id,
+                    base_site_process_id: base_id,
+                    modulation: density_modulation,
+                },
+                PatternMechanism::SiteExclusion {
+                    id: exclusion_id,
+                    density_modulation_id: modulation_id,
+                    policy: exclusion,
+                },
+                PatternMechanism::RandomSiteProduct {
+                    id: site_id,
+                    exclusion_id,
+                    maximum_attempts,
+                    maximum_neighbor_checks,
+                },
+            ],
+            output_layers: vec![PatternOutputLayer::MarkPrototype {
+                id: output_id,
+                site_mechanism_id: site_id,
+                prototype: MarkPrototype::Circle,
+                orientation: MarkOrientation::Fixed,
             }],
             modulation: PatternModulation,
             coverage,
@@ -1360,10 +1519,28 @@ fn validate_definition(definition: &PatternDefinition) -> Result<(), ValidationE
             ));
         }
     }
+    if let PatternFamily::RandomSites {
+        base_site_process_id,
+        density_modulation_id,
+        exclusion_id,
+        site_product_id,
+    } = definition.family
+    {
+        return validate_random_site_definition(
+            definition,
+            base_site_process_id,
+            density_modulation_id,
+            exclusion_id,
+            site_product_id,
+        );
+    }
     let PatternFamily::GuideIntersections {
         guide_mechanism_id,
         site_mechanism_id: root_site_id,
-    } = definition.family;
+    } = definition.family
+    else {
+        unreachable!("all pattern families are handled above");
+    };
     if let [
         PatternMechanism::StraightGuideDimensions { id, dimensions },
         site,
@@ -1397,6 +1574,159 @@ fn validate_definition(definition: &PatternDefinition) -> Result<(), ValidationE
         ));
     }
     Ok(())
+}
+
+fn validate_random_site_definition(
+    definition: &PatternDefinition,
+    base_id: PatternMechanismId,
+    modulation_id: PatternMechanismId,
+    exclusion_id: PatternMechanismId,
+    site_id: PatternMechanismId,
+) -> Result<(), ValidationError> {
+    let [
+        PatternMechanism::RandomSiteProcess {
+            id: declared_base,
+            character,
+            ..
+        },
+        PatternMechanism::SiteDensityModulation {
+            id: declared_modulation,
+            base_site_process_id,
+            modulation,
+        },
+        PatternMechanism::SiteExclusion {
+            id: declared_exclusion,
+            density_modulation_id,
+            policy,
+        },
+        PatternMechanism::RandomSiteProduct {
+            id: declared_site,
+            exclusion_id: product_exclusion_id,
+            maximum_attempts,
+            maximum_neighbor_checks,
+        },
+    ] = definition.mechanisms.as_slice()
+    else {
+        return Err(ValidationError::new(
+            "pattern_definitions.family",
+            "random-site family requires base, modulation, exclusion, and site product in stored order",
+        ));
+    };
+    if *declared_base != base_id
+        || *declared_modulation != modulation_id
+        || *declared_exclusion != exclusion_id
+        || *declared_site != site_id
+        || *base_site_process_id != base_id
+        || *density_modulation_id != modulation_id
+        || *product_exclusion_id != exclusion_id
+    {
+        return Err(ValidationError::new(
+            "pattern_definitions.family",
+            "random-site family root must reference its ordered mechanism chain",
+        ));
+    }
+    validate_random_character(character)?;
+    validate_site_density_modulation(modulation)?;
+    validate_site_exclusion(policy)?;
+    if *maximum_attempts == 0 {
+        return Err(ValidationError::new(
+            "pattern_definitions.mechanisms.random_sites.maximum_attempts",
+            "random-site maximum attempts must be nonzero",
+        ));
+    }
+    if *maximum_neighbor_checks == 0 {
+        return Err(ValidationError::new(
+            "pattern_definitions.mechanisms.random_sites.maximum_neighbor_checks",
+            "random-site maximum neighbor checks must be nonzero",
+        ));
+    }
+    let [
+        PatternOutputLayer::MarkPrototype {
+            site_mechanism_id,
+            prototype: MarkPrototype::Circle,
+            orientation: MarkOrientation::Fixed,
+            ..
+        },
+    ] = definition.output_layers.as_slice()
+    else {
+        return Err(ValidationError::new(
+            "pattern_definitions.output_layers",
+            "random-site products require exactly one fixed circle mark layer",
+        ));
+    };
+    if *site_mechanism_id != site_id {
+        return Err(ValidationError::new(
+            "pattern_definitions.output_layers.site_mechanism_id",
+            "output layer must consume the declared random-site product",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_random_character(character: &RandomSiteCharacter) -> Result<(), ValidationError> {
+    match character {
+        RandomSiteCharacter::RawUniform => Ok(()),
+        RandomSiteCharacter::Even {
+            minimum_center_distance,
+        } => validate_positive_finite(
+            *minimum_center_distance,
+            "pattern_definitions.mechanisms.random_sites.minimum_center_distance",
+        ),
+        RandomSiteCharacter::Clustered {
+            cluster_density,
+            cluster_spread,
+            cluster_strength,
+        } => {
+            validate_positive_finite(
+                *cluster_density,
+                "pattern_definitions.mechanisms.random_sites.cluster_density",
+            )?;
+            validate_positive_finite(
+                *cluster_spread,
+                "pattern_definitions.mechanisms.random_sites.cluster_spread",
+            )?;
+            validate_unit_component(
+                *cluster_strength,
+                "pattern_definitions.mechanisms.random_sites.cluster_strength",
+            )
+        }
+    }
+}
+
+fn validate_site_density_modulation(
+    modulation: &SiteDensityModulation,
+) -> Result<(), ValidationError> {
+    match modulation {
+        SiteDensityModulation::Uniform => Ok(()),
+        SiteDensityModulation::ArtworkWeighted {
+            mapping,
+            strength,
+            response,
+        } => {
+            validate_source_mapping(*mapping)?;
+            validate_unit_component(
+                *strength,
+                "pattern_definitions.mechanisms.site_density.strength",
+            )?;
+            match response {
+                ArtworkWeightResponse::Linear | ArtworkWeightResponse::Smoothstep => Ok(()),
+            }
+        }
+    }
+}
+
+fn validate_site_exclusion(policy: &SiteExclusionPolicy) -> Result<(), ValidationError> {
+    match policy {
+        SiteExclusionPolicy::None => Ok(()),
+        SiteExclusionPolicy::MinimumCenterDistance { minimum } => validate_positive_finite(
+            *minimum,
+            "pattern_definitions.mechanisms.site_exclusion.minimum",
+        ),
+        SiteExclusionPolicy::VisibleMarkMargin { margin, .. } => validate_nonnegative_finite(
+            *margin,
+            "pattern_definitions.mechanisms.site_exclusion.margin",
+        ),
+    }
 }
 
 /// Validates one standalone typed definition before it is installed in an
