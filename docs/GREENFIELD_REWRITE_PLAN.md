@@ -1601,30 +1601,20 @@ checkpoint `e777270`.
 
 ### Stage 17A — Explicit compound-variant transition drafts
 
-**Status: Accepted awaiting checkpoint.** Correct the accepted Stage 17 authority with a narrow
-headless contract for deliberate transitions between payload-bearing enum
-variants before Stage 18 resumes.
-
-- Expose immutable transient transition drafts for random character, density
-  modulation, exclusion policy, and guided output orientation choices.
-- Derive every required payload field, typed value, bound, choice, reference,
-  unit, and stable target from domain contracts. The draft is not an active
-  document descriptor, persisted state, history state, or frontend default.
-- Require callers to present and explicitly confirm the complete draft before
-  producing the existing compatible `PatternDefinitionEdit`; domain command
-  validation remains authoritative.
-- Keep active descriptor semantics, current-v2 and immutable-v1 persistence,
-  command results, IDs, invalidation, history, evaluator, cache, scheduler,
-  canonical output, CLI authority, and GTK lifecycle unchanged.
-
-**Stop condition:** Accept exhaustive alternative/payload coverage, explicit
-confirmation, atomic rejection/no-op behavior, and persistence/runtime-state
-absence before correcting or resuming Stage 18.
+**Status: Complete at commit `2a85252`.** The headless authority now exposes
+immutable transient drafts for random-character, density-modulation,
+exclusion-policy, and guided-output-orientation transitions. Each draft derives
+the complete typed payload, bounds, units, choices, references, and stable
+targets from domain contracts, requires explicit confirmation, and finalizes
+only the existing compatible `PatternDefinitionEdit`. Drafts remain absent from
+active descriptors, document/history state, persistence, cache/evaluator
+inputs, and frontend state. Domain validation, no-op/stale rejection, IDs,
+invalidation, and shared/copy history behavior remain authoritative.
 
 ## Stage 18 — Descriptor-driven GTK channel inspector
 
-**Status: Implemented awaiting review.** Add channel selection and per-channel editing over Stage
-17 authority without structural pattern mathematics in GTK.
+**Status: Complete at commit `2a85252`.** Add channel selection and per-channel
+editing over Stage 17 authority without structural pattern mathematics in GTK.
 
 - Present channel appearance, source mapping, definition selection/sharing
   state, family-appropriate density, layout, and output-compatible geometry
@@ -1632,16 +1622,23 @@ absence before correcting or resuming Stage 18.
 - Use progressive disclosure: common compatible controls first; advanced
   anisotropy, seeds, exclusion, and mechanism-specific parameters only when the
   active descriptor exposes them.
-- GTK renders widgets, parses transient text, and dispatches typed commands
-  through `DocumentHistory`. It never mutates definitions, allocates IDs,
-  computes pattern geometry, or maintains hidden authoritative values.
-- Preserve asynchronous revision/ticket rejection under rapid editing and keep
-  the preview a raw-RGBA final consumer.
+- Read current values through the separate immutable typed value reader, retain
+  selected channels by stable ID with deterministic fallback, and keep drafts,
+  disclosure, status, and focus state runtime-only.
+- GTK renders descriptor-driven controls and visible compound-transition drafts;
+  explicit confirmation dispatches typed edits through `DocumentHistory`, with
+  selected copy-on-edit and deliberate shared-definition editing using the
+  accepted history commands. Invalid, rejected, and semantic no-op drafts keep
+  the document, history, preview, and last-successful cache unchanged.
+- Preserve asynchronous revision/ticket rejection, last-successful raw-RGBA
+  preview protection, lifecycle behavior, v1/current-v2 persistence, and the
+  canonical preview/PNG/SVG output path.
 
 Structural Pattern Editor controls and preset authoring remain Stage 19.
 
-**Stop condition:** User accepts channel workflow, undo/redo, focus/accessibility,
-stale-preview rejection, and all supported model/source combinations.
+Automated/static checks, native raw-artifact inspection, and the bounded app
+source/liveness evidence do not substitute for actual GNOME/Wayland manual
+visual, keyboard/focus, or assistive-technology review.
 
 ## Stage 19A — Pure-schema preset registry
 

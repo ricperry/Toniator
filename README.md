@@ -175,7 +175,29 @@ values, validation, serialization, or UI behavior. The generic
 deterministic order. Stable-ID allocation, copy-on-edit and explicit shared
 editing, undo/redo, persistence/CLI parity, cache reuse, and restored canonical
 render output are covered by the accepted headless tests. GTK channel controls
-remain planned for Stage 18.
+are implemented in the descriptor-driven Stage 18 inspector below.
+
+Stage 17A and Stage 18 are complete at checkpoint `2a85252`. Stage 17A adds
+immutable transient compound-variant drafts for random character,
+density-modulation, exclusion-policy, and guided-orientation changes. Drafts
+derive complete typed payloads from domain contracts, require visible explicit
+confirmation, finalize only existing typed edits, and remain outside descriptors,
+document/history state, persistence, cache/evaluator inputs, and frontend state.
+
+Stage 18 adds a descriptor-driven selected-channel GTK inspector. It reads
+current values through a separate immutable typed reader, selects and falls back
+by stable channel ID, renders generic controls with progressive disclosure, and
+routes selected copy-on-edit or deliberate shared editing through
+`DocumentHistory`. Compound transitions show their domain draft before
+confirmation; invalid, rejected, and semantic no-op drafts preserve the draft,
+status, document/history state, and last-successful preview. Selection, drafts,
+disclosure, status, and focus remain runtime-only. Existing lifecycle,
+v1/current-v2 persistence, and canonical preview/PNG/SVG output behavior are
+preserved, including guarded asynchronous preview updates.
+
+Automated and static checks, raw native output inspection, and bounded app
+evidence do not claim actual GNOME/Wayland manual visual, keyboard/focus, or
+assistive-technology acceptance; that review remains outstanding.
 
 Low-resolution fixtures and outputs are supplementary only. Every future stage
 that exercises source loading, sampling, rendering, preview, or export must

@@ -263,15 +263,25 @@ Validation covers atomic command rejection, persistence/CLI parity, cache and
 scheduler reuse, and natural-resolution raster/vector output evidence; it does
 not claim separate manual GTK visual, interactive, or accessibility acceptance.
 
-**Stage 17A — Accepted awaiting checkpoint.** Add a narrow immutable transient domain contract
-for explicitly completing every payload required by random-character,
-density-modulation, exclusion-policy, and guided-orientation variant changes.
-The correction must produce the existing typed edits without GTK defaults,
-inactive-descriptor guesses, persistence changes, or evaluator behavior.
+**Stage 17A — Complete at commit `2a85252`.** Immutable transient compound-variant
+drafts derive complete typed payloads for random-character, density-modulation,
+exclusion-policy, and guided-output-orientation changes, require explicit
+confirmation, and finalize only existing typed edits. Drafts remain outside
+descriptors, document/history state, persistence, cache/evaluator inputs, and
+frontend state; domain validation, no-op/stale rejection, and history semantics
+remain authoritative.
 
-**Stage 18 — Implemented awaiting review.** Add the descriptor-driven GTK channel inspector over
-`DocumentHistory`, with progressive disclosure and no hidden values, ID
-allocation, pattern mathematics, validation, or alternate schema in GTK.
+**Stage 18 — Complete at commit `2a85252`.** Descriptor-driven selected-channel
+GTK inspection uses the immutable typed current-value reader, stable-ID
+selection/fallback, generic descriptor controls, and progressive disclosure.
+Selected copy-on-edit and explicit shared editing dispatch through
+`DocumentHistory`; visible domain transition drafts require confirmation, while
+invalid/no-op drafts preserve document/history and preview state. Selection,
+drafts, disclosure, status, and focus are runtime-only; guarded asynchronous
+updates retain the last-successful raw-RGBA preview. Lifecycle, persistence, and
+canonical preview/PNG/SVG output boundaries remain unchanged. Automated/static
+and native artifact evidence is not manual GNOME/Wayland visual, keyboard,
+focus, or assistive-technology acceptance.
 
 **Stage 19A — Planned.** Add the versioned headless pure-schema preset registry
 and reconstruction gates; preset names remain metadata and never evaluator
