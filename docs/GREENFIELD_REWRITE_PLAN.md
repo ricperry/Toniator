@@ -1501,7 +1501,7 @@ renderer-owned pattern dispatch.
 **Stop condition (complete):** The generic headless pipeline, capability and
 provenance validation, exact identity/reuse boundaries, cancellation and
 failure atomicity, and frozen-v1/saved-v2 RGB/CMYK/SourceColorAlpha parity were
-accepted at implementation checkpoint `711058b`. Stage 17 remains planned.
+accepted at implementation checkpoint `711058b`. Stage 17 follows below.
 
 ## Stage 16A — Generalized straight-guide mechanisms
 
@@ -1571,12 +1571,12 @@ separate manual visual, interactive, or accessibility acceptance is claimed.
 **Stop condition (complete):** Deterministic distribution distinctions,
 exclusion guarantees, weighted sampling, persistence preservation, and native
 output parity were accepted at implementation checkpoint `77bad7c`. Stage 17
-editor commands remain planned.
+headless editor commands follow in the next section.
 
 ## Stage 17 — Headless pattern/channel editing and capabilities
 
-**Status: Implemented awaiting review.** Complete the authoritative command and
-introspection surface before creating GTK controls.
+**Status: Complete at commit `e777270`.** The authoritative command and
+introspection surface is complete before creating GTK controls.
 
 - Add typed commands for every supported channel property and structural edit,
   including density-axis/aspect behavior, transform/phase, geometry response,
@@ -1596,7 +1596,8 @@ introspection surface before creating GTK controls.
 
 **Stop condition:** Accept command completeness, descriptor derivation,
 copy/shared semantics, undo/redo, exact invalidation, and restored render parity
-before GTK inspector work.
+before GTK inspector work. These conditions were accepted at implementation
+checkpoint `e777270`.
 
 ## Stage 18 — Descriptor-driven GTK channel inspector
 

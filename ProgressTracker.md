@@ -1,6 +1,6 @@
 # Toniator Progress Tracker
 
-Last updated: **2026-08-09**. The durable execution contract is
+Last updated: **2026-08-11**. The durable execution contract is
 [GREENFIELD_REWRITE_PLAN.md](docs/GREENFIELD_REWRITE_PLAN.md). Normative
 architecture remains in the five protected [Project Specification files](Project%20Specification/Addendum.md).
 
@@ -228,8 +228,8 @@ reuse only matching authoritative inputs while the current supported
 configuration preserves exact canonical geometry and frozen-v1/saved-v2
 RGB/CMYK/SourceColorAlpha PNG/SVG parity. DocumentHistory, immutable v1
 migration, deterministic v2 persistence, scheduler acceptance, CLI/preview,
-renderers, and corrected GTK lifecycle behavior remain unchanged. Stage 17 and
-later editor work remain planned.
+renderers, and corrected GTK lifecycle behavior remain unchanged. Stage 17 is
+complete below at `e777270`; later GTK editor work remains planned.
 
 **Stage 16A — Complete at commit `ccec466`.** Add generalized one-to-four-dimension straight-guide
 mechanisms, independent angles/phase, intersections and along-guide sites,
@@ -254,10 +254,14 @@ SVG resolution with high-density raw/native artifacts and save/reopen parity.
 Automated/native evidence and bounded app liveness are recorded without claiming
 separate manual visual, interactive, or accessibility acceptance.
 
-**Stage 17 — Implemented awaiting review.** Complete typed headless pattern/channel commands and
-schema-derived property/capability descriptors, exact invalidation, stable-ID
-allocation, copy/shared semantics, undo/redo, and rendered restoration before
-any GTK inspector controls.
+**Stage 17 — Complete at commit `e777270`.** Typed headless pattern/channel
+commands and schema-derived property/capability descriptors provide exact
+invalidation, stable-ID allocation, copy/shared semantics, undo/redo, and
+rendered restoration before any GTK inspector controls. The deterministic CLI
+`capabilities [--input PATH]` surface exposes the same descriptor contracts.
+Validation covers atomic command rejection, persistence/CLI parity, cache and
+scheduler reuse, and natural-resolution raster/vector output evidence; it does
+not claim separate manual GTK visual, interactive, or accessibility acceptance.
 
 **Stage 18 — Planned.** Add the descriptor-driven GTK channel inspector over
 `DocumentHistory`, with progressive disclosure and no hidden values, ID

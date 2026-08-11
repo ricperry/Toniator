@@ -117,8 +117,8 @@ with byte-identical PNG/SVG results across all three models; v1/v2 persistence,
 Native artifacts and bounded app launches are liveness/review evidence, not
 exhaustive manual visual, interactive, or accessibility acceptance. Stage 16A
 was provisionally accepted on 2026-08-09 and is implemented at checkpoint
-`ccec466`; Stage 16B is complete at checkpoint `77bad7c`, while Stage 17 and
-later GTK pattern/channel editing remain planned.
+`ccec466`; Stage 16B is complete at checkpoint `77bad7c`, and Stage 17 is
+complete at checkpoint `e777270`.
 
 Stage 16A generalizes the typed straight-guide family through the same generic
 headless pipeline. A definition may contain one to four ordered straight-guide
@@ -162,6 +162,20 @@ High-density natural-resolution validation covers the 1024×1024 PNG and
 Automated checks, raw artifact inspection, CLI parity, and bounded app launches
 are evidence only; no separate manual visual, interactive, or accessibility
 acceptance is claimed.
+
+Stage 17 headless editing authority is complete at checkpoint `e777270`.
+`DocumentHistory` accepts typed commands for supported channel properties and
+structural edits, validates each transition atomically, reports deterministic
+affected channels, and returns the earliest applicable invalidation level:
+Presentation, Realization, Family, Source, or ChannelTopology. Schema-derived
+read-only descriptors expose stable typed field IDs, value kinds, choices,
+bounds, units, dependencies, support, and invalidation metadata without owning
+values, validation, serialization, or UI behavior. The generic
+`toniator capabilities [--input PATH]` command emits those descriptors in
+deterministic order. Stable-ID allocation, copy-on-edit and explicit shared
+editing, undo/redo, persistence/CLI parity, cache reuse, and restored canonical
+render output are covered by the accepted headless tests. GTK channel controls
+remain planned for Stage 18.
 
 Low-resolution fixtures and outputs are supplementary only. Every future stage
 that exercises source loading, sampling, rendering, preview, or export must
