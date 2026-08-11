@@ -263,7 +263,13 @@ Validation covers atomic command rejection, persistence/CLI parity, cache and
 scheduler reuse, and natural-resolution raster/vector output evidence; it does
 not claim separate manual GTK visual, interactive, or accessibility acceptance.
 
-**Stage 18 — Planned.** Add the descriptor-driven GTK channel inspector over
+**Stage 17A — Accepted awaiting checkpoint.** Add a narrow immutable transient domain contract
+for explicitly completing every payload required by random-character,
+density-modulation, exclusion-policy, and guided-orientation variant changes.
+The correction must produce the existing typed edits without GTK defaults,
+inactive-descriptor guesses, persistence changes, or evaluator behavior.
+
+**Stage 18 — Implemented awaiting review.** Add the descriptor-driven GTK channel inspector over
 `DocumentHistory`, with progressive disclosure and no hidden values, ID
 allocation, pattern mathematics, validation, or alternate schema in GTK.
 

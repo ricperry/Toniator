@@ -1599,9 +1599,31 @@ copy/shared semantics, undo/redo, exact invalidation, and restored render parity
 before GTK inspector work. These conditions were accepted at implementation
 checkpoint `e777270`.
 
+### Stage 17A — Explicit compound-variant transition drafts
+
+**Status: Accepted awaiting checkpoint.** Correct the accepted Stage 17 authority with a narrow
+headless contract for deliberate transitions between payload-bearing enum
+variants before Stage 18 resumes.
+
+- Expose immutable transient transition drafts for random character, density
+  modulation, exclusion policy, and guided output orientation choices.
+- Derive every required payload field, typed value, bound, choice, reference,
+  unit, and stable target from domain contracts. The draft is not an active
+  document descriptor, persisted state, history state, or frontend default.
+- Require callers to present and explicitly confirm the complete draft before
+  producing the existing compatible `PatternDefinitionEdit`; domain command
+  validation remains authoritative.
+- Keep active descriptor semantics, current-v2 and immutable-v1 persistence,
+  command results, IDs, invalidation, history, evaluator, cache, scheduler,
+  canonical output, CLI authority, and GTK lifecycle unchanged.
+
+**Stop condition:** Accept exhaustive alternative/payload coverage, explicit
+confirmation, atomic rejection/no-op behavior, and persistence/runtime-state
+absence before correcting or resuming Stage 18.
+
 ## Stage 18 — Descriptor-driven GTK channel inspector
 
-**Status: Planned.** Add channel selection and per-channel editing over Stage
+**Status: Implemented awaiting review.** Add channel selection and per-channel editing over Stage
 17 authority without structural pattern mathematics in GTK.
 
 - Present channel appearance, source mapping, definition selection/sharing

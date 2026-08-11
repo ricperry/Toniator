@@ -3,18 +3,20 @@ use std::collections::HashSet;
 use toniator_domain::{
     ArtworkWeightResponse, CanvasSpec, ChannelAppearance, ChannelId, ChannelPaint,
     ChannelPatternLayout, ChannelSourceMapping, ChannelState, ColorComponent, ColorValue,
-    CoveragePolicy, DensityEditedAxis, DensityMetric2D, Document, DocumentCommand,
-    DocumentCommandFieldClassification, DocumentHistory, DocumentId, DocumentSession,
-    GuideDimensionId, InvalidationLevel, LegacyMappingFieldEdit, MarkGeometryFieldEdit,
-    MarkGeometryResponse, MarkOrientation, MarkPrototype, ModeledMappingFieldEdit,
-    NonFieldCommandOperation, PROPERTY_FIELD_IDS, PatternDefinition, PatternDefinitionEdit,
-    PatternDefinitionId, PatternMechanismId, PatternOutputLayerId, PropertyApplicability,
-    PropertyCommandKind, PropertyFieldId, PropertyTarget, RandomSiteCharacter,
-    SiteDensityModulation, SiteExclusionPolicy, SourceComponent, SourceMapping,
-    SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId,
-    StraightGuideDimension, StraightGuideRepetition, StructuralSupportConstraint,
-    TranslationEditedAxis, VisibleMarkSizingPolicy, property_field_contract,
-    property_field_contracts,
+    CoveragePolicy, DensityEditedAxis, DensityMetric2D, DensityModulationKind, Document,
+    DocumentCommand, DocumentCommandFieldClassification, DocumentHistory, DocumentId,
+    DocumentSession, ExclusionKind, GuideDimensionId, InvalidationLevel, LegacyMappingFieldEdit,
+    MarkGeometryFieldEdit, MarkGeometryResponse, MarkOrientation, MarkOrientationKind,
+    MarkPrototype, ModeledMappingFieldEdit, NonFieldCommandOperation, PROPERTY_FIELD_IDS,
+    PatternDefinition, PatternDefinitionEdit, PatternDefinitionId, PatternMechanismId,
+    PatternOutputLayerId, PropertyApplicability, PropertyCommandKind, PropertyCurrentValueKind,
+    PropertyEnumChoice, PropertyFieldId, PropertyReferenceValue, PropertyTarget,
+    RandomCharacterKind, RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy,
+    SourceComponent, SourceMapping, SourceMappingComponent, SourcePlacement, SourceReference,
+    SourceReferenceId, StraightGuideDimension, StraightGuideRepetition,
+    StructuralSupportConstraint, TranslationEditedAxis, VariantTransitionDraft,
+    VariantTransitionFieldUpdate, VariantTransitionValue, VisibleMarkSizingPolicy,
+    property_field_contract, property_field_contracts,
 };
 
 fn generalized_document(
@@ -270,6 +272,827 @@ fn descriptors_are_deterministic_duplicate_free_and_backed_by_commands() {
             .command_kind(),
         PropertyCommandKind::SetGuideSpacingMultiplier
     );
+}
+
+#[test]
+fn active_descriptor_values_are_typed_separate_and_exhaustive() {
+    let document = shared_document();
+    let descriptors = document.property_descriptors();
+    let values = document.property_values();
+    assert_eq!(values.len(), descriptors.len());
+    assert!(values.iter().zip(descriptors).all(|(value, descriptor)| {
+        value.descriptor == descriptor
+            && matches!(
+                (&value.descriptor.value_kind, &value.value),
+                (
+                    toniator_domain::PropertyValueKind::FiniteF64,
+                    PropertyCurrentValueKind::FiniteF64(_)
+                ) | (
+                    toniator_domain::PropertyValueKind::U32,
+                    PropertyCurrentValueKind::U32(_)
+                ) | (
+                    toniator_domain::PropertyValueKind::Boolean,
+                    PropertyCurrentValueKind::Boolean(_)
+                ) | (
+                    toniator_domain::PropertyValueKind::EnumChoice,
+                    PropertyCurrentValueKind::EnumChoice(_)
+                ) | (
+                    toniator_domain::PropertyValueKind::StableIdReference,
+                    PropertyCurrentValueKind::Reference(_)
+                ) | (
+                    toniator_domain::PropertyValueKind::StableIdReference,
+                    PropertyCurrentValueKind::ReferenceCollection(_)
+                )
+            )
+    }));
+    assert_eq!(document.property_values(), values);
+}
+
+fn transition_fixture() -> Document {
+    let mut history = DocumentHistory::new(DocumentSession::new(shared_document()).unwrap());
+    history
+        .apply(&DocumentCommand::AddTypedPatternDefinition {
+            definition: PatternDefinition::random_sites(
+                PatternDefinitionId(50),
+                "transition random",
+                PatternMechanismId(60),
+                PatternMechanismId(61),
+                PatternMechanismId(62),
+                PatternMechanismId(63),
+                PatternOutputLayerId(70),
+                RandomSiteCharacter::RawUniform,
+                17,
+                SiteDensityModulation::Uniform,
+                SiteExclusionPolicy::None,
+                1_000,
+                2_000,
+                CoveragePolicy {
+                    guard_steps: 3,
+                    maximum_support_radius: 8.0,
+                },
+            ),
+        })
+        .unwrap();
+    history.document().clone()
+}
+
+fn selector(
+    document: &Document,
+    field: PropertyFieldId,
+    target: PropertyTarget,
+) -> toniator_domain::PropertyDescriptor {
+    document
+        .property_descriptors()
+        .into_iter()
+        .find(|descriptor| descriptor.field == field && descriptor.target == target)
+        .unwrap()
+}
+
+fn assert_transition_fields(draft: &VariantTransitionDraft, expected: &[PropertyFieldId]) {
+    assert_eq!(
+        draft
+            .fields()
+            .iter()
+            .map(|field| field.field)
+            .collect::<Vec<_>>(),
+        expected
+    );
+    for field in draft.fields() {
+        assert_eq!(
+            field.contract,
+            property_field_contract(field.field),
+            "transition field {:?} must copy its authoritative contract",
+            field.field
+        );
+    }
+}
+
+#[test]
+fn compound_variant_drafts_are_exhaustive_explicit_and_finalize_to_existing_edits() {
+    let document = transition_fixture();
+    let random = selector(
+        &document,
+        PropertyFieldId::RandomCharacter,
+        PropertyTarget::Mechanism(PatternDefinitionId(50), PatternMechanismId(60)),
+    );
+    let even = document
+        .variant_transition_draft(
+            &random,
+            PropertyEnumChoice::RandomCharacter(RandomCharacterKind::Even),
+        )
+        .unwrap();
+    assert_transition_fields(&even, &[PropertyFieldId::RandomEvenMinimumCenterDistance]);
+    assert_eq!(
+        even.finalize(&document).unwrap(),
+        PatternDefinitionEdit::SetRandomCharacter {
+            mechanism_id: PatternMechanismId(60),
+            character: RandomSiteCharacter::Even {
+                minimum_center_distance: 1.0,
+            },
+        }
+    );
+    let clustered = document
+        .variant_transition_draft(
+            &random,
+            PropertyEnumChoice::RandomCharacter(RandomCharacterKind::Clustered),
+        )
+        .unwrap();
+    assert_transition_fields(
+        &clustered,
+        &[
+            PropertyFieldId::RandomClusterDensity,
+            PropertyFieldId::RandomClusterSpread,
+            PropertyFieldId::RandomClusterStrength,
+        ],
+    );
+    assert_eq!(
+        clustered.finalize(&document).unwrap(),
+        PatternDefinitionEdit::SetRandomCharacter {
+            mechanism_id: PatternMechanismId(60),
+            character: RandomSiteCharacter::Clustered {
+                cluster_density: 1.0,
+                cluster_spread: 1.0,
+                cluster_strength: 1.0,
+            },
+        }
+    );
+
+    let modulation = selector(
+        &document,
+        PropertyFieldId::RandomDensityModulation,
+        PropertyTarget::Mechanism(PatternDefinitionId(50), PatternMechanismId(61)),
+    );
+    let artwork = document
+        .variant_transition_draft(
+            &modulation,
+            PropertyEnumChoice::DensityModulation(DensityModulationKind::ArtworkWeighted),
+        )
+        .unwrap();
+    assert_transition_fields(
+        &artwork,
+        &[
+            PropertyFieldId::ArtworkWeightMappingComponent,
+            PropertyFieldId::ArtworkWeightMappingPlacement,
+            PropertyFieldId::ArtworkWeightMappingInverted,
+            PropertyFieldId::ArtworkWeightMappingGain,
+            PropertyFieldId::ArtworkWeightMappingBias,
+            PropertyFieldId::ArtworkWeightStrength,
+            PropertyFieldId::ArtworkWeightResponse,
+        ],
+    );
+    assert_eq!(
+        artwork.finalize(&document).unwrap(),
+        PatternDefinitionEdit::SetDensityModulationVariant {
+            mechanism_id: PatternMechanismId(61),
+            modulation: SiteDensityModulation::ArtworkWeighted {
+                mapping: SourceMapping::canonical(SourceMappingComponent::Luminance),
+                strength: 1.0,
+                response: ArtworkWeightResponse::Linear,
+            },
+        }
+    );
+
+    let exclusion = selector(
+        &document,
+        PropertyFieldId::RandomExclusion,
+        PropertyTarget::Mechanism(PatternDefinitionId(50), PatternMechanismId(62)),
+    );
+    for (choice, fields, expected) in [
+        (
+            ExclusionKind::MinimumCenterDistance,
+            vec![PropertyFieldId::ExclusionMinimumCenterDistance],
+            PatternDefinitionEdit::SetExclusionVariant {
+                mechanism_id: PatternMechanismId(62),
+                policy: SiteExclusionPolicy::MinimumCenterDistance { minimum: 1.0 },
+            },
+        ),
+        (
+            ExclusionKind::VisibleMarkMargin,
+            vec![
+                PropertyFieldId::VisibleMarkMargin,
+                PropertyFieldId::VisibleMarkSizingPolicy,
+            ],
+            PatternDefinitionEdit::SetExclusionVariant {
+                mechanism_id: PatternMechanismId(62),
+                policy: SiteExclusionPolicy::VisibleMarkMargin {
+                    margin: 0.0,
+                    sizing: VisibleMarkSizingPolicy::MaximumSupportRadius,
+                },
+            },
+        ),
+    ] {
+        let draft = document
+            .variant_transition_draft(&exclusion, PropertyEnumChoice::Exclusion(choice))
+            .unwrap();
+        assert_transition_fields(&draft, &fields);
+        assert_eq!(draft.finalize(&document).unwrap(), expected);
+    }
+
+    let oriented = along_guide_document();
+    let orientation = selector(
+        &oriented,
+        PropertyFieldId::OutputOrientation,
+        PropertyTarget::OutputLayer(PatternDefinitionId(10), PatternOutputLayerId(30)),
+    );
+    let normal = oriented
+        .variant_transition_draft(
+            &orientation,
+            PropertyEnumChoice::MarkOrientation(MarkOrientationKind::GuideNormal),
+        )
+        .unwrap();
+    let dimension = normal.fields().first().unwrap();
+    assert_transition_fields(&normal, &[PropertyFieldId::OutputOrientationDimension]);
+    assert_eq!(dimension.field, PropertyFieldId::OutputOrientationDimension);
+    assert!(matches!(
+        dimension.value,
+        VariantTransitionValue::StableReference(None)
+    ));
+    assert_eq!(
+        dimension.reference_choices,
+        vec![
+            PropertyReferenceValue::GuideDimension(GuideDimensionId(40)),
+            PropertyReferenceValue::GuideDimension(GuideDimensionId(41)),
+            PropertyReferenceValue::GuideDimension(GuideDimensionId(42)),
+        ]
+    );
+    assert!(
+        normal.finalize(&oriented).is_err(),
+        "guided orientation cannot silently choose a guide"
+    );
+    let normal = normal
+        .with_updates(&[VariantTransitionFieldUpdate {
+            field: PropertyFieldId::OutputOrientationDimension,
+            target: PropertyTarget::OutputLayer(PatternDefinitionId(10), PatternOutputLayerId(30)),
+            value: VariantTransitionValue::StableReference(Some(
+                PropertyReferenceValue::GuideDimension(GuideDimensionId(41)),
+            )),
+        }])
+        .unwrap();
+    assert_eq!(
+        normal.finalize(&oriented).unwrap(),
+        PatternDefinitionEdit::SetOutputOrientation {
+            output_layer_id: PatternOutputLayerId(30),
+            orientation: MarkOrientation::GuideNormal {
+                dimension_id: GuideDimensionId(41)
+            },
+        }
+    );
+
+    let fixed = oriented
+        .variant_transition_draft(
+            &orientation,
+            PropertyEnumChoice::MarkOrientation(MarkOrientationKind::Fixed),
+        )
+        .unwrap();
+    assert_transition_fields(&fixed, &[]);
+    assert_eq!(
+        fixed.finalize(&oriented).unwrap(),
+        PatternDefinitionEdit::SetOutputOrientation {
+            output_layer_id: PatternOutputLayerId(30),
+            orientation: MarkOrientation::Fixed,
+        }
+    );
+}
+
+#[test]
+fn compound_transition_finalization_reaches_every_selector_alternative_exactly() {
+    let mut history = DocumentHistory::new(DocumentSession::new(transition_fixture()).unwrap());
+    let apply = |history: &mut DocumentHistory, edit| {
+        let base = history
+            .document()
+            .pattern_definitions()
+            .iter()
+            .find(|definition| definition.id == PatternDefinitionId(50))
+            .unwrap()
+            .clone();
+        history
+            .apply(&DocumentCommand::EditSharedPatternDefinition {
+                definition_id: PatternDefinitionId(50),
+                base_definition: base,
+                edit,
+            })
+            .unwrap();
+    };
+
+    apply(
+        &mut history,
+        PatternDefinitionEdit::SetRandomCharacter {
+            mechanism_id: PatternMechanismId(60),
+            character: RandomSiteCharacter::Even {
+                minimum_center_distance: 3.25,
+            },
+        },
+    );
+    let random = selector(
+        history.document(),
+        PropertyFieldId::RandomCharacter,
+        PropertyTarget::Mechanism(PatternDefinitionId(50), PatternMechanismId(60)),
+    );
+    let raw = history
+        .document()
+        .variant_transition_draft(
+            &random,
+            PropertyEnumChoice::RandomCharacter(RandomCharacterKind::RawUniform),
+        )
+        .unwrap();
+    assert_transition_fields(&raw, &[]);
+    assert_eq!(
+        raw.finalize(history.document()).unwrap(),
+        PatternDefinitionEdit::SetRandomCharacter {
+            mechanism_id: PatternMechanismId(60),
+            character: RandomSiteCharacter::RawUniform,
+        }
+    );
+
+    apply(
+        &mut history,
+        PatternDefinitionEdit::SetDensityModulationVariant {
+            mechanism_id: PatternMechanismId(61),
+            modulation: SiteDensityModulation::ArtworkWeighted {
+                mapping: SourceMapping::canonical(SourceMappingComponent::Luminance),
+                strength: 0.75,
+                response: ArtworkWeightResponse::Smoothstep,
+            },
+        },
+    );
+    let modulation = selector(
+        history.document(),
+        PropertyFieldId::RandomDensityModulation,
+        PropertyTarget::Mechanism(PatternDefinitionId(50), PatternMechanismId(61)),
+    );
+    let uniform = history
+        .document()
+        .variant_transition_draft(
+            &modulation,
+            PropertyEnumChoice::DensityModulation(DensityModulationKind::Uniform),
+        )
+        .unwrap();
+    assert_transition_fields(&uniform, &[]);
+    assert_eq!(
+        uniform.finalize(history.document()).unwrap(),
+        PatternDefinitionEdit::SetDensityModulationVariant {
+            mechanism_id: PatternMechanismId(61),
+            modulation: SiteDensityModulation::Uniform,
+        }
+    );
+
+    apply(
+        &mut history,
+        PatternDefinitionEdit::SetExclusionVariant {
+            mechanism_id: PatternMechanismId(62),
+            policy: SiteExclusionPolicy::MinimumCenterDistance { minimum: 1.5 },
+        },
+    );
+    let exclusion = selector(
+        history.document(),
+        PropertyFieldId::RandomExclusion,
+        PropertyTarget::Mechanism(PatternDefinitionId(50), PatternMechanismId(62)),
+    );
+    let none = history
+        .document()
+        .variant_transition_draft(
+            &exclusion,
+            PropertyEnumChoice::Exclusion(ExclusionKind::None),
+        )
+        .unwrap();
+    assert_transition_fields(&none, &[]);
+    assert_eq!(
+        none.finalize(history.document()).unwrap(),
+        PatternDefinitionEdit::SetExclusionVariant {
+            mechanism_id: PatternMechanismId(62),
+            policy: SiteExclusionPolicy::None,
+        }
+    );
+
+    let oriented = shared_document();
+    let orientation = selector(
+        &oriented,
+        PropertyFieldId::OutputOrientation,
+        PropertyTarget::OutputLayer(PatternDefinitionId(10), PatternOutputLayerId(30)),
+    );
+    let tangent = oriented
+        .variant_transition_draft(
+            &orientation,
+            PropertyEnumChoice::MarkOrientation(MarkOrientationKind::GuideTangent),
+        )
+        .unwrap();
+    assert_transition_fields(&tangent, &[PropertyFieldId::OutputOrientationDimension]);
+    let tangent = tangent
+        .with_updates(&[VariantTransitionFieldUpdate {
+            field: PropertyFieldId::OutputOrientationDimension,
+            target: PropertyTarget::OutputLayer(PatternDefinitionId(10), PatternOutputLayerId(30)),
+            value: VariantTransitionValue::StableReference(Some(
+                PropertyReferenceValue::GuideDimension(GuideDimensionId(40)),
+            )),
+        }])
+        .unwrap();
+    assert_eq!(
+        tangent.finalize(&oriented).unwrap(),
+        PatternDefinitionEdit::SetOutputOrientation {
+            output_layer_id: PatternOutputLayerId(30),
+            orientation: MarkOrientation::GuideTangent {
+                dimension_id: GuideDimensionId(40),
+            },
+        }
+    );
+}
+
+#[test]
+fn compound_transition_drafts_retain_same_choice_and_reject_bad_or_stale_updates_atomically() {
+    let document = transition_fixture();
+    let random = selector(
+        &document,
+        PropertyFieldId::RandomCharacter,
+        PropertyTarget::Mechanism(PatternDefinitionId(50), PatternMechanismId(60)),
+    );
+    let same = document
+        .variant_transition_draft(
+            &random,
+            PropertyEnumChoice::RandomCharacter(RandomCharacterKind::RawUniform),
+        )
+        .unwrap();
+    assert!(same.fields().is_empty());
+    assert!(
+        same.finalize(&document).is_err(),
+        "same choice must remain a semantic no-op"
+    );
+    let even = document
+        .variant_transition_draft(
+            &random,
+            PropertyEnumChoice::RandomCharacter(RandomCharacterKind::Even),
+        )
+        .unwrap();
+    let update = VariantTransitionFieldUpdate {
+        field: PropertyFieldId::RandomEvenMinimumCenterDistance,
+        target: PropertyTarget::Mechanism(PatternDefinitionId(50), PatternMechanismId(60)),
+        value: VariantTransitionValue::FiniteF64(2.5),
+    };
+    let edited = even.with_updates(std::slice::from_ref(&update)).unwrap();
+    assert_eq!(
+        edited.finalize(&document).unwrap().field_projection().field,
+        PropertyFieldId::RandomCharacter
+    );
+    for updates in [
+        vec![update.clone(), update.clone()],
+        vec![VariantTransitionFieldUpdate {
+            value: VariantTransitionValue::FiniteF64(f64::NAN),
+            ..update.clone()
+        }],
+        vec![VariantTransitionFieldUpdate {
+            value: VariantTransitionValue::FiniteF64(-0.1),
+            ..update.clone()
+        }],
+        vec![VariantTransitionFieldUpdate {
+            value: VariantTransitionValue::U32(2),
+            ..update.clone()
+        }],
+        vec![VariantTransitionFieldUpdate {
+            target: PropertyTarget::Mechanism(PatternDefinitionId(50), PatternMechanismId(999)),
+            ..update.clone()
+        }],
+    ] {
+        assert!(even.with_updates(&updates).is_err());
+        assert_eq!(
+            even.finalize(&document).unwrap(),
+            PatternDefinitionEdit::SetRandomCharacter {
+                mechanism_id: PatternMechanismId(60),
+                character: RandomSiteCharacter::Even {
+                    minimum_center_distance: 1.0
+                }
+            }
+        );
+    }
+    let oriented = along_guide_document();
+    let orientation = selector(
+        &oriented,
+        PropertyFieldId::OutputOrientation,
+        PropertyTarget::OutputLayer(PatternDefinitionId(10), PatternOutputLayerId(30)),
+    );
+    let normal = oriented
+        .variant_transition_draft(
+            &orientation,
+            PropertyEnumChoice::MarkOrientation(MarkOrientationKind::GuideNormal),
+        )
+        .unwrap();
+    let reference_update = VariantTransitionFieldUpdate {
+        field: PropertyFieldId::OutputOrientationDimension,
+        target: PropertyTarget::OutputLayer(PatternDefinitionId(10), PatternOutputLayerId(30)),
+        value: VariantTransitionValue::StableReference(Some(PropertyReferenceValue::Mechanism(
+            PatternMechanismId(20),
+        ))),
+    };
+    assert!(normal.with_updates(&[reference_update]).is_err());
+    let mut history = DocumentHistory::new(DocumentSession::new(document.clone()).unwrap());
+    let base = history
+        .document()
+        .pattern_definitions()
+        .iter()
+        .find(|definition| definition.id == PatternDefinitionId(50))
+        .unwrap()
+        .clone();
+    history
+        .apply(&DocumentCommand::EditSharedPatternDefinition {
+            definition_id: PatternDefinitionId(50),
+            base_definition: base,
+            edit: PatternDefinitionEdit::SetRandomCharacter {
+                mechanism_id: PatternMechanismId(60),
+                character: RandomSiteCharacter::Even {
+                    minimum_center_distance: 2.0,
+                },
+            },
+        })
+        .unwrap();
+    assert!(
+        edited.finalize(history.document()).is_err(),
+        "draft base must reject a changed selector"
+    );
+}
+
+#[test]
+fn compound_transition_drafts_reject_same_discriminant_and_unrelated_definition_staleness() {
+    let mut history = DocumentHistory::new(DocumentSession::new(transition_fixture()).unwrap());
+    let apply = |history: &mut DocumentHistory, edit| {
+        let base = history
+            .document()
+            .pattern_definitions()
+            .iter()
+            .find(|definition| definition.id == PatternDefinitionId(50))
+            .unwrap()
+            .clone();
+        history
+            .apply(&DocumentCommand::EditSharedPatternDefinition {
+                definition_id: PatternDefinitionId(50),
+                base_definition: base,
+                edit,
+            })
+            .unwrap();
+    };
+    apply(
+        &mut history,
+        PatternDefinitionEdit::SetRandomCharacter {
+            mechanism_id: PatternMechanismId(60),
+            character: RandomSiteCharacter::Even {
+                minimum_center_distance: 3.25,
+            },
+        },
+    );
+    let random_selector = selector(
+        history.document(),
+        PropertyFieldId::RandomCharacter,
+        PropertyTarget::Mechanism(PatternDefinitionId(50), PatternMechanismId(60)),
+    );
+    let same_even = history
+        .document()
+        .variant_transition_draft(
+            &random_selector,
+            PropertyEnumChoice::RandomCharacter(RandomCharacterKind::Even),
+        )
+        .unwrap();
+    apply(
+        &mut history,
+        PatternDefinitionEdit::SetRandomCharacter {
+            mechanism_id: PatternMechanismId(60),
+            character: RandomSiteCharacter::Even {
+                minimum_center_distance: 4.0,
+            },
+        },
+    );
+    assert!(
+        same_even.finalize(history.document()).is_err(),
+        "same enum discriminant cannot overwrite newer payload"
+    );
+    let fresh = history
+        .document()
+        .variant_transition_draft(
+            &selector(
+                history.document(),
+                PropertyFieldId::RandomCharacter,
+                PropertyTarget::Mechanism(PatternDefinitionId(50), PatternMechanismId(60)),
+            ),
+            PropertyEnumChoice::RandomCharacter(RandomCharacterKind::Clustered),
+        )
+        .unwrap();
+    apply(
+        &mut history,
+        PatternDefinitionEdit::SetRandomSeed {
+            mechanism_id: PatternMechanismId(60),
+            seed: 18,
+        },
+    );
+    assert!(
+        fresh.finalize(history.document()).is_err(),
+        "an unrelated same-definition structural edit makes the draft stale"
+    );
+}
+
+#[test]
+fn compound_transition_same_choice_drafts_retain_authoritative_payloads() {
+    let mut history = DocumentHistory::new(DocumentSession::new(transition_fixture()).unwrap());
+    let apply = |history: &mut DocumentHistory, edit| {
+        let base = history
+            .document()
+            .pattern_definitions()
+            .iter()
+            .find(|definition| definition.id == PatternDefinitionId(50))
+            .unwrap()
+            .clone();
+        history
+            .apply(&DocumentCommand::EditSharedPatternDefinition {
+                definition_id: PatternDefinitionId(50),
+                base_definition: base,
+                edit,
+            })
+            .unwrap();
+    };
+    apply(
+        &mut history,
+        PatternDefinitionEdit::SetRandomCharacter {
+            mechanism_id: PatternMechanismId(60),
+            character: RandomSiteCharacter::Even {
+                minimum_center_distance: 3.25,
+            },
+        },
+    );
+    apply(
+        &mut history,
+        PatternDefinitionEdit::SetDensityModulationVariant {
+            mechanism_id: PatternMechanismId(61),
+            modulation: SiteDensityModulation::ArtworkWeighted {
+                mapping: SourceMapping {
+                    component: SourceMappingComponent::Alpha,
+                    placement: SourcePlacement::StretchToCanvas,
+                    inverted: true,
+                    gain: 0.75,
+                    bias: -0.25,
+                },
+                strength: 0.5,
+                response: ArtworkWeightResponse::Smoothstep,
+            },
+        },
+    );
+    apply(
+        &mut history,
+        PatternDefinitionEdit::SetExclusionVariant {
+            mechanism_id: PatternMechanismId(62),
+            policy: SiteExclusionPolicy::VisibleMarkMargin {
+                margin: 1.5,
+                sizing: VisibleMarkSizingPolicy::MaximumSupportRadius,
+            },
+        },
+    );
+    let document = history.document();
+    for (field, target, choice, expected) in [
+        (
+            PropertyFieldId::RandomCharacter,
+            PropertyTarget::Mechanism(PatternDefinitionId(50), PatternMechanismId(60)),
+            PropertyEnumChoice::RandomCharacter(RandomCharacterKind::Even),
+            VariantTransitionValue::FiniteF64(3.25),
+        ),
+        (
+            PropertyFieldId::RandomDensityModulation,
+            PropertyTarget::Mechanism(PatternDefinitionId(50), PatternMechanismId(61)),
+            PropertyEnumChoice::DensityModulation(DensityModulationKind::ArtworkWeighted),
+            VariantTransitionValue::EnumChoice(PropertyEnumChoice::SourceMappingComponent(
+                SourceMappingComponent::Alpha,
+            )),
+        ),
+        (
+            PropertyFieldId::RandomExclusion,
+            PropertyTarget::Mechanism(PatternDefinitionId(50), PatternMechanismId(62)),
+            PropertyEnumChoice::Exclusion(ExclusionKind::VisibleMarkMargin),
+            VariantTransitionValue::FiniteF64(1.5),
+        ),
+    ] {
+        let draft = document
+            .variant_transition_draft(&selector(document, field, target), choice)
+            .unwrap();
+        assert!(
+            draft
+                .fields()
+                .iter()
+                .any(|candidate| candidate.value == expected)
+        );
+        assert!(
+            draft.finalize(document).is_err(),
+            "same choice remains a semantic no-op"
+        );
+    }
+    let oriented = along_guide_document();
+    let orientation = selector(
+        &oriented,
+        PropertyFieldId::OutputOrientation,
+        PropertyTarget::OutputLayer(PatternDefinitionId(10), PatternOutputLayerId(30)),
+    );
+    let same = oriented
+        .variant_transition_draft(
+            &orientation,
+            PropertyEnumChoice::MarkOrientation(MarkOrientationKind::GuideTangent),
+        )
+        .unwrap();
+    assert_eq!(
+        same.fields()[0].value,
+        VariantTransitionValue::StableReference(Some(PropertyReferenceValue::GuideDimension(
+            GuideDimensionId(40)
+        )))
+    );
+    assert!(same.finalize(&oriented).is_err());
+}
+
+#[test]
+fn finalized_transition_edit_preserves_existing_history_results_and_redo_branch_rules() {
+    let mut history = DocumentHistory::new(DocumentSession::new(transition_fixture()).unwrap());
+    for channel_id in [ChannelId(1), ChannelId(2)] {
+        history
+            .apply(&DocumentCommand::RetargetChannelPatternDefinition {
+                channel_id,
+                definition_id: PatternDefinitionId(50),
+            })
+            .unwrap();
+    }
+    let random_selector = selector(
+        history.document(),
+        PropertyFieldId::RandomCharacter,
+        PropertyTarget::Mechanism(PatternDefinitionId(50), PatternMechanismId(60)),
+    );
+    let draft = history
+        .document()
+        .variant_transition_draft(
+            &random_selector,
+            PropertyEnumChoice::RandomCharacter(RandomCharacterKind::Even),
+        )
+        .unwrap();
+    let base = history
+        .document()
+        .pattern_definitions()
+        .iter()
+        .find(|definition| definition.id == PatternDefinitionId(50))
+        .unwrap()
+        .clone();
+    let result = history
+        .apply(&DocumentCommand::EditSharedPatternDefinition {
+            definition_id: PatternDefinitionId(50),
+            base_definition: base,
+            edit: draft.finalize(history.document()).unwrap(),
+        })
+        .unwrap();
+    assert_eq!(result.affected_channels, vec![ChannelId(1), ChannelId(2)]);
+    assert_eq!(result.invalidation, InvalidationLevel::Family);
+    let applied = history.document().clone();
+    let revision = history.revision();
+    assert!(history.can_undo());
+    history.undo().unwrap();
+    assert!(history.can_redo());
+    history.redo().unwrap();
+    assert_eq!(history.document(), &applied);
+    assert_eq!(history.revision().0, revision.0 + 2);
+    history.undo().unwrap();
+    let base = history
+        .document()
+        .pattern_definitions()
+        .iter()
+        .find(|definition| definition.id == PatternDefinitionId(50))
+        .unwrap()
+        .clone();
+    let clustered = history
+        .document()
+        .variant_transition_draft(
+            &selector(
+                history.document(),
+                PropertyFieldId::RandomCharacter,
+                PropertyTarget::Mechanism(PatternDefinitionId(50), PatternMechanismId(60)),
+            ),
+            PropertyEnumChoice::RandomCharacter(RandomCharacterKind::Clustered),
+        )
+        .unwrap();
+    let branch_revision = history.revision();
+    history
+        .apply(&DocumentCommand::EditSharedPatternDefinition {
+            definition_id: PatternDefinitionId(50),
+            base_definition: base,
+            edit: clustered.finalize(history.document()).unwrap(),
+        })
+        .unwrap();
+    assert_eq!(history.revision().0, branch_revision.0 + 1);
+    assert!(
+        !history.can_redo(),
+        "new finalized transition truncates redo"
+    );
+    let no_op = history
+        .document()
+        .variant_transition_draft(
+            &selector(
+                history.document(),
+                PropertyFieldId::RandomCharacter,
+                PropertyTarget::Mechanism(PatternDefinitionId(50), PatternMechanismId(60)),
+            ),
+            PropertyEnumChoice::RandomCharacter(RandomCharacterKind::Clustered),
+        )
+        .unwrap();
+    let no_op_document = history.document().clone();
+    let no_op_revision = history.revision();
+    assert!(no_op.finalize(history.document()).is_err());
+    assert_eq!(history.document(), &no_op_document);
+    assert_eq!(history.revision(), no_op_revision);
 }
 
 #[test]

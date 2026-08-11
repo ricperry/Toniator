@@ -1302,6 +1302,316 @@ impl Document {
         descriptors
     }
 
+    /// Returns the immutable current value for every active descriptor.  This
+    /// deliberately mirrors `property_descriptors` rather than extending a
+    /// descriptor with mutable document data: descriptor metadata and current
+    /// authority remain two independently readable surfaces.
+    pub fn property_values(&self) -> Vec<PropertyCurrentValue> {
+        self.property_descriptors()
+            .into_iter()
+            .map(|descriptor| PropertyCurrentValue {
+                value: self.property_value_for(&descriptor),
+                descriptor,
+            })
+            .collect()
+    }
+
+    /// Begins a deliberate compound-variant transition from an active selector
+    /// descriptor. The resulting draft has explicit domain-owned initial
+    /// payload values and must be finalized before it becomes an existing
+    /// `PatternDefinitionEdit`.
+    pub fn variant_transition_draft(
+        &self,
+        selector: &PropertyDescriptor,
+        choice: PropertyEnumChoice,
+    ) -> Result<VariantTransitionDraft, ValidationError> {
+        if !self.property_descriptors().contains(selector) {
+            return Err(ValidationError::new(
+                "transition_draft.selector",
+                "transition selector is inactive or stale",
+            ));
+        }
+        let base_choice = self
+            .property_values()
+            .into_iter()
+            .find(|value| value.descriptor == *selector)
+            .and_then(|value| match value.value {
+                PropertyCurrentValueKind::EnumChoice(choice) => Some(choice),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                ValidationError::new(
+                    "transition_draft.selector",
+                    "transition selector does not have an enum value",
+                )
+            })?;
+        if !selector.choices.contains(&choice) {
+            return Err(ValidationError::new(
+                "transition_draft.choice",
+                "transition choice is not supported by this selector",
+            ));
+        }
+        let fields = transition_fields_for(self, selector, base_choice, choice)?;
+        let definition_id = transition_definition_id(selector.target).ok_or_else(|| {
+            ValidationError::new(
+                "transition_draft.selector",
+                "transition selector has no structural definition target",
+            )
+        })?;
+        let base_definition = self.definition(definition_id).cloned().ok_or_else(|| {
+            ValidationError::new(
+                "transition_draft.target",
+                "transition definition is missing",
+            )
+        })?;
+        Ok(VariantTransitionDraft {
+            selector: selector.clone(),
+            base_choice,
+            choice,
+            fields,
+            base_definition,
+        })
+    }
+
+    fn property_value_for(&self, descriptor: &PropertyDescriptor) -> PropertyCurrentValueKind {
+        let channel = |id| {
+            self.channel(id)
+                .map(ChannelPropertyState::Legacy)
+                .or_else(|| self.modeled_channel(id).map(ChannelPropertyState::Modeled))
+        };
+        match descriptor.target {
+            PropertyTarget::Document => match descriptor.field {
+                PropertyFieldId::SourceReference => PropertyCurrentValueKind::Reference(
+                    PropertyReferenceValue::Source(self.source.clone()),
+                ),
+                _ => unreachable!("only document descriptor is source reference"),
+            },
+            PropertyTarget::Channel(channel_id) => {
+                let channel = channel(channel_id).expect("active descriptor targets channel");
+                match descriptor.field {
+                    PropertyFieldId::DensityAcrossX => {
+                        PropertyCurrentValueKind::FiniteF64(channel.layout().density.across_x)
+                    }
+                    PropertyFieldId::DensityAcrossY => {
+                        PropertyCurrentValueKind::FiniteF64(channel.layout().density.across_y)
+                    }
+                    PropertyFieldId::DensityAspectLocked => {
+                        PropertyCurrentValueKind::Boolean(channel.layout().density.aspect_locked)
+                    }
+                    PropertyFieldId::RotationDegrees => {
+                        PropertyCurrentValueKind::FiniteF64(channel.layout().rotation_degrees)
+                    }
+                    PropertyFieldId::TranslationX => {
+                        PropertyCurrentValueKind::FiniteF64(channel.layout().translation_x)
+                    }
+                    PropertyFieldId::TranslationY => {
+                        PropertyCurrentValueKind::FiniteF64(channel.layout().translation_y)
+                    }
+                    PropertyFieldId::MarkMinimumSize => {
+                        PropertyCurrentValueKind::FiniteF64(channel.mark().minimum_size)
+                    }
+                    PropertyFieldId::MarkMaximumSize => {
+                        PropertyCurrentValueKind::FiniteF64(channel.mark().maximum_size)
+                    }
+                    PropertyFieldId::Opacity => {
+                        PropertyCurrentValueKind::FiniteF64(channel.opacity())
+                    }
+                    PropertyFieldId::Visibility => {
+                        PropertyCurrentValueKind::Boolean(channel.visible())
+                    }
+                    PropertyFieldId::DefinitionSelection => PropertyCurrentValueKind::Reference(
+                        PropertyReferenceValue::Definition(channel.definition_id()),
+                    ),
+                    PropertyFieldId::ColorRed => {
+                        PropertyCurrentValueKind::FiniteF64(channel.color().red)
+                    }
+                    PropertyFieldId::ColorGreen => {
+                        PropertyCurrentValueKind::FiniteF64(channel.color().green)
+                    }
+                    PropertyFieldId::ColorBlue => {
+                        PropertyCurrentValueKind::FiniteF64(channel.color().blue)
+                    }
+                    PropertyFieldId::ColorAlpha => {
+                        PropertyCurrentValueKind::FiniteF64(channel.color().alpha)
+                    }
+                    PropertyFieldId::LegacyMappingComponent => {
+                        PropertyCurrentValueKind::EnumChoice(
+                            PropertyEnumChoice::SourceMappingComponent(
+                                match channel
+                                    .legacy_mapping()
+                                    .expect("legacy descriptor")
+                                    .component
+                                {
+                                    SourceComponent::Luminance => SourceMappingComponent::Luminance,
+                                    SourceComponent::Alpha => SourceMappingComponent::Alpha,
+                                },
+                            ),
+                        )
+                    }
+                    PropertyFieldId::LegacyMappingPlacement => {
+                        PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::SourcePlacement(
+                            channel
+                                .legacy_mapping()
+                                .expect("legacy descriptor")
+                                .placement,
+                        ))
+                    }
+                    PropertyFieldId::ModeledMappingComponent => {
+                        PropertyCurrentValueKind::EnumChoice(
+                            PropertyEnumChoice::SourceMappingComponent(
+                                channel.mapping().expect("modeled descriptor").component,
+                            ),
+                        )
+                    }
+                    PropertyFieldId::ModeledMappingPlacement => {
+                        PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::SourcePlacement(
+                            channel.mapping().expect("modeled descriptor").placement,
+                        ))
+                    }
+                    PropertyFieldId::ModeledMappingInverted => PropertyCurrentValueKind::Boolean(
+                        channel.mapping().expect("modeled descriptor").inverted,
+                    ),
+                    PropertyFieldId::ModeledMappingGain => PropertyCurrentValueKind::FiniteF64(
+                        channel.mapping().expect("modeled descriptor").gain,
+                    ),
+                    PropertyFieldId::ModeledMappingBias => PropertyCurrentValueKind::FiniteF64(
+                        channel.mapping().expect("modeled descriptor").bias,
+                    ),
+                    PropertyFieldId::Paint => {
+                        PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::Paint(
+                            match channel.paint().expect("modeled descriptor") {
+                                ChannelPaint::Solid(_) => PaintKind::Solid,
+                                ChannelPaint::SampledSource => PaintKind::SampledSource,
+                            },
+                        ))
+                    }
+                    _ => unreachable!("channel descriptor field"),
+                }
+            }
+            PropertyTarget::Definition(definition_id) => {
+                let definition = self
+                    .pattern_definitions
+                    .iter()
+                    .find(|definition| definition.id == definition_id)
+                    .expect("active definition descriptor");
+                match descriptor.field {
+                    PropertyFieldId::CoverageGuardSteps => {
+                        PropertyCurrentValueKind::U32(definition.coverage.guard_steps)
+                    }
+                    PropertyFieldId::CoverageMaximumSupportRadius => {
+                        PropertyCurrentValueKind::FiniteF64(
+                            definition.coverage.maximum_support_radius,
+                        )
+                    }
+                    _ => unreachable!("definition descriptor field"),
+                }
+            }
+            PropertyTarget::GuideDimension(definition_id, mechanism_id, dimension_id) => {
+                let dimension = self
+                    .pattern_definitions
+                    .iter()
+                    .find(|definition| definition.id == definition_id)
+                    .and_then(|definition| {
+                        definition
+                            .mechanisms
+                            .iter()
+                            .find(|mechanism| mechanism.id() == mechanism_id)
+                    })
+                    .and_then(|mechanism| match mechanism {
+                        PatternMechanism::StraightGuideDimensions { dimensions, .. } => dimensions
+                            .iter()
+                            .find(|dimension| dimension.id == dimension_id),
+                        _ => None,
+                    })
+                    .expect("active guide dimension descriptor");
+                match descriptor.field {
+                    PropertyFieldId::GuideBaselineAngle => {
+                        PropertyCurrentValueKind::FiniteF64(dimension.baseline_angle_degrees)
+                    }
+                    PropertyFieldId::GuidePhase => {
+                        PropertyCurrentValueKind::FiniteF64(dimension.phase)
+                    }
+                    PropertyFieldId::GuideSpacingMultiplier => {
+                        PropertyCurrentValueKind::FiniteF64(dimension.repetition.spacing_multiplier)
+                    }
+                    _ => unreachable!("guide descriptor field"),
+                }
+            }
+            PropertyTarget::Mechanism(definition_id, mechanism_id) => {
+                let mechanism = self
+                    .pattern_definitions
+                    .iter()
+                    .find(|definition| definition.id == definition_id)
+                    .and_then(|definition| {
+                        definition
+                            .mechanisms
+                            .iter()
+                            .find(|mechanism| mechanism.id() == mechanism_id)
+                    })
+                    .expect("active mechanism descriptor");
+                property_value_for_mechanism(descriptor.field, mechanism)
+            }
+            PropertyTarget::OutputLayer(definition_id, output_layer_id) => {
+                let layer = self
+                    .pattern_definitions
+                    .iter()
+                    .find(|definition| definition.id == definition_id)
+                    .and_then(|definition| {
+                        definition
+                            .output_layers
+                            .iter()
+                            .find(|layer| layer.id() == output_layer_id)
+                    })
+                    .expect("active output descriptor");
+                match (descriptor.field, layer) {
+                    (
+                        PropertyFieldId::OutputSiteProduct,
+                        PatternOutputLayer::CircularMarks {
+                            site_mechanism_id, ..
+                        }
+                        | PatternOutputLayer::MarkPrototype {
+                            site_mechanism_id, ..
+                        },
+                    ) => PropertyCurrentValueKind::Reference(PropertyReferenceValue::Mechanism(
+                        *site_mechanism_id,
+                    )),
+                    (
+                        PropertyFieldId::OutputPrototype,
+                        PatternOutputLayer::MarkPrototype { prototype, .. },
+                    ) => PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::MarkPrototype(
+                        match prototype {
+                            MarkPrototype::Circle => MarkPrototypeKind::Circle,
+                        },
+                    )),
+                    (
+                        PropertyFieldId::OutputOrientation,
+                        PatternOutputLayer::MarkPrototype { orientation, .. },
+                    ) => PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::MarkOrientation(
+                        match orientation {
+                            MarkOrientation::Fixed => MarkOrientationKind::Fixed,
+                            MarkOrientation::GuideTangent { .. } => {
+                                MarkOrientationKind::GuideTangent
+                            }
+                            MarkOrientation::GuideNormal { .. } => MarkOrientationKind::GuideNormal,
+                        },
+                    )),
+                    (
+                        PropertyFieldId::OutputOrientationDimension,
+                        PatternOutputLayer::MarkPrototype {
+                            orientation:
+                                MarkOrientation::GuideTangent { dimension_id }
+                                | MarkOrientation::GuideNormal { dimension_id },
+                            ..
+                        },
+                    ) => PropertyCurrentValueKind::Reference(
+                        PropertyReferenceValue::GuideDimension(*dimension_id),
+                    ),
+                    _ => unreachable!("output descriptor field"),
+                }
+            }
+        }
+    }
+
     /// Mechanical bidirectional completeness gate for the active schema.
     pub fn validate_property_descriptors(&self) -> Result<(), ValidationError> {
         let descriptors = self.property_descriptors();
@@ -4464,6 +4774,1149 @@ pub struct PropertyDescriptor {
     pub structural_support: StructuralSupportConstraint,
     pub reference_constraint: PropertyReferenceConstraint,
     pub choice_policy: PropertyChoicePolicy,
+}
+
+/// An immutable typed value paired with one active descriptor.  This is a
+/// read boundary for frontends and tooling, not a second document shape.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PropertyCurrentValue {
+    pub descriptor: PropertyDescriptor,
+    pub value: PropertyCurrentValueKind,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum PropertyCurrentValueKind {
+    FiniteF64(f64),
+    U32(u32),
+    Boolean(bool),
+    EnumChoice(PropertyEnumChoice),
+    Reference(PropertyReferenceValue),
+    ReferenceCollection(Vec<PropertyReferenceValue>),
+}
+
+/// Stable identifiers remain typed at the read boundary; presentation code
+/// may format them, but cannot turn them into positional aliases.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PropertyReferenceValue {
+    Source(SourceReference),
+    Definition(PatternDefinitionId),
+    Mechanism(PatternMechanismId),
+    GuideDimension(GuideDimensionId),
+}
+
+/// A non-persisted, immutable proposal for the complete payload needed when a
+/// selector changes to a payload-bearing alternative.  It is intentionally
+/// separate from active property descriptors: these fields are transition
+/// inputs, not current document capabilities.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VariantTransitionDraft {
+    selector: PropertyDescriptor,
+    /// Private immutable structural base. Like command bases, this is
+    /// lifecycle-only stale detection and never document/persistence state.
+    base_definition: PatternDefinition,
+    base_choice: PropertyEnumChoice,
+    choice: PropertyEnumChoice,
+    fields: Vec<VariantTransitionField>,
+}
+
+impl VariantTransitionDraft {
+    pub fn selector(&self) -> &PropertyDescriptor {
+        &self.selector
+    }
+
+    pub fn choice(&self) -> PropertyEnumChoice {
+        self.choice
+    }
+
+    pub fn fields(&self) -> &[VariantTransitionField] {
+        &self.fields
+    }
+
+    /// Returns a new draft after validating the complete update set.  The
+    /// update list is intentionally keyed by stable field and target, never
+    /// list index; duplicate, missing, or foreign updates are rejected.
+    pub fn with_updates(
+        &self,
+        updates: &[VariantTransitionFieldUpdate],
+    ) -> Result<Self, ValidationError> {
+        let mut next = self.clone();
+        let mut seen = HashSet::new();
+        for update in updates {
+            let key = (update.field, update.target);
+            if !seen.insert(key) {
+                return Err(ValidationError::new(
+                    "transition_draft.update",
+                    "transition draft contains a duplicate field update",
+                ));
+            }
+            let field = next
+                .fields
+                .iter_mut()
+                .find(|field| field.field == update.field && field.target == update.target)
+                .ok_or_else(|| {
+                    ValidationError::new(
+                        "transition_draft.update",
+                        "transition draft update targets an absent field",
+                    )
+                })?;
+            validate_transition_field_value(field, &update.value)?;
+            field.value = update.value.clone();
+        }
+        Ok(next)
+    }
+
+    /// Validates this transient draft against the current immutable document
+    /// and returns the existing typed edit.  It never mutates a document or
+    /// history owner.
+    pub fn finalize(&self, document: &Document) -> Result<PatternDefinitionEdit, ValidationError> {
+        validate_transition_draft_shape(self, document)?;
+        let edit = transition_draft_edit(self)?;
+        let definition_id =
+            transition_definition_id(self.selector.target).expect("validated selector target");
+        let definition = document.definition(definition_id).ok_or_else(|| {
+            ValidationError::new(
+                "transition_draft.target",
+                "transition definition is missing",
+            )
+        })?;
+        validate_definition_edit(definition, &edit)?;
+        let mut candidate = definition.clone();
+        apply_definition_edit(&mut candidate, &edit);
+        if &candidate == definition {
+            return Err(ValidationError::new(
+                "transition_draft.confirm",
+                "transition draft is a semantic no-op",
+            ));
+        }
+        validate_definition(&candidate)?;
+        Ok(edit)
+    }
+}
+
+/// One complete typed transition payload field. `contract` is copied from the
+/// immutable schema field contract, never from a frontend policy or document value.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VariantTransitionField {
+    pub field: PropertyFieldId,
+    pub target: PropertyTarget,
+    pub contract: PropertyFieldContract,
+    pub value: VariantTransitionValue,
+    pub reference_choices: Vec<PropertyReferenceValue>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum VariantTransitionValue {
+    FiniteF64(f64),
+    U32(u32),
+    Boolean(bool),
+    EnumChoice(PropertyEnumChoice),
+    /// `None` is an explicit incomplete required reference, used only where
+    /// transition policy cannot choose a stable identity on the user's behalf.
+    StableReference(Option<PropertyReferenceValue>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct VariantTransitionFieldUpdate {
+    pub field: PropertyFieldId,
+    pub target: PropertyTarget,
+    pub value: VariantTransitionValue,
+}
+
+enum ChannelPropertyState<'a> {
+    Legacy(&'a ChannelState),
+    Modeled(&'a ModeledChannelState),
+}
+
+impl ChannelPropertyState<'_> {
+    fn layout(&self) -> &ChannelPatternLayout {
+        match self {
+            Self::Legacy(channel) => &channel.layout,
+            Self::Modeled(channel) => &channel.layout,
+        }
+    }
+    fn mark(&self) -> &MarkGeometryResponse {
+        match self {
+            Self::Legacy(channel) => &channel.mark_geometry_response,
+            Self::Modeled(channel) => &channel.mark_geometry_response,
+        }
+    }
+    fn definition_id(&self) -> PatternDefinitionId {
+        match self {
+            Self::Legacy(channel) => channel.pattern_definition_id,
+            Self::Modeled(channel) => channel.pattern_definition_id,
+        }
+    }
+    fn opacity(&self) -> f64 {
+        match self {
+            Self::Legacy(channel) => channel.appearance.opacity,
+            Self::Modeled(channel) => channel.opacity,
+        }
+    }
+    fn visible(&self) -> bool {
+        match self {
+            Self::Legacy(channel) => channel.appearance.visible,
+            Self::Modeled(channel) => channel.visible,
+        }
+    }
+    fn color(&self) -> &ColorValue {
+        match self {
+            Self::Legacy(channel) => &channel.appearance.color,
+            Self::Modeled(channel) => match &channel.paint {
+                ChannelPaint::Solid(color) => color,
+                ChannelPaint::SampledSource => {
+                    unreachable!("sampled paint has no color descriptors")
+                }
+            },
+        }
+    }
+    fn legacy_mapping(&self) -> Option<ChannelSourceMapping> {
+        match self {
+            Self::Legacy(channel) => Some(channel.source_mapping),
+            Self::Modeled(_) => None,
+        }
+    }
+    fn mapping(&self) -> Option<SourceMapping> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Modeled(channel) => Some(channel.mapping),
+        }
+    }
+    fn paint(&self) -> Option<&ChannelPaint> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Modeled(channel) => Some(&channel.paint),
+        }
+    }
+}
+
+fn property_value_for_mechanism(
+    field: PropertyFieldId,
+    mechanism: &PatternMechanism,
+) -> PropertyCurrentValueKind {
+    match (field, mechanism) {
+        (
+            PropertyFieldId::IntersectionDimensions,
+            PatternMechanism::SelectedGuideIntersections { dimensions, .. },
+        ) => PropertyCurrentValueKind::ReferenceCollection(
+            dimensions
+                .iter()
+                .copied()
+                .map(PropertyReferenceValue::GuideDimension)
+                .collect(),
+        ),
+        (
+            PropertyFieldId::IntersectionMergeEpsilon,
+            PatternMechanism::SelectedGuideIntersections { merge_epsilon, .. },
+        ) => PropertyCurrentValueKind::FiniteF64(*merge_epsilon),
+        (
+            PropertyFieldId::AlongGuideDimensions,
+            PatternMechanism::AlongGuideSites { dimensions, .. },
+        ) => PropertyCurrentValueKind::ReferenceCollection(
+            dimensions
+                .iter()
+                .copied()
+                .map(PropertyReferenceValue::GuideDimension)
+                .collect(),
+        ),
+        (
+            PropertyFieldId::AlongGuideIntervalMultiplier,
+            PatternMechanism::AlongGuideSites {
+                interval_multiplier,
+                ..
+            },
+        ) => PropertyCurrentValueKind::FiniteF64(*interval_multiplier),
+        (PropertyFieldId::AlongGuidePhase, PatternMechanism::AlongGuideSites { phase, .. }) => {
+            PropertyCurrentValueKind::FiniteF64(*phase)
+        }
+        (
+            PropertyFieldId::RandomCharacter,
+            PatternMechanism::RandomSiteProcess { character, .. },
+        ) => PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::RandomCharacter(
+            match character {
+                RandomSiteCharacter::RawUniform => RandomCharacterKind::RawUniform,
+                RandomSiteCharacter::Even { .. } => RandomCharacterKind::Even,
+                RandomSiteCharacter::Clustered { .. } => RandomCharacterKind::Clustered,
+            },
+        )),
+        (PropertyFieldId::RandomSeed, PatternMechanism::RandomSiteProcess { seed, .. }) => {
+            PropertyCurrentValueKind::U32(*seed)
+        }
+        (
+            PropertyFieldId::RandomEvenMinimumCenterDistance,
+            PatternMechanism::RandomSiteProcess {
+                character:
+                    RandomSiteCharacter::Even {
+                        minimum_center_distance,
+                    },
+                ..
+            },
+        ) => PropertyCurrentValueKind::FiniteF64(*minimum_center_distance),
+        (
+            PropertyFieldId::RandomClusterDensity,
+            PatternMechanism::RandomSiteProcess {
+                character:
+                    RandomSiteCharacter::Clustered {
+                        cluster_density, ..
+                    },
+                ..
+            },
+        ) => PropertyCurrentValueKind::FiniteF64(*cluster_density),
+        (
+            PropertyFieldId::RandomClusterSpread,
+            PatternMechanism::RandomSiteProcess {
+                character: RandomSiteCharacter::Clustered { cluster_spread, .. },
+                ..
+            },
+        ) => PropertyCurrentValueKind::FiniteF64(*cluster_spread),
+        (
+            PropertyFieldId::RandomClusterStrength,
+            PatternMechanism::RandomSiteProcess {
+                character:
+                    RandomSiteCharacter::Clustered {
+                        cluster_strength, ..
+                    },
+                ..
+            },
+        ) => PropertyCurrentValueKind::FiniteF64(*cluster_strength),
+        (
+            PropertyFieldId::RandomDensityModulation,
+            PatternMechanism::SiteDensityModulation { modulation, .. },
+        ) => PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::DensityModulation(
+            match modulation {
+                SiteDensityModulation::Uniform => DensityModulationKind::Uniform,
+                SiteDensityModulation::ArtworkWeighted { .. } => {
+                    DensityModulationKind::ArtworkWeighted
+                }
+            },
+        )),
+        (
+            PropertyFieldId::ArtworkWeightMappingComponent,
+            PatternMechanism::SiteDensityModulation {
+                modulation: SiteDensityModulation::ArtworkWeighted { mapping, .. },
+                ..
+            },
+        ) => PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::SourceMappingComponent(
+            mapping.component,
+        )),
+        (
+            PropertyFieldId::ArtworkWeightMappingPlacement,
+            PatternMechanism::SiteDensityModulation {
+                modulation: SiteDensityModulation::ArtworkWeighted { mapping, .. },
+                ..
+            },
+        ) => PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::SourcePlacement(
+            mapping.placement,
+        )),
+        (
+            PropertyFieldId::ArtworkWeightMappingInverted,
+            PatternMechanism::SiteDensityModulation {
+                modulation: SiteDensityModulation::ArtworkWeighted { mapping, .. },
+                ..
+            },
+        ) => PropertyCurrentValueKind::Boolean(mapping.inverted),
+        (
+            PropertyFieldId::ArtworkWeightMappingGain,
+            PatternMechanism::SiteDensityModulation {
+                modulation: SiteDensityModulation::ArtworkWeighted { mapping, .. },
+                ..
+            },
+        ) => PropertyCurrentValueKind::FiniteF64(mapping.gain),
+        (
+            PropertyFieldId::ArtworkWeightMappingBias,
+            PatternMechanism::SiteDensityModulation {
+                modulation: SiteDensityModulation::ArtworkWeighted { mapping, .. },
+                ..
+            },
+        ) => PropertyCurrentValueKind::FiniteF64(mapping.bias),
+        (
+            PropertyFieldId::ArtworkWeightStrength,
+            PatternMechanism::SiteDensityModulation {
+                modulation: SiteDensityModulation::ArtworkWeighted { strength, .. },
+                ..
+            },
+        ) => PropertyCurrentValueKind::FiniteF64(*strength),
+        (
+            PropertyFieldId::ArtworkWeightResponse,
+            PatternMechanism::SiteDensityModulation {
+                modulation: SiteDensityModulation::ArtworkWeighted { response, .. },
+                ..
+            },
+        ) => PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::ArtworkWeightResponse(
+            *response,
+        )),
+        (PropertyFieldId::RandomExclusion, PatternMechanism::SiteExclusion { policy, .. }) => {
+            PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::Exclusion(match policy {
+                SiteExclusionPolicy::None => ExclusionKind::None,
+                SiteExclusionPolicy::MinimumCenterDistance { .. } => {
+                    ExclusionKind::MinimumCenterDistance
+                }
+                SiteExclusionPolicy::VisibleMarkMargin { .. } => ExclusionKind::VisibleMarkMargin,
+            }))
+        }
+        (
+            PropertyFieldId::ExclusionMinimumCenterDistance,
+            PatternMechanism::SiteExclusion {
+                policy: SiteExclusionPolicy::MinimumCenterDistance { minimum },
+                ..
+            },
+        ) => PropertyCurrentValueKind::FiniteF64(*minimum),
+        (
+            PropertyFieldId::VisibleMarkMargin,
+            PatternMechanism::SiteExclusion {
+                policy: SiteExclusionPolicy::VisibleMarkMargin { margin, .. },
+                ..
+            },
+        ) => PropertyCurrentValueKind::FiniteF64(*margin),
+        (
+            PropertyFieldId::VisibleMarkSizingPolicy,
+            PatternMechanism::SiteExclusion {
+                policy: SiteExclusionPolicy::VisibleMarkMargin { sizing, .. },
+                ..
+            },
+        ) => PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::VisibleMarkSizingPolicy(
+            *sizing,
+        )),
+        (
+            PropertyFieldId::RandomMaximumAttempts,
+            PatternMechanism::RandomSiteProduct {
+                maximum_attempts, ..
+            },
+        ) => PropertyCurrentValueKind::U32(*maximum_attempts),
+        (
+            PropertyFieldId::RandomMaximumNeighborChecks,
+            PatternMechanism::RandomSiteProduct {
+                maximum_neighbor_checks,
+                ..
+            },
+        ) => PropertyCurrentValueKind::U32(*maximum_neighbor_checks),
+        _ => unreachable!("active mechanism descriptor field"),
+    }
+}
+
+fn transition_definition_id(target: PropertyTarget) -> Option<PatternDefinitionId> {
+    match target {
+        PropertyTarget::Mechanism(definition_id, _)
+        | PropertyTarget::OutputLayer(definition_id, _) => Some(definition_id),
+        _ => None,
+    }
+}
+
+fn transition_field(
+    field: PropertyFieldId,
+    target: PropertyTarget,
+    value: VariantTransitionValue,
+    reference_choices: Vec<PropertyReferenceValue>,
+) -> VariantTransitionField {
+    VariantTransitionField {
+        field,
+        target,
+        contract: property_field_contract(field),
+        value,
+        reference_choices,
+    }
+}
+
+fn transition_fields_for(
+    document: &Document,
+    selector: &PropertyDescriptor,
+    base_choice: PropertyEnumChoice,
+    choice: PropertyEnumChoice,
+) -> Result<Vec<VariantTransitionField>, ValidationError> {
+    match (selector.field, selector.target, base_choice, choice) {
+        (
+            PropertyFieldId::RandomCharacter,
+            PropertyTarget::Mechanism(definition_id, mechanism_id),
+            PropertyEnumChoice::RandomCharacter(base),
+            PropertyEnumChoice::RandomCharacter(choice),
+        ) => random_transition_fields(document, definition_id, mechanism_id, base, choice),
+        (
+            PropertyFieldId::RandomDensityModulation,
+            PropertyTarget::Mechanism(definition_id, mechanism_id),
+            PropertyEnumChoice::DensityModulation(base),
+            PropertyEnumChoice::DensityModulation(choice),
+        ) => modulation_transition_fields(document, definition_id, mechanism_id, base, choice),
+        (
+            PropertyFieldId::RandomExclusion,
+            PropertyTarget::Mechanism(definition_id, mechanism_id),
+            PropertyEnumChoice::Exclusion(base),
+            PropertyEnumChoice::Exclusion(choice),
+        ) => exclusion_transition_fields(document, definition_id, mechanism_id, base, choice),
+        (
+            PropertyFieldId::OutputOrientation,
+            PropertyTarget::OutputLayer(definition_id, output_layer_id),
+            PropertyEnumChoice::MarkOrientation(base),
+            PropertyEnumChoice::MarkOrientation(choice),
+        ) => orientation_transition_fields(document, definition_id, output_layer_id, base, choice),
+        _ => Err(ValidationError::new(
+            "transition_draft.selector",
+            "selector target or choice does not support compound transition drafts",
+        )),
+    }
+}
+
+fn transition_mechanism(
+    document: &Document,
+    definition_id: PatternDefinitionId,
+    mechanism_id: PatternMechanismId,
+) -> Result<&PatternMechanism, ValidationError> {
+    document
+        .definition(definition_id)
+        .and_then(|definition| {
+            definition
+                .mechanisms
+                .iter()
+                .find(|mechanism| mechanism.id() == mechanism_id)
+        })
+        .ok_or_else(|| {
+            ValidationError::new("transition_draft.target", "transition mechanism is missing")
+        })
+}
+
+fn random_transition_fields(
+    document: &Document,
+    definition_id: PatternDefinitionId,
+    mechanism_id: PatternMechanismId,
+    base: RandomCharacterKind,
+    choice: RandomCharacterKind,
+) -> Result<Vec<VariantTransitionField>, ValidationError> {
+    let mechanism = transition_mechanism(document, definition_id, mechanism_id)?;
+    let PatternMechanism::RandomSiteProcess { character, .. } = mechanism else {
+        return Err(ValidationError::new(
+            "transition_draft.target",
+            "selector is not a random process",
+        ));
+    };
+    let target = PropertyTarget::Mechanism(definition_id, mechanism_id);
+    match choice {
+        RandomCharacterKind::RawUniform => Ok(Vec::new()),
+        RandomCharacterKind::Even => {
+            let value = if base == choice {
+                match character {
+                    RandomSiteCharacter::Even {
+                        minimum_center_distance,
+                    } => *minimum_center_distance,
+                    _ => unreachable!("base selector is current"),
+                }
+            } else {
+                1.0
+            };
+            Ok(vec![transition_field(
+                PropertyFieldId::RandomEvenMinimumCenterDistance,
+                target,
+                VariantTransitionValue::FiniteF64(value),
+                Vec::new(),
+            )])
+        }
+        RandomCharacterKind::Clustered => {
+            let (density, spread, strength) = if base == choice {
+                match character {
+                    RandomSiteCharacter::Clustered {
+                        cluster_density,
+                        cluster_spread,
+                        cluster_strength,
+                    } => (*cluster_density, *cluster_spread, *cluster_strength),
+                    _ => unreachable!("base selector is current"),
+                }
+            } else {
+                (1.0, 1.0, 1.0)
+            };
+            Ok(vec![
+                transition_field(
+                    PropertyFieldId::RandomClusterDensity,
+                    target,
+                    VariantTransitionValue::FiniteF64(density),
+                    Vec::new(),
+                ),
+                transition_field(
+                    PropertyFieldId::RandomClusterSpread,
+                    target,
+                    VariantTransitionValue::FiniteF64(spread),
+                    Vec::new(),
+                ),
+                transition_field(
+                    PropertyFieldId::RandomClusterStrength,
+                    target,
+                    VariantTransitionValue::FiniteF64(strength),
+                    Vec::new(),
+                ),
+            ])
+        }
+    }
+}
+
+fn modulation_transition_fields(
+    document: &Document,
+    definition_id: PatternDefinitionId,
+    mechanism_id: PatternMechanismId,
+    base: DensityModulationKind,
+    choice: DensityModulationKind,
+) -> Result<Vec<VariantTransitionField>, ValidationError> {
+    let mechanism = transition_mechanism(document, definition_id, mechanism_id)?;
+    let PatternMechanism::SiteDensityModulation { modulation, .. } = mechanism else {
+        return Err(ValidationError::new(
+            "transition_draft.target",
+            "selector is not density modulation",
+        ));
+    };
+    if choice == DensityModulationKind::Uniform {
+        return Ok(Vec::new());
+    }
+    let target = PropertyTarget::Mechanism(definition_id, mechanism_id);
+    let (mapping, strength, response) = if base == choice {
+        match modulation {
+            SiteDensityModulation::ArtworkWeighted {
+                mapping,
+                strength,
+                response,
+            } => (*mapping, *strength, *response),
+            _ => unreachable!("base selector is current"),
+        }
+    } else {
+        (
+            SourceMapping::canonical(SourceMappingComponent::Luminance),
+            1.0,
+            ArtworkWeightResponse::Linear,
+        )
+    };
+    Ok(vec![
+        transition_field(
+            PropertyFieldId::ArtworkWeightMappingComponent,
+            target,
+            VariantTransitionValue::EnumChoice(PropertyEnumChoice::SourceMappingComponent(
+                mapping.component,
+            )),
+            Vec::new(),
+        ),
+        transition_field(
+            PropertyFieldId::ArtworkWeightMappingPlacement,
+            target,
+            VariantTransitionValue::EnumChoice(PropertyEnumChoice::SourcePlacement(
+                mapping.placement,
+            )),
+            Vec::new(),
+        ),
+        transition_field(
+            PropertyFieldId::ArtworkWeightMappingInverted,
+            target,
+            VariantTransitionValue::Boolean(mapping.inverted),
+            Vec::new(),
+        ),
+        transition_field(
+            PropertyFieldId::ArtworkWeightMappingGain,
+            target,
+            VariantTransitionValue::FiniteF64(mapping.gain),
+            Vec::new(),
+        ),
+        transition_field(
+            PropertyFieldId::ArtworkWeightMappingBias,
+            target,
+            VariantTransitionValue::FiniteF64(mapping.bias),
+            Vec::new(),
+        ),
+        transition_field(
+            PropertyFieldId::ArtworkWeightStrength,
+            target,
+            VariantTransitionValue::FiniteF64(strength),
+            Vec::new(),
+        ),
+        transition_field(
+            PropertyFieldId::ArtworkWeightResponse,
+            target,
+            VariantTransitionValue::EnumChoice(PropertyEnumChoice::ArtworkWeightResponse(response)),
+            Vec::new(),
+        ),
+    ])
+}
+
+fn exclusion_transition_fields(
+    document: &Document,
+    definition_id: PatternDefinitionId,
+    mechanism_id: PatternMechanismId,
+    base: ExclusionKind,
+    choice: ExclusionKind,
+) -> Result<Vec<VariantTransitionField>, ValidationError> {
+    let mechanism = transition_mechanism(document, definition_id, mechanism_id)?;
+    let PatternMechanism::SiteExclusion { policy, .. } = mechanism else {
+        return Err(ValidationError::new(
+            "transition_draft.target",
+            "selector is not exclusion policy",
+        ));
+    };
+    let target = PropertyTarget::Mechanism(definition_id, mechanism_id);
+    match choice {
+        ExclusionKind::None => Ok(Vec::new()),
+        ExclusionKind::MinimumCenterDistance => {
+            let minimum = if base == choice {
+                match policy {
+                    SiteExclusionPolicy::MinimumCenterDistance { minimum } => *minimum,
+                    _ => unreachable!("base selector is current"),
+                }
+            } else {
+                1.0
+            };
+            Ok(vec![transition_field(
+                PropertyFieldId::ExclusionMinimumCenterDistance,
+                target,
+                VariantTransitionValue::FiniteF64(minimum),
+                Vec::new(),
+            )])
+        }
+        ExclusionKind::VisibleMarkMargin => {
+            let (margin, sizing) = if base == choice {
+                match policy {
+                    SiteExclusionPolicy::VisibleMarkMargin { margin, sizing } => (*margin, *sizing),
+                    _ => unreachable!("base selector is current"),
+                }
+            } else {
+                (0.0, VisibleMarkSizingPolicy::MaximumSupportRadius)
+            };
+            Ok(vec![
+                transition_field(
+                    PropertyFieldId::VisibleMarkMargin,
+                    target,
+                    VariantTransitionValue::FiniteF64(margin),
+                    Vec::new(),
+                ),
+                transition_field(
+                    PropertyFieldId::VisibleMarkSizingPolicy,
+                    target,
+                    VariantTransitionValue::EnumChoice(
+                        PropertyEnumChoice::VisibleMarkSizingPolicy(sizing),
+                    ),
+                    Vec::new(),
+                ),
+            ])
+        }
+    }
+}
+
+fn orientation_transition_fields(
+    document: &Document,
+    definition_id: PatternDefinitionId,
+    output_layer_id: PatternOutputLayerId,
+    base: MarkOrientationKind,
+    choice: MarkOrientationKind,
+) -> Result<Vec<VariantTransitionField>, ValidationError> {
+    let definition = document.definition(definition_id).ok_or_else(|| {
+        ValidationError::new(
+            "transition_draft.target",
+            "transition definition is missing",
+        )
+    })?;
+    let layer = definition
+        .output_layers
+        .iter()
+        .find(|layer| layer.id() == output_layer_id)
+        .ok_or_else(|| {
+            ValidationError::new(
+                "transition_draft.target",
+                "transition output layer is missing",
+            )
+        })?;
+    if !matches!(layer, PatternOutputLayer::MarkPrototype { .. }) {
+        return Err(ValidationError::new(
+            "transition_draft.target",
+            "selector is not a mark-prototype output",
+        ));
+    }
+    if choice == MarkOrientationKind::Fixed {
+        return Ok(Vec::new());
+    }
+    let reference_choices = definition
+        .mechanisms
+        .iter()
+        .flat_map(|mechanism| match mechanism {
+            PatternMechanism::StraightGuideDimensions { dimensions, .. } => dimensions
+                .iter()
+                .map(|dimension| PropertyReferenceValue::GuideDimension(dimension.id))
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    let existing = if base == choice {
+        match layer {
+            PatternOutputLayer::MarkPrototype {
+                orientation:
+                    MarkOrientation::GuideTangent { dimension_id }
+                    | MarkOrientation::GuideNormal { dimension_id },
+                ..
+            } => Some(PropertyReferenceValue::GuideDimension(*dimension_id)),
+            _ => unreachable!("base selector is current"),
+        }
+    } else {
+        None
+    };
+    Ok(vec![transition_field(
+        PropertyFieldId::OutputOrientationDimension,
+        PropertyTarget::OutputLayer(definition_id, output_layer_id),
+        VariantTransitionValue::StableReference(existing),
+        reference_choices,
+    )])
+}
+
+fn validate_transition_field_value(
+    field: &VariantTransitionField,
+    value: &VariantTransitionValue,
+) -> Result<(), ValidationError> {
+    let projection = match (field.contract.value_kind, value) {
+        (PropertyValueKind::FiniteF64, VariantTransitionValue::FiniteF64(value)) => {
+            PropertyFieldValue::FiniteF64(*value)
+        }
+        (PropertyValueKind::U32, VariantTransitionValue::U32(value)) => {
+            PropertyFieldValue::U32(*value)
+        }
+        (PropertyValueKind::Boolean, VariantTransitionValue::Boolean(value)) => {
+            PropertyFieldValue::Boolean(*value)
+        }
+        (PropertyValueKind::EnumChoice, VariantTransitionValue::EnumChoice(value)) => {
+            if !field.contract.choices.contains(value) {
+                return Err(ValidationError::new(
+                    "transition_draft.value",
+                    "transition enum choice is unsupported",
+                ));
+            }
+            PropertyFieldValue::EnumChoice(*value)
+        }
+        (
+            PropertyValueKind::StableIdReference,
+            VariantTransitionValue::StableReference(Some(reference)),
+        ) => {
+            if !field.reference_choices.contains(reference) {
+                return Err(ValidationError::new(
+                    "transition_draft.reference",
+                    "transition reference is missing or incompatible",
+                ));
+            }
+            PropertyFieldValue::StableIdReference
+        }
+        (PropertyValueKind::StableIdReference, VariantTransitionValue::StableReference(None)) => {
+            return Err(ValidationError::new(
+                "transition_draft.reference",
+                "transition requires an explicit stable reference",
+            ));
+        }
+        _ => {
+            return Err(ValidationError::new(
+                "transition_draft.value",
+                "transition value has the wrong kind",
+            ));
+        }
+    };
+    validate_property_field_projection(PropertyCommandFieldProjection {
+        field: field.field,
+        value: projection,
+    })
+}
+
+fn validate_transition_draft_shape(
+    draft: &VariantTransitionDraft,
+    document: &Document,
+) -> Result<(), ValidationError> {
+    let definition_id = transition_definition_id(draft.selector.target).ok_or_else(|| {
+        ValidationError::new(
+            "transition_draft.selector",
+            "transition selector has no structural definition target",
+        )
+    })?;
+    if document.definition(definition_id) != Some(&draft.base_definition) {
+        return Err(ValidationError::new(
+            "transition_draft.stale",
+            "transition draft definition base is stale",
+        ));
+    }
+    let active = document.property_descriptors();
+    if !active.contains(&draft.selector) {
+        return Err(ValidationError::new(
+            "transition_draft.selector",
+            "transition selector is inactive or stale",
+        ));
+    }
+    let current = document
+        .property_values()
+        .into_iter()
+        .find(|value| value.descriptor == draft.selector)
+        .and_then(|value| match value.value {
+            PropertyCurrentValueKind::EnumChoice(choice) => Some(choice),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            ValidationError::new(
+                "transition_draft.selector",
+                "transition selector no longer has an enum value",
+            )
+        })?;
+    if current != draft.base_choice {
+        return Err(ValidationError::new(
+            "transition_draft.stale",
+            "transition draft base is stale",
+        ));
+    }
+    let expected =
+        transition_fields_for(document, &draft.selector, draft.base_choice, draft.choice)?;
+    if expected.len() != draft.fields.len()
+        || expected
+            .iter()
+            .zip(&draft.fields)
+            .any(|(expected, actual)| {
+                expected.field != actual.field
+                    || expected.target != actual.target
+                    || expected.contract != actual.contract
+                    || expected.reference_choices != actual.reference_choices
+            })
+    {
+        return Err(ValidationError::new(
+            "transition_draft.fields",
+            "transition draft field order or shape is invalid",
+        ));
+    }
+    for field in &draft.fields {
+        validate_transition_field_value(field, &field.value)?;
+    }
+    Ok(())
+}
+
+fn transition_value(
+    draft: &VariantTransitionDraft,
+    field: PropertyFieldId,
+) -> Result<&VariantTransitionValue, ValidationError> {
+    draft
+        .fields
+        .iter()
+        .find(|candidate| candidate.field == field)
+        .map(|field| &field.value)
+        .ok_or_else(|| {
+            ValidationError::new(
+                "transition_draft.fields",
+                "transition draft is missing a required field",
+            )
+        })
+}
+
+fn transition_f64(
+    draft: &VariantTransitionDraft,
+    field: PropertyFieldId,
+) -> Result<f64, ValidationError> {
+    match transition_value(draft, field)? {
+        VariantTransitionValue::FiniteF64(value) => Ok(*value),
+        _ => Err(ValidationError::new(
+            "transition_draft.value",
+            "transition field has the wrong kind",
+        )),
+    }
+}
+
+fn transition_choice(
+    draft: &VariantTransitionDraft,
+    field: PropertyFieldId,
+) -> Result<PropertyEnumChoice, ValidationError> {
+    match transition_value(draft, field)? {
+        VariantTransitionValue::EnumChoice(value) => Ok(*value),
+        _ => Err(ValidationError::new(
+            "transition_draft.value",
+            "transition field has the wrong kind",
+        )),
+    }
+}
+
+fn transition_reference(
+    draft: &VariantTransitionDraft,
+    field: PropertyFieldId,
+) -> Result<PropertyReferenceValue, ValidationError> {
+    match transition_value(draft, field)? {
+        VariantTransitionValue::StableReference(Some(value)) => Ok(value.clone()),
+        _ => Err(ValidationError::new(
+            "transition_draft.reference",
+            "transition requires an explicit stable reference",
+        )),
+    }
+}
+
+fn transition_draft_edit(
+    draft: &VariantTransitionDraft,
+) -> Result<PatternDefinitionEdit, ValidationError> {
+    match (draft.selector.field, draft.selector.target, draft.choice) {
+        (
+            PropertyFieldId::RandomCharacter,
+            PropertyTarget::Mechanism(_, mechanism_id),
+            PropertyEnumChoice::RandomCharacter(choice),
+        ) => {
+            let character = match choice {
+                RandomCharacterKind::RawUniform => RandomSiteCharacter::RawUniform,
+                RandomCharacterKind::Even => RandomSiteCharacter::Even {
+                    minimum_center_distance: transition_f64(
+                        draft,
+                        PropertyFieldId::RandomEvenMinimumCenterDistance,
+                    )?,
+                },
+                RandomCharacterKind::Clustered => RandomSiteCharacter::Clustered {
+                    cluster_density: transition_f64(draft, PropertyFieldId::RandomClusterDensity)?,
+                    cluster_spread: transition_f64(draft, PropertyFieldId::RandomClusterSpread)?,
+                    cluster_strength: transition_f64(
+                        draft,
+                        PropertyFieldId::RandomClusterStrength,
+                    )?,
+                },
+            };
+            Ok(PatternDefinitionEdit::SetRandomCharacter {
+                mechanism_id,
+                character,
+            })
+        }
+        (
+            PropertyFieldId::RandomDensityModulation,
+            PropertyTarget::Mechanism(_, mechanism_id),
+            PropertyEnumChoice::DensityModulation(choice),
+        ) => {
+            let modulation = match choice {
+                DensityModulationKind::Uniform => SiteDensityModulation::Uniform,
+                DensityModulationKind::ArtworkWeighted => {
+                    let component = match transition_choice(
+                        draft,
+                        PropertyFieldId::ArtworkWeightMappingComponent,
+                    )? {
+                        PropertyEnumChoice::SourceMappingComponent(value) => value,
+                        _ => {
+                            return Err(ValidationError::new(
+                                "transition_draft.value",
+                                "mapping component choice is invalid",
+                            ));
+                        }
+                    };
+                    let placement = match transition_choice(
+                        draft,
+                        PropertyFieldId::ArtworkWeightMappingPlacement,
+                    )? {
+                        PropertyEnumChoice::SourcePlacement(value) => value,
+                        _ => {
+                            return Err(ValidationError::new(
+                                "transition_draft.value",
+                                "mapping placement choice is invalid",
+                            ));
+                        }
+                    };
+                    let inverted = match transition_value(
+                        draft,
+                        PropertyFieldId::ArtworkWeightMappingInverted,
+                    )? {
+                        VariantTransitionValue::Boolean(value) => *value,
+                        _ => {
+                            return Err(ValidationError::new(
+                                "transition_draft.value",
+                                "mapping inverted value is invalid",
+                            ));
+                        }
+                    };
+                    let response =
+                        match transition_choice(draft, PropertyFieldId::ArtworkWeightResponse)? {
+                            PropertyEnumChoice::ArtworkWeightResponse(value) => value,
+                            _ => {
+                                return Err(ValidationError::new(
+                                    "transition_draft.value",
+                                    "artwork response choice is invalid",
+                                ));
+                            }
+                        };
+                    SiteDensityModulation::ArtworkWeighted {
+                        mapping: SourceMapping {
+                            component,
+                            placement,
+                            inverted,
+                            gain: transition_f64(draft, PropertyFieldId::ArtworkWeightMappingGain)?,
+                            bias: transition_f64(draft, PropertyFieldId::ArtworkWeightMappingBias)?,
+                        },
+                        strength: transition_f64(draft, PropertyFieldId::ArtworkWeightStrength)?,
+                        response,
+                    }
+                }
+            };
+            Ok(PatternDefinitionEdit::SetDensityModulationVariant {
+                mechanism_id,
+                modulation,
+            })
+        }
+        (
+            PropertyFieldId::RandomExclusion,
+            PropertyTarget::Mechanism(_, mechanism_id),
+            PropertyEnumChoice::Exclusion(choice),
+        ) => {
+            let policy = match choice {
+                ExclusionKind::None => SiteExclusionPolicy::None,
+                ExclusionKind::MinimumCenterDistance => {
+                    SiteExclusionPolicy::MinimumCenterDistance {
+                        minimum: transition_f64(
+                            draft,
+                            PropertyFieldId::ExclusionMinimumCenterDistance,
+                        )?,
+                    }
+                }
+                ExclusionKind::VisibleMarkMargin => {
+                    let sizing =
+                        match transition_choice(draft, PropertyFieldId::VisibleMarkSizingPolicy)? {
+                            PropertyEnumChoice::VisibleMarkSizingPolicy(value) => value,
+                            _ => {
+                                return Err(ValidationError::new(
+                                    "transition_draft.value",
+                                    "visible-mark sizing choice is invalid",
+                                ));
+                            }
+                        };
+                    SiteExclusionPolicy::VisibleMarkMargin {
+                        margin: transition_f64(draft, PropertyFieldId::VisibleMarkMargin)?,
+                        sizing,
+                    }
+                }
+            };
+            Ok(PatternDefinitionEdit::SetExclusionVariant {
+                mechanism_id,
+                policy,
+            })
+        }
+        (
+            PropertyFieldId::OutputOrientation,
+            PropertyTarget::OutputLayer(_, output_layer_id),
+            PropertyEnumChoice::MarkOrientation(choice),
+        ) => {
+            let orientation = match choice {
+                MarkOrientationKind::Fixed => MarkOrientation::Fixed,
+                MarkOrientationKind::GuideTangent => {
+                    match transition_reference(draft, PropertyFieldId::OutputOrientationDimension)?
+                    {
+                        PropertyReferenceValue::GuideDimension(dimension_id) => {
+                            MarkOrientation::GuideTangent { dimension_id }
+                        }
+                        _ => {
+                            return Err(ValidationError::new(
+                                "transition_draft.reference",
+                                "orientation requires a guide dimension",
+                            ));
+                        }
+                    }
+                }
+                MarkOrientationKind::GuideNormal => {
+                    match transition_reference(draft, PropertyFieldId::OutputOrientationDimension)?
+                    {
+                        PropertyReferenceValue::GuideDimension(dimension_id) => {
+                            MarkOrientation::GuideNormal { dimension_id }
+                        }
+                        _ => {
+                            return Err(ValidationError::new(
+                                "transition_draft.reference",
+                                "orientation requires a guide dimension",
+                            ));
+                        }
+                    }
+                }
+            };
+            Ok(PatternDefinitionEdit::SetOutputOrientation {
+                output_layer_id,
+                orientation,
+            })
+        }
+        _ => Err(ValidationError::new(
+            "transition_draft.selector",
+            "transition draft selector/choice is invalid",
+        )),
+    }
 }
 
 /// Exhaustive command-facing schema contract for one editable field.  It is
