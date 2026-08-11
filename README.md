@@ -117,8 +117,8 @@ with byte-identical PNG/SVG results across all three models; v1/v2 persistence,
 Native artifacts and bounded app launches are liveness/review evidence, not
 exhaustive manual visual, interactive, or accessibility acceptance. Stage 16A
 was provisionally accepted on 2026-08-09 and is implemented at checkpoint
-`ccec466`; the remaining Stage 16B distribution work and GTK pattern/channel
-editing remain planned.
+`ccec466`; Stage 16B is complete at checkpoint `77bad7c`, while Stage 17 and
+later GTK pattern/channel editing remain planned.
 
 Stage 16A generalizes the typed straight-guide family through the same generic
 headless pipeline. A definition may contain one to four ordered straight-guide
@@ -140,6 +140,28 @@ configuration retains its Stage 15 geometry and RGB/CMYK/SourceColorAlpha
 parity. The private immutable v1 parser and migration remain unchanged; new
 definitions use only additive current-v2 DTO variants and deterministically
 save and reopen without evaluator or cache state.
+
+Stage 16B adds a typed `RandomSites` family through the same headless path. Its
+ordered chain combines raw-uniform, genuinely even, or clustered base
+processes; uniform or artwork-weighted density modulation (Linear or
+Smoothstep); and minimum-center or visible-mark exclusion before circular mark
+realization. A deterministic xorshift32 stream consumes each authored `u32`
+seed, and accepted sites retain stable candidate/accepted ordinals with
+Canvas/Guard provenance. Diagnostics report requested versus achieved sites,
+candidate/rejection counts, and scope counts under bounded candidate,
+neighbor-work, and cancellation policies.
+
+Source identity is intentionally narrow: only artwork-weighted structure uses
+decoded content and pixel identity; source-independent random families remain
+source-free, while logical source references stay at decoder lookup. New
+families use additive current-v2 persistence variants while the immutable v1
+parser/migration and existing v2 forms remain preserved. Random variants reuse
+the shared canonical geometry, clipping, preview, PNG, and SVG output pipeline.
+High-density natural-resolution validation covers the 1024×1024 PNG and
+900×620 SVG baselines, including raw/native artifact and save/reopen parity.
+Automated checks, raw artifact inspection, CLI parity, and bounded app launches
+are evidence only; no separate manual visual, interactive, or accessibility
+acceptance is claimed.
 
 Low-resolution fixtures and outputs are supplementary only. Every future stage
 that exercises source loading, sampling, rendering, preview, or export must

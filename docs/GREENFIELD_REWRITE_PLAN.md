@@ -1501,7 +1501,7 @@ renderer-owned pattern dispatch.
 **Stop condition (complete):** The generic headless pipeline, capability and
 provenance validation, exact identity/reuse boundaries, cancellation and
 failure atomicity, and frozen-v1/saved-v2 RGB/CMYK/SourceColorAlpha parity were
-accepted at implementation checkpoint `711058b`. Stage 16 remains planned.
+accepted at implementation checkpoint `711058b`. Stage 17 remains planned.
 
 ## Stage 16A — Generalized straight-guide mechanisms
 
@@ -1532,11 +1532,12 @@ natural-resolution rule above for all future applicable tests.
 
 ## Stage 16B — Random and site-distribution mechanisms
 
-**Status: Accepted awaiting checkpoint.** Immediately prove the Stage 14–15 architecture is not
-grid-shaped by adding reusable deterministic site distributions.
+**Status: Complete at commit `77bad7c`.** The typed random-site family proves the
+Stage 14–15 architecture is not grid-shaped while retaining the generic
+family-to-modulation-to-realization pipeline.
 
 - Add raw uniform random, genuinely even/exclusion-based placement, clustered
-  placement, and source-weighted placement with stable `u32` seeds.
+  placement, and artwork-weighted density modulation with stable `u32` seeds.
 - Support minimum center spacing, visible-mark exclusion margin, deterministic
   achieved-density diagnostics when a request is unsatisfiable, and bounded
   candidate/work policies.
@@ -1546,8 +1547,31 @@ grid-shaped by adding reusable deterministic site distributions.
 - Treat Poisson-disk methods or blue-noise measurements as defined reusable
   constructions/quality evidence, never unexplained named generator branches.
 
-**Stop condition:** Accept deterministic distribution distinctions, exclusion
-guarantees, weighted sampling, and native output parity before editor commands.
+The family uses the ordered mechanism chain `RandomSiteProcess` (raw uniform,
+even, or clustered) → `SiteDensityModulation` (uniform or artwork-weighted
+with the fixed Linear/Smoothstep responses) → `SiteExclusion` (None,
+minimum-center, or visible-mark policy) → `RandomSiteProduct`. A deterministic xorshift32
+stream consumes the authored `u32` seed, and accepted sites retain stable
+candidate/accepted ordinals and Canvas/Guard provenance. Bounded diagnostics
+report requested versus achieved sites, candidate and rejection counts, and
+scope counts; cancellation and candidate/neighbor work limits are enforced
+without partial publication. Visible-mark exclusion uses the conservative
+maximum-support policy for the current circular output.
+
+Only artwork-weighted structure depends on decoded source content and pixel
+identity; source-independent random families remain source-free, and logical
+source references stay at decoder lookup. The additive current-v2 DTO variants
+preserve the immutable v1 parser/migration and existing v2 forms. All variants
+reuse the existing canonical geometry, clipping, preview, PNG, and SVG output
+path. Natural-resolution raster (1024×1024) and vector (900×620) artifacts
+exercise high-density raw/native output and save/reopen parity. Automated raw
+artifact inspection, CLI parity, and bounded app liveness are recorded; no
+separate manual visual, interactive, or accessibility acceptance is claimed.
+
+**Stop condition (complete):** Deterministic distribution distinctions,
+exclusion guarantees, weighted sampling, persistence preservation, and native
+output parity were accepted at implementation checkpoint `77bad7c`. Stage 17
+editor commands remain planned.
 
 ## Stage 17 — Headless pattern/channel editing and capabilities
 

@@ -228,8 +228,8 @@ reuse only matching authoritative inputs while the current supported
 configuration preserves exact canonical geometry and frozen-v1/saved-v2
 RGB/CMYK/SourceColorAlpha PNG/SVG parity. DocumentHistory, immutable v1
 migration, deterministic v2 persistence, scheduler acceptance, CLI/preview,
-renderers, and corrected GTK lifecycle behavior remain unchanged. Stage 16
-expanded mechanisms remain planned.
+renderers, and corrected GTK lifecycle behavior remain unchanged. Stage 17 and
+later editor work remain planned.
 
 **Stage 16A — Complete at commit `ccec466`.** Add generalized one-to-four-dimension straight-guide
 mechanisms, independent angles/phase, intersections and along-guide sites,
@@ -239,10 +239,20 @@ rectangular/triangular branches. The user provisionally accepted the stage on
 low-resolution tests for every future applicable stage. The implementation is
 checkpointed at `ccec466`.
 
-**Stage 16B — Accepted awaiting checkpoint.** Immediately prove the framework is not grid-shaped by
-adding deterministic raw/even/exclusion, clustered, and source-weighted site
-distributions with `u32` seeds, spacing guarantees, achieved-density
-diagnostics, and the same downstream output machinery.
+**Stage 16B — Complete at commit `77bad7c`.** The typed `RandomSites` family
+adds an ordered raw-uniform/even/clustered base process, uniform or
+artwork-weighted density modulation, minimum-center or visible-mark exclusion,
+and the existing circular output product. Deterministic xorshift32 `u32` seeds,
+stable accepted-site provenance, bounded candidate/neighbor work, cancellation,
+and requested-versus-achieved plus rejection/scope diagnostics are verified.
+Only artwork-weighted structure includes decoded content/pixel identity; source-
+independent families remain source-free and logical references remain at decode
+lookup. Additive current-v2 persistence preserves the immutable v1 parser,
+migration, and existing v2 forms. The shared canonical geometry/clipping,
+preview, PNG, and SVG path is exercised at natural 1024×1024 PNG and 900×620
+SVG resolution with high-density raw/native artifacts and save/reopen parity.
+Automated/native evidence and bounded app liveness are recorded without claiming
+separate manual visual, interactive, or accessibility acceptance.
 
 **Stage 17 — Planned.** Complete typed headless pattern/channel commands and
 schema-derived property/capability descriptors, exact invalidation, stable-ID
