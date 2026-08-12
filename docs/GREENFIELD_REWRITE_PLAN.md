@@ -1634,7 +1634,9 @@ editing over Stage 17 authority without structural pattern mathematics in GTK.
   preview protection, lifecycle behavior, v1/current-v2 persistence, and the
   canonical preview/PNG/SVG output path.
 
-Structural Pattern Editor controls and preset authoring remain Stage 19.
+The structural Pattern Editor remains Stage 19B; headless preset registry
+work is recorded in Stage 19A below, while GTK preset authoring remains
+out of scope.
 
 Automated/static checks, native raw-artifact inspection, and the bounded app
 source/liveness evidence do not substitute for actual GNOME/Wayland manual
@@ -1642,8 +1644,11 @@ visual, keyboard/focus, or assistive-technology review.
 
 ## Stage 19A — Pure-schema preset registry
 
-**Status: Accepted awaiting checkpoint.** Add a versioned headless preset registry whose entries are
-ordinary typed pattern definitions using only exposed mechanisms.
+**Status: Complete at commit `9919d85`.** The version-1 headless preset
+registry is implemented with standalone `preset_format_version: 1` records.
+The bundled entries have stable order `even-random-circles`, then
+`straight-grid-circles`, and each is an ordinary typed recipe using only
+exposed mechanisms.
 
 - Applying a preset creates an independent document-owned definition by
   default. Updating an existing shared definition requires an explicit shared
@@ -1652,10 +1657,26 @@ ordinary typed pattern definitions using only exposed mechanisms.
   removes the shortcut, not evaluator capability; no evaluator/cache/renderer
   branch may inspect a preset name.
 - Reconstruction tests build every bundled preset from a blank definition using
-  exposed typed controls, serialize/reload it, and compare canonical output.
+  exposed typed controls and Stage 17A transition drafts, serialize/reload it,
+  and compare canonical output. Selected application and explicit shared
+  replacement remain separate operations; shared replacement confirms the
+  disclosed ordered affected-channel set before mutation.
+- Serialization/reload and independent reconstruction preserve canonical PNG/SVG
+  parity at natural 1024×1024 raster and 900×620 SVG resolution. Strengthened
+  RGB-independence evidence applies distinct definitions per channel and proves
+  isolated red edits leave green/blue definitions, identities, isolated PNG
+  bytes, and visible geometry unchanged, while documenting the modeled SVG
+  identity metadata caveat.
+- Document schema v2, `.toniator` container v1, and the immutable v1
+  parser/migration remain unchanged. The accepted persistent `StringList`
+  selector correction (splice, deferred rebuild, and invalid-position
+  rejection) is included in the checkpoint as a bounded GTK correction, not
+  as GTK preset UI.
 
-**Stop condition:** Accept headless preset reconstruction and versioning before
-GTK preset/pattern editing.
+**Stop condition (complete):** Headless preset reconstruction, standalone
+versioning, independent versus explicitly disclosed shared application, and
+canonical output parity were accepted at implementation checkpoint `9919d85`.
+The documented selector correction does not add GTK preset/pattern editing.
 
 ## Stage 19B — Structural GTK Pattern Editor
 

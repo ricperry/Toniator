@@ -1,6 +1,6 @@
 # Toniator Progress Tracker
 
-Last updated: **2026-08-11**. The durable execution contract is
+Last updated: **2026-08-12**. The durable execution contract is
 [GREENFIELD_REWRITE_PLAN.md](docs/GREENFIELD_REWRITE_PLAN.md). Normative
 architecture remains in the five protected [Project Specification files](Project%20Specification/Addendum.md).
 
@@ -283,9 +283,24 @@ canonical preview/PNG/SVG output boundaries remain unchanged. Automated/static
 and native artifact evidence is not manual GNOME/Wayland visual, keyboard,
 focus, or assistive-technology acceptance.
 
-**Stage 19A — Accepted awaiting checkpoint.** Add the versioned headless pure-schema preset registry
-and reconstruction gates; preset names remain metadata and never evaluator
-branches.
+**Stage 19A — Complete at commit `9919d85`.** The version-1 headless
+preset registry uses standalone `preset_format_version: 1` records in stable
+order: `even-random-circles`, then `straight-grid-circles`. Preset IDs, names,
+categories, descriptions, and thumbnails are metadata only; ordinary typed
+recipes reconstruct document-owned definitions through the typed command and
+Stage 17A draft authority, never through evaluator/cache/renderer name
+branches. Selected application creates an independent definition. Explicit
+shared replacement discloses the ordered affected channels and confirms that
+scope before mutation. Every bundled record serializes/reloads and
+reconstructs independently with canonical PNG/SVG parity at 1024×1024 PNG and
+900×620 SVG natural resolution. The accepted RGB-independence evidence proves
+that an isolated red edit leaves green/blue definitions, identities, isolated
+PNG bytes, and visible geometry unchanged, with the modeled SVG identity
+caveat. Schema
+v2, container v1, and the immutable v1 parser/migration remain unchanged.
+The accepted persistent-`StringList`/`splice`/deferred-rebuild/
+invalid-position selector correction is included in this checkpoint as a
+bounded GTK correction, not GTK preset UI.
 
 **Stage 19B — Planned.** Add the separate descriptor-driven structural Pattern
 Editor, defaulting shared definitions to atomic copy-on-edit and exposing

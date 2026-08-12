@@ -57,7 +57,8 @@ current content, history, location, title, and dirty state; successful saves upd
 location, title, and savepoint only after IO succeeds. Load/save errors and
 generic migration information are reported in-window. GTK delegates default
 document construction to the headless factory and remains ignorant of pattern
-internals; channel/pattern controls and GTK undo controls remain out of scope.
+internals; at this checkpoint, channel/pattern controls and GTK undo controls
+remained out of scope.
 The separately accepted app-only reentrancy correction at `02bc2c9` preserves
 this lifecycle behavior while preventing nested model-selector and window-close
 callbacks; it is not part of the Stage 14 schema checkpoint.
@@ -198,6 +199,31 @@ preserved, including guarded asynchronous preview updates.
 Automated and static checks, raw native output inspection, and bounded app
 evidence do not claim actual GNOME/Wayland manual visual, keyboard/focus, or
 assistive-technology acceptance; that review remains outstanding.
+
+Stage 19A is complete at implementation checkpoint `9919d85`. The headless
+preset registry is version 1, with standalone serialized records using
+`preset_format_version: 1`. Its stable bundled order is
+`even-random-circles` followed by `straight-grid-circles`; IDs, names,
+categories, descriptions, and thumbnails are metadata only and never enter
+document evaluation, cache identity, or renderer dispatch. Applying a record
+reconstructs an ordinary typed pattern definition through the existing typed
+command and Stage 17A draft authority. Selected-channel application creates an
+independent document-owned definition; explicit shared replacement first
+discloses the ordered affected channels and then requires confirmation against
+that scope. The registry does not add GTK preset controls.
+
+Every bundled record is serialized and reloaded, reconstructed independently,
+and checked for canonical PNG/SVG parity at the natural 1024×1024 raster and
+900×620 SVG dimensions. The strengthened RGB-independence evidence applies
+different preset definitions to independent channels, verifies stable channel
+and definition identities, proves an isolated red edit leaves green/blue
+definitions, identities, isolated PNG bytes, and visible geometry unchanged,
+and records the modeled SVG document-identity metadata caveat. Document schema v2,
+`.toniator` container v1, and the immutable v1 parser/migration remain
+unchanged; current and migrated documents continue to save as schema v2.
+The accepted channel-selector correction is included in `9919d85`: it uses a
+persistent `StringList`, `splice`, deferred rebuild, and invalid-position
+rejection. This is a bounded GTK selector correction, not GTK preset UI.
 
 Low-resolution fixtures and outputs are supplementary only. Every future stage
 that exercises source loading, sampling, rendering, preview, or export must
