@@ -6,11 +6,12 @@ use std::{collections::BTreeMap, error::Error, fmt};
 
 use serde::Serialize;
 use toniator_domain::{
-    ArtworkWeightResponse, CanvasSpec, DensityMetric2D, GuideDimensionId, MarkOrientation,
-    MarkPrototype, PatternDefinition, PatternFamily, PatternMechanism, PatternMechanismId,
-    PatternModulation, PatternOutputLayer, PatternOutputLayerId, RandomSiteCharacter,
-    SiteDensityModulation, SiteExclusionPolicy, SourceMapping, StraightGuideDimension,
-    VisibleMarkSizingPolicy,
+    ArtworkWeightResponse, CanvasSpec, ChannelId, DensityMetric2D, DocumentCommand,
+    DocumentHistory, DocumentSessionError, GuideDimensionDraft, GuideDimensionId, MarkOrientation,
+    MarkOrientationDraft, MarkPrototype, PatternDefinition, PatternDefinitionRecipe, PatternFamily,
+    PatternMechanism, PatternMechanismId, PatternModulation, PatternOutputLayer,
+    PatternOutputLayerId, PresetMetadata, PresetRecord, RandomSiteCharacter, SiteDensityModulation,
+    SiteExclusionPolicy, SourceMapping, StraightGuideDimension, VisibleMarkSizingPolicy,
 };
 pub use toniator_geometry::{
     AffineTransform2D, Bounds, CanonicalCircleMark, GuideInstanceId, GuideIntersectionProvenance,
@@ -27,6 +28,288 @@ pub const ANTIALIAS_MARGIN: f64 = 1.0;
 /// Stable IDs for the two fixed rectangular straight-guide dimensions.
 pub const FIRST_DIMENSION_ID: GuideDimensionId = GuideDimensionId(1);
 pub const SECOND_DIMENSION_ID: GuideDimensionId = GuideDimensionId(2);
+
+/// The stable version of the built-in registry ordering and metadata contract.
+pub const BUNDLED_PRESET_REGISTRY_VERSION: u32 = 1;
+
+/// Immutable, deterministic preset registry owned by the pattern/schema layer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PresetRegistry {
+    version: u32,
+    entries: Vec<PresetRecord>,
+}
+
+/// Validation failure for pure metadata/registry structure before any document
+/// command is constructed or history state can change.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PresetRegistryError {
+    message: String,
+}
+
+/// A deliberate, non-mutating shared replacement proposal. Callers inspect
+/// `affected_channels` before explicitly confirming the history transition.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreparedSharedPresetReplacement {
+    definition_id: toniator_domain::PatternDefinitionId,
+    base_definition: PatternDefinition,
+    recipe: PatternDefinitionRecipe,
+    affected_channels: Vec<ChannelId>,
+}
+
+impl PreparedSharedPresetReplacement {
+    /// Returns every linked channel in authoritative document order before any
+    /// shared definition mutation has been dispatched.
+    pub fn affected_channels(&self) -> &[ChannelId] {
+        &self.affected_channels
+    }
+
+    /// Confirms the previously disclosed replacement through `DocumentHistory`.
+    /// The immutable base keeps stale/no-op validation and undo/redo semantics
+    /// identical to every other authoritative shared transition. A changed
+    /// linked-channel set is rejected before command dispatch so confirmation
+    /// cannot mutate a different scope than the caller disclosed.
+    pub fn confirm(
+        self,
+        history: &mut DocumentHistory,
+    ) -> Result<toniator_domain::CommandResult, DocumentSessionError> {
+        if history.document().linked_channels(self.definition_id) != self.affected_channels {
+            return Err(DocumentSessionError::Validation(
+                toniator_domain::ValidationError::new(
+                    "preset.shared.affected_channels",
+                    "shared preset replacement disclosure is stale",
+                ),
+            ));
+        }
+        history.apply(&DocumentCommand::ReplaceSharedPatternDefinitionRecipe {
+            definition_id: self.definition_id,
+            base_definition: self.base_definition,
+            recipe: self.recipe,
+        })
+    }
+}
+
+impl PresetRegistryError {
+    /// Returns the stable human-readable validation failure.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for PresetRegistryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl Error for PresetRegistryError {}
+
+impl PresetRegistry {
+    /// Builds a validated registry with caller-defined deterministic entry order.
+    pub fn new(version: u32, entries: Vec<PresetRecord>) -> Result<Self, PresetRegistryError> {
+        if version == 0 {
+            return Err(PresetRegistryError {
+                message: "preset registry version must be nonzero".into(),
+            });
+        }
+        let mut previous = None;
+        for entry in &entries {
+            toniator_domain::validate_preset_record(entry).map_err(|error| {
+                PresetRegistryError {
+                    message: error.to_string(),
+                }
+            })?;
+            for (path, value) in [
+                ("id", entry.metadata.id.as_str()),
+                ("name", entry.metadata.name.as_str()),
+                ("category", entry.metadata.category.as_str()),
+                ("description", entry.metadata.description.as_str()),
+            ] {
+                if value.trim().is_empty() || value.chars().any(char::is_control) {
+                    return Err(PresetRegistryError {
+                        message: format!("preset metadata {path} must be nonempty printable text"),
+                    });
+                }
+            }
+            if entry
+                .metadata
+                .thumbnail
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty() || value.chars().any(char::is_control))
+            {
+                return Err(PresetRegistryError {
+                    message: "preset thumbnail must be printable text when present".into(),
+                });
+            }
+            if previous.is_some_and(|id: &str| id >= entry.metadata.id.as_str()) {
+                return Err(PresetRegistryError {
+                    message: "preset IDs must be unique and strictly sorted".into(),
+                });
+            }
+            previous = Some(entry.metadata.id.as_str());
+        }
+        Ok(Self { version, entries })
+    }
+
+    /// Returns the versioned built-in pure-schema registry in stable ID order.
+    pub fn bundled() -> Self {
+        Self::new(
+            BUNDLED_PRESET_REGISTRY_VERSION,
+            vec![
+                PresetRecord {
+                    metadata: PresetMetadata {
+                        id: "even-random-circles".into(),
+                        name: "Even Random Circles".into(),
+                        category: "Random sites".into(),
+                        description: "Evenly separated deterministic circular marks.".into(),
+                        thumbnail: Some("builtin:even-random-circles".into()),
+                    },
+                    recipe: PatternDefinitionRecipe::RandomSites {
+                        name: "Even random circles".into(),
+                        coverage: toniator_domain::CoveragePolicy {
+                            guard_steps: 2,
+                            maximum_support_radius: 4.5,
+                        },
+                        character: RandomSiteCharacter::Even {
+                            minimum_center_distance: 8.0,
+                        },
+                        seed: 19,
+                        density_modulation: SiteDensityModulation::Uniform,
+                        exclusion: SiteExclusionPolicy::None,
+                        maximum_attempts: 16_000_000,
+                        maximum_neighbor_checks: 16_000_000,
+                    },
+                },
+                PresetRecord {
+                    metadata: PresetMetadata {
+                        id: "straight-grid-circles".into(),
+                        name: "Straight Grid Circles".into(),
+                        category: "Guides".into(),
+                        description: "Two rotated, offset straight guides with circular marks."
+                            .into(),
+                        thumbnail: Some("builtin:straight-grid-circles".into()),
+                    },
+                    recipe: PatternDefinitionRecipe::GeneralizedStraightGuides {
+                        name: "Straight grid circles".into(),
+                        coverage: toniator_domain::CoveragePolicy {
+                            guard_steps: 2,
+                            maximum_support_radius: 4.5,
+                        },
+                        dimensions: vec![
+                            GuideDimensionDraft {
+                                baseline_angle_degrees: 17.0,
+                                phase: 0.23,
+                                spacing_multiplier: 0.82,
+                            },
+                            GuideDimensionDraft {
+                                baseline_angle_degrees: 107.0,
+                                phase: -0.31,
+                                spacing_multiplier: 1.18,
+                            },
+                        ],
+                        product: toniator_domain::GeneralizedSiteProductDraft::Intersections {
+                            dimension_indices: vec![0, 1],
+                            merge_epsilon: 1e-9,
+                        },
+                        orientation: MarkOrientationDraft::Fixed,
+                    },
+                },
+            ],
+        )
+        .expect("bundled preset literals satisfy registry validation")
+    }
+
+    /// Returns this registry format version without exposing mutable state.
+    pub const fn version(&self) -> u32 {
+        self.version
+    }
+
+    /// Returns records in their validated stable order.
+    pub fn entries(&self) -> &[PresetRecord] {
+        &self.entries
+    }
+
+    /// Finds one entry by its stable metadata ID.
+    pub fn find(&self, id: &str) -> Option<&PresetRecord> {
+        self.entries
+            .binary_search_by(|entry| entry.metadata.id.as_str().cmp(id))
+            .ok()
+            .map(|index| &self.entries[index])
+    }
+
+    /// Returns an ID-free reconstruction recipe for one preset shortcut.
+    pub fn reconstruct(&self, id: &str) -> Option<PatternDefinitionRecipe> {
+        self.find(id).map(|entry| entry.recipe.clone())
+    }
+
+    /// Applies a preset as a fresh document-owned definition and retargets only
+    /// the selected channel through the authoritative history boundary.
+    pub fn apply_to_selected(
+        &self,
+        history: &mut DocumentHistory,
+        channel_id: ChannelId,
+        id: &str,
+    ) -> Result<toniator_domain::CommandResult, DocumentSessionError> {
+        let recipe = self
+            .find(id)
+            .ok_or_else(|| {
+                DocumentSessionError::Validation(toniator_domain::ValidationError::new(
+                    "preset.id",
+                    "preset ID is not present in this registry",
+                ))
+            })?
+            .recipe
+            .clone();
+        let base_definition = history
+            .document()
+            .pattern_definition_for(channel_id)
+            .expect("document history preserves channel references")
+            .clone();
+        history.apply(&DocumentCommand::ReplaceSelectedChannelDefinitionRecipe {
+            channel_id,
+            base_definition,
+            recipe,
+        })
+    }
+
+    /// Prepares a shared replacement without mutating the document so callers
+    /// can disclose every affected channel before explicit confirmation.
+    pub fn prepare_shared_replacement(
+        &self,
+        history: &DocumentHistory,
+        definition_id: toniator_domain::PatternDefinitionId,
+        id: &str,
+    ) -> Result<PreparedSharedPresetReplacement, DocumentSessionError> {
+        let recipe = self
+            .find(id)
+            .ok_or_else(|| {
+                DocumentSessionError::Validation(toniator_domain::ValidationError::new(
+                    "preset.id",
+                    "preset ID is not present in this registry",
+                ))
+            })?
+            .recipe
+            .clone();
+        let base_definition = history
+            .document()
+            .pattern_definitions()
+            .iter()
+            .find(|definition| definition.id == definition_id)
+            .ok_or_else(|| {
+                DocumentSessionError::Validation(toniator_domain::ValidationError::new(
+                    "pattern_definitions.id",
+                    "shared preset replacement targets a missing definition",
+                ))
+            })?
+            .clone();
+        let affected_channels = history.document().linked_channels(definition_id);
+        Ok(PreparedSharedPresetReplacement {
+            definition_id,
+            base_definition,
+            recipe,
+            affected_channels,
+        })
+    }
+}
 
 /// The structural product a family makes available to later pipeline stages.
 /// It is deliberately typed rather than inferred from a pattern name.

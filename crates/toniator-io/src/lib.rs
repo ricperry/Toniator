@@ -19,10 +19,12 @@ use sha2::{Digest, Sha256};
 use toniator_domain::{
     ArtworkWeightResponse, CanvasSpec, ChannelAppearance, ChannelId, ChannelPaint,
     ChannelPatternLayout, ChannelSourceMapping, ChannelState, ChannelTopology, ColorValue,
-    CoveragePolicy, DensityMetric2D, Document, DocumentId, GuideDimensionId, HalftoneChannelModel,
-    HalftoneChannelRole, MarkGeometryResponse, MarkOrientation, MarkPrototype, ModeledChannelState,
-    PatternDefinition, PatternDefinitionId, PatternMechanismId, PatternOutputLayerId,
-    RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy, SourceComponent,
+    CoveragePolicy, DensityMetric2D, Document, DocumentId, GeneralizedSiteProductDraft,
+    GuideDimensionDraft, GuideDimensionId, HalftoneChannelModel, HalftoneChannelRole,
+    MarkGeometryResponse, MarkOrientation, MarkOrientationDraft, MarkPrototype,
+    ModeledChannelState, PatternDefinition, PatternDefinitionDraft, PatternDefinitionId,
+    PatternDefinitionRecipe, PatternMechanismId, PatternOutputLayerId, PresetMetadata,
+    PresetRecord, RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy, SourceComponent,
     SourceMapping, SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId,
     StraightGuideDimension, StraightGuideRepetition, ValidationError, VisibleMarkSizingPolicy,
 };
@@ -30,11 +32,80 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 pub const CONTAINER_VERSION: u32 = 1;
 pub const DOCUMENT_SCHEMA_VERSION: u32 = 2;
+/// Standalone pure-schema preset JSON format version. It is deliberately
+/// independent from the `.toniator` container and document schema versions.
+pub const PRESET_FORMAT_VERSION: u32 = 1;
 const DOCUMENT_SCHEMA_VERSION_V1: u32 = 1;
 pub const MAX_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_DOCUMENT_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_SOURCE_BYTES: u64 = 128 * 1024 * 1024;
 pub const MAX_UNCOMPRESSED_BYTES: u64 = 132 * 1024 * 1024;
+
+/// Failure at the standalone preset serialization boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PresetIoError {
+    context: String,
+}
+
+impl PresetIoError {
+    /// Returns the precise serialization or validation context.
+    pub fn context(&self) -> &str {
+        &self.context
+    }
+}
+
+impl std::fmt::Display for PresetIoError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.context)
+    }
+}
+
+impl std::error::Error for PresetIoError {}
+
+/// Saves a standalone versioned preset without changing the document container.
+pub fn save_preset(path: &Path, preset: &PresetRecord) -> Result<(), PresetIoError> {
+    toniator_domain::validate_preset_record(preset).map_err(|error| PresetIoError {
+        context: error.to_string(),
+    })?;
+    let bytes =
+        serde_json::to_vec_pretty(&PresetEnvelopeDto::from_domain(preset)).map_err(|error| {
+            PresetIoError {
+                context: error.to_string(),
+            }
+        })?;
+    fs::write(path, bytes).map_err(|error| PresetIoError {
+        context: format!("{}: {error}", path.display()),
+    })
+}
+
+/// Loads and validates one standalone current-version pure-schema preset.
+pub fn load_preset(path: &Path) -> Result<PresetRecord, PresetIoError> {
+    let bytes = fs::read(path).map_err(|error| PresetIoError {
+        context: format!("{}: {error}", path.display()),
+    })?;
+    if bytes.len() as u64 > MAX_DOCUMENT_BYTES {
+        return Err(PresetIoError {
+            context: "preset JSON exceeds the 4 MiB limit".into(),
+        });
+    }
+    let envelope: PresetEnvelopeDto =
+        serde_json::from_slice(&bytes).map_err(|error| PresetIoError {
+            context: error.to_string(),
+        })?;
+    if envelope.preset_format_version != PRESET_FORMAT_VERSION {
+        return Err(PresetIoError {
+            context: format!(
+                "unsupported preset format version {}",
+                envelope.preset_format_version
+            ),
+        });
+    }
+    let preset = envelope.into_domain()?;
+    toniator_domain::validate_preset_record(&preset).map_err(|error| PresetIoError {
+        context: error.to_string(),
+    })?;
+    Ok(preset)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EmbeddedSourceFormat {
@@ -838,6 +909,71 @@ struct VersionEnvelope {
     container_version: u32,
     document_schema_version: u32,
 }
+#[derive(Serialize, Deserialize)]
+struct PresetEnvelopeDto {
+    preset_format_version: u32,
+    metadata: PresetMetadataDto,
+    recipe: PresetRecipeDto,
+}
+#[derive(Serialize, Deserialize)]
+struct PresetMetadataDto {
+    id: String,
+    name: String,
+    category: String,
+    description: String,
+    thumbnail: Option<String>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum PresetRecipeDto {
+    StraightGrid {
+        name: String,
+        coverage: CoverageDtoV2,
+    },
+    GeneralizedStraightGuides {
+        name: String,
+        coverage: CoverageDtoV2,
+        dimensions: Vec<GuideDimensionDraftDto>,
+        product: GeneralizedSiteProductDraftDto,
+        orientation: MarkOrientationDraftDto,
+    },
+    RandomSites {
+        name: String,
+        coverage: CoverageDtoV2,
+        character: RandomSiteCharacterDtoV2,
+        seed: u32,
+        density_modulation: SiteDensityModulationDtoV2,
+        exclusion: SiteExclusionPolicyDtoV2,
+        maximum_attempts: u32,
+        maximum_neighbor_checks: u32,
+    },
+}
+#[derive(Serialize, Deserialize)]
+struct GuideDimensionDraftDto {
+    baseline_angle_degrees: f64,
+    phase: f64,
+    spacing_multiplier: f64,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum GeneralizedSiteProductDraftDto {
+    Intersections {
+        dimension_indices: Vec<usize>,
+        merge_epsilon: f64,
+    },
+    AlongGuides {
+        dimension_indices: Vec<usize>,
+        interval_multiplier: f64,
+        phase: f64,
+    },
+}
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum MarkOrientationDraftDto {
+    Fixed,
+    GuideTangent { dimension_index: usize },
+    GuideNormal { dimension_index: usize },
+}
 #[derive(Clone, Serialize, Deserialize)]
 struct SourceManifestDtoV1 {
     id: String,
@@ -1075,6 +1211,243 @@ struct PatternModulationDtoV2 {}
 struct CoverageDtoV2 {
     guard_steps: u32,
     maximum_support_radius: f64,
+}
+
+impl PresetEnvelopeDto {
+    /// Converts a pure-schema preset record into the standalone v1 DTO.
+    fn from_domain(value: &PresetRecord) -> Self {
+        Self {
+            preset_format_version: PRESET_FORMAT_VERSION,
+            metadata: PresetMetadataDto {
+                id: value.metadata.id.clone(),
+                name: value.metadata.name.clone(),
+                category: value.metadata.category.clone(),
+                description: value.metadata.description.clone(),
+                thumbnail: value.metadata.thumbnail.clone(),
+            },
+            recipe: PresetRecipeDto::from_domain(&value.recipe),
+        }
+    }
+
+    /// Converts a validated-format DTO into ordinary domain schema data.
+    fn into_domain(self) -> Result<PresetRecord, PresetIoError> {
+        let metadata = PresetMetadata {
+            id: self.metadata.id,
+            name: self.metadata.name,
+            category: self.metadata.category,
+            description: self.metadata.description,
+            thumbnail: self.metadata.thumbnail,
+        };
+        for value in [
+            &metadata.id,
+            &metadata.name,
+            &metadata.category,
+            &metadata.description,
+        ] {
+            if value.trim().is_empty() || value.chars().any(char::is_control) {
+                return Err(PresetIoError {
+                    context: "preset metadata must be nonempty printable text".into(),
+                });
+            }
+        }
+        if metadata
+            .thumbnail
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty() || value.chars().any(char::is_control))
+        {
+            return Err(PresetIoError {
+                context: "preset thumbnail must be printable text when present".into(),
+            });
+        }
+        Ok(PresetRecord {
+            metadata,
+            recipe: self.recipe.into_domain(),
+        })
+    }
+}
+
+impl PresetRecipeDto {
+    /// Converts an ID-free recipe into its stable standalone representation.
+    fn from_domain(value: &PatternDefinitionRecipe) -> Self {
+        let coverage = |coverage: &CoveragePolicy| CoverageDtoV2 {
+            guard_steps: coverage.guard_steps,
+            maximum_support_radius: coverage.maximum_support_radius,
+        };
+        match value {
+            PatternDefinitionRecipe::StraightGrid(draft) => Self::StraightGrid {
+                name: draft.name.clone(),
+                coverage: coverage(&draft.coverage),
+            },
+            PatternDefinitionRecipe::GeneralizedStraightGuides {
+                name,
+                coverage: definition_coverage,
+                dimensions,
+                product,
+                orientation,
+            } => Self::GeneralizedStraightGuides {
+                name: name.clone(),
+                coverage: coverage(definition_coverage),
+                dimensions: dimensions
+                    .iter()
+                    .map(|dimension| GuideDimensionDraftDto {
+                        baseline_angle_degrees: dimension.baseline_angle_degrees,
+                        phase: dimension.phase,
+                        spacing_multiplier: dimension.spacing_multiplier,
+                    })
+                    .collect(),
+                product: GeneralizedSiteProductDraftDto::from_domain(product),
+                orientation: MarkOrientationDraftDto::from_domain(orientation),
+            },
+            PatternDefinitionRecipe::RandomSites {
+                name,
+                coverage: definition_coverage,
+                character,
+                seed,
+                density_modulation,
+                exclusion,
+                maximum_attempts,
+                maximum_neighbor_checks,
+            } => Self::RandomSites {
+                name: name.clone(),
+                coverage: coverage(definition_coverage),
+                character: RandomSiteCharacterDtoV2::from_domain(character),
+                seed: *seed,
+                density_modulation: SiteDensityModulationDtoV2::from_domain(density_modulation),
+                exclusion: SiteExclusionPolicyDtoV2::from_domain(exclusion),
+                maximum_attempts: *maximum_attempts,
+                maximum_neighbor_checks: *maximum_neighbor_checks,
+            },
+        }
+    }
+
+    /// Rebuilds an ID-free recipe without allocating document-owned IDs.
+    fn into_domain(self) -> PatternDefinitionRecipe {
+        let coverage_from = |value: CoverageDtoV2| CoveragePolicy {
+            guard_steps: value.guard_steps,
+            maximum_support_radius: value.maximum_support_radius,
+        };
+        match self {
+            Self::StraightGrid { name, coverage } => {
+                PatternDefinitionRecipe::StraightGrid(PatternDefinitionDraft {
+                    name,
+                    coverage: coverage_from(coverage),
+                })
+            }
+            Self::GeneralizedStraightGuides {
+                name,
+                coverage: stored_coverage,
+                dimensions,
+                product,
+                orientation,
+            } => PatternDefinitionRecipe::GeneralizedStraightGuides {
+                name,
+                coverage: coverage_from(stored_coverage),
+                dimensions: dimensions
+                    .into_iter()
+                    .map(|dimension| GuideDimensionDraft {
+                        baseline_angle_degrees: dimension.baseline_angle_degrees,
+                        phase: dimension.phase,
+                        spacing_multiplier: dimension.spacing_multiplier,
+                    })
+                    .collect(),
+                product: product.into_domain(),
+                orientation: orientation.into_domain(),
+            },
+            Self::RandomSites {
+                name,
+                coverage: stored_coverage,
+                character,
+                seed,
+                density_modulation,
+                exclusion,
+                maximum_attempts,
+                maximum_neighbor_checks,
+            } => PatternDefinitionRecipe::RandomSites {
+                name,
+                coverage: coverage_from(stored_coverage),
+                character: character.into_domain(),
+                seed,
+                density_modulation: density_modulation.into_domain(),
+                exclusion: exclusion.into_domain(),
+                maximum_attempts,
+                maximum_neighbor_checks,
+            },
+        }
+    }
+}
+
+impl GeneralizedSiteProductDraftDto {
+    /// Converts typed index references into standalone DTO form.
+    fn from_domain(value: &GeneralizedSiteProductDraft) -> Self {
+        match value {
+            GeneralizedSiteProductDraft::Intersections {
+                dimension_indices,
+                merge_epsilon,
+            } => Self::Intersections {
+                dimension_indices: dimension_indices.clone(),
+                merge_epsilon: *merge_epsilon,
+            },
+            GeneralizedSiteProductDraft::AlongGuides {
+                dimension_indices,
+                interval_multiplier,
+                phase,
+            } => Self::AlongGuides {
+                dimension_indices: dimension_indices.clone(),
+                interval_multiplier: *interval_multiplier,
+                phase: *phase,
+            },
+        }
+    }
+
+    /// Converts standalone index references back to typed recipe data.
+    fn into_domain(self) -> GeneralizedSiteProductDraft {
+        match self {
+            Self::Intersections {
+                dimension_indices,
+                merge_epsilon,
+            } => GeneralizedSiteProductDraft::Intersections {
+                dimension_indices,
+                merge_epsilon,
+            },
+            Self::AlongGuides {
+                dimension_indices,
+                interval_multiplier,
+                phase,
+            } => GeneralizedSiteProductDraft::AlongGuides {
+                dimension_indices,
+                interval_multiplier,
+                phase,
+            },
+        }
+    }
+}
+
+impl MarkOrientationDraftDto {
+    /// Converts typed orientation selection into standalone DTO form.
+    fn from_domain(value: &MarkOrientationDraft) -> Self {
+        match value {
+            MarkOrientationDraft::Fixed => Self::Fixed,
+            MarkOrientationDraft::GuideTangent { dimension_index } => Self::GuideTangent {
+                dimension_index: *dimension_index,
+            },
+            MarkOrientationDraft::GuideNormal { dimension_index } => Self::GuideNormal {
+                dimension_index: *dimension_index,
+            },
+        }
+    }
+
+    /// Converts standalone orientation selection back to typed recipe data.
+    fn into_domain(self) -> MarkOrientationDraft {
+        match self {
+            Self::Fixed => MarkOrientationDraft::Fixed,
+            Self::GuideTangent { dimension_index } => {
+                MarkOrientationDraft::GuideTangent { dimension_index }
+            }
+            Self::GuideNormal { dimension_index } => {
+                MarkOrientationDraft::GuideNormal { dimension_index }
+            }
+        }
+    }
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

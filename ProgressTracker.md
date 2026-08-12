@@ -283,7 +283,7 @@ canonical preview/PNG/SVG output boundaries remain unchanged. Automated/static
 and native artifact evidence is not manual GNOME/Wayland visual, keyboard,
 focus, or assistive-technology acceptance.
 
-**Stage 19A — Planned.** Add the versioned headless pure-schema preset registry
+**Stage 19A — Accepted awaiting checkpoint.** Add the versioned headless pure-schema preset registry
 and reconstruction gates; preset names remain metadata and never evaluator
 branches.
 

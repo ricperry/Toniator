@@ -1007,6 +1007,14 @@ impl Document {
         &self.pattern_definitions
     }
 
+    /// Returns the authoritative definition currently targeted by one channel.
+    /// The returned value is immutable; mutations still require a validated
+    /// command through `DocumentHistory`.
+    pub fn pattern_definition_for(&self, channel_id: ChannelId) -> Option<&PatternDefinition> {
+        self.pattern_definition_id_for(channel_id)
+            .and_then(|definition_id| self.definition(definition_id))
+    }
+
     /// Returns legacy single-channel state only. A modeled topology is not a
     /// legacy evaluation input and therefore is intentionally not projected.
     pub fn channels(&self) -> Option<&[ChannelState]> {
@@ -1737,7 +1745,10 @@ impl Document {
             .find(|definition| definition.id == id)
     }
 
-    fn linked_channels(&self, definition_id: PatternDefinitionId) -> Vec<ChannelId> {
+    /// Returns the channels targeting one definition in authoritative document
+    /// order. Read-only callers use this to disclose a shared edit before its
+    /// history-backed command is confirmed.
+    pub fn linked_channels(&self, definition_id: PatternDefinitionId) -> Vec<ChannelId> {
         match &self.channel_configuration {
             ChannelConfiguration::Legacy(channels) => channels
                 .iter()
@@ -1836,6 +1847,510 @@ impl Document {
             output_id,
             draft.coverage.clone(),
         ))
+    }
+
+    /// Materializes an ID-free recipe through the existing descriptor, variant
+    /// draft, edit, and validation boundaries. The neutral topology is first
+    /// attached to a private candidate; payload-bearing variants are assembled
+    /// only by `VariantTransitionDraft` before any command can publish it.
+    fn allocate_definition_from_recipe(
+        &self,
+        channel_id: ChannelId,
+        recipe: &PatternDefinitionRecipe,
+    ) -> Result<PatternDefinition, ValidationError> {
+        let neutral = self.allocate_neutral_definition_from_recipe(recipe)?;
+        let mut candidate = self.clone();
+        candidate.pattern_definitions.push(neutral.clone());
+        candidate.retarget_channel(channel_id, neutral.id);
+        candidate.apply_recipe_controls(neutral.id, recipe)?;
+        candidate.definition(neutral.id).cloned().ok_or_else(|| {
+            ValidationError::new(
+                "pattern_definitions.recipe",
+                "recipe materialization lost its fresh definition",
+            )
+        })
+    }
+
+    /// Allocates only a valid neutral topology for an ID-free recipe. Variant
+    /// payloads deliberately remain neutral here and are applied later through
+    /// the public transition-draft authority.
+    fn allocate_neutral_definition_from_recipe(
+        &self,
+        recipe: &PatternDefinitionRecipe,
+    ) -> Result<PatternDefinition, ValidationError> {
+        match recipe {
+            PatternDefinitionRecipe::StraightGrid(draft) => {
+                self.allocate_definition_from_draft(draft)
+            }
+            PatternDefinitionRecipe::GeneralizedStraightGuides {
+                name,
+                coverage,
+                dimensions,
+                product,
+                orientation: _,
+            } => {
+                let id = self.allocate_definition_id()?;
+                let guide_id = self.allocate_mechanism_id()?;
+                let site_id = PatternMechanismId(guide_id.0.checked_add(1).ok_or_else(|| {
+                    ValidationError::new(
+                        "pattern_definitions.mechanisms.id",
+                        "document mechanism ID space is exhausted",
+                    )
+                })?);
+                let output_id = self.allocate_output_layer_id()?;
+                let mut next_dimension = self.allocate_dimension_id()?.0;
+                let mut materialized_dimensions = Vec::with_capacity(dimensions.len());
+                for (index, _) in dimensions.iter().enumerate() {
+                    materialized_dimensions.push(StraightGuideDimension {
+                        id: GuideDimensionId(next_dimension),
+                        baseline_angle_degrees: [0.0, 90.0, 45.0, 135.0]
+                            .get(index)
+                            .copied()
+                            .unwrap_or(0.0),
+                        phase: 0.0,
+                        repetition: StraightGuideRepetition {
+                            spacing_multiplier: 1.0,
+                        },
+                    });
+                    next_dimension = next_dimension.checked_add(1).ok_or_else(|| {
+                        ValidationError::new(
+                            "pattern_definitions.mechanisms.dimensions.id",
+                            "document dimension ID space is exhausted",
+                        )
+                    })?;
+                }
+                let dimension = |index: usize| {
+                    materialized_dimensions
+                        .get(index)
+                        .map(|value| value.id)
+                        .ok_or_else(|| {
+                            ValidationError::new(
+                                "pattern_definitions.recipe.dimensions",
+                                "recipe dimension index is out of bounds",
+                            )
+                        })
+                };
+                let product = match product {
+                    GeneralizedSiteProductDraft::Intersections { .. } => {
+                        GeneralizedSiteProduct::Intersections {
+                            dimensions: vec![dimension(0)?, dimension(1)?],
+                            merge_epsilon: 0.0,
+                        }
+                    }
+                    GeneralizedSiteProductDraft::AlongGuides { .. } => {
+                        GeneralizedSiteProduct::AlongGuides {
+                            dimensions: vec![dimension(0)?],
+                            interval_multiplier: 1.0,
+                            phase: 0.0,
+                        }
+                    }
+                };
+                let definition = PatternDefinition::generalized_straight_guides(
+                    id,
+                    name.clone(),
+                    guide_id,
+                    site_id,
+                    output_id,
+                    materialized_dimensions,
+                    product,
+                    MarkOrientation::Fixed,
+                    coverage.clone(),
+                );
+                validate_definition(&definition)?;
+                Ok(definition)
+            }
+            PatternDefinitionRecipe::RandomSites {
+                name,
+                coverage,
+                character: _,
+                seed: _,
+                density_modulation: _,
+                exclusion: _,
+                maximum_attempts: _,
+                maximum_neighbor_checks: _,
+            } => {
+                let id = self.allocate_definition_id()?;
+                let base_id = self.allocate_mechanism_id()?;
+                let modulation_id =
+                    PatternMechanismId(base_id.0.checked_add(1).ok_or_else(|| {
+                        ValidationError::new(
+                            "pattern_definitions.mechanisms.id",
+                            "document mechanism ID space is exhausted",
+                        )
+                    })?);
+                let exclusion_id =
+                    PatternMechanismId(modulation_id.0.checked_add(1).ok_or_else(|| {
+                        ValidationError::new(
+                            "pattern_definitions.mechanisms.id",
+                            "document mechanism ID space is exhausted",
+                        )
+                    })?);
+                let site_id =
+                    PatternMechanismId(exclusion_id.0.checked_add(1).ok_or_else(|| {
+                        ValidationError::new(
+                            "pattern_definitions.mechanisms.id",
+                            "document mechanism ID space is exhausted",
+                        )
+                    })?);
+                let definition = PatternDefinition::random_sites(
+                    id,
+                    name.clone(),
+                    base_id,
+                    modulation_id,
+                    exclusion_id,
+                    site_id,
+                    self.allocate_output_layer_id()?,
+                    RandomSiteCharacter::RawUniform,
+                    0,
+                    SiteDensityModulation::Uniform,
+                    SiteExclusionPolicy::None,
+                    1,
+                    1,
+                    coverage.clone(),
+                );
+                validate_definition(&definition)?;
+                Ok(definition)
+            }
+        }
+    }
+
+    /// Applies a recipe's scalar controls and compound alternatives to a
+    /// private candidate definition. All payload-bearing alternatives pass
+    /// through `variant_transition_draft`; scalar leaves use existing edits.
+    fn apply_recipe_controls(
+        &mut self,
+        definition_id: PatternDefinitionId,
+        recipe: &PatternDefinitionRecipe,
+    ) -> Result<(), ValidationError> {
+        match recipe {
+            PatternDefinitionRecipe::StraightGrid(_) => Ok(()),
+            PatternDefinitionRecipe::GeneralizedStraightGuides {
+                coverage,
+                dimensions,
+                product,
+                orientation,
+                ..
+            } => {
+                let definition = self
+                    .definition(definition_id)
+                    .cloned()
+                    .expect("fresh recipe definition");
+                let (guide_id, site_id, _output_id, stored_dimensions) = match (
+                    definition.mechanisms.as_slice(),
+                    definition.output_layers.as_slice(),
+                ) {
+                    (
+                        [
+                            PatternMechanism::StraightGuideDimensions { id, dimensions },
+                            site,
+                        ],
+                        [output],
+                    ) => (*id, site.id(), output.id(), dimensions.clone()),
+                    _ => unreachable!("neutral generalized recipe has typed topology"),
+                };
+                self.apply_recipe_edit(
+                    definition_id,
+                    PatternDefinitionEdit::SetCoverageGuardSteps {
+                        guard_steps: coverage.guard_steps,
+                    },
+                )?;
+                self.apply_recipe_edit(
+                    definition_id,
+                    PatternDefinitionEdit::SetCoverageMaximumSupportRadius {
+                        maximum_support_radius: coverage.maximum_support_radius,
+                    },
+                )?;
+                for (index, authored) in dimensions.iter().enumerate() {
+                    let dimension_id = stored_dimensions
+                        .get(index)
+                        .ok_or_else(|| {
+                            ValidationError::new(
+                                "pattern_definitions.recipe.dimensions",
+                                "recipe dimension index is out of bounds",
+                            )
+                        })?
+                        .id;
+                    self.apply_recipe_edit(
+                        definition_id,
+                        PatternDefinitionEdit::SetGuideBaselineAngle {
+                            mechanism_id: guide_id,
+                            dimension_id,
+                            baseline_angle_degrees: authored.baseline_angle_degrees,
+                        },
+                    )?;
+                    self.apply_recipe_edit(
+                        definition_id,
+                        PatternDefinitionEdit::SetGuidePhase {
+                            mechanism_id: guide_id,
+                            dimension_id,
+                            phase: authored.phase,
+                        },
+                    )?;
+                    self.apply_recipe_edit(
+                        definition_id,
+                        PatternDefinitionEdit::SetGuideSpacingMultiplier {
+                            mechanism_id: guide_id,
+                            dimension_id,
+                            spacing_multiplier: authored.spacing_multiplier,
+                        },
+                    )?;
+                }
+                let map_indices =
+                    |indices: &[usize]| -> Result<Vec<GuideDimensionId>, ValidationError> {
+                        indices
+                            .iter()
+                            .map(|index| {
+                                stored_dimensions
+                                    .get(*index)
+                                    .map(|value| value.id)
+                                    .ok_or_else(|| {
+                                        ValidationError::new(
+                                            "pattern_definitions.recipe.dimensions",
+                                            "recipe dimension index is out of bounds",
+                                        )
+                                    })
+                            })
+                            .collect()
+                    };
+                match product {
+                    GeneralizedSiteProductDraft::Intersections {
+                        dimension_indices,
+                        merge_epsilon,
+                    } => {
+                        self.apply_recipe_edit(
+                            definition_id,
+                            PatternDefinitionEdit::SetIntersectionDimensions {
+                                mechanism_id: site_id,
+                                dimensions: map_indices(dimension_indices)?,
+                            },
+                        )?;
+                        self.apply_recipe_edit(
+                            definition_id,
+                            PatternDefinitionEdit::SetIntersectionMergeEpsilon {
+                                mechanism_id: site_id,
+                                merge_epsilon: *merge_epsilon,
+                            },
+                        )?;
+                    }
+                    GeneralizedSiteProductDraft::AlongGuides {
+                        dimension_indices,
+                        interval_multiplier,
+                        phase,
+                    } => {
+                        self.apply_recipe_edit(
+                            definition_id,
+                            PatternDefinitionEdit::SetAlongGuideDimensions {
+                                mechanism_id: site_id,
+                                dimensions: map_indices(dimension_indices)?,
+                            },
+                        )?;
+                        self.apply_recipe_edit(
+                            definition_id,
+                            PatternDefinitionEdit::SetAlongGuideIntervalMultiplier {
+                                mechanism_id: site_id,
+                                interval_multiplier: *interval_multiplier,
+                            },
+                        )?;
+                        self.apply_recipe_edit(
+                            definition_id,
+                            PatternDefinitionEdit::SetAlongGuidePhase {
+                                mechanism_id: site_id,
+                                phase: *phase,
+                            },
+                        )?;
+                    }
+                }
+                let (choice, dimension_index) = match orientation {
+                    MarkOrientationDraft::Fixed => return Ok(()),
+                    MarkOrientationDraft::GuideTangent { dimension_index } => {
+                        (MarkOrientationKind::GuideTangent, *dimension_index)
+                    }
+                    MarkOrientationDraft::GuideNormal { dimension_index } => {
+                        (MarkOrientationKind::GuideNormal, *dimension_index)
+                    }
+                };
+                let guide_dimension = stored_dimensions
+                    .get(dimension_index)
+                    .ok_or_else(|| {
+                        ValidationError::new(
+                            "pattern_definitions.recipe.orientation",
+                            "recipe orientation dimension index is out of bounds",
+                        )
+                    })?
+                    .id;
+                self.apply_recipe_transition(
+                    definition_id,
+                    PropertyFieldId::OutputOrientation,
+                    PropertyEnumChoice::MarkOrientation(choice),
+                    vec![(
+                        PropertyFieldId::OutputOrientationDimension,
+                        VariantTransitionValue::StableReference(Some(
+                            PropertyReferenceValue::GuideDimension(guide_dimension),
+                        )),
+                    )],
+                )
+            }
+            PatternDefinitionRecipe::RandomSites {
+                coverage,
+                character,
+                seed,
+                density_modulation,
+                exclusion,
+                maximum_attempts,
+                maximum_neighbor_checks,
+                ..
+            } => {
+                let definition = self
+                    .definition(definition_id)
+                    .cloned()
+                    .expect("fresh recipe definition");
+                let [
+                    PatternMechanism::RandomSiteProcess { id: random_id, .. },
+                    PatternMechanism::SiteDensityModulation {
+                        id: modulation_id, ..
+                    },
+                    PatternMechanism::SiteExclusion {
+                        id: exclusion_id, ..
+                    },
+                    PatternMechanism::RandomSiteProduct { id: product_id, .. },
+                ] = definition.mechanisms.as_slice()
+                else {
+                    unreachable!("neutral random recipe has typed topology")
+                };
+                self.apply_recipe_edit(
+                    definition_id,
+                    PatternDefinitionEdit::SetCoverageGuardSteps {
+                        guard_steps: coverage.guard_steps,
+                    },
+                )?;
+                self.apply_recipe_edit(
+                    definition_id,
+                    PatternDefinitionEdit::SetCoverageMaximumSupportRadius {
+                        maximum_support_radius: coverage.maximum_support_radius,
+                    },
+                )?;
+                self.apply_recipe_edit(
+                    definition_id,
+                    PatternDefinitionEdit::SetRandomSeed {
+                        mechanism_id: *random_id,
+                        seed: *seed,
+                    },
+                )?;
+                self.apply_recipe_edit(
+                    definition_id,
+                    PatternDefinitionEdit::SetRandomMaximumAttempts {
+                        mechanism_id: *product_id,
+                        maximum_attempts: *maximum_attempts,
+                    },
+                )?;
+                self.apply_recipe_edit(
+                    definition_id,
+                    PatternDefinitionEdit::SetRandomMaximumNeighborChecks {
+                        mechanism_id: *product_id,
+                        maximum_neighbor_checks: *maximum_neighbor_checks,
+                    },
+                )?;
+                let (character_choice, character_updates) = recipe_random_transition(character);
+                if character_choice != RandomCharacterKind::RawUniform {
+                    self.apply_recipe_transition(
+                        definition_id,
+                        PropertyFieldId::RandomCharacter,
+                        PropertyEnumChoice::RandomCharacter(character_choice),
+                        character_updates,
+                    )?;
+                }
+                let (modulation_choice, modulation_updates) =
+                    recipe_modulation_transition(density_modulation);
+                if modulation_choice != DensityModulationKind::Uniform {
+                    self.apply_recipe_transition(
+                        definition_id,
+                        PropertyFieldId::RandomDensityModulation,
+                        PropertyEnumChoice::DensityModulation(modulation_choice),
+                        modulation_updates,
+                    )?;
+                }
+                let (exclusion_choice, exclusion_updates) = recipe_exclusion_transition(exclusion);
+                if exclusion_choice != ExclusionKind::None {
+                    self.apply_recipe_transition(
+                        definition_id,
+                        PropertyFieldId::RandomExclusion,
+                        PropertyEnumChoice::Exclusion(exclusion_choice),
+                        exclusion_updates,
+                    )?;
+                }
+                let _ = (modulation_id, exclusion_id);
+                Ok(())
+            }
+        }
+    }
+
+    /// Validates and applies one existing scalar edit to an unpublished recipe
+    /// candidate, preserving the same leaf validation as normal commands.
+    fn apply_recipe_edit(
+        &mut self,
+        definition_id: PatternDefinitionId,
+        edit: PatternDefinitionEdit,
+    ) -> Result<(), ValidationError> {
+        let definition = self
+            .definition(definition_id)
+            .cloned()
+            .expect("fresh recipe definition");
+        validate_definition_edit(&definition, &edit)?;
+        let target = self
+            .pattern_definitions
+            .iter_mut()
+            .find(|definition| definition.id == definition_id)
+            .expect("fresh recipe definition");
+        apply_definition_edit(target, &edit);
+        validate_definition(target)
+    }
+
+    /// Finalizes and applies a Stage 17A transition draft to an unpublished
+    /// recipe candidate. This is the sole recipe path for complete variants.
+    fn apply_recipe_transition(
+        &mut self,
+        definition_id: PatternDefinitionId,
+        field: PropertyFieldId,
+        choice: PropertyEnumChoice,
+        values: Vec<(PropertyFieldId, VariantTransitionValue)>,
+    ) -> Result<(), ValidationError> {
+        let selector = self
+            .property_descriptors()
+            .into_iter()
+            .find(|descriptor| {
+                descriptor.field == field
+                    && transition_definition_id(descriptor.target) == Some(definition_id)
+            })
+            .ok_or_else(|| {
+                ValidationError::new(
+                    "pattern_definitions.recipe",
+                    "recipe transition selector is inactive",
+                )
+            })?;
+        let draft = self.variant_transition_draft(&selector, choice)?;
+        let updates = values
+            .into_iter()
+            .map(|(field, value)| {
+                let target = draft
+                    .fields()
+                    .iter()
+                    .find(|candidate| candidate.field == field)
+                    .ok_or_else(|| {
+                        ValidationError::new(
+                            "pattern_definitions.recipe",
+                            "recipe transition payload is inactive",
+                        )
+                    })?
+                    .target;
+                Ok(VariantTransitionFieldUpdate {
+                    field,
+                    target,
+                    value,
+                })
+            })
+            .collect::<Result<Vec<_>, ValidationError>>()?;
+        let edit = draft.with_updates(&updates)?.finalize(self)?;
+        self.apply_recipe_edit(definition_id, edit)
     }
 
     fn duplicate_definition(
@@ -2143,7 +2658,9 @@ impl Document {
             ));
         }
         let mut result = command.result_for_transition(self, &candidate);
-        if let DocumentCommand::EditSharedPatternDefinition { definition_id, .. } = command {
+        if let DocumentCommand::EditSharedPatternDefinition { definition_id, .. }
+        | DocumentCommand::ReplaceSharedPatternDefinitionRecipe { definition_id, .. } = command
+        {
             result.affected_channels = self.linked_channels(*definition_id);
         }
         if let DocumentCommand::EditSelectedChannelPatternDefinition {
@@ -2161,8 +2678,8 @@ impl Document {
         } else if matches!(
             command,
             DocumentCommand::EditSelectedChannelPatternDefinition { .. }
-        ) || matches!(command, DocumentCommand::EditSharedPatternDefinition { .. })
-        {
+                | DocumentCommand::EditSharedPatternDefinition { .. }
+        ) {
             let edit = match command {
                 DocumentCommand::EditSelectedChannelPatternDefinition { edit, .. }
                 | DocumentCommand::EditSharedPatternDefinition { edit, .. } => edit,
@@ -2192,6 +2709,140 @@ fn validate_definition_draft(draft: &PatternDefinitionDraft) -> Result<(), Valid
         draft.coverage.maximum_support_radius,
         "pattern_definitions.coverage.maximum_support_radius",
     )
+}
+
+/// Projects one random-character recipe payload onto the explicit Stage 17A
+/// transition-field updates required to finalize that alternative.
+fn recipe_random_transition(
+    character: &RandomSiteCharacter,
+) -> (
+    RandomCharacterKind,
+    Vec<(PropertyFieldId, VariantTransitionValue)>,
+) {
+    match character {
+        RandomSiteCharacter::RawUniform => (RandomCharacterKind::RawUniform, Vec::new()),
+        RandomSiteCharacter::Even {
+            minimum_center_distance,
+        } => (
+            RandomCharacterKind::Even,
+            vec![(
+                PropertyFieldId::RandomEvenMinimumCenterDistance,
+                VariantTransitionValue::FiniteF64(*minimum_center_distance),
+            )],
+        ),
+        RandomSiteCharacter::Clustered {
+            cluster_density,
+            cluster_spread,
+            cluster_strength,
+        } => (
+            RandomCharacterKind::Clustered,
+            vec![
+                (
+                    PropertyFieldId::RandomClusterDensity,
+                    VariantTransitionValue::FiniteF64(*cluster_density),
+                ),
+                (
+                    PropertyFieldId::RandomClusterSpread,
+                    VariantTransitionValue::FiniteF64(*cluster_spread),
+                ),
+                (
+                    PropertyFieldId::RandomClusterStrength,
+                    VariantTransitionValue::FiniteF64(*cluster_strength),
+                ),
+            ],
+        ),
+    }
+}
+
+/// Projects one density-modulation recipe payload onto the explicit Stage 17A
+/// transition-field updates required to finalize that alternative.
+fn recipe_modulation_transition(
+    modulation: &SiteDensityModulation,
+) -> (
+    DensityModulationKind,
+    Vec<(PropertyFieldId, VariantTransitionValue)>,
+) {
+    match modulation {
+        SiteDensityModulation::Uniform => (DensityModulationKind::Uniform, Vec::new()),
+        SiteDensityModulation::ArtworkWeighted {
+            mapping,
+            strength,
+            response,
+        } => (
+            DensityModulationKind::ArtworkWeighted,
+            vec![
+                (
+                    PropertyFieldId::ArtworkWeightMappingComponent,
+                    VariantTransitionValue::EnumChoice(PropertyEnumChoice::SourceMappingComponent(
+                        mapping.component,
+                    )),
+                ),
+                (
+                    PropertyFieldId::ArtworkWeightMappingPlacement,
+                    VariantTransitionValue::EnumChoice(PropertyEnumChoice::SourcePlacement(
+                        mapping.placement,
+                    )),
+                ),
+                (
+                    PropertyFieldId::ArtworkWeightMappingInverted,
+                    VariantTransitionValue::Boolean(mapping.inverted),
+                ),
+                (
+                    PropertyFieldId::ArtworkWeightMappingGain,
+                    VariantTransitionValue::FiniteF64(mapping.gain),
+                ),
+                (
+                    PropertyFieldId::ArtworkWeightMappingBias,
+                    VariantTransitionValue::FiniteF64(mapping.bias),
+                ),
+                (
+                    PropertyFieldId::ArtworkWeightStrength,
+                    VariantTransitionValue::FiniteF64(*strength),
+                ),
+                (
+                    PropertyFieldId::ArtworkWeightResponse,
+                    VariantTransitionValue::EnumChoice(PropertyEnumChoice::ArtworkWeightResponse(
+                        *response,
+                    )),
+                ),
+            ],
+        ),
+    }
+}
+
+/// Projects one exclusion recipe payload onto the explicit Stage 17A
+/// transition-field updates required to finalize that alternative.
+fn recipe_exclusion_transition(
+    exclusion: &SiteExclusionPolicy,
+) -> (
+    ExclusionKind,
+    Vec<(PropertyFieldId, VariantTransitionValue)>,
+) {
+    match exclusion {
+        SiteExclusionPolicy::None => (ExclusionKind::None, Vec::new()),
+        SiteExclusionPolicy::MinimumCenterDistance { minimum } => (
+            ExclusionKind::MinimumCenterDistance,
+            vec![(
+                PropertyFieldId::ExclusionMinimumCenterDistance,
+                VariantTransitionValue::FiniteF64(*minimum),
+            )],
+        ),
+        SiteExclusionPolicy::VisibleMarkMargin { margin, sizing } => (
+            ExclusionKind::VisibleMarkMargin,
+            vec![
+                (
+                    PropertyFieldId::VisibleMarkMargin,
+                    VariantTransitionValue::FiniteF64(*margin),
+                ),
+                (
+                    PropertyFieldId::VisibleMarkSizingPolicy,
+                    VariantTransitionValue::EnumChoice(
+                        PropertyEnumChoice::VisibleMarkSizingPolicy(*sizing),
+                    ),
+                ),
+            ],
+        ),
+    }
 }
 
 fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefinitionEdit) {
@@ -6506,6 +7157,274 @@ pub struct PatternDefinitionDraft {
     pub coverage: CoveragePolicy,
 }
 
+/// Stable metadata for a pure-schema preset shortcut.
+///
+/// It is intentionally independent from evaluation: removing this metadata
+/// never removes the ordinary pattern definition capability it describes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PresetMetadata {
+    pub id: String,
+    pub name: String,
+    pub category: String,
+    pub description: String,
+    pub thumbnail: Option<String>,
+}
+
+/// An ID-free straight-guide dimension authored through the typed pattern
+/// boundary. The document allocates its stable ID when materializing a recipe.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GuideDimensionDraft {
+    pub baseline_angle_degrees: f64,
+    pub phase: f64,
+    pub spacing_multiplier: f64,
+}
+
+/// An ID-free site-product choice whose dimension references are stored-order
+/// indices into the recipe's `dimensions` collection.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GeneralizedSiteProductDraft {
+    Intersections {
+        dimension_indices: Vec<usize>,
+        merge_epsilon: f64,
+    },
+    AlongGuides {
+        dimension_indices: Vec<usize>,
+        interval_multiplier: f64,
+        phase: f64,
+    },
+}
+
+/// An ID-free output-orientation choice whose reference, when present, is a
+/// stored-order index into the recipe's `dimensions` collection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MarkOrientationDraft {
+    Fixed,
+    GuideTangent { dimension_index: usize },
+    GuideNormal { dimension_index: usize },
+}
+
+/// A complete ID-free recipe for an ordinary supported pattern definition.
+///
+/// All fields map directly to current typed schema controls; this recipe
+/// contains neither a preset discriminator nor evaluator/cache/render state.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PatternDefinitionRecipe {
+    StraightGrid(PatternDefinitionDraft),
+    GeneralizedStraightGuides {
+        name: String,
+        coverage: CoveragePolicy,
+        dimensions: Vec<GuideDimensionDraft>,
+        product: GeneralizedSiteProductDraft,
+        orientation: MarkOrientationDraft,
+    },
+    RandomSites {
+        name: String,
+        coverage: CoveragePolicy,
+        character: RandomSiteCharacter,
+        seed: u32,
+        density_modulation: SiteDensityModulation,
+        exclusion: SiteExclusionPolicy,
+        maximum_attempts: u32,
+        maximum_neighbor_checks: u32,
+    },
+}
+
+/// A metadata/recipe pair crossing registry and persistence boundaries.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PresetRecord {
+    pub metadata: PresetMetadata,
+    pub recipe: PatternDefinitionRecipe,
+}
+
+/// Validates pure preset metadata and ID-free recipe inputs without allocating
+/// IDs, mutating a document, or publishing history. Full reconstruction still
+/// reuses command validation when a recipe is applied to a document.
+pub fn validate_preset_record(record: &PresetRecord) -> Result<(), ValidationError> {
+    for (path, value) in [
+        ("preset.metadata.id", record.metadata.id.as_str()),
+        ("preset.metadata.name", record.metadata.name.as_str()),
+        (
+            "preset.metadata.category",
+            record.metadata.category.as_str(),
+        ),
+        (
+            "preset.metadata.description",
+            record.metadata.description.as_str(),
+        ),
+    ] {
+        if value.trim().is_empty() || value.chars().any(char::is_control) {
+            return Err(ValidationError::new(
+                path,
+                "must be nonempty printable text",
+            ));
+        }
+    }
+    if record
+        .metadata
+        .thumbnail
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty() || value.chars().any(char::is_control))
+    {
+        return Err(ValidationError::new(
+            "preset.metadata.thumbnail",
+            "must be printable text when present",
+        ));
+    }
+    match &record.recipe {
+        PatternDefinitionRecipe::StraightGrid(draft) => validate_definition_draft(draft),
+        PatternDefinitionRecipe::GeneralizedStraightGuides {
+            name,
+            coverage,
+            dimensions,
+            product,
+            orientation,
+        } => {
+            validate_definition_draft(&PatternDefinitionDraft {
+                name: name.clone(),
+                coverage: coverage.clone(),
+            })?;
+            if !(1..=4).contains(&dimensions.len()) {
+                return Err(ValidationError::new(
+                    "preset.recipe.dimensions",
+                    "must contain one through four guide dimensions",
+                ));
+            }
+            for dimension in dimensions {
+                validate_finite(
+                    dimension.baseline_angle_degrees,
+                    "preset.recipe.dimensions.baseline_angle_degrees",
+                )?;
+                validate_finite(dimension.phase, "preset.recipe.dimensions.phase")?;
+                validate_positive_finite(
+                    dimension.spacing_multiplier,
+                    "preset.recipe.dimensions.spacing_multiplier",
+                )?;
+            }
+            let validate_indices = |indices: &[usize], minimum: usize| {
+                if !(minimum..=4).contains(&indices.len()) {
+                    return Err(ValidationError::new(
+                        "preset.recipe.product.dimension_indices",
+                        "has invalid cardinality",
+                    ));
+                }
+                let mut seen = HashSet::new();
+                for index in indices {
+                    if *index >= dimensions.len() || !seen.insert(*index) {
+                        return Err(ValidationError::new(
+                            "preset.recipe.product.dimension_indices",
+                            "must be unique in bounds indices",
+                        ));
+                    }
+                }
+                Ok(())
+            };
+            match product {
+                GeneralizedSiteProductDraft::Intersections {
+                    dimension_indices,
+                    merge_epsilon,
+                } => {
+                    validate_indices(dimension_indices, 2)?;
+                    validate_nonnegative_finite(
+                        *merge_epsilon,
+                        "preset.recipe.product.merge_epsilon",
+                    )?;
+                }
+                GeneralizedSiteProductDraft::AlongGuides {
+                    dimension_indices,
+                    interval_multiplier,
+                    phase,
+                } => {
+                    validate_indices(dimension_indices, 1)?;
+                    validate_positive_finite(
+                        *interval_multiplier,
+                        "preset.recipe.product.interval_multiplier",
+                    )?;
+                    validate_finite(*phase, "preset.recipe.product.phase")?;
+                }
+            }
+            match orientation {
+                MarkOrientationDraft::Fixed => Ok(()),
+                MarkOrientationDraft::GuideTangent { dimension_index }
+                | MarkOrientationDraft::GuideNormal { dimension_index }
+                    if *dimension_index < dimensions.len() =>
+                {
+                    Ok(())
+                }
+                _ => Err(ValidationError::new(
+                    "preset.recipe.orientation.dimension_index",
+                    "must address an in-bounds guide dimension",
+                )),
+            }
+        }
+        PatternDefinitionRecipe::RandomSites {
+            name,
+            coverage,
+            character,
+            seed: _,
+            density_modulation,
+            exclusion,
+            maximum_attempts,
+            maximum_neighbor_checks,
+        } => {
+            validate_definition_draft(&PatternDefinitionDraft {
+                name: name.clone(),
+                coverage: coverage.clone(),
+            })?;
+            match character {
+                RandomSiteCharacter::RawUniform => {}
+                RandomSiteCharacter::Even {
+                    minimum_center_distance,
+                } => validate_positive_finite(
+                    *minimum_center_distance,
+                    "preset.recipe.character.minimum_center_distance",
+                )?,
+                RandomSiteCharacter::Clustered {
+                    cluster_density,
+                    cluster_spread,
+                    cluster_strength,
+                } => {
+                    validate_positive_finite(
+                        *cluster_density,
+                        "preset.recipe.character.cluster_density",
+                    )?;
+                    validate_positive_finite(
+                        *cluster_spread,
+                        "preset.recipe.character.cluster_spread",
+                    )?;
+                    validate_unit_component(
+                        *cluster_strength,
+                        "preset.recipe.character.cluster_strength",
+                    )?;
+                }
+            }
+            if let SiteDensityModulation::ArtworkWeighted {
+                mapping, strength, ..
+            } = density_modulation
+            {
+                validate_nonnegative_finite(mapping.gain, "preset.recipe.modulation.mapping.gain")?;
+                validate_finite(mapping.bias, "preset.recipe.modulation.mapping.bias")?;
+                validate_unit_component(*strength, "preset.recipe.modulation.strength")?;
+            }
+            match exclusion {
+                SiteExclusionPolicy::None => {}
+                SiteExclusionPolicy::MinimumCenterDistance { minimum } => {
+                    validate_positive_finite(*minimum, "preset.recipe.exclusion.minimum")?
+                }
+                SiteExclusionPolicy::VisibleMarkMargin { margin, .. } => {
+                    validate_nonnegative_finite(*margin, "preset.recipe.exclusion.margin")?
+                }
+            }
+            if *maximum_attempts == 0 || *maximum_neighbor_checks == 0 {
+                return Err(ValidationError::new(
+                    "preset.recipe.random_work",
+                    "maximum attempts and neighbor checks must be nonzero",
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
 /// A typed structural edit. It has no UI/editor state and can be applied only
 /// through `DocumentHistory`, which records its exact inverse.
 #[derive(Clone, Debug, PartialEq)]
@@ -6669,6 +7588,14 @@ pub enum DocumentCommand {
         base_definition: PatternDefinition,
         definition: PatternDefinition,
     },
+    /// Atomically materializes a fresh definition from an ID-free recipe and
+    /// retargets one selected channel. It is the default preset application
+    /// path and therefore never mutates linked channels.
+    ReplaceSelectedChannelDefinitionRecipe {
+        channel_id: ChannelId,
+        base_definition: PatternDefinition,
+        recipe: PatternDefinitionRecipe,
+    },
     DuplicatePatternDefinition {
         definition_id: PatternDefinitionId,
     },
@@ -6695,6 +7622,15 @@ pub enum DocumentCommand {
         /// Immutable editor base; see selected-channel edit above.
         base_definition: PatternDefinition,
         edit: PatternDefinitionEdit,
+    },
+    /// Explicitly replaces one existing definition's topology for every
+    /// linked channel. Callers must disclose the returned affected channels
+    /// before applying this history-backed shared operation.
+    ReplaceSharedPatternDefinitionRecipe {
+        definition_id: PatternDefinitionId,
+        /// Immutable editor base; this rejects stale shared replacements.
+        base_definition: PatternDefinition,
+        recipe: PatternDefinitionRecipe,
     },
     SetDensityAxis {
         channel_id: ChannelId,
@@ -6784,6 +7720,8 @@ pub enum NonFieldCommandOperation {
     AddPatternDefinition,
     AddTypedPatternDefinition,
     ReplaceSelectedChannelDefinitionTopology,
+    ReplaceSelectedChannelDefinitionRecipe,
+    ReplaceSharedPatternDefinitionRecipe,
     DuplicatePatternDefinition,
     RemoveUnreferencedPatternDefinition,
     ReplaceChannelTopology,
@@ -7030,6 +7968,16 @@ impl DocumentCommand {
                     NonFieldCommandOperation::ReplaceSelectedChannelDefinitionTopology,
                 )
             }
+            Command::ReplaceSelectedChannelDefinitionRecipe { .. } => {
+                DocumentCommandFieldClassification::NonField(
+                    NonFieldCommandOperation::ReplaceSelectedChannelDefinitionRecipe,
+                )
+            }
+            Command::ReplaceSharedPatternDefinitionRecipe { .. } => {
+                DocumentCommandFieldClassification::NonField(
+                    NonFieldCommandOperation::ReplaceSharedPatternDefinitionRecipe,
+                )
+            }
             Command::DuplicatePatternDefinition { .. } => {
                 DocumentCommandFieldClassification::NonField(
                     NonFieldCommandOperation::DuplicatePatternDefinition,
@@ -7183,17 +8131,20 @@ impl DocumentCommand {
             Self::AddPatternDefinition { .. }
                 | Self::AddTypedPatternDefinition { .. }
                 | Self::ReplaceSelectedChannelDefinitionTopology { .. }
+                | Self::ReplaceSelectedChannelDefinitionRecipe { .. }
                 | Self::DuplicatePatternDefinition { .. }
                 | Self::RetargetChannelPatternDefinition { .. }
                 | Self::RemoveUnreferencedPatternDefinition { .. }
                 | Self::EditSelectedChannelPatternDefinition { .. }
                 | Self::EditSharedPatternDefinition { .. }
+                | Self::ReplaceSharedPatternDefinitionRecipe { .. }
         )
     }
 
     fn channel_id(&self) -> ChannelId {
         match self {
             Self::ReplaceSelectedChannelDefinitionTopology { channel_id, .. }
+            | Self::ReplaceSelectedChannelDefinitionRecipe { channel_id, .. }
             | Self::SetDensityAxis { channel_id, .. }
             | Self::SetDensityAspectLock { channel_id, .. }
             | Self::SetRotation { channel_id, .. }
@@ -7213,7 +8164,8 @@ impl DocumentCommand {
             | Self::AddTypedPatternDefinition { .. }
             | Self::DuplicatePatternDefinition { .. }
             | Self::RemoveUnreferencedPatternDefinition { .. }
-            | Self::EditSharedPatternDefinition { .. } => ChannelId(0),
+            | Self::EditSharedPatternDefinition { .. }
+            | Self::ReplaceSharedPatternDefinitionRecipe { .. } => ChannelId(0),
         }
     }
 
@@ -7227,6 +8179,7 @@ impl DocumentCommand {
                 | Self::DuplicatePatternDefinition { .. }
                 | Self::RemoveUnreferencedPatternDefinition { .. }
                 | Self::EditSharedPatternDefinition { .. }
+                | Self::ReplaceSharedPatternDefinitionRecipe { .. }
         ) && !document.has_channel(self.channel_id())
         {
             return Err(ValidationError::new(
@@ -7278,6 +8231,22 @@ impl DocumentCommand {
                     ));
                 }
                 validate_definition(definition)
+            }
+            Self::ReplaceSelectedChannelDefinitionRecipe {
+                channel_id,
+                base_definition,
+                recipe,
+            } => {
+                if document.pattern_definition_id_for(*channel_id) != Some(base_definition.id)
+                    || document.definition(base_definition.id) != Some(base_definition)
+                {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.base",
+                        "selected-channel definition base is stale",
+                    ));
+                }
+                document.allocate_definition_from_recipe(*channel_id, recipe)?;
+                Ok(())
             }
             Self::DuplicatePatternDefinition { definition_id } => {
                 let source = document
@@ -7389,6 +8358,41 @@ impl DocumentCommand {
                     ));
                 }
                 validate_definition(&edited)
+            }
+            Self::ReplaceSharedPatternDefinitionRecipe {
+                definition_id,
+                base_definition,
+                recipe,
+            } => {
+                if *definition_id != base_definition.id
+                    || document.definition(*definition_id) != Some(base_definition)
+                {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.base",
+                        "shared definition base is stale",
+                    ));
+                }
+                let channel_id = document
+                    .linked_channels(*definition_id)
+                    .first()
+                    .copied()
+                    .ok_or_else(|| {
+                        ValidationError::new(
+                            "pattern_definitions.id",
+                            "shared replacement targets an unlinked definition",
+                        )
+                    })?;
+                let mut replacement =
+                    document.allocate_definition_from_recipe(channel_id, recipe)?;
+                replacement.id = *definition_id;
+                validate_definition(&replacement)?;
+                if &replacement == base_definition {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.recipe",
+                        "shared replacement is a semantic no-op",
+                    ));
+                }
+                Ok(())
             }
             Self::SetDensityAxis {
                 edited_axis, value, ..
@@ -7549,6 +8553,17 @@ impl DocumentCommand {
                 document.retarget_channel(*channel_id, definition.id);
                 return;
             }
+            Self::ReplaceSelectedChannelDefinitionRecipe {
+                channel_id, recipe, ..
+            } => {
+                let definition = document
+                    .allocate_definition_from_recipe(*channel_id, recipe)
+                    .expect("command validation materialized a recipe");
+                let definition_id = definition.id;
+                document.pattern_definitions.push(definition);
+                document.retarget_channel(*channel_id, definition_id);
+                return;
+            }
             Self::DuplicatePatternDefinition { definition_id } => {
                 let source = document
                     .definition(*definition_id)
@@ -7612,6 +8627,29 @@ impl DocumentCommand {
                     .find(|definition| definition.id == *definition_id)
                     .expect("validated definition");
                 apply_definition_edit(definition, edit);
+                return;
+            }
+            Self::ReplaceSharedPatternDefinitionRecipe {
+                definition_id,
+                recipe,
+                ..
+            } => {
+                let mut replacement = document
+                    .allocate_definition_from_recipe(
+                        *document
+                            .linked_channels(*definition_id)
+                            .first()
+                            .expect("validated shared definition link"),
+                        recipe,
+                    )
+                    .expect("command validation materialized a recipe");
+                replacement.id = *definition_id;
+                let definition = document
+                    .pattern_definitions
+                    .iter_mut()
+                    .find(|definition| definition.id == *definition_id)
+                    .expect("validated definition");
+                *definition = replacement;
                 return;
             }
             _ => {}
@@ -7772,6 +8810,8 @@ impl DocumentCommand {
                 NonFieldCommandOperation::AddPatternDefinition
                 | NonFieldCommandOperation::AddTypedPatternDefinition
                 | NonFieldCommandOperation::ReplaceSelectedChannelDefinitionTopology
+                | NonFieldCommandOperation::ReplaceSelectedChannelDefinitionRecipe
+                | NonFieldCommandOperation::ReplaceSharedPatternDefinitionRecipe
                 | NonFieldCommandOperation::DuplicatePatternDefinition
                 | NonFieldCommandOperation::RemoveUnreferencedPatternDefinition => {
                     InvalidationLevel::Family
@@ -7788,10 +8828,13 @@ impl DocumentCommand {
                 | Self::DuplicatePatternDefinition { .. }
                 | Self::RemoveUnreferencedPatternDefinition { .. } => Vec::new(),
                 Self::RetargetChannelPatternDefinition { channel_id, .. }
+                | Self::ReplaceSelectedChannelDefinitionTopology { channel_id, .. }
+                | Self::ReplaceSelectedChannelDefinitionRecipe { channel_id, .. }
                 | Self::EditSelectedChannelPatternDefinition { channel_id, .. } => {
                     vec![*channel_id]
                 }
-                Self::EditSharedPatternDefinition { .. } => Vec::new(),
+                Self::EditSharedPatternDefinition { .. }
+                | Self::ReplaceSharedPatternDefinitionRecipe { .. } => Vec::new(),
                 Self::SetSourceReference { .. } => after.channel_ids(),
                 Self::ReplaceChannelTopology { topology, .. } => {
                     affected_topology_channels(before.channel_ids(), topology)

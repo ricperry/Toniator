@@ -169,6 +169,9 @@ fn transition_control_route(value: &VariantTransitionValue) -> InspectorControlR
     }
 }
 
+/// Preserves the selected stable channel ID when it survives a document
+/// transition and otherwise chooses the first authoritative channel. This
+/// policy never invents a channel ID and returns `None` for an empty topology.
 fn selected_channel_after_transition(
     selected: Option<ChannelId>,
     authoritative_order: &[ChannelId],
@@ -176,6 +179,18 @@ fn selected_channel_after_transition(
     selected
         .filter(|id| authoritative_order.contains(id))
         .or_else(|| authoritative_order.first().copied())
+}
+
+/// Resolves a GTK selector position through the current authoritative channel
+/// order. Invalid GTK positions and positions outside that order are rejected
+/// so a notification can never select a stale or fabricated channel.
+fn channel_id_at_selector_position(
+    position: u32,
+    authoritative_order: &[ChannelId],
+) -> Option<ChannelId> {
+    (position != gtk::INVALID_LIST_POSITION)
+        .then_some(position as usize)
+        .and_then(|index| authoritative_order.get(index).copied())
 }
 
 impl PreviewModel {
@@ -719,10 +734,12 @@ struct AppState {
     banner: adw::Banner,
     selector: gtk::DropDown,
     channel_selector: gtk::DropDown,
+    channel_selector_model: gtk::StringList,
     inspector: gtk::Box,
     inspector_status: gtk::Label,
     inspector_runtime: InspectorRuntime,
     syncing_inspector: bool,
+    inspector_rebuild_scheduled: bool,
     preview: Option<gtk::gdk::Texture>,
     preview_target: Option<toniator_engine::PreviewRasterTarget>,
 }
@@ -750,6 +767,10 @@ fn parse_args(arguments: Vec<std::ffi::OsString>) -> Result<Option<PathBuf>, Str
     }
 }
 
+/// Constructs the GTK-only application window and connects its controls to the
+/// authoritative headless workspace/history boundary. This function owns
+/// widget lifetime and notification wiring, but never directly mutates a
+/// document outside the existing command paths.
 fn build_window(app: &adw::Application, initial_path: Option<PathBuf>) {
     install_css();
     let window = adw::ApplicationWindow::builder()
@@ -777,7 +798,11 @@ fn build_window(app: &adw::Application, initial_path: Option<PathBuf>) {
     let channel_label = gtk::Label::new(Some("_Channel"));
     channel_label.set_use_underline(true);
     channel_label.add_css_class("dim-label");
-    let channel_selector = gtk::DropDown::from_strings(&["No channel"]);
+    let channel_selector_model = gtk::StringList::new(&[]);
+    let channel_selector = gtk::DropDown::new(
+        Some(channel_selector_model.clone()),
+        None::<gtk::Expression>,
+    );
     channel_selector.set_sensitive(false);
     channel_selector.set_tooltip_text(Some("Selected authoritative channel"));
     channel_label.set_mnemonic_widget(Some(&channel_selector));
@@ -898,10 +923,12 @@ fn build_window(app: &adw::Application, initial_path: Option<PathBuf>) {
         banner,
         selector,
         channel_selector,
+        channel_selector_model,
         inspector,
         inspector_status,
         inspector_runtime: InspectorRuntime::default(),
         syncing_inspector: false,
+        inspector_rebuild_scheduled: false,
         preview: None,
         preview_target: None,
     }));
@@ -929,7 +956,7 @@ fn build_window(app: &adw::Application, initial_path: Option<PathBuf>) {
                 .as_ref()
                 .map(|workspace| authoritative_channel_ids(workspace.document()))
                 .unwrap_or_default();
-            if let Some(channel_id) = ids.get(selector.selected() as usize).copied() {
+            if let Some(channel_id) = channel_id_at_selector_position(selector.selected(), &ids) {
                 {
                     let mut app_state = state.borrow_mut();
                     app_state.inspector_runtime.selected_channel = Some(channel_id);
@@ -938,7 +965,7 @@ fn build_window(app: &adw::Application, initial_path: Option<PathBuf>) {
                     // channel into it.
                     app_state.inspector_runtime.focus = None;
                 }
-                rebuild_inspector(&state);
+                schedule_inspector_rebuild(&state);
             }
         });
     }
@@ -1475,11 +1502,41 @@ fn schedule_inspector_focus(
     });
 }
 
+/// Coalesces a channel-selector rebuild onto the GTK idle queue. The queue
+/// boundary lets `selected-notify` unwind before the selector model or its
+/// selected position changes, preventing GTK re-entrancy while retaining the
+/// latest stable-ID runtime state.
+fn schedule_inspector_rebuild(state: &Rc<RefCell<AppState>>) {
+    let should_schedule = {
+        let mut app_state = state.borrow_mut();
+        if app_state.inspector_rebuild_scheduled {
+            false
+        } else {
+            app_state.inspector_rebuild_scheduled = true;
+            true
+        }
+    };
+    if !should_schedule {
+        return;
+    }
+    let state = Rc::clone(state);
+    glib::idle_add_local_once(move || {
+        state.borrow_mut().inspector_rebuild_scheduled = false;
+        rebuild_inspector(&state);
+    });
+}
+
+/// Rebuilds the inspector from authoritative document descriptors while
+/// preserving runtime-only stable selection, focus, expansion, and draft
+/// policy. Selector synchronization mutates only its persistent model while
+/// programmatic notifications are guarded.
 fn rebuild_inspector(state: &Rc<RefCell<AppState>>) {
     let (
         inspector,
         status,
         selector,
+        selector_model,
+        channel_ids,
         labels,
         selected,
         values,
@@ -1528,6 +1585,12 @@ fn rebuild_inspector(state: &Rc<RefCell<AppState>>) {
             state.inspector.clone(),
             state.inspector_status.clone(),
             selector,
+            state.channel_selector_model.clone(),
+            state
+                .workspace
+                .as_ref()
+                .map(|workspace| authoritative_channel_ids(workspace.document()))
+                .unwrap_or_default(),
             labels,
             selected,
             values,
@@ -1538,29 +1601,17 @@ fn rebuild_inspector(state: &Rc<RefCell<AppState>>) {
             state.inspector_runtime.focus.clone(),
         )
     };
-    selector.set_model(Some(&gtk::StringList::new(
-        labels
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .as_slice(),
-    )));
+    selector_model.splice(
+        0,
+        selector_model.n_items(),
+        &labels.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
     selector.set_sensitive(!labels.is_empty());
     selector.set_selected(
         selected
-            .and_then(|id| {
-                authoritative_channel_ids(
-                    state
-                        .borrow()
-                        .workspace
-                        .as_ref()
-                        .expect("selected has workspace")
-                        .document(),
-                )
-                .iter()
-                .position(|candidate| *candidate == id)
-            })
-            .unwrap_or(gtk::INVALID_LIST_POSITION as usize) as u32,
+            .and_then(|id| channel_ids.iter().position(|candidate| *candidate == id))
+            .map(|index| index as u32)
+            .unwrap_or(gtk::INVALID_LIST_POSITION),
     );
     state.borrow_mut().syncing_inspector = false;
 
@@ -5086,6 +5137,9 @@ mod tests {
         )
     }
 
+    /// Verifies stable-ID selection retention, deterministic removal fallback,
+    /// and rejection of invalid GTK selector positions without constructing GTK
+    /// widgets or changing document authority.
     #[test]
     fn inspector_selection_is_stable_id_based_and_has_deterministic_removal_fallback() {
         let ids = [ChannelId(30), ChannelId(10), ChannelId(20)];
@@ -5105,6 +5159,46 @@ mod tests {
             selected_channel_after_transition(Some(ChannelId(10)), &[]),
             None
         );
+        assert_eq!(
+            channel_id_at_selector_position(1, &ids),
+            Some(ChannelId(10)),
+            "a valid GTK position resolves through authoritative document order"
+        );
+        assert_eq!(
+            channel_id_at_selector_position(gtk::INVALID_LIST_POSITION, &ids),
+            None,
+            "GTK's invalid position cannot alter selected channel state"
+        );
+        assert_eq!(
+            channel_id_at_selector_position(3, &ids),
+            None,
+            "out-of-range positions cannot select a stale channel"
+        );
+    }
+
+    /// Locks the source-level GTK re-entrancy contract: the channel selector
+    /// owns one persistent string-list model, selected notifications schedule
+    /// an idle rebuild, and rebuilds splice rather than replace that model.
+    #[test]
+    fn channel_selector_defers_rebuild_and_preserves_its_persistent_model() {
+        let implementation = include_str!("main.rs");
+        let build_window_source = implementation
+            .split("fn build_window")
+            .nth(1)
+            .and_then(|source| source.split("fn connect_actions").next())
+            .expect("application source retains the window construction boundary");
+        assert!(build_window_source.contains("gtk::StringList::new(&[])"));
+        assert!(build_window_source.contains("schedule_inspector_rebuild(&state)"));
+
+        let rebuild_source = implementation
+            .split("fn rebuild_inspector")
+            .nth(1)
+            .and_then(|source| source.split("fn append_expander").next())
+            .expect("application source retains the inspector rebuild boundary");
+        assert!(rebuild_source.contains("selector_model.splice("));
+        assert!(!rebuild_source.contains("selector.set_model("));
+        assert!(rebuild_source.contains("state.syncing_inspector = true"));
+        assert!(rebuild_source.contains("state.borrow_mut().syncing_inspector = false"));
     }
 
     #[test]

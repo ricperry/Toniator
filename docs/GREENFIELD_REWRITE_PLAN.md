@@ -1642,7 +1642,7 @@ visual, keyboard/focus, or assistive-technology review.
 
 ## Stage 19A — Pure-schema preset registry
 
-**Status: Planned.** Add a versioned headless preset registry whose entries are
+**Status: Accepted awaiting checkpoint.** Add a versioned headless preset registry whose entries are
 ordinary typed pattern definitions using only exposed mechanisms.
 
 - Applying a preset creates an independent document-owned definition by
