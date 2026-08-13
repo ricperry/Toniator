@@ -302,9 +302,27 @@ The accepted persistent-`StringList`/`splice`/deferred-rebuild/
 invalid-position selector correction is included in this checkpoint as a
 bounded GTK correction, not GTK preset UI.
 
-**Stage 19B — Planned.** Add the separate descriptor-driven structural Pattern
-Editor, defaulting shared definitions to atomic copy-on-edit and exposing
-deliberate affected-channel **Edit Shared Definition** behavior.
+**Stage 19B — Complete at commit `b0b84e4`.** The first descriptor-driven GTK
+Pattern Editor failed artist-usability review because raw artwork could not
+apply the bundled Random or Grid patterns and the interface exposed
+engine-oriented controls instead of a coherent creative workflow. That attempt
+is superseded by the accepted GTK application remediation: an adaptive canvas
+and persistent artist-facing channel editor, immediate bundled-pattern
+application, visible Undo/Redo, and a deliberately opened private-draft Pattern
+Editor, all over the accepted headless command, history, scheduler, persistence,
+and canonical-output authorities. The user accepted this implementation
+milestone at the local `b0b84e4` checkpoint; that acceptance does not claim
+manual GNOME Shell/Mutter or exhaustive usability acceptance.
+
+The stage-owned report under `target/validation/stage-19b-gui-remediation/`
+records private Sway/AT-SPI evidence, direct persistence and canonical export
+witnesses for both immutable inputs, and focused private-draft transition
+tests. Its limits remain explicit: portal dialogs are external surfaces,
+UI-driven export encountered a private-session keyring surface, and injected
+WayVNC keyboard/pointer actions did not reach GTK; direct boundary tests cover
+canonical output instead. The report was generated from the implementation
+tree immediately before the local checkpoint, whose exact accepted SHA is
+`b0b84e4`.
 
 **Stage 20+ — Planned.** Add curved/procedural guides, connected/network output,
 regions/Voronoi and reusable offsetting, composite output mechanisms,

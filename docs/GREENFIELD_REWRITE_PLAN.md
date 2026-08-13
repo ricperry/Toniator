@@ -1678,25 +1678,64 @@ versioning, independent versus explicitly disclosed shared application, and
 canonical output parity were accepted at implementation checkpoint `9919d85`.
 The documented selector correction does not add GTK preset/pattern editing.
 
-## Stage 19B — Structural GTK Pattern Editor
+## Stage 19B — Feedback-ready GTK application remediation
 
-**Status: Planned.** Add a separate structural editor launched from selected
-channel context and driven by Stage 17 descriptors.
+**Status: Complete at commit `b0b84e4`.** The first descriptor-driven Pattern
+Editor failed artist-usability review: raw artwork could not apply a Random or
+Grid pattern, the window edited the main document immediately instead of owning
+a private draft, Blueprint was only an unused probe, and engine terminology
+dominated the workflow. This accepted remediation supersedes that implementation
+without changing the accepted headless document, command, history, invalidation,
+scheduler, persistence, preset, rendering, or canonical-output authorities
+unless a focused test proves a defect. The user accepted the implementation at
+the local `b0b84e4` checkpoint.
 
-- Default ordinary editing uses the atomic copy-on-edit command when the
-  selected definition is shared. A separate deliberate **Edit Shared
-  Definition** operation shows every affected channel before dispatch.
-- Edit the typed family, mechanisms, modulation, coverage, and ordered output
-  layers supported by the current evaluator. Raw schema JSON is not the primary
-  workflow, and unsupported future mechanisms are not exposed.
-- Transient widget/draft text is non-authoritative. Valid edits commit through
-  typed commands, history, exact invalidation, and the shared scheduler/preview.
-- Preset application creates an independent definition by default; deliberate
-  shared replacement remains explicit.
+- Split `toniator-app` into an application model with no widgets, a typed-intent
+  controller, immutable document/channel/pattern/lifecycle/preview view models,
+  a generation- and ticket-aware preview coordinator, and GTK components that
+  render view models and emit intents. Async completion returns through GLib
+  main-context messages rather than one universal polling loop.
+- Make Blueprint/GResource the actual composition system for the adaptive main
+  shell, persistent channel editor, stable pattern-catalog rows, separate
+  Pattern Editor, and dialogs. Stable IDs, unique accessible names, predictable
+  focus order, and persistent list models are part of the component contract.
+- The main window presents artist-facing channel selection, visibility, color,
+  opacity, source mapping, named pattern selection, density/aspect lock,
+  rotation, X/Y offset, compatible mark sizing, visible Undo/Redo, and an
+  explicit **Edit Pattern...** action. Bundled **Even Random Circles** and
+  **Straight Grid Circles** apply immediately through
+  `PresetRegistry::apply_to_selected` as one undoable copy-on-edit transition.
+  Shared replacement remains a separate affected-channel disclosure and
+  confirmation workflow.
+- The document-modal Pattern Editor owns a cloned private document/history
+  draft and a simplified preview using the existing scheduler and canonical
+  rendering path. It exposes only currently supported Grid and Random structure,
+  with modulation, exclusion, coverage, and safety under Advanced. Cancel and
+  standard close discard the draft, confirming when dirty. **Save as Preset...**
+  remains visibly disabled as later-stage work; no preset storage or library
+  management is added here.
+- Numeric controls commit once per completed gesture or Enter. Choices and
+  toggles may commit immediately. Loading, error, keyboard, focus, and
+  accessibility states use artist language and never treat descriptors or
+  engine IDs as the product interface.
+- An internal opt-in JSONL event sink may observe immutable synchronization
+  events for workspace generation, document revision, selected channel, active
+  family, dirty/savepoint and lifecycle state, submitted/accepted preview
+  identity, and export completion. It is evidence infrastructure, not document
+  authority or a production control API.
 
-**Stop condition:** User constructs, saves, reloads, edits, shares/copies, undoes,
-and renders representative grid and random definitions without hidden or
-named-pattern behavior.
+**Stop condition (complete):** The stage-owned report under
+`target/validation/stage-19b-gui-remediation/` records the bounded private Sway
+GTK/AT-SPI evidence, responsive header/sidebar placement, selected preset
+projection, direct persistence and canonical PNG/SVG witnesses for both
+immutable inputs, and focused private Pattern Editor transition tests. The
+private harness has explicit limits: portal dialogs are external surfaces,
+UI-driven export encountered a private-session keyring surface, and injected
+WayVNC keyboard/pointer actions did not reach GTK. Direct boundary tests cover
+canonical output, but these results do not claim manual GNOME Shell/Mutter or
+exhaustive usability acceptance. The accepted implementation checkpoint is
+`b0b84e4`; **Save as Preset...** remains disabled and preset authoring,
+library management, and Stage 20+ work remain planned.
 
 ## Stage 20+ — Advanced reusable mechanisms
 

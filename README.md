@@ -225,6 +225,28 @@ The accepted channel-selector correction is included in `9919d85`: it uses a
 persistent `StringList`, `splice`, deferred rebuild, and invalid-position
 rejection. This is a bounded GTK selector correction, not GTK preset UI.
 
+Stage 19B is complete at implementation checkpoint `b0b84e4`. It supersedes the
+first descriptor-driven Pattern Editor after artist-usability review found that
+raw artwork could not apply Random or Grid patterns, edits changed the main
+document immediately, Blueprint was only an unused probe, and engine
+terminology dominated the workflow. The remediation uses the actual
+Blueprint/GResource composition, an adaptive artist-facing channel editor with
+immediate bundled Even Random Circles and Straight Grid Circles application,
+visible Undo/Redo, and a separate private-draft Pattern Editor over the accepted
+headless command/history/scheduler and canonical preview, PNG, and SVG paths.
+`Save as Preset...` remains disabled; preset authoring, library management, and
+Stage 20+ mechanisms remain planned.
+
+Stage-owned validation under
+`target/validation/stage-19b-gui-remediation/` includes private Sway/AT-SPI
+layout and selector evidence, focused private-draft transition tests, and
+direct persistence/canonical-output witnesses for both immutable inputs. These
+results do not claim manual GNOME Shell/Mutter or exhaustive usability
+acceptance: portal dialogs and a private-session keyring surface were external,
+and injected WayVNC keyboard/pointer actions did not reach GTK. The user
+accepted the implementation checkpoint; this evidence boundary remains in
+force.
+
 Low-resolution fixtures and outputs are supplementary only. Every future stage
 that exercises source loading, sampling, rendering, preview, or export must
 also test the immutable PNG at its natural 1024×1024 dimensions and the SVG at
