@@ -12,8 +12,18 @@
   GTK/libadwaita; `toniator-cli` is headless; GTK/libadwaita belongs only in
   `toniator-app`; canonical geometry remains the shared preview/PNG/SVG
   boundary; authoritative commands report the correct invalidation level.
-- Do not add broad legacy compatibility, hidden adapters, or preset-specific
-  behavior. Current schemas and explicit porting decisions are authoritative.
+- Toniator is pre-release. Do not implement, preserve, or extend backward
+  compatibility for superseded in-development schemas, containers, behaviors,
+  fixtures, or adapters unless the current stage contract or protected
+  normative specification explicitly requires it. Current schemas and explicit
+  porting decisions are authoritative; reject obsolete formats instead of
+  migrating them by default.
+- Keep verification stage-scoped. Add focused tests for each stage's new or
+  changed behavior and run only those tests plus directly relevant current
+  foundational checks. Do not use workspace- or package-wide test commands that
+  sweep obsolete historical export or compatibility tests, and do not regenerate
+  earlier-stage validation directories. Run a historical test only for an
+  explicitly authorized quarry task.
 - Read applicable `.codex-work/` evidence before broad exploration, then
   validate it against the current checkout. Evidence is not durable product
   documentation.
