@@ -9,8 +9,9 @@ implementation and focused gate are complete and the independent read-only
 review passes. User acceptance is complete. The single acceptance checkpoint
 includes the implementation, the authorized current-format real-world
 `.toniator` fixture, and durable documentation; this contract intentionally
-does not invent a self-referential checkpoint hash. Stage 20C is the next
-planning-only boundary and is not started.
+does not invent a self-referential checkpoint hash. Stage 20C subsequently
+completed in its own single named acceptance checkpoint with direct parent
+`08d970a`; its checkpoint hash is intentionally not self-referenced here.
 
 Stage 20B adds a finite, deterministic, geometry-owned foundation for connected
 line and cubic Bézier paths: explicit line/polyline/cubic construction; open
@@ -312,6 +313,10 @@ review and manual desktop acceptance are excluded.
 
 ## Review, acceptance, checkpoint and stop gates (historical execution record)
 
+The following numbered gates preserve the Stage 20B execution record. They are
+not current Stage 20C status instructions; Stage 20B is complete and Stage 20C
+is complete in its named acceptance checkpoint.
+
 1. The parent rechecks the approved start gate and records only Stage 20B
    **In progress**.
 2. Exactly one `desktop_implementer` implements and verifies the allowlist.
@@ -330,9 +335,11 @@ review and manual desktop acceptance are excluded.
 
 The executed closeout supersedes the intermediate statuses above: Stage 20B is
 complete in the single acceptance checkpoint, which contains all tracked Stage
-20B implementation, fixture, and durable documentation. Stage 20C is not
-started and requires a fresh planning-only contract and explicit user approval
-before implementation.
+20B implementation, fixture, and durable documentation. The later Stage 20C
+closeout is also complete in its single named acceptance checkpoint, whose
+direct parent is `08d970a`; that checkpoint hash is intentionally not
+self-referenced here. Stage 20D remains planned and requires a fresh
+planning-only contract and explicit user approval before implementation.
 
 If implementation reveals a material vocabulary/numerical decision, needs a
 dependency or excluded file, cannot satisfy the fixed tolerance/limit

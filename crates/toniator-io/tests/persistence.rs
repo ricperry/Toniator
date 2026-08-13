@@ -8,8 +8,9 @@ use std::{
 };
 
 use toniator_domain::{
-    ArtworkWeightResponse, CanvasSpec, ChannelAppearance, ChannelId, ChannelPaint,
-    ChannelPatternLayout, ChannelSourceMapping, ChannelState, ChannelTopology,
+    ArtworkWeightResponse, AuthoredCurveSegment, AuthoredPoint2, AuthoredStructure,
+    AuthoredStructureId, AuthoredStructureKind, CanvasSpec, ChannelAppearance, ChannelId,
+    ChannelPaint, ChannelPatternLayout, ChannelSourceMapping, ChannelState, ChannelTopology,
     ChannelTopologyTemplate, ColorComponent, ColorValue, CoveragePolicy, DensityMetric2D, Document,
     DocumentCommand, DocumentHistory, DocumentId, DocumentSession, GeneralizedSiteProduct,
     GuideDimensionId, HalftoneChannelModel, MarkGeometryResponse, MarkOrientation,
@@ -218,6 +219,166 @@ fn random_site_v2_definition_round_trips_without_changing_existing_v2_forms() {
     fs::remove_file(first).unwrap();
     fs::remove_file(second).unwrap();
     assert_eq!(loaded.document(), &document);
+}
+
+/// Builds a finite authored point for deterministic Stage 20C persistence fixtures.
+fn authored_point(x: f64, y: f64) -> AuthoredPoint2 {
+    AuthoredPoint2 { x, y }
+}
+
+/// Builds one document with ordered authored open and closed construction structures.
+fn document_with_authored_structures() -> (Document, SourceBundle) {
+    let (base, sources) = legacy_document();
+    let structures = vec![
+        AuthoredStructure::new(
+            AuthoredStructureId(21),
+            AuthoredStructureKind::OpenPath,
+            vec![
+                AuthoredCurveSegment::Line {
+                    start: authored_point(-0.0, 1.0),
+                    end: authored_point(2.0, 3.0),
+                },
+                AuthoredCurveSegment::CubicBezier {
+                    start: authored_point(2.0, 3.0),
+                    control_1: authored_point(4.0, 5.0),
+                    control_2: authored_point(6.0, 7.0),
+                    end: authored_point(8.0, 9.0),
+                },
+            ],
+        )
+        .unwrap(),
+        AuthoredStructure::new(
+            AuthoredStructureId(4),
+            AuthoredStructureKind::ClosedShape,
+            vec![AuthoredCurveSegment::Line {
+                start: authored_point(10.0, 11.0),
+                end: authored_point(10.0, 11.0),
+            }],
+        )
+        .unwrap(),
+    ];
+    (
+        Document::with_source_and_authored_structures(
+            base.id(),
+            base.canvas().clone(),
+            base.source().clone(),
+            base.pattern_definitions().to_vec(),
+            base.channels().unwrap().to_vec(),
+            structures,
+        )
+        .unwrap(),
+        sources,
+    )
+}
+
+/// Round-trips ordered authored structures with exact IDs, variants, declared topology, and coordinates.
+#[test]
+fn stage20c_authored_structures_round_trip_ids_order_topology_and_coordinates() {
+    let (document, sources) = document_with_authored_structures();
+    let first = temporary("stage20c-authored-first.toniator");
+    let second = temporary("stage20c-authored-second.toniator");
+    save(&first, &document, &sources).unwrap();
+    save(&second, &document, &sources).unwrap();
+    assert_eq!(fs::read(&first).unwrap(), fs::read(&second).unwrap());
+    let loaded = load(&first).unwrap();
+    assert_eq!(loaded.document(), &document);
+    let structures = loaded.document().authored_structures();
+    assert_eq!(
+        structures
+            .iter()
+            .map(|structure| structure.id())
+            .collect::<Vec<_>>(),
+        vec![AuthoredStructureId(21), AuthoredStructureId(4)]
+    );
+    assert_eq!(structures[0].kind(), AuthoredStructureKind::OpenPath);
+    assert_eq!(structures[1].kind(), AuthoredStructureKind::ClosedShape);
+    let AuthoredCurveSegment::Line { start, .. } = structures[0].segments()[0] else {
+        panic!("first authored segment must retain its line variant");
+    };
+    assert_eq!(start.x.to_bits(), (-0.0_f64).to_bits());
+    assert!(matches!(
+        structures[0].segments()[1],
+        AuthoredCurveSegment::CubicBezier { .. }
+    ));
+    fs::remove_file(first).unwrap();
+    fs::remove_file(second).unwrap();
+}
+
+/// Proves empty-store saves retain accepted current-v2 bytes and immutable v1 migration begins empty.
+#[test]
+fn stage20c_empty_store_preserves_accepted_v2_bytes_and_v1_migration() {
+    let (document, sources) = legacy_document();
+    let (first_json, _, _) = saved_parts(&document, &sources);
+    let (second_json, _, _) = saved_parts(&document, &sources);
+    assert_eq!(first_json, second_json);
+    let json = String::from_utf8(first_json).unwrap();
+    assert!(!json.contains("authored_structures"));
+    for fixture in ["raster-sample-v1.toniator", "vector-sample-v1.toniator"] {
+        let loaded = load(&asset(fixture)).unwrap();
+        assert!(!loaded.migration_report().is_empty());
+        assert!(loaded.document().authored_structures().is_empty());
+    }
+    let migrated = load(&asset("raster-sample-v1.toniator")).unwrap();
+    let path = temporary("stage20c-accepted-old-v2.toniator");
+    save(&path, migrated.document(), migrated.sources()).unwrap();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(fs::read(&path).unwrap())),
+        "7135531041b8a4f9136731267b356ce4b3acbdb74c6e12c6670817e0613436cf"
+    );
+    fs::remove_file(path).unwrap();
+}
+
+/// Proves current-v2 documents without the defaulted field load with an empty authored-structure store.
+#[test]
+fn stage20c_existing_documents_load_with_empty_authored_structure_store() {
+    let (document, sources) = legacy_document();
+    let (json, source_name, source) = saved_parts(&document, &sources);
+    assert!(
+        !String::from_utf8(json.clone())
+            .unwrap()
+            .contains("authored_structures")
+    );
+    let bytes = archive_from_entries(&[
+        ("document.json", &json, zip::CompressionMethod::Stored),
+        (&source_name, &source, zip::CompressionMethod::Stored),
+    ]);
+    let path = temporary("stage20c-existing-v2.toniator");
+    fs::write(&path, bytes).unwrap();
+    let loaded = load(&path).unwrap();
+    assert!(loaded.migration_report().is_empty());
+    assert!(loaded.document().authored_structures().is_empty());
+    fs::remove_file(path).unwrap();
+}
+
+/// Rejects invalid authored resource JSON before it can publish a partially reconstructed document.
+#[test]
+fn stage20c_invalid_resource_json_rejects_before_document_commit() {
+    let (document, sources) = legacy_document();
+    let (json, source_name, source) = saved_parts(&document, &sources);
+    let mut value: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    value["document"]["authored_structures"] = serde_json::json!([{
+        "id": 0,
+        "kind": "open_path",
+        "segments": [{
+            "kind": "line",
+            "start": {"x": 0.0, "y": 0.0},
+            "end": {"x": 1.0, "y": 0.0}
+        }]
+    }]);
+    let invalid = serde_json::to_vec(&value).unwrap();
+    assert_load_error(
+        &archive_from_entries(&[
+            ("document.json", &invalid, zip::CompressionMethod::Stored),
+            (&source_name, &source, zip::CompressionMethod::Stored),
+        ]),
+        |error| {
+            matches!(
+                error,
+                LoadError::DomainValidation { context }
+                    if context == "authored_structures.id: authored structure IDs must be nonzero"
+            )
+        },
+    );
 }
 
 #[test]

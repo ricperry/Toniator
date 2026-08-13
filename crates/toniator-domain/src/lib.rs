@@ -23,6 +23,226 @@ pub struct PatternMechanismId(pub u64);
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PatternOutputLayerId(pub u64);
 
+/// A stable identifier for one reusable authored construction structure owned
+/// by exactly one document.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AuthoredStructureId(pub u64);
+
+/// One finite document-space point in an authored construction structure.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AuthoredPoint2 {
+    pub x: f64,
+    pub y: f64,
+}
+
+/// One explicit construction segment in an authored open path or closed shape.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AuthoredCurveSegment {
+    Line {
+        start: AuthoredPoint2,
+        end: AuthoredPoint2,
+    },
+    CubicBezier {
+        start: AuthoredPoint2,
+        control_1: AuthoredPoint2,
+        control_2: AuthoredPoint2,
+        end: AuthoredPoint2,
+    },
+}
+
+impl AuthoredCurveSegment {
+    /// Returns the explicit segment start without inferring a connection from adjacent storage.
+    pub const fn start(&self) -> AuthoredPoint2 {
+        match self {
+            Self::Line { start, .. } | Self::CubicBezier { start, .. } => *start,
+        }
+    }
+
+    /// Returns the explicit segment end without inferring a connection from adjacent storage.
+    pub const fn end(&self) -> AuthoredPoint2 {
+        match self {
+            Self::Line { end, .. } | Self::CubicBezier { end, .. } => *end,
+        }
+    }
+}
+
+/// The declared topology of one authored construction structure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthoredStructureKind {
+    OpenPath,
+    ClosedShape,
+}
+
+/// A validated ID-free authored-structure payload for an authoritative add or replacement command.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AuthoredStructureDraft {
+    kind: AuthoredStructureKind,
+    segments: Vec<AuthoredCurveSegment>,
+}
+
+impl AuthoredStructureDraft {
+    /// Validates one ID-free authored payload before it can become document-owned state.
+    ///
+    /// # Errors
+    ///
+    /// Returns the stable authored-structure topology, coordinate, or segment-limit diagnostic.
+    pub fn new(
+        kind: AuthoredStructureKind,
+        segments: Vec<AuthoredCurveSegment>,
+    ) -> Result<Self, ValidationError> {
+        validate_authored_structure_segments(kind, &segments)?;
+        Ok(Self { kind, segments })
+    }
+
+    /// Returns the declared topology without deriving closure from endpoint coincidence.
+    pub const fn kind(&self) -> AuthoredStructureKind {
+        self.kind
+    }
+
+    /// Returns immutable explicit construction segments in their authored order.
+    pub fn segments(&self) -> &[AuthoredCurveSegment] {
+        &self.segments
+    }
+}
+
+/// A validated reusable authored structure with a stable document-scoped identity.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AuthoredStructure {
+    id: AuthoredStructureId,
+    kind: AuthoredStructureKind,
+    segments: Vec<AuthoredCurveSegment>,
+}
+
+impl AuthoredStructure {
+    /// Validates one stable document-owned authored structure without assigning or remapping its ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an authored-structure ID, topology, coordinate, or segment-limit diagnostic.
+    pub fn new(
+        id: AuthoredStructureId,
+        kind: AuthoredStructureKind,
+        segments: Vec<AuthoredCurveSegment>,
+    ) -> Result<Self, ValidationError> {
+        validate_authored_structure_id(id)?;
+        validate_authored_structure_segments(kind, &segments)?;
+        Ok(Self { id, kind, segments })
+    }
+
+    /// Returns the immutable document-scoped identity preserved by replacement, persistence, and history.
+    pub const fn id(&self) -> AuthoredStructureId {
+        self.id
+    }
+
+    /// Returns the declared topology without deriving closure from endpoint coincidence.
+    pub const fn kind(&self) -> AuthoredStructureKind {
+        self.kind
+    }
+
+    /// Returns immutable explicit construction segments in their authored order.
+    pub fn segments(&self) -> &[AuthoredCurveSegment] {
+        &self.segments
+    }
+
+    /// Rebuilds this structure with a replacement payload while preserving its stable identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns the stable authored-structure topology, coordinate, or segment-limit diagnostic;
+    /// the target ID is retained exactly and never reallocated.
+    pub(crate) fn replace_with(
+        &self,
+        replacement: &AuthoredStructureDraft,
+    ) -> Result<Self, ValidationError> {
+        Self::new(self.id, replacement.kind, replacement.segments.clone())
+    }
+}
+
+/// The value category exposed by one authored-structure descriptor field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthoredStructureValueKind {
+    EnumChoice,
+    SegmentSequence,
+}
+
+/// The stable identity of one editable authored-structure field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthoredStructureFieldId {
+    Kind,
+    Segments,
+}
+
+/// The construction variant of one authored curve segment for descriptor choices and UI-neutral tooling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthoredCurveSegmentKind {
+    Line,
+    CubicBezier,
+}
+
+/// Value-free editing contract for one authored-structure field.
+///
+/// `invalidation` is a target-independent conservative upper bound for any
+/// command affecting this field. A descriptor refines it against its concrete
+/// structure kind: closed-shape segment edits are `Realization`, while any
+/// open-path segment edit remains `Family`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AuthoredStructureFieldContract {
+    pub field: AuthoredStructureFieldId,
+    pub value_kind: AuthoredStructureValueKind,
+    pub allowed_structure_kinds: &'static [AuthoredStructureKind],
+    pub allowed_segment_kinds: &'static [AuthoredCurveSegmentKind],
+    pub maximum_segments: Option<usize>,
+    pub shared_edit: bool,
+    pub invalidation: InvalidationLevel,
+}
+
+/// Value-free descriptor for one document-owned authored structure field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AuthoredStructureFieldDescriptor {
+    pub target: AuthoredStructureId,
+    pub field: AuthoredStructureFieldId,
+    pub value_kind: AuthoredStructureValueKind,
+    pub allowed_structure_kinds: &'static [AuthoredStructureKind],
+    pub allowed_segment_kinds: &'static [AuthoredCurveSegmentKind],
+    pub maximum_segments: Option<usize>,
+    pub shared_edit: bool,
+    pub invalidation: InvalidationLevel,
+}
+
+const AUTHORED_STRUCTURE_KINDS: &[AuthoredStructureKind] = &[
+    AuthoredStructureKind::OpenPath,
+    AuthoredStructureKind::ClosedShape,
+];
+const AUTHORED_CURVE_SEGMENT_KINDS: &[AuthoredCurveSegmentKind] = &[
+    AuthoredCurveSegmentKind::Line,
+    AuthoredCurveSegmentKind::CubicBezier,
+];
+const AUTHORED_STRUCTURE_FIELD_CONTRACTS: &[AuthoredStructureFieldContract] = &[
+    AuthoredStructureFieldContract {
+        field: AuthoredStructureFieldId::Kind,
+        value_kind: AuthoredStructureValueKind::EnumChoice,
+        allowed_structure_kinds: AUTHORED_STRUCTURE_KINDS,
+        allowed_segment_kinds: &[],
+        maximum_segments: None,
+        shared_edit: true,
+        invalidation: InvalidationLevel::Family,
+    },
+    AuthoredStructureFieldContract {
+        field: AuthoredStructureFieldId::Segments,
+        value_kind: AuthoredStructureValueKind::SegmentSequence,
+        allowed_structure_kinds: &[],
+        allowed_segment_kinds: AUTHORED_CURVE_SEGMENT_KINDS,
+        maximum_segments: Some(4_096),
+        shared_edit: true,
+        invalidation: InvalidationLevel::Family,
+    },
+];
+
+/// Returns the complete value-free authored-structure editing contract.
+pub const fn authored_structure_field_contracts() -> &'static [AuthoredStructureFieldContract] {
+    AUTHORED_STRUCTURE_FIELD_CONTRACTS
+}
+
 /// A stable identifier for one structural guide dimension.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GuideDimensionId(pub u64);
@@ -871,6 +1091,7 @@ pub struct Document {
     source: SourceReference,
     pattern_definitions: Vec<PatternDefinition>,
     channel_configuration: ChannelConfiguration,
+    authored_structures: Vec<AuthoredStructure>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -888,6 +1109,12 @@ impl Document {
     /// workspaces so their `DocumentSession`/`DocumentHistory` begins at
     /// revision zero. The fixed template stays encapsulated in the headless
     /// document layer rather than requiring caller-side construction details.
+    /// It initializes the Stage 20C authored-structure store empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns the existing topology or document validation diagnostics; the
+    /// default never manufactures authored structures.
     pub fn new_default_document(
         canvas: CanvasSpec,
         source: SourceReference,
@@ -934,6 +1161,12 @@ impl Document {
     }
 
     /// Constructs and validates a document with an unassigned source reference.
+    /// It delegates to the empty-authored-store legacy constructor.
+    ///
+    /// # Errors
+    ///
+    /// Returns any legacy document validation diagnostic after validating the
+    /// complete candidate and its empty authored-structure store.
     pub fn new(
         id: DocumentId,
         canvas: CanvasSpec,
@@ -950,6 +1183,12 @@ impl Document {
     }
 
     /// Constructs and validates a document with explicitly supplied source state.
+    /// It initializes the Stage 20C authored-structure store empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns any legacy document validation diagnostic after validating the
+    /// empty authored-structure store with the complete candidate.
     pub fn with_source(
         id: DocumentId,
         canvas: CanvasSpec,
@@ -963,6 +1202,7 @@ impl Document {
             source,
             pattern_definitions,
             channel_configuration: ChannelConfiguration::Legacy(channels),
+            authored_structures: Vec::new(),
         };
         document.validate()?;
         Ok(document)
@@ -971,7 +1211,13 @@ impl Document {
     /// Constructs a complete modeled document from an explicit, already
     /// ordered topology. This is intentionally the narrow construction seam
     /// used by persistence to rebuild a validated authoritative document; it
-    /// does not expose the private channel-configuration representation.
+    /// does not expose the private channel-configuration representation. It
+    /// initializes the Stage 20C authored-structure store empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns any topology or complete-document validation diagnostic after
+    /// validating the empty authored-structure store.
     pub fn with_source_and_topology(
         id: DocumentId,
         canvas: CanvasSpec,
@@ -986,6 +1232,60 @@ impl Document {
             source,
             pattern_definitions,
             channel_configuration: ChannelConfiguration::Topology { model, topology },
+            authored_structures: Vec::new(),
+        };
+        document.validate()?;
+        Ok(document)
+    }
+
+    /// Constructs and validates a legacy-channel document with explicit authored construction structures.
+    ///
+    /// # Errors
+    ///
+    /// Returns any existing document validation failure or an authored-structure ID, topology,
+    /// coordinate, continuity, closure, or document-wide limit diagnostic.
+    pub fn with_source_and_authored_structures(
+        id: DocumentId,
+        canvas: CanvasSpec,
+        source: SourceReference,
+        pattern_definitions: Vec<PatternDefinition>,
+        channels: Vec<ChannelState>,
+        authored_structures: Vec<AuthoredStructure>,
+    ) -> Result<Self, ValidationError> {
+        let document = Self {
+            id,
+            canvas,
+            source,
+            pattern_definitions,
+            channel_configuration: ChannelConfiguration::Legacy(channels),
+            authored_structures,
+        };
+        document.validate()?;
+        Ok(document)
+    }
+
+    /// Constructs and validates a modeled-topology document with explicit authored construction structures.
+    ///
+    /// # Errors
+    ///
+    /// Returns any existing document validation failure or an authored-structure ID, topology,
+    /// coordinate, continuity, closure, or document-wide limit diagnostic.
+    pub fn with_source_topology_and_authored_structures(
+        id: DocumentId,
+        canvas: CanvasSpec,
+        source: SourceReference,
+        pattern_definitions: Vec<PatternDefinition>,
+        model: HalftoneChannelModel,
+        topology: ChannelTopology,
+        authored_structures: Vec<AuthoredStructure>,
+    ) -> Result<Self, ValidationError> {
+        let document = Self {
+            id,
+            canvas,
+            source,
+            pattern_definitions,
+            channel_configuration: ChannelConfiguration::Topology { model, topology },
+            authored_structures,
         };
         document.validate()?;
         Ok(document)
@@ -1005,6 +1305,52 @@ impl Document {
 
     pub fn pattern_definitions(&self) -> &[PatternDefinition] {
         &self.pattern_definitions
+    }
+
+    /// Returns document-owned authored structures in stable creation order.
+    pub fn authored_structures(&self) -> &[AuthoredStructure] {
+        &self.authored_structures
+    }
+
+    /// Resolves one authored structure only within this document's stable ID namespace.
+    pub fn authored_structure(&self, id: AuthoredStructureId) -> Option<&AuthoredStructure> {
+        self.authored_structures
+            .iter()
+            .find(|structure| structure.id == id)
+    }
+
+    /// Reports whether an existing document-owned owner references an authored structure.
+    ///
+    /// Stage 20C deliberately has no live reference-bearing owner, so removal remains available
+    /// until a later stage introduces one and extends this authoritative check.
+    fn authored_structure_is_referenced(&self, _id: AuthoredStructureId) -> bool {
+        false
+    }
+
+    /// Returns value-free descriptors for every authored structure without exposing values or UI layout.
+    pub fn authored_structure_descriptors(&self) -> Vec<AuthoredStructureFieldDescriptor> {
+        self.authored_structures
+            .iter()
+            .flat_map(|structure| {
+                authored_structure_field_contracts()
+                    .iter()
+                    .map(move |contract| AuthoredStructureFieldDescriptor {
+                        target: structure.id,
+                        field: contract.field,
+                        value_kind: contract.value_kind,
+                        allowed_structure_kinds: contract.allowed_structure_kinds,
+                        allowed_segment_kinds: contract.allowed_segment_kinds,
+                        maximum_segments: contract.maximum_segments,
+                        shared_edit: contract.shared_edit,
+                        invalidation: match contract.field {
+                            AuthoredStructureFieldId::Kind => InvalidationLevel::Family,
+                            AuthoredStructureFieldId::Segments => {
+                                authored_structure_invalidation(structure.kind)
+                            }
+                        },
+                    })
+            })
+            .collect()
     }
 
     /// Returns the authoritative definition currently targeted by one channel.
@@ -2560,10 +2906,17 @@ impl Document {
         }
     }
 
-    /// Validates the complete persisted document contract.
+    /// Validates the complete persisted document contract, including its
+    /// bounded authored-structure store before channel or pattern state.
+    ///
+    /// # Errors
+    ///
+    /// Returns stable authored-structure, canvas, definition, channel, or
+    /// topology diagnostics without mutating the document.
     pub fn validate(&self) -> Result<(), ValidationError> {
         validate_positive_finite(self.canvas.width, "canvas.width")?;
         validate_positive_finite(self.canvas.height, "canvas.height")?;
+        validate_authored_structures(&self.authored_structures)?;
 
         let mut definition_ids = HashSet::new();
         let mut mechanism_ids = HashSet::new();
@@ -2643,6 +2996,12 @@ impl Document {
     ///
     /// `toniator-engine` is responsible for atomically installing the returned
     /// candidate alongside the corresponding revision advance.
+    ///
+    /// # Errors
+    ///
+    /// Returns stable command or complete-candidate validation diagnostics;
+    /// authored-structure failures leave `self` unchanged and publish neither
+    /// a new resource ID nor a partial command result.
     pub fn apply_command(
         &self,
         command: &DocumentCommand,
@@ -2696,6 +3055,158 @@ fn next_id(values: impl Iterator<Item = u64>, path: &'static str) -> Result<u64,
     maximum
         .checked_add(1)
         .ok_or_else(|| ValidationError::new(path, "document ID space is exhausted"))
+}
+
+/// Validates the document-owned authored-structure store and its aggregate bounds before commit.
+///
+/// # Errors
+///
+/// Returns stable store-limit, aggregate-segment-limit, ID, coordinate, or
+/// topology diagnostics without reordering, repairing, or allocating data.
+fn validate_authored_structures(structures: &[AuthoredStructure]) -> Result<(), ValidationError> {
+    if structures.len() > 4_096 {
+        return Err(ValidationError::new(
+            "authored_structures.limit",
+            "documents support at most 4096 authored structures",
+        ));
+    }
+    let mut ids = HashSet::new();
+    let mut total_segments = 0_usize;
+    for structure in structures {
+        validate_authored_structure_id(structure.id)?;
+        if !ids.insert(structure.id) {
+            return Err(ValidationError::new(
+                "authored_structures.id",
+                "authored structure IDs must be unique within a document",
+            ));
+        }
+        validate_authored_structure_segments(structure.kind, &structure.segments)?;
+        total_segments =
+            total_segments
+                .checked_add(structure.segments.len())
+                .ok_or(ValidationError::new(
+                    "authored_structures.segment_limit",
+                    "document authored segment count exceeds the supported limit",
+                ))?;
+        if total_segments > 65_536 {
+            return Err(ValidationError::new(
+                "authored_structures.segment_limit",
+                "documents support at most 65536 authored segments",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validates the nonzero stable identity of one document-owned authored structure.
+///
+/// # Errors
+///
+/// Returns `authored_structures.id` when the identity is zero.
+fn validate_authored_structure_id(id: AuthoredStructureId) -> Result<(), ValidationError> {
+    if id.0 == 0 {
+        return Err(ValidationError::new(
+            "authored_structures.id",
+            "authored structure IDs must be nonzero",
+        ));
+    }
+    Ok(())
+}
+
+/// Validates finite explicit segments and exact C0/closure topology without creating geometry.
+///
+/// # Errors
+///
+/// Returns stable empty, per-structure-limit, coordinate, continuity, or
+/// closure diagnostics; it accepts finite degeneracies and never adds a seam.
+fn validate_authored_structure_segments(
+    kind: AuthoredStructureKind,
+    segments: &[AuthoredCurveSegment],
+) -> Result<(), ValidationError> {
+    if segments.is_empty() {
+        return Err(ValidationError::new(
+            "authored_structures.segments.empty",
+            "authored structures require at least one segment",
+        ));
+    }
+    if segments.len() > 4_096 {
+        return Err(ValidationError::new(
+            "authored_structures.segments.limit",
+            "authored structures support at most 4096 segments",
+        ));
+    }
+    for segment in segments {
+        validate_authored_curve_segment(segment)?;
+    }
+    for pair in segments.windows(2) {
+        if pair[0].end() != pair[1].start() {
+            return Err(ValidationError::new(
+                "authored_structures.segments.continuity",
+                "adjacent authored segment endpoints must be exactly equal",
+            ));
+        }
+    }
+    if kind == AuthoredStructureKind::ClosedShape
+        && segments.last().expect("nonempty authored segments").end() != segments[0].start()
+    {
+        return Err(ValidationError::new(
+            "authored_structures.closure",
+            "closed authored shapes require the final endpoint to equal the initial start",
+        ));
+    }
+    Ok(())
+}
+
+/// Validates every explicitly stored point of one authored segment without rejecting degeneracy.
+///
+/// # Errors
+///
+/// Returns `authored_structures.segments.coordinates` for any non-finite
+/// endpoint or cubic control coordinate.
+fn validate_authored_curve_segment(segment: &AuthoredCurveSegment) -> Result<(), ValidationError> {
+    let points = match segment {
+        AuthoredCurveSegment::Line { start, end } => vec![*start, *end],
+        AuthoredCurveSegment::CubicBezier {
+            start,
+            control_1,
+            control_2,
+            end,
+        } => vec![*start, *control_1, *control_2, *end],
+    };
+    if points
+        .iter()
+        .any(|point| !point.x.is_finite() || !point.y.is_finite())
+    {
+        return Err(ValidationError::new(
+            "authored_structures.segments.coordinates",
+            "authored structure coordinates must be finite",
+        ));
+    }
+    Ok(())
+}
+
+/// Allocates the next stable authored-structure ID with checked arithmetic.
+///
+/// # Errors
+///
+/// Returns `authored_structures.id` if the current maximum ID cannot advance;
+/// it never reuses an ID or changes store order.
+fn next_authored_structure_id(
+    structures: &[AuthoredStructure],
+) -> Result<AuthoredStructureId, ValidationError> {
+    next_id(
+        structures.iter().map(|structure| structure.id.0),
+        "authored_structures.id",
+    )
+    .map(AuthoredStructureId)
+}
+
+/// Derives the earliest future cache boundary affected by an authored structure kind transition.
+fn authored_structure_invalidation(kind: AuthoredStructureKind) -> InvalidationLevel {
+    match kind {
+        AuthoredStructureKind::OpenPath => InvalidationLevel::Family,
+        AuthoredStructureKind::ClosedShape => InvalidationLevel::Realization,
+    }
 }
 
 fn validate_definition_draft(draft: &PatternDefinitionDraft) -> Result<(), ValidationError> {
@@ -5050,6 +5561,8 @@ pub enum InvalidationLevel {
 pub struct CommandResult {
     pub affected_channels: Vec<ChannelId>,
     pub invalidation: InvalidationLevel,
+    /// A newly allocated authored structure ID, when this command creates a reusable structure.
+    pub created_authored_structure_id: Option<AuthoredStructureId>,
 }
 
 /// The explicit density control which supplied a replacement value.  Keeping
@@ -7568,9 +8081,32 @@ pub enum PatternDefinitionEdit {
     },
 }
 
-/// Supported channel edits in the Stage 2 authoritative command boundary.
+/// The authoritative document command surface for channel edits and
+/// document-scoped structural resources.
+///
+/// Commands carry only validated persisted intent. Document validation builds
+/// an atomic candidate before publication, while reversible structural
+/// transitions are owned by `DocumentHistory` rather than a frontend or an
+/// evaluator.
 #[derive(Clone, Debug, PartialEq)]
 pub enum DocumentCommand {
+    /// Adds one validated reusable authored structure with a fresh document-scoped ID.
+    AddAuthoredStructure {
+        draft: AuthoredStructureDraft,
+    },
+    /// Duplicates one existing reusable authored structure with a fresh document-scoped ID.
+    DuplicateAuthoredStructure {
+        structure_id: AuthoredStructureId,
+    },
+    /// Replaces one exact current authored structure while preserving its stable ID and store position.
+    ReplaceAuthoredStructure {
+        base_structure: AuthoredStructure,
+        replacement: AuthoredStructureDraft,
+    },
+    /// Removes one currently unreferenced authored structure without retargeting any owner.
+    RemoveUnreferencedAuthoredStructure {
+        structure_id: AuthoredStructureId,
+    },
     AddPatternDefinition {
         definition: PatternDefinitionDraft,
     },
@@ -7717,6 +8253,10 @@ pub struct PropertyCommandFieldProjection {
 /// omitted from descriptor/command completeness checks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NonFieldCommandOperation {
+    AddAuthoredStructure,
+    DuplicateAuthoredStructure,
+    ReplaceAuthoredStructure,
+    RemoveUnreferencedAuthoredStructure,
     AddPatternDefinition,
     AddTypedPatternDefinition,
     ReplaceSelectedChannelDefinitionTopology,
@@ -7955,6 +8495,24 @@ impl DocumentCommand {
             ])
         };
         match self {
+            Command::AddAuthoredStructure { .. } => DocumentCommandFieldClassification::NonField(
+                NonFieldCommandOperation::AddAuthoredStructure,
+            ),
+            Command::DuplicateAuthoredStructure { .. } => {
+                DocumentCommandFieldClassification::NonField(
+                    NonFieldCommandOperation::DuplicateAuthoredStructure,
+                )
+            }
+            Command::ReplaceAuthoredStructure { .. } => {
+                DocumentCommandFieldClassification::NonField(
+                    NonFieldCommandOperation::ReplaceAuthoredStructure,
+                )
+            }
+            Command::RemoveUnreferencedAuthoredStructure { .. } => {
+                DocumentCommandFieldClassification::NonField(
+                    NonFieldCommandOperation::RemoveUnreferencedAuthoredStructure,
+                )
+            }
             Command::AddPatternDefinition { .. } => DocumentCommandFieldClassification::NonField(
                 NonFieldCommandOperation::AddPatternDefinition,
             ),
@@ -8122,13 +8680,20 @@ impl DocumentCommand {
         }
     }
 
-    /// Stage 14 definition transitions require the reversible history owner.
-    /// The public `DocumentSession` surface retains its pre-Stage-14 command
-    /// behavior, while `DocumentHistory` uses its private transition path.
+    /// Returns whether a document-owned structural resource or definition
+    /// transition requires reversible `DocumentHistory` ownership.
+    ///
+    /// The public `DocumentSession` boundary intentionally rejects these
+    /// commands; only history records their before/after authoritative
+    /// snapshots after validation succeeds.
     fn requires_history(&self) -> bool {
         matches!(
             self,
-            Self::AddPatternDefinition { .. }
+            Self::AddAuthoredStructure { .. }
+                | Self::DuplicateAuthoredStructure { .. }
+                | Self::ReplaceAuthoredStructure { .. }
+                | Self::RemoveUnreferencedAuthoredStructure { .. }
+                | Self::AddPatternDefinition { .. }
                 | Self::AddTypedPatternDefinition { .. }
                 | Self::ReplaceSelectedChannelDefinitionTopology { .. }
                 | Self::ReplaceSelectedChannelDefinitionRecipe { .. }
@@ -8141,6 +8706,10 @@ impl DocumentCommand {
         )
     }
 
+    /// Returns a command's channel target or a neutral ID for document-scoped structural commands.
+    ///
+    /// The neutral value is used only after command classification exempts non-channel operations
+    /// from channel lookup; it is never an implicit document reference.
     fn channel_id(&self) -> ChannelId {
         match self {
             Self::ReplaceSelectedChannelDefinitionTopology { channel_id, .. }
@@ -8160,6 +8729,10 @@ impl DocumentCommand {
             | Self::EditSelectedChannelPatternDefinition { channel_id, .. } => *channel_id,
             Self::SetSourceReference { .. }
             | Self::ReplaceChannelTopology { .. }
+            | Self::AddAuthoredStructure { .. }
+            | Self::DuplicateAuthoredStructure { .. }
+            | Self::ReplaceAuthoredStructure { .. }
+            | Self::RemoveUnreferencedAuthoredStructure { .. }
             | Self::AddPatternDefinition { .. }
             | Self::AddTypedPatternDefinition { .. }
             | Self::DuplicatePatternDefinition { .. }
@@ -8169,11 +8742,21 @@ impl DocumentCommand {
         }
     }
 
+    /// Validates one command completely before an authoritative candidate document is mutated.
+    ///
+    /// # Errors
+    ///
+    /// Returns stable command, authored-structure, or existing document diagnostics while leaving
+    /// both the document and history unchanged.
     fn validate(&self, document: &Document) -> Result<(), ValidationError> {
         if !matches!(
             self,
             Self::SetSourceReference { .. }
                 | Self::ReplaceChannelTopology { .. }
+                | Self::AddAuthoredStructure { .. }
+                | Self::DuplicateAuthoredStructure { .. }
+                | Self::ReplaceAuthoredStructure { .. }
+                | Self::RemoveUnreferencedAuthoredStructure { .. }
                 | Self::AddPatternDefinition { .. }
                 | Self::AddTypedPatternDefinition { .. }
                 | Self::DuplicatePatternDefinition { .. }
@@ -8193,6 +8776,60 @@ impl DocumentCommand {
         }
 
         match self {
+            Self::AddAuthoredStructure { draft } => {
+                next_authored_structure_id(&document.authored_structures)?;
+                validate_authored_structure_segments(draft.kind, &draft.segments)
+            }
+            Self::DuplicateAuthoredStructure { structure_id } => {
+                document
+                    .authored_structure(*structure_id)
+                    .ok_or(ValidationError::new(
+                        "authored_structures.reference",
+                        "authored structure to duplicate does not exist",
+                    ))?;
+                next_authored_structure_id(&document.authored_structures)?;
+                Ok(())
+            }
+            Self::ReplaceAuthoredStructure {
+                base_structure,
+                replacement,
+            } => {
+                let current = document.authored_structure(base_structure.id()).ok_or(
+                    ValidationError::new(
+                        "authored_structures.reference",
+                        "authored structure to replace does not exist",
+                    ),
+                )?;
+                if current != base_structure {
+                    return Err(ValidationError::new(
+                        "authored_structures.edit.stale",
+                        "authored structure replacement base is stale",
+                    ));
+                }
+                let replaced = current.replace_with(replacement)?;
+                if &replaced == current {
+                    return Err(ValidationError::new(
+                        "authored_structures.edit.noop",
+                        "authored structure replacement is a semantic no-op",
+                    ));
+                }
+                Ok(())
+            }
+            Self::RemoveUnreferencedAuthoredStructure { structure_id } => {
+                document
+                    .authored_structure(*structure_id)
+                    .ok_or(ValidationError::new(
+                        "authored_structures.remove.missing",
+                        "authored structure to remove does not exist",
+                    ))?;
+                if document.authored_structure_is_referenced(*structure_id) {
+                    return Err(ValidationError::new(
+                        "authored_structures.remove.referenced",
+                        "referenced authored structures cannot be removed",
+                    ));
+                }
+                Ok(())
+            }
             Self::AddPatternDefinition { definition } => {
                 document.allocate_definition_from_draft(definition)?;
                 Ok(())
@@ -8531,8 +9168,54 @@ impl DocumentCommand {
         }
     }
 
+    /// Applies a command only after validation has established all allocation and topology invariants.
+    ///
+    /// This private mutation helper relies on its caller to validate first and never publishes a
+    /// partial candidate; authoritative session/history code installs the completed clone atomically.
     fn apply_to_valid_document(&self, document: &mut Document) {
         match self {
+            Self::AddAuthoredStructure { draft } => {
+                let id = next_authored_structure_id(&document.authored_structures)
+                    .expect("command validation allocated an authored structure ID");
+                document.authored_structures.push(
+                    AuthoredStructure::new(id, draft.kind, draft.segments.clone())
+                        .expect("command validation retained a valid authored structure draft"),
+                );
+                return;
+            }
+            Self::DuplicateAuthoredStructure { structure_id } => {
+                let source = document
+                    .authored_structure(*structure_id)
+                    .expect("validated authored structure")
+                    .clone();
+                let id = next_authored_structure_id(&document.authored_structures)
+                    .expect("command validation allocated an authored structure ID");
+                document.authored_structures.push(
+                    AuthoredStructure::new(id, source.kind, source.segments)
+                        .expect("validated authored structure duplication remains valid"),
+                );
+                return;
+            }
+            Self::ReplaceAuthoredStructure {
+                base_structure,
+                replacement,
+            } => {
+                let structure = document
+                    .authored_structures
+                    .iter_mut()
+                    .find(|structure| structure.id == base_structure.id)
+                    .expect("validated authored structure replacement target");
+                *structure = structure
+                    .replace_with(replacement)
+                    .expect("validated authored structure replacement");
+                return;
+            }
+            Self::RemoveUnreferencedAuthoredStructure { structure_id } => {
+                document
+                    .authored_structures
+                    .retain(|structure| structure.id != *structure_id);
+                return;
+            }
             Self::AddPatternDefinition { definition } => {
                 let definition = document
                     .allocate_definition_from_draft(definition)
@@ -8798,6 +9481,10 @@ impl DocumentCommand {
         }
     }
 
+    /// Derives the authoritative invalidation and affected-consumer result from an exact transition.
+    ///
+    /// Authored structures have no Stage 20C consumers, so their successful commands report an
+    /// empty set while preserving the earliest future invalidation authority.
     fn result_for_transition(&self, before: &Document, after: &Document) -> CommandResult {
         let invalidation = match self.field_classification() {
             DocumentCommandFieldClassification::DescriptorBacked(projections) => {
@@ -8807,7 +9494,10 @@ impl DocumentCommand {
                 property_field_contract(projection.field).invalidation
             }
             DocumentCommandFieldClassification::NonField(operation) => match operation {
-                NonFieldCommandOperation::AddPatternDefinition
+                NonFieldCommandOperation::AddAuthoredStructure
+                | NonFieldCommandOperation::DuplicateAuthoredStructure
+                | NonFieldCommandOperation::RemoveUnreferencedAuthoredStructure
+                | NonFieldCommandOperation::AddPatternDefinition
                 | NonFieldCommandOperation::AddTypedPatternDefinition
                 | NonFieldCommandOperation::ReplaceSelectedChannelDefinitionTopology
                 | NonFieldCommandOperation::ReplaceSelectedChannelDefinitionRecipe
@@ -8819,11 +9509,31 @@ impl DocumentCommand {
                 NonFieldCommandOperation::ReplaceChannelTopology => {
                     InvalidationLevel::ChannelTopology
                 }
+                NonFieldCommandOperation::ReplaceAuthoredStructure => {
+                    let DocumentCommand::ReplaceAuthoredStructure { base_structure, .. } = self
+                    else {
+                        unreachable!("authored replacement classification matches its command")
+                    };
+                    let replacement = after
+                        .authored_structure(base_structure.id)
+                        .expect("validated authored replacement preserves its target");
+                    if base_structure.kind == AuthoredStructureKind::OpenPath
+                        || replacement.kind == AuthoredStructureKind::OpenPath
+                    {
+                        InvalidationLevel::Family
+                    } else {
+                        InvalidationLevel::Realization
+                    }
+                }
             },
         };
         CommandResult {
             affected_channels: match self {
-                Self::AddPatternDefinition { .. }
+                Self::AddAuthoredStructure { .. }
+                | Self::DuplicateAuthoredStructure { .. }
+                | Self::ReplaceAuthoredStructure { .. }
+                | Self::RemoveUnreferencedAuthoredStructure { .. }
+                | Self::AddPatternDefinition { .. }
                 | Self::AddTypedPatternDefinition { .. }
                 | Self::DuplicatePatternDefinition { .. }
                 | Self::RemoveUnreferencedPatternDefinition { .. } => Vec::new(),
@@ -8842,6 +9552,12 @@ impl DocumentCommand {
                 _ => vec![self.channel_id()],
             },
             invalidation,
+            created_authored_structure_id: match self {
+                Self::AddAuthoredStructure { .. } | Self::DuplicateAuthoredStructure { .. } => {
+                    after.authored_structures.last().map(AuthoredStructure::id)
+                }
+                _ => None,
+            },
         }
     }
 }

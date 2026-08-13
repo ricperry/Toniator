@@ -235,7 +235,7 @@ immediate bundled Even Random Circles and Straight Grid Circles application,
 visible Undo/Redo, and a separate private-draft Pattern Editor over the accepted
 headless command/history/scheduler and canonical preview, PNG, and SVG paths.
 `Save as Preset...` remains disabled; preset authoring, library management, and
-Stage 20C+ mechanisms remain planned.
+the remaining Stage 20D+ mechanisms remain planned.
 
 Stage-owned validation under
 `target/validation/stage-19b-gui-remediation/` includes private Sway/AT-SPI
@@ -267,8 +267,16 @@ persistence, rendering, export, CLI, GTK, or canvas-created topology. The
 checkpoint includes the authorized current-format real-world fixture
 `assets/HolidayMugs_2024_2025.toniator`, whose SHA-256 is
 `717fd7e03cba2c92d2730db05028c39b7a8e8de8e0bcc7054abcb3c56d5e5947`.
-Stage 20C is the next planning-only boundary and is not started; later
-Stage 20C+ mechanisms remain planned.
+
+Stage 20C is complete in its single named acceptance checkpoint. Its bounded
+headless domain/IO boundary adds document-owned authored open paths and closed
+shapes, authoritative add/duplicate/replace/remove commands, descriptors,
+history, deterministic current-v2 persistence, and exact conversion to Stage
+20B construction geometry. The checkpoint's direct parent is the Stage 20B
+checkpoint `08d970a`; the checkpoint is intentionally named rather than
+self-referenced by a hash. It adds no consumer, evaluator, cache,
+canonical-output, renderer/export, CLI, GTK, preset, schema-version, or later
+stage behavior. The remaining Stage 20D+ mechanisms remain planned.
 
 Low-resolution fixtures and outputs are supplementary only. Every future stage
 that exercises source loading, sampling, rendering, preview, or export must

@@ -17,9 +17,10 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use toniator_domain::{
-    ArtworkWeightResponse, CanvasSpec, ChannelAppearance, ChannelId, ChannelPaint,
-    ChannelPatternLayout, ChannelSourceMapping, ChannelState, ChannelTopology, ColorValue,
-    CoveragePolicy, DensityMetric2D, Document, DocumentId, GeneralizedSiteProductDraft,
+    ArtworkWeightResponse, AuthoredCurveSegment, AuthoredPoint2, AuthoredStructure,
+    AuthoredStructureId, AuthoredStructureKind, CanvasSpec, ChannelAppearance, ChannelId,
+    ChannelPaint, ChannelPatternLayout, ChannelSourceMapping, ChannelState, ChannelTopology,
+    ColorValue, CoveragePolicy, DensityMetric2D, Document, DocumentId, GeneralizedSiteProductDraft,
     GuideDimensionDraft, GuideDimensionId, HalftoneChannelModel, HalftoneChannelRole,
     MarkGeometryResponse, MarkOrientation, MarkOrientationDraft, MarkPrototype,
     ModeledChannelState, PatternDefinition, PatternDefinitionDraft, PatternDefinitionId,
@@ -1032,6 +1033,47 @@ struct DocumentDtoV2 {
     source_reference_id: String,
     pattern_definitions: Vec<PatternDefinitionDtoV2>,
     channel_configuration: ChannelConfigurationDto,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    authored_structures: Vec<AuthoredStructureDtoV2>,
+}
+
+/// Current-v2 persistence representation of one document-owned authored structure.
+#[derive(Serialize, Deserialize)]
+struct AuthoredStructureDtoV2 {
+    id: u64,
+    kind: AuthoredStructureKindDtoV2,
+    segments: Vec<AuthoredCurveSegmentDtoV2>,
+}
+
+/// Current-v2 persistence representation of declared authored-structure topology.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AuthoredStructureKindDtoV2 {
+    OpenPath,
+    ClosedShape,
+}
+
+/// Current-v2 persistence representation of one explicit authored construction segment.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum AuthoredCurveSegmentDtoV2 {
+    Line {
+        start: AuthoredPointDtoV2,
+        end: AuthoredPointDtoV2,
+    },
+    CubicBezier {
+        start: AuthoredPointDtoV2,
+        control_1: AuthoredPointDtoV2,
+        control_2: AuthoredPointDtoV2,
+        end: AuthoredPointDtoV2,
+    },
+}
+
+/// Current-v2 persistence representation of one authored finite coordinate pair.
+#[derive(Serialize, Deserialize)]
+struct AuthoredPointDtoV2 {
+    x: f64,
+    y: f64,
 }
 #[derive(Serialize, Deserialize)]
 struct CanvasDto {
@@ -1610,6 +1652,12 @@ dto_enum!(
 );
 
 impl DocumentDtoV1 {
+    /// Migrates immutable v1 document fields into the current v2 DTO with an empty authored store.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable load error when legacy typed-definition allocation cannot be represented;
+    /// authored structures never exist in this immutable v1 input path.
     fn migrate(self) -> Result<DocumentDtoV2, LoadError> {
         let mut definitions = Vec::with_capacity(self.pattern_definitions.len());
         for definition in self.pattern_definitions {
@@ -1671,11 +1719,18 @@ impl DocumentDtoV1 {
             source_reference_id: self.source_reference_id,
             pattern_definitions: definitions,
             channel_configuration: self.channel_configuration,
+            authored_structures: Vec::new(),
         })
     }
 }
 
 impl DocumentDtoV2 {
+    /// Projects an authoritative document into deterministic current-v2 persistence without runtime state.
+    ///
+    /// # Errors
+    ///
+    /// Returns a save error for an unassigned source or incoherent channel configuration before an
+    /// archive is written; an empty authored store is omitted to preserve accepted old-v2 bytes.
     fn from_domain(document: &Document) -> Result<Self, SaveError> {
         let source_reference_id = match document.source() {
             SourceReference::Assigned(id) => id.as_str().to_owned(),
@@ -1720,8 +1775,19 @@ impl DocumentDtoV2 {
                 .map(PatternDefinitionDtoV2::from_domain)
                 .collect(),
             channel_configuration,
+            authored_structures: document
+                .authored_structures()
+                .iter()
+                .map(AuthoredStructureDtoV2::from_domain)
+                .collect(),
         })
     }
+    /// Rebuilds and validates the complete authoritative document before a loaded archive commits.
+    ///
+    /// # Errors
+    ///
+    /// Returns stable domain validation diagnostics for authored IDs, coordinates, topology, bounds,
+    /// or existing document state; no partially rebuilt document escapes this boundary.
     fn into_domain(self) -> Result<Document, ValidationError> {
         let source = SourceReference::Assigned(dto_source_id(&self.source_reference_id)?);
         let definitions = self
@@ -1729,22 +1795,30 @@ impl DocumentDtoV2 {
             .into_iter()
             .map(PatternDefinitionDtoV2::into_domain)
             .collect();
+        let authored_structures = self
+            .authored_structures
+            .into_iter()
+            .map(AuthoredStructureDtoV2::into_domain)
+            .collect::<Result<Vec<_>, _>>()?;
         match self.channel_configuration {
-            ChannelConfigurationDto::Legacy { channels } => Document::with_source(
-                DocumentId(self.id),
-                CanvasSpec {
-                    width: self.canvas.width,
-                    height: self.canvas.height,
-                },
-                source,
-                definitions,
-                channels
-                    .into_iter()
-                    .map(LegacyChannelDto::into_domain)
-                    .collect(),
-            ),
+            ChannelConfigurationDto::Legacy { channels } => {
+                Document::with_source_and_authored_structures(
+                    DocumentId(self.id),
+                    CanvasSpec {
+                        width: self.canvas.width,
+                        height: self.canvas.height,
+                    },
+                    source,
+                    definitions,
+                    channels
+                        .into_iter()
+                        .map(LegacyChannelDto::into_domain)
+                        .collect(),
+                    authored_structures,
+                )
+            }
             ChannelConfigurationDto::Topology { model, channels } => {
-                Document::with_source_and_topology(
+                Document::with_source_topology_and_authored_structures(
                     DocumentId(self.id),
                     CanvasSpec {
                         width: self.canvas.width,
@@ -1759,11 +1833,124 @@ impl DocumentDtoV2 {
                             .map(ModeledChannelDto::into_domain)
                             .collect(),
                     ),
+                    authored_structures,
                 )
             }
         }
     }
 }
+
+impl AuthoredStructureDtoV2 {
+    /// Projects one validated domain-owned structure into deterministic current-v2 persistence fields.
+    fn from_domain(value: &AuthoredStructure) -> Self {
+        Self {
+            id: value.id().0,
+            kind: AuthoredStructureKindDtoV2::from_domain(value.kind()),
+            segments: value
+                .segments()
+                .iter()
+                .map(AuthoredCurveSegmentDtoV2::from_domain)
+                .collect(),
+        }
+    }
+
+    /// Rebuilds one validated domain-owned structure before the document can commit loaded data.
+    ///
+    /// # Errors
+    ///
+    /// Returns the stable domain validation diagnostic for invalid IDs, coordinates, topology, or bounds.
+    fn into_domain(self) -> Result<AuthoredStructure, ValidationError> {
+        AuthoredStructure::new(
+            AuthoredStructureId(self.id),
+            self.kind.into_domain(),
+            self.segments
+                .into_iter()
+                .map(AuthoredCurveSegmentDtoV2::into_domain)
+                .collect(),
+        )
+    }
+}
+
+impl AuthoredStructureKindDtoV2 {
+    /// Converts declared domain topology into its stable current-v2 string representation.
+    fn from_domain(value: AuthoredStructureKind) -> Self {
+        match value {
+            AuthoredStructureKind::OpenPath => Self::OpenPath,
+            AuthoredStructureKind::ClosedShape => Self::ClosedShape,
+        }
+    }
+
+    /// Converts stable current-v2 topology into its domain-owned enum.
+    fn into_domain(self) -> AuthoredStructureKind {
+        match self {
+            Self::OpenPath => AuthoredStructureKind::OpenPath,
+            Self::ClosedShape => AuthoredStructureKind::ClosedShape,
+        }
+    }
+}
+
+impl AuthoredCurveSegmentDtoV2 {
+    /// Projects one explicit domain segment into the matching tagged current-v2 representation.
+    fn from_domain(value: &AuthoredCurveSegment) -> Self {
+        match value {
+            AuthoredCurveSegment::Line { start, end } => Self::Line {
+                start: AuthoredPointDtoV2::from_domain(*start),
+                end: AuthoredPointDtoV2::from_domain(*end),
+            },
+            AuthoredCurveSegment::CubicBezier {
+                start,
+                control_1,
+                control_2,
+                end,
+            } => Self::CubicBezier {
+                start: AuthoredPointDtoV2::from_domain(*start),
+                control_1: AuthoredPointDtoV2::from_domain(*control_1),
+                control_2: AuthoredPointDtoV2::from_domain(*control_2),
+                end: AuthoredPointDtoV2::from_domain(*end),
+            },
+        }
+    }
+
+    /// Converts one tagged current-v2 segment without inferring closure, winding, or render semantics.
+    fn into_domain(self) -> AuthoredCurveSegment {
+        match self {
+            Self::Line { start, end } => AuthoredCurveSegment::Line {
+                start: start.into_domain(),
+                end: end.into_domain(),
+            },
+            Self::CubicBezier {
+                start,
+                control_1,
+                control_2,
+                end,
+            } => AuthoredCurveSegment::CubicBezier {
+                start: start.into_domain(),
+                control_1: control_1.into_domain(),
+                control_2: control_2.into_domain(),
+                end: end.into_domain(),
+            },
+        }
+    }
+}
+
+impl AuthoredPointDtoV2 {
+    /// Projects one authored coordinate pair into deterministic current-v2 numeric fields.
+    fn from_domain(value: AuthoredPoint2) -> Self {
+        Self {
+            x: value.x,
+            y: value.y,
+        }
+    }
+
+    /// Converts one stored coordinate pair for authoritative domain validation.
+    fn into_domain(self) -> AuthoredPoint2 {
+        AuthoredPoint2 {
+            x: self.x,
+            y: self.y,
+        }
+    }
+}
+
 impl PatternDefinitionDtoV2 {
     fn from_domain(value: &PatternDefinition) -> Self {
         Self {

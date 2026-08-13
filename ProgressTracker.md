@@ -346,12 +346,22 @@ semantics, or later-stage authority. The checkpoint additionally tracks the
 authorized current-format real-world `.toniator` validation case and this
 durable documentation; the fixture is acceptance data, not a Stage 20B geometry
 input. The checkpoint is intentionally named rather than self-referenced by hash.
-Stage 20C is the next planning-only boundary and has not started.
 
-**Remaining Stage 20C+ — Planned.** Curved/procedural guides,
+**Stage 20C — Complete in the Stage 20C acceptance checkpoint.** The accepted bounded headless contract adds only
+document-owned authored open paths and closed shapes, authoritative commands,
+descriptors, history, deterministic current-v2 persistence, and exact
+conversion to Stage 20B construction geometry. It adds no consumer, evaluator,
+cache, canonical output, renderer/export, CLI, GTK, preset, or later-stage
+behavior. The exact focused gate and independent read-only review pass, and the
+user accepted the implementation and separately authorized its single local
+checkpoint on 2026-08-13. The checkpoint includes the implementation and
+synchronized durable documentation and is intentionally named rather than
+self-referenced by hash.
+
+**Remaining Stage 20D+ — Planned.** Curved/procedural guides,
 connected/network output, regions/Voronoi and reusable offsetting, composite
-output mechanisms, user-authored structures, multiframe sources, transitions,
-and Stage 20C+ remain planned and require their own reviewed contracts.
+output mechanisms, multiframe sources, transitions, and later Stage 20+
+capabilities remain planned and require their own reviewed contracts.
 
 ## Maintenance rules
 
@@ -362,6 +372,10 @@ and Stage 20C+ remain planned and require their own reviewed contracts.
   implementation, fixture, and durable documentation; it is not split into a
   separate implementation and documentation checkpoint and is not named by a
   self-referential hash.
+- For this closeout, Stage 20C is **Complete in the Stage 20C acceptance
+  checkpoint**. That single local checkpoint contains all tracked Stage 20C
+  implementation and synchronized durable documentation and is intentionally
+  named rather than self-referenced by hash.
 - The parent owns accepted/complete transitions and checkpoint hashes. A writer
   reports proposed status; evidence cannot substitute for user acceptance or a
   commit.

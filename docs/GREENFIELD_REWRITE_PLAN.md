@@ -1765,16 +1765,26 @@ implementation allowlist; focused verification and independent read-only review
 pass. User acceptance is complete. The single acceptance checkpoint includes
 the implementation, the authorized current-format real-world `.toniator`
 fixture, and durable documentation; this text intentionally does not invent a
-self-referential checkpoint hash. Stage 20C is the next planning-only boundary
-and is not started. Semantic-map was not used because direct source, `rg`,
-Cargo, Git, and the architecture validator were more efficient for this
-isolated new geometry subsystem.
+self-referential checkpoint hash. Semantic-map was not used because direct
+source, `rg`, Cargo, Git, and the architecture validator were more efficient
+for this isolated new geometry subsystem.
 
-**Later Stage 20C+ — Planned.** Curved/procedural guide generators and coverage,
+**Stage 20C — Complete in the Stage 20C acceptance checkpoint.** The accepted bounded headless contract adds only
+document-owned authored open paths and closed shapes, authoritative commands,
+descriptors, history, deterministic current-v2 persistence, and exact
+conversion to Stage 20B construction geometry. It adds no consumer, evaluator,
+cache, canonical output, renderer/export, CLI, GTK, preset, or later-stage
+behavior. The exact focused gate and independent read-only review pass, and the
+user accepted the implementation and separately authorized its single local
+checkpoint on 2026-08-13. The checkpoint includes the implementation and
+synchronized durable documentation and is intentionally named rather than
+self-referenced by hash.
+
+**Later Stage 20D+ — Planned.** Curved/procedural guide generators and coverage,
 connected/network topology, regions and ordinary Voronoi, reusable region
-offset/collapse behavior, composite output mechanisms, user-authored paths or
-structures, multiframe sources, simple transitions, and Stage 20C+ remain
-planned and require their own approved contracts.
+offset/collapse behavior, composite output mechanisms, multiframe sources,
+simple transitions, and later Stage 20+ work remain planned and require their
+own approved contracts.
 
 Every mechanism must enter through the Stage 14 typed schema, Stage 15 generic
 pipeline, Stage 17 command/descriptor contract, canonical geometry, and

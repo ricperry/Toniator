@@ -1,6 +1,7 @@
 //! Finite, deterministic construction geometry for connected curve paths.
 
 mod arc_length;
+mod authored;
 mod clipping;
 mod intersections;
 mod path;

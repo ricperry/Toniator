@@ -5,17 +5,18 @@
 **Approved roadmap scope.** The approved roadmap in
 `docs/GREENFIELD_REWRITE_PLAN.md` / `ProgressTracker.md` records Stage 20A as
 complete, Stage 20B as complete in the single Stage 20B acceptance checkpoint,
-and the **remaining Stage 20C+ work as Planned**: curved or procedural
-guide generators and coverage; connected or
-network topology; regions, ordinary Voronoi, reusable offset/collapse;
-composite outputs; user-authored paths or structures; multiframe sources; and
+Stage 20C as complete in its single named acceptance checkpoint, and the
+**remaining Stage 20D+ work as Planned**: curved or procedural guide
+generators and coverage; connected or network topology; regions, ordinary
+Voronoi, reusable offset/collapse; composite outputs; multiframe sources; and
 simple transitions. Stage 19B is complete at implementation checkpoint
 `b0b84e4`. Stage 20A is complete at implementation checkpoint `b7fbd81`.
 
-This document records the approved decomposition after the Stage 20B
-acceptance checkpoint. Stage 20C is the next planning-only boundary and is not
-started; this document does not authorize its implementation or reorder the
-remaining Stage 20C+ roadmap.
+This document records the approved decomposition after the Stage 20C
+acceptance checkpoint. Stage 20C's named checkpoint has direct parent
+`08d970a`; its own hash is intentionally not self-referenced here. The
+document does not authorize Stage 20D implementation or reorder the remaining
+Stage 20D+ roadmap.
 
 | Authority | Present responsibility | Stage 20+ rule |
 |---|---|---|
@@ -34,9 +35,11 @@ Current types now separate the shared site contract: `PatternFamily`,
 `SiteId`, `IntersectionSite`, `SiteScope`, and `CanonicalCircleMark` exist.
 Generalized along-guide and random results retain truthful provenance in
 `FamilySiteSet`; the existing circle realization receives only a private
-compatibility view. No document-owned path, graph, region, canonical
-path/region, curve prototype, Voronoi, or multiframe/transition authority
-exists yet.
+compatibility view. Stage 20C now adds document-owned authored open paths and
+closed shapes, their authoritative commands/descriptors/history, current-v2
+persistence, and an exact conversion boundary to Stage 20B `CurvePath`
+construction geometry. No guide consumer, graph, region, canonical path/region,
+curve prototype, Voronoi, or multiframe/transition authority exists yet.
 
 ## Ten-concern separation audit
 
@@ -51,7 +54,7 @@ exists yet.
 | Realization | `PatternOutputLayer`, typed circular realization and `CanonicalCircleMark` | Current output is circles only and receives an intersection-shaped compatibility input. | 20E, 20G, 20K, 20O. | **Realization:** prototype, geometry response, path/region treatment miss realization/downstream while retaining family. |
 | Per-channel transforms/controls | `ChannelPatternLayout`, appearance, mapping, descriptor/command/history authority | Structural transform is distinct from mark response and presentation; future controls need the same descriptors. | Existing authority is reused; expose new fields only with their headless checkpoint then 20F/20J/20N/20S. | Layout is **structural**; mark size/thickness/inset is **realization**; sampled response is **modulation/source**; opacity/visibility/color are **presentation**. |
 | Canonical geometry/render/export | geometry canonical circles; renderer scene; engine preview/raster/SVG consumers | Canonical paths/regions/strokes are missing; renderer must not generate them. | 20B, 20E, 20G, 20K–20O. | Canonical content follows structural/realization changes; raster target/AA/background are **presentation** consumers. |
-| Persistence/presets/UI | domain/IO current-v2 and pure preset records; app private drafts/commands/descriptors | Authored structures and temporal values lack schema; presets/UI must not own evaluator state. | 20C, then each mechanism checkpoint; 20F/20J/20N/20S UI. | Persisted structural/realization/modulation/presentation values use their existing invalidation class; never persist derived sites/topology/caches. |
+| Persistence/presets/UI | domain/IO current-v2 authored structures and pure preset records; app private drafts/commands/descriptors | Temporal values lack schema; presets/UI must not own evaluator state. | Each mechanism checkpoint after 20C; 20F/20J/20N/20S UI. | Persisted structural/realization/modulation/presentation values use their existing invalidation class; never persist derived sites/topology/caches. |
 
 The classification is deliberate: structural values select source structure,
 guides, sites, topology and regions; realization values select marks, paths,
@@ -65,8 +68,8 @@ use the earliest class it changes, never a convenient lower-cost cache class.
 Stage 20A established the truthful, common derived site interchange. Curves,
 random distributions, straight intersections and future authored structures can
 now produce sites without claiming the same guide contributors. The reusable
-curve/path geometry dependency is now accepted; the next dependency is
-document-owned structures.
+curve/path geometry dependency and document-owned authored-structure boundary
+are now accepted; the next dependency is curved/procedural guide coverage.
 Curved
 guide coverage consumes them; graph/topology and Voronoi consume the common
 site set independently; generic region operations consume canonical regions;
@@ -90,13 +93,13 @@ faces, cells, maze boundaries or topology. Persist schema, stable resource IDs,
 seeds and topology-program parameters; regenerate sites, adjacency, paths,
 faces, cells, offsets, caches and scheduler results.
 
-## Remaining planned checkpoints after Stage 20B
+## Remaining planned checkpoints after Stage 20C
 
 | Label | Outcome | Non-goals | Layers / dependencies | Verification | GTK | Stop / Goal candidacy |
 |---|---|---|---|---|---|---|
 | 20A Structural Site Interchange | **Complete at `b7fbd81`:** deterministic `FamilySiteSet`, truthful provenance, accepted output parity. | Schema, paths, graphs, regions, rendering, UI. | geometry/patterns; accepted evaluator/cache. | Site contracts; family/realization/PNG/SVG/cache parity on both baselines. | None. | Historical authority; no further implementation. |
 | 20B Canonical Curve/Path Geometry | **Complete in the Stage 20B acceptance checkpoint:** reusable polyline/Bézier segments, arc length, tangents, bounds, intersections, and clipping. | Authoring schema, curved families, strokes. | geometry; 20A. | Property, degeneracy, clipping tests. | None. | Historical accepted authority; no further implementation. |
-| 20C Document-owned Authored Structures | Stable reusable open paths/closed shapes, commands/descriptors and persistence. | Curves-only storage, direct manipulation, output algorithms. | domain/io/patterns; 20B. | Validation, history, descriptor, save/reload/reference tests. | None. | **Next planning-only boundary; not started; requires fresh contract and user approval.** |
+| 20C Document-owned Authored Structures | **Complete in the single named Stage 20C acceptance checkpoint:** document-owned open paths/closed shapes, authoritative commands/descriptors/history, deterministic current-v2 persistence, and exact conversion to Stage 20B construction geometry. The checkpoint's direct parent is `08d970a`; its own hash is intentionally not self-referenced. | Consumers, evaluators, caches, canonical output, rendering/export, CLI, GTK, presets, schema-version changes, and later stages. | domain/io/geometry; 20B. | Validation, history, descriptor, save/reload, and exact conversion tests passed. | None. | Historical accepted authority; no further implementation. |
 | 20D Curved/Procedural Guide Mechanisms | Guide prototypes plus repetition/coverage, reusing dimensions without a curves family. | Shape marks, strokes, topology. | domain/patterns/geometry; 20A–20C. | Coverage, IDs, cancellation, cache/invalidation, persistence. | None. | Parent review; needs replanning. |
 | 20E User-shape Mark Realization | Authored closed structures as ordinary site marks through canonical geometry. | Renderer modes, preset magic, GTK. | patterns/geometry/render; 20A/20C. | Public evaluator, canonical PNG/SVG, round-trip. | None. | Parent review; needs replanning. |
 | 20F Guide/shape editor exposure | Descriptor-driven private-draft exposure for 20C–20E. | Frontend evaluator, preset library/Save & Apply. | app; accepted commands/descriptors. | GTK Wayland plus command/persistence/export checks. | Yes. | Parent/user GNOME review; normal prompt/review. |
