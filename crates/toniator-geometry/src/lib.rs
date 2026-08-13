@@ -8,10 +8,15 @@ use serde::Serialize;
 use toniator_domain::{GuideDimensionId, PatternMechanismId};
 
 mod curves;
+mod guides;
 
 pub use curves::{
     CubicBezierSegment, CurveError, CurvePath, CurveSegment, IntersectionKind, LineSegment,
     PathArcLength, PathClosure, PathIntersection, PathLocation, SegmentIntersection,
+};
+pub use guides::{
+    GuideCoveragePlan, GuideDimensionCoverage, GuidePathInstance, GuidePathLocationProvenance,
+    GuidePathSet, construct_circular_arc, resolve_guide_prototype,
 };
 
 /// A finite document- or pattern-local point.
@@ -272,6 +277,18 @@ pub enum FamilySiteProvenance {
         accepted_ordinal: usize,
         exclusion_neighbor_ordinal: Option<usize>,
     },
+    /// A site from intersecting finite Stage 20D curve-guide instances.
+    CurveGuideIntersection {
+        contributors: Vec<GuidePathLocationProvenance>,
+    },
+    /// A site sampled by arc length along a finite Stage 20D curve guide.
+    CurveAlongGuide {
+        location: GuidePathLocationProvenance,
+        guide_order: usize,
+        sequence: i64,
+        absolute_arc_position_bits: u64,
+        local_arc_position_bits: u64,
+    },
 }
 
 /// One deterministic evaluator-emitted site before topology or realization.
@@ -426,6 +443,38 @@ impl FamilySiteSet {
                     return Err(FamilySiteError::new(
                         "family_sites.provenance.along_guide.arc_position",
                         "along-guide arc positions must decode to finite values",
+                    ));
+                }
+            }
+            FamilySiteProvenance::CurveGuideIntersection { contributors } => {
+                let unique = contributors.iter().collect::<BTreeSet<_>>();
+                if contributors.len() < 2
+                    || unique.len() != contributors.len()
+                    || contributors.iter().any(|location| {
+                        location.guide_id.dimension_id == 0
+                            || !f64::from_bits(location.parameter_bits).is_finite()
+                    })
+                {
+                    return Err(FamilySiteError::new(
+                        "family_sites.provenance.curve_guide_intersection.contributors",
+                        "curve guide intersections require at least two unique finite locations",
+                    ));
+                }
+            }
+            FamilySiteProvenance::CurveAlongGuide {
+                location,
+                absolute_arc_position_bits,
+                local_arc_position_bits,
+                ..
+            } => {
+                if location.guide_id.dimension_id == 0
+                    || !f64::from_bits(location.parameter_bits).is_finite()
+                    || !f64::from_bits(*absolute_arc_position_bits).is_finite()
+                    || !f64::from_bits(*local_arc_position_bits).is_finite()
+                {
+                    return Err(FamilySiteError::new(
+                        "family_sites.provenance.curve_along_guide",
+                        "curve along-guide provenance requires finite nonzero guide locations",
                     ));
                 }
             }

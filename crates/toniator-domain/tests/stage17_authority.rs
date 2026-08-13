@@ -1,22 +1,23 @@
 use std::collections::HashSet;
 
 use toniator_domain::{
-    ArtworkWeightResponse, CanvasSpec, ChannelAppearance, ChannelId, ChannelPaint,
-    ChannelPatternLayout, ChannelSourceMapping, ChannelState, ColorComponent, ColorValue,
-    CoveragePolicy, DensityEditedAxis, DensityMetric2D, DensityModulationKind, Document,
-    DocumentCommand, DocumentCommandFieldClassification, DocumentHistory, DocumentId,
-    DocumentSession, ExclusionKind, GuideDimensionId, InvalidationLevel, LegacyMappingFieldEdit,
-    MarkGeometryFieldEdit, MarkGeometryResponse, MarkOrientation, MarkOrientationKind,
-    MarkPrototype, ModeledMappingFieldEdit, NonFieldCommandOperation, PROPERTY_FIELD_IDS,
-    PatternDefinition, PatternDefinitionEdit, PatternDefinitionId, PatternMechanismId,
-    PatternOutputLayerId, PropertyApplicability, PropertyCommandKind, PropertyCurrentValueKind,
-    PropertyEnumChoice, PropertyFieldId, PropertyReferenceValue, PropertyTarget,
-    RandomCharacterKind, RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy,
-    SourceComponent, SourceMapping, SourceMappingComponent, SourcePlacement, SourceReference,
-    SourceReferenceId, StraightGuideDimension, StraightGuideRepetition,
-    StructuralSupportConstraint, TranslationEditedAxis, VariantTransitionDraft,
-    VariantTransitionFieldUpdate, VariantTransitionValue, VisibleMarkSizingPolicy,
-    property_field_contract, property_field_contracts,
+    ArtworkWeightResponse, AuthoredPoint2, AuthoredStructureId, CanvasSpec, ChannelAppearance,
+    ChannelId, ChannelPaint, ChannelPatternLayout, ChannelSourceMapping, ChannelState,
+    ColorComponent, ColorValue, CoveragePolicy, DensityEditedAxis, DensityMetric2D,
+    DensityModulationKind, Document, DocumentCommand, DocumentCommandFieldClassification,
+    DocumentHistory, DocumentId, DocumentSession, ExclusionKind, GuideDimensionId, GuidePrototype,
+    GuideRepetition, InvalidationLevel, LegacyMappingFieldEdit, MarkGeometryFieldEdit,
+    MarkGeometryResponse, MarkOrientation, MarkOrientationKind, MarkPrototype,
+    ModeledMappingFieldEdit, NonFieldCommandOperation, PROPERTY_FIELD_IDS, PatternDefinition,
+    PatternDefinitionEdit, PatternDefinitionId, PatternMechanismId, PatternOutputLayerId,
+    PropertyApplicability, PropertyCommandKind, PropertyCurrentValueKind, PropertyEnumChoice,
+    PropertyFieldId, PropertyReferenceValue, PropertyTarget, RandomCharacterKind,
+    RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy, SourceComponent,
+    SourceMapping, SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId,
+    StraightGuideDimension, StraightGuideRepetition, StructuralSupportConstraint,
+    TranslationEditedAxis, VariantTransitionDraft, VariantTransitionFieldUpdate,
+    VariantTransitionValue, VisibleMarkSizingPolicy, property_field_contract,
+    property_field_contracts,
 };
 
 fn generalized_document(
@@ -1261,6 +1262,71 @@ fn representative_descriptor_command(field: PropertyFieldId) -> DocumentCommand 
                 mechanism_id: PatternMechanismId(20),
                 dimension_id: GuideDimensionId(40),
                 spacing_multiplier: 1.1,
+            })
+        }
+        PropertyFieldId::GuidePrototype => structural(PatternDefinitionEdit::SetGuidePrototype {
+            mechanism_id: PatternMechanismId(20),
+            dimension_id: GuideDimensionId(40),
+            prototype: GuidePrototype::CircularArc {
+                center: AuthoredPoint2 { x: 0.0, y: 0.0 },
+                radius: 1.0,
+                start_angle_degrees: 0.0,
+                sweep_angle_degrees: 90.0,
+            },
+        }),
+        PropertyFieldId::GuideAuthoredStructure => {
+            structural(PatternDefinitionEdit::SetGuideAuthoredStructure {
+                mechanism_id: PatternMechanismId(20),
+                dimension_id: GuideDimensionId(40),
+                structure_id: AuthoredStructureId(1),
+            })
+        }
+        PropertyFieldId::GuideArcCenterX => structural(PatternDefinitionEdit::SetGuideArcCenterX {
+            mechanism_id: PatternMechanismId(20),
+            dimension_id: GuideDimensionId(40),
+            value: 1.0,
+        }),
+        PropertyFieldId::GuideArcCenterY => structural(PatternDefinitionEdit::SetGuideArcCenterY {
+            mechanism_id: PatternMechanismId(20),
+            dimension_id: GuideDimensionId(40),
+            value: 1.0,
+        }),
+        PropertyFieldId::GuideArcRadius => structural(PatternDefinitionEdit::SetGuideArcRadius {
+            mechanism_id: PatternMechanismId(20),
+            dimension_id: GuideDimensionId(40),
+            value: 1.0,
+        }),
+        PropertyFieldId::GuideArcStartAngle => {
+            structural(PatternDefinitionEdit::SetGuideArcStartAngle {
+                mechanism_id: PatternMechanismId(20),
+                dimension_id: GuideDimensionId(40),
+                value: 1.0,
+            })
+        }
+        PropertyFieldId::GuideArcSweepAngle => {
+            structural(PatternDefinitionEdit::SetGuideArcSweepAngle {
+                mechanism_id: PatternMechanismId(20),
+                dimension_id: GuideDimensionId(40),
+                value: 1.0,
+            })
+        }
+        PropertyFieldId::GuideRepetition => structural(PatternDefinitionEdit::SetGuideRepetition {
+            mechanism_id: PatternMechanismId(20),
+            dimension_id: GuideDimensionId(40),
+            repetition: GuideRepetition::Single,
+        }),
+        PropertyFieldId::GuideStackDirection => {
+            structural(PatternDefinitionEdit::SetGuideStackDirection {
+                mechanism_id: PatternMechanismId(20),
+                dimension_id: GuideDimensionId(40),
+                value: 1.0,
+            })
+        }
+        PropertyFieldId::GuideStackSpacingMultiplier => {
+            structural(PatternDefinitionEdit::SetGuideStackSpacingMultiplier {
+                mechanism_id: PatternMechanismId(20),
+                dimension_id: GuideDimensionId(40),
+                value: 1.0,
             })
         }
         PropertyFieldId::IntersectionDimensions => {

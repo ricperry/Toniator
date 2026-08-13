@@ -235,7 +235,7 @@ immediate bundled Even Random Circles and Straight Grid Circles application,
 visible Undo/Redo, and a separate private-draft Pattern Editor over the accepted
 headless command/history/scheduler and canonical preview, PNG, and SVG paths.
 `Save as Preset...` remains disabled; preset authoring, library management, and
-the remaining Stage 20D+ mechanisms remain planned.
+the remaining Stage 20E+ mechanisms remain planned.
 
 Stage-owned validation under
 `target/validation/stage-19b-gui-remediation/` includes private Sway/AT-SPI
@@ -276,7 +276,21 @@ history, deterministic current-v2 persistence, and exact conversion to Stage
 checkpoint `08d970a`; the checkpoint is intentionally named rather than
 self-referenced by a hash. It adds no consumer, evaluator, cache,
 canonical-output, renderer/export, CLI, GTK, preset, schema-version, or later
-stage behavior. The remaining Stage 20D+ mechanisms remain planned.
+stage behavior.
+
+Stage 20D is complete in the Stage 20D acceptance checkpoint. Its headless
+boundary adds authored-open-path and circular-arc guide prototypes, bounded
+`Single` and `TransformStack` repetition, baseline/phase/stack transforms,
+deterministic conservative coverage, existing guide-site product consumption,
+document-aware identity/invalidation, transactional cancellation/cache
+behavior, and deterministic current-v2 persistence. The checkpoint is
+intentionally named rather than self-referenced by a hash. A narrow
+post-review `toniator-app` compilation correction adds presentation labels for
+the new typed guide fields, choices, and authored references only; it does not
+add Stage 20D editing UI or move authority into the frontend. Private
+Sway/AT-SPI evidence is automated only and does not claim manual GNOME/Mutter
+acceptance. Stage 20E+ mechanisms remain planned and require their own
+reviewed contracts.
 
 Low-resolution fixtures and outputs are supplementary only. Every future stage
 that exercises source loading, sampling, rendering, preview, or export must

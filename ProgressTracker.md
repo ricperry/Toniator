@@ -358,13 +358,20 @@ checkpoint on 2026-08-13. The checkpoint includes the implementation and
 synchronized durable documentation and is intentionally named rather than
 self-referenced by hash.
 
-**Stage 20D — Planned under the approved planning contract.** The user approved
-the bounded decision-complete curved/procedural guide-generation and coverage
-contract in `Stage20D_planning_contract.md` on 2026-08-13. Its local planning
-checkpoint contains only the approved contract and synchronized durable
-planning documentation. Implementation has not started and requires a separate
-explicit request; the checkpoint authorizes no source edit, push, Stage 20E,
-or later work.
+**Stage 20D — Complete in the Stage 20D acceptance checkpoint.** The accepted
+headless boundary adds authored-open-path and circular-arc guide prototypes,
+bounded `Single` and `TransformStack` repetition, baseline/phase/stack
+transforms, deterministic conservative coverage, existing guide-site product
+consumption, document-aware identity and invalidation, transactional
+cancellation/cache behavior, and deterministic current-v2 persistence. The
+complete implementation began from planning checkpoint
+`453104e39204afc1e10397b9d5bbf551dd85deac`; focused verification and
+independent read-only review pass. A narrow post-review `toniator-app`
+compilation correction adds presentation labels for the new typed guide fields,
+choices, and authored references only; it does not add Stage 20D editing UI or
+move authority into the frontend. Private Sway/AT-SPI evidence is automated
+only and does not claim manual GNOME/Mutter acceptance. The acceptance
+checkpoint is intentionally named rather than self-referenced by hash.
 
 **Remaining Stage 20E+ — Planned.** Closed-shape realization,
 connected/network output, regions/Voronoi and reusable offsetting, composite
@@ -384,9 +391,11 @@ capabilities remain planned and require their own reviewed contracts.
   checkpoint**. That single local checkpoint contains all tracked Stage 20C
   implementation and synchronized durable documentation and is intentionally
   named rather than self-referenced by hash.
-- Stage 20D remains **Planned under the approved planning contract**. Its named
-  planning checkpoint approves only the contract and synchronized planning
-  documentation; it is not an implementation or acceptance transition.
+- Stage 20D is **Complete in the Stage 20D acceptance checkpoint**, whose
+  direct planning parent is `453104e39204afc1e10397b9d5bbf551dd85deac`; the
+  acceptance checkpoint is intentionally named rather than self-referenced by
+  hash. Stage 20E+ remain **Planned** and require their own reviewed
+  contracts.
 - The parent owns accepted/complete transitions and checkpoint hashes. A writer
   reports proposed status; evidence cannot substitute for user acceptance or a
   commit.

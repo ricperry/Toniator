@@ -1780,17 +1780,25 @@ checkpoint on 2026-08-13. The checkpoint includes the implementation and
 synchronized durable documentation and is intentionally named rather than
 self-referenced by hash.
 
-**Stage 20D — Planned under the approved planning contract.** The bounded
+**Stage 20D — Complete in the Stage 20D acceptance checkpoint.** The bounded
 decision-complete contract in
 [`Stage20D_planning_contract.md`](../Stage20D_planning_contract.md) defines
 generic authored-open-path and circular-arc guide prototypes, baseline/phase
 transforms, Single and TransformStack repetition, exact conservative coverage,
 existing guide-site product consumption, identity/invalidation, current-v2
 persistence, focused tests, and its implementation/review gates. The user
-approved this planning contract on 2026-08-13. Its named local planning
-checkpoint contains only the contract and synchronized durable planning
-documentation; Stage 20D implementation remains unstarted and requires a
-separate explicit request.
+approved this planning contract on 2026-08-13. The complete implementation
+began after a separate explicit request from exact planning checkpoint
+`453104e39204afc1e10397b9d5bbf551dd85deac`; the focused gate and independent
+read-only review pass. The implementation's document-aware resolution and
+cache boundaries include resolved authored guide identity, and current-v2
+persistence validates rebuilt guide resources before publication. A narrow
+post-review `toniator-app` compilation correction adds presentation labels for
+the new typed guide fields, choices, and authored references only; it does not
+expose Stage 20D editing UI or move authority into the frontend. Private
+Sway/AT-SPI evidence is automated only and does not claim manual GNOME/Mutter
+acceptance. The acceptance checkpoint is intentionally named rather than
+self-referenced by hash.
 
 **Later Stage 20E+ — Planned.** Closed-shape realization, connected/network
 topology, regions and ordinary Voronoi, reusable region offset/collapse

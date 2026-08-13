@@ -36,11 +36,11 @@ pub use toniator_patterns::{
     SiteScope,
 };
 use toniator_patterns::{
-    FamilyCapability, GridFamilyOutput, MappedCircularMarkRealization, PatternPipelineError,
-    SourceColorCircularMarkRealization, TypedFamilyOutput, TypedRealization,
-    evaluate_straight_grid, evaluate_typed_family_product_with_source_cancellable,
-    family_requires_decoded_source, realize_circular_marks, realize_typed_mapped_outputs,
-    realize_typed_source_color_outputs,
+    CurveSegment, FamilyCapability, GenericGuideCapability, GridFamilyOutput,
+    MappedCircularMarkRealization, PatternPipelineError, SourceColorCircularMarkRealization,
+    TypedFamilyOutput, TypedRealization, evaluate_straight_grid,
+    evaluate_typed_family_product_with_source_cancellable, family_requires_decoded_source,
+    realize_circular_marks, realize_typed_mapped_outputs, realize_typed_source_color_outputs,
 };
 pub use toniator_render::{
     GeometryOutput, OutputRasterTarget, PreviewRasterTarget, RasterAntialiasing, RasterBackground,
@@ -272,6 +272,7 @@ struct FamilyDefinitionKey {
     definition_id: u64,
     family: toniator_domain::PatternFamily,
     mechanisms: Vec<PatternMechanism>,
+    resolved_guide_content: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -688,7 +689,7 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
     // Capability resolution is authoritative and happens before decoding or
     // cache lookup, so an unsupported composition cannot publish a partial
     // artifact into a last-successful cache.
-    let plan = toniator_patterns::resolve_pattern_pipeline(definition)
+    let plan = toniator_patterns::resolve_document_pattern_pipeline(document, definition)
         .map_err(EvaluationError::from_pipeline)?;
     let response = MarkResponse {
         minimum_size: channel.mark_geometry_response.minimum_size,
@@ -726,7 +727,14 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
             channel.layout.translation_y.to_bits(),
         ),
         guard_steps: definition.coverage.guard_steps,
-        definition: family_definition_key(definition),
+        definition: FamilyDefinitionKey {
+            resolved_guide_content: plan
+                .family
+                .generic_guides
+                .as_ref()
+                .map(resolved_guide_identity),
+            ..family_definition_key(definition)
+        },
         maximum_support_radius: definition.coverage.maximum_support_radius.to_bits(),
         max_family_candidates: limits.max_family_candidates(),
         structural_source: family_requires_decoded_source(&plan.family)
@@ -892,12 +900,59 @@ fn canvas_key(canvas: &CanvasSpec) -> (u64, u64) {
     (canvas.width.to_bits(), canvas.height.to_bits())
 }
 
+/// Captures immutable authored definition intent before resolved resource content enters a cache key.
+///
+/// The caller must add document-resolved authored guide content for resource-bearing
+/// Stage 20D definitions; this helper alone deliberately cannot cross that cache boundary.
 fn family_definition_key(value: &PatternDefinition) -> FamilyDefinitionKey {
     FamilyDefinitionKey {
         definition_id: value.id.0,
         family: value.family.clone(),
         mechanisms: value.mechanisms.clone(),
+        resolved_guide_content: None,
     }
+}
+
+/// Hashes resolved generic guide content in stored order for both engine family-cache paths.
+fn resolved_guide_identity(value: &GenericGuideCapability) -> String {
+    let mut bytes = b"toniator-stage-20d-resolved-guide-content-v1".to_vec();
+    for (source, path) in &value.resolved_paths {
+        bytes.extend(source.map_or(0, |id| id.0).to_le_bytes());
+        bytes.extend(
+            u64::try_from(path.segments().len())
+                .expect("usize fits u64")
+                .to_le_bytes(),
+        );
+        for segment in path.segments() {
+            match segment {
+                CurveSegment::Line(line) => {
+                    bytes.push(1);
+                    for point in [line.start(), line.end()] {
+                        bytes.extend(point.x.to_bits().to_le_bytes());
+                        bytes.extend(point.y.to_bits().to_le_bytes());
+                    }
+                }
+                CurveSegment::CubicBezier(cubic) => {
+                    bytes.push(2);
+                    for point in [
+                        cubic.start(),
+                        cubic.control_1(),
+                        cubic.control_2(),
+                        cubic.end(),
+                    ] {
+                        bytes.extend(point.x.to_bits().to_le_bytes());
+                        bytes.extend(point.y.to_bits().to_le_bytes());
+                    }
+                }
+            }
+        }
+    }
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("toniator-stage-20d-guide-family-v1:fnv1a64:{hash:016x}")
 }
 
 fn realization_source_identity(value: &SourceIdentity) -> RealizationSourceIdentity {
@@ -1590,7 +1645,7 @@ fn evaluate_cached_document_impl(
                 "evaluation.pattern_definition",
                 "channel references a missing pattern definition",
             ))?;
-        toniator_patterns::resolve_pattern_pipeline(definition)
+        toniator_patterns::resolve_document_pattern_pipeline(document, definition)
             .map_err(EvaluationError::from_pipeline)?;
     }
     let source_key = SourceCacheKey {
@@ -1640,7 +1695,7 @@ fn evaluate_cached_document_impl(
                 "evaluation.pattern_definition",
                 "channel references a missing pattern definition",
             ))?;
-        let plan = toniator_patterns::resolve_pattern_pipeline(definition)
+        let plan = toniator_patterns::resolve_document_pattern_pipeline(document, definition)
             .map_err(EvaluationError::from_pipeline)?;
         let key = document_family_cache_key(
             document.canvas(),
@@ -1957,6 +2012,11 @@ struct DocumentFamilyCacheKey {
     candidate_limit: usize,
 }
 
+/// Builds one modeled-channel family cache key including resolved authored guide content.
+///
+/// This remains a cache identity only: document capability resolution supplies `family`,
+/// and source decoding remains owned by the caller.  No errors are produced because all
+/// supplied values have already crossed their authoritative validation boundaries.
 fn document_family_cache_key(
     canvas: &CanvasSpec,
     definition: &toniator_domain::PatternDefinition,
@@ -1979,7 +2039,10 @@ fn document_family_cache_key(
             ),
             guard_steps: definition.coverage.guard_steps,
             support_radius: definition.coverage.maximum_support_radius.to_bits(),
-            definition: family_definition_key(definition),
+            definition: FamilyDefinitionKey {
+                resolved_guide_content: family.generic_guides.as_ref().map(resolved_guide_identity),
+                ..family_definition_key(definition)
+            },
             structural_source: family_requires_decoded_source(family)
                 .then(|| realization_source_identity(source.identity())),
         },
@@ -2466,6 +2529,7 @@ mod cache_key_tests {
                     site_mechanism_id: toniator_domain::PatternMechanismId(2),
                 },
                 mechanisms: vec![],
+                resolved_guide_content: None,
             },
             maximum_support_radius: 4.5_f64.to_bits(),
             max_family_candidates: EvaluationLimits::DEFAULT_MAX_FAMILY_CANDIDATES,

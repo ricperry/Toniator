@@ -13,11 +13,12 @@ use toniator_domain::{
     ChannelPaint, ChannelPatternLayout, ChannelSourceMapping, ChannelState, ChannelTopology,
     ChannelTopologyTemplate, ColorComponent, ColorValue, CoveragePolicy, DensityMetric2D, Document,
     DocumentCommand, DocumentHistory, DocumentId, DocumentSession, GeneralizedSiteProduct,
-    GuideDimensionId, HalftoneChannelModel, MarkGeometryResponse, MarkOrientation,
-    ModeledMappingFieldEdit, PatternDefinition, PatternDefinitionEdit, PatternDefinitionId,
-    PatternMechanismId, PatternOutputLayerId, RandomSiteCharacter, SiteDensityModulation,
-    SiteExclusionPolicy, SourceComponent, SourceMappingComponent, SourcePlacement, SourceReference,
-    SourceReferenceId, StraightGuideDimension, StraightGuideRepetition, TranslationEditedAxis,
+    GuideDimension, GuideDimensionId, GuidePrototype, GuideRepetition, HalftoneChannelModel,
+    MarkGeometryResponse, MarkOrientation, ModeledMappingFieldEdit, PatternDefinition,
+    PatternDefinitionEdit, PatternDefinitionId, PatternMechanismId, PatternOutputLayerId,
+    RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy, SourceComponent,
+    SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId,
+    StraightGuideDimension, StraightGuideRepetition, TranslationEditedAxis,
     VisibleMarkSizingPolicy,
 };
 use toniator_io::{
@@ -1900,4 +1901,205 @@ fn post_write_rename_failure_cleans_only_the_attempted_temp() {
     );
     fs::remove_dir(directory_target).unwrap();
     fs::remove_dir(root).unwrap();
+}
+
+/// Proves Stage 20D guide DTO absence preserves accepted old-v2 bytes and v1 migration output.
+#[test]
+fn stage20d_absent_variants_preserve_existing_v2_bytes_and_v1_migration() {
+    let (document, sources) = legacy_document();
+    let first = temporary("stage20d-absent-first.toniator");
+    let second = temporary("stage20d-absent-second.toniator");
+    save(&first, &document, &sources).unwrap();
+    let loaded = load(&first).unwrap();
+    save(&second, loaded.document(), loaded.sources()).unwrap();
+    assert_eq!(fs::read(&first).unwrap(), fs::read(&second).unwrap());
+    let migrated = load(&asset("raster-sample-v1.toniator")).unwrap();
+    assert_eq!(migrated.versions().document(), 1);
+    assert!(!migrated.migration_report().is_empty());
+    let migrated_path = temporary("stage20d-accepted-old-v2.toniator");
+    save(&migrated_path, migrated.document(), migrated.sources()).unwrap();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(fs::read(&migrated_path).unwrap())),
+        "7135531041b8a4f9136731267b356ce4b3acbdb74c6e12c6670817e0613436cf"
+    );
+    fs::remove_file(first).unwrap();
+    fs::remove_file(second).unwrap();
+    fs::remove_file(migrated_path).unwrap();
+}
+
+/// Proves current-v2 persistence retains generic-guide variants, order, references, and authored numeric bits.
+#[test]
+fn stage20d_guide_definitions_round_trip_references_variants_order_and_numeric_bits() {
+    let (base, sources) = document_with_authored_structures();
+    let definition = PatternDefinition::generalized_guides(
+        PatternDefinitionId(91),
+        "curved",
+        PatternMechanismId(181),
+        PatternMechanismId(182),
+        PatternOutputLayerId(91),
+        vec![
+            GuideDimension {
+                id: GuideDimensionId(501),
+                baseline_angle_degrees: -0.0,
+                phase: 3.25,
+                prototype: GuidePrototype::AuthoredOpenPath {
+                    structure_id: AuthoredStructureId(21),
+                },
+                repetition: GuideRepetition::Single,
+            },
+            GuideDimension {
+                id: GuideDimensionId(502),
+                baseline_angle_degrees: 17.0,
+                phase: -2.5,
+                prototype: GuidePrototype::CircularArc {
+                    center: authored_point(-0.0, 4.0),
+                    radius: 8.0,
+                    start_angle_degrees: -45.0,
+                    sweep_angle_degrees: 270.0,
+                },
+                repetition: GuideRepetition::TransformStack {
+                    direction_degrees: 90.0,
+                    spacing_multiplier: 1.5,
+                },
+            },
+        ],
+        GeneralizedSiteProduct::Intersections {
+            dimensions: vec![GuideDimensionId(501), GuideDimensionId(502)],
+            merge_epsilon: 0.25,
+        },
+        MarkOrientation::Fixed,
+        CoveragePolicy {
+            guard_steps: 2,
+            maximum_support_radius: 4.5,
+        },
+    );
+    let document = Document::with_source_and_authored_structures(
+        base.id(),
+        base.canvas().clone(),
+        base.source().clone(),
+        vec![definition],
+        base.channels().unwrap().to_vec(),
+        base.authored_structures().to_vec(),
+    )
+    .unwrap();
+    let path = temporary("stage20d-guide-roundtrip.toniator");
+    save(&path, &document, &sources).unwrap();
+    let loaded = load(&path).unwrap();
+    assert_eq!(loaded.document(), &document);
+    let dimensions = match &loaded.document().pattern_definitions()[0].mechanisms[0] {
+        toniator_domain::PatternMechanism::GuideDimensions { dimensions, .. } => dimensions,
+        other => panic!("expected generic guide root, got {other:?}"),
+    };
+    assert_eq!(
+        dimensions[0].baseline_angle_degrees.to_bits(),
+        (-0.0_f64).to_bits()
+    );
+    assert_eq!(dimensions[0].phase.to_bits(), 3.25_f64.to_bits());
+    assert_eq!(
+        dimensions[1].baseline_angle_degrees.to_bits(),
+        17.0_f64.to_bits()
+    );
+    assert_eq!(dimensions[1].phase.to_bits(), (-2.5_f64).to_bits());
+    match &dimensions[1].prototype {
+        GuidePrototype::CircularArc {
+            center,
+            radius,
+            start_angle_degrees,
+            sweep_angle_degrees,
+        } => {
+            assert_eq!(center.x.to_bits(), (-0.0_f64).to_bits());
+            assert_eq!(center.y.to_bits(), 4.0_f64.to_bits());
+            assert_eq!(radius.to_bits(), 8.0_f64.to_bits());
+            assert_eq!(start_angle_degrees.to_bits(), (-45.0_f64).to_bits());
+            assert_eq!(sweep_angle_degrees.to_bits(), 270.0_f64.to_bits());
+        }
+        other => panic!("expected circular arc, got {other:?}"),
+    }
+    match &dimensions[1].repetition {
+        GuideRepetition::TransformStack {
+            direction_degrees,
+            spacing_multiplier,
+        } => {
+            assert_eq!(direction_degrees.to_bits(), 90.0_f64.to_bits());
+            assert_eq!(spacing_multiplier.to_bits(), 1.5_f64.to_bits());
+        }
+        other => panic!("expected transform stack, got {other:?}"),
+    }
+    fs::remove_file(path).unwrap();
+}
+
+/// Proves missing and closed generic guide references reject during complete current-v2 reconstruction.
+#[test]
+fn stage20d_invalid_or_closed_guide_references_reject_before_document_commit() {
+    let (base, sources) = document_with_authored_structures();
+    let definition = PatternDefinition::generalized_guides(
+        PatternDefinitionId(91),
+        "curved",
+        PatternMechanismId(181),
+        PatternMechanismId(182),
+        PatternOutputLayerId(91),
+        vec![
+            GuideDimension {
+                id: GuideDimensionId(501),
+                baseline_angle_degrees: 0.0,
+                phase: 0.0,
+                prototype: GuidePrototype::AuthoredOpenPath {
+                    structure_id: AuthoredStructureId(21),
+                },
+                repetition: GuideRepetition::Single,
+            },
+            GuideDimension {
+                id: GuideDimensionId(502),
+                baseline_angle_degrees: 0.0,
+                phase: 0.0,
+                prototype: GuidePrototype::CircularArc {
+                    center: authored_point(0.0, 0.0),
+                    radius: 1.0,
+                    start_angle_degrees: 0.0,
+                    sweep_angle_degrees: 90.0,
+                },
+                repetition: GuideRepetition::Single,
+            },
+        ],
+        GeneralizedSiteProduct::Intersections {
+            dimensions: vec![GuideDimensionId(501), GuideDimensionId(502)],
+            merge_epsilon: 0.0,
+        },
+        MarkOrientation::Fixed,
+        CoveragePolicy {
+            guard_steps: 1,
+            maximum_support_radius: 4.5,
+        },
+    );
+    let document = Document::with_source_and_authored_structures(
+        base.id(),
+        base.canvas().clone(),
+        base.source().clone(),
+        vec![definition],
+        base.channels().unwrap().to_vec(),
+        base.authored_structures().to_vec(),
+    )
+    .unwrap();
+    let (json, source_name, source) = saved_parts(&document, &sources);
+    let mut value: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    value["document"]["pattern_definitions"][0]["mechanisms"][0]["dimensions"][0]["prototype"]["structure_id"] =
+        serde_json::json!(4);
+    let invalid = serde_json::to_vec(&value).unwrap();
+    assert_load_error(
+        &archive_from_entries(&[
+            ("document.json", &invalid, zip::CompressionMethod::Stored),
+            (&source_name, &source, zip::CompressionMethod::Stored),
+        ]),
+        |error| matches!(error, LoadError::DomainValidation { context } if context == "pattern_definitions.mechanisms.guide_prototype.kind: authored guide prototypes require an open path"),
+    );
+    value["document"]["pattern_definitions"][0]["mechanisms"][0]["dimensions"][0]["prototype"]["structure_id"] =
+        serde_json::json!(999);
+    let missing = serde_json::to_vec(&value).unwrap();
+    assert_load_error(
+        &archive_from_entries(&[
+            ("document.json", &missing, zip::CompressionMethod::Stored),
+            (&source_name, &source, zip::CompressionMethod::Stored),
+        ]),
+        |error| matches!(error, LoadError::DomainValidation { context } if context == "pattern_definitions.mechanisms.guide_prototype.reference: authored guide prototype references a missing structure"),
+    );
 }

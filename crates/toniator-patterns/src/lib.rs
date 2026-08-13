@@ -6,17 +6,20 @@ use std::{collections::BTreeMap, error::Error, fmt};
 
 use serde::Serialize;
 use toniator_domain::{
-    ArtworkWeightResponse, CanvasSpec, ChannelId, DensityMetric2D, DocumentCommand,
-    DocumentHistory, DocumentSessionError, GuideDimensionDraft, GuideDimensionId, MarkOrientation,
-    MarkOrientationDraft, MarkPrototype, PatternDefinition, PatternDefinitionRecipe, PatternFamily,
-    PatternMechanism, PatternMechanismId, PatternModulation, PatternOutputLayer,
-    PatternOutputLayerId, PresetMetadata, PresetRecord, RandomSiteCharacter, SiteDensityModulation,
-    SiteExclusionPolicy, SourceMapping, StraightGuideDimension, VisibleMarkSizingPolicy,
+    ArtworkWeightResponse, AuthoredStructureId, CanvasSpec, ChannelId, DensityMetric2D, Document,
+    DocumentCommand, DocumentHistory, DocumentSessionError, GuideDimension, GuideDimensionDraft,
+    GuideDimensionId, GuidePrototype, GuideRepetition, MarkOrientation, MarkOrientationDraft,
+    MarkPrototype, PatternDefinition, PatternDefinitionRecipe, PatternFamily, PatternMechanism,
+    PatternMechanismId, PatternModulation, PatternOutputLayer, PatternOutputLayerId,
+    PresetMetadata, PresetRecord, RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy,
+    SourceMapping, StraightGuideDimension, VisibleMarkSizingPolicy,
 };
 pub use toniator_geometry::{
-    AffineTransform2D, Bounds, CanonicalCircleMark, FamilySite, FamilySiteError, FamilySiteId,
-    FamilySiteProvenance, FamilySiteSet, GuideInstanceId, GuideIntersectionProvenance,
-    IntersectionSite, Point2, SiteId, SiteScope, StraightGuide, Vector2, projection_range,
+    AffineTransform2D, Bounds, CanonicalCircleMark, CurveError, CurvePath, CurveSegment,
+    FamilySite, FamilySiteError, FamilySiteId, FamilySiteProvenance, FamilySiteSet,
+    GuideInstanceId, GuideIntersectionProvenance, GuidePathInstance, GuidePathLocationProvenance,
+    GuidePathSet, IntersectionSite, PathLocation, Point2, SiteId, SiteScope, StraightGuide,
+    Vector2, projection_range, resolve_guide_prototype,
 };
 use toniator_sampling::{
     SampledSourcePaint, SamplingError, SourceComponent, SourceField, SourceMappingComponent,
@@ -342,6 +345,15 @@ pub struct FamilyCapability {
     pub along_interval_multiplier: Option<f64>,
     pub along_phase: Option<f64>,
     pub random: Option<RandomSiteCapability>,
+    /// Document-resolved generic guide capability.  Legacy definition-only plans leave this absent.
+    pub generic_guides: Option<GenericGuideCapability>,
+}
+
+/// Resolved document-owned or procedural guide prototypes retained only for one family evaluation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GenericGuideCapability {
+    pub dimensions: Vec<GuideDimension>,
+    pub resolved_paths: Vec<(Option<AuthoredStructureId>, CurvePath)>,
 }
 
 /// Resolved Stage 16B structural chain.  The source-dependent modulation is
@@ -409,6 +421,7 @@ struct TypedFamilyStructure {
     guard_steps: u32,
     antialias_margin: f64,
     generation_domain: Bounds,
+    guide_path_set: Option<GuidePathSet>,
 }
 
 impl TypedFamilyOutput {
@@ -430,6 +443,11 @@ impl TypedFamilyOutput {
     /// Returns bounded random-process diagnostics only for random-site products.
     pub fn random_diagnostics(&self) -> Option<&RandomSiteDiagnostics> {
         self.diagnostics.as_ref()
+    }
+
+    /// Returns Stage 20D's truthful reusable finite guide authority when this family produces it.
+    pub fn guide_path_set(&self) -> Option<&GuidePathSet> {
+        self.structure.guide_path_set.as_ref()
     }
 }
 
@@ -484,6 +502,20 @@ impl fmt::Display for PatternPipelineError {
 
 impl Error for PatternPipelineError {}
 
+impl From<CurveError> for PatternPipelineError {
+    /// Preserves the stable Stage 20B curve diagnostic at the typed pipeline boundary.
+    fn from(error: CurveError) -> Self {
+        Self::new(error.path(), error.message())
+    }
+}
+
+impl From<GridError> for PatternPipelineError {
+    /// Preserves existing grid/coverage diagnostics when shared spacing helpers fail.
+    fn from(error: GridError) -> Self {
+        Self::new(error.path(), error.message())
+    }
+}
+
 /// Resolve the typed capability graph in declared order. This is the one
 /// family/output compatibility boundary shared by document and diagnostic
 /// evaluation; unsupported combinations fail before any source decode or
@@ -491,6 +523,16 @@ impl Error for PatternPipelineError {}
 pub fn resolve_pattern_pipeline(
     definition: &PatternDefinition,
 ) -> Result<PatternPipelinePlan, PatternPipelineError> {
+    if definition
+        .mechanisms
+        .iter()
+        .any(|mechanism| matches!(mechanism, PatternMechanism::GuideDimensions { .. }))
+    {
+        return Err(PatternPipelineError::new(
+            "pattern.pipeline.guide_resources",
+            "document-owned guide resources require document-aware pipeline resolution",
+        ));
+    }
     if matches!(definition.family, PatternFamily::RandomSites { .. }) {
         return resolve_random_site_pipeline(definition);
     }
@@ -650,10 +692,81 @@ pub fn resolve_pattern_pipeline(
             along_interval_multiplier,
             along_phase,
             random: None,
+            generic_guides: None,
         },
         modulation: definition.modulation.clone(),
         ordered_outputs,
     })
+}
+
+/// Resolves a typed family with document-owned generic guide resources before family allocation.
+///
+/// # Errors
+///
+/// Returns the established document resource or pipeline diagnostic without consulting global state.
+pub fn resolve_document_pattern_pipeline(
+    document: &Document,
+    definition: &PatternDefinition,
+) -> Result<PatternPipelinePlan, PatternPipelineError> {
+    let Some((guide_id, dimensions)) =
+        definition
+            .mechanisms
+            .iter()
+            .find_map(|mechanism| match mechanism {
+                PatternMechanism::GuideDimensions { id, dimensions } => Some((*id, dimensions)),
+                _ => None,
+            })
+    else {
+        return resolve_pattern_pipeline(definition);
+    };
+    let mut surrogate = definition.clone();
+    let generic_dimensions = dimensions.to_vec();
+    let replacement = PatternMechanism::StraightGuideDimensions {
+        id: guide_id,
+        dimensions: generic_dimensions
+            .iter()
+            .map(|dimension| StraightGuideDimension {
+                id: dimension.id,
+                baseline_angle_degrees: dimension.baseline_angle_degrees,
+                phase: dimension.phase,
+                repetition: toniator_domain::StraightGuideRepetition {
+                    spacing_multiplier: 1.0,
+                },
+            })
+            .collect(),
+    };
+    let target = surrogate
+        .mechanisms
+        .iter_mut()
+        .find(|mechanism| mechanism.id() == guide_id)
+        .expect("generic root was found in cloned definition");
+    *target = replacement;
+    let mut plan = resolve_pattern_pipeline(&surrogate)?;
+    let mut resolved_paths = Vec::with_capacity(generic_dimensions.len());
+    for dimension in &generic_dimensions {
+        let structure = match dimension.prototype {
+            GuidePrototype::AuthoredOpenPath { structure_id } => {
+                document.authored_structure(structure_id)
+            }
+            GuidePrototype::CircularArc { .. } => None,
+        };
+        let path = resolve_guide_prototype(&dimension.prototype, structure).map_err(|_| {
+            PatternPipelineError::new(
+                "pattern.pipeline.guide_resources",
+                "document-owned guide resources require document-aware pipeline resolution",
+            )
+        })?;
+        let source_id = match dimension.prototype {
+            GuidePrototype::AuthoredOpenPath { structure_id } => Some(structure_id),
+            _ => None,
+        };
+        resolved_paths.push((source_id, path));
+    }
+    plan.family.generic_guides = Some(GenericGuideCapability {
+        dimensions: generic_dimensions,
+        resolved_paths,
+    });
+    Ok(plan)
 }
 
 fn resolve_random_site_pipeline(
@@ -757,6 +870,7 @@ fn resolve_random_site_pipeline(
                 maximum_attempts: *maximum_attempts,
                 maximum_neighbor_checks: *maximum_neighbor_checks,
             }),
+            generic_guides: None,
         },
         modulation: definition.modulation.clone(),
         ordered_outputs: vec![OutputCapability {
@@ -791,6 +905,22 @@ pub fn evaluate_typed_family_cancellable(
     evaluate_typed_family_product_cancellable(&plan.family, request, is_cancelled)
 }
 
+/// Resolves document-owned guide resources and evaluates their typed family without global state.
+///
+/// # Errors
+///
+/// Returns the resolver, coverage, geometry, limit, or cancellation error before publishing any
+/// partial guide or site result.
+pub fn evaluate_document_typed_family_cancellable(
+    document: &Document,
+    definition: &PatternDefinition,
+    request: &GridInspectRequest,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<TypedFamilyOutput, PatternPipelineError> {
+    let plan = resolve_document_pattern_pipeline(document, definition)?;
+    evaluate_typed_family_product_cancellable(&plan.family, request, is_cancelled)
+}
+
 /// Evaluates only the structural family product. Output-layer and modulation
 /// contracts intentionally stay out of this cacheable result and are supplied
 /// later to realization.
@@ -811,6 +941,9 @@ pub fn evaluate_typed_family_product_with_source_cancellable(
     source: Option<&SourceField>,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<TypedFamilyOutput, PatternPipelineError> {
+    if family.generic_guides.is_some() {
+        return evaluate_generic_curve_guides_cancellable(family, request, is_cancelled);
+    }
     if family.product == StructuralProductCapability::RandomSites {
         let output = evaluate_random_sites_cancellable(family, request, source, is_cancelled)?;
         let site_set = FamilySiteSet::new(
@@ -830,6 +963,7 @@ pub fn evaluate_typed_family_product_with_source_cancellable(
                 guard_steps: request.guard_steps,
                 antialias_margin: ANTIALIAS_MARGIN,
                 generation_domain: output.generation_domain,
+                guide_path_set: None,
             },
         });
     }
@@ -888,6 +1022,7 @@ pub fn evaluate_typed_family_product_with_source_cancellable(
                 guard_steps: request.guard_steps,
                 antialias_margin: ANTIALIAS_MARGIN,
                 generation_domain,
+                guide_path_set: None,
             },
         });
     }
@@ -900,6 +1035,749 @@ pub fn evaluate_typed_family_product_with_source_cancellable(
         diagnostics: None,
         structure: TypedFamilyStructure::from_grid(&output),
     })
+}
+
+/// Evaluates resolved Stage 20D finite guide paths before any current-circle compatibility realization.
+fn evaluate_generic_curve_guides_cancellable(
+    family: &FamilyCapability,
+    request: &GridInspectRequest,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<TypedFamilyOutput, PatternPipelineError> {
+    let generic = family
+        .generic_guides
+        .as_ref()
+        .expect("generic branch has resolved guide capability");
+    if is_cancelled() {
+        return Err(PatternPipelineError::new(
+            "evaluation.cancelled",
+            "evaluation was cancelled",
+        ));
+    }
+    let canvas = Bounds::new(
+        Point2::new(0.0, 0.0),
+        Point2::new(request.canvas.width, request.canvas.height),
+    )
+    .ok_or(PatternPipelineError::new(
+        "coverage.curved_guides.proof",
+        "curved-guide coverage could not prove a complete generation envelope",
+    ))?;
+    let maximum_directional_spacing = (request.canvas.width / request.density.across_x)
+        .max(request.canvas.height / request.density.across_y);
+    if !maximum_directional_spacing.is_finite() || maximum_directional_spacing <= 0.0 {
+        return Err(PatternPipelineError::new(
+            "coverage.curved_guides.proof",
+            "curved-guide coverage could not prove a complete generation envelope",
+        ));
+    }
+    let along_bound = family
+        .along_interval_multiplier
+        .map(|value| value * maximum_directional_spacing)
+        .unwrap_or(0.0);
+    let mut maximum_spacing = along_bound;
+    for dimension in &generic.dimensions {
+        if let GuideRepetition::TransformStack {
+            direction_degrees,
+            spacing_multiplier,
+        } = dimension.repetition
+        {
+            let angle = (dimension.baseline_angle_degrees + direction_degrees).to_radians();
+            let unit = Vector2::new(angle.cos(), angle.sin());
+            let spacing =
+                directional_spacing(&request.canvas, &request.density, unit)? * spacing_multiplier;
+            maximum_spacing = maximum_spacing.max(spacing);
+        }
+    }
+    let margin =
+        request.support_radius + ANTIALIAS_MARGIN + request.guard_steps as f64 * maximum_spacing;
+    let document_domain = canvas.expanded(margin).ok_or(PatternPipelineError::new(
+        "coverage.curved_guides.proof",
+        "curved-guide coverage could not prove a complete generation envelope",
+    ))?;
+    let channel_transform = AffineTransform2D::rotate_about_then_translate(
+        Point2::new(request.canvas.width / 2.0, request.canvas.height / 2.0),
+        request.rotation_degrees,
+        Vector2::new(request.translation_x, request.translation_y),
+    )
+    .ok_or(PatternPipelineError::new(
+        "coverage.curved_guides.proof",
+        "curved-guide coverage could not prove a complete generation envelope",
+    ))?;
+    let local_domain =
+        channel_transform
+            .inverse_bounds(document_domain)
+            .ok_or(PatternPipelineError::new(
+                "coverage.curved_guides.proof",
+                "curved-guide coverage could not prove a complete generation envelope",
+            ))?;
+    let mut guides = Vec::new();
+    let mut grouped = Vec::<Vec<GuidePathInstance>>::new();
+    for (dimension, (source_structure_id, prototype)) in
+        generic.dimensions.iter().zip(&generic.resolved_paths)
+    {
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        let baseline = AffineTransform2D::rotate_about_then_translate(
+            Point2::new(0.0, 0.0),
+            dimension.baseline_angle_degrees,
+            Vector2::new(0.0, 0.0),
+        )
+        .ok_or(PatternPipelineError::new(
+            "coverage.curved_guides.proof",
+            "curved-guide coverage could not prove a complete generation envelope",
+        ))?;
+        let base = prototype.transformed(baseline)?;
+        let (unit, spacing, indices) = match dimension.repetition {
+            GuideRepetition::Single => {
+                let angle = dimension.baseline_angle_degrees.to_radians();
+                (Vector2::new(angle.cos(), angle.sin()), 0.0, vec![0])
+            }
+            GuideRepetition::TransformStack {
+                direction_degrees,
+                spacing_multiplier,
+            } => {
+                let angle = (dimension.baseline_angle_degrees + direction_degrees).to_radians();
+                let unit = Vector2::new(angle.cos(), angle.sin());
+                let spacing = directional_spacing(&request.canvas, &request.density, unit)?
+                    * spacing_multiplier;
+                let bounds = base.bounds()?;
+                let projections = local_domain
+                    .corners()
+                    .into_iter()
+                    .map(|point| point.dot(unit));
+                let (min_domain, max_domain) = projections
+                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), value| {
+                        (min.min(value), max.max(value))
+                    });
+                let path_projections = bounds.corners().into_iter().map(|point| point.dot(unit));
+                let (min_path, max_path) = path_projections
+                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), value| {
+                        (min.min(value), max.max(value))
+                    });
+                // Index zero remains the raw authored phase; normalizing it here would
+                // preserve geometry but incorrectly renumber derived guide identities.
+                let first_raw = ((min_domain - max_path - dimension.phase) / spacing).floor();
+                let last_raw = ((max_domain - min_path - dimension.phase) / spacing).ceil();
+                if !first_raw.is_finite()
+                    || !last_raw.is_finite()
+                    || first_raw < i64::MIN as f64
+                    || last_raw > i64::MAX as f64
+                {
+                    return Err(PatternPipelineError::new(
+                        "coverage.curved_guides.numeric_overflow",
+                        "curved-guide coverage arithmetic overflowed",
+                    ));
+                }
+                let guard = i64::from(request.guard_steps);
+                let first =
+                    (first_raw as i64)
+                        .checked_sub(guard)
+                        .ok_or(PatternPipelineError::new(
+                            "coverage.curved_guides.numeric_overflow",
+                            "curved-guide coverage arithmetic overflowed",
+                        ))?;
+                let last =
+                    (last_raw as i64)
+                        .checked_add(guard)
+                        .ok_or(PatternPipelineError::new(
+                            "coverage.curved_guides.numeric_overflow",
+                            "curved-guide coverage arithmetic overflowed",
+                        ))?;
+                let count = last
+                    .checked_sub(first)
+                    .and_then(|value| value.checked_add(1));
+                if count.is_none() || count.unwrap() as u64 > request.max_family_candidates as u64 {
+                    return Err(PatternPipelineError::new(
+                        "coverage.curved_guides.instance_limit",
+                        "curved-guide instance count exceeds the configured family limit",
+                    ));
+                }
+                (unit, spacing, (first..=last).collect())
+            }
+        };
+        let mut this_dimension = Vec::new();
+        for index in indices {
+            if is_cancelled() {
+                return Err(PatternPipelineError::new(
+                    "evaluation.cancelled",
+                    "evaluation was cancelled",
+                ));
+            }
+            let offset = dimension.phase + index as f64 * spacing;
+            let local = AffineTransform2D::rotate_about_then_translate(
+                Point2::new(0.0, 0.0),
+                0.0,
+                unit.scale(offset),
+            )
+            .ok_or(PatternPipelineError::new(
+                "coverage.curved_guides.proof",
+                "curved-guide coverage could not prove a complete generation envelope",
+            ))?;
+            let path = base.transformed(local)?.transformed(channel_transform)?;
+            let instance = GuidePathInstance {
+                id: GuideInstanceId::new(dimension.id, index),
+                source_structure_id: *source_structure_id,
+                path,
+            };
+            this_dimension.push(instance.clone());
+            guides.push(instance);
+            if guides.len() > request.max_family_candidates {
+                return Err(PatternPipelineError::new(
+                    "coverage.curved_guides.instance_limit",
+                    "curved-guide instance count exceeds the configured family limit",
+                ));
+            }
+        }
+        grouped.push(this_dimension);
+    }
+    let fingerprint = generic_curve_fingerprint(family, request, generic);
+    let guide_set = GuidePathSet::new(
+        fingerprint.clone(),
+        family.provenance.mechanism_ids[0],
+        guides,
+    )
+    .map_err(|_| {
+        PatternPipelineError::new(
+            "coverage.curved_guides.proof",
+            "curved-guide coverage could not prove a complete generation envelope",
+        )
+    })?;
+    let selected = family
+        .site_selection
+        .iter()
+        .map(|id| {
+            generic
+                .dimensions
+                .iter()
+                .position(|dimension| dimension.id == *id)
+                .ok_or(PatternPipelineError::new(
+                    "pattern.family.selection",
+                    "selection references a missing dimension ID",
+                ))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let sites = match family.product {
+        StructuralProductCapability::GuideIntersections => {
+            preflight_curve_intersection_work(&grouped, &selected, request.max_family_candidates)?;
+            curve_intersection_sites(
+                &grouped,
+                &selected,
+                family.merge_epsilon.unwrap_or(0.0),
+                canvas,
+                document_domain,
+                family.provenance.mechanism_ids[1],
+                request.max_family_candidates,
+                is_cancelled,
+            )?
+        }
+        StructuralProductCapability::AlongGuideSites => {
+            let multiplier = family.along_interval_multiplier.unwrap_or(1.0);
+            preflight_curve_along_work(
+                &grouped,
+                &selected,
+                multiplier,
+                &request.canvas,
+                &request.density,
+                request.max_family_candidates,
+                is_cancelled,
+            )?;
+            curve_along_sites(
+                &grouped,
+                &selected,
+                multiplier,
+                family.along_phase.unwrap_or(0.0),
+                &request.canvas,
+                &request.density,
+                canvas,
+                document_domain,
+                family.provenance.mechanism_ids[1],
+                request.max_family_candidates,
+                is_cancelled,
+            )?
+        }
+        StructuralProductCapability::RandomSites => unreachable!(),
+    };
+    let site_set = FamilySiteSet::new(fingerprint, family.provenance.mechanism_ids[1], sites)
+        .map_err(family_site_error)?;
+    Ok(TypedFamilyOutput {
+        family: family.clone(),
+        sites: site_set,
+        diagnostics: None,
+        structure: TypedFamilyStructure {
+            coverage: Vec::new(),
+            guides: Vec::new(),
+            support_radius: request.support_radius,
+            guard_steps: request.guard_steps,
+            antialias_margin: ANTIALIAS_MARGIN,
+            generation_domain: document_domain,
+            guide_path_set: Some(guide_set),
+        },
+    })
+}
+
+/// Bounds variable-tangent along-guide sampling before site output can be allocated.
+///
+/// # Errors
+///
+/// Returns the Stage 20D cancellation, numeric, or along-guide-limit diagnostic when a
+/// selected finite guide cannot be measured within the declared family work limit.
+fn preflight_curve_along_work(
+    grouped: &[Vec<GuidePathInstance>],
+    selected: &[usize],
+    multiplier: f64,
+    canvas: &CanvasSpec,
+    density: &DensityMetric2D,
+    limit: usize,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), PatternPipelineError> {
+    let minimum_interval =
+        (canvas.width / density.across_x).min(canvas.height / density.across_y) * multiplier;
+    if !minimum_interval.is_finite() || minimum_interval <= 0.0 {
+        return Err(PatternPipelineError::new(
+            "coverage.curved_guides.proof",
+            "curved-guide coverage could not prove a complete generation envelope",
+        ));
+    }
+    let mut predicted = 0_usize;
+    for &dimension in selected {
+        for guide in &grouped[dimension] {
+            if cancelled() {
+                return Err(PatternPipelineError::new(
+                    "evaluation.cancelled",
+                    "evaluation was cancelled",
+                ));
+            }
+            let count = (guide.path.measure_arc_length()?.total_length() / minimum_interval)
+                .ceil()
+                .max(0.0) as usize;
+            predicted =
+                predicted
+                    .checked_add(count.saturating_add(1))
+                    .ok_or(PatternPipelineError::new(
+                        "coverage.curved_guides.numeric_overflow",
+                        "curved-guide coverage arithmetic overflowed",
+                    ))?;
+            if predicted > limit {
+                return Err(PatternPipelineError::new(
+                    "coverage.curved_guides.along_guide_limit",
+                    "curved along-guide site count exceeds the configured family limit",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Bounds selected guide pairs, segment products, and merge candidates before curve allocation.
+fn preflight_curve_intersection_work(
+    grouped: &[Vec<GuidePathInstance>],
+    selected: &[usize],
+    limit: usize,
+) -> Result<(), PatternPipelineError> {
+    let mut guide_pairs = 0_usize;
+    let mut segment_pairs = 0_usize;
+    for (offset, &left) in selected.iter().enumerate() {
+        for &right in &selected[offset + 1..] {
+            guide_pairs = guide_pairs
+                .checked_add(
+                    grouped[left]
+                        .len()
+                        .checked_mul(grouped[right].len())
+                        .ok_or(PatternPipelineError::new(
+                            "coverage.curved_guides.numeric_overflow",
+                            "curved-guide coverage arithmetic overflowed",
+                        ))?,
+                )
+                .ok_or(PatternPipelineError::new(
+                    "coverage.curved_guides.numeric_overflow",
+                    "curved-guide coverage arithmetic overflowed",
+                ))?;
+            for first in &grouped[left] {
+                for second in &grouped[right] {
+                    segment_pairs = segment_pairs
+                        .checked_add(
+                            first
+                                .path
+                                .segments()
+                                .len()
+                                .checked_mul(second.path.segments().len())
+                                .ok_or(PatternPipelineError::new(
+                                    "coverage.curved_guides.numeric_overflow",
+                                    "curved-guide coverage arithmetic overflowed",
+                                ))?,
+                        )
+                        .ok_or(PatternPipelineError::new(
+                            "coverage.curved_guides.numeric_overflow",
+                            "curved-guide coverage arithmetic overflowed",
+                        ))?;
+                }
+            }
+        }
+    }
+    if guide_pairs > limit || segment_pairs > limit {
+        return Err(PatternPipelineError::new(
+            "coverage.curved_guides.pairwise_limit",
+            "curved-guide pairwise work exceeds the configured family limit",
+        ));
+    }
+    // Two cubic Béziers have at most nine isolated contacts.  The geometry layer also
+    // defends its own larger diagnostic cap, but this strict mathematical bound lets the
+    // family reject impossible merge work before invoking any intersection routine.
+    let merge_work = segment_pairs
+        .checked_mul(9)
+        .ok_or(PatternPipelineError::new(
+            "coverage.curved_guides.numeric_overflow",
+            "curved-guide coverage arithmetic overflowed",
+        ))?;
+    if merge_work > limit {
+        return Err(PatternPipelineError::new(
+            "coverage.curved_guides.merge_limit",
+            "curved-guide merge work exceeds the configured family limit",
+        ));
+    }
+    Ok(())
+}
+
+/// Builds bounded curve-intersection sites in selected-dimension and guide-instance order.
+#[allow(clippy::too_many_arguments)] // Explicit evaluator inputs preserve the bounded headless authority.
+fn curve_intersection_sites(
+    grouped: &[Vec<GuidePathInstance>],
+    selected: &[usize],
+    epsilon: f64,
+    canvas: Bounds,
+    generation_domain: Bounds,
+    product_id: PatternMechanismId,
+    limit: usize,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<FamilySite>, PatternPipelineError> {
+    let mut raw = Vec::<(Point2, Vec<GuidePathLocationProvenance>)>::new();
+    for (offset, &left) in selected.iter().enumerate() {
+        for &right in &selected[offset + 1..] {
+            for first in &grouped[left] {
+                for second in &grouped[right] {
+                    if cancelled() {
+                        return Err(PatternPipelineError::new(
+                            "evaluation.cancelled",
+                            "evaluation was cancelled",
+                        ));
+                    }
+                    let contacts = first.path.intersections(&second.path)?;
+                    if cancelled() {
+                        return Err(PatternPipelineError::new(
+                            "evaluation.cancelled",
+                            "evaluation was cancelled",
+                        ));
+                    }
+                    for contact in contacts {
+                        let point = contact.point();
+                        if site_scope(point, canvas, generation_domain).is_none() {
+                            continue;
+                        }
+                        raw.push((
+                            point,
+                            vec![
+                                GuidePathLocationProvenance {
+                                    guide_id: first.id,
+                                    segment_index: contact.first_location().segment_index(),
+                                    parameter_bits: contact.first_location().parameter().to_bits(),
+                                },
+                                GuidePathLocationProvenance {
+                                    guide_id: second.id,
+                                    segment_index: contact.second_location().segment_index(),
+                                    parameter_bits: contact.second_location().parameter().to_bits(),
+                                },
+                            ],
+                        ));
+                        if raw.len() > limit {
+                            return Err(PatternPipelineError::new(
+                                "coverage.curved_guides.merge_limit",
+                                "curved-guide merge work exceeds the configured family limit",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut output: Vec<FamilySite> = Vec::new();
+    for (point, mut contributors) in raw {
+        if let Some(existing) = output
+            .iter_mut()
+            .find(|site| ((site.position.x - point.x).hypot(site.position.y - point.y)) <= epsilon)
+        {
+            if let FamilySiteProvenance::CurveGuideIntersection {
+                contributors: prior,
+            } = &mut existing.provenance
+            {
+                for contributor in contributors {
+                    if !prior.contains(&contributor) {
+                        prior.push(contributor);
+                    }
+                }
+            }
+            continue;
+        }
+        contributors.dedup();
+        output.push(FamilySite {
+            id: FamilySiteId {
+                mechanism_id: product_id,
+                ordinal: output.len(),
+            },
+            position: point,
+            // Contacts outside the document coverage envelope were excluded before
+            // raw accumulation, so they cannot consume merge work or become Guard sites.
+            scope: site_scope(point, canvas, generation_domain).expect("filtered envelope"),
+            provenance: FamilySiteProvenance::CurveGuideIntersection { contributors },
+        });
+    }
+    Ok(output)
+}
+
+/// Samples selected finite curve paths by bounded arc length and exact tangent-derived directional spacing.
+#[allow(clippy::too_many_arguments)] // Explicit evaluator inputs preserve the bounded headless authority.
+fn curve_along_sites(
+    grouped: &[Vec<GuidePathInstance>],
+    selected: &[usize],
+    multiplier: f64,
+    phase: f64,
+    canvas_spec: &CanvasSpec,
+    density: &DensityMetric2D,
+    canvas: Bounds,
+    generation_domain: Bounds,
+    product_id: PatternMechanismId,
+    limit: usize,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<FamilySite>, PatternPipelineError> {
+    let mut output = Vec::new();
+    let mut guide_order = 0;
+    for &dimension in selected {
+        for guide in &grouped[dimension] {
+            if cancelled() {
+                return Err(PatternPipelineError::new(
+                    "evaluation.cancelled",
+                    "evaluation was cancelled",
+                ));
+            }
+            let measure = guide.path.measure_arc_length()?;
+            let total = measure.total_length();
+            let start = measure.location_at_length(0.0)?;
+            let start_tangent = guide.path.unit_tangent_at(start).map_err(|_| {
+                PatternPipelineError::new(
+                    "pattern.family.curved_guides.tangent",
+                    "curved along-guide sampling requires a nonstationary tangent",
+                )
+            })?;
+            let start_interval =
+                directional_spacing(canvas_spec, density, start_tangent.perpendicular())?
+                    * multiplier;
+            if !start_interval.is_finite() || start_interval <= 0.0 {
+                return Err(PatternPipelineError::new(
+                    "coverage.curved_guides.proof",
+                    "curved-guide coverage could not prove a complete generation envelope",
+                ));
+            }
+            let mut position = phase.rem_euclid(1.0) * start_interval;
+            let mut sequence = 0_i64;
+            while position <= total {
+                if cancelled() {
+                    return Err(PatternPipelineError::new(
+                        "evaluation.cancelled",
+                        "evaluation was cancelled",
+                    ));
+                }
+                let location = measure.location_at_length(position)?;
+                let tangent = guide.path.unit_tangent_at(location).map_err(|_| {
+                    PatternPipelineError::new(
+                        "pattern.family.curved_guides.tangent",
+                        "curved along-guide sampling requires a nonstationary tangent",
+                    )
+                })?;
+                let normal = tangent.perpendicular();
+                let spacing = directional_spacing(canvas_spec, density, normal)? * multiplier;
+                if !spacing.is_finite() || spacing <= 0.0 {
+                    return Err(PatternPipelineError::new(
+                        "coverage.curved_guides.proof",
+                        "curved-guide coverage could not prove a complete generation envelope",
+                    ));
+                }
+                let point = guide.path.point_at(location)?;
+                let scope = match site_scope(point, canvas, generation_domain) {
+                    Some(scope) => scope,
+                    None => {
+                        position += spacing;
+                        sequence += 1;
+                        continue;
+                    }
+                };
+                output.push(FamilySite {
+                    id: FamilySiteId {
+                        mechanism_id: product_id,
+                        ordinal: output.len(),
+                    },
+                    position: point,
+                    scope,
+                    provenance: FamilySiteProvenance::CurveAlongGuide {
+                        location: GuidePathLocationProvenance {
+                            guide_id: guide.id,
+                            segment_index: location.segment_index(),
+                            parameter_bits: location.parameter().to_bits(),
+                        },
+                        guide_order,
+                        sequence,
+                        absolute_arc_position_bits: position.to_bits(),
+                        local_arc_position_bits: position.to_bits(),
+                    },
+                });
+                if output.len() > limit {
+                    return Err(PatternPipelineError::new(
+                        "coverage.curved_guides.along_guide_limit",
+                        "curved along-guide site count exceeds the configured family limit",
+                    ));
+                }
+                position += spacing;
+                sequence += 1;
+            }
+            guide_order += 1;
+        }
+    }
+    Ok(output)
+}
+
+/// Classifies a completed document-space site without manufacturing guard output outside coverage.
+fn site_scope(point: Point2, canvas: Bounds, generation_domain: Bounds) -> Option<SiteScope> {
+    canvas
+        .contains(point)
+        .then_some(SiteScope::Canvas)
+        .or_else(|| {
+            generation_domain
+                .contains(point)
+                .then_some(SiteScope::Guard)
+        })
+}
+
+/// Hashes complete resolved generic guide intent and layout inputs under the fixed Stage 20D identity prefix.
+fn generic_curve_fingerprint(
+    family: &FamilyCapability,
+    request: &GridInspectRequest,
+    generic: &GenericGuideCapability,
+) -> String {
+    let mut bytes =
+        b"toniator-stage-20d-guide-family-v1|arc-policy-fixed-90-degree-cubic-v1".to_vec();
+    bytes.extend(family.provenance.definition_id.to_le_bytes());
+    for id in &family.provenance.mechanism_ids {
+        bytes.extend(id.0.to_le_bytes());
+    }
+    bytes.push(match family.product {
+        StructuralProductCapability::GuideIntersections => 1,
+        StructuralProductCapability::AlongGuideSites => 2,
+        StructuralProductCapability::RandomSites => 3,
+    });
+    for id in &family.site_selection {
+        bytes.extend(id.0.to_le_bytes());
+    }
+    bytes.extend(family.merge_epsilon.unwrap_or(0.0).to_bits().to_le_bytes());
+    bytes.extend(
+        family
+            .along_interval_multiplier
+            .unwrap_or(0.0)
+            .to_bits()
+            .to_le_bytes(),
+    );
+    bytes.extend(family.along_phase.unwrap_or(0.0).to_bits().to_le_bytes());
+    for dimension in &generic.dimensions {
+        bytes.extend(dimension.id.0.to_le_bytes());
+        bytes.extend(dimension.baseline_angle_degrees.to_bits().to_le_bytes());
+        bytes.extend(dimension.phase.to_bits().to_le_bytes());
+        match &dimension.prototype {
+            GuidePrototype::AuthoredOpenPath { structure_id } => {
+                bytes.push(1);
+                bytes.extend(structure_id.0.to_le_bytes());
+            }
+            GuidePrototype::CircularArc {
+                center,
+                radius,
+                start_angle_degrees,
+                sweep_angle_degrees,
+            } => {
+                bytes.push(2);
+                for value in [
+                    center.x,
+                    center.y,
+                    *radius,
+                    *start_angle_degrees,
+                    *sweep_angle_degrees,
+                ] {
+                    bytes.extend(value.to_bits().to_le_bytes());
+                }
+            }
+        }
+        match dimension.repetition {
+            GuideRepetition::Single => bytes.push(1),
+            GuideRepetition::TransformStack {
+                direction_degrees,
+                spacing_multiplier,
+            } => {
+                bytes.push(2);
+                bytes.extend(direction_degrees.to_bits().to_le_bytes());
+                bytes.extend(spacing_multiplier.to_bits().to_le_bytes());
+            }
+        }
+    }
+    for (source, path) in &generic.resolved_paths {
+        bytes.extend(source.map_or(0, |id| id.0).to_le_bytes());
+        bytes.extend(
+            u64::try_from(path.segments().len())
+                .expect("usize fits u64")
+                .to_le_bytes(),
+        );
+        for segment in path.segments() {
+            match segment {
+                CurveSegment::Line(line) => {
+                    bytes.push(1);
+                    for point in [line.start(), line.end()] {
+                        bytes.extend(point.x.to_bits().to_le_bytes());
+                        bytes.extend(point.y.to_bits().to_le_bytes());
+                    }
+                }
+                CurveSegment::CubicBezier(cubic) => {
+                    bytes.push(2);
+                    for point in [
+                        cubic.start(),
+                        cubic.control_1(),
+                        cubic.control_2(),
+                        cubic.end(),
+                    ] {
+                        bytes.extend(point.x.to_bits().to_le_bytes());
+                        bytes.extend(point.y.to_bits().to_le_bytes());
+                    }
+                }
+            }
+        }
+    }
+    for value in [
+        request.canvas.width,
+        request.canvas.height,
+        request.density.across_x,
+        request.density.across_y,
+        request.rotation_degrees,
+        request.translation_x,
+        request.translation_y,
+        request.support_radius,
+    ] {
+        bytes.extend(value.to_bits().to_le_bytes());
+    }
+    bytes.push(u8::from(request.density.aspect_locked));
+    bytes.extend(request.guard_steps.to_le_bytes());
+    bytes.extend(
+        u64::try_from(request.max_family_candidates)
+            .expect("usize fits u64")
+            .to_le_bytes(),
+    );
+    bytes.extend(ANTIALIAS_MARGIN.to_bits().to_le_bytes());
+    format!("toniator-stage-20d-guide-family-v1:{}", fnv1a64(bytes))
 }
 
 /// Converts a validated family-site failure into the typed evaluation error boundary.
@@ -991,6 +1869,7 @@ impl TypedFamilyStructure {
             guard_steps: output.guard_steps,
             antialias_margin: output.antialias_margin,
             generation_domain: output.generation_domain,
+            guide_path_set: None,
         }
     }
 }
@@ -1799,6 +2678,33 @@ fn adapt_family_sites_for_current_circular_marks(family: &TypedFamilyOutput) -> 
                         second_index: *sequence,
                     },
                     vec![*guide_id],
+                ),
+                FamilySiteProvenance::CurveGuideIntersection { contributors } => {
+                    let first = contributors[0].guide_id;
+                    let second = contributors[1].guide_id;
+                    (
+                        SiteId {
+                            first_dimension_id: first.dimension_id,
+                            first_index: first.index,
+                            second_dimension_id: second.dimension_id,
+                            second_index: second.index,
+                        },
+                        contributors
+                            .iter()
+                            .map(|location| location.guide_id)
+                            .collect(),
+                    )
+                }
+                FamilySiteProvenance::CurveAlongGuide {
+                    location, sequence, ..
+                } => (
+                    SiteId {
+                        first_dimension_id: location.guide_id.dimension_id,
+                        first_index: location.guide_id.index,
+                        second_dimension_id: location.guide_id.dimension_id,
+                        second_index: *sequence,
+                    },
+                    vec![location.guide_id],
                 ),
                 FamilySiteProvenance::Random {
                     accepted_ordinal, ..

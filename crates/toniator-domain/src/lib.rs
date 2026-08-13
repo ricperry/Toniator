@@ -259,6 +259,45 @@ pub struct StraightGuideDimension {
     pub repetition: StraightGuideRepetition,
 }
 
+/// One persisted prototype for a generic guide dimension.  Authored-path
+/// references remain document-local intent; the procedural arc is the only
+/// Stage 20D constructed prototype.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GuidePrototype {
+    AuthoredOpenPath {
+        structure_id: AuthoredStructureId,
+    },
+    CircularArc {
+        center: AuthoredPoint2,
+        radius: f64,
+        start_angle_degrees: f64,
+        sweep_angle_degrees: f64,
+    },
+}
+
+/// The bounded Stage 20D repetition vocabulary.  A transform-stack direction
+/// is relative to the owning dimension baseline and never carries scale/shear.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GuideRepetition {
+    Single,
+    TransformStack {
+        direction_degrees: f64,
+        spacing_multiplier: f64,
+    },
+}
+
+/// One finite, stable generic guide dimension authored in definition-local
+/// coordinates.  Its raw angle and phase bits are authoritative identity and
+/// are not normalized during validation or persistence.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GuideDimension {
+    pub id: GuideDimensionId,
+    pub baseline_angle_degrees: f64,
+    pub phase: f64,
+    pub prototype: GuidePrototype,
+    pub repetition: GuideRepetition,
+}
+
 /// The deliberately small Stage 16A repetition vocabulary.  The spacing is a
 /// multiplier of the resolved channel density, so authored density remains a
 /// channel concern rather than becoming a second structural density system.
@@ -783,6 +822,13 @@ pub enum PatternMechanism {
         id: PatternMechanismId,
         dimensions: Vec<StraightGuideDimension>,
     },
+    /// Generic Stage 20D guide producer for document-owned open paths and
+    /// deterministic circular arcs.  It remains a root consumed by existing
+    /// selected-intersection and along-guide product mechanisms.
+    GuideDimensions {
+        id: PatternMechanismId,
+        dimensions: Vec<GuideDimension>,
+    },
     /// An explicit selected intersection product; selections are stable IDs,
     /// not positional aliases.
     SelectedGuideIntersections {
@@ -831,6 +877,7 @@ impl PatternMechanism {
             Self::StraightGuides { id }
             | Self::GuideIntersections { id, .. }
             | Self::StraightGuideDimensions { id, .. }
+            | Self::GuideDimensions { id, .. }
             | Self::SelectedGuideIntersections { id, .. }
             | Self::AlongGuideSites { id, .. }
             | Self::RandomSiteProcess { id, .. }
@@ -971,6 +1018,67 @@ impl PatternDefinition {
             },
             mechanisms: vec![
                 PatternMechanism::StraightGuideDimensions {
+                    id: guide_id,
+                    dimensions,
+                },
+                site,
+            ],
+            output_layers: vec![PatternOutputLayer::MarkPrototype {
+                id: output_id,
+                site_mechanism_id: site_id,
+                prototype: MarkPrototype::Circle,
+                orientation,
+            }],
+            modulation: PatternModulation,
+            coverage,
+        }
+    }
+
+    /// Constructs an explicit Stage 20D generic guide definition with exactly
+    /// one existing site product and one existing circle output layer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generalized_guides(
+        id: PatternDefinitionId,
+        name: impl Into<String>,
+        guide_id: PatternMechanismId,
+        site_id: PatternMechanismId,
+        output_id: PatternOutputLayerId,
+        dimensions: Vec<GuideDimension>,
+        product: GeneralizedSiteProduct,
+        orientation: MarkOrientation,
+        coverage: CoveragePolicy,
+    ) -> Self {
+        let site = match product {
+            GeneralizedSiteProduct::Intersections {
+                dimensions,
+                merge_epsilon,
+            } => PatternMechanism::SelectedGuideIntersections {
+                id: site_id,
+                guide_mechanism_id: guide_id,
+                dimensions,
+                merge_epsilon,
+            },
+            GeneralizedSiteProduct::AlongGuides {
+                dimensions,
+                interval_multiplier,
+                phase,
+            } => PatternMechanism::AlongGuideSites {
+                id: site_id,
+                guide_mechanism_id: guide_id,
+                dimensions,
+                interval_multiplier,
+                phase,
+            },
+        };
+        Self {
+            id,
+            name: name.into(),
+            family: PatternFamily::GuideIntersections {
+                guide_mechanism_id: guide_id,
+                site_mechanism_id: site_id,
+            },
+            mechanisms: vec![
+                PatternMechanism::GuideDimensions {
                     id: guide_id,
                     dimensions,
                 },
@@ -1319,12 +1427,19 @@ impl Document {
             .find(|structure| structure.id == id)
     }
 
-    /// Reports whether an existing document-owned owner references an authored structure.
-    ///
-    /// Stage 20C deliberately has no live reference-bearing owner, so removal remains available
-    /// until a later stage introduces one and extends this authoritative check.
-    fn authored_structure_is_referenced(&self, _id: AuthoredStructureId) -> bool {
-        false
+    /// Reports whether any generic guide definition shares this authored structure reference.
+    fn authored_structure_is_referenced(&self, id: AuthoredStructureId) -> bool {
+        self.pattern_definitions.iter().any(|definition| {
+            definition.mechanisms.iter().any(|mechanism| {
+                matches!(mechanism,
+                    PatternMechanism::GuideDimensions { dimensions, .. }
+                        if dimensions.iter().any(|dimension| matches!(
+                            dimension.prototype,
+                            GuidePrototype::AuthoredOpenPath { structure_id } if structure_id == id
+                        ))
+                )
+            })
+        })
     }
 
     /// Returns value-free descriptors for every authored structure without exposing values or UI layout.
@@ -1511,6 +1626,45 @@ impl Document {
                                 PropertyFieldId::GuidePhase,
                                 PropertyFieldId::GuideSpacingMultiplier,
                             ] {
+                                descriptors.push(descriptor_from_contract(field, target));
+                            }
+                        }
+                    }
+                    PatternMechanism::GuideDimensions { dimensions, .. } => {
+                        for dimension in dimensions {
+                            let target = PropertyTarget::GuideDimension(
+                                definition.id,
+                                mechanism.id(),
+                                dimension.id,
+                            );
+                            let mut fields = vec![
+                                PropertyFieldId::GuidePrototype,
+                                PropertyFieldId::GuideBaselineAngle,
+                                PropertyFieldId::GuidePhase,
+                                PropertyFieldId::GuideRepetition,
+                            ];
+                            match dimension.prototype {
+                                GuidePrototype::AuthoredOpenPath { .. } => {
+                                    fields.push(PropertyFieldId::GuideAuthoredStructure);
+                                }
+                                GuidePrototype::CircularArc { .. } => fields.extend([
+                                    PropertyFieldId::GuideArcCenterX,
+                                    PropertyFieldId::GuideArcCenterY,
+                                    PropertyFieldId::GuideArcRadius,
+                                    PropertyFieldId::GuideArcStartAngle,
+                                    PropertyFieldId::GuideArcSweepAngle,
+                                ]),
+                            }
+                            if matches!(
+                                dimension.repetition,
+                                GuideRepetition::TransformStack { .. }
+                            ) {
+                                fields.extend([
+                                    PropertyFieldId::GuideStackDirection,
+                                    PropertyFieldId::GuideStackSpacingMultiplier,
+                                ]);
+                            }
+                            for field in fields {
                                 descriptors.push(descriptor_from_contract(field, target));
                             }
                         }
@@ -1861,7 +2015,7 @@ impl Document {
                 }
             }
             PropertyTarget::GuideDimension(definition_id, mechanism_id, dimension_id) => {
-                let dimension = self
+                let mechanism = self
                     .pattern_definitions
                     .iter()
                     .find(|definition| definition.id == definition_id)
@@ -1871,24 +2025,136 @@ impl Document {
                             .iter()
                             .find(|mechanism| mechanism.id() == mechanism_id)
                     })
-                    .and_then(|mechanism| match mechanism {
-                        PatternMechanism::StraightGuideDimensions { dimensions, .. } => dimensions
+                    .expect("active guide dimension mechanism");
+                match mechanism {
+                    PatternMechanism::StraightGuideDimensions { dimensions, .. } => {
+                        let dimension = dimensions
                             .iter()
-                            .find(|dimension| dimension.id == dimension_id),
-                        _ => None,
-                    })
-                    .expect("active guide dimension descriptor");
-                match descriptor.field {
-                    PropertyFieldId::GuideBaselineAngle => {
-                        PropertyCurrentValueKind::FiniteF64(dimension.baseline_angle_degrees)
+                            .find(|dimension| dimension.id == dimension_id)
+                            .expect("active straight guide dimension descriptor");
+                        match descriptor.field {
+                            PropertyFieldId::GuideBaselineAngle => {
+                                PropertyCurrentValueKind::FiniteF64(
+                                    dimension.baseline_angle_degrees,
+                                )
+                            }
+                            PropertyFieldId::GuidePhase => {
+                                PropertyCurrentValueKind::FiniteF64(dimension.phase)
+                            }
+                            PropertyFieldId::GuideSpacingMultiplier => {
+                                PropertyCurrentValueKind::FiniteF64(
+                                    dimension.repetition.spacing_multiplier,
+                                )
+                            }
+                            _ => unreachable!("straight guide descriptor field"),
+                        }
                     }
-                    PropertyFieldId::GuidePhase => {
-                        PropertyCurrentValueKind::FiniteF64(dimension.phase)
+                    PatternMechanism::GuideDimensions { dimensions, .. } => {
+                        let dimension = dimensions
+                            .iter()
+                            .find(|dimension| dimension.id == dimension_id)
+                            .expect("active generic guide dimension descriptor");
+                        match (
+                            descriptor.field,
+                            &dimension.prototype,
+                            &dimension.repetition,
+                        ) {
+                            (
+                                PropertyFieldId::GuidePrototype,
+                                GuidePrototype::AuthoredOpenPath { .. },
+                                _,
+                            ) => PropertyCurrentValueKind::EnumChoice(
+                                PropertyEnumChoice::GuidePrototype(
+                                    GuidePrototypeKind::AuthoredOpenPath,
+                                ),
+                            ),
+                            (
+                                PropertyFieldId::GuidePrototype,
+                                GuidePrototype::CircularArc { .. },
+                                _,
+                            ) => PropertyCurrentValueKind::EnumChoice(
+                                PropertyEnumChoice::GuidePrototype(GuidePrototypeKind::CircularArc),
+                            ),
+                            (
+                                PropertyFieldId::GuideAuthoredStructure,
+                                GuidePrototype::AuthoredOpenPath { structure_id },
+                                _,
+                            ) => PropertyCurrentValueKind::Reference(
+                                PropertyReferenceValue::AuthoredStructure(*structure_id),
+                            ),
+                            (
+                                PropertyFieldId::GuideArcCenterX,
+                                GuidePrototype::CircularArc { center, .. },
+                                _,
+                            ) => PropertyCurrentValueKind::FiniteF64(center.x),
+                            (
+                                PropertyFieldId::GuideArcCenterY,
+                                GuidePrototype::CircularArc { center, .. },
+                                _,
+                            ) => PropertyCurrentValueKind::FiniteF64(center.y),
+                            (
+                                PropertyFieldId::GuideArcRadius,
+                                GuidePrototype::CircularArc { radius, .. },
+                                _,
+                            ) => PropertyCurrentValueKind::FiniteF64(*radius),
+                            (
+                                PropertyFieldId::GuideArcStartAngle,
+                                GuidePrototype::CircularArc {
+                                    start_angle_degrees,
+                                    ..
+                                },
+                                _,
+                            ) => PropertyCurrentValueKind::FiniteF64(*start_angle_degrees),
+                            (
+                                PropertyFieldId::GuideArcSweepAngle,
+                                GuidePrototype::CircularArc {
+                                    sweep_angle_degrees,
+                                    ..
+                                },
+                                _,
+                            ) => PropertyCurrentValueKind::FiniteF64(*sweep_angle_degrees),
+                            (PropertyFieldId::GuideBaselineAngle, _, _) => {
+                                PropertyCurrentValueKind::FiniteF64(
+                                    dimension.baseline_angle_degrees,
+                                )
+                            }
+                            (PropertyFieldId::GuidePhase, _, _) => {
+                                PropertyCurrentValueKind::FiniteF64(dimension.phase)
+                            }
+                            (PropertyFieldId::GuideRepetition, _, GuideRepetition::Single) => {
+                                PropertyCurrentValueKind::EnumChoice(
+                                    PropertyEnumChoice::GuideRepetition(
+                                        GuideRepetitionKind::Single,
+                                    ),
+                                )
+                            }
+                            (
+                                PropertyFieldId::GuideRepetition,
+                                _,
+                                GuideRepetition::TransformStack { .. },
+                            ) => PropertyCurrentValueKind::EnumChoice(
+                                PropertyEnumChoice::GuideRepetition(
+                                    GuideRepetitionKind::TransformStack,
+                                ),
+                            ),
+                            (
+                                PropertyFieldId::GuideStackDirection,
+                                _,
+                                GuideRepetition::TransformStack {
+                                    direction_degrees, ..
+                                },
+                            ) => PropertyCurrentValueKind::FiniteF64(*direction_degrees),
+                            (
+                                PropertyFieldId::GuideStackSpacingMultiplier,
+                                _,
+                                GuideRepetition::TransformStack {
+                                    spacing_multiplier, ..
+                                },
+                            ) => PropertyCurrentValueKind::FiniteF64(*spacing_multiplier),
+                            _ => unreachable!("inactive generic guide descriptor field"),
+                        }
                     }
-                    PropertyFieldId::GuideSpacingMultiplier => {
-                        PropertyCurrentValueKind::FiniteF64(dimension.repetition.spacing_multiplier)
-                    }
-                    _ => unreachable!("guide descriptor field"),
+                    _ => unreachable!("guide dimension descriptor targets a guide root"),
                 }
             }
             PropertyTarget::Mechanism(definition_id, mechanism_id) => {
@@ -2150,6 +2416,10 @@ impl Document {
                 .flat_map(|definition| definition.mechanisms.iter())
                 .flat_map(|mechanism| match mechanism {
                     PatternMechanism::StraightGuideDimensions { dimensions, .. } => dimensions
+                        .iter()
+                        .map(|dimension| dimension.id.0)
+                        .collect::<Vec<_>>(),
+                    PatternMechanism::GuideDimensions { dimensions, .. } => dimensions
                         .iter()
                         .map(|dimension| dimension.id.0)
                         .collect::<Vec<_>>(),
@@ -2703,6 +2973,114 @@ impl Document {
         &self,
         source: &PatternDefinition,
     ) -> Result<PatternDefinition, ValidationError> {
+        if let [PatternMechanism::GuideDimensions { dimensions, .. }, site] =
+            source.mechanisms.as_slice()
+        {
+            let id = self.allocate_definition_id()?;
+            let guide_id = self.allocate_mechanism_id()?;
+            let site_id = PatternMechanismId(guide_id.0.checked_add(1).ok_or_else(|| {
+                ValidationError::new(
+                    "pattern_definitions.mechanisms.id",
+                    "document mechanism ID space is exhausted",
+                )
+            })?);
+            let output_id = self.allocate_output_layer_id()?;
+            let mut next_dimension = self.allocate_dimension_id()?.0;
+            let mut remapped = Vec::with_capacity(dimensions.len());
+            for dimension in dimensions {
+                let new_id = GuideDimensionId(next_dimension);
+                next_dimension = next_dimension.checked_add(1).ok_or_else(|| {
+                    ValidationError::new(
+                        "pattern_definitions.mechanisms.guide_dimensions.id",
+                        "document dimension ID space is exhausted",
+                    )
+                })?;
+                remapped.push((
+                    dimension.id,
+                    GuideDimension {
+                        id: new_id,
+                        baseline_angle_degrees: dimension.baseline_angle_degrees,
+                        phase: dimension.phase,
+                        prototype: dimension.prototype.clone(),
+                        repetition: dimension.repetition.clone(),
+                    },
+                ));
+            }
+            let remap = |old: GuideDimensionId| {
+                remapped
+                    .iter()
+                    .find(|(candidate, _)| *candidate == old)
+                    .map(|(_, value)| value.id)
+                    .expect("source selection is validated")
+            };
+            let product = match site {
+                PatternMechanism::SelectedGuideIntersections {
+                    dimensions,
+                    merge_epsilon,
+                    ..
+                } => GeneralizedSiteProduct::Intersections {
+                    dimensions: dimensions.iter().copied().map(remap).collect(),
+                    merge_epsilon: *merge_epsilon,
+                },
+                PatternMechanism::AlongGuideSites {
+                    dimensions,
+                    interval_multiplier,
+                    phase,
+                    ..
+                } => GeneralizedSiteProduct::AlongGuides {
+                    dimensions: dimensions.iter().copied().map(remap).collect(),
+                    interval_multiplier: *interval_multiplier,
+                    phase: *phase,
+                },
+                _ => {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.family",
+                        "generic definition has an incompatible site mechanism",
+                    ));
+                }
+            };
+            let orientation = match source.output_layers.as_slice() {
+                [
+                    PatternOutputLayer::MarkPrototype {
+                        orientation: MarkOrientation::Fixed,
+                        ..
+                    },
+                ] => MarkOrientation::Fixed,
+                [
+                    PatternOutputLayer::MarkPrototype {
+                        orientation: MarkOrientation::GuideTangent { dimension_id },
+                        ..
+                    },
+                ] => MarkOrientation::GuideTangent {
+                    dimension_id: remap(*dimension_id),
+                },
+                [
+                    PatternOutputLayer::MarkPrototype {
+                        orientation: MarkOrientation::GuideNormal { dimension_id },
+                        ..
+                    },
+                ] => MarkOrientation::GuideNormal {
+                    dimension_id: remap(*dimension_id),
+                },
+                _ => {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.output_layers",
+                        "generic definition has an incompatible mark prototype",
+                    ));
+                }
+            };
+            return Ok(PatternDefinition::generalized_guides(
+                id,
+                source.name.clone(),
+                guide_id,
+                site_id,
+                output_id,
+                remapped.into_iter().map(|(_, value)| value).collect(),
+                product,
+                orientation,
+                source.coverage.clone(),
+            ));
+        }
         if let [
             PatternMechanism::StraightGuideDimensions { dimensions, .. },
             site,
@@ -2936,6 +3314,7 @@ impl Document {
                 ));
             }
             validate_definition(definition)?;
+            validate_definition_guide_references(definition, &self.authored_structures)?;
             for mechanism in &definition.mechanisms {
                 if !mechanism_ids.insert(mechanism.id()) {
                     return Err(ValidationError::new(
@@ -2943,15 +3322,28 @@ impl Document {
                         "mechanism IDs must be unique document-wide",
                     ));
                 }
-                if let PatternMechanism::StraightGuideDimensions { dimensions, .. } = mechanism {
-                    for dimension in dimensions {
-                        if !dimension_ids.insert(dimension.id) {
-                            return Err(ValidationError::new(
-                                "pattern_definitions.mechanisms.dimensions",
-                                "straight-guide dimension IDs must be unique document-wide",
-                            ));
+                match mechanism {
+                    PatternMechanism::StraightGuideDimensions { dimensions, .. } => {
+                        for dimension in dimensions {
+                            if !dimension_ids.insert(dimension.id) {
+                                return Err(ValidationError::new(
+                                    "pattern_definitions.mechanisms.dimensions",
+                                    "straight-guide dimension IDs must be unique document-wide",
+                                ));
+                            }
                         }
                     }
+                    PatternMechanism::GuideDimensions { dimensions, .. } => {
+                        for dimension in dimensions {
+                            if !dimension_ids.insert(dimension.id) {
+                                return Err(ValidationError::new(
+                                    "pattern_definitions.mechanisms.guide_dimensions.id",
+                                    "guide dimension IDs must be nonzero and unique in stored order",
+                                ));
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             for layer in &definition.output_layers {
@@ -3048,6 +3440,37 @@ impl Document {
         }
         Ok((candidate, result))
     }
+}
+
+/// Resolves every authored generic-guide reference through the owning document store.
+fn validate_definition_guide_references(
+    definition: &PatternDefinition,
+    structures: &[AuthoredStructure],
+) -> Result<(), ValidationError> {
+    for mechanism in &definition.mechanisms {
+        let PatternMechanism::GuideDimensions { dimensions, .. } = mechanism else {
+            continue;
+        };
+        for dimension in dimensions {
+            let GuidePrototype::AuthoredOpenPath { structure_id } = dimension.prototype else {
+                continue;
+            };
+            let structure = structures
+                .iter()
+                .find(|structure| structure.id == structure_id)
+                .ok_or(ValidationError::new(
+                    "pattern_definitions.mechanisms.guide_prototype.reference",
+                    "authored guide prototype references a missing structure",
+                ))?;
+            if structure.kind != AuthoredStructureKind::OpenPath {
+                return Err(ValidationError::new(
+                    "pattern_definitions.mechanisms.guide_prototype.kind",
+                    "authored guide prototypes require an open path",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn next_id(values: impl Iterator<Item = u64>, path: &'static str) -> Result<u64, ValidationError> {
@@ -3369,15 +3792,28 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
             dimension_id,
             baseline_angle_degrees,
         } => {
-            if let Some(PatternMechanism::StraightGuideDimensions { dimensions, .. }) = definition
+            match definition
                 .mechanisms
                 .iter_mut()
                 .find(|mechanism| mechanism.id() == *mechanism_id)
-                && let Some(existing) = dimensions
-                    .iter_mut()
-                    .find(|value| value.id == *dimension_id)
             {
-                existing.baseline_angle_degrees = *baseline_angle_degrees;
+                Some(PatternMechanism::StraightGuideDimensions { dimensions, .. }) => {
+                    if let Some(existing) = dimensions
+                        .iter_mut()
+                        .find(|value| value.id == *dimension_id)
+                    {
+                        existing.baseline_angle_degrees = *baseline_angle_degrees;
+                    }
+                }
+                Some(PatternMechanism::GuideDimensions { dimensions, .. }) => {
+                    if let Some(existing) = dimensions
+                        .iter_mut()
+                        .find(|value| value.id == *dimension_id)
+                    {
+                        existing.baseline_angle_degrees = *baseline_angle_degrees;
+                    }
+                }
+                _ => {}
             }
         }
         PatternDefinitionEdit::SetGuidePhase {
@@ -3385,15 +3821,28 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
             dimension_id,
             phase,
         } => {
-            if let Some(PatternMechanism::StraightGuideDimensions { dimensions, .. }) = definition
+            match definition
                 .mechanisms
                 .iter_mut()
                 .find(|mechanism| mechanism.id() == *mechanism_id)
-                && let Some(existing) = dimensions
-                    .iter_mut()
-                    .find(|value| value.id == *dimension_id)
             {
-                existing.phase = *phase;
+                Some(PatternMechanism::StraightGuideDimensions { dimensions, .. }) => {
+                    if let Some(existing) = dimensions
+                        .iter_mut()
+                        .find(|value| value.id == *dimension_id)
+                    {
+                        existing.phase = *phase;
+                    }
+                }
+                Some(PatternMechanism::GuideDimensions { dimensions, .. }) => {
+                    if let Some(existing) = dimensions
+                        .iter_mut()
+                        .find(|value| value.id == *dimension_id)
+                    {
+                        existing.phase = *phase;
+                    }
+                }
+                _ => {}
             }
         }
         PatternDefinitionEdit::SetGuideSpacingMultiplier {
@@ -3411,6 +3860,151 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
             {
                 existing.repetition.spacing_multiplier = *spacing_multiplier;
             }
+        }
+        PatternDefinitionEdit::SetGuidePrototype {
+            mechanism_id,
+            dimension_id,
+            prototype,
+        } => {
+            if let Some(PatternMechanism::GuideDimensions { dimensions, .. }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+                && let Some(dimension) = dimensions
+                    .iter_mut()
+                    .find(|dimension| dimension.id == *dimension_id)
+            {
+                dimension.prototype = prototype.clone();
+            }
+        }
+        PatternDefinitionEdit::SetGuideAuthoredStructure {
+            mechanism_id,
+            dimension_id,
+            structure_id,
+        } => {
+            if let Some(PatternMechanism::GuideDimensions { dimensions, .. }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+                && let Some(GuideDimension {
+                    prototype:
+                        GuidePrototype::AuthoredOpenPath {
+                            structure_id: current,
+                        },
+                    ..
+                }) = dimensions
+                    .iter_mut()
+                    .find(|dimension| dimension.id == *dimension_id)
+            {
+                *current = *structure_id;
+            }
+        }
+        PatternDefinitionEdit::SetGuideArcCenterX {
+            mechanism_id,
+            dimension_id,
+            value,
+        } => {
+            apply_guide_arc_scalar(
+                definition,
+                *mechanism_id,
+                *dimension_id,
+                *value,
+                |arc, value| arc.0.x = value,
+            );
+        }
+        PatternDefinitionEdit::SetGuideArcCenterY {
+            mechanism_id,
+            dimension_id,
+            value,
+        } => {
+            apply_guide_arc_scalar(
+                definition,
+                *mechanism_id,
+                *dimension_id,
+                *value,
+                |arc, value| arc.0.y = value,
+            );
+        }
+        PatternDefinitionEdit::SetGuideArcRadius {
+            mechanism_id,
+            dimension_id,
+            value,
+        } => {
+            apply_guide_arc_scalar(
+                definition,
+                *mechanism_id,
+                *dimension_id,
+                *value,
+                |arc, value| *arc.1 = value,
+            );
+        }
+        PatternDefinitionEdit::SetGuideArcStartAngle {
+            mechanism_id,
+            dimension_id,
+            value,
+        } => {
+            apply_guide_arc_scalar(
+                definition,
+                *mechanism_id,
+                *dimension_id,
+                *value,
+                |arc, value| *arc.2 = value,
+            );
+        }
+        PatternDefinitionEdit::SetGuideArcSweepAngle {
+            mechanism_id,
+            dimension_id,
+            value,
+        } => {
+            apply_guide_arc_scalar(
+                definition,
+                *mechanism_id,
+                *dimension_id,
+                *value,
+                |arc, value| *arc.3 = value,
+            );
+        }
+        PatternDefinitionEdit::SetGuideRepetition {
+            mechanism_id,
+            dimension_id,
+            repetition,
+        } => {
+            if let Some(PatternMechanism::GuideDimensions { dimensions, .. }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+                && let Some(dimension) = dimensions
+                    .iter_mut()
+                    .find(|dimension| dimension.id == *dimension_id)
+            {
+                dimension.repetition = repetition.clone();
+            }
+        }
+        PatternDefinitionEdit::SetGuideStackDirection {
+            mechanism_id,
+            dimension_id,
+            value,
+        } => {
+            apply_guide_stack_scalar(
+                definition,
+                *mechanism_id,
+                *dimension_id,
+                *value,
+                |direction, _spacing, value| *direction = value,
+            );
+        }
+        PatternDefinitionEdit::SetGuideStackSpacingMultiplier {
+            mechanism_id,
+            dimension_id,
+            value,
+        } => {
+            apply_guide_stack_scalar(
+                definition,
+                *mechanism_id,
+                *dimension_id,
+                *value,
+                |_direction, spacing, value| *spacing = value,
+            );
         }
         PatternDefinitionEdit::SetIntersectionDimensions {
             mechanism_id,
@@ -3885,6 +4479,70 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
     }
 }
 
+/// Applies one active circular-arc payload leaf without inventing an inactive prototype.
+///
+/// The caller has already validated the target and field applicability, so a missing or inactive
+/// payload remains unchanged here; candidate validation remains the authoritative publication gate.
+fn apply_guide_arc_scalar(
+    definition: &mut PatternDefinition,
+    mechanism_id: PatternMechanismId,
+    dimension_id: GuideDimensionId,
+    value: f64,
+    mutate: impl FnOnce((&mut AuthoredPoint2, &mut f64, &mut f64, &mut f64), f64),
+) {
+    if let Some(PatternMechanism::GuideDimensions { dimensions, .. }) = definition
+        .mechanisms
+        .iter_mut()
+        .find(|mechanism| mechanism.id() == mechanism_id)
+        && let Some(GuideDimension {
+            prototype:
+                GuidePrototype::CircularArc {
+                    center,
+                    radius,
+                    start_angle_degrees,
+                    sweep_angle_degrees,
+                },
+            ..
+        }) = dimensions
+            .iter_mut()
+            .find(|dimension| dimension.id == dimension_id)
+    {
+        mutate(
+            (center, radius, start_angle_degrees, sweep_angle_degrees),
+            value,
+        );
+    }
+}
+
+/// Applies one active transform-stack payload leaf without creating dormant repetition data.
+///
+/// The caller validates that the target is a generic transform stack before this local mutation.
+fn apply_guide_stack_scalar(
+    definition: &mut PatternDefinition,
+    mechanism_id: PatternMechanismId,
+    dimension_id: GuideDimensionId,
+    value: f64,
+    mutate: impl FnOnce(&mut f64, &mut f64, f64),
+) {
+    if let Some(PatternMechanism::GuideDimensions { dimensions, .. }) = definition
+        .mechanisms
+        .iter_mut()
+        .find(|mechanism| mechanism.id() == mechanism_id)
+        && let Some(GuideDimension {
+            repetition:
+                GuideRepetition::TransformStack {
+                    direction_degrees,
+                    spacing_multiplier,
+                },
+            ..
+        }) = dimensions
+            .iter_mut()
+            .find(|dimension| dimension.id == dimension_id)
+    {
+        mutate(direction_degrees, spacing_multiplier, value);
+    }
+}
+
 fn remap_definition_edit_for_duplicate(
     source: &PatternDefinition,
     duplicate: &PatternDefinition,
@@ -3929,6 +4587,96 @@ fn remap_definition_edit_for_duplicate(
             mechanism_id: mechanism(*mechanism_id),
             dimension_id: dimension(*dimension_id),
             spacing_multiplier: *spacing_multiplier,
+        },
+        PatternDefinitionEdit::SetGuidePrototype {
+            mechanism_id,
+            dimension_id,
+            prototype,
+        } => PatternDefinitionEdit::SetGuidePrototype {
+            mechanism_id: mechanism(*mechanism_id),
+            dimension_id: dimension(*dimension_id),
+            prototype: prototype.clone(),
+        },
+        PatternDefinitionEdit::SetGuideAuthoredStructure {
+            mechanism_id,
+            dimension_id,
+            structure_id,
+        } => PatternDefinitionEdit::SetGuideAuthoredStructure {
+            mechanism_id: mechanism(*mechanism_id),
+            dimension_id: dimension(*dimension_id),
+            structure_id: *structure_id,
+        },
+        PatternDefinitionEdit::SetGuideArcCenterX {
+            mechanism_id,
+            dimension_id,
+            value,
+        } => PatternDefinitionEdit::SetGuideArcCenterX {
+            mechanism_id: mechanism(*mechanism_id),
+            dimension_id: dimension(*dimension_id),
+            value: *value,
+        },
+        PatternDefinitionEdit::SetGuideArcCenterY {
+            mechanism_id,
+            dimension_id,
+            value,
+        } => PatternDefinitionEdit::SetGuideArcCenterY {
+            mechanism_id: mechanism(*mechanism_id),
+            dimension_id: dimension(*dimension_id),
+            value: *value,
+        },
+        PatternDefinitionEdit::SetGuideArcRadius {
+            mechanism_id,
+            dimension_id,
+            value,
+        } => PatternDefinitionEdit::SetGuideArcRadius {
+            mechanism_id: mechanism(*mechanism_id),
+            dimension_id: dimension(*dimension_id),
+            value: *value,
+        },
+        PatternDefinitionEdit::SetGuideArcStartAngle {
+            mechanism_id,
+            dimension_id,
+            value,
+        } => PatternDefinitionEdit::SetGuideArcStartAngle {
+            mechanism_id: mechanism(*mechanism_id),
+            dimension_id: dimension(*dimension_id),
+            value: *value,
+        },
+        PatternDefinitionEdit::SetGuideArcSweepAngle {
+            mechanism_id,
+            dimension_id,
+            value,
+        } => PatternDefinitionEdit::SetGuideArcSweepAngle {
+            mechanism_id: mechanism(*mechanism_id),
+            dimension_id: dimension(*dimension_id),
+            value: *value,
+        },
+        PatternDefinitionEdit::SetGuideRepetition {
+            mechanism_id,
+            dimension_id,
+            repetition,
+        } => PatternDefinitionEdit::SetGuideRepetition {
+            mechanism_id: mechanism(*mechanism_id),
+            dimension_id: dimension(*dimension_id),
+            repetition: repetition.clone(),
+        },
+        PatternDefinitionEdit::SetGuideStackDirection {
+            mechanism_id,
+            dimension_id,
+            value,
+        } => PatternDefinitionEdit::SetGuideStackDirection {
+            mechanism_id: mechanism(*mechanism_id),
+            dimension_id: dimension(*dimension_id),
+            value: *value,
+        },
+        PatternDefinitionEdit::SetGuideStackSpacingMultiplier {
+            mechanism_id,
+            dimension_id,
+            value,
+        } => PatternDefinitionEdit::SetGuideStackSpacingMultiplier {
+            mechanism_id: mechanism(*mechanism_id),
+            dimension_id: dimension(*dimension_id),
+            value: *value,
         },
         PatternDefinitionEdit::SetIntersectionDimensions {
             mechanism_id,
@@ -4230,6 +4978,106 @@ fn validate_definition_edit(
                 "pattern_definitions.mechanisms.dimensions.baseline_angle_degrees",
             )
         }
+        PatternDefinitionEdit::SetGuidePrototype {
+            mechanism_id,
+            dimension_id,
+            prototype,
+        } => {
+            validate_generic_guide_dimension_target(definition, *mechanism_id, *dimension_id)?;
+            validate_guide_prototype(prototype)
+        }
+        PatternDefinitionEdit::SetGuideAuthoredStructure {
+            mechanism_id,
+            dimension_id,
+            ..
+        } => {
+            match &validate_generic_guide_dimension_target(
+                definition,
+                *mechanism_id,
+                *dimension_id,
+            )?
+            .prototype
+            {
+                GuidePrototype::AuthoredOpenPath { .. } => Ok(()),
+                _ => Err(ValidationError::new(
+                    "pattern_definitions.mechanisms.guide_prototype.reference",
+                    "field is inactive for the current guide prototype",
+                )),
+            }
+        }
+        PatternDefinitionEdit::SetGuideArcCenterX {
+            mechanism_id,
+            dimension_id,
+            value,
+        }
+        | PatternDefinitionEdit::SetGuideArcCenterY {
+            mechanism_id,
+            dimension_id,
+            value,
+        } => {
+            validate_active_arc_target(definition, *mechanism_id, *dimension_id)?;
+            validate_finite(
+                *value,
+                "pattern_definitions.mechanisms.guide_prototype.arc.center",
+            )
+        }
+        PatternDefinitionEdit::SetGuideArcRadius {
+            mechanism_id,
+            dimension_id,
+            value,
+        } => {
+            validate_active_arc_target(definition, *mechanism_id, *dimension_id)?;
+            validate_positive_finite(
+                *value,
+                "pattern_definitions.mechanisms.guide_prototype.arc.radius",
+            )
+        }
+        PatternDefinitionEdit::SetGuideArcStartAngle {
+            mechanism_id,
+            dimension_id,
+            value,
+        }
+        | PatternDefinitionEdit::SetGuideArcSweepAngle {
+            mechanism_id,
+            dimension_id,
+            value,
+        } => {
+            validate_active_arc_target(definition, *mechanism_id, *dimension_id)?;
+            validate_finite(
+                *value,
+                "pattern_definitions.mechanisms.guide_prototype.arc.angles",
+            )
+        }
+        PatternDefinitionEdit::SetGuideRepetition {
+            mechanism_id,
+            dimension_id,
+            repetition,
+        } => {
+            validate_generic_guide_dimension_target(definition, *mechanism_id, *dimension_id)?;
+            validate_guide_repetition(repetition)
+        }
+        PatternDefinitionEdit::SetGuideStackDirection {
+            mechanism_id,
+            dimension_id,
+            value,
+        } => {
+            validate_active_stack_target(definition, *mechanism_id, *dimension_id)?;
+            validate_finite(
+                *value,
+                "pattern_definitions.mechanisms.guide_repetition.direction",
+            )
+        }
+        PatternDefinitionEdit::SetGuideStackSpacingMultiplier {
+            mechanism_id,
+            dimension_id,
+            value,
+        } => {
+            validate_active_stack_target(definition, *mechanism_id, *dimension_id)?;
+            validate_positive_finite(
+                *value,
+                "pattern_definitions.mechanisms.guide_repetition.spacing_multiplier",
+            )
+        }
         PatternDefinitionEdit::SetGuidePhase {
             mechanism_id,
             dimension_id,
@@ -4243,7 +5091,34 @@ fn validate_definition_edit(
             dimension_id,
             spacing_multiplier,
         } => {
-            validate_guide_dimension_target(definition, *mechanism_id, *dimension_id)?;
+            match definition
+                .mechanisms
+                .iter()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                Some(PatternMechanism::StraightGuideDimensions { dimensions, .. })
+                    if dimensions
+                        .iter()
+                        .any(|dimension| dimension.id == *dimension_id) => {}
+                Some(PatternMechanism::StraightGuideDimensions { .. }) => {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.mechanisms.dimensions.id",
+                        "command targets a missing guide dimension",
+                    ));
+                }
+                Some(_) => {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.mechanisms.dimensions",
+                        "field is inactive for the current guide repetition",
+                    ));
+                }
+                None => {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.mechanisms.id",
+                        "command targets a missing guide mechanism",
+                    ));
+                }
+            }
             validate_positive_finite(
                 *spacing_multiplier,
                 "pattern_definitions.mechanisms.dimensions.repetition.spacing_multiplier",
@@ -4645,6 +5520,17 @@ fn validate_guide_dimension_target(
             "pattern_definitions.mechanisms.dimensions.id",
             "command targets a missing guide dimension",
         )),
+        Some(PatternMechanism::GuideDimensions { dimensions, .. })
+            if dimensions
+                .iter()
+                .any(|dimension| dimension.id == dimension_id) =>
+        {
+            Ok(())
+        }
+        Some(PatternMechanism::GuideDimensions { .. }) => Err(ValidationError::new(
+            "pattern_definitions.mechanisms.guide_dimensions.id",
+            "command targets a missing guide dimension",
+        )),
         Some(_) => Err(ValidationError::new(
             "pattern_definitions.mechanisms.dimensions",
             "command targets an incompatible guide mechanism",
@@ -4652,6 +5538,70 @@ fn validate_guide_dimension_target(
         None => Err(ValidationError::new(
             "pattern_definitions.mechanisms.id",
             "command targets a missing guide mechanism",
+        )),
+    }
+}
+
+/// Returns the active generic guide dimension or a stable target/applicability diagnostic.
+fn validate_generic_guide_dimension_target(
+    definition: &PatternDefinition,
+    mechanism_id: PatternMechanismId,
+    dimension_id: GuideDimensionId,
+) -> Result<&GuideDimension, ValidationError> {
+    match definition
+        .mechanisms
+        .iter()
+        .find(|mechanism| mechanism.id() == mechanism_id)
+    {
+        Some(PatternMechanism::GuideDimensions { dimensions, .. }) => dimensions
+            .iter()
+            .find(|dimension| dimension.id == dimension_id)
+            .ok_or_else(|| {
+                ValidationError::new(
+                    "pattern_definitions.mechanisms.guide_dimensions.id",
+                    "command targets a missing guide dimension",
+                )
+            }),
+        Some(_) => Err(ValidationError::new(
+            "pattern_definitions.mechanisms.guide_dimensions",
+            "command targets an incompatible generic guide mechanism",
+        )),
+        None => Err(ValidationError::new(
+            "pattern_definitions.mechanisms.id",
+            "command targets a missing guide mechanism",
+        )),
+    }
+}
+
+/// Validates that one payload edit addresses an active circular-arc prototype.
+fn validate_active_arc_target(
+    definition: &PatternDefinition,
+    mechanism_id: PatternMechanismId,
+    dimension_id: GuideDimensionId,
+) -> Result<(), ValidationError> {
+    match validate_generic_guide_dimension_target(definition, mechanism_id, dimension_id)?.prototype
+    {
+        GuidePrototype::CircularArc { .. } => Ok(()),
+        _ => Err(ValidationError::new(
+            "pattern_definitions.mechanisms.guide_prototype.arc",
+            "field is inactive for the current guide prototype",
+        )),
+    }
+}
+
+/// Validates that one payload edit addresses an active transform-stack repetition.
+fn validate_active_stack_target(
+    definition: &PatternDefinition,
+    mechanism_id: PatternMechanismId,
+    dimension_id: GuideDimensionId,
+) -> Result<(), ValidationError> {
+    match validate_generic_guide_dimension_target(definition, mechanism_id, dimension_id)?
+        .repetition
+    {
+        GuideRepetition::TransformStack { .. } => Ok(()),
+        _ => Err(ValidationError::new(
+            "pattern_definitions.mechanisms.guide_repetition",
+            "field is inactive for the current guide repetition",
         )),
     }
 }
@@ -4846,9 +5796,18 @@ fn validate_output_orientation(
         MarkOrientation::Fixed => Ok(()),
         MarkOrientation::GuideTangent { dimension_id }
         | MarkOrientation::GuideNormal { dimension_id }
-            if definition.mechanisms.iter().any(|mechanism| {
-                matches!(mechanism, PatternMechanism::StraightGuideDimensions { dimensions, .. } if dimensions.iter().any(|dimension| dimension.id == *dimension_id))
-            }) =>
+            if definition
+                .mechanisms
+                .iter()
+                .any(|mechanism| match mechanism {
+                    PatternMechanism::StraightGuideDimensions { dimensions, .. } => dimensions
+                        .iter()
+                        .any(|dimension| dimension.id == *dimension_id),
+                    PatternMechanism::GuideDimensions { dimensions, .. } => dimensions
+                        .iter()
+                        .any(|dimension| dimension.id == *dimension_id),
+                    _ => false,
+                }) =>
         {
             Ok(())
         }
@@ -4962,6 +5921,21 @@ fn validate_definition(definition: &PatternDefinition) -> Result<(), ValidationE
         validate_straight_dimensions(dimensions)?;
         validate_site_mechanism(site, *id, root_site_id, dimensions)?;
         validate_generalized_output_layers(&definition.output_layers, root_site_id, dimensions)?;
+        return Ok(());
+    }
+    if let [PatternMechanism::GuideDimensions { id, dimensions }, site] =
+        definition.mechanisms.as_slice()
+    {
+        if *id != guide_mechanism_id {
+            return Err(ValidationError::new(
+                "pattern_definitions.family.guide_mechanism_id",
+                "family root must reference the ordered guide-dimensions mechanism",
+            ));
+        }
+        validate_guide_dimensions(dimensions)?;
+        let ids: Vec<_> = dimensions.iter().map(|dimension| dimension.id).collect();
+        validate_site_mechanism_ids(site, *id, root_site_id, &ids)?;
+        validate_generalized_output_layers_ids(&definition.output_layers, root_site_id, &ids)?;
         return Ok(());
     }
     if !matches!(definition.mechanisms.first(), Some(PatternMechanism::StraightGuides { id }) if *id == guide_mechanism_id)
@@ -5212,6 +6186,235 @@ fn validate_selection(
         previous = Some(position);
     }
     Ok(())
+}
+
+/// Validates ordered site selections against stable generic dimension IDs.
+fn validate_selection_ids(
+    selection: &[GuideDimensionId],
+    dimensions: &[GuideDimensionId],
+    minimum: usize,
+    path: &'static str,
+) -> Result<(), ValidationError> {
+    if selection.len() < minimum {
+        return Err(ValidationError::new(
+            path,
+            "selection has too few dimensions",
+        ));
+    }
+    let mut previous = None;
+    for id in selection {
+        let Some(position) = dimensions.iter().position(|candidate| candidate == id) else {
+            return Err(ValidationError::new(
+                path,
+                "selection references a missing dimension ID",
+            ));
+        };
+        if previous.is_some_and(|value| position <= value) {
+            return Err(ValidationError::new(
+                path,
+                "selection must be unique and follow dimension stored order",
+            ));
+        }
+        previous = Some(position);
+    }
+    Ok(())
+}
+
+/// Validates bounded generic guide dimensions without resolving their document resources.
+fn validate_guide_dimensions(dimensions: &[GuideDimension]) -> Result<(), ValidationError> {
+    if !(1..=4).contains(&dimensions.len()) {
+        return Err(ValidationError::new(
+            "pattern_definitions.mechanisms.guide_dimensions",
+            "guide dimensions must contain one through four entries",
+        ));
+    }
+    let mut ids = HashSet::new();
+    for dimension in dimensions {
+        if dimension.id.0 == 0 || !ids.insert(dimension.id) {
+            return Err(ValidationError::new(
+                "pattern_definitions.mechanisms.guide_dimensions.id",
+                "guide dimension IDs must be nonzero and unique in stored order",
+            ));
+        }
+        validate_finite(
+            dimension.baseline_angle_degrees,
+            "pattern_definitions.mechanisms.guide_dimensions.baseline_angle",
+        )?;
+        validate_finite(
+            dimension.phase,
+            "pattern_definitions.mechanisms.guide_dimensions.phase",
+        )?;
+        match &dimension.prototype {
+            GuidePrototype::AuthoredOpenPath { .. } => {}
+            GuidePrototype::CircularArc {
+                center,
+                radius,
+                start_angle_degrees,
+                sweep_angle_degrees,
+            } => {
+                if !center.x.is_finite() || !center.y.is_finite() {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.mechanisms.guide_prototype.arc.center",
+                        "circular-arc centers must be finite",
+                    ));
+                }
+                if !radius.is_finite() || *radius <= 0.0 {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.mechanisms.guide_prototype.arc.radius",
+                        "circular-arc radius must be positive and finite",
+                    ));
+                }
+                if !start_angle_degrees.is_finite()
+                    || !sweep_angle_degrees.is_finite()
+                    || *sweep_angle_degrees == 0.0
+                    || sweep_angle_degrees.abs() > 360.0
+                {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.mechanisms.guide_prototype.arc.angles",
+                        "circular-arc angles must be finite with a nonzero sweep of at most 360 degrees",
+                    ));
+                }
+            }
+        }
+        if let GuideRepetition::TransformStack {
+            direction_degrees,
+            spacing_multiplier,
+        } = dimension.repetition
+        {
+            validate_finite(
+                direction_degrees,
+                "pattern_definitions.mechanisms.guide_repetition.direction",
+            )?;
+            if !spacing_multiplier.is_finite() || spacing_multiplier <= 0.0 {
+                return Err(ValidationError::new(
+                    "pattern_definitions.mechanisms.guide_repetition.spacing_multiplier",
+                    "guide stack spacing multiplier must be positive and finite",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validates one complete generic prototype payload before an edit installs it.
+fn validate_guide_prototype(prototype: &GuidePrototype) -> Result<(), ValidationError> {
+    let probe = GuideDimension {
+        id: GuideDimensionId(1),
+        baseline_angle_degrees: 0.0,
+        phase: 0.0,
+        prototype: prototype.clone(),
+        repetition: GuideRepetition::Single,
+    };
+    validate_guide_dimensions(&[probe])
+}
+
+/// Validates one complete bounded generic repetition payload before an edit installs it.
+fn validate_guide_repetition(repetition: &GuideRepetition) -> Result<(), ValidationError> {
+    let probe = GuideDimension {
+        id: GuideDimensionId(1),
+        baseline_angle_degrees: 0.0,
+        phase: 0.0,
+        prototype: GuidePrototype::CircularArc {
+            center: AuthoredPoint2 { x: 0.0, y: 0.0 },
+            radius: 1.0,
+            start_angle_degrees: 0.0,
+            sweep_angle_degrees: 90.0,
+        },
+        repetition: repetition.clone(),
+    };
+    validate_guide_dimensions(&[probe])
+}
+
+/// Validates existing site products against a generic guide root without changing their semantics.
+fn validate_site_mechanism_ids(
+    mechanism: &PatternMechanism,
+    guide_id: PatternMechanismId,
+    site_id: PatternMechanismId,
+    dimensions: &[GuideDimensionId],
+) -> Result<(), ValidationError> {
+    match mechanism {
+        PatternMechanism::SelectedGuideIntersections {
+            id,
+            guide_mechanism_id,
+            dimensions: selection,
+            merge_epsilon,
+        } if *id == site_id && *guide_mechanism_id == guide_id => {
+            validate_selection_ids(
+                selection,
+                dimensions,
+                2,
+                "pattern_definitions.mechanisms.intersections.dimensions",
+            )?;
+            validate_nonnegative_finite(
+                *merge_epsilon,
+                "pattern_definitions.mechanisms.intersections.merge_epsilon",
+            )
+        }
+        PatternMechanism::AlongGuideSites {
+            id,
+            guide_mechanism_id,
+            dimensions: selection,
+            interval_multiplier,
+            phase,
+        } if *id == site_id && *guide_mechanism_id == guide_id => {
+            validate_selection_ids(
+                selection,
+                dimensions,
+                1,
+                "pattern_definitions.mechanisms.along_guides.dimensions",
+            )?;
+            validate_positive_finite(
+                *interval_multiplier,
+                "pattern_definitions.mechanisms.along_guides.interval_multiplier",
+            )?;
+            validate_finite(*phase, "pattern_definitions.mechanisms.along_guides.phase")
+        }
+        _ => Err(ValidationError::new(
+            "pattern_definitions.family",
+            "family root requires a compatible declared guide site mechanism",
+        )),
+    }
+}
+
+/// Validates the unchanged mark output against generic stable guide dimension IDs.
+fn validate_generalized_output_layers_ids(
+    layers: &[PatternOutputLayer],
+    site_id: PatternMechanismId,
+    dimensions: &[GuideDimensionId],
+) -> Result<(), ValidationError> {
+    let [
+        PatternOutputLayer::MarkPrototype {
+            site_mechanism_id,
+            prototype: MarkPrototype::Circle,
+            orientation,
+            ..
+        },
+    ] = layers
+    else {
+        return Err(ValidationError::new(
+            "pattern_definitions.output_layers",
+            "generalized guide products require exactly one circle mark prototype layer",
+        ));
+    };
+    if *site_mechanism_id != site_id {
+        return Err(ValidationError::new(
+            "pattern_definitions.output_layers.site_mechanism_id",
+            "output layer must consume its declared site product",
+        ));
+    }
+    match orientation {
+        MarkOrientation::Fixed => Ok(()),
+        MarkOrientation::GuideTangent { dimension_id }
+        | MarkOrientation::GuideNormal { dimension_id }
+            if dimensions.contains(dimension_id) =>
+        {
+            Ok(())
+        }
+        _ => Err(ValidationError::new(
+            "pattern_definitions.output_layers.orientation",
+            "orientation references a missing guide dimension",
+        )),
+    }
 }
 
 fn validate_site_mechanism(
@@ -5614,6 +6817,16 @@ pub enum PropertyFieldId {
     GuideBaselineAngle,
     GuidePhase,
     GuideSpacingMultiplier,
+    GuidePrototype,
+    GuideAuthoredStructure,
+    GuideArcCenterX,
+    GuideArcCenterY,
+    GuideArcRadius,
+    GuideArcStartAngle,
+    GuideArcSweepAngle,
+    GuideRepetition,
+    GuideStackDirection,
+    GuideStackSpacingMultiplier,
     IntersectionDimensions,
     IntersectionMergeEpsilon,
     AlongGuideDimensions,
@@ -5678,6 +6891,16 @@ pub const PROPERTY_FIELD_IDS: &[PropertyFieldId] = &[
     PropertyFieldId::GuideBaselineAngle,
     PropertyFieldId::GuidePhase,
     PropertyFieldId::GuideSpacingMultiplier,
+    PropertyFieldId::GuidePrototype,
+    PropertyFieldId::GuideAuthoredStructure,
+    PropertyFieldId::GuideArcCenterX,
+    PropertyFieldId::GuideArcCenterY,
+    PropertyFieldId::GuideArcRadius,
+    PropertyFieldId::GuideArcStartAngle,
+    PropertyFieldId::GuideArcSweepAngle,
+    PropertyFieldId::GuideRepetition,
+    PropertyFieldId::GuideStackDirection,
+    PropertyFieldId::GuideStackSpacingMultiplier,
     PropertyFieldId::IntersectionDimensions,
     PropertyFieldId::IntersectionMergeEpsilon,
     PropertyFieldId::AlongGuideDimensions,
@@ -5742,6 +6965,8 @@ pub enum PropertyEnumChoice {
     VisibleMarkSizingPolicy(VisibleMarkSizingPolicy),
     MarkPrototype(MarkPrototypeKind),
     MarkOrientation(MarkOrientationKind),
+    GuidePrototype(GuidePrototypeKind),
+    GuideRepetition(GuideRepetitionKind),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5776,6 +7001,18 @@ pub enum MarkOrientationKind {
     GuideTangent,
     GuideNormal,
 }
+/// Stable generic-guide prototype choices; payloads have separate fields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuidePrototypeKind {
+    AuthoredOpenPath,
+    CircularArc,
+}
+/// Stable bounded generic-guide repetition choices; payloads have separate fields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuideRepetitionKind {
+    Single,
+    TransformStack,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PropertyBounds {
@@ -5803,6 +7040,10 @@ pub enum PropertyDependency {
     SolidPaint,
     SampledPaint,
     StraightGuideDimension,
+    GenericGuideDimension,
+    AuthoredPathPrototype,
+    CircularArc,
+    TransformStack,
     IntersectionProduct,
     AlongGuideProduct,
     RandomProcess,
@@ -5823,6 +7064,10 @@ pub enum PropertyApplicability {
     ModeledChannel,
     SolidPaint,
     StraightGuideDimension,
+    GenericGuideDimension,
+    AuthoredPathPrototype,
+    CircularArc,
+    TransformStack,
     IntersectionProduct,
     AlongGuideProduct,
     RandomProcess,
@@ -5889,6 +7134,16 @@ pub enum PropertyCommandKind {
     SetGuideBaselineAngle,
     SetGuidePhase,
     SetGuideSpacingMultiplier,
+    SetGuidePrototype,
+    SetGuideAuthoredStructure,
+    SetGuideArcCenterX,
+    SetGuideArcCenterY,
+    SetGuideArcRadius,
+    SetGuideArcStartAngle,
+    SetGuideArcSweepAngle,
+    SetGuideRepetition,
+    SetGuideStackDirection,
+    SetGuideStackSpacingMultiplier,
     SetIntersectionDimensions,
     SetIntersectionMergeEpsilon,
     SetAlongGuideDimensions,
@@ -5966,6 +7221,7 @@ pub enum PropertyReferenceValue {
     Definition(PatternDefinitionId),
     Mechanism(PatternMechanismId),
     GuideDimension(GuideDimensionId),
+    AuthoredStructure(AuthoredStructureId),
 }
 
 /// A non-persisted, immutable proposal for the complete payload needed when a
@@ -7139,6 +8395,20 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::GuideSpacingMultiplier => {
                 PropertyCommandKind::SetGuideSpacingMultiplier
             }
+            PropertyFieldId::GuidePrototype => PropertyCommandKind::SetGuidePrototype,
+            PropertyFieldId::GuideAuthoredStructure => {
+                PropertyCommandKind::SetGuideAuthoredStructure
+            }
+            PropertyFieldId::GuideArcCenterX => PropertyCommandKind::SetGuideArcCenterX,
+            PropertyFieldId::GuideArcCenterY => PropertyCommandKind::SetGuideArcCenterY,
+            PropertyFieldId::GuideArcRadius => PropertyCommandKind::SetGuideArcRadius,
+            PropertyFieldId::GuideArcStartAngle => PropertyCommandKind::SetGuideArcStartAngle,
+            PropertyFieldId::GuideArcSweepAngle => PropertyCommandKind::SetGuideArcSweepAngle,
+            PropertyFieldId::GuideRepetition => PropertyCommandKind::SetGuideRepetition,
+            PropertyFieldId::GuideStackDirection => PropertyCommandKind::SetGuideStackDirection,
+            PropertyFieldId::GuideStackSpacingMultiplier => {
+                PropertyCommandKind::SetGuideStackSpacingMultiplier
+            }
             PropertyFieldId::IntersectionDimensions => {
                 PropertyCommandKind::SetIntersectionDimensions
             }
@@ -7207,7 +8477,8 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::IntersectionDimensions
             | PropertyFieldId::AlongGuideDimensions
             | PropertyFieldId::OutputSiteProduct
-            | PropertyFieldId::OutputOrientationDimension => PropertyValueKind::StableIdReference,
+            | PropertyFieldId::OutputOrientationDimension
+            | PropertyFieldId::GuideAuthoredStructure => PropertyValueKind::StableIdReference,
             PropertyFieldId::DensityAspectLocked
             | PropertyFieldId::ModeledMappingInverted
             | PropertyFieldId::ArtworkWeightMappingInverted
@@ -7229,7 +8500,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::RandomExclusion
             | PropertyFieldId::VisibleMarkSizingPolicy
             | PropertyFieldId::OutputPrototype
-            | PropertyFieldId::OutputOrientation => PropertyValueKind::EnumChoice,
+            | PropertyFieldId::OutputOrientation
+            | PropertyFieldId::GuidePrototype
+            | PropertyFieldId::GuideRepetition => PropertyValueKind::EnumChoice,
             _ => PropertyValueKind::FiniteF64,
         },
         choices: match field {
@@ -7246,12 +8519,16 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::VisibleMarkSizingPolicy => VISIBLE_MARK_SIZING_POLICY_CHOICES,
             PropertyFieldId::OutputPrototype => MARK_PROTOTYPE_CHOICES,
             PropertyFieldId::OutputOrientation => MARK_ORIENTATION_CHOICES,
+            PropertyFieldId::GuidePrototype => GUIDE_PROTOTYPE_CHOICES,
+            PropertyFieldId::GuideRepetition => GUIDE_REPETITION_CHOICES,
             _ => &[],
         },
         bounds: match field {
             PropertyFieldId::DensityAcrossX
             | PropertyFieldId::DensityAcrossY
             | PropertyFieldId::GuideSpacingMultiplier
+            | PropertyFieldId::GuideArcRadius
+            | PropertyFieldId::GuideStackSpacingMultiplier
             | PropertyFieldId::AlongGuideIntervalMultiplier
             | PropertyFieldId::RandomEvenMinimumCenterDistance
             | PropertyFieldId::RandomClusterDensity
@@ -7284,6 +8561,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::RotationDegrees | PropertyFieldId::GuideBaselineAngle => {
                 PropertyUnit::Degrees
             }
+            PropertyFieldId::GuideArcStartAngle
+            | PropertyFieldId::GuideArcSweepAngle
+            | PropertyFieldId::GuideStackDirection => PropertyUnit::Degrees,
             PropertyFieldId::GuidePhase | PropertyFieldId::AlongGuidePhase => PropertyUnit::Phase,
             PropertyFieldId::TranslationX
             | PropertyFieldId::TranslationY
@@ -7295,6 +8575,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::RandomClusterSpread
             | PropertyFieldId::ExclusionMinimumCenterDistance
             | PropertyFieldId::VisibleMarkMargin => PropertyUnit::DocumentDistance,
+            PropertyFieldId::GuideArcCenterX
+            | PropertyFieldId::GuideArcCenterY
+            | PropertyFieldId::GuideArcRadius => PropertyUnit::DocumentDistance,
             PropertyFieldId::ColorRed
             | PropertyFieldId::ColorGreen
             | PropertyFieldId::ColorBlue
@@ -7327,6 +8610,18 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::GuidePhase
             | PropertyFieldId::GuideSpacingMultiplier => {
                 PropertyApplicability::StraightGuideDimension
+            }
+            PropertyFieldId::GuidePrototype | PropertyFieldId::GuideRepetition => {
+                PropertyApplicability::GenericGuideDimension
+            }
+            PropertyFieldId::GuideAuthoredStructure => PropertyApplicability::AuthoredPathPrototype,
+            PropertyFieldId::GuideArcCenterX
+            | PropertyFieldId::GuideArcCenterY
+            | PropertyFieldId::GuideArcRadius
+            | PropertyFieldId::GuideArcStartAngle
+            | PropertyFieldId::GuideArcSweepAngle => PropertyApplicability::CircularArc,
+            PropertyFieldId::GuideStackDirection | PropertyFieldId::GuideStackSpacingMultiplier => {
+                PropertyApplicability::TransformStack
             }
             PropertyFieldId::IntersectionDimensions | PropertyFieldId::IntersectionMergeEpsilon => {
                 PropertyApplicability::IntersectionProduct
@@ -7405,6 +8700,16 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
                 | PropertyFieldId::GuideBaselineAngle
                 | PropertyFieldId::GuidePhase
                 | PropertyFieldId::GuideSpacingMultiplier
+                | PropertyFieldId::GuidePrototype
+                | PropertyFieldId::GuideAuthoredStructure
+                | PropertyFieldId::GuideArcCenterX
+                | PropertyFieldId::GuideArcCenterY
+                | PropertyFieldId::GuideArcRadius
+                | PropertyFieldId::GuideArcStartAngle
+                | PropertyFieldId::GuideArcSweepAngle
+                | PropertyFieldId::GuideRepetition
+                | PropertyFieldId::GuideStackDirection
+                | PropertyFieldId::GuideStackSpacingMultiplier
                 | PropertyFieldId::IntersectionDimensions
                 | PropertyFieldId::IntersectionMergeEpsilon
                 | PropertyFieldId::AlongGuideDimensions
@@ -7465,7 +8770,8 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::SourceReference
             | PropertyFieldId::DefinitionSelection
             | PropertyFieldId::OutputSiteProduct
-            | PropertyFieldId::OutputOrientationDimension => PropertyReferenceConstraint::Singular,
+            | PropertyFieldId::OutputOrientationDimension
+            | PropertyFieldId::GuideAuthoredStructure => PropertyReferenceConstraint::Singular,
             _ => PropertyReferenceConstraint::NotReference,
         },
         choice_policy: match field {
@@ -7538,6 +8844,14 @@ const MARK_ORIENTATION_CHOICES: &[PropertyEnumChoice] = &[
     PropertyEnumChoice::MarkOrientation(MarkOrientationKind::GuideTangent),
     PropertyEnumChoice::MarkOrientation(MarkOrientationKind::GuideNormal),
 ];
+const GUIDE_PROTOTYPE_CHOICES: &[PropertyEnumChoice] = &[
+    PropertyEnumChoice::GuidePrototype(GuidePrototypeKind::AuthoredOpenPath),
+    PropertyEnumChoice::GuidePrototype(GuidePrototypeKind::CircularArc),
+];
+const GUIDE_REPETITION_CHOICES: &[PropertyEnumChoice] = &[
+    PropertyEnumChoice::GuideRepetition(GuideRepetitionKind::Single),
+    PropertyEnumChoice::GuideRepetition(GuideRepetitionKind::TransformStack),
+];
 
 const fn dependency_for_contract(
     applicability: PropertyApplicability,
@@ -7548,6 +8862,10 @@ const fn dependency_for_contract(
         PropertyApplicability::ModeledChannel => PropertyDependency::ModeledChannel,
         PropertyApplicability::SolidPaint => PropertyDependency::SolidPaint,
         PropertyApplicability::StraightGuideDimension => PropertyDependency::StraightGuideDimension,
+        PropertyApplicability::GenericGuideDimension => PropertyDependency::GenericGuideDimension,
+        PropertyApplicability::AuthoredPathPrototype => PropertyDependency::AuthoredPathPrototype,
+        PropertyApplicability::CircularArc => PropertyDependency::CircularArc,
+        PropertyApplicability::TransformStack => PropertyDependency::TransformStack,
         PropertyApplicability::IntersectionProduct => PropertyDependency::IntersectionProduct,
         PropertyApplicability::AlongGuideProduct => PropertyDependency::AlongGuideProduct,
         PropertyApplicability::RandomProcess => PropertyDependency::RandomProcess,
@@ -7963,6 +9281,56 @@ pub enum PatternDefinitionEdit {
         dimension_id: GuideDimensionId,
         spacing_multiplier: f64,
     },
+    SetGuidePrototype {
+        mechanism_id: PatternMechanismId,
+        dimension_id: GuideDimensionId,
+        prototype: GuidePrototype,
+    },
+    SetGuideAuthoredStructure {
+        mechanism_id: PatternMechanismId,
+        dimension_id: GuideDimensionId,
+        structure_id: AuthoredStructureId,
+    },
+    SetGuideArcCenterX {
+        mechanism_id: PatternMechanismId,
+        dimension_id: GuideDimensionId,
+        value: f64,
+    },
+    SetGuideArcCenterY {
+        mechanism_id: PatternMechanismId,
+        dimension_id: GuideDimensionId,
+        value: f64,
+    },
+    SetGuideArcRadius {
+        mechanism_id: PatternMechanismId,
+        dimension_id: GuideDimensionId,
+        value: f64,
+    },
+    SetGuideArcStartAngle {
+        mechanism_id: PatternMechanismId,
+        dimension_id: GuideDimensionId,
+        value: f64,
+    },
+    SetGuideArcSweepAngle {
+        mechanism_id: PatternMechanismId,
+        dimension_id: GuideDimensionId,
+        value: f64,
+    },
+    SetGuideRepetition {
+        mechanism_id: PatternMechanismId,
+        dimension_id: GuideDimensionId,
+        repetition: GuideRepetition,
+    },
+    SetGuideStackDirection {
+        mechanism_id: PatternMechanismId,
+        dimension_id: GuideDimensionId,
+        value: f64,
+    },
+    SetGuideStackSpacingMultiplier {
+        mechanism_id: PatternMechanismId,
+        dimension_id: GuideDimensionId,
+        value: f64,
+    },
     SetIntersectionDimensions {
         mechanism_id: PatternMechanismId,
         dimensions: Vec<GuideDimensionId>,
@@ -8307,6 +9675,60 @@ impl PatternDefinitionEdit {
             } => (
                 PropertyFieldId::GuideSpacingMultiplier,
                 PropertyFieldValue::FiniteF64(*spacing_multiplier),
+            ),
+            Edit::SetGuidePrototype { prototype, .. } => (
+                PropertyFieldId::GuidePrototype,
+                PropertyFieldValue::EnumChoice(PropertyEnumChoice::GuidePrototype(
+                    match prototype {
+                        GuidePrototype::AuthoredOpenPath { .. } => {
+                            GuidePrototypeKind::AuthoredOpenPath
+                        }
+                        GuidePrototype::CircularArc { .. } => GuidePrototypeKind::CircularArc,
+                    },
+                )),
+            ),
+            Edit::SetGuideAuthoredStructure { .. } => (
+                PropertyFieldId::GuideAuthoredStructure,
+                PropertyFieldValue::StableIdReference,
+            ),
+            Edit::SetGuideArcCenterX { value, .. } => (
+                PropertyFieldId::GuideArcCenterX,
+                PropertyFieldValue::FiniteF64(*value),
+            ),
+            Edit::SetGuideArcCenterY { value, .. } => (
+                PropertyFieldId::GuideArcCenterY,
+                PropertyFieldValue::FiniteF64(*value),
+            ),
+            Edit::SetGuideArcRadius { value, .. } => (
+                PropertyFieldId::GuideArcRadius,
+                PropertyFieldValue::FiniteF64(*value),
+            ),
+            Edit::SetGuideArcStartAngle { value, .. } => (
+                PropertyFieldId::GuideArcStartAngle,
+                PropertyFieldValue::FiniteF64(*value),
+            ),
+            Edit::SetGuideArcSweepAngle { value, .. } => (
+                PropertyFieldId::GuideArcSweepAngle,
+                PropertyFieldValue::FiniteF64(*value),
+            ),
+            Edit::SetGuideRepetition { repetition, .. } => (
+                PropertyFieldId::GuideRepetition,
+                PropertyFieldValue::EnumChoice(PropertyEnumChoice::GuideRepetition(
+                    match repetition {
+                        GuideRepetition::Single => GuideRepetitionKind::Single,
+                        GuideRepetition::TransformStack { .. } => {
+                            GuideRepetitionKind::TransformStack
+                        }
+                    },
+                )),
+            ),
+            Edit::SetGuideStackDirection { value, .. } => (
+                PropertyFieldId::GuideStackDirection,
+                PropertyFieldValue::FiniteF64(*value),
+            ),
+            Edit::SetGuideStackSpacingMultiplier { value, .. } => (
+                PropertyFieldId::GuideStackSpacingMultiplier,
+                PropertyFieldValue::FiniteF64(*value),
             ),
             Edit::SetIntersectionDimensions { dimensions, .. } => (
                 PropertyFieldId::IntersectionDimensions,
@@ -9483,8 +10905,8 @@ impl DocumentCommand {
 
     /// Derives the authoritative invalidation and affected-consumer result from an exact transition.
     ///
-    /// Authored structures have no Stage 20C consumers, so their successful commands report an
-    /// empty set while preserving the earliest future invalidation authority.
+    /// Authored resource replacements enumerate every current generic-guide consumer in channel
+    /// order, while unreferenced resource operations retain the established empty result.
     fn result_for_transition(&self, before: &Document, after: &Document) -> CommandResult {
         let invalidation = match self.field_classification() {
             DocumentCommandFieldClassification::DescriptorBacked(projections) => {
@@ -9531,12 +10953,18 @@ impl DocumentCommand {
             affected_channels: match self {
                 Self::AddAuthoredStructure { .. }
                 | Self::DuplicateAuthoredStructure { .. }
-                | Self::ReplaceAuthoredStructure { .. }
                 | Self::RemoveUnreferencedAuthoredStructure { .. }
                 | Self::AddPatternDefinition { .. }
                 | Self::AddTypedPatternDefinition { .. }
                 | Self::DuplicatePatternDefinition { .. }
                 | Self::RemoveUnreferencedPatternDefinition { .. } => Vec::new(),
+                Self::ReplaceAuthoredStructure { base_structure, .. } => before
+                    .channel_ids()
+                    .into_iter()
+                    .filter(|channel_id| before.pattern_definition_id_for(*channel_id).is_some_and(|definition_id| {
+                        before.definition(definition_id).is_some_and(|definition| definition.mechanisms.iter().any(|mechanism| matches!(mechanism, PatternMechanism::GuideDimensions { dimensions, .. } if dimensions.iter().any(|dimension| matches!(dimension.prototype, GuidePrototype::AuthoredOpenPath { structure_id } if structure_id == base_structure.id())))))
+                    }))
+                    .collect(),
                 Self::RetargetChannelPatternDefinition { channel_id, .. }
                 | Self::ReplaceSelectedChannelDefinitionTopology { channel_id, .. }
                 | Self::ReplaceSelectedChannelDefinitionRecipe { channel_id, .. }

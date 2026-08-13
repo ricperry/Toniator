@@ -36,7 +36,7 @@ set of viable parent options. Preserve the worktree. Do not change schema,
 persistence, identity, renderer or product semantics merely to keep the Goal
 alive.
 
-## Stage 20B closeout and Stage 20C boundary
+## Stage 20B–20D closeout
 
 Stage 20B is complete in the single Stage 20B acceptance checkpoint, whose
 direct parent is the Stage 20A documentation checkpoint `e7e2dca`. The
@@ -56,8 +56,19 @@ conversion to Stage 20B construction geometry. It adds no consumer, evaluator,
 cache, canonical output, renderer/export, CLI, GTK, preset, schema-version, or
 later-stage behavior. No checkpoint hash is invented here.
 
-Stage 20D is the next planning-only boundary. Do not begin implementation until
-a fresh decision-complete Stage 20D contract is approved.
+Stage 20D is complete in the Stage 20D acceptance checkpoint. Its accepted
+headless boundary adds authored-open-path and circular-arc guide prototypes,
+bounded `Single` and `TransformStack` repetition, baseline/phase/stack
+transforms, deterministic conservative coverage, existing guide-site product
+consumption, document-aware identity/invalidation, transactional
+cancellation/cache behavior, and deterministic current-v2 persistence. The
+checkpoint is intentionally named rather than self-referenced by a hash. A
+narrow post-review `toniator-app` compilation correction adds presentation
+labels for the new typed guide fields, choices, and authored references only;
+it does not expose Stage 20D editing UI or move authority into the frontend.
+Private Sway/AT-SPI evidence is automated only and does not claim manual
+GNOME/Mutter acceptance. Stage 20E and later remain planning-only and require
+their own reviewed contracts.
 
 ## Later Goal candidates
 
@@ -68,7 +79,7 @@ fresh planning validates its contract against actual implementation evidence.
 |---|---|---|---|---|---|
 | 20B | Reusable canonical curve/path geometry. | Geometry/degeneracy/clip tests. | 20A. | Path primitive vocabulary. | **Complete in the Stage 20B acceptance checkpoint** |
 | 20C | Persisted reusable authored open/closed structures. | Commands/descriptors/history/round-trip and exact Stage 20B conversion. | 20B. | None within the accepted bounded contract. | **Complete in the single named Stage 20C acceptance checkpoint; direct parent `08d970a`; checkpoint hash intentionally not self-referenced** |
-| 20D | Generic curved/procedural guide generation and coverage. | Coverage/identity/cancel/cache/persistence. | 20A–20C. | Prototypes/repetition. | **planned; requires a fresh contract and user approval** |
+| 20D | Generic curved/procedural guide generation and coverage. | Coverage/identity/cancel/cache/persistence. | 20A–20C. | Prototypes/repetition. | **Complete in the Stage 20D acceptance checkpoint** |
 | 20E | User-shape mark realization from authored structures. | Canonical geometry and PNG/SVG parity. | 20A, 20C. | Shape response semantics. | needs replanning after prior checkpoint |
 | 20F | GTK guide/shape editor exposure. | GTK Sway plus command/export checks. | 20C–20E. | Direct-manipulation UX. | not a Goal candidate |
 | 20G | Canonical connected guide paths/strokes. | Path/stroke/export tests. | 20B, 20D. | Stroke/crossing defaults. | planned after dependencies |

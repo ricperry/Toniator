@@ -6,23 +6,25 @@ use std::{
     time::{Duration, Instant},
 };
 use toniator_domain::{
-    ArtworkWeightResponse, CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternLayout,
-    ChannelSourceMapping, ChannelState, ChannelTopology, ChannelTopologyTemplate, ColorValue,
-    CoveragePolicy, DensityMetric2D, Document, DocumentCommand, DocumentHistory, DocumentId,
-    DocumentSession, GeneralizedSiteProduct, GuideDimensionId, HalftoneChannelModel,
-    HalftoneChannelRole, InvalidationLevel, MarkGeometryFieldEdit, MarkGeometryResponse,
-    MarkOrientation, PROPERTY_FIELD_IDS, PatternDefinition, PatternDefinitionEdit,
-    PatternDefinitionId, PatternMechanism, PatternMechanismId, PatternOutputLayer,
-    PatternOutputLayerId, PropertyFieldId, RandomSiteCharacter, SiteDensityModulation,
-    SiteExclusionPolicy, SourceComponent, SourceMapping, SourceMappingComponent, SourcePlacement,
-    SourceReference, SourceReferenceId, StraightGuideDimension, StraightGuideRepetition,
-    TranslationEditedAxis, VisibleMarkSizingPolicy, property_field_contract,
-    property_field_contracts,
+    ArtworkWeightResponse, AuthoredCurveSegment, AuthoredPoint2, AuthoredStructure,
+    AuthoredStructureDraft, AuthoredStructureId, AuthoredStructureKind, CanvasSpec,
+    ChannelAppearance, ChannelId, ChannelPatternLayout, ChannelSourceMapping, ChannelState,
+    ChannelTopology, ChannelTopologyTemplate, ColorValue, CoveragePolicy, DensityMetric2D,
+    Document, DocumentCommand, DocumentHistory, DocumentId, DocumentSession,
+    GeneralizedSiteProduct, GuideDimension, GuideDimensionId, GuidePrototype, GuideRepetition,
+    HalftoneChannelModel, HalftoneChannelRole, InvalidationLevel, MarkGeometryFieldEdit,
+    MarkGeometryResponse, MarkOrientation, PROPERTY_FIELD_IDS, PatternDefinition,
+    PatternDefinitionEdit, PatternDefinitionId, PatternMechanism, PatternMechanismId,
+    PatternOutputLayer, PatternOutputLayerId, PropertyFieldId, RandomSiteCharacter,
+    SiteDensityModulation, SiteExclusionPolicy, SourceComponent, SourceMapping,
+    SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId,
+    StraightGuideDimension, StraightGuideRepetition, TranslationEditedAxis,
+    VisibleMarkSizingPolicy, property_field_contract, property_field_contracts,
 };
 use toniator_engine::{
-    CacheDisposition, EvaluationCompletion, EvaluationLimits, EvaluationRequest,
-    EvaluationScheduler, PreviewRasterTarget, ResolvedSource, SourceFormatHint, encode_png,
-    evaluate, evaluate_with_limits, write_svg,
+    CacheDisposition, ChannelDiagnosticRequest, EvaluationCompletion, EvaluationLimits,
+    EvaluationRequest, EvaluationScheduler, PreviewRasterTarget, ResolvedSource, SourceFormatHint,
+    encode_png, evaluate, evaluate_channel_diagnostic, evaluate_with_limits, write_svg,
 };
 use toniator_io::{EmbeddedSource, EmbeddedSourceFormat, SourceBundle, load, save};
 
@@ -35,6 +37,251 @@ fn wait_for_latest(scheduler: &EvaluationScheduler) -> EvaluationCompletion {
         assert!(Instant::now() < deadline);
         std::thread::yield_now();
     }
+}
+
+/// Builds a complete source-assigned modeled session with a shared authored guide resource.
+fn stage20d_session() -> DocumentSession {
+    let source_id = SourceReferenceId::new("fixture-source").unwrap();
+    let base = Document::new_default_document(
+        CanvasSpec {
+            width: 100.0,
+            height: 100.0,
+        },
+        SourceReference::Assigned(source_id),
+    )
+    .unwrap();
+    let definition = PatternDefinition::generalized_guides(
+        PatternDefinitionId(1),
+        "curved",
+        PatternMechanismId(1),
+        PatternMechanismId(2),
+        PatternOutputLayerId(1),
+        vec![
+            GuideDimension {
+                id: GuideDimensionId(1),
+                baseline_angle_degrees: 0.0,
+                phase: 0.0,
+                prototype: GuidePrototype::AuthoredOpenPath {
+                    structure_id: AuthoredStructureId(7),
+                },
+                repetition: GuideRepetition::Single,
+            },
+            GuideDimension {
+                id: GuideDimensionId(2),
+                baseline_angle_degrees: 90.0,
+                phase: 0.0,
+                prototype: GuidePrototype::CircularArc {
+                    center: AuthoredPoint2 { x: 50.0, y: 50.0 },
+                    radius: 30.0,
+                    start_angle_degrees: 0.0,
+                    sweep_angle_degrees: 180.0,
+                },
+                repetition: GuideRepetition::Single,
+            },
+        ],
+        GeneralizedSiteProduct::Intersections {
+            dimensions: vec![GuideDimensionId(1), GuideDimensionId(2)],
+            merge_epsilon: 0.0,
+        },
+        MarkOrientation::Fixed,
+        CoveragePolicy {
+            guard_steps: 1,
+            maximum_support_radius: 4.5,
+        },
+    );
+    let structure = AuthoredStructure::new(
+        AuthoredStructureId(7),
+        AuthoredStructureKind::OpenPath,
+        vec![AuthoredCurveSegment::Line {
+            start: AuthoredPoint2 { x: 0.0, y: 50.0 },
+            end: AuthoredPoint2 { x: 100.0, y: 50.0 },
+        }],
+    )
+    .unwrap();
+    DocumentSession::new(
+        Document::with_source_topology_and_authored_structures(
+            base.id(),
+            base.canvas().clone(),
+            base.source().clone(),
+            vec![definition],
+            base.channel_model().unwrap(),
+            base.channel_topology().unwrap().clone(),
+            vec![structure],
+        )
+        .unwrap(),
+    )
+    .unwrap()
+}
+
+/// Builds a legacy single-channel snapshot so the public diagnostic entry proves document-aware guide resolution.
+fn stage20d_legacy_diagnostic_session() -> DocumentSession {
+    let modeled = stage20d_session();
+    let document = modeled.document();
+    let legacy = Document::with_source_and_authored_structures(
+        document.id(),
+        document.canvas().clone(),
+        document.source().clone(),
+        vec![document.pattern_definitions()[0].clone()],
+        vec![ChannelState {
+            id: ChannelId(71),
+            pattern_definition_id: PatternDefinitionId(1),
+            layout: ChannelPatternLayout {
+                density: DensityMetric2D {
+                    across_x: 10.0,
+                    across_y: 10.0,
+                    aspect_locked: false,
+                },
+                rotation_degrees: 0.0,
+                translation_x: 0.0,
+                translation_y: 0.0,
+            },
+            appearance: ChannelAppearance {
+                visible: true,
+                color: ColorValue {
+                    red: 0.0,
+                    green: 0.0,
+                    blue: 0.0,
+                    alpha: 1.0,
+                },
+                opacity: 1.0,
+            },
+            mark_geometry_response: MarkGeometryResponse {
+                minimum_size: 1.0,
+                maximum_size: 4.5,
+            },
+            source_mapping: ChannelSourceMapping {
+                component: SourceComponent::Luminance,
+                placement: SourcePlacement::StretchToCanvas,
+            },
+        }],
+        document.authored_structures().to_vec(),
+    )
+    .unwrap();
+    DocumentSession::new(legacy).unwrap()
+}
+
+/// Proves resolved authored content, repetition/root layout, and candidate bounds participate in family cache identity.
+#[test]
+fn stage20d_authored_content_repetition_and_layout_key_family_cache_exactly() {
+    let mut history = DocumentHistory::new(stage20d_session());
+    let scheduler = EvaluationScheduler::new().unwrap();
+    let bytes = fs::read("../../assets/raster-sample.png").unwrap();
+    let request = |history: &DocumentHistory| {
+        EvaluationRequest::new(
+            history.session().document_evaluation_snapshot(),
+            ResolvedSource::new(
+                SourceReferenceId::new("fixture-source").unwrap(),
+                bytes.clone(),
+                SourceFormatHint::Png,
+            )
+            .unwrap(),
+        )
+    };
+    let legacy = stage20d_legacy_diagnostic_session();
+    let diagnostic = ChannelDiagnosticRequest::new(
+        legacy.evaluation_snapshot(ChannelId(71)).unwrap(),
+        ResolvedSource::new(
+            SourceReferenceId::new("fixture-source").unwrap(),
+            bytes.clone(),
+            SourceFormatHint::Png,
+        )
+        .unwrap(),
+    );
+    assert!(
+        evaluate_channel_diagnostic(diagnostic).is_ok(),
+        "the public single-channel route resolves authored guide content through its snapshot document"
+    );
+    let first = submit_and_accept(&scheduler, history.session(), request(&history));
+    assert!(
+        first
+            .cache_diagnostics()
+            .unwrap()
+            .channels
+            .iter()
+            .all(|channel| channel.family == CacheDisposition::Miss)
+    );
+    let original = history
+        .document()
+        .authored_structure(AuthoredStructureId(7))
+        .unwrap()
+        .clone();
+    let replacement = AuthoredStructureDraft::new(
+        AuthoredStructureKind::OpenPath,
+        vec![AuthoredCurveSegment::Line {
+            start: AuthoredPoint2 { x: 0.0, y: 40.0 },
+            end: AuthoredPoint2 { x: 100.0, y: 40.0 },
+        }],
+    )
+    .unwrap();
+    history
+        .apply(&DocumentCommand::ReplaceAuthoredStructure {
+            base_structure: original,
+            replacement,
+        })
+        .unwrap();
+    let second = submit_and_accept(&scheduler, history.session(), request(&history));
+    assert!(
+        second
+            .cache_diagnostics()
+            .unwrap()
+            .channels
+            .iter()
+            .all(|channel| channel.family == CacheDisposition::Miss)
+    );
+}
+
+/// Proves failed and superseded complete-document requests cannot overwrite a prior accepted Stage 20D family cache.
+#[test]
+fn stage20d_failed_or_superseded_evaluation_preserves_last_accepted_cache() {
+    let history = DocumentHistory::new(stage20d_session());
+    let scheduler = EvaluationScheduler::new().unwrap();
+    let bytes = fs::read("../../assets/raster-sample.png").unwrap();
+    let good = || {
+        EvaluationRequest::new(
+            history.session().document_evaluation_snapshot(),
+            ResolvedSource::new(
+                SourceReferenceId::new("fixture-source").unwrap(),
+                bytes.clone(),
+                SourceFormatHint::Png,
+            )
+            .unwrap(),
+        )
+    };
+    submit_and_accept(&scheduler, history.session(), good());
+    let bad = EvaluationRequest::new(
+        history.session().document_evaluation_snapshot(),
+        ResolvedSource::new(
+            SourceReferenceId::new("wrong-source").unwrap(),
+            bytes.clone(),
+            SourceFormatHint::Png,
+        )
+        .unwrap(),
+    );
+    let ticket = scheduler.submit(bad).unwrap();
+    let failed = wait_for_latest(&scheduler);
+    assert_eq!(failed.ticket(), ticket);
+    assert!(failed.error().is_some());
+    let superseded_ticket = scheduler.submit(good()).unwrap();
+    let latest_ticket = scheduler.submit(good()).unwrap();
+    assert_ne!(superseded_ticket, latest_ticket);
+    let superseding = wait_for_latest(&scheduler);
+    assert_eq!(superseding.ticket(), latest_ticket);
+    assert!(
+        scheduler
+            .accept_completion(&superseding, history.session())
+            .unwrap(),
+        "only the newer request can publish its cache transaction"
+    );
+    assert_eq!(scheduler.try_receive_latest().unwrap(), None);
+    let reused = submit_and_accept(&scheduler, history.session(), good());
+    assert!(
+        reused
+            .cache_diagnostics()
+            .unwrap()
+            .channels
+            .iter()
+            .all(|channel| channel.family == CacheDisposition::Hit)
+    );
 }
 
 fn submit_and_accept(
@@ -547,6 +794,16 @@ fn is_pattern_definition_leaf(field: PropertyFieldId) -> bool {
         | PropertyFieldId::GuideBaselineAngle
         | PropertyFieldId::GuidePhase
         | PropertyFieldId::GuideSpacingMultiplier
+        | PropertyFieldId::GuidePrototype
+        | PropertyFieldId::GuideAuthoredStructure
+        | PropertyFieldId::GuideArcCenterX
+        | PropertyFieldId::GuideArcCenterY
+        | PropertyFieldId::GuideArcRadius
+        | PropertyFieldId::GuideArcStartAngle
+        | PropertyFieldId::GuideArcSweepAngle
+        | PropertyFieldId::GuideRepetition
+        | PropertyFieldId::GuideStackDirection
+        | PropertyFieldId::GuideStackSpacingMultiplier
         | PropertyFieldId::IntersectionDimensions
         | PropertyFieldId::IntersectionMergeEpsilon
         | PropertyFieldId::AlongGuideDimensions

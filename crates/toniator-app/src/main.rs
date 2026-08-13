@@ -1512,6 +1512,10 @@ fn inspector_group(field: PropertyFieldId) -> &'static str {
     }
 }
 
+/// Returns the artist-facing inspector label for one typed domain field.
+///
+/// This presentation mapping does not infer applicability or mutate document
+/// state; the domain descriptor remains authoritative for those boundaries.
 fn inspector_field_label(field: PropertyFieldId) -> String {
     match field {
         PropertyFieldId::SourceReference => "Source artwork".into(),
@@ -1545,6 +1549,16 @@ fn inspector_field_label(field: PropertyFieldId) -> String {
         PropertyFieldId::GuideBaselineAngle => "Direction angle".into(),
         PropertyFieldId::GuidePhase => "Direction offset".into(),
         PropertyFieldId::GuideSpacingMultiplier => "Direction spacing".into(),
+        PropertyFieldId::GuidePrototype => "Guide prototype".into(),
+        PropertyFieldId::GuideAuthoredStructure => "Authored open path".into(),
+        PropertyFieldId::GuideArcCenterX => "Arc center X".into(),
+        PropertyFieldId::GuideArcCenterY => "Arc center Y".into(),
+        PropertyFieldId::GuideArcRadius => "Arc radius".into(),
+        PropertyFieldId::GuideArcStartAngle => "Arc start angle".into(),
+        PropertyFieldId::GuideArcSweepAngle => "Arc sweep angle".into(),
+        PropertyFieldId::GuideRepetition => "Guide repetition".into(),
+        PropertyFieldId::GuideStackDirection => "Stack direction".into(),
+        PropertyFieldId::GuideStackSpacingMultiplier => "Stack spacing multiplier".into(),
         PropertyFieldId::IntersectionDimensions => "Directions at intersections".into(),
         PropertyFieldId::IntersectionMergeEpsilon => "Intersection merge tolerance".into(),
         PropertyFieldId::AlongGuideDimensions => "Directions along guides".into(),
@@ -1579,6 +1593,10 @@ fn inspector_field_label(field: PropertyFieldId) -> String {
     }
 }
 
+/// Returns the static artist-facing label for one typed selector choice.
+///
+/// Choice validity and variant-transition payloads remain domain-owned; this
+/// function supplies presentation text only and has no side effects.
 fn enum_choice_label(choice: PropertyEnumChoice) -> &'static str {
     match choice {
         PropertyEnumChoice::SourceMappingComponent(component) => match component {
@@ -1626,9 +1644,25 @@ fn enum_choice_label(choice: PropertyEnumChoice) -> &'static str {
         PropertyEnumChoice::MarkOrientation(MarkOrientationKind::Fixed) => "Fixed",
         PropertyEnumChoice::MarkOrientation(MarkOrientationKind::GuideTangent) => "Guide tangent",
         PropertyEnumChoice::MarkOrientation(MarkOrientationKind::GuideNormal) => "Guide normal",
+        PropertyEnumChoice::GuidePrototype(
+            toniator_domain::GuidePrototypeKind::AuthoredOpenPath,
+        ) => "Authored open path",
+        PropertyEnumChoice::GuidePrototype(toniator_domain::GuidePrototypeKind::CircularArc) => {
+            "Circular arc"
+        }
+        PropertyEnumChoice::GuideRepetition(toniator_domain::GuideRepetitionKind::Single) => {
+            "Single"
+        }
+        PropertyEnumChoice::GuideRepetition(
+            toniator_domain::GuideRepetitionKind::TransformStack,
+        ) => "Transform stack",
     }
 }
 
+/// Returns the artist-facing display text for one typed stable reference.
+///
+/// The label intentionally does not replace the stable ID used by commands;
+/// reference resolution and compatibility remain authoritative in the domain.
 fn reference_label(reference: &PropertyReferenceValue) -> String {
     match reference {
         PropertyReferenceValue::Source(SourceReference::Unassigned) => "No source assigned".into(),
@@ -1638,6 +1672,7 @@ fn reference_label(reference: &PropertyReferenceValue) -> String {
         PropertyReferenceValue::Definition(_) => "Current pattern".into(),
         PropertyReferenceValue::Mechanism(_) => "Current placement".into(),
         PropertyReferenceValue::GuideDimension(_) => "Direction".into(),
+        PropertyReferenceValue::AuthoredStructure(_) => "Authored open path".into(),
     }
 }
 
@@ -6104,6 +6139,70 @@ mod tests {
             .find(|value| value.descriptor.field == field)
             .map(|value| value.descriptor)
             .unwrap_or_else(|| panic!("private draft is missing active {field:?}"))
+    }
+
+    /// Covers every Stage 20D presentation-only guide variant added to the inspector boundary.
+    ///
+    /// The witness exercises static label projection without constructing GTK
+    /// controls, mutating document state, or claiming frontend edit support.
+    #[test]
+    fn stage20d_guide_variants_have_inspector_labels() {
+        let fields = [
+            (PropertyFieldId::GuidePrototype, "Guide prototype"),
+            (
+                PropertyFieldId::GuideAuthoredStructure,
+                "Authored open path",
+            ),
+            (PropertyFieldId::GuideArcCenterX, "Arc center X"),
+            (PropertyFieldId::GuideArcCenterY, "Arc center Y"),
+            (PropertyFieldId::GuideArcRadius, "Arc radius"),
+            (PropertyFieldId::GuideArcStartAngle, "Arc start angle"),
+            (PropertyFieldId::GuideArcSweepAngle, "Arc sweep angle"),
+            (PropertyFieldId::GuideRepetition, "Guide repetition"),
+            (PropertyFieldId::GuideStackDirection, "Stack direction"),
+            (
+                PropertyFieldId::GuideStackSpacingMultiplier,
+                "Stack spacing multiplier",
+            ),
+        ];
+        for (field, expected) in fields {
+            assert_eq!(inspector_field_label(field), expected);
+        }
+
+        let choices = [
+            (
+                PropertyEnumChoice::GuidePrototype(
+                    toniator_domain::GuidePrototypeKind::AuthoredOpenPath,
+                ),
+                "Authored open path",
+            ),
+            (
+                PropertyEnumChoice::GuidePrototype(
+                    toniator_domain::GuidePrototypeKind::CircularArc,
+                ),
+                "Circular arc",
+            ),
+            (
+                PropertyEnumChoice::GuideRepetition(toniator_domain::GuideRepetitionKind::Single),
+                "Single",
+            ),
+            (
+                PropertyEnumChoice::GuideRepetition(
+                    toniator_domain::GuideRepetitionKind::TransformStack,
+                ),
+                "Transform stack",
+            ),
+        ];
+        for (choice, expected) in choices {
+            assert_eq!(enum_choice_label(choice), expected);
+        }
+
+        assert_eq!(
+            reference_label(&PropertyReferenceValue::AuthoredStructure(
+                toniator_domain::AuthoredStructureId(7),
+            )),
+            "Authored open path"
+        );
     }
 
     /// Submits and accepts one canonical private preview without a fixed sleep.

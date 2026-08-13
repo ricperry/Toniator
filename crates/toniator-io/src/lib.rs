@@ -21,13 +21,14 @@ use toniator_domain::{
     AuthoredStructureId, AuthoredStructureKind, CanvasSpec, ChannelAppearance, ChannelId,
     ChannelPaint, ChannelPatternLayout, ChannelSourceMapping, ChannelState, ChannelTopology,
     ColorValue, CoveragePolicy, DensityMetric2D, Document, DocumentId, GeneralizedSiteProductDraft,
-    GuideDimensionDraft, GuideDimensionId, HalftoneChannelModel, HalftoneChannelRole,
-    MarkGeometryResponse, MarkOrientation, MarkOrientationDraft, MarkPrototype,
-    ModeledChannelState, PatternDefinition, PatternDefinitionDraft, PatternDefinitionId,
-    PatternDefinitionRecipe, PatternMechanismId, PatternOutputLayerId, PresetMetadata,
-    PresetRecord, RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy, SourceComponent,
-    SourceMapping, SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId,
-    StraightGuideDimension, StraightGuideRepetition, ValidationError, VisibleMarkSizingPolicy,
+    GuideDimension, GuideDimensionDraft, GuideDimensionId, GuidePrototype, GuideRepetition,
+    HalftoneChannelModel, HalftoneChannelRole, MarkGeometryResponse, MarkOrientation,
+    MarkOrientationDraft, MarkPrototype, ModeledChannelState, PatternDefinition,
+    PatternDefinitionDraft, PatternDefinitionId, PatternDefinitionRecipe, PatternMechanismId,
+    PatternOutputLayerId, PresetMetadata, PresetRecord, RandomSiteCharacter, SiteDensityModulation,
+    SiteExclusionPolicy, SourceComponent, SourceMapping, SourceMappingComponent, SourcePlacement,
+    SourceReference, SourceReferenceId, StraightGuideDimension, StraightGuideRepetition,
+    ValidationError, VisibleMarkSizingPolicy,
 };
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
@@ -549,6 +550,7 @@ pub fn load(path: &Path) -> Result<LoadedDocument, LoadError> {
                             PatternMechanismDtoV2::StraightGuides { id }
                             | PatternMechanismDtoV2::GuideIntersections { id, .. }
                             | PatternMechanismDtoV2::StraightGuideDimensions { id, .. }
+                            | PatternMechanismDtoV2::GuideDimensions { id, .. }
                             | PatternMechanismDtoV2::SelectedGuideIntersections { id, .. }
                             | PatternMechanismDtoV2::AlongGuideSites { id, .. }
                             | PatternMechanismDtoV2::RandomSiteProcess { id, .. }
@@ -1127,6 +1129,10 @@ enum PatternMechanismDtoV2 {
         id: u64,
         dimensions: Vec<StraightGuideDimensionDtoV2>,
     },
+    GuideDimensions {
+        id: u64,
+        dimensions: Vec<GuideDimensionDtoV2>,
+    },
     SelectedGuideIntersections {
         id: u64,
         guide_mechanism_id: u64,
@@ -1220,6 +1226,132 @@ struct StraightGuideDimensionDtoV2 {
     baseline_angle_degrees: f64,
     phase: f64,
     spacing_multiplier: f64,
+}
+#[derive(Serialize, Deserialize)]
+struct GuideDimensionDtoV2 {
+    id: u64,
+    baseline_angle_degrees: f64,
+    phase: f64,
+    prototype: GuidePrototypeDtoV2,
+    repetition: GuideRepetitionDtoV2,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum GuidePrototypeDtoV2 {
+    AuthoredOpenPath {
+        structure_id: u64,
+    },
+    CircularArc {
+        center: AuthoredPointDtoV2,
+        radius: f64,
+        start_angle_degrees: f64,
+        sweep_angle_degrees: f64,
+    },
+}
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum GuideRepetitionDtoV2 {
+    Single,
+    TransformStack {
+        direction_degrees: f64,
+        spacing_multiplier: f64,
+    },
+}
+
+impl GuideDimensionDtoV2 {
+    /// Projects one generic guide dimension into persisted intent without resolving resources.
+    fn from_domain(value: &GuideDimension) -> Self {
+        Self {
+            id: value.id.0,
+            baseline_angle_degrees: value.baseline_angle_degrees,
+            phase: value.phase,
+            prototype: GuidePrototypeDtoV2::from_domain(&value.prototype),
+            repetition: GuideRepetitionDtoV2::from_domain(&value.repetition),
+        }
+    }
+
+    /// Rebuilds one generic guide dimension for later complete-document validation.
+    fn into_domain(self) -> GuideDimension {
+        GuideDimension {
+            id: GuideDimensionId(self.id),
+            baseline_angle_degrees: self.baseline_angle_degrees,
+            phase: self.phase,
+            prototype: self.prototype.into_domain(),
+            repetition: self.repetition.into_domain(),
+        }
+    }
+}
+
+impl GuidePrototypeDtoV2 {
+    /// Projects a persisted generic-guide prototype into deterministic current-v2 fields.
+    fn from_domain(value: &GuidePrototype) -> Self {
+        match value {
+            GuidePrototype::AuthoredOpenPath { structure_id } => Self::AuthoredOpenPath {
+                structure_id: structure_id.0,
+            },
+            GuidePrototype::CircularArc {
+                center,
+                radius,
+                start_angle_degrees,
+                sweep_angle_degrees,
+            } => Self::CircularArc {
+                center: AuthoredPointDtoV2::from_domain(*center),
+                radius: *radius,
+                start_angle_degrees: *start_angle_degrees,
+                sweep_angle_degrees: *sweep_angle_degrees,
+            },
+        }
+    }
+
+    /// Rebuilds generic-guide prototype intent for authoritative domain validation.
+    fn into_domain(self) -> GuidePrototype {
+        match self {
+            Self::AuthoredOpenPath { structure_id } => GuidePrototype::AuthoredOpenPath {
+                structure_id: AuthoredStructureId(structure_id),
+            },
+            Self::CircularArc {
+                center,
+                radius,
+                start_angle_degrees,
+                sweep_angle_degrees,
+            } => GuidePrototype::CircularArc {
+                center: center.into_domain(),
+                radius,
+                start_angle_degrees,
+                sweep_angle_degrees,
+            },
+        }
+    }
+}
+
+impl GuideRepetitionDtoV2 {
+    /// Projects a bounded generic-guide repetition variant into current-v2 intent fields.
+    fn from_domain(value: &GuideRepetition) -> Self {
+        match value {
+            GuideRepetition::Single => Self::Single,
+            GuideRepetition::TransformStack {
+                direction_degrees,
+                spacing_multiplier,
+            } => Self::TransformStack {
+                direction_degrees: *direction_degrees,
+                spacing_multiplier: *spacing_multiplier,
+            },
+        }
+    }
+
+    /// Rebuilds one repetition variant for authoritative domain validation.
+    fn into_domain(self) -> GuideRepetition {
+        match self {
+            Self::Single => GuideRepetition::Single,
+            Self::TransformStack {
+                direction_degrees,
+                spacing_multiplier,
+            } => GuideRepetition::TransformStack {
+                direction_degrees,
+                spacing_multiplier,
+            },
+        }
+    }
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -2065,6 +2197,15 @@ impl PatternMechanismDtoV2 {
                         .collect(),
                 }
             }
+            toniator_domain::PatternMechanism::GuideDimensions { id, dimensions } => {
+                Self::GuideDimensions {
+                    id: id.0,
+                    dimensions: dimensions
+                        .iter()
+                        .map(GuideDimensionDtoV2::from_domain)
+                        .collect(),
+                }
+            }
             toniator_domain::PatternMechanism::SelectedGuideIntersections {
                 id,
                 guide_mechanism_id,
@@ -2147,6 +2288,15 @@ impl PatternMechanismDtoV2 {
                     dimensions: dimensions
                         .into_iter()
                         .map(StraightGuideDimensionDtoV2::into_domain)
+                        .collect(),
+                }
+            }
+            Self::GuideDimensions { id, dimensions } => {
+                toniator_domain::PatternMechanism::GuideDimensions {
+                    id: PatternMechanismId(id),
+                    dimensions: dimensions
+                        .into_iter()
+                        .map(GuideDimensionDtoV2::into_domain)
                         .collect(),
                 }
             }
