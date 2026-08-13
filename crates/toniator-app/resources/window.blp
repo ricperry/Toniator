@@ -1,6 +1,19 @@
 using Gtk 4.0;
 using Adw 1;
 
-template $ToniatorResourceProbe : Adw.ApplicationWindow {
-  title: "Toniator";
+template $ToniatorMainShell : Gtk.Box {
+  orientation: vertical;
+  vexpand: true;
+
+  Adw.Banner main_banner {
+    revealed: false;
+  }
+
+  Adw.OverlaySplitView workspace_split {
+    vexpand: true;
+    sidebar-position: end;
+    show-sidebar: true;
+    enable-show-gesture: true;
+    enable-hide-gesture: true;
+  }
 }

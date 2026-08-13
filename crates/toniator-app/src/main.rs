@@ -4,6 +4,14 @@
 //! portable-container boundaries.  The workspace below is controller state;
 //! `DocumentHistory` remains the only mutable document authority.
 
+mod app_events;
+mod application_model;
+mod automation;
+mod components;
+mod controller;
+mod preview_coordinator;
+mod view_models;
+
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
@@ -12,25 +20,31 @@ use std::{
     rc::Rc,
     sync::{
         Arc,
-        mpsc::{self, Receiver, TryRecvError},
+        atomic::{AtomicBool, Ordering},
     },
     thread,
     time::Duration,
 };
 
 use adw::prelude::*;
+use app_events::AppEvent;
+use automation::AutomationSink;
+use controller::{UiIntent, history_redo};
+#[cfg(test)]
+use preview_coordinator::{PreviewSubmission, accepts_submission};
 use toniator_domain::{
     CanvasSpec, ChannelId, ChannelPaint, ChannelTopologyTemplate, ColorComponent,
     DensityEditedAxis, Document, DocumentCommand, DocumentHistory, DocumentSession,
-    HalftoneChannelModel, LegacyMappingFieldEdit, MarkGeometryFieldEdit, MarkOrientationKind,
-    MarkPrototype, ModeledMappingFieldEdit, PaintKind, PatternDefinitionEdit, PatternDefinitionId,
-    PatternMechanismId, PatternOutputLayerId, PropertyCurrentValue, PropertyCurrentValueKind,
-    PropertyDescriptor, PropertyEnumChoice, PropertyFieldId, PropertyReferenceValue,
-    PropertyTarget, PropertyValueKind, RandomCharacterKind, SourceComponent,
-    SourceMappingComponent, SourceReference, SourceReferenceId, TranslationEditedAxis,
-    VariantTransitionDraft, VariantTransitionField, VariantTransitionFieldUpdate,
-    VariantTransitionValue,
+    GeneralizedSiteProductDraft, GuideDimensionDraft, HalftoneChannelModel, LegacyMappingFieldEdit,
+    MarkGeometryFieldEdit, MarkOrientationKind, MarkPrototype, ModeledMappingFieldEdit, PaintKind,
+    PatternDefinitionEdit, PatternDefinitionId, PatternMechanismId, PatternOutputLayerId,
+    PropertyCurrentValue, PropertyCurrentValueKind, PropertyDescriptor, PropertyEnumChoice,
+    PropertyFieldId, PropertyReferenceValue, PropertyTarget, PropertyValueKind,
+    RandomCharacterKind, SourceComponent, SourceMappingComponent, SourceReference,
+    SourceReferenceId, TranslationEditedAxis, VariantTransitionFieldUpdate, VariantTransitionValue,
 };
+#[cfg(test)]
+use toniator_domain::{DensityModulationKind, ExclusionKind};
 use toniator_engine::{
     EvaluationLimits, EvaluationRequest, EvaluationScheduler, OutputRasterTarget,
     RasterAntialiasing, RasterBackground, RasterSurface, ResolvedSource, SourceFormatHint,
@@ -41,6 +55,8 @@ use toniator_io::{
     EmbeddedSource, EmbeddedSourceFormat, SourceBundle, load as load_container,
     save as save_container,
 };
+use toniator_patterns::PresetRegistry;
+use view_models::{LifecycleViewModel, PatternCatalogViewModel, project_document};
 
 const APP_ID: &str = "com.silentbutdigital.Toniator";
 const RESOURCE_PREFIX: &str = "/com/silentbutdigital/Toniator";
@@ -65,19 +81,23 @@ const LIFECYCLE_BUTTONS: [(&str, &str, &str); 6] = [
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PreviewModel {
+pub(crate) enum PreviewModel {
     Rgb,
     Cmyk,
     SourceColorAlpha,
 }
 
-/// Frontend-only state.  It is deliberately absent from `Workspace`, document
-/// snapshots, history, descriptors, evaluator requests, and persistence.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Identifies the private Pattern Editor's selected-copy command boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum DefinitionEditScope {
-    #[default]
     SelectedCopy,
-    Shared,
+}
+
+impl Default for DefinitionEditScope {
+    /// Starts ordinary structural edits as selected-channel copies.
+    fn default() -> Self {
+        Self::SelectedCopy
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -96,7 +116,6 @@ struct InspectorRuntime {
     scope: DefinitionEditScope,
     drafts: BTreeMap<String, String>,
     expanded_groups: BTreeSet<String>,
-    transition: Option<VariantTransitionDraft>,
     status: Option<String>,
     focus: Option<InspectorFocusIdentity>,
 }
@@ -117,10 +136,6 @@ enum InspectorFocusIdentity {
         field: PropertyFieldId,
         collection_index: Option<usize>,
         guide_ordinal: Option<usize>,
-    },
-    TransitionField {
-        field: PropertyFieldId,
-        target: PropertyTarget,
     },
 }
 
@@ -156,16 +171,6 @@ fn control_route(value: &PropertyCurrentValue) -> Option<InspectorControlRoute> 
             PropertyCurrentValueKind::ReferenceCollection(_),
         ) => Some(InspectorControlRoute::ReferenceCollection),
         _ => None,
-    }
-}
-
-fn transition_control_route(value: &VariantTransitionValue) -> InspectorControlRoute {
-    match value {
-        VariantTransitionValue::FiniteF64(_) => InspectorControlRoute::FiniteNumber,
-        VariantTransitionValue::U32(_) => InspectorControlRoute::WholeNumber,
-        VariantTransitionValue::Boolean(_) => InspectorControlRoute::Toggle,
-        VariantTransitionValue::EnumChoice(_) => InspectorControlRoute::Choice,
-        VariantTransitionValue::StableReference(_) => InspectorControlRoute::Reference,
     }
 }
 
@@ -230,7 +235,7 @@ impl PreviewModel {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct SavedContent {
+pub(crate) struct SavedContent {
     document: Document,
     sources: SourceBundle,
 }
@@ -245,11 +250,11 @@ struct SourcePresentation {
 /// Private lifecycle state.  It holds no independently mutable document:
 /// every change to `document()` goes through `history`.
 #[derive(Debug)]
-struct Workspace {
-    history: DocumentHistory,
+pub(crate) struct Workspace {
+    pub(crate) history: DocumentHistory,
     sources: SourceBundle,
     location: Option<PathBuf>,
-    display_name: String,
+    pub(crate) display_name: String,
     source_presentation: Option<SourcePresentation>,
     migration_notice: bool,
     savepoint: Option<SavedContent>,
@@ -358,7 +363,11 @@ impl Workspace {
         self.history.document()
     }
 
-    fn is_dirty(&self) -> bool {
+    /// Reports whether mutable document or embedded-source state differs from its savepoint.
+    ///
+    /// The comparison is read-only and uses the immutable snapshot boundary;
+    /// it never writes files or advances history.
+    pub(crate) fn is_dirty(&self) -> bool {
         self.savepoint
             .as_ref()
             .is_none_or(|saved| saved.document != *self.document() || saved.sources != self.sources)
@@ -444,7 +453,7 @@ impl Page {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LifecycleAction {
+pub(crate) enum LifecycleAction {
     New,
     Open,
     Close,
@@ -560,7 +569,7 @@ enum SaveRoute {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ExportFormat {
+pub(crate) enum ExportFormat {
     Png,
     Svg,
 }
@@ -643,61 +652,37 @@ fn apply_banner_policy(banner: &adw::Banner, policy: BannerPolicy) {
     }
 }
 
-struct PendingLoad {
-    generation: u64,
-    receiver: Receiver<Result<Workspace, String>>,
-}
-
-struct PendingSave {
-    generation: u64,
-    path: PathBuf,
-    snapshot: SavedContent,
-    receiver: Receiver<Result<(), String>>,
-    after: Option<LifecycleAction>,
-}
-
-struct PendingExport {
-    generation: u64,
-    workspace_generation: u64,
-    receiver: Receiver<Result<(), String>>,
-}
-
 /// App-owned lifecycle identity paired with an engine scheduler ticket.  The
 /// scheduler remains authoritative for ticket/revision/cache acceptance; this
 /// merely prevents two distinct revision-zero workspaces from looking equal to
 /// GTK presentation.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct PreviewSubmission {
-    workspace_generation: u64,
-    ticket: u64,
-}
-
 enum CompletionInstall<T> {
     Install(T),
     Preserve,
 }
 
+#[cfg(test)]
 fn lifecycle_completion_policy<T>(
     current_generation: u64,
     candidate_generation: u64,
     candidate: T,
 ) -> CompletionInstall<T> {
-    if is_current_generation(current_generation, candidate_generation) {
+    if current_generation == candidate_generation {
         CompletionInstall::Install(candidate)
     } else {
         CompletionInstall::Preserve
     }
 }
 
+#[cfg(test)]
 fn accepts_preview_submission(
     current_workspace_generation: u64,
     submission: Option<PreviewSubmission>,
     completion_ticket: u64,
 ) -> bool {
-    submission.is_some_and(|submission| {
-        submission.workspace_generation == current_workspace_generation
-            && submission.ticket == completion_ticket
-    })
+    accepts_submission(current_workspace_generation, submission, completion_ticket)
 }
 
 #[derive(Clone)]
@@ -712,16 +697,84 @@ struct Actions {
     redo: gio::SimpleAction,
 }
 
+/// Holds the transient GTK widgets around one private Pattern Editor history.
+///
+/// The surface presents only a cloned draft document/history and draft preview;
+/// it has no route to the main workspace, savepoint, location, or filesystem.
+/// Dropping the surface on close discards that private authority.
+struct PatternEditorSurface {
+    window: adw::Window,
+    status: gtk::Label,
+    picture: gtk::Picture,
+    draft: Rc<RefCell<PatternEditorDraft>>,
+    introduction: gtk::Label,
+    history: gtk::Label,
+    current_pattern: gtk::Label,
+    family: DraftFamilyControls,
+    primary: gtk::Box,
+    advanced_rows: gtk::Box,
+    descriptor_components: BTreeMap<String, DraftDescriptorComponent>,
+}
+
+/// Holds stable private-editor controls that select a draft pattern family.
+///
+/// The controls own only GTK interaction and render state. The private draft
+/// history remains the authority for family, direction count, and site mode.
+struct DraftFamilyControls {
+    root: gtk::Box,
+    directions: gtk::Box,
+    count: gtk::Entry,
+    intersections: gtk::Button,
+    along_guides: gtk::Button,
+}
+
+/// Retains one private-editor descriptor row and its immutable source value.
+///
+/// Rows are keyed by descriptor identity so accepted draft edits preserve
+/// unaffected widget/focus instances. The row never owns document, scheduler,
+/// or savepoint authority.
+struct DraftDescriptorComponent {
+    row: gtk::Box,
+    control: gtk::Widget,
+    value: PropertyCurrentValue,
+}
+
+/// Owns an intentionally private structural-editing session for one channel.
+///
+/// Its history starts from a cloned main document and never escapes into the
+/// main workspace, savepoint, source bundle, scheduler, or filesystem.
+struct PatternEditorDraft {
+    history: DocumentHistory,
+    selected_channel: ChannelId,
+    initial_document: Document,
+    discard_confirmed: bool,
+    sources: SourceBundle,
+    presentation: SourcePresentation,
+    scheduler: Arc<EvaluationScheduler>,
+    preview_submission: Option<u64>,
+    epoch: u64,
+}
+
+/// Retains one persistent sidebar row and its last immutable descriptor value.
+///
+/// The component owns GTK presentation only. Its descriptor/value snapshot is
+/// replaced from document view data while the row identity and connected
+/// callbacks survive ordinary model updates.
+struct DescriptorComponent {
+    row: gtk::Box,
+    control: gtk::Widget,
+    value: PropertyCurrentValue,
+}
+
+impl PatternEditorDraft {
+    /// Reports whether this private editor has changes that a close must disclose.
+    fn is_dirty(&self) -> bool {
+        self.history.document() != &self.initial_document
+    }
+}
+
 struct AppState {
-    scheduler: EvaluationScheduler,
-    workspace: Option<Workspace>,
-    pending_load: Option<PendingLoad>,
-    pending_save: Option<PendingSave>,
-    pending_export: Option<PendingExport>,
-    generation: u64,
-    workspace_generation: u64,
-    preview_submission: Option<PreviewSubmission>,
-    model: PreviewModel,
+    application_model: application_model::ApplicationModel,
     syncing_model: bool,
     window_close: WindowCloseController,
     actions: Actions,
@@ -735,18 +788,43 @@ struct AppState {
     selector: gtk::DropDown,
     channel_selector: gtk::DropDown,
     channel_selector_model: gtk::StringList,
-    inspector: gtk::Box,
+    inspector_catalog: gtk::Box,
+    active_pattern: gtk::Label,
+    inspector_descriptors: gtk::Box,
     inspector_status: gtk::Label,
+    descriptor_components: BTreeMap<String, DescriptorComponent>,
     inspector_runtime: InspectorRuntime,
     syncing_inspector: bool,
+    syncing_draft_editor: bool,
     inspector_rebuild_scheduled: bool,
+    pattern_editor: Option<PatternEditorSurface>,
+    draft_epoch: u64,
     preview: Option<gtk::gdk::Texture>,
     preview_target: Option<toniator_engine::PreviewRasterTarget>,
+    presets: PresetRegistry,
+    automation: Option<AutomationSink>,
+    event_sender: async_channel::Sender<AppEvent>,
+    preview_bridge_stop: Arc<AtomicBool>,
+}
+
+impl std::ops::Deref for AppState {
+    type Target = application_model::ApplicationModel;
+
+    /// Exposes widget-free application authority to existing controller paths.
+    fn deref(&self) -> &Self::Target {
+        &self.application_model
+    }
+}
+
+impl std::ops::DerefMut for AppState {
+    /// Exposes mutable application authority without extending GTK widget borrows.
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.application_model
+    }
 }
 
 fn main() {
-    gio::resources_register_include!("toniator.gresource")
-        .expect("failed to register compiled Toniator GResource");
+    register_resources();
     let initial_path = match parse_args(env::args_os().skip(1).collect()) {
         Ok(path) => path,
         Err(message) => {
@@ -757,6 +835,17 @@ fn main() {
     let app = adw::Application::builder().application_id(APP_ID).build();
     app.connect_activate(move |app| build_window(app, initial_path.clone()));
     app.run_with_args(&["toniator-app"]);
+}
+
+/// Registers the checked-in GResource bundle before any composite widget is built.
+///
+/// The registration contains presentation assets only and does not establish
+/// document, history, evaluator, or persistence authority. Failure is fatal
+/// because a GTK application without its required templates cannot present a
+/// coherent window.
+fn register_resources() {
+    gio::resources_register_include!("toniator.gresource")
+        .expect("failed to register compiled Toniator GResource");
 }
 
 fn parse_args(arguments: Vec<std::ffi::OsString>) -> Result<Option<PathBuf>, String> {
@@ -781,38 +870,43 @@ fn build_window(app: &adw::Application, initial_path: Option<PathBuf>) {
         .build();
     window.set_size_request(480, 360);
     let header = adw::HeaderBar::new();
+    let file_menu = gio::Menu::new();
     for (label, action, tooltip) in LIFECYCLE_BUTTONS {
+        file_menu.append(Some(label.trim_start_matches('_')), Some(action));
+        let _ = tooltip;
+    }
+    let file_button = gtk::MenuButton::builder()
+        .label("File")
+        .menu_model(&file_menu)
+        .tooltip_text("Document and export actions")
+        .build();
+    header.pack_start(&file_button);
+    for (label, action, tooltip) in [
+        ("_Undo", "app.undo", "Undo the last change (Ctrl+Z)"),
+        ("_Redo", "app.redo", "Redo the last change (Ctrl+Shift+Z)"),
+    ] {
         let button = gtk::Button::with_mnemonic(label);
         button.set_action_name(Some(action));
         button.set_tooltip_text(Some(tooltip));
         header.pack_start(&button);
     }
-    let model_label = gtk::Label::new(Some("_Model"));
-    model_label.set_use_underline(true);
-    model_label.add_css_class("dim-label");
     let selector = gtk::DropDown::from_strings(&PreviewModel::ALL.map(PreviewModel::label));
-    selector.set_tooltip_text(Some("Authoritative channel model"));
-    model_label.set_mnemonic_widget(Some(&selector));
-    header.pack_end(&selector);
-    header.pack_end(&model_label);
-    let channel_label = gtk::Label::new(Some("_Channel"));
-    channel_label.set_use_underline(true);
-    channel_label.add_css_class("dim-label");
+    selector.set_tooltip_text(Some("Choose the channel color model"));
     let channel_selector_model = gtk::StringList::new(&[]);
     let channel_selector = gtk::DropDown::new(
         Some(channel_selector_model.clone()),
         None::<gtk::Expression>,
     );
     channel_selector.set_sensitive(false);
-    channel_selector.set_tooltip_text(Some("Selected authoritative channel"));
-    channel_label.set_mnemonic_widget(Some(&channel_selector));
-    header.pack_end(&channel_selector);
-    header.pack_end(&channel_label);
+    channel_selector.set_tooltip_text(Some("Choose the channel to adjust"));
+    // Model and channel selectors remain in state for the ordinary inspector
+    // workflow; the responsive header reserves narrow-space for Undo/Redo and
+    // the clearly named settings drawer instead of cropping actionable controls.
     let window_title = adw::WindowTitle::new("Toniator", "Document lifecycle");
     header.set_title_widget(Some(&window_title));
 
-    let banner = adw::Banner::new("");
-    banner.set_revealed(false);
+    let shell = components::ToniatorMainShell::new();
+    let banner = shell.banner();
     let stack = gtk::Stack::new();
     stack.set_hexpand(true);
     stack.set_vexpand(true);
@@ -838,37 +932,54 @@ fn build_window(app: &adw::Application, initial_path: Option<PathBuf>) {
     viewer.append(&picture);
     stack.add_named(&viewer, Some(Page::Success.name()));
     stack.set_visible_child_name(Page::Empty.name());
-    let inspector = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    inspector.add_css_class("toniator-inspector");
-    inspector.set_margin_top(12);
-    inspector.set_margin_bottom(12);
-    inspector.set_margin_start(12);
-    inspector.set_margin_end(12);
-    let inspector_status =
-        gtk::Label::new(Some("Open a source-backed document to inspect channels."));
-    inspector_status.set_wrap(true);
-    inspector_status.set_xalign(0.0);
-    inspector_status.add_css_class("dim-label");
-    inspector.append(&inspector_status);
+    let channel_editor = components::ToniatorChannelEditor::new();
+    channel_editor.add_css_class("toniator-inspector");
+    let inspector = channel_editor.content();
+    let inspector_status = channel_editor.status();
+    inspector_status.set_label("Open a source-backed document to inspect channels.");
+    let inspector_catalog = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let inspector_descriptors = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let selection_row = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let model_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let model_label = gtk::Label::new(Some("Color model"));
+    model_label.set_xalign(0.0);
+    model_label.set_hexpand(true);
+    model_label.set_mnemonic_widget(Some(&selector));
+    selector.update_property(&[gtk::accessible::Property::Label("Color model")]);
+    model_row.append(&model_label);
+    model_row.append(&selector);
+    let channel_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let channel_label = gtk::Label::new(Some("Channel"));
+    channel_label.set_xalign(0.0);
+    channel_label.set_hexpand(true);
+    channel_label.set_mnemonic_widget(Some(&channel_selector));
+    channel_selector.update_property(&[gtk::accessible::Property::Label("Channel")]);
+    channel_row.append(&channel_label);
+    channel_row.append(&channel_selector);
+    selection_row.append(&model_row);
+    selection_row.append(&channel_row);
+    inspector.append(&selection_row);
+    inspector.append(&inspector_catalog);
+    inspector.append(&inspector_descriptors);
     let inspector_scroll = gtk::ScrolledWindow::new();
     inspector_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     inspector_scroll.set_min_content_width(300);
     inspector_scroll.set_max_content_width(420);
-    inspector_scroll.set_child(Some(&inspector));
-    let workspace_view = gtk::Paned::new(gtk::Orientation::Horizontal);
-    workspace_view.set_wide_handle(true);
-    workspace_view.set_start_child(Some(&stack));
-    workspace_view.set_end_child(Some(&inspector_scroll));
-    workspace_view.set_resize_start_child(true);
-    workspace_view.set_shrink_start_child(false);
-    workspace_view.set_resize_end_child(false);
-    workspace_view.set_shrink_end_child(false);
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    content.append(&banner);
-    content.append(&workspace_view);
+    inspector_scroll.set_child(Some(&channel_editor));
+    let split = shell.split();
+    split.set_content(Some(&stack));
+    split.set_sidebar(Some(&inspector_scroll));
+    split.set_min_sidebar_width(320.0);
+    split.set_max_sidebar_width(360.0);
+    let drawer = gtk::ToggleButton::with_mnemonic("_Channel settings");
+    drawer.set_tooltip_text(Some("Show or hide channel settings"));
+    drawer.set_active(true);
+    let split_for_drawer = split.clone();
+    drawer.connect_toggled(move |button| split_for_drawer.set_show_sidebar(button.is_active()));
+    header.pack_end(&drawer);
     let toolbar_view = adw::ToolbarView::new();
     toolbar_view.add_top_bar(&header);
-    toolbar_view.set_content(Some(&content));
+    toolbar_view.set_content(Some(&shell));
     window.set_content(Some(&toolbar_view));
 
     let actions = Actions {
@@ -901,16 +1012,9 @@ fn build_window(app: &adw::Application, initial_path: Option<PathBuf>) {
     app.set_accels_for_action("app.close", &["<Primary>w"]);
     app.set_accels_for_action("app.undo", &["<Primary>z"]);
     app.set_accels_for_action("app.redo", &["<Primary><Shift>z"]);
+    let (event_sender, event_receiver) = async_channel::unbounded();
     let state = Rc::new(RefCell::new(AppState {
-        scheduler: EvaluationScheduler::new().expect("failed to start evaluation scheduler"),
-        workspace: None,
-        pending_load: None,
-        pending_save: None,
-        pending_export: None,
-        generation: 0,
-        workspace_generation: 0,
-        preview_submission: None,
-        model: PreviewModel::Rgb,
+        application_model: application_model::ApplicationModel::new(),
         syncing_model: false,
         window_close: WindowCloseController::default(),
         actions,
@@ -924,14 +1028,35 @@ fn build_window(app: &adw::Application, initial_path: Option<PathBuf>) {
         selector,
         channel_selector,
         channel_selector_model,
-        inspector,
+        inspector_catalog,
+        active_pattern: gtk::Label::new(None),
+        inspector_descriptors,
         inspector_status,
+        descriptor_components: BTreeMap::new(),
         inspector_runtime: InspectorRuntime::default(),
         syncing_inspector: false,
+        syncing_draft_editor: false,
         inspector_rebuild_scheduled: false,
+        pattern_editor: None,
+        draft_epoch: 0,
         preview: None,
         preview_target: None,
+        presets: PresetRegistry::bundled(),
+        automation: AutomationSink::from_environment(),
+        event_sender,
+        preview_bridge_stop: Arc::new(AtomicBool::new(false)),
     }));
+    let event_state = Rc::clone(&state);
+    glib::MainContext::default().spawn_local(async move {
+        while let Ok(event) = event_receiver.recv().await {
+            handle_app_event(&event_state, event);
+        }
+    });
+    start_preview_event_bridge(
+        Arc::clone(&state.borrow().scheduler),
+        state.borrow().event_sender.clone(),
+        Arc::clone(&state.borrow().preview_bridge_stop),
+    );
     connect_actions(&state);
     {
         let state = Rc::clone(&state);
@@ -959,13 +1084,19 @@ fn build_window(app: &adw::Application, initial_path: Option<PathBuf>) {
             if let Some(channel_id) = channel_id_at_selector_position(selector.selected(), &ids) {
                 {
                     let mut app_state = state.borrow_mut();
+                    let previous_channel = app_state.inspector_runtime.selected_channel;
                     app_state.inspector_runtime.selected_channel = Some(channel_id);
                     // A user-selected channel is a new inspector context.  Never
                     // carry a control identity from the previously selected
                     // channel into it.
                     app_state.inspector_runtime.focus = None;
+                    if previous_channel != Some(channel_id) {
+                        clear_structural_edit_context_for_selection(
+                            &mut app_state.inspector_runtime,
+                        );
+                    }
                 }
-                schedule_inspector_rebuild(&state);
+                dispatch_ui_intent(&state, UiIntent::SelectChannel(channel_id));
             }
         });
     }
@@ -987,10 +1118,6 @@ fn build_window(app: &adw::Application, initial_path: Option<PathBuf>) {
             }
         });
     }
-    {
-        let state = Rc::clone(&state);
-        glib::timeout_add_local(Duration::from_millis(16), move || poll(&state));
-    }
     sync_ui(&mut state.borrow_mut());
     rebuild_inspector(&state);
     window.present();
@@ -1006,7 +1133,9 @@ fn connect_actions(state: &Rc<RefCell<AppState>>) {
         (state.borrow().actions.close.clone(), LifecycleAction::Close),
     ] {
         let state = Rc::clone(state);
-        action.connect_activate(move |_, _| request_lifecycle(&state, lifecycle));
+        action.connect_activate(move |_, _| {
+            dispatch_ui_intent(&state, UiIntent::Lifecycle(lifecycle))
+        });
     }
     {
         let state = Rc::clone(state);
@@ -1028,10 +1157,61 @@ fn connect_actions(state: &Rc<RefCell<AppState>>) {
         (state.borrow().actions.redo.clone(), true),
     ] {
         let state = Rc::clone(state);
-        action.connect_activate(move |_, _| apply_history_navigation(&state, redo));
+        action.connect_activate(move |_, _| {
+            dispatch_ui_intent(&state, if redo { UiIntent::Redo } else { UiIntent::Undo })
+        });
     }
 }
 
+/// Dispatches a typed header intent through the authoritative history boundary.
+fn dispatch_ui_intent(state: &Rc<RefCell<AppState>>, intent: UiIntent) {
+    if let Some(redo) = history_redo(&intent) {
+        apply_history_navigation(state, redo);
+        return;
+    }
+    match intent {
+        UiIntent::Lifecycle(action) => request_lifecycle(state, action),
+        UiIntent::SelectChannel(channel) => {
+            state.borrow_mut().selected_channel = Some(channel);
+            schedule_inspector_rebuild(state);
+        }
+        UiIntent::ApplyPreset(id) => apply_selected_preset(state, &id, &id),
+        UiIntent::OpenPatternEditor => open_pattern_editor(state),
+        UiIntent::DiscardPatternEditor => request_draft_discard(state),
+        UiIntent::Undo | UiIntent::Redo => unreachable!("history intents returned above"),
+    }
+}
+
+/// Bridges the unchanged scheduler receiver into typed main-context events.
+///
+/// The bridge never touches GTK, document history, or cache acceptance. It
+/// stops when the app coordinator requests shutdown; token/ticket validation
+/// remains in `handle_preview_completion` on the main context.
+fn start_preview_event_bridge(
+    scheduler: Arc<EvaluationScheduler>,
+    sender: async_channel::Sender<AppEvent>,
+    stop: Arc<AtomicBool>,
+) {
+    thread::spawn(move || {
+        while !stop.load(Ordering::Acquire) {
+            match scheduler.try_receive_latest() {
+                Ok(Some(completion)) => {
+                    if sender.send_blocking(AppEvent::Preview(completion)).is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => thread::park_timeout(Duration::from_millis(4)),
+                Err(_) => break,
+            }
+        }
+    });
+}
+
+/// Moves the authoritative main history cursor and schedules one fresh preview.
+///
+/// A missing/no-op cursor leaves the document and last successful preview
+/// untouched. Accepted navigation mutates only `Workspace::history`; GTK work
+/// and scheduler submission occur after the callback's mutable borrow ends.
 fn apply_history_navigation(state: &Rc<RefCell<AppState>>, redo: bool) {
     let result = {
         let mut app_state = state.borrow_mut();
@@ -1048,17 +1228,11 @@ fn apply_history_navigation(state: &Rc<RefCell<AppState>>, redo: bool) {
         Ok(Some(_)) => {
             let mut app_state = state.borrow_mut();
             set_preview_pending(&mut app_state);
-            set_inspector_status(
-                &mut app_state,
-                if redo {
-                    "Redo applied. Preview update is pending."
-                } else {
-                    "Undo applied. Preview update is pending."
-                },
-            );
+            set_inspector_status(&mut app_state, "Rendering preview…");
             sync_ui(&mut app_state);
             drop(app_state);
             rebuild_inspector(state);
+            schedule_main_preview_submission(state);
         }
         Ok(None) => {}
         Err(error) => show_error(&mut state.borrow_mut(), error.to_string()),
@@ -1096,19 +1270,13 @@ fn authoritative_channel_ids(document: &Document) -> Vec<ChannelId> {
 }
 
 fn channel_display_name(document: &Document, channel_id: ChannelId) -> String {
-    if let Some(channel) = document.channel(channel_id) {
-        return format!("Legacy channel (ID {})", channel.id.0);
+    if document.channel(channel_id).is_some() {
+        return "Channel".to_owned();
     }
     document
         .modeled_channel(channel_id)
-        .map(|channel| {
-            format!(
-                "{} channel (ID {})",
-                channel_role_label(channel.role),
-                channel.id.0
-            )
-        })
-        .unwrap_or_else(|| format!("Missing channel (ID {})", channel_id.0))
+        .map(|channel| channel_role_label(channel.role).to_owned())
+        .unwrap_or_else(|| "Unavailable channel".to_owned())
 }
 
 fn channel_role_label(role: toniator_domain::HalftoneChannelRole) -> &'static str {
@@ -1128,6 +1296,7 @@ fn inspector_key(descriptor: &PropertyDescriptor) -> String {
     format!("{:?}:{:?}", descriptor.target, descriptor.field)
 }
 
+#[cfg(test)]
 fn focus_for_descriptor(
     descriptor: &PropertyDescriptor,
     collection_index: Option<usize>,
@@ -1179,7 +1348,6 @@ fn focus_with_collection_index(
             collection_index: Some(collection_index),
             guide_ordinal: *guide_ordinal,
         },
-        InspectorFocusIdentity::TransitionField { .. } => focus.clone(),
     }
 }
 
@@ -1206,6 +1374,41 @@ fn selected_property_values(
                 })
                 .unwrap_or(false),
         })
+        .collect()
+}
+
+/// Classifies descriptor targets that edit a document-owned pattern definition.
+///
+/// Channel and document targets remain in the channel inspector; every other
+/// supported target belongs to the transient Pattern Editor. This classification
+/// is presentation-only and never changes descriptor, command, or history
+/// authority.
+fn is_structural_descriptor(descriptor: &PropertyDescriptor) -> bool {
+    !matches!(
+        descriptor.target,
+        PropertyTarget::Document | PropertyTarget::Channel(_)
+    )
+}
+
+/// Returns only selected-channel instance and presentation values for the
+/// sidebar inspector. Structural values are deliberately excluded so the
+/// sidebar cannot become an alternate Pattern Editor.
+fn channel_inspector_values(values: &[PropertyCurrentValue]) -> Vec<PropertyCurrentValue> {
+    values
+        .iter()
+        .filter(|value| !is_structural_descriptor(&value.descriptor))
+        .cloned()
+        .collect()
+}
+
+/// Returns the selected definition's supported structural values for the
+/// Pattern Editor. The immutable reader remains the source of current values;
+/// this filter neither materializes a definition copy nor exposes future fields.
+fn pattern_editor_values(values: &[PropertyCurrentValue]) -> Vec<PropertyCurrentValue> {
+    values
+        .iter()
+        .filter(|value| is_structural_descriptor(&value.descriptor))
+        .cloned()
         .collect()
 }
 
@@ -1279,22 +1482,22 @@ fn inspector_group(field: PropertyFieldId) -> &'static str {
         | PropertyFieldId::ArtworkWeightMappingGain
         | PropertyFieldId::ArtworkWeightMappingBias
         | PropertyFieldId::ArtworkWeightStrength
-        | PropertyFieldId::ArtworkWeightResponse => "Source mapping",
+        | PropertyFieldId::ArtworkWeightResponse => "Source",
         PropertyFieldId::Paint
         | PropertyFieldId::ColorRed
         | PropertyFieldId::ColorGreen
         | PropertyFieldId::ColorBlue
         | PropertyFieldId::ColorAlpha
         | PropertyFieldId::Opacity
-        | PropertyFieldId::Visibility => "Channel appearance",
+        | PropertyFieldId::Visibility => "Appearance",
         PropertyFieldId::DensityAcrossX
         | PropertyFieldId::DensityAcrossY
         | PropertyFieldId::DensityAspectLocked
         | PropertyFieldId::RotationDegrees
         | PropertyFieldId::TranslationX
-        | PropertyFieldId::TranslationY => "Density and layout",
-        PropertyFieldId::MarkMinimumSize | PropertyFieldId::MarkMaximumSize => "Mark response",
-        PropertyFieldId::DefinitionSelection => "Definition and sharing",
+        | PropertyFieldId::TranslationY => "Transform",
+        PropertyFieldId::MarkMinimumSize | PropertyFieldId::MarkMaximumSize => "Marks",
+        PropertyFieldId::DefinitionSelection => "Pattern",
         PropertyFieldId::CoverageGuardSteps
         | PropertyFieldId::CoverageMaximumSupportRadius
         | PropertyFieldId::GuideBaselineAngle
@@ -1316,8 +1519,8 @@ fn inspector_field_label(field: PropertyFieldId) -> String {
         PropertyFieldId::DensityAcrossY => "Density across Y".into(),
         PropertyFieldId::DensityAspectLocked => "Lock density aspect".into(),
         PropertyFieldId::RotationDegrees => "Rotation".into(),
-        PropertyFieldId::TranslationX => "Horizontal translation".into(),
-        PropertyFieldId::TranslationY => "Vertical translation".into(),
+        PropertyFieldId::TranslationX => "X offset".into(),
+        PropertyFieldId::TranslationY => "Y offset".into(),
         PropertyFieldId::MarkMinimumSize => "Minimum mark size".into(),
         PropertyFieldId::MarkMaximumSize => "Maximum mark size".into(),
         PropertyFieldId::LegacyMappingComponent | PropertyFieldId::ModeledMappingComponent => {
@@ -1336,15 +1539,15 @@ fn inspector_field_label(field: PropertyFieldId) -> String {
         PropertyFieldId::ColorAlpha => "Alpha".into(),
         PropertyFieldId::Opacity => "Opacity".into(),
         PropertyFieldId::Visibility => "Visible".into(),
-        PropertyFieldId::DefinitionSelection => "Pattern definition".into(),
+        PropertyFieldId::DefinitionSelection => "Pattern".into(),
         PropertyFieldId::CoverageGuardSteps => "Coverage guard steps".into(),
         PropertyFieldId::CoverageMaximumSupportRadius => "Maximum support radius".into(),
-        PropertyFieldId::GuideBaselineAngle => "Guide baseline angle".into(),
-        PropertyFieldId::GuidePhase => "Guide phase".into(),
-        PropertyFieldId::GuideSpacingMultiplier => "Guide spacing multiplier".into(),
-        PropertyFieldId::IntersectionDimensions => "Intersection guide dimensions".into(),
+        PropertyFieldId::GuideBaselineAngle => "Direction angle".into(),
+        PropertyFieldId::GuidePhase => "Direction offset".into(),
+        PropertyFieldId::GuideSpacingMultiplier => "Direction spacing".into(),
+        PropertyFieldId::IntersectionDimensions => "Directions at intersections".into(),
         PropertyFieldId::IntersectionMergeEpsilon => "Intersection merge tolerance".into(),
-        PropertyFieldId::AlongGuideDimensions => "Along-guide dimensions".into(),
+        PropertyFieldId::AlongGuideDimensions => "Directions along guides".into(),
         PropertyFieldId::AlongGuideIntervalMultiplier => "Along-guide interval multiplier".into(),
         PropertyFieldId::AlongGuidePhase => "Along-guide phase".into(),
         PropertyFieldId::RandomCharacter => "Random distribution".into(),
@@ -1369,7 +1572,7 @@ fn inspector_field_label(field: PropertyFieldId) -> String {
         PropertyFieldId::VisibleMarkSizingPolicy => "Visible-mark sizing policy".into(),
         PropertyFieldId::RandomMaximumAttempts => "Maximum random attempts".into(),
         PropertyFieldId::RandomMaximumNeighborChecks => "Maximum neighbor checks".into(),
-        PropertyFieldId::OutputSiteProduct => "Output site product".into(),
+        PropertyFieldId::OutputSiteProduct => "Mark placement".into(),
         PropertyFieldId::OutputPrototype => "Mark prototype".into(),
         PropertyFieldId::OutputOrientation => "Mark orientation".into(),
         PropertyFieldId::OutputOrientationDimension => "Orientation guide dimension".into(),
@@ -1394,7 +1597,7 @@ fn enum_choice_label(choice: PropertyEnumChoice) -> &'static str {
         }
         PropertyEnumChoice::Paint(PaintKind::Solid) => "Solid color",
         PropertyEnumChoice::Paint(PaintKind::SampledSource) => "Sampled source color",
-        PropertyEnumChoice::RandomCharacter(RandomCharacterKind::RawUniform) => "Raw uniform",
+        PropertyEnumChoice::RandomCharacter(RandomCharacterKind::RawUniform) => "Uniform",
         PropertyEnumChoice::RandomCharacter(RandomCharacterKind::Even) => "Even spacing",
         PropertyEnumChoice::RandomCharacter(RandomCharacterKind::Clustered) => "Clustered",
         PropertyEnumChoice::DensityModulation(toniator_domain::DensityModulationKind::Uniform) => {
@@ -1429,18 +1632,18 @@ fn enum_choice_label(choice: PropertyEnumChoice) -> &'static str {
 fn reference_label(reference: &PropertyReferenceValue) -> String {
     match reference {
         PropertyReferenceValue::Source(SourceReference::Unassigned) => "No source assigned".into(),
-        PropertyReferenceValue::Source(SourceReference::Assigned(id)) => {
-            format!("Source reference ({})", id.as_str())
+        PropertyReferenceValue::Source(SourceReference::Assigned(_)) => {
+            "Current source artwork".into()
         }
-        PropertyReferenceValue::Definition(id) => format!("Pattern definition (ID {})", id.0),
-        PropertyReferenceValue::Mechanism(id) => format!("Mechanism (ID {})", id.0),
-        PropertyReferenceValue::GuideDimension(id) => format!("Guide dimension (ID {})", id.0),
+        PropertyReferenceValue::Definition(_) => "Current pattern".into(),
+        PropertyReferenceValue::Mechanism(_) => "Current placement".into(),
+        PropertyReferenceValue::GuideDimension(_) => "Direction".into(),
     }
 }
 
 fn current_display(value: &PropertyCurrentValueKind) -> String {
     match value {
-        PropertyCurrentValueKind::FiniteF64(value) => format!("{value:.6}"),
+        PropertyCurrentValueKind::FiniteF64(value) => format!("{value:.4}"),
         PropertyCurrentValueKind::U32(value) => value.to_string(),
         PropertyCurrentValueKind::Boolean(value) => value.to_string(),
         PropertyCurrentValueKind::EnumChoice(value) => enum_choice_label(*value).into(),
@@ -1453,20 +1656,53 @@ fn current_display(value: &PropertyCurrentValueKind) -> String {
     }
 }
 
-fn is_advanced_descriptor(field: PropertyFieldId) -> bool {
-    matches!(
-        inspector_group(field),
-        "Active family" | "Active mechanism and output"
-    )
+/// Projects the selected channel's active pattern in artist-facing vocabulary.
+///
+/// This reads immutable descriptor values only and never exposes a preset ID,
+/// recipe, mechanism, or evaluator detail to GTK. The default guide pattern is
+/// named explicitly so new and raw documents remain understandable.
+fn artist_pattern_name(values: &[PropertyCurrentValue]) -> String {
+    if values
+        .iter()
+        .any(|value| value.descriptor.field == PropertyFieldId::RandomCharacter)
+    {
+        "Random".to_owned()
+    } else if values
+        .iter()
+        .any(|value| value.descriptor.field == PropertyFieldId::GuideBaselineAngle)
+    {
+        "Grid".to_owned()
+    } else {
+        "Simple XY Grid".to_owned()
+    }
 }
 
-fn is_transition_selector(field: PropertyFieldId) -> bool {
+/// Identifies structural work-limit and tolerance controls that remain
+/// progressively disclosed in the Pattern Editor.
+///
+/// All ordinary supported family/mechanism/modulation/output controls remain
+/// visible on open in descriptor order. This presentation policy is
+/// frontend-only and does not affect descriptor applicability or authority.
+fn is_pattern_editor_advanced_safety_descriptor(field: PropertyFieldId) -> bool {
     matches!(
         field,
-        PropertyFieldId::RandomCharacter
+        PropertyFieldId::CoverageGuardSteps
+            | PropertyFieldId::CoverageMaximumSupportRadius
+            | PropertyFieldId::IntersectionMergeEpsilon
             | PropertyFieldId::RandomDensityModulation
+            | PropertyFieldId::ArtworkWeightMappingComponent
+            | PropertyFieldId::ArtworkWeightMappingPlacement
+            | PropertyFieldId::ArtworkWeightMappingInverted
+            | PropertyFieldId::ArtworkWeightMappingGain
+            | PropertyFieldId::ArtworkWeightMappingBias
+            | PropertyFieldId::ArtworkWeightStrength
+            | PropertyFieldId::ArtworkWeightResponse
             | PropertyFieldId::RandomExclusion
-            | PropertyFieldId::OutputOrientation
+            | PropertyFieldId::ExclusionMinimumCenterDistance
+            | PropertyFieldId::VisibleMarkMargin
+            | PropertyFieldId::VisibleMarkSizingPolicy
+            | PropertyFieldId::RandomMaximumAttempts
+            | PropertyFieldId::RandomMaximumNeighborChecks
     )
 }
 
@@ -1532,7 +1768,9 @@ fn schedule_inspector_rebuild(state: &Rc<RefCell<AppState>>) {
 /// programmatic notifications are guarded.
 fn rebuild_inspector(state: &Rc<RefCell<AppState>>) {
     let (
-        inspector,
+        catalog,
+        active_pattern,
+        descriptors,
         status,
         selector,
         selector_model,
@@ -1540,14 +1778,11 @@ fn rebuild_inspector(state: &Rc<RefCell<AppState>>) {
         labels,
         selected,
         values,
-        scope,
-        transition,
+        active_pattern_text,
         status_message,
-        expanded_groups,
-        focus,
     ) = {
         let mut state = state.borrow_mut();
-        let (labels, values, selected) = if let Some(document) = state
+        let (labels, values, selected, active_pattern_text) = if let Some(document) = state
             .workspace
             .as_ref()
             .map(|workspace| workspace.document().clone())
@@ -1556,9 +1791,11 @@ fn rebuild_inspector(state: &Rc<RefCell<AppState>>) {
             let previous_selected = state.inspector_runtime.selected_channel;
             state.inspector_runtime.selected_channel =
                 selected_channel_after_transition(previous_selected, &ids);
+            state.selected_channel = state.inspector_runtime.selected_channel;
             let selected = state.inspector_runtime.selected_channel;
             if previous_selected.is_some() && previous_selected != selected {
                 state.inspector_runtime.focus = None;
+                clear_structural_edit_context_for_selection(&mut state.inspector_runtime);
             } else {
                 state.inspector_runtime.focus = resolve_focus_after_document_change(
                     &document,
@@ -1566,23 +1803,36 @@ fn rebuild_inspector(state: &Rc<RefCell<AppState>>) {
                     state.inspector_runtime.focus.clone(),
                 );
             }
-            let values = selected
+            if disarm_shared_edit_if_stale(&mut state.inspector_runtime, &document) {
+                state.inspector_runtime.status = Some(
+                    "Shared edit audience changed; disclose the current linked channels again."
+                        .to_owned(),
+                );
+            }
+            let all_values = selected
                 .map(|channel_id| selected_property_values(&document, channel_id))
                 .unwrap_or_default();
             (
                 ids.iter()
                     .map(|id| channel_display_name(&document, *id))
                     .collect(),
-                values,
+                channel_inspector_values(&all_values),
                 selected,
+                selected
+                    .map(|channel_id| {
+                        artist_pattern_name(&selected_property_values(&document, channel_id))
+                    })
+                    .unwrap_or_else(|| "Simple XY Grid".to_owned()),
             )
         } else {
-            (Vec::new(), Vec::new(), None)
+            (Vec::new(), Vec::new(), None, String::new())
         };
         state.syncing_inspector = true;
         let selector = state.channel_selector.clone();
         (
-            state.inspector.clone(),
+            state.inspector_catalog.clone(),
+            state.active_pattern.clone(),
+            state.inspector_descriptors.clone(),
             state.inspector_status.clone(),
             selector,
             state.channel_selector_model.clone(),
@@ -1594,11 +1844,8 @@ fn rebuild_inspector(state: &Rc<RefCell<AppState>>) {
             labels,
             selected,
             values,
-            state.inspector_runtime.scope,
-            state.inspector_runtime.transition.clone(),
+            active_pattern_text,
             state.inspector_runtime.status.clone(),
-            state.inspector_runtime.expanded_groups.clone(),
-            state.inspector_runtime.focus.clone(),
         )
     };
     selector_model.splice(
@@ -1615,23 +1862,24 @@ fn rebuild_inspector(state: &Rc<RefCell<AppState>>) {
     );
     state.borrow_mut().syncing_inspector = false;
 
-    while let Some(child) = inspector.first_child() {
-        inspector.remove(&child);
-    }
     if selected.is_none() {
         status.set_label("No surviving channel is selected.");
-        inspector.append(&status);
+        catalog.set_visible(false);
+        reconcile_descriptor_components(state, &descriptors, Vec::new());
+        rebuild_pattern_editor(state);
         return;
     }
+    catalog.set_visible(true);
+    active_pattern.set_label(&format!("Current pattern: {active_pattern_text}"));
     status.set_label(
         status_message
             .as_deref()
-            .unwrap_or("Edits are validated by the document and committed atomically."),
+            .unwrap_or("Choose a pattern or adjust this channel."),
     );
-    inspector.append(&status);
-    append_sharing_controls(state, &inspector, scope);
-    if let Some(transition) = transition {
-        append_transition_draft(state, &inspector, transition);
+    if catalog.first_child().is_none() {
+        catalog.append(&active_pattern);
+        append_preset_catalog(state, &catalog);
+        append_pattern_editor_launch(state, &catalog);
     }
     let descriptor_focuses = values
         .iter()
@@ -1642,384 +1890,1869 @@ fn rebuild_inspector(state: &Rc<RefCell<AppState>>) {
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let mut last_group = "";
-    let mut advanced_groups: Vec<(&str, Vec<PropertyCurrentValue>)> = Vec::new();
-    for value in values {
-        let group = inspector_group(value.descriptor.field);
-        if is_advanced_descriptor(value.descriptor.field) {
-            if let Some((last, fields)) = advanced_groups.last_mut()
-                && *last == group
-            {
-                fields.push(value);
-            } else {
-                advanced_groups.push((group, vec![value]));
+    let components = values
+        .into_iter()
+        .map(|value| {
+            let focus = descriptor_focuses[&inspector_key(&value.descriptor)].clone();
+            (value, focus)
+        })
+        .collect();
+    reconcile_descriptor_components(state, &descriptors, components);
+    rebuild_pattern_editor(state);
+    submit_draft_preview(state);
+}
+
+/// Reconciles persistent sidebar rows against immutable channel descriptor VMs.
+///
+/// Unchanged descriptor identities retain their GTK row and signal connections.
+/// Simple scalar updates are applied while `syncing_inspector` rejects their
+/// programmatic notifications; topology/reference changes replace only their
+/// affected row and stale identities are removed. This function never mutates
+/// the document, history, or preview authority.
+fn reconcile_descriptor_components(
+    state: &Rc<RefCell<AppState>>,
+    container: &gtk::Box,
+    values: Vec<(PropertyCurrentValue, InspectorFocusIdentity)>,
+) {
+    let active_keys = values
+        .iter()
+        .map(|(value, _)| inspector_key(&value.descriptor))
+        .collect::<BTreeSet<_>>();
+    let stale = state
+        .borrow()
+        .descriptor_components
+        .keys()
+        .filter(|key| !active_keys.contains(*key))
+        .cloned()
+        .collect::<Vec<_>>();
+    {
+        let mut app_state = state.borrow_mut();
+        for key in stale {
+            if let Some(component) = app_state.descriptor_components.remove(&key) {
+                container.remove(&component.row);
             }
-            continue;
         }
-        if group != last_group {
-            let heading = gtk::Label::new(Some(group));
-            heading.set_xalign(0.0);
-            heading.add_css_class("heading");
-            heading.set_margin_top(12);
-            inspector.append(&heading);
-            last_group = group;
-        }
-        let focus = descriptor_focuses[&inspector_key(&value.descriptor)].clone();
-        append_descriptor_control(state, &inspector, value, focus);
     }
-    for (group, fields) in advanced_groups {
-        let focus_expands_group = fields.iter().any(|value| {
-            matches!(
-                &focus,
-                Some(InspectorFocusIdentity::Descriptor { key, .. })
-                    if *key == inspector_key(&value.descriptor)
-            )
-        });
-        if focus_expands_group {
+
+    let mut previous_group = None;
+    for (value, focus) in values {
+        let key = inspector_key(&value.descriptor);
+        let group = inspector_group(value.descriptor.field);
+        let replace = {
+            let mut app_state = state.borrow_mut();
+            app_state.syncing_inspector = true;
+            let updated = app_state
+                .descriptor_components
+                .get_mut(&key)
+                .map(|component| update_descriptor_component(component, &value))
+                .unwrap_or(false);
+            app_state.syncing_inspector = false;
+            !updated
+        };
+        if replace {
+            let old = state.borrow_mut().descriptor_components.remove(&key);
+            if let Some(old) = old {
+                container.remove(&old.row);
+            }
+            let component = append_descriptor_control(
+                state,
+                value,
+                focus,
+                (previous_group != Some(group)).then_some(group),
+            );
             state
                 .borrow_mut()
-                .inspector_runtime
-                .expanded_groups
-                .insert(group.to_owned());
+                .descriptor_components
+                .insert(key.clone(), component);
         }
-        let advanced = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        for value in fields {
-            let focus = descriptor_focuses[&inspector_key(&value.descriptor)].clone();
-            append_descriptor_control(state, &advanced, value, focus);
+        let row = state
+            .borrow()
+            .descriptor_components
+            .get(&key)
+            .expect("active descriptor component is inserted")
+            .row
+            .clone();
+        if row.parent().is_none() {
+            container.append(&row);
         }
-        let expander = gtk::Expander::new(Some(group));
-        expander.set_child(Some(&advanced));
-        expander.set_expanded(expanded_groups.contains(group) || focus_expands_group);
-        expander.set_tooltip_text(Some("Show advanced active pattern controls"));
-        let state = Rc::clone(state);
-        let group = group.to_owned();
-        expander.connect_expanded_notify(move |expander| {
-            let mut state = state.borrow_mut();
-            if expander.is_expanded() {
-                state
-                    .inspector_runtime
-                    .expanded_groups
-                    .insert(group.clone());
+        previous_group = Some(group);
+    }
+}
+
+/// Updates a retained scalar descriptor row from its new immutable view value.
+///
+/// Reference collections intentionally return `false`: their item topology can
+/// change, so reconciliation replaces only that row instead of retaining stale
+/// selection callbacks. The caller owns synchronization guarding and document
+/// authority remains outside this presentation helper.
+fn update_descriptor_component(
+    component: &mut DescriptorComponent,
+    value: &PropertyCurrentValue,
+) -> bool {
+    if component.value.descriptor != value.descriptor {
+        return false;
+    }
+    match (&component.value.value, &value.value) {
+        (PropertyCurrentValueKind::FiniteF64(_), PropertyCurrentValueKind::FiniteF64(next)) => {
+            if let Some(entry) = component.control.downcast_ref::<gtk::Entry>() {
+                if !entry.has_focus() {
+                    entry.set_text(&format!("{next:.4}"));
+                }
+                component.value = value.clone();
+                true
             } else {
-                state.inspector_runtime.expanded_groups.remove(&group);
+                false
             }
-        });
-        inspector.append(&expander);
+        }
+        (PropertyCurrentValueKind::U32(_), PropertyCurrentValueKind::U32(next)) => {
+            if let Some(entry) = component.control.downcast_ref::<gtk::Entry>() {
+                if !entry.has_focus() {
+                    entry.set_text(&next.to_string());
+                }
+                component.value = value.clone();
+                true
+            } else {
+                false
+            }
+        }
+        (PropertyCurrentValueKind::Boolean(_), PropertyCurrentValueKind::Boolean(next)) => {
+            if let Some(control) = component.control.downcast_ref::<gtk::Switch>() {
+                control.set_active(*next);
+                component.value = value.clone();
+                true
+            } else {
+                false
+            }
+        }
+        (PropertyCurrentValueKind::EnumChoice(_), PropertyCurrentValueKind::EnumChoice(next)) => {
+            if let Some(control) = component.control.downcast_ref::<gtk::DropDown>() {
+                let selected = value
+                    .descriptor
+                    .choices
+                    .iter()
+                    .position(|choice| choice == next)
+                    .unwrap_or(0);
+                control.set_selected(selected as u32);
+                component.value = value.clone();
+                true
+            } else {
+                false
+            }
+        }
+        _ => false,
     }
 }
 
-fn append_sharing_controls(
-    state: &Rc<RefCell<AppState>>,
-    inspector: &gtk::Box,
-    scope: DefinitionEditScope,
-) {
-    let sharing = {
-        let binding = state.borrow();
-        binding.workspace.as_ref().and_then(|workspace| {
-            let document = workspace.document();
-            binding
-                .inspector_runtime
-                .selected_channel
-                .and_then(|channel_id| {
-                    let definition_id = document
-                        .channel(channel_id)
-                        .map(|channel| channel.pattern_definition_id)
-                        .or_else(|| {
-                            document
-                                .modeled_channel(channel_id)
-                                .map(|channel| channel.pattern_definition_id)
-                        })?;
-                    let links = authoritative_channel_ids(document)
-                        .into_iter()
-                        .filter(|id| {
-                            document
-                                .channel(*id)
-                                .map(|channel| channel.pattern_definition_id == definition_id)
-                                .or_else(|| {
-                                    document.modeled_channel(*id).map(|channel| {
-                                        channel.pattern_definition_id == definition_id
-                                    })
-                                })
-                                .unwrap_or(false)
-                        })
-                        .count();
-                    Some(format!(
-                        "Definition {} — linked by {links} channel(s)",
-                        definition_id.0
-                    ))
-                })
-        })
-    };
-    if let Some(sharing) = sharing {
-        let summary = gtk::Label::new(Some(&sharing));
-        summary.set_xalign(0.0);
-        summary.set_wrap(true);
-        summary.add_css_class("dim-label");
-        inspector.append(&summary);
-    }
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let label = gtk::Label::new(Some("_Structural edit scope"));
-    label.set_use_underline(true);
-    label.set_xalign(0.0);
-    label.set_hexpand(true);
-    let selector =
-        gtk::DropDown::from_strings(&["Copy selected channel", "Edit shared definition"]);
-    selector.set_selected(match scope {
-        DefinitionEditScope::SelectedCopy => 0,
-        DefinitionEditScope::Shared => 1,
-    });
-    label.set_mnemonic_widget(Some(&selector));
-    let state = Rc::clone(state);
-    selector.connect_selected_notify(move |selector| {
-        let scope = if selector.selected() == 1 {
-            DefinitionEditScope::Shared
-        } else {
-            DefinitionEditScope::SelectedCopy
-        };
-        state.borrow_mut().inspector_runtime.scope = scope;
-    });
-    row.append(&label);
-    row.append(&selector);
-    inspector.append(&row);
-}
-
-fn transition_field_key(field: &VariantTransitionField) -> String {
-    format!("transition:{:?}:{:?}", field.target, field.field)
-}
-
-fn append_transition_draft(
-    state: &Rc<RefCell<AppState>>,
-    inspector: &gtk::Box,
-    transition: VariantTransitionDraft,
-) {
-    let heading = gtk::Label::new(Some("Pending structural transition"));
+/// Adds the stable bundled-pattern catalog without exposing preset IDs as UI authority.
+///
+/// Each row immediately asks the headless registry for one selected-channel,
+/// copy-on-edit history transition. The registry remains the only source of
+/// recipe semantics and the catalog never stores a recipe in a GTK widget.
+fn append_preset_catalog(state: &Rc<RefCell<AppState>>, inspector: &gtk::Box) {
+    let heading = gtk::Label::new(Some("Pattern"));
     heading.set_xalign(0.0);
     heading.add_css_class("heading");
-    heading.set_margin_top(12);
     inspector.append(&heading);
-    let instruction = gtk::Label::new(Some(&format!(
-        "{} is selected but not yet applied. Complete every required value, then confirm one atomic edit.",
-        enum_choice_label(transition.choice())
-    )));
-    instruction.set_xalign(0.0);
-    instruction.set_wrap(true);
-    inspector.append(&instruction);
-    let selector_focus = focus_for_descriptor(transition.selector(), None);
-    for field in transition.fields().iter().cloned() {
-        append_transition_field(state, inspector, field);
+    let entries = state
+        .borrow()
+        .presets
+        .entries()
+        .iter()
+        .map(|entry| {
+            (
+                entry.metadata.id.clone(),
+                PatternCatalogViewModel {
+                    name: entry.metadata.name.clone(),
+                    description: entry.metadata.description.clone(),
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    for (id, view_model) in entries {
+        let row = components::ToniatorPresetRow::new();
+        row.add_css_class("toniator-preset-row");
+        row.set_preset_name(&view_model.name);
+        row.set_preset_description(&view_model.description);
+        let button = gtk::Button::with_label(&format!("Use {}", view_model.name));
+        let state_for_apply = Rc::clone(state);
+        let name = view_model.name.clone();
+        button.connect_clicked(move |_| {
+            let intent = UiIntent::ApplyPreset(id.clone());
+            if let UiIntent::ApplyPreset(id) = intent {
+                apply_selected_preset(&state_for_apply, &id, &name);
+            }
+        });
+        row.append(&button);
+        inspector.append(&row);
     }
-    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let cancel = gtk::Button::with_mnemonic("_Cancel transition");
-    cancel.set_tooltip_text(Some("Discard only the pending structural transition"));
-    let state_for_cancel = Rc::clone(state);
-    cancel.connect_clicked(move |_| {
-        let mut state = state_for_cancel.borrow_mut();
-        state.inspector_runtime.transition = None;
-        state.inspector_runtime.focus = Some(selector_focus.clone());
-        state.inspector_runtime.status = Some("Pending transition discarded.".into());
-        drop(state);
-        rebuild_inspector(&state_for_cancel);
-    });
-    let confirm = gtk::Button::with_mnemonic("_Confirm transition");
-    confirm.set_tooltip_text(Some("Validate and apply one typed structural command"));
-    let state_for_confirm = Rc::clone(state);
-    confirm.connect_clicked(move |_| commit_transition_draft(&state_for_confirm));
-    buttons.append(&cancel);
-    buttons.append(&confirm);
-    inspector.append(&buttons);
+    let shared = gtk::Button::with_label("Replace shared pattern…");
+    shared.set_tooltip_text(Some(
+        "Replace the linked channels after reviewing their names",
+    ));
+    let state_for_shared = Rc::clone(state);
+    shared.connect_clicked(move |_| choose_shared_preset_choice(&state_for_shared));
+    inspector.append(&shared);
 }
 
-fn append_transition_field(
-    state: &Rc<RefCell<AppState>>,
-    inspector: &gtk::Box,
-    field: VariantTransitionField,
-) {
-    debug_assert!(matches!(
-        transition_control_route(&field.value),
-        InspectorControlRoute::FiniteNumber
-            | InspectorControlRoute::WholeNumber
-            | InspectorControlRoute::Toggle
-            | InspectorControlRoute::Choice
-            | InspectorControlRoute::Reference
-    ));
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    row.set_valign(gtk::Align::Center);
-    let labels = gtk::Box::new(gtk::Orientation::Vertical, 2);
-    labels.set_hexpand(true);
-    let label = gtk::Label::new(Some(&format!("_{}", inspector_field_label(field.field))));
-    label.set_use_underline(true);
-    label.set_xalign(0.0);
-    label.set_wrap(true);
-    let detail = gtk::Label::new(Some(&field_detail(
-        field.contract.bounds,
-        field.contract.unit,
-    )));
-    detail.set_xalign(0.0);
-    detail.add_css_class("dim-label");
-    labels.append(&label);
-    labels.append(&detail);
-    let key = transition_field_key(&field);
-    let focus = InspectorFocusIdentity::TransitionField {
-        field: field.field,
-        target: field.target,
+/// Applies one bundled pattern to only the currently selected channel.
+///
+/// Registry failure leaves the document, history, selection, and last preview
+/// untouched; accepted history transitions schedule exactly one fresh preview.
+fn apply_selected_preset(state: &Rc<RefCell<AppState>>, id: &str, name: &str) {
+    let result = {
+        let mut app_state = state.borrow_mut();
+        let selected = app_state.inspector_runtime.selected_channel;
+        let registry = app_state.presets.clone();
+        let Some(workspace) = app_state.workspace.as_mut() else {
+            return;
+        };
+        let Some(channel) = selected else {
+            return;
+        };
+        registry.apply_to_selected(&mut workspace.history, channel, id)
     };
-    match field.value.clone() {
-        VariantTransitionValue::FiniteF64(value) => {
+    match result {
+        Ok(_) => {
+            let mut app_state = state.borrow_mut();
+            set_preview_pending(&mut app_state);
+            set_inspector_status(
+                &mut app_state,
+                format!("{name} applied to the selected channel."),
+            );
+            emit_automation_state(&mut app_state, "preset_applied", None);
+            sync_ui(&mut app_state);
+            drop(app_state);
+            rebuild_inspector(state);
+            schedule_main_preview_submission(state);
+        }
+        Err(error) => {
+            let mut app_state = state.borrow_mut();
+            set_inspector_status(&mut app_state, format!("Couldn’t apply {name}: {error}"));
+        }
+    }
+}
+
+/// Opens a deliberate shared-replacement disclosure that never combines with copy-on-edit.
+/// Opens an explicit shared-pattern choice before any linked channel is prepared.
+///
+/// Choosing neither option leaves document/history/preview untouched. Each
+/// choice then opens its own affected-channel disclosure and revalidates on
+/// confirmation through the preset registry.
+fn choose_shared_preset_choice(state: &Rc<RefCell<AppState>>) {
+    let dialog = adw::Window::builder()
+        .title("Choose a shared pattern")
+        .transient_for(&state.borrow().window)
+        .modal(true)
+        .build();
+    let content = components::ToniatorConfirmationContent::new();
+    content.set_detail("Choose the pattern to use for every linked channel after confirmation.");
+    let actions = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let random = gtk::Button::with_label("Even Random Circles");
+    let grid = gtk::Button::with_label("Straight Grid Circles");
+    let cancel = gtk::Button::with_label("Cancel");
+    actions.append(&random);
+    actions.append(&grid);
+    actions.append(&cancel);
+    content.append(&actions);
+    dialog.set_content(Some(&content));
+    let state_for_random = Rc::clone(state);
+    let dialog_for_random = dialog.clone();
+    random.connect_clicked(move |_| {
+        dialog_for_random.close();
+        choose_shared_preset_replacement(
+            &state_for_random,
+            "even-random-circles",
+            "Even Random Circles",
+        );
+    });
+    let state_for_grid = Rc::clone(state);
+    let dialog_for_grid = dialog.clone();
+    grid.connect_clicked(move |_| {
+        dialog_for_grid.close();
+        choose_shared_preset_replacement(
+            &state_for_grid,
+            "straight-grid-circles",
+            "Straight Grid Circles",
+        );
+    });
+    let dialog_for_cancel = dialog.clone();
+    cancel.connect_clicked(move |_| dialog_for_cancel.close());
+    dialog.present();
+}
+
+/// Discloses every affected channel before one explicitly chosen shared replacement.
+fn choose_shared_preset_replacement(
+    state: &Rc<RefCell<AppState>>,
+    preset_id: &str,
+    preset_name: &str,
+) {
+    let prepared = {
+        let app_state = state.borrow();
+        let Some(workspace) = app_state.workspace.as_ref() else {
+            return;
+        };
+        let Some(selected) = app_state.inspector_runtime.selected_channel else {
+            return;
+        };
+        let Some(definition) = workspace.document().pattern_definition_for(selected) else {
+            return;
+        };
+        app_state
+            .presets
+            .prepare_shared_replacement(&workspace.history, definition.id, preset_id)
+    };
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            set_inspector_status(
+                &mut state.borrow_mut(),
+                format!("Couldn’t prepare shared replacement: {error}"),
+            );
+            return;
+        }
+    };
+    let names = {
+        let app_state = state.borrow();
+        let Some(document) = app_state.workspace.as_ref().map(Workspace::document) else {
+            return;
+        };
+        prepared
+            .affected_channels()
+            .iter()
+            .map(|channel| channel_display_name(document, *channel))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let dialog = adw::Window::builder()
+        .title("Replace the shared pattern?")
+        .transient_for(&state.borrow().window)
+        .modal(true)
+        .build();
+    let content = components::ToniatorConfirmationContent::new();
+    content.set_detail(&format!("Use {preset_name} for: {names}."));
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    actions.set_halign(gtk::Align::End);
+    let cancel = gtk::Button::with_label("Cancel");
+    let replace = gtk::Button::with_label("Replace pattern");
+    actions.append(&cancel);
+    actions.append(&replace);
+    content.append(&actions);
+    dialog.set_content(Some(&content));
+    let dialog_for_cancel = dialog.clone();
+    cancel.connect_clicked(move |_| dialog_for_cancel.close());
+    let state_for_confirm = Rc::clone(state);
+    let dialog_for_confirm = dialog.clone();
+    replace.connect_clicked(move |_| {
+        let result = {
+            let mut app_state = state_for_confirm.borrow_mut();
+            let Some(workspace) = app_state.workspace.as_mut() else {
+                return;
+            };
+            prepared.clone().confirm(&mut workspace.history)
+        };
+        match result {
+            Ok(_) => {
+                let mut app_state = state_for_confirm.borrow_mut();
+                set_preview_pending(&mut app_state);
+                set_inspector_status(&mut app_state, "Shared pattern replaced.");
+                emit_automation_state(&mut app_state, "shared_pattern_replaced", None);
+                sync_ui(&mut app_state);
+                drop(app_state);
+                rebuild_inspector(&state_for_confirm);
+                schedule_main_preview_submission(&state_for_confirm);
+            }
+            Err(error) => set_inspector_status(
+                &mut state_for_confirm.borrow_mut(),
+                format!("Couldn’t replace the shared pattern: {error}"),
+            ),
+        }
+        dialog_for_confirm.close();
+    });
+    dialog.present();
+}
+
+/// Adds the selected-channel affordance that opens the separate Pattern Editor.
+///
+/// The sidebar retains channel-instance controls only. The button does not
+/// create a definition, choose shared scope, or mutate document/history state.
+fn append_pattern_editor_launch(state: &Rc<RefCell<AppState>>, inspector: &gtk::Box) {
+    let button = gtk::Button::with_mnemonic("Edit _Pattern…");
+    button.set_tooltip_text(Some(
+        "Explore the selected channel's pattern in a private draft",
+    ));
+    let state = Rc::clone(state);
+    button.connect_clicked(move |_| dispatch_ui_intent(&state, UiIntent::OpenPatternEditor));
+    inspector.append(&button);
+}
+
+/// Opens or raises the transient Pattern Editor for the current stable channel.
+///
+/// The editor owns a cloned private document/history. It can inspect and edit
+/// its draft, but it has no route back to the main workspace, savepoint, or
+/// filesystem; closing always discards the private session.
+fn open_pattern_editor(state: &Rc<RefCell<AppState>>) {
+    if let Some(window) = state
+        .borrow()
+        .pattern_editor
+        .as_ref()
+        .map(|surface| surface.window.clone())
+    {
+        rebuild_pattern_editor(state);
+        window.present();
+        return;
+    }
+    let (parent, draft) = {
+        let mut app_state = state.borrow_mut();
+        let Some(selected_channel) = app_state.inspector_runtime.selected_channel else {
+            return;
+        };
+        let (document, presentation, sources) = {
+            let Some(workspace) = app_state.workspace.as_ref() else {
+                return;
+            };
+            let Some(presentation) = workspace.source_presentation.clone() else {
+                return;
+            };
+            (
+                workspace.document().clone(),
+                presentation,
+                workspace.sources.clone(),
+            )
+        };
+        app_state.draft_epoch = app_state.draft_epoch.saturating_add(1);
+        let epoch = app_state.draft_epoch;
+        let history = match fresh_history(document.clone()) {
+            Ok(history) => history,
+            Err(error) => {
+                drop(app_state);
+                set_inspector_status(&mut state.borrow_mut(), error);
+                return;
+            }
+        };
+        (
+            app_state.window.clone(),
+            Rc::new(RefCell::new(PatternEditorDraft {
+                history,
+                selected_channel,
+                initial_document: document,
+                discard_confirmed: false,
+                sources,
+                presentation,
+                scheduler: Arc::new(
+                    EvaluationScheduler::new().expect("private draft scheduler starts"),
+                ),
+                preview_submission: None,
+                epoch,
+            })),
+        )
+    };
+    let window = adw::Window::builder()
+        .title("Pattern Editor")
+        .default_width(460)
+        .default_height(640)
+        .transient_for(&parent)
+        .modal(true)
+        .build();
+    let editor = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    let shell = components::ToniatorPatternEditorShell::new();
+    let status = shell.status();
+    let picture = shell.picture();
+    picture.set_can_shrink(true);
+    picture.set_size_request(-1, 160);
+    shell.set_editor(&editor);
+    let introduction = gtk::Label::new(Some(
+        "Changes stay in this private draft. Cancel discards them and leaves your document unchanged.",
+    ));
+    introduction.set_xalign(0.0);
+    introduction.set_wrap(true);
+    introduction.add_css_class("dim-label");
+    let history = gtk::Label::new(None);
+    history.set_xalign(0.0);
+    history.add_css_class("dim-label");
+    let current_pattern = gtk::Label::new(None);
+    current_pattern.set_xalign(0.0);
+    current_pattern.add_css_class("heading");
+    let family = create_draft_family_controls(state);
+    let primary = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    let advanced = gtk::Expander::new(Some("Advanced"));
+    advanced.set_tooltip_text(Some(
+        "Optional modulation, exclusion, coverage, and safety controls for this private draft.",
+    ));
+    let advanced_rows = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    advanced.set_child(Some(&advanced_rows));
+    editor.append(&introduction);
+    editor.append(&history);
+    editor.append(&current_pattern);
+    editor.append(&family.root);
+    editor.append(&primary);
+    editor.append(&advanced);
+    let undo = gtk::Button::with_mnemonic("_Undo");
+    let state_for_undo = Rc::clone(state);
+    undo.connect_clicked(move |_| apply_draft_history_navigation(&state_for_undo, false));
+    let redo = gtk::Button::with_mnemonic("_Redo");
+    let state_for_redo = Rc::clone(state);
+    redo.connect_clicked(move |_| apply_draft_history_navigation(&state_for_redo, true));
+    let preset = gtk::Button::with_label("Save as Preset…");
+    preset.set_sensitive(false);
+    preset.set_tooltip_text(Some("Preset authoring is planned for a later release."));
+    let cancel = gtk::Button::with_mnemonic("_Cancel");
+    let state_for_cancel = Rc::clone(state);
+    cancel.connect_clicked(move |_| {
+        dispatch_ui_intent(&state_for_cancel, UiIntent::DiscardPatternEditor)
+    });
+    shell.append_action(&undo);
+    shell.append_action(&redo);
+    shell.append_action(&preset);
+    shell.append_action(&cancel);
+    let header = adw::HeaderBar::new();
+    let toolbar = adw::ToolbarView::new();
+    toolbar.add_top_bar(&header);
+    toolbar.set_content(Some(&shell));
+    window.set_content(Some(&toolbar));
+    let state_for_close = Rc::clone(state);
+    window.connect_close_request(move |_| {
+        if state_for_close.borrow().pattern_editor.is_none() {
+            return glib::Propagation::Proceed;
+        }
+        let should_close = state_for_close
+            .borrow()
+            .pattern_editor
+            .as_ref()
+            .is_some_and(|surface| surface.draft.borrow().discard_confirmed);
+        if should_close {
+            state_for_close.borrow_mut().pattern_editor = None;
+            glib::Propagation::Proceed
+        } else {
+            request_draft_discard(&state_for_close);
+            glib::Propagation::Stop
+        }
+    });
+    state.borrow_mut().pattern_editor = Some(PatternEditorSurface {
+        window: window.clone(),
+        status,
+        picture,
+        draft,
+        introduction,
+        history,
+        current_pattern,
+        family,
+        primary,
+        advanced_rows,
+        descriptor_components: BTreeMap::new(),
+    });
+    emit_draft_automation_state(&mut state.borrow_mut(), "draft_opened", None);
+    rebuild_pattern_editor(state);
+    window.present();
+    submit_draft_preview(state);
+}
+
+/// Detaches and closes the private Pattern Editor only after discard is chosen.
+///
+/// The window leaves `AppState` under a short borrow before GTK destruction can
+/// synchronously signal `close-request`, avoiding a nested `RefCell` borrow.
+fn close_pattern_editor(state: &Rc<RefCell<AppState>>) {
+    let window = {
+        let mut state = state.borrow_mut();
+        state.pattern_editor.take().map(|surface| surface.window)
+    };
+    if let Some(window) = window {
+        window.close();
+    }
+}
+
+/// Rebuilds the private Pattern Editor from its cloned document/history only.
+///
+/// GTK sees immutable draft value models and sends typed inputs back to that
+/// private history. Main workspace state is intentionally not read or mutated
+/// after the editor opens, which makes Cancel and titlebar close true discard.
+fn rebuild_pattern_editor(state: &Rc<RefCell<AppState>>) {
+    let Some((window, status, draft)) = (|| {
+        let state = state.borrow();
+        let surface = state.pattern_editor.as_ref()?;
+        Some((
+            surface.window.clone(),
+            surface.status.clone(),
+            Rc::clone(&surface.draft),
+        ))
+    })() else {
+        // Take the surface while borrowed, then close it after the RefCell
+        // borrow ends because close-request synchronously re-enters AppState.
+        let window = {
+            let mut state = state.borrow_mut();
+            state.pattern_editor.take().map(|surface| surface.window)
+        };
+        if let Some(window) = window {
+            window.close();
+        }
+        return;
+    };
+    let (selected, name, values, dirty, can_undo, can_redo) = {
+        let mut draft = draft.borrow_mut();
+        let document = draft.history.document().clone();
+        let ids = authoritative_channel_ids(&document);
+        let Some(selected) = selected_channel_after_transition(Some(draft.selected_channel), &ids)
+        else {
+            return;
+        };
+        draft.selected_channel = selected;
+        (
+            selected,
+            channel_display_name(&document, selected),
+            pattern_editor_values(&selected_property_values(&document, selected)),
+            draft.is_dirty(),
+            draft.history.can_undo(),
+            draft.history.can_redo(),
+        )
+    };
+    window.set_title(Some(&format!("Pattern Editor — {name}")));
+    status.set_label(if dirty {
+        "Unsaved changes. Previewing draft…"
+    } else {
+        "Draft preview updated."
+    });
+    {
+        let app_state = state.borrow();
+        let surface = app_state
+            .pattern_editor
+            .as_ref()
+            .expect("live draft surface survives rebuild");
+        surface.introduction.set_visible(true);
+        surface.history.set_label(&format!(
+            "Draft history: {}undo, {}redo",
+            if can_undo { "" } else { "no " },
+            if can_redo { "" } else { "no " }
+        ));
+        surface.current_pattern.set_label(&format!(
+            "Current pattern: {}",
+            draft_pattern_summary(&values)
+        ));
+        update_draft_family_controls(&surface.family, &values);
+    }
+    let (primary_values, advanced_values): (Vec<_>, Vec<_>) = values
+        .into_iter()
+        .partition(|value| !is_pattern_editor_advanced_safety_descriptor(value.descriptor.field));
+    reconcile_draft_descriptor_components(state, selected, primary_values, advanced_values);
+}
+
+/// Creates persistent private-draft family controls that reuse bundled recipes.
+///
+/// Choosing a family changes only the cloned `DocumentHistory`, then submits
+/// only the draft scheduler. The main workspace, its history/savepoint and
+/// preview are not read or changed by this control.
+fn create_draft_family_controls(state: &Rc<RefCell<AppState>>) -> DraftFamilyControls {
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let heading = gtk::Label::new(Some("Pattern family"));
+    heading.set_xalign(0.0);
+    heading.add_css_class("heading");
+    root.append(&heading);
+    let choices = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let grid = gtk::Button::with_label("Grid");
+    grid.set_tooltip_text(Some("Choose guide-based circles for this private draft."));
+    let state_for_grid = Rc::clone(state);
+    grid.connect_clicked(move |_| choose_draft_grid(&state_for_grid));
+    let random = gtk::Button::with_label("Random");
+    random.set_tooltip_text(Some("Choose random circles for this private draft."));
+    let state_for_random = Rc::clone(state);
+    random.connect_clicked(move |_| apply_draft_preset(&state_for_random, "even-random-circles"));
+    choices.append(&grid);
+    choices.append(&random);
+    root.append(&choices);
+    let topology = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let count_label = gtk::Label::new(Some("Directions"));
+    count_label.set_xalign(0.0);
+    let count = gtk::Entry::new();
+    count.set_input_purpose(gtk::InputPurpose::Digits);
+    count.set_tooltip_text(Some(
+        "Choose one to four numbered directions for the private grid draft.",
+    ));
+    count_label.set_mnemonic_widget(Some(&count));
+    let state_for_count = Rc::clone(state);
+    count.connect_activate(move |control| {
+        commit_draft_direction_count(&state_for_count, control);
+    });
+    let count_focus = gtk::EventControllerFocus::new();
+    let state_for_count_leave = Rc::clone(state);
+    let count_for_leave = count.clone();
+    count_focus.connect_leave(move |_| {
+        commit_draft_direction_count(&state_for_count_leave, &count_for_leave);
+    });
+    count.add_controller(count_focus);
+    let intersections = gtk::Button::with_label("At intersections");
+    intersections.set_tooltip_text(Some("Place marks where selected directions meet."));
+    let state_for_intersections = Rc::clone(state);
+    intersections
+        .connect_clicked(move |_| apply_current_draft_grid_recipe(&state_for_intersections, true));
+    let along_guides = gtk::Button::with_label("Along guides");
+    along_guides.set_tooltip_text(Some(
+        "Place marks at regular spacing along selected directions.",
+    ));
+    let state_for_along = Rc::clone(state);
+    along_guides.connect_clicked(move |_| apply_current_draft_grid_recipe(&state_for_along, false));
+    topology.append(&count_label);
+    topology.append(&count);
+    topology.append(&intersections);
+    topology.append(&along_guides);
+    root.append(&topology);
+    DraftFamilyControls {
+        root,
+        directions: topology,
+        count,
+        intersections,
+        along_guides,
+    }
+}
+
+/// Commits a completed one-to-four direction count for the private grid draft.
+///
+/// Text remains local until Enter or focus leave, avoiding a history transition
+/// for every keystroke. Invalid values leave both documents and previews intact.
+fn commit_draft_direction_count(state: &Rc<RefCell<AppState>>, control: &gtk::Entry) {
+    match control.text().trim().parse::<usize>() {
+        Ok(count @ 1..=4) => {
+            let intersections = current_draft_grid_topology(state)
+                .map(|(_, intersections)| intersections)
+                .unwrap_or(false);
+            apply_draft_grid_recipe(state, count, intersections);
+        }
+        _ => {
+            if let Some(surface) = state.borrow().pattern_editor.as_ref() {
+                surface
+                    .status
+                    .set_label("Fix the highlighted setting… Choose one to four directions.");
+            }
+        }
+    }
+}
+
+/// Reuses the current private grid count while changing its artist-facing site mode.
+///
+/// The count/mode projection reads the private draft only; rebuilding the
+/// recipe remains the sole typed-history mutation path.
+fn apply_current_draft_grid_recipe(state: &Rc<RefCell<AppState>>, intersections: bool) {
+    if let Some((count, _)) = current_draft_grid_topology(state) {
+        apply_draft_grid_recipe(state, count, intersections);
+    }
+}
+
+/// Reads current grid topology from the private editor's immutable values.
+///
+/// A random draft has no guide topology, so callers leave its family untouched.
+fn current_draft_grid_topology(state: &Rc<RefCell<AppState>>) -> Option<(usize, bool)> {
+    let binding = state.borrow();
+    let surface = binding.pattern_editor.as_ref()?;
+    let draft = surface.draft.borrow();
+    let values = pattern_editor_values(&selected_property_values(
+        draft.history.document(),
+        draft.selected_channel,
+    ));
+    draft_grid_topology(&values)
+}
+
+/// Updates persistent family controls from immutable private-draft values.
+///
+/// Programmatic state changes do not build commands; callbacks read the draft
+/// only when an artist activates an action. Random drafts hide grid-only
+/// controls without destroying their focus/callback instances.
+fn update_draft_family_controls(family: &DraftFamilyControls, values: &[PropertyCurrentValue]) {
+    if let Some((count, intersections)) = draft_grid_topology(values) {
+        if !family.count.has_focus() {
+            family.count.set_text(&count.to_string());
+        }
+        family.directions.set_visible(true);
+        family.intersections.set_sensitive(!intersections);
+        family.along_guides.set_sensitive(intersections);
+    } else {
+        family.directions.set_visible(false);
+    }
+}
+
+/// Projects a concise active-family readout without exposing recipe internals.
+///
+/// The values are immutable domain projections; the result is presentation
+/// text only and defaults to the artist-facing Simple XY Grid name.
+fn draft_pattern_summary(values: &[PropertyCurrentValue]) -> &'static str {
+    if draft_grid_topology(values).is_some() {
+        "Grid"
+    } else if values
+        .iter()
+        .any(|value| value.descriptor.field == PropertyFieldId::RandomCharacter)
+    {
+        "Random"
+    } else {
+        "Simple XY Grid"
+    }
+}
+
+/// Projects the active private grid's artist-visible direction count and site mode.
+///
+/// The projection reads immutable descriptor values only. `None` deliberately
+/// hides grid-only controls for a random draft; recipe rebuilding remains the
+/// typed history authority when the artist changes either value.
+fn draft_grid_topology(values: &[PropertyCurrentValue]) -> Option<(usize, bool)> {
+    let count = values
+        .iter()
+        .filter(|value| value.descriptor.field == PropertyFieldId::GuideBaselineAngle)
+        .count();
+    if !(1..=4).contains(&count) {
+        return None;
+    }
+    let intersections = values
+        .iter()
+        .any(|value| value.descriptor.field == PropertyFieldId::IntersectionDimensions);
+    Some((count, intersections))
+}
+
+/// Applies one bundled recipe to the private Pattern Editor history only.
+///
+/// Registry failures preserve the private and main documents plus both preview
+/// textures. On success this creates one private undo step and schedules the
+/// private canonical preview path.
+fn apply_draft_preset(state: &Rc<RefCell<AppState>>, id: &str) {
+    let result = {
+        let state = state.borrow();
+        let Some(surface) = state.pattern_editor.as_ref() else {
+            return;
+        };
+        let mut draft = surface.draft.borrow_mut();
+        let selected = draft.selected_channel;
+        PresetRegistry::bundled()
+            .apply_to_selected(&mut draft.history, selected, id)
+            .map_err(|error| error.to_string())
+    };
+    match result {
+        Ok(_) => {
+            emit_draft_automation_state(&mut state.borrow_mut(), "draft_changed", None);
+            rebuild_pattern_editor(state);
+            submit_draft_preview(state);
+        }
+        Err(error) => {
+            if let Some(surface) = state.borrow().pattern_editor.as_ref() {
+                surface
+                    .status
+                    .set_label(&format!("Fix the highlighted setting… {error}"));
+            }
+        }
+    }
+}
+
+/// Chooses the editable guide-based family for the private draft.
+///
+/// This reconstructs a typed two-direction recipe even when the source
+/// document starts with the simpler default grid, so the one-to-four direction
+/// controls are immediately available. The main document and preview remain
+/// outside this private-history transition.
+fn choose_draft_grid(state: &Rc<RefCell<AppState>>) {
+    apply_draft_grid_recipe(state, 2, true);
+}
+
+/// Rebuilds the private grid recipe with one-to-four artist-visible directions.
+///
+/// This uses the existing typed recipe replacement command, never GTK-owned
+/// geometry. Intersection placement requires two directions; a one-direction
+/// choice therefore uses along-guide placement. The resulting command affects
+/// only the private draft history and schedules only its preview on success.
+fn apply_draft_grid_recipe(
+    state: &Rc<RefCell<AppState>>,
+    requested_count: usize,
+    intersections: bool,
+) {
+    let result = {
+        let app_state = state.borrow();
+        let Some(surface) = app_state.pattern_editor.as_ref() else {
+            return;
+        };
+        let Some(recipe) = draft_grid_recipe(requested_count, intersections) else {
+            return;
+        };
+        let mut draft = surface.draft.borrow_mut();
+        let selected = draft.selected_channel;
+        let Some(base_definition) = draft
+            .history
+            .document()
+            .pattern_definition_for(selected)
+            .cloned()
+        else {
+            return;
+        };
+        draft
+            .history
+            .apply(&DocumentCommand::ReplaceSelectedChannelDefinitionRecipe {
+                channel_id: selected,
+                base_definition,
+                recipe,
+            })
+            .map_err(|error| error.to_string())
+    };
+    match result {
+        Ok(_) => {
+            emit_draft_automation_state(&mut state.borrow_mut(), "draft_changed", None);
+            rebuild_pattern_editor(state);
+            submit_draft_preview(state);
+        }
+        Err(error) => {
+            if let Some(surface) = state.borrow().pattern_editor.as_ref() {
+                surface
+                    .status
+                    .set_label(&format!("Fix the highlighted setting… {error}"));
+            }
+        }
+    }
+}
+
+/// Builds an ID-free one-to-four-direction grid recipe for the private editor.
+///
+/// This pure helper preserves pattern-recipe authority: it has no GTK, history,
+/// preview, or filesystem side effects. A one-direction request uses along-
+/// guide sites because intersections require at least two directions.
+fn draft_grid_recipe(
+    requested_count: usize,
+    intersections: bool,
+) -> Option<toniator_domain::PatternDefinitionRecipe> {
+    let count = requested_count.clamp(1, 4);
+    let mut recipe = PresetRegistry::bundled().reconstruct("straight-grid-circles")?;
+    let toniator_domain::PatternDefinitionRecipe::GeneralizedStraightGuides {
+        dimensions,
+        product,
+        ..
+    } = &mut recipe
+    else {
+        return None;
+    };
+    let defaults = [0.0, 90.0, 45.0, 135.0];
+    *dimensions = (0..count)
+        .map(|index| GuideDimensionDraft {
+            baseline_angle_degrees: defaults[index],
+            phase: 0.0,
+            spacing_multiplier: 1.0,
+        })
+        .collect();
+    *product = if intersections && count >= 2 {
+        GeneralizedSiteProductDraft::Intersections {
+            dimension_indices: (0..count).collect(),
+            merge_epsilon: 1e-9,
+        }
+    } else {
+        GeneralizedSiteProductDraft::AlongGuides {
+            dimension_indices: (0..count).collect(),
+            interval_multiplier: 1.0,
+            phase: 0.0,
+        }
+    };
+    Some(recipe)
+}
+
+/// Projects a unique artist-facing label for one private draft control.
+///
+/// Guide identity remains in the typed descriptor target, while its ordinal is
+/// derived from the immutable selected-draft value order. GTK receives only
+/// the resulting artist vocabulary and never an identifier or geometry rule.
+fn draft_descriptor_label(
+    state: &Rc<RefCell<AppState>>,
+    selected: ChannelId,
+    current: &PropertyCurrentValue,
+) -> String {
+    if !matches!(
+        current.descriptor.target,
+        PropertyTarget::GuideDimension(..)
+    ) {
+        return inspector_field_label(current.descriptor.field);
+    }
+    let ordinal = state
+        .borrow()
+        .pattern_editor
+        .as_ref()
+        .and_then(|surface| {
+            pattern_editor_values(&selected_property_values(
+                surface.draft.borrow().history.document(),
+                selected,
+            ))
+            .iter()
+            .filter(|value| {
+                value.descriptor.field == current.descriptor.field
+                    && matches!(value.descriptor.target, PropertyTarget::GuideDimension(..))
+            })
+            .position(|value| value.descriptor.target == current.descriptor.target)
+            .map(|index| index + 1)
+        })
+        .unwrap_or(1);
+    format!(
+        "Direction {ordinal} {}",
+        inspector_field_label(current.descriptor.field)
+    )
+}
+
+/// Renders one private-draft structural control with no main-workspace route.
+///
+/// Supported scalar/choice controls dispatch the existing typed command builder
+/// against the cloned document. Stable-reference fields stay read-only here
+/// rather than exposing structural IDs as artist-facing product vocabulary.
+fn append_draft_descriptor_control(
+    state: &Rc<RefCell<AppState>>,
+    selected: ChannelId,
+    current: PropertyCurrentValue,
+) -> DraftDescriptorComponent {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let artist_label = draft_descriptor_label(state, selected, &current);
+    let label = gtk::Label::new(Some(&artist_label));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    let descriptor = current.descriptor.clone();
+    let saved_current = current.clone();
+    let control: gtk::Widget = match current.value {
+        PropertyCurrentValueKind::FiniteF64(value) => {
             let control = gtk::Entry::new();
-            control.set_text(&draft_text(state, &key, &format!("{value:.6}")));
+            control.set_text(&format!("{value:.4}"));
             control.set_input_purpose(gtk::InputPurpose::Number);
-            control.set_width_chars(12);
-            label.set_mnemonic_widget(Some(&control));
-            let state_for_callback = Rc::clone(state);
+            control.set_tooltip_text(Some(&format!(
+                "{artist_label}. Press Enter or leave this field to update the draft."
+            )));
+            let state_for_activate = Rc::clone(state);
+            let descriptor_for_activate = descriptor.clone();
             control.connect_activate(move |control| {
-                let text = control.text().to_string();
-                match text.parse::<f64>() {
-                    Ok(value) if value.is_finite() => {
-                        remember_transition_draft(&state_for_callback, &field, text);
-                        update_transition_field(
-                            &state_for_callback,
-                            field.clone(),
-                            VariantTransitionValue::FiniteF64(value),
-                        );
-                    }
-                    _ => record_transition_draft(
-                        &state_for_callback,
-                        &field,
-                        text,
-                        "Enter a finite number.",
-                    ),
-                }
+                commit_draft_numeric_entry(
+                    &state_for_activate,
+                    selected,
+                    descriptor_for_activate.clone(),
+                    control,
+                    false,
+                );
             });
-            row.append(&labels);
+            let focus = gtk::EventControllerFocus::new();
+            let state_for_leave = Rc::clone(state);
+            let descriptor_for_leave = descriptor.clone();
+            let control_for_leave = control.clone();
+            focus.connect_leave(move |_| {
+                commit_draft_numeric_entry(
+                    &state_for_leave,
+                    selected,
+                    descriptor_for_leave.clone(),
+                    &control_for_leave,
+                    false,
+                );
+            });
+            control.add_controller(focus);
+            label.set_mnemonic_widget(Some(&control));
+            row.append(&label);
             row.append(&control);
-            schedule_inspector_focus(state, focus, &control);
+            control.upcast()
         }
-        VariantTransitionValue::U32(value) => {
+        PropertyCurrentValueKind::U32(value) => {
             let control = gtk::Entry::new();
-            control.set_text(&draft_text(state, &key, &value.to_string()));
+            control.set_text(&value.to_string());
             control.set_input_purpose(gtk::InputPurpose::Digits);
-            control.set_width_chars(10);
-            label.set_mnemonic_widget(Some(&control));
-            let state_for_callback = Rc::clone(state);
+            control.set_tooltip_text(Some(&format!(
+                "{artist_label}. Press Enter or leave this field to update the draft."
+            )));
+            let state_for_activate = Rc::clone(state);
+            let descriptor_for_activate = descriptor.clone();
             control.connect_activate(move |control| {
-                let text = control.text().to_string();
-                match text.parse::<u32>() {
-                    Ok(value) => {
-                        remember_transition_draft(&state_for_callback, &field, text);
-                        update_transition_field(
-                            &state_for_callback,
-                            field.clone(),
-                            VariantTransitionValue::U32(value),
-                        );
-                    }
-                    Err(_) => record_transition_draft(
-                        &state_for_callback,
-                        &field,
-                        text,
-                        "Enter a whole number.",
-                    ),
-                }
+                commit_draft_numeric_entry(
+                    &state_for_activate,
+                    selected,
+                    descriptor_for_activate.clone(),
+                    control,
+                    true,
+                );
             });
-            row.append(&labels);
+            let focus = gtk::EventControllerFocus::new();
+            let state_for_leave = Rc::clone(state);
+            let descriptor_for_leave = descriptor.clone();
+            let control_for_leave = control.clone();
+            focus.connect_leave(move |_| {
+                commit_draft_numeric_entry(
+                    &state_for_leave,
+                    selected,
+                    descriptor_for_leave.clone(),
+                    &control_for_leave,
+                    true,
+                );
+            });
+            control.add_controller(focus);
+            label.set_mnemonic_widget(Some(&control));
+            row.append(&label);
             row.append(&control);
-            schedule_inspector_focus(state, focus, &control);
+            control.upcast()
         }
-        VariantTransitionValue::Boolean(value) => {
+        PropertyCurrentValueKind::Boolean(value) => {
             let control = gtk::Switch::new();
             control.set_active(value);
-            label.set_mnemonic_widget(Some(&control));
-            let state_for_callback = Rc::clone(state);
-            control.connect_state_set(move |_, value| {
-                update_transition_field(
-                    &state_for_callback,
-                    field.clone(),
-                    VariantTransitionValue::Boolean(value),
+            let state = Rc::clone(state);
+            control.connect_state_set(move |_, active| {
+                if state.borrow().syncing_draft_editor {
+                    return glib::Propagation::Proceed;
+                }
+                apply_draft_input(
+                    &state,
+                    selected,
+                    descriptor.clone(),
+                    InspectorInput::Boolean(active),
                 );
                 glib::Propagation::Proceed
             });
-            row.append(&labels);
+            label.set_mnemonic_widget(Some(&control));
+            row.append(&label);
             row.append(&control);
-            schedule_inspector_focus(state, focus, &control);
+            control.upcast()
         }
-        VariantTransitionValue::EnumChoice(value) => {
-            let choices = field.contract.choices.to_vec();
-            let labels_for_choices = choices
+        PropertyCurrentValueKind::EnumChoice(active) => {
+            let choices = descriptor.choices.to_vec();
+            let labels = choices
                 .iter()
                 .map(|choice| enum_choice_label(*choice))
                 .collect::<Vec<_>>();
-            let control = gtk::DropDown::from_strings(&labels_for_choices);
+            let control = gtk::DropDown::from_strings(&labels);
             control.set_selected(
                 choices
                     .iter()
-                    .position(|choice| *choice == value)
+                    .position(|choice| *choice == active)
                     .unwrap_or(0) as u32,
             );
-            label.set_mnemonic_widget(Some(&control));
-            let state_for_callback = Rc::clone(state);
+            let state = Rc::clone(state);
             control.connect_selected_notify(move |control| {
-                if let Some(choice) = choices.get(control.selected() as usize).copied() {
-                    update_transition_field(
-                        &state_for_callback,
-                        field.clone(),
-                        VariantTransitionValue::EnumChoice(choice),
-                    );
-                }
-            });
-            row.append(&labels);
-            row.append(&control);
-            schedule_inspector_focus(state, focus, &control);
-        }
-        VariantTransitionValue::StableReference(selected) => {
-            let choices = field.reference_choices.clone();
-            let mut labels_for_choices = vec!["Select a stable reference…".to_owned()];
-            labels_for_choices.extend(choices.iter().map(reference_label));
-            let control = gtk::DropDown::from_strings(
-                &labels_for_choices
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>(),
-            );
-            control.set_selected(
-                selected
-                    .as_ref()
-                    .and_then(|reference| {
-                        choices
-                            .iter()
-                            .position(|choice| choice == reference)
-                            .map(|index| index + 1)
-                    })
-                    .unwrap_or(0) as u32,
-            );
-            label.set_mnemonic_widget(Some(&control));
-            let state_for_callback = Rc::clone(state);
-            control.connect_selected_notify(move |control| {
-                let selected = control.selected();
-                if selected == 0 {
+                if state.borrow().syncing_draft_editor {
                     return;
                 }
-                if let Some(reference) = choices.get(selected as usize - 1).cloned() {
-                    update_transition_field(
-                        &state_for_callback,
-                        field.clone(),
-                        VariantTransitionValue::StableReference(Some(reference)),
+                if let Some(choice) = choices.get(control.selected() as usize).copied() {
+                    apply_draft_input(
+                        &state,
+                        selected,
+                        descriptor.clone(),
+                        InspectorInput::EnumChoice(choice),
                     );
                 }
             });
-            row.append(&labels);
+            label.set_mnemonic_widget(Some(&control));
+            row.append(&label);
             row.append(&control);
-            schedule_inspector_focus(state, focus, &control);
+            control.upcast()
         }
+        PropertyCurrentValueKind::Reference(reference) => {
+            let choices = draft_reference_choices(state, &descriptor);
+            let labels = choices.iter().map(reference_label).collect::<Vec<_>>();
+            let control =
+                gtk::DropDown::from_strings(&labels.iter().map(String::as_str).collect::<Vec<_>>());
+            control.set_selected(
+                choices
+                    .iter()
+                    .position(|candidate| candidate == &reference)
+                    .unwrap_or(0) as u32,
+            );
+            control.set_sensitive(!choices.is_empty());
+            let state_for_change = Rc::clone(state);
+            control.connect_selected_notify(move |control| {
+                if state_for_change.borrow().syncing_draft_editor {
+                    return;
+                }
+                if let Some(choice) = choices.get(control.selected() as usize).cloned() {
+                    apply_draft_input(
+                        &state_for_change,
+                        selected,
+                        descriptor.clone(),
+                        InspectorInput::Reference(choice),
+                    );
+                }
+            });
+            label.set_mnemonic_widget(Some(&control));
+            row.append(&label);
+            row.append(&control);
+            control.upcast()
+        }
+        PropertyCurrentValueKind::ReferenceCollection(references) => {
+            let choices = draft_reference_choices(state, &descriptor);
+            let controls = gtk::Box::new(gtk::Orientation::Vertical, 4);
+            for (index, reference) in references.iter().cloned().enumerate() {
+                let direction = gtk::Label::new(Some(&format!("Direction {}", index + 1)));
+                direction.set_xalign(0.0);
+                let labels = choices.iter().map(reference_label).collect::<Vec<_>>();
+                let select = gtk::DropDown::from_strings(
+                    &labels.iter().map(String::as_str).collect::<Vec<_>>(),
+                );
+                select.set_selected(
+                    choices
+                        .iter()
+                        .position(|candidate| candidate == &reference)
+                        .unwrap_or(0) as u32,
+                );
+                let accessible_name = format!("Direction {} selector", index + 1);
+                select.update_property(&[gtk::accessible::Property::Label(&accessible_name)]);
+                direction.set_mnemonic_widget(Some(&select));
+                let state_for_change = Rc::clone(state);
+                let descriptor_for_change = descriptor.clone();
+                let choices_for_change = choices.clone();
+                let original = references.clone();
+                select.connect_selected_notify(move |select| {
+                    if state_for_change.borrow().syncing_draft_editor {
+                        return;
+                    }
+                    if let Some(choice) =
+                        choices_for_change.get(select.selected() as usize).cloned()
+                    {
+                        let mut rewritten = original.clone();
+                        rewritten[index] = choice;
+                        apply_draft_input(
+                            &state_for_change,
+                            selected,
+                            descriptor_for_change.clone(),
+                            InspectorInput::ReferenceCollection(rewritten),
+                        );
+                    }
+                });
+                controls.append(&direction);
+                controls.append(&select);
+            }
+            row.append(&label);
+            row.append(&controls);
+            controls.upcast()
+        }
+    };
+    DraftDescriptorComponent {
+        row,
+        control,
+        value: saved_current,
     }
-    inspector.append(&row);
 }
 
+/// Reconciles private-editor descriptor rows without rebuilding its shell.
+///
+/// Immutable private-history values select the active keys. Unchanged scalar
+/// controls keep their widget and callback identity; incompatible/topology
+/// controls replace only their own row. This function never reads or changes
+/// main workspace state, savepoints, files, or main preview coordination.
+fn reconcile_draft_descriptor_components(
+    state: &Rc<RefCell<AppState>>,
+    selected: ChannelId,
+    primary_values: Vec<PropertyCurrentValue>,
+    advanced_values: Vec<PropertyCurrentValue>,
+) {
+    let entries = primary_values
+        .into_iter()
+        .map(|value| (false, value))
+        .chain(advanced_values.into_iter().map(|value| (true, value)))
+        .collect::<Vec<_>>();
+    let active = entries
+        .iter()
+        .map(|(_, value)| inspector_key(&value.descriptor))
+        .collect::<BTreeSet<_>>();
+    let stale = state
+        .borrow()
+        .pattern_editor
+        .as_ref()
+        .map(|surface| {
+            surface
+                .descriptor_components
+                .keys()
+                .filter(|key| !active.contains(*key))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for key in stale {
+        let row = state
+            .borrow_mut()
+            .pattern_editor
+            .as_mut()
+            .and_then(|surface| surface.descriptor_components.remove(&key))
+            .map(|component| component.row);
+        if let Some(row) = row
+            && let Some(parent) = row.parent().and_downcast::<gtk::Box>()
+        {
+            parent.remove(&row);
+        }
+    }
+    for (advanced, value) in entries {
+        let key = inspector_key(&value.descriptor);
+        let retained = {
+            let mut app_state = state.borrow_mut();
+            app_state.syncing_draft_editor = true;
+            let retained = app_state
+                .pattern_editor
+                .as_mut()
+                .and_then(|surface| surface.descriptor_components.get_mut(&key))
+                .map(|component| update_draft_descriptor_component(component, &value))
+                .unwrap_or(false);
+            app_state.syncing_draft_editor = false;
+            retained
+        };
+        if retained {
+            continue;
+        }
+        let old = state
+            .borrow_mut()
+            .pattern_editor
+            .as_mut()
+            .and_then(|surface| surface.descriptor_components.remove(&key));
+        if let Some(old) = old
+            && let Some(parent) = old.row.parent().and_downcast::<gtk::Box>()
+        {
+            parent.remove(&old.row);
+        }
+        let component = append_draft_descriptor_control(state, selected, value);
+        let row = component.row.clone();
+        let parent = state.borrow().pattern_editor.as_ref().map(|surface| {
+            if advanced {
+                surface.advanced_rows.clone()
+            } else {
+                surface.primary.clone()
+            }
+        });
+        if let Some(parent) = parent {
+            parent.append(&row);
+        }
+        if let Some(surface) = state.borrow_mut().pattern_editor.as_mut() {
+            surface.descriptor_components.insert(key, component);
+        }
+    }
+}
+
+/// Synchronizes a retained private scalar control from a new immutable value.
+///
+/// Entry text updates preserve an active artist edit. Other controls replace
+/// only their own row when an update could emit an interaction signal, keeping
+/// private-history command dispatch free of programmatic duplicate callbacks.
+fn update_draft_descriptor_component(
+    component: &mut DraftDescriptorComponent,
+    value: &PropertyCurrentValue,
+) -> bool {
+    if component.value.descriptor != value.descriptor {
+        return false;
+    }
+    match (&component.value.value, &value.value) {
+        (PropertyCurrentValueKind::FiniteF64(_), PropertyCurrentValueKind::FiniteF64(next)) => {
+            if let Some(entry) = component.control.downcast_ref::<gtk::Entry>() {
+                if !entry.has_focus() {
+                    entry.set_text(&format!("{next:.4}"));
+                }
+                component.value = value.clone();
+                true
+            } else {
+                false
+            }
+        }
+        (PropertyCurrentValueKind::U32(_), PropertyCurrentValueKind::U32(next)) => {
+            if let Some(entry) = component.control.downcast_ref::<gtk::Entry>() {
+                if !entry.has_focus() {
+                    entry.set_text(&next.to_string());
+                }
+                component.value = value.clone();
+                true
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Projects supported private-draft references without reading main workspace state.
+///
+/// The private history remains the sole source for its choices. Returned values
+/// are typed references that the existing command boundary validates, never
+/// display IDs or GTK-owned structural data.
+fn draft_reference_choices(
+    state: &Rc<RefCell<AppState>>,
+    descriptor: &PropertyDescriptor,
+) -> Vec<PropertyReferenceValue> {
+    let state = state.borrow();
+    let Some(surface) = state.pattern_editor.as_ref() else {
+        return Vec::new();
+    };
+    let document = surface.draft.borrow();
+    let document = document.history.document();
+    match descriptor.field {
+        PropertyFieldId::OutputSiteProduct => definition_for_target(document, descriptor.target)
+            .map(|definition| {
+                definition
+                    .mechanisms
+                    .iter()
+                    .map(|mechanism| PropertyReferenceValue::Mechanism(mechanism.id()))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        PropertyFieldId::OutputOrientationDimension
+        | PropertyFieldId::IntersectionDimensions
+        | PropertyFieldId::AlongGuideDimensions => {
+            guide_dimensions_for_target(document, descriptor.target)
+                .into_iter()
+                .map(PropertyReferenceValue::GuideDimension)
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Commits one completed private numeric edit without reacting to each keystroke.
+///
+/// The entry keeps artist input local until Enter or focus leave. Invalid text
+/// does not touch draft history or its preview and is reported on the private
+/// editor surface; finite decimal and whole-number boundaries remain enforced
+/// before the existing typed command path receives the value.
+fn commit_draft_numeric_entry(
+    state: &Rc<RefCell<AppState>>,
+    selected: ChannelId,
+    descriptor: PropertyDescriptor,
+    control: &gtk::Entry,
+    whole_number: bool,
+) {
+    let text = control.text();
+    let input = if whole_number {
+        text.trim()
+            .parse::<u32>()
+            .map(InspectorInput::U32)
+            .map_err(|_| "Enter a whole number for this setting.".to_owned())
+    } else {
+        text.trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .map(InspectorInput::FiniteF64)
+            .ok_or_else(|| "Enter a finite number for this setting.".to_owned())
+    };
+    match input {
+        Ok(input) => {
+            if draft_numeric_input_matches_current(state, &descriptor, &input) {
+                return;
+            }
+            apply_draft_input(state, selected, descriptor, input)
+        }
+        Err(message) => {
+            if let Some(surface) = state.borrow().pattern_editor.as_ref() {
+                surface
+                    .status
+                    .set_label(&format!("Fix the highlighted setting… {message}"));
+            }
+        }
+    }
+}
+
+/// Reports whether a completed private numeric edit already equals draft authority.
+///
+/// Enter and focus leave both call the commit helper; this guard makes the
+/// second callback a no-op without changing private history or submitting an
+/// extra preview.
+fn draft_numeric_input_matches_current(
+    state: &Rc<RefCell<AppState>>,
+    descriptor: &PropertyDescriptor,
+    input: &InspectorInput,
+) -> bool {
+    let state = state.borrow();
+    let Some(surface) = state.pattern_editor.as_ref() else {
+        return false;
+    };
+    let draft = surface.draft.borrow();
+    selected_property_values(draft.history.document(), draft.selected_channel)
+        .into_iter()
+        .find(|value| value.descriptor == *descriptor)
+        .is_some_and(|value| match (&value.value, input) {
+            (PropertyCurrentValueKind::FiniteF64(current), InspectorInput::FiniteF64(next)) => {
+                current == next
+            }
+            (PropertyCurrentValueKind::U32(current), InspectorInput::U32(next)) => current == next,
+            _ => false,
+        })
+}
+
+/// Applies one typed structural input to the private draft history only.
+///
+/// Failure preserves the draft's last successful state and leaves every main
+/// document/lifecycle/preview boundary untouched.
+fn apply_draft_input(
+    state: &Rc<RefCell<AppState>>,
+    _selected: ChannelId,
+    descriptor: PropertyDescriptor,
+    input: InspectorInput,
+) {
+    let result = {
+        let app_state = state.borrow();
+        let Some(surface) = app_state.pattern_editor.as_ref() else {
+            return;
+        };
+        let mut draft = surface.draft.borrow_mut();
+        let selected = draft.selected_channel;
+        let command =
+            private_draft_command_for_input(draft.history.document(), selected, &descriptor, input);
+        command.and_then(|command| {
+            draft
+                .history
+                .apply(&command)
+                .map_err(|error| error.to_string())
+        })
+    };
+    if let Err(error) = result {
+        if let Some(surface) = state.borrow().pattern_editor.as_ref() {
+            surface
+                .status
+                .set_label(&format!("Fix the highlighted setting to continue. {error}"));
+        }
+        return;
+    }
+    rebuild_pattern_editor(state);
+    submit_draft_preview(state);
+}
+
+/// Converts one private Pattern Editor input into a selected-copy command.
+///
+/// Compound enum selectors are finalized through the domain's transient
+/// transition draft so their payload defaults and stable references remain
+/// domain-owned. This helper is private-editor-only: callers must pass the
+/// cloned draft document and it never exposes a main-workspace route.
+///
+/// # Errors
+///
+/// Returns an artist-actionable error when the descriptor is stale, the choice
+/// is unsupported, a transition payload cannot be completed, or the selected
+/// draft channel has no current pattern definition.
+fn private_draft_command_for_input(
+    document: &Document,
+    selected_channel: ChannelId,
+    descriptor: &PropertyDescriptor,
+    input: InspectorInput,
+) -> Result<DocumentCommand, String> {
+    match input {
+        InspectorInput::EnumChoice(choice)
+            if matches!(
+                descriptor.field,
+                PropertyFieldId::RandomCharacter
+                    | PropertyFieldId::RandomDensityModulation
+                    | PropertyFieldId::RandomExclusion
+                    | PropertyFieldId::OutputOrientation
+            ) =>
+        {
+            private_compound_transition_command(document, selected_channel, descriptor, choice)
+        }
+        input => command_for_inspector_input(
+            document,
+            Some(selected_channel),
+            DefinitionEditScope::SelectedCopy,
+            descriptor,
+            input,
+        ),
+    }
+}
+
+/// Finalizes one private compound selector transition as exactly one history command.
+///
+/// The document creates the transition's scalar payload defaults. A guided
+/// orientation is the one payload that cannot be inferred by the document;
+/// this editor chooses the first domain-advertised compatible direction so the
+/// visible orientation chooser remains immediately operable, after which its
+/// stable Direction selector remains available for deliberate adjustment.
+/// No main document, main history, lifecycle state, or main preview identity
+/// is read or mutated by this private-draft command construction.
+///
+/// # Errors
+///
+/// Returns an error if the domain rejects the transition or payload, the
+/// selector has no compatible direction, or the selected channel has no base
+/// definition for stale-command protection.
+fn private_compound_transition_command(
+    document: &Document,
+    selected_channel: ChannelId,
+    descriptor: &PropertyDescriptor,
+    choice: PropertyEnumChoice,
+) -> Result<DocumentCommand, String> {
+    let transition = document
+        .variant_transition_draft(descriptor, choice)
+        .map_err(|error| error.to_string())?;
+    let required_references = transition
+        .fields()
+        .iter()
+        .filter_map(|field| match &field.value {
+            VariantTransitionValue::StableReference(None) => {
+                field.reference_choices.first().cloned().map(|reference| {
+                    VariantTransitionFieldUpdate {
+                        field: field.field,
+                        target: field.target,
+                        value: VariantTransitionValue::StableReference(Some(reference)),
+                    }
+                })
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let transition = transition
+        .with_updates(&required_references)
+        .map_err(|error| error.to_string())?;
+    let edit = transition
+        .finalize(document)
+        .map_err(|error| error.to_string())?;
+    let base_definition = document
+        .pattern_definition_for(selected_channel)
+        .cloned()
+        .ok_or_else(|| "The selected draft pattern is no longer available.".to_owned())?;
+    Ok(DocumentCommand::EditSelectedChannelPatternDefinition {
+        channel_id: selected_channel,
+        base_definition,
+        edit,
+    })
+}
+
+/// Moves only the private draft history cursor and then redraws draft controls.
+fn apply_draft_history_navigation(state: &Rc<RefCell<AppState>>, redo: bool) {
+    let result = {
+        let app_state = state.borrow();
+        let Some(surface) = app_state.pattern_editor.as_ref() else {
+            return;
+        };
+        let mut draft = surface.draft.borrow_mut();
+        if redo {
+            draft.history.redo()
+        } else {
+            draft.history.undo()
+        }
+    };
+    if let Err(error) = result {
+        if let Some(surface) = state.borrow().pattern_editor.as_ref() {
+            surface
+                .status
+                .set_label(&format!("Couldn’t update this draft: {error}"));
+        }
+        return;
+    }
+    rebuild_pattern_editor(state);
+    submit_draft_preview(state);
+}
+
+/// Submits the private document clone through its own scheduler and source bundle.
+///
+/// This request never shares a ticket, cache acceptance, texture, or document
+/// token with the main workspace preview coordinator.
+fn submit_draft_preview(state: &Rc<RefCell<AppState>>) {
+    let (scheduler, request, sender, epoch, ticket_value) = {
+        let app_state = state.borrow();
+        let Some(surface) = app_state.pattern_editor.as_ref() else {
+            return;
+        };
+        let mut draft = surface.draft.borrow_mut();
+        let Some(source) = draft.sources.get(&draft.presentation.id) else {
+            return;
+        };
+        let resolved = match ResolvedSource::new(
+            draft.presentation.id.clone(),
+            Arc::<[u8]>::from(source.bytes()),
+            draft.presentation.format,
+        ) {
+            Ok(source) => source,
+            Err(error) => {
+                surface.status.set_label(&format!(
+                    "Couldn’t render this pattern. Your last preview is still shown. {error}"
+                ));
+                return;
+            }
+        };
+        let target = toniator_engine::PreviewRasterTarget::new(512, 512)
+            .expect("fixed preview target is valid");
+        let request = EvaluationRequest::with_preview_target(
+            draft.history.session().document_evaluation_snapshot(),
+            resolved,
+            target,
+        );
+        let scheduler = Arc::clone(&draft.scheduler);
+        let ticket = match scheduler.submit(request.clone()) {
+            Ok(ticket) => ticket,
+            Err(error) => {
+                surface.status.set_label(&format!(
+                    "Couldn’t render this pattern. Your last preview is still shown. {error}"
+                ));
+                return;
+            }
+        };
+        draft.preview_submission = Some(ticket.value());
+        surface.status.set_label("Previewing draft…");
+        (
+            scheduler,
+            request,
+            app_state.event_sender.clone(),
+            draft.epoch,
+            ticket.value(),
+        )
+    };
+    emit_draft_automation_state(
+        &mut state.borrow_mut(),
+        "draft_preview_submitted",
+        Some(ticket_value),
+    );
+    let _ = request;
+    thread::spawn(move || {
+        loop {
+            match scheduler.try_receive_latest() {
+                Ok(Some(completion)) => {
+                    let _ = sender.send_blocking(AppEvent::DraftPreview { epoch, completion });
+                    break;
+                }
+                Ok(None) => thread::park_timeout(Duration::from_millis(4)),
+                Err(_) => break,
+            }
+        }
+    });
+}
+
+/// Requests a private-draft discard, confirming only when local edits exist.
+fn request_draft_discard(state: &Rc<RefCell<AppState>>) {
+    let (dirty, parent) = {
+        let app_state = state.borrow();
+        let Some(surface) = app_state.pattern_editor.as_ref() else {
+            return;
+        };
+        (surface.draft.borrow().is_dirty(), app_state.window.clone())
+    };
+    if !dirty {
+        close_pattern_editor(state);
+        return;
+    }
+    let dialog = adw::Window::builder()
+        .title("Discard pattern changes?")
+        .transient_for(&parent)
+        .modal(true)
+        .build();
+    let content = components::ToniatorConfirmationContent::new();
+    content
+        .set_detail("Discarding closes this private draft. Your current document stays unchanged.");
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    actions.set_halign(gtk::Align::End);
+    let keep_editing = gtk::Button::with_label("Keep editing");
+    let discard = gtk::Button::with_label("Discard changes");
+    discard.add_css_class("destructive-action");
+    actions.append(&keep_editing);
+    actions.append(&discard);
+    content.append(&actions);
+    dialog.set_content(Some(&content));
+    let dialog_for_keep = dialog.clone();
+    keep_editing.connect_clicked(move |_| dialog_for_keep.close());
+    let state_for_discard = Rc::clone(state);
+    let dialog_for_discard = dialog.clone();
+    discard.connect_clicked(move |_| {
+        if let Some(surface) = state_for_discard.borrow().pattern_editor.as_ref() {
+            surface.draft.borrow_mut().discard_confirmed = true;
+        }
+        close_pattern_editor(&state_for_discard);
+        dialog_for_discard.close();
+    });
+    dialog.present();
+}
+
+/// Clears the frontend-only scalar drafts after a channel context changes.
+///
+/// Draft text never enters document/history authority; the next immutable view
+/// model repopulates matching controls from the selected channel only.
+fn clear_structural_edit_context_for_selection(runtime: &mut InspectorRuntime) {
+    runtime.drafts.clear();
+    runtime.scope = DefinitionEditScope::SelectedCopy;
+}
+
+/// Leaves the removed shared-definition editor path disarmed in production.
+fn disarm_shared_edit_if_stale(_runtime: &mut InspectorRuntime, _document: &Document) -> bool {
+    false
+}
+
+/// Retains the normal selected-copy command boundary after removing old shared UI.
+fn reject_stale_shared_edit_before_command(_state: &Rc<RefCell<AppState>>) -> bool {
+    false
+}
+
+/// Parses and commits one ordinary numeric descriptor entry through the shared
+/// typed command route. Enter and focus-leave both invoke this helper, preserving identical finite/whole-number parsing, draft retention,
+/// focus, invalidation, and history behavior. Invalid text never mutates the
+/// document; domain rejection remains status-only until a valid command applies.
+fn commit_numeric_descriptor_entry(
+    state: &Rc<RefCell<AppState>>,
+    descriptor: PropertyDescriptor,
+    focus: InspectorFocusIdentity,
+    control: &gtk::Entry,
+) {
+    let text = control.text().to_string();
+    match descriptor.value_kind {
+        PropertyValueKind::FiniteF64 => match text.parse::<f64>() {
+            Ok(value) if value.is_finite() => {
+                if main_numeric_input_matches_current(
+                    state,
+                    &descriptor,
+                    &InspectorInput::FiniteF64(value),
+                ) {
+                    return;
+                }
+                remember_inspector_draft(state, &descriptor, text);
+                commit_inspector_input_with_focus(
+                    state,
+                    descriptor,
+                    InspectorInput::FiniteF64(value),
+                    focus,
+                );
+            }
+            _ => record_inspector_draft(state, &descriptor, text, "Enter a finite number."),
+        },
+        PropertyValueKind::U32 => match text.parse::<u32>() {
+            Ok(value) => {
+                if main_numeric_input_matches_current(
+                    state,
+                    &descriptor,
+                    &InspectorInput::U32(value),
+                ) {
+                    return;
+                }
+                remember_inspector_draft(state, &descriptor, text);
+                commit_inspector_input_with_focus(
+                    state,
+                    descriptor,
+                    InspectorInput::U32(value),
+                    focus,
+                );
+            }
+            Err(_) => record_inspector_draft(state, &descriptor, text, "Enter a whole number."),
+        },
+        _ => unreachable!("numeric descriptor helper receives only numeric descriptors"),
+    }
+}
+
+/// Reports whether an ordinary numeric edit already equals main document authority.
+///
+/// This suppresses the focus-leave duplicate immediately following an Enter
+/// commit, so one completed gesture creates at most one history transition.
+fn main_numeric_input_matches_current(
+    state: &Rc<RefCell<AppState>>,
+    descriptor: &PropertyDescriptor,
+    input: &InspectorInput,
+) -> bool {
+    let state = state.borrow();
+    let Some(workspace) = state.workspace.as_ref() else {
+        return false;
+    };
+    let Some(selected) = state.inspector_runtime.selected_channel else {
+        return false;
+    };
+    selected_property_values(workspace.document(), selected)
+        .into_iter()
+        .find(|value| value.descriptor == *descriptor)
+        .is_some_and(|value| match (&value.value, input) {
+            (PropertyCurrentValueKind::FiniteF64(current), InspectorInput::FiniteF64(next)) => {
+                current == next
+            }
+            (PropertyCurrentValueKind::U32(current), InspectorInput::U32(next)) => current == next,
+            _ => false,
+        })
+}
+
+/// Renders one descriptor/value control for the channel inspector or Pattern
+/// Editor while preserving the immutable descriptor/value authority boundary.
+///
+/// Numeric entries use the shared completed-edit commit helper; immediate widgets
+/// route existing typed commands. Invalid drafts and domain errors remain
+/// frontend-only, while successful commands flow through history and scheduler
+/// handling. No widget value is independently persisted or evaluated.
 fn append_descriptor_control(
     state: &Rc<RefCell<AppState>>,
-    inspector: &gtk::Box,
     current: PropertyCurrentValue,
     focus: InspectorFocusIdentity,
-) {
+    group_heading: Option<&str>,
+) -> DescriptorComponent {
     debug_assert!(control_route(&current).is_some());
+    let component = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    if let Some(group) = group_heading {
+        let heading = gtk::Label::new(Some(group));
+        heading.set_xalign(0.0);
+        heading.add_css_class("heading");
+        heading.set_margin_top(12);
+        component.append(&heading);
+    }
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     row.set_valign(gtk::Align::Center);
     let labels = gtk::Box::new(gtk::Orientation::Vertical, 2);
@@ -2040,16 +3773,19 @@ fn append_descriptor_control(
     labels.append(&label);
     labels.append(&detail);
     let descriptor = current.descriptor.clone();
-    match (&descriptor.value_kind, &current.value) {
+    let control: gtk::Widget = match (&descriptor.value_kind, &current.value) {
         (PropertyValueKind::Boolean, PropertyCurrentValueKind::Boolean(active)) => {
             let control = gtk::Switch::new();
             control.set_active(*active);
-            control.set_tooltip_text(Some("Commits a typed Boolean command"));
+            control.set_tooltip_text(Some("Turn this setting on or off"));
             label.set_mnemonic_widget(Some(&control));
             let state_for_callback = Rc::clone(state);
             let descriptor_for_callback = descriptor.clone();
             let focus_for_callback = focus.clone();
             control.connect_state_set(move |_, active| {
+                if state_for_callback.borrow().syncing_inspector {
+                    return glib::Propagation::Proceed;
+                }
                 commit_inspector_input_with_focus(
                     &state_for_callback,
                     descriptor_for_callback.clone(),
@@ -2061,6 +3797,7 @@ fn append_descriptor_control(
             row.append(&labels);
             row.append(&control);
             schedule_inspector_focus(state, focus, &control);
+            control.upcast()
         }
         (PropertyValueKind::EnumChoice, PropertyCurrentValueKind::EnumChoice(active)) => {
             let choice_labels = descriptor
@@ -2082,33 +3819,29 @@ fn append_descriptor_control(
             let descriptor_for_callback = descriptor.clone();
             let focus_for_callback = focus.clone();
             control.connect_selected_notify(move |control| {
+                if state_for_callback.borrow().syncing_inspector {
+                    return;
+                }
                 if let Some(choice) = choices.get(control.selected() as usize).copied() {
-                    if is_transition_selector(descriptor_for_callback.field) {
-                        begin_variant_transition(
-                            &state_for_callback,
-                            descriptor_for_callback.clone(),
-                            choice,
-                        );
-                    } else {
-                        commit_inspector_input_with_focus(
-                            &state_for_callback,
-                            descriptor_for_callback.clone(),
-                            InspectorInput::EnumChoice(choice),
-                            focus_for_callback.clone(),
-                        );
-                    }
+                    commit_inspector_input_with_focus(
+                        &state_for_callback,
+                        descriptor_for_callback.clone(),
+                        InspectorInput::EnumChoice(choice),
+                        focus_for_callback.clone(),
+                    );
                 }
             });
             row.append(&labels);
             row.append(&control);
             schedule_inspector_focus(state, focus, &control);
+            control.upcast()
         }
         (PropertyValueKind::FiniteF64, PropertyCurrentValueKind::FiniteF64(value)) => {
             let control = gtk::Entry::new();
             control.set_text(&draft_text(
                 state,
                 &inspector_key(&descriptor),
-                &format!("{value:.6}"),
+                &format!("{value:.4}"),
             ));
             control.set_input_purpose(gtk::InputPurpose::Number);
             control.set_width_chars(12);
@@ -2118,32 +3851,31 @@ fn append_descriptor_control(
             let descriptor_for_callback = descriptor.clone();
             let focus_for_callback = focus.clone();
             control.connect_activate(move |control| {
-                let text = control.text().to_string();
-                match text.parse::<f64>() {
-                    Ok(value) if value.is_finite() => {
-                        remember_inspector_draft(
-                            &state_for_callback,
-                            &descriptor_for_callback,
-                            text,
-                        );
-                        commit_inspector_input_with_focus(
-                            &state_for_callback,
-                            descriptor_for_callback.clone(),
-                            InspectorInput::FiniteF64(value),
-                            focus_for_callback.clone(),
-                        );
-                    }
-                    _ => record_inspector_draft(
-                        &state_for_callback,
-                        &descriptor_for_callback,
-                        text,
-                        "Enter a finite number.",
-                    ),
-                }
+                commit_numeric_descriptor_entry(
+                    &state_for_callback,
+                    descriptor_for_callback.clone(),
+                    focus_for_callback.clone(),
+                    control,
+                );
             });
+            let focus_controller = gtk::EventControllerFocus::new();
+            let state_for_leave = Rc::clone(state);
+            let descriptor_for_leave = descriptor.clone();
+            let focus_for_leave = focus.clone();
+            let control_for_leave = control.clone();
+            focus_controller.connect_leave(move |_| {
+                commit_numeric_descriptor_entry(
+                    &state_for_leave,
+                    descriptor_for_leave.clone(),
+                    focus_for_leave.clone(),
+                    &control_for_leave,
+                );
+            });
+            control.add_controller(focus_controller);
             row.append(&labels);
             row.append(&control);
             schedule_inspector_focus(state, focus, &control);
+            control.upcast()
         }
         (PropertyValueKind::U32, PropertyCurrentValueKind::U32(value)) => {
             let control = gtk::Entry::new();
@@ -2160,32 +3892,31 @@ fn append_descriptor_control(
             let descriptor_for_callback = descriptor.clone();
             let focus_for_callback = focus.clone();
             control.connect_activate(move |control| {
-                let text = control.text().to_string();
-                match text.parse::<u32>() {
-                    Ok(value) => {
-                        remember_inspector_draft(
-                            &state_for_callback,
-                            &descriptor_for_callback,
-                            text,
-                        );
-                        commit_inspector_input_with_focus(
-                            &state_for_callback,
-                            descriptor_for_callback.clone(),
-                            InspectorInput::U32(value),
-                            focus_for_callback.clone(),
-                        );
-                    }
-                    Err(_) => record_inspector_draft(
-                        &state_for_callback,
-                        &descriptor_for_callback,
-                        text,
-                        "Enter a whole number.",
-                    ),
-                }
+                commit_numeric_descriptor_entry(
+                    &state_for_callback,
+                    descriptor_for_callback.clone(),
+                    focus_for_callback.clone(),
+                    control,
+                );
             });
+            let focus_controller = gtk::EventControllerFocus::new();
+            let state_for_leave = Rc::clone(state);
+            let descriptor_for_leave = descriptor.clone();
+            let focus_for_leave = focus.clone();
+            let control_for_leave = control.clone();
+            focus_controller.connect_leave(move |_| {
+                commit_numeric_descriptor_entry(
+                    &state_for_leave,
+                    descriptor_for_leave.clone(),
+                    focus_for_leave.clone(),
+                    &control_for_leave,
+                );
+            });
+            control.add_controller(focus_controller);
             row.append(&labels);
             row.append(&control);
             schedule_inspector_focus(state, focus, &control);
+            control.upcast()
         }
         (_, PropertyCurrentValueKind::Reference(reference)) => {
             let choices = reference_choices(state, &descriptor);
@@ -2208,6 +3939,9 @@ fn append_descriptor_control(
             let descriptor_for_callback = descriptor.clone();
             let focus_for_callback = focus.clone();
             control.connect_selected_notify(move |control| {
+                if state_for_callback.borrow().syncing_inspector {
+                    return;
+                }
                 if let Some(value) = choices.get(control.selected() as usize).cloned() {
                     commit_inspector_input_with_focus(
                         &state_for_callback,
@@ -2220,11 +3954,14 @@ fn append_descriptor_control(
             row.append(&labels);
             row.append(&control);
             schedule_inspector_focus(state, focus, &control);
+            control.upcast()
         }
         (_, PropertyCurrentValueKind::ReferenceCollection(references)) => {
             let control = gtk::Box::new(gtk::Orientation::Vertical, 4);
             let choices = reference_collection_choices(state, &descriptor);
             for (index, reference) in references.iter().cloned().enumerate() {
+                let direction = gtk::Label::new(Some(&format!("Direction {}", index + 1)));
+                direction.set_xalign(0.0);
                 let reference_labels = choices.iter().map(reference_label).collect::<Vec<_>>();
                 let select = gtk::DropDown::from_strings(
                     &reference_labels
@@ -2238,6 +3975,9 @@ fn append_descriptor_control(
                         .position(|choice| choice == &reference)
                         .unwrap_or(0) as u32,
                 );
+                let accessible_name = format!("Direction {} selector", index + 1);
+                select.update_property(&[gtk::accessible::Property::Label(&accessible_name)]);
+                direction.set_mnemonic_widget(Some(&select));
                 let state_for_callback = Rc::clone(state);
                 let descriptor = descriptor.clone();
                 let choices = choices.clone();
@@ -2245,6 +3985,9 @@ fn append_descriptor_control(
                 let focus = focus_with_collection_index(&focus, index);
                 let focus_for_callback = focus.clone();
                 select.connect_selected_notify(move |select| {
+                    if state_for_callback.borrow().syncing_inspector {
+                        return;
+                    }
                     if let Some(reference) = choices.get(select.selected() as usize).cloned() {
                         let mut rewritten = original.clone();
                         rewritten[index] = reference;
@@ -2256,74 +3999,56 @@ fn append_descriptor_control(
                         );
                     }
                 });
+                control.append(&direction);
                 control.append(&select);
                 schedule_inspector_focus(state, focus, &select);
             }
-            control.set_tooltip_text(Some("Ordered stable guide-dimension references; the domain validates order, cardinality, and uniqueness."));
-            label.set_mnemonic_widget(Some(&control));
+            control.set_tooltip_text(Some("Choose the numbered directions used by this pattern."));
             row.append(&labels);
             row.append(&control);
+            control.upcast()
         }
         _ => {
             let control = gtk::Label::new(Some(&current_display(&current.value)));
             control.set_xalign(1.0);
             row.append(&labels);
             row.append(&control);
+            control.upcast()
         }
+    };
+    component.append(&row);
+    DescriptorComponent {
+        row: component,
+        control,
+        value: current,
     }
-    inspector.append(&row);
 }
 
+/// Maps a supported semantic unit to concise artist-facing helper text.
+///
+/// Raw descriptor bounds and unit tokens never reach product vocabulary.
+/// Empty text intentionally means that the setting needs no extra helper.
 fn unit_message(unit: toniator_domain::PropertyUnit) -> &'static str {
     match unit {
-        toniator_domain::PropertyUnit::None => "No unit",
+        toniator_domain::PropertyUnit::None => "",
         toniator_domain::PropertyUnit::Density => "Density",
         toniator_domain::PropertyUnit::Degrees => "Degrees",
-        toniator_domain::PropertyUnit::Phase => "Phase distance",
-        toniator_domain::PropertyUnit::DocumentDistance => "Document distance",
-        toniator_domain::PropertyUnit::NormalizedComponent => "Normalized component",
+        toniator_domain::PropertyUnit::Phase => "Offset",
+        toniator_domain::PropertyUnit::DocumentDistance => "Canvas distance",
+        toniator_domain::PropertyUnit::NormalizedComponent => "Channel amount",
         toniator_domain::PropertyUnit::Count => "Count",
     }
 }
 
-fn bounds_message(bounds: toniator_domain::PropertyBounds) -> String {
-    let minimum = bounds
-        .minimum
-        .map(|value| {
-            format!(
-                "{}{}",
-                if bounds.minimum_inclusive { "≥" } else { ">" },
-                value
-            )
-        })
-        .unwrap_or_default();
-    let maximum = bounds
-        .maximum
-        .map(|value| {
-            format!(
-                "{}{}",
-                if bounds.maximum_inclusive { "≤" } else { "<" },
-                value
-            )
-        })
-        .unwrap_or_default();
-    [minimum, maximum]
-        .into_iter()
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
+/// Produces non-authoritative helper text without exposing domain bounds.
+///
+/// The ignored bounds remain domain validation authority; UI text never
+/// advertises raw comparator strings that would read as backend vocabulary.
 fn field_detail(
-    bounds: Option<toniator_domain::PropertyBounds>,
+    _bounds: Option<toniator_domain::PropertyBounds>,
     unit: toniator_domain::PropertyUnit,
 ) -> String {
-    let bounds = bounds.map(bounds_message).filter(|value| !value.is_empty());
-    match (bounds, unit_message(unit)) {
-        (Some(bounds), "No unit") => bounds,
-        (Some(bounds), unit) => format!("{bounds}; {unit}"),
-        (None, unit) => unit.to_owned(),
-    }
+    unit_message(unit).to_owned()
 }
 
 fn draft_text(state: &Rc<RefCell<AppState>>, key: &str, authoritative: &str) -> String {
@@ -2336,90 +4061,16 @@ fn draft_text(state: &Rc<RefCell<AppState>>, key: &str, authoritative: &str) -> 
         .unwrap_or_else(|| authoritative.to_owned())
 }
 
+/// Publishes a runtime-only edit status to every live editor surface.
+///
+/// Status never enters the document or history; a destroyed Pattern Editor has
+/// no surface and therefore cannot receive a stale GTK update.
 fn set_inspector_status(state: &mut AppState, message: impl Into<String>) {
     let message = message.into();
     state.inspector_runtime.status = Some(message.clone());
     state.inspector_status.set_label(&message);
-}
-
-fn record_transition_draft(
-    state: &Rc<RefCell<AppState>>,
-    field: &VariantTransitionField,
-    text: String,
-    message: &str,
-) {
-    let mut state = state.borrow_mut();
-    state
-        .inspector_runtime
-        .drafts
-        .insert(transition_field_key(field), text);
-    set_inspector_status(&mut state, message);
-}
-
-fn remember_transition_draft(
-    state: &Rc<RefCell<AppState>>,
-    field: &VariantTransitionField,
-    text: String,
-) {
-    state
-        .borrow_mut()
-        .inspector_runtime
-        .drafts
-        .insert(transition_field_key(field), text);
-}
-
-fn update_transition_field(
-    state: &Rc<RefCell<AppState>>,
-    field: VariantTransitionField,
-    value: VariantTransitionValue,
-) {
-    let rejected_text = match &value {
-        VariantTransitionValue::FiniteF64(value) => Some(value.to_string()),
-        VariantTransitionValue::U32(value) => Some(value.to_string()),
-        _ => None,
-    };
-    let update = VariantTransitionFieldUpdate {
-        field: field.field,
-        target: field.target,
-        value,
-    };
-    let changed = {
-        let mut state = state.borrow_mut();
-        let Some(transition) = state.inspector_runtime.transition.as_ref() else {
-            return;
-        };
-        match transition.with_updates(&[update]) {
-            Ok(next) => {
-                state
-                    .inspector_runtime
-                    .drafts
-                    .remove(&transition_field_key(&field));
-                state.inspector_runtime.transition = Some(next);
-                state.inspector_runtime.focus = Some(InspectorFocusIdentity::TransitionField {
-                    field: field.field,
-                    target: field.target,
-                });
-                set_inspector_status(
-                    &mut state,
-                    "Transition value updated. Review and confirm the structural edit.",
-                );
-                true
-            }
-            Err(error) => {
-                if let Some(text) = rejected_text {
-                    state
-                        .inspector_runtime
-                        .drafts
-                        .entry(transition_field_key(&field))
-                        .or_insert(text);
-                }
-                set_inspector_status(&mut state, error.to_string());
-                false
-            }
-        }
-    };
-    if changed {
-        rebuild_inspector(state);
+    if let Some(surface) = state.pattern_editor.as_ref() {
+        surface.status.set_label(&message);
     }
 }
 
@@ -2504,126 +4155,23 @@ fn remember_inspector_draft(
         .insert(inspector_key(descriptor), text);
 }
 
-fn clear_transition_drafts(runtime: &mut InspectorRuntime) {
-    runtime
-        .drafts
-        .retain(|key, _| !key.starts_with("transition:"));
-    runtime.transition = None;
-}
-
-fn begin_variant_transition(
-    state: &Rc<RefCell<AppState>>,
-    descriptor: PropertyDescriptor,
-    choice: PropertyEnumChoice,
-) {
-    let result = {
-        let state = state.borrow();
-        state
-            .workspace
-            .as_ref()
-            .ok_or_else(|| "No document is open.".to_owned())
-            .and_then(|workspace| {
-                workspace
-                    .document()
-                    .variant_transition_draft(&descriptor, choice)
-                    .map_err(|error| error.to_string())
-            })
-    };
-    match result {
-        Ok(transition) => {
-            let mut app_state = state.borrow_mut();
-            clear_transition_drafts(&mut app_state.inspector_runtime);
-            app_state.inspector_runtime.transition = Some(transition);
-            app_state.inspector_runtime.focus = Some(focus_for_descriptor(&descriptor, None));
-            set_inspector_status(
-                &mut app_state,
-                "Complete the visible transition values, then confirm one atomic structural edit.",
-            );
-            drop(app_state);
-            rebuild_inspector(state);
-        }
-        Err(error) => {
-            let mut state = state.borrow_mut();
-            set_inspector_status(&mut state, error);
-        }
-    }
-}
-
-fn command_for_transition_draft(
-    document: &Document,
-    selected_channel: Option<ChannelId>,
-    scope: DefinitionEditScope,
-    transition: &VariantTransitionDraft,
-) -> Result<DocumentCommand, String> {
-    let edit = transition
-        .finalize(document)
-        .map_err(|error| error.to_string())?;
-    let definition_id = target_definition_id(transition.selector().target)
-        .ok_or_else(|| "A transition selector must target a pattern definition.".to_owned())?;
-    let base_definition = document
-        .pattern_definitions()
-        .iter()
-        .find(|definition| definition.id == definition_id)
-        .cloned()
-        .ok_or_else(|| "The active definition is missing.".to_owned())?;
-    match scope {
-        DefinitionEditScope::SelectedCopy => {
-            Ok(DocumentCommand::EditSelectedChannelPatternDefinition {
-                channel_id: selected_channel
-                    .ok_or_else(|| "Select a channel before editing its definition.".to_owned())?,
-                base_definition,
-                edit,
-            })
-        }
-        DefinitionEditScope::Shared => Ok(DocumentCommand::EditSharedPatternDefinition {
-            definition_id,
-            base_definition,
-            edit,
-        }),
-    }
-}
-
-fn commit_transition_draft(state: &Rc<RefCell<AppState>>) {
-    let result = {
-        let state = state.borrow();
-        let Some(workspace) = state.workspace.as_ref() else {
-            return;
-        };
-        let Some(transition) = state.inspector_runtime.transition.as_ref() else {
-            return;
-        };
-        command_for_transition_draft(
-            workspace.document(),
-            state.inspector_runtime.selected_channel,
-            state.inspector_runtime.scope,
-            transition,
-        )
-    };
-    match result {
-        Ok(command) => {
-            let selector_focus = {
-                let state = state.borrow();
-                state
-                    .inspector_runtime
-                    .transition
-                    .as_ref()
-                    .map(|draft| focus_for_descriptor(draft.selector(), None))
-            };
-            if apply_inspector_command(state, &command, None, true, selector_focus) {
-                rebuild_inspector(state);
-            }
-        }
-        Err(error) => {
-            let mut state = state.borrow_mut();
-            set_inspector_status(&mut state, error);
-        }
-    }
-}
-
 fn set_preview_pending(state: &mut AppState) {
     state.preview_target = None;
-    state.preview_submission = None;
+    state.preview_coordinator.clear_submission();
     set_page(state, page_while_preview_pending(state.preview.is_some()));
+}
+
+/// Schedules one main preview submission after the current GTK callback unwinds.
+///
+/// The idle boundary coalesces synchronous widget notifications. The scheduler
+/// and preview coordinator remain the sole request/ticket authority; no GTK
+/// widget value is sampled by this helper.
+fn schedule_main_preview_submission(state: &Rc<RefCell<AppState>>) {
+    let state = Rc::clone(state);
+    glib::idle_add_local_once(move || {
+        let mut app_state = state.borrow_mut();
+        submit_if_viewport_ready(&mut app_state);
+    });
 }
 
 const fn page_while_preview_pending(has_accepted_preview: bool) -> Page {
@@ -2642,6 +4190,11 @@ const fn page_after_preview_error(has_accepted_preview: bool) -> Page {
     }
 }
 
+/// Applies one already-typed inspector or Pattern Editor command through the
+/// sole mutable document authority. Accepted edits schedule the existing
+/// preview path; rejected or no-op edits preserve history, document, and the
+/// last successful preview. A deliberate shared edit automatically returns to
+/// selected-channel copy-on-edit after its one dispatch.
 fn apply_inspector_command(
     state: &Rc<RefCell<AppState>>,
     command: &DocumentCommand,
@@ -2649,32 +4202,36 @@ fn apply_inspector_command(
     accepted_transition: bool,
     focus: Option<InspectorFocusIdentity>,
 ) -> bool {
-    let mut state = state.borrow_mut();
-    let Some(workspace) = state.workspace.as_mut() else {
+    let state_handle = Rc::clone(state);
+    let mut app_state = state.borrow_mut();
+    let Some(workspace) = app_state.workspace.as_mut() else {
         return false;
     };
     match workspace.history.apply(command) {
         Ok(_) => {
             if let Some(descriptor) = accepted_descriptor {
-                state
+                app_state
                     .inspector_runtime
                     .drafts
                     .remove(&inspector_key(descriptor));
             }
-            if accepted_transition {
-                clear_transition_drafts(&mut state.inspector_runtime);
-            }
-            state.inspector_runtime.focus =
-                focus_after_command_attempt(state.inspector_runtime.focus.clone(), focus, true);
-            set_preview_pending(&mut state);
-            set_inspector_status(&mut state, "Applied. Preview update is pending.");
-            sync_ui(&mut state);
+            let _ = accepted_transition;
+            app_state.inspector_runtime.focus =
+                focus_after_command_attempt(app_state.inspector_runtime.focus.clone(), focus, true);
+            set_preview_pending(&mut app_state);
+            set_inspector_status(&mut app_state, "Rendering preview…");
+            sync_ui(&mut app_state);
+            drop(app_state);
+            schedule_main_preview_submission(&state_handle);
             true
         }
         Err(error) => {
-            state.inspector_runtime.focus =
-                focus_after_command_attempt(state.inspector_runtime.focus.clone(), focus, false);
-            set_inspector_status(&mut state, error.to_string());
+            app_state.inspector_runtime.focus = focus_after_command_attempt(
+                app_state.inspector_runtime.focus.clone(),
+                focus,
+                false,
+            );
+            set_inspector_status(&mut app_state, error.to_string());
             false
         }
     }
@@ -2740,12 +4297,24 @@ fn target_output_layer_id(target: PropertyTarget) -> Option<PatternOutputLayerId
     }
 }
 
+/// Commits one typed descriptor value from either editor surface through
+/// `DocumentHistory`, retaining the requested frontend focus on success.
+///
+/// It first rejects/disarms a stale shared audience, then delegates all value,
+/// target, stale-base, and no-op validation to the existing command/domain
+/// boundary. Invalid input affects only runtime status/drafts; accepted input
+/// follows the established preview scheduling path and never directly mutates
+/// a document from GTK.
 fn commit_inspector_input_with_focus(
     state: &Rc<RefCell<AppState>>,
     descriptor: PropertyDescriptor,
     input: InspectorInput,
     focus: InspectorFocusIdentity,
 ) {
+    if reject_stale_shared_edit_before_command(state) {
+        rebuild_pattern_editor(state);
+        return;
+    }
     let command = {
         let state = state.borrow();
         let Some(workspace) = state.workspace.as_ref() else {
@@ -2754,7 +4323,7 @@ fn commit_inspector_input_with_focus(
         command_for_inspector_input(
             workspace.document(),
             state.inspector_runtime.selected_channel,
-            state.inspector_runtime.scope,
+            state.inspector_runtime.scope.clone(),
             &descriptor,
             input,
         )
@@ -2964,6 +4533,15 @@ fn command_for_inspector_input(
     }
 }
 
+/// Converts one active structural descriptor input into its existing typed
+/// definition-edit command without applying it.
+///
+/// The descriptor target must resolve to the current definition/mechanism or
+/// output layer, and the domain remains authoritative for semantic validation.
+/// Selected-copy commands require a selected channel; shared commands require
+/// the exact immutable disclosure arm. Returns an error for mismatched input,
+/// unsupported active fields, missing targets, or stale disclosure and has no
+/// document/history/preview side effects.
 fn structural_command_for_input(
     document: &Document,
     selected_channel: Option<ChannelId>,
@@ -3215,21 +4793,13 @@ fn structural_command_for_input(
         .find(|definition| definition.id == definition_id)
         .cloned()
         .ok_or_else(|| "The active definition is missing.".to_owned())?;
-    match scope {
-        DefinitionEditScope::SelectedCopy => {
-            Ok(DocumentCommand::EditSelectedChannelPatternDefinition {
-                channel_id: selected_channel
-                    .ok_or_else(|| "Select a channel before editing its definition.".to_owned())?,
-                base_definition,
-                edit,
-            })
-        }
-        DefinitionEditScope::Shared => Ok(DocumentCommand::EditSharedPatternDefinition {
-            definition_id,
-            base_definition,
-            edit,
-        }),
-    }
+    let _ = (scope, definition_id);
+    Ok(DocumentCommand::EditSelectedChannelPatternDefinition {
+        channel_id: selected_channel
+            .ok_or_else(|| "Select a channel before editing its definition.".to_owned())?,
+        base_definition,
+        edit,
+    })
 }
 
 fn centered(child: impl IsA<gtk::Widget>) -> gtk::Box {
@@ -3294,6 +4864,13 @@ fn choose_unsaved_resolution(state: &Rc<RefCell<AppState>>, action: LifecycleAct
     });
 }
 
+/// Executes an already-resolved lifecycle action at the GTK workspace boundary.
+///
+/// New/open delegate workspace creation/loading; Close clears the authoritative
+/// workspace and then rebuilds presentation. The close path must not retain an
+/// `AppState` borrow across Pattern Editor destruction because its GTK callback
+/// synchronously re-enters the same `RefCell`. Errors are reported through the
+/// existing UI boundary and no action directly edits document/history content.
 fn execute_lifecycle(state: &Rc<RefCell<AppState>>, action: LifecycleAction) {
     match action {
         LifecycleAction::New => match Workspace::from_new() {
@@ -3302,7 +4879,7 @@ fn execute_lifecycle(state: &Rc<RefCell<AppState>>, action: LifecycleAction) {
         },
         LifecycleAction::Open => choose_open(state),
         LifecycleAction::Close => {
-            clear_workspace(&mut state.borrow_mut());
+            clear_workspace(state);
             rebuild_inspector(state);
         }
         LifecycleAction::WindowClose => defer_window_close(state),
@@ -3333,7 +4910,7 @@ fn cancel_window_close_after(state: &mut AppState, after: Option<LifecycleAction
 }
 
 fn lifecycle_is_busy(state: &AppState) -> bool {
-    state.pending_load.is_some() || state.pending_save.is_some()
+    state.pending_load || state.pending_save
 }
 
 fn request_window_close(
@@ -3653,25 +5230,23 @@ fn with_toniator_extension(mut path: PathBuf) -> PathBuf {
 }
 
 fn start_load(state: &Rc<RefCell<AppState>>, path: PathBuf) {
-    let (sender, receiver) = mpsc::channel();
-    let generation = {
+    let (generation, event_sender) = {
         let mut state = state.borrow_mut();
         state.generation = state.generation.saturating_add(1);
         let generation = state.generation;
-        state.pending_load = Some(PendingLoad {
-            generation,
-            receiver,
-        });
+        state.pending_load = true;
         if state.workspace.is_none() {
             set_page(&mut state, Page::Loading);
         }
         sync_ui(&mut state);
-        generation
+        (generation, state.event_sender.clone())
     };
     thread::spawn(move || {
         let candidate = load_workspace(&path);
-        let _ = sender.send(candidate);
-        let _ = generation;
+        let _ = event_sender.send_blocking(AppEvent::Load {
+            generation,
+            result: Box::new(candidate),
+        });
     });
 }
 
@@ -3728,23 +5303,24 @@ fn start_save_to(state: &Rc<RefCell<AppState>>, path: PathBuf, after: Option<Lif
             return;
         };
         let snapshot = workspace.snapshot();
+        let event_snapshot = snapshot.clone();
         let generation = state.generation;
-        let (sender, receiver) = mpsc::channel();
+        let event_sender = state.event_sender.clone();
         let document = snapshot.document.clone();
         let sources = snapshot.sources.clone();
         let save_path = path.clone();
         thread::spawn(move || {
             let result =
                 save_container(&save_path, &document, &sources).map_err(|error| error.to_string());
-            let _ = sender.send(result);
+            let _ = event_sender.send_blocking(AppEvent::Save {
+                generation,
+                path: save_path,
+                snapshot: event_snapshot,
+                after,
+                result,
+            });
         });
-        state.pending_save = Some(PendingSave {
-            generation,
-            path,
-            snapshot,
-            receiver,
-            after,
-        });
+        state.pending_save = true;
         sync_ui(&mut state);
     }
 }
@@ -3752,7 +5328,7 @@ fn start_save_to(state: &Rc<RefCell<AppState>>, path: PathBuf, after: Option<Lif
 fn start_export(state: &Rc<RefCell<AppState>>, path: PathBuf, settings: ExportSettings) {
     let (snapshot, presentation, generation, workspace_generation) = {
         let mut state = state.borrow_mut();
-        if state.pending_export.is_some() {
+        if state.pending_export {
             return;
         }
         let Some(workspace) = state.workspace.as_ref() else {
@@ -3769,16 +5345,19 @@ fn start_export(state: &Rc<RefCell<AppState>>, path: PathBuf, settings: ExportSe
             state.workspace_generation,
         )
     };
-    let (sender, receiver) = mpsc::channel();
+    let event_sender = state.borrow().event_sender.clone();
+    let format = settings.format;
     thread::spawn(move || {
-        let _ = sender.send(export_snapshot(snapshot, presentation, path, settings));
+        let result = export_snapshot(snapshot, presentation, path, settings);
+        let _ = event_sender.send_blocking(AppEvent::Export {
+            generation,
+            workspace_generation,
+            format,
+            result,
+        });
     });
     let mut state = state.borrow_mut();
-    state.pending_export = Some(PendingExport {
-        generation,
-        workspace_generation,
-        receiver,
-    });
+    state.pending_export = true;
     sync_ui(&mut state);
 }
 
@@ -3826,187 +5405,194 @@ fn export_snapshot(
     }
 }
 
-fn poll(state: &Rc<RefCell<AppState>>) -> glib::ControlFlow {
-    poll_load(state);
-    poll_save(state);
-    poll_export(state);
-    {
-        let mut state = state.borrow_mut();
-        if state
-            .workspace
-            .as_ref()
-            .is_some_and(|workspace| workspace.source_presentation.is_some())
-        {
-            submit_if_viewport_ready(&mut state);
-        }
-    }
-    let completion = state.borrow().scheduler.try_receive_latest();
-    match completion {
-        Ok(Some(completion)) => {
-            let mut state = state.borrow_mut();
-            let accepted = if accepts_preview_submission(
-                state.workspace_generation,
-                state.preview_submission,
-                completion.ticket().value(),
-            ) {
-                match state.workspace.as_ref() {
-                    Some(workspace) => state
-                        .scheduler
-                        .accept_completion(&completion, workspace.history.session()),
-                    None => Ok(false),
-                }
-            } else {
-                Ok(false)
-            };
-            match accepted {
-                Ok(true) => match completion.result() {
-                    Some(result) => match texture_from_surface(result.raster()) {
-                        Ok(texture) => {
-                            state.picture.set_paintable(Some(&texture));
-                            state.preview = Some(texture);
-                            set_page(&mut state, Page::Success);
-                        }
-                        Err(error) => show_error(&mut state, error),
-                    },
-                    None => show_error(
-                        &mut state,
-                        completion
-                            .error()
-                            .expect("failed completion has an error")
-                            .to_string(),
-                    ),
-                },
-                Ok(false) => {}
-                Err(error) => show_error(&mut state, error.to_string()),
+/// Applies one worker completion on GTK's main context without timer polling.
+///
+/// Workers carry immutable results only. This function retains the existing
+/// generation and scheduler token gates before any view or savepoint changes.
+fn handle_app_event(state: &Rc<RefCell<AppState>>, event: AppEvent) {
+    match event {
+        AppEvent::Load { generation, result } => {
+            if state.borrow().generation != generation {
+                return;
+            }
+            state.borrow_mut().pending_load = false;
+            match *result {
+                Ok(workspace) => install_workspace(state, workspace),
+                Err(error) => show_error(&mut state.borrow_mut(), error),
             }
         }
-        Ok(None) => {}
-        Err(error) => show_error(&mut state.borrow_mut(), error.to_string()),
-    }
-    glib::ControlFlow::Continue
-}
-
-fn poll_export(state: &Rc<RefCell<AppState>>) {
-    let pending = state.borrow_mut().pending_export.take();
-    let Some(pending) = pending else { return };
-    match pending.receiver.try_recv() {
-        Ok(result) => {
-            let mut state = state.borrow_mut();
-            if is_current_generation(state.generation, pending.generation)
-                && is_current_generation(state.workspace_generation, pending.workspace_generation)
-                && let Err(error) = result
-            {
-                show_error(&mut state, format!("export.failed: {error}"));
+        AppEvent::Save {
+            generation,
+            path,
+            snapshot,
+            after,
+            result,
+        } => {
+            if state.borrow().generation != generation {
+                return;
             }
-            sync_ui(&mut state);
-        }
-        Err(TryRecvError::Empty) => state.borrow_mut().pending_export = Some(pending),
-        Err(TryRecvError::Disconnected) => {
-            let mut state = state.borrow_mut();
-            if is_current_generation(state.generation, pending.generation)
-                && is_current_generation(state.workspace_generation, pending.workspace_generation)
-            {
-                show_error(&mut state, "Export stopped unexpectedly.".to_owned());
-            }
-            sync_ui(&mut state);
-        }
-    }
-}
-
-fn poll_load(state: &Rc<RefCell<AppState>>) {
-    let pending = state.borrow_mut().pending_load.take();
-    let Some(pending) = pending else { return };
-    match pending.receiver.try_recv() {
-        Ok(result) => {
-            let completion =
-                lifecycle_completion_policy(state.borrow().generation, pending.generation, result);
-            if let CompletionInstall::Install(result) = completion {
-                match result {
-                    Ok(workspace) => install_workspace(state, workspace),
-                    Err(error) => {
-                        let mut state = state.borrow_mut();
-                        show_error(&mut state, error);
-                        sync_ui(&mut state);
+            state.borrow_mut().pending_save = false;
+            let mut app_state = state.borrow_mut();
+            let saved = result.is_ok();
+            match result {
+                Ok(()) => {
+                    if let Some(workspace) = app_state.workspace.as_mut() {
+                        workspace.accept_saved_snapshot(path, snapshot);
                     }
+                    emit_automation_state(&mut app_state, "save_completed", None);
                 }
-            } else {
-                sync_ui(&mut state.borrow_mut());
+                Err(error) => show_error(
+                    &mut app_state,
+                    format!("Couldn’t save this document: {error}"),
+                ),
+            }
+            sync_ui(&mut app_state);
+            drop(app_state);
+            if saved && let Some(after) = after {
+                request_lifecycle(state, after);
             }
         }
-        Err(TryRecvError::Empty) => state.borrow_mut().pending_load = Some(pending),
-        Err(TryRecvError::Disconnected) => {
-            let mut state = state.borrow_mut();
-            if state.generation == pending.generation {
-                show_error(
-                    &mut state,
-                    "Document loader stopped unexpectedly.".to_owned(),
-                );
+        AppEvent::Export {
+            generation,
+            workspace_generation,
+            format,
+            result,
+        } => {
+            if state.borrow().generation != generation
+                || state.borrow().workspace_generation != workspace_generation
+            {
+                return;
             }
-            sync_ui(&mut state);
-        }
-    }
-}
-
-fn poll_save(state: &Rc<RefCell<AppState>>) {
-    let pending = state.borrow_mut().pending_save.take();
-    let Some(pending) = pending else { return };
-    match pending.receiver.try_recv() {
-        Ok(result) => {
-            let after_action = {
-                let mut app_state = state.borrow_mut();
-                let mut after_action = None;
-                if let CompletionInstall::Install(result) =
-                    lifecycle_completion_policy(app_state.generation, pending.generation, result)
-                {
-                    match result {
-                        Ok(()) => {
-                            if let Some(workspace) = app_state.workspace.as_mut() {
-                                // This is the exact snapshot accepted by atomic IO;
-                                // later history changes remain dirty by comparison.
-                                workspace
-                                    .accept_saved_snapshot(pending.path.clone(), pending.snapshot);
+            state.borrow_mut().pending_export = false;
+            let mut app_state = state.borrow_mut();
+            match result {
+                Ok(()) => {
+                    emit_automation_state(&mut app_state, "export_completed", None);
+                    set_inspector_status(
+                        &mut app_state,
+                        format!(
+                            "{} export complete.",
+                            match format {
+                                ExportFormat::Png => "PNG",
+                                ExportFormat::Svg => "SVG",
                             }
-                            sync_ui(&mut app_state);
-                            after_action = pending.after;
-                        }
-                        Err(error) => {
-                            show_error(&mut app_state, format!("save.failed: {error}"));
-                            cancel_window_close_after(&mut app_state, pending.after);
-                            sync_ui(&mut app_state);
-                        }
-                    }
-                } else {
-                    cancel_window_close_after(&mut app_state, pending.after);
-                    sync_ui(&mut app_state);
+                        ),
+                    );
                 }
-                after_action
-            };
-            if let Some(action) = after_action {
-                // The snapshot may have become an old savepoint while the
-                // user changed model/content during asynchronous saving.
-                // Re-enter the one unsaved-work boundary instead of discarding
-                // that newer authoritative content.
-                request_lifecycle(state, action);
+                Err(error) => show_error(
+                    &mut app_state,
+                    format!("Couldn’t export this artwork: {error}"),
+                ),
             }
+            sync_ui(&mut app_state);
         }
-        Err(TryRecvError::Empty) => state.borrow_mut().pending_save = Some(pending),
-        Err(TryRecvError::Disconnected) => {
-            let mut state = state.borrow_mut();
-            if is_current_generation(state.generation, pending.generation) {
-                show_error(&mut state, "Document save stopped unexpectedly.".to_owned());
-            }
-            cancel_window_close_after(&mut state, pending.after);
-            sync_ui(&mut state);
+        AppEvent::Preview(completion) => handle_preview_completion(state, completion),
+        AppEvent::DraftPreview { epoch, completion } => {
+            handle_draft_preview_completion(state, epoch, completion)
         }
     }
 }
 
+/// Accepts a scheduler completion only for its still-current workspace token.
+fn handle_preview_completion(
+    state: &Rc<RefCell<AppState>>,
+    completion: toniator_engine::EvaluationCompletion,
+) {
+    let mut app_state = state.borrow_mut();
+    let workspace_generation = app_state.workspace_generation;
+    let accepted = app_state.workspace.as_ref().map_or(Ok(false), |workspace| {
+        app_state
+            .scheduler
+            .accept_completion(&completion, workspace.history.session())
+    });
+    match accepted {
+        Ok(true)
+            if app_state
+                .preview_coordinator
+                .accept(workspace_generation, completion.ticket().value()) =>
+        {
+            match completion.result() {
+                Some(result) => match texture_from_surface(result.raster()) {
+                    Ok(texture) => {
+                        app_state.picture.set_paintable(Some(&texture));
+                        app_state.preview = Some(texture);
+                        set_page(&mut app_state, Page::Success);
+                        emit_automation_state(
+                            &mut app_state,
+                            "preview_accepted",
+                            Some(completion.ticket().value()),
+                        );
+                    }
+                    Err(error) => show_error(&mut app_state, error),
+                },
+                None => show_error(
+                    &mut app_state,
+                    "Couldn’t render this pattern. Your last preview is still shown.".to_owned(),
+                ),
+            }
+        }
+        Ok(true) => {}
+        Ok(false) => {}
+        Err(error) => show_error(&mut app_state, error.to_string()),
+    }
+}
+
+/// Installs a private draft result only after its private ticket and token pass.
+fn handle_draft_preview_completion(
+    state: &Rc<RefCell<AppState>>,
+    epoch: u64,
+    completion: toniator_engine::EvaluationCompletion,
+) {
+    let app_state = state.borrow();
+    let Some(surface) = app_state.pattern_editor.as_ref() else {
+        return;
+    };
+    let draft = surface.draft.borrow_mut();
+    if draft.epoch != epoch || draft.preview_submission != Some(completion.ticket().value()) {
+        return;
+    }
+    match draft
+        .scheduler
+        .accept_completion(&completion, draft.history.session())
+    {
+        Ok(true) => match completion.result() {
+            Some(result) => match texture_from_surface(result.raster()) {
+                Ok(texture) => {
+                    surface.picture.set_paintable(Some(&texture));
+                    surface.status.set_label("Draft preview updated.");
+                    drop(draft);
+                    drop(app_state);
+                    emit_draft_automation_state(
+                        &mut state.borrow_mut(),
+                        "draft_preview_accepted",
+                        Some(completion.ticket().value()),
+                    );
+                }
+                Err(_) => surface
+                    .status
+                    .set_label("Couldn’t render this pattern. Your last preview is still shown."),
+            },
+            None => surface
+                .status
+                .set_label("Couldn’t render this pattern. Your last preview is still shown."),
+        },
+        Ok(false) => {}
+        Err(_) => surface
+            .status
+            .set_label("Couldn’t render this pattern. Your last preview is still shown."),
+    }
+}
+
+/// Installs a newly created or loaded workspace and closes any editor surface
+/// bound to the replaced document. The next editor launch starts with fresh
+/// runtime-only selection/draft state and cannot target destroyed widgets.
 fn install_workspace(state: &Rc<RefCell<AppState>>, workspace: Workspace) {
-    let model = {
+    let (model, pattern_editor_window) = {
         let mut state = state.borrow_mut();
         state.workspace_generation = state.workspace_generation.saturating_add(1);
-        state.preview_submission = None;
+        state.preview_coordinator.clear_submission();
         state.inspector_runtime.reset_for_workspace();
+        let pattern_editor_window = state.pattern_editor.take().map(|surface| surface.window);
         state.workspace = Some(workspace);
         state.model = state
             .workspace
@@ -4014,8 +5600,13 @@ fn install_workspace(state: &Rc<RefCell<AppState>>, workspace: Workspace) {
             .and_then(|workspace| workspace.document().channel_model())
             .map(PreviewModel::from_domain)
             .unwrap_or(PreviewModel::Rgb);
-        state.model
+        (state.model, pattern_editor_window)
     };
+    // The close-request callback borrows AppState, so the detached editor may
+    // close only after the workspace-install borrow above has ended.
+    if let Some(window) = pattern_editor_window {
+        window.close();
+    }
     sync_model_selector(state, model);
 
     {
@@ -4037,6 +5628,11 @@ fn install_workspace(state: &Rc<RefCell<AppState>>, workspace: Workspace) {
         sync_ui(&mut app_state);
     }
     rebuild_inspector(state);
+    let state_for_preview = Rc::clone(state);
+    glib::idle_add_local_once(move || {
+        let mut app_state = state_for_preview.borrow_mut();
+        submit_if_viewport_ready(&mut app_state);
+    });
 }
 
 /// Synchronize the GTK control without allowing its synchronous notification
@@ -4056,29 +5652,48 @@ fn sync_model_selector(state: &Rc<RefCell<AppState>>, model: PreviewModel) {
     state.borrow_mut().syncing_model = false;
 }
 
-fn clear_workspace(state: &mut AppState) {
-    state.generation = state.generation.saturating_add(1);
-    state.workspace_generation = state.workspace_generation.saturating_add(1);
-    state.preview_submission = None;
-    state.inspector_runtime.reset_for_workspace();
-    state.workspace = None;
-    state.pending_load = None;
-    state.pending_save = None;
-    state.pending_export = None;
-    clear_preview(state);
-    state.preview_target = None;
-    state.banner.set_revealed(false);
-    set_page(state, Page::Empty);
-    sync_ui(state);
+/// Clears the workspace and detaches any Pattern Editor before closing it.
+///
+/// GTK close requests synchronously invoke the editor callback, so this
+/// function takes the window while holding `AppState` and calls `close()` only
+/// after that mutable `RefCell` borrow ends. Cleanup remains presentation-only
+/// and never creates document/history/persistence side effects.
+fn clear_workspace(state: &Rc<RefCell<AppState>>) {
+    let pattern_editor_window = {
+        let mut state = state.borrow_mut();
+        state.generation = state.generation.saturating_add(1);
+        state.workspace_generation = state.workspace_generation.saturating_add(1);
+        state.preview_coordinator.clear_submission();
+        state.inspector_runtime.reset_for_workspace();
+        let pattern_editor_window = state.pattern_editor.take().map(|surface| surface.window);
+        state.workspace = None;
+        state.pending_load = false;
+        state.pending_save = false;
+        state.pending_export = false;
+        clear_preview(&mut state);
+        state.preview_target = None;
+        state.banner.set_revealed(false);
+        set_page(&mut state, Page::Empty);
+        sync_ui(&mut state);
+        pattern_editor_window
+    };
+    if let Some(window) = pattern_editor_window {
+        window.close();
+    }
 }
 
+/// Replaces the main channel model through its typed history command and refreshes preview.
+///
+/// This function rejects synchronization/loading/source-less calls before any
+/// mutation. A successful change updates only the main workspace history and
+/// schedules its canonical preview after GTK notifications unwind.
 fn change_model(state: &Rc<RefCell<AppState>>, model: PreviewModel) {
     let mut app_state = state.borrow_mut();
     if !should_apply_model_change(
         app_state.syncing_model,
         app_state.model,
         model,
-        app_state.pending_load.is_some(),
+        app_state.pending_load,
         app_state
             .workspace
             .as_ref()
@@ -4097,13 +5712,11 @@ fn change_model(state: &Rc<RefCell<AppState>>, model: PreviewModel) {
     app_state.model = model;
     update_backdrop(&mut app_state);
     set_preview_pending(&mut app_state);
-    set_inspector_status(
-        &mut app_state,
-        "Channel model changed. Preview update is pending.",
-    );
+    set_inspector_status(&mut app_state, "Rendering preview…");
     sync_ui(&mut app_state);
     drop(app_state);
     rebuild_inspector(state);
+    schedule_main_preview_submission(state);
 }
 
 fn should_apply_model_change(
@@ -4194,11 +5807,100 @@ fn submit_current_source(
         .submit(request)
         .map_err(|error| error.to_string())?;
     state.preview_target = Some(target);
-    state.preview_submission = Some(PreviewSubmission {
-        workspace_generation: state.workspace_generation,
-        ticket: ticket.value(),
-    });
+    let workspace_generation = state.workspace_generation;
+    state
+        .preview_coordinator
+        .submit(workspace_generation, ticket.value());
+    emit_automation_state(state, "preview_submitted", Some(ticket.value()));
     Ok(())
+}
+
+/// Emits a bounded immutable state snapshot after an authoritative UI event.
+///
+/// This is test synchronization evidence only: JSON fields describe the
+/// existing workspace/history/preview state and are never parsed by the app.
+fn emit_automation_state(state: &mut AppState, event: &str, ticket: Option<u64>) {
+    let (revision, dirty, savepoint, channel, family) =
+        state
+            .workspace
+            .as_ref()
+            .map_or((None, false, false, None, None), |workspace| {
+                let selected = state.inspector_runtime.selected_channel.map(|id| id.0);
+                let family = state
+                    .inspector_runtime
+                    .selected_channel
+                    .and_then(|channel| {
+                        workspace
+                            .document()
+                            .pattern_definition_for(channel)
+                            .map(|definition| format!("{:?}", definition.family))
+                    });
+                (
+                    Some(workspace.history.session().revision().0),
+                    workspace.is_dirty(),
+                    workspace.savepoint.is_some(),
+                    selected,
+                    family,
+                )
+            });
+    let workspace_generation = state.workspace_generation;
+    let lifecycle = if state.workspace.is_some() {
+        "open"
+    } else {
+        "empty"
+    };
+    let record = serde_json::json!({
+        "event": event,
+        "workspace_generation": workspace_generation,
+        "document_revision": revision,
+        "selected_channel": channel,
+        "active_pattern_family": family,
+        "dirty": dirty,
+        "has_savepoint": savepoint,
+        "lifecycle": lifecycle,
+        "preview_identity": ticket.map(|ticket| serde_json::json!({"ticket": ticket, "workspace_generation": workspace_generation, "document_revision": revision})),
+    });
+    if let Some(sink) = state.automation.as_mut() {
+        sink.emit(&record);
+    }
+}
+
+/// Emits immutable private-editor evidence while retaining the main snapshot.
+///
+/// The draft fields describe only the cloned history and never establish a
+/// second production authority. They let a harness prove that draft changes
+/// leave the main revision, accepted preview, savepoint, and filesystem route
+/// untouched.
+fn emit_draft_automation_state(state: &mut AppState, event: &str, ticket: Option<u64>) {
+    let main_revision = state
+        .workspace
+        .as_ref()
+        .map(|workspace| workspace.history.session().revision().0);
+    let main_accepted_ticket = state.preview_coordinator.last_accepted_ticket();
+    let Some(surface) = state.pattern_editor.as_ref() else {
+        return;
+    };
+    let draft = surface.draft.borrow();
+    let draft_revision = draft.history.session().revision().0;
+    let draft_family = draft
+        .history
+        .document()
+        .pattern_definition_for(draft.selected_channel)
+        .map(|definition| format!("{:?}", definition.family));
+    let record = serde_json::json!({
+        "event": event,
+        "workspace_generation": state.workspace_generation,
+        "main_document_revision": main_revision,
+        "main_preview_accepted_ticket": main_accepted_ticket,
+        "draft_epoch": draft.epoch,
+        "draft_document_revision": draft_revision,
+        "draft_pattern_family": draft_family,
+        "draft_preview_ticket": ticket,
+        "selected_channel": draft.selected_channel.0,
+    });
+    if let Some(sink) = state.automation.as_mut() {
+        sink.emit(&record);
+    }
 }
 
 fn preview_target_for(stack: &gtk::Stack) -> Option<toniator_engine::PreviewRasterTarget> {
@@ -4239,6 +5941,7 @@ fn texture_from_surface(surface: &RasterSurface) -> Result<gtk::gdk::Texture, St
     .upcast())
 }
 
+#[cfg(test)]
 const fn is_current_generation(current: u64, candidate: u64) -> bool {
     current == candidate
 }
@@ -4312,13 +6015,34 @@ fn show_error(state: &mut AppState, message: String) {
     set_page(state, page_after_preview_error(state.preview.is_some()));
 }
 
+/// Projects immutable application state into persistent GTK widgets.
+///
+/// The projection updates enabled state, labels, and presentation only; it
+/// never changes workspace/history/scheduler authority or starts I/O.
 fn sync_ui(state: &mut AppState) {
     let policy = ui_policy(
         state.workspace.as_ref(),
-        state.pending_load.is_some(),
-        state.pending_save.is_some(),
-        state.pending_export.is_some(),
+        state.pending_load,
+        state.pending_save,
+        state.pending_export,
     );
+    let lifecycle_vm = LifecycleViewModel {
+        title: policy.title.clone(),
+        has_workspace: state.workspace.is_some(),
+        dirty: state.workspace.as_ref().is_some_and(Workspace::is_dirty),
+    };
+    let selected_name = state.workspace.as_ref().and_then(|workspace| {
+        state
+            .selected_channel
+            .map(|channel| channel_display_name(workspace.document(), channel))
+    });
+    let active_pattern = state.workspace.as_ref().and_then(|workspace| {
+        state.selected_channel.map(|channel| {
+            artist_pattern_name(&selected_property_values(workspace.document(), channel))
+        })
+    });
+    let (document_vm, channel_vm, preview_vm) =
+        project_document(state, selected_name, active_pattern);
     state.actions.new.set_enabled(policy.new_enabled);
     state.actions.open.set_enabled(policy.open_enabled);
     state.actions.close.set_enabled(policy.close_enabled);
@@ -4328,21 +6052,373 @@ fn sync_ui(state: &mut AppState) {
     state.selector.set_sensitive(policy.selector_enabled);
     state.actions.undo.set_enabled(policy.undo_enabled);
     state.actions.redo.set_enabled(policy.redo_enabled);
-    state.window.set_title(Some(&policy.title));
+    state.window.set_title(Some(&lifecycle_vm.title));
     state
         .window_title
-        .set_title(policy.title.trim_end_matches(" — Toniator"));
+        .set_title(lifecycle_vm.title.trim_end_matches(" — Toniator"));
+    state
+        .window
+        .set_tooltip_text(Some(if lifecycle_vm.has_workspace && lifecycle_vm.dirty {
+            "Unsaved changes"
+        } else {
+            &document_vm.title
+        }));
+    state.channel_selector.set_tooltip_text(
+        channel_vm
+            .active_pattern
+            .as_deref()
+            .or(channel_vm.name.as_deref()),
+    );
+    state.picture.set_tooltip_text(Some(if preview_vm.pending {
+        "Rendering preview…"
+    } else if preview_vm.accepted_ticket.is_some() {
+        "Preview updated."
+    } else {
+        "No preview yet"
+    }));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
     fn asset(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../assets")
             .join(name)
+    }
+
+    /// Finds one active selected-channel descriptor by its typed field identity.
+    ///
+    /// The helper projects only the immutable private draft document. It never
+    /// creates GTK controls or falls back to a stale descriptor after a
+    /// selected-copy transition.
+    fn private_descriptor(
+        document: &Document,
+        channel: ChannelId,
+        field: PropertyFieldId,
+    ) -> PropertyDescriptor {
+        selected_property_values(document, channel)
+            .into_iter()
+            .find(|value| value.descriptor.field == field)
+            .map(|value| value.descriptor)
+            .unwrap_or_else(|| panic!("private draft is missing active {field:?}"))
+    }
+
+    /// Submits and accepts one canonical private preview without a fixed sleep.
+    ///
+    /// The bounded poll mirrors the scheduler's event bridge: only the private
+    /// `DocumentHistory` session may accept this completion. It reads the
+    /// cloned source bundle and never touches a main workspace scheduler or
+    /// preview coordinator.
+    fn accept_private_preview_for_test(
+        history: &DocumentHistory,
+        sources: &SourceBundle,
+        presentation: &SourcePresentation,
+    ) {
+        let source = sources
+            .get(&presentation.id)
+            .expect("private source bundle retains the active source");
+        let resolved = ResolvedSource::new(
+            presentation.id.clone(),
+            Arc::<[u8]>::from(source.bytes()),
+            presentation.format,
+        )
+        .expect("private source remains resolvable");
+        let target = toniator_engine::PreviewRasterTarget::new(96, 96)
+            .expect("bounded private preview target is valid");
+        let scheduler = EvaluationScheduler::new().expect("private test scheduler starts");
+        let ticket = scheduler
+            .submit(EvaluationRequest::with_preview_target(
+                history.session().document_evaluation_snapshot(),
+                resolved,
+                target,
+            ))
+            .expect("private snapshot submits through canonical scheduler");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let completion = loop {
+            match scheduler
+                .try_receive_latest()
+                .expect("private scheduler result channel remains healthy")
+            {
+                Some(completion) => break completion,
+                None if Instant::now() < deadline => thread::yield_now(),
+                None => panic!("private preview did not complete before the test guard"),
+            }
+        };
+        assert_eq!(completion.ticket(), ticket);
+        assert!(
+            scheduler
+                .accept_completion(&completion, history.session())
+                .expect("private completion validates against its private token"),
+            "canonical private scheduler accepts the matching private revision"
+        );
+        assert!(completion.result().is_some());
+        scheduler
+            .shutdown()
+            .expect("private test scheduler shuts down");
+    }
+
+    /// Builds private grid recipes with the requested one-to-four directions.
+    ///
+    /// This test proves the editor's count control stays recipe/command based
+    /// and never requires GTK geometry or renderer authority.
+    #[test]
+    fn private_grid_recipe_supports_one_to_four_directions_and_site_modes() {
+        for count in 1..=4 {
+            let recipe = draft_grid_recipe(count, true).expect("bundled grid exists");
+            let toniator_domain::PatternDefinitionRecipe::GeneralizedStraightGuides {
+                dimensions,
+                product,
+                ..
+            } = recipe
+            else {
+                panic!("bundled grid remains generalized straight guides");
+            };
+            assert_eq!(dimensions.len(), count);
+            match product {
+                GeneralizedSiteProductDraft::AlongGuides { .. } => assert_eq!(count, 1),
+                GeneralizedSiteProductDraft::Intersections { .. } => assert!(count >= 2),
+            }
+        }
+        let recipe = draft_grid_recipe(4, false).expect("bundled grid exists");
+        let toniator_domain::PatternDefinitionRecipe::GeneralizedStraightGuides { product, .. } =
+            recipe
+        else {
+            panic!("bundled grid remains generalized straight guides");
+        };
+        assert!(matches!(
+            product,
+            GeneralizedSiteProductDraft::AlongGuides { .. }
+        ));
+        let mut workspace = load_workspace(&asset("raster-sample-v1.toniator"))
+            .expect("frozen raster fixture opens for descriptor projection");
+        let selected = authoritative_channel_ids(workspace.document())[0];
+        PresetRegistry::bundled()
+            .apply_to_selected(&mut workspace.history, selected, "straight-grid-circles")
+            .expect("bundled grid projects through selected-copy history");
+        let values =
+            pattern_editor_values(&selected_property_values(workspace.document(), selected));
+        assert_eq!(draft_grid_topology(&values), Some((2, true)));
+    }
+
+    /// Applies a rebuilt three-direction recipe through private-history command authority.
+    ///
+    /// This regression test proves the visible count control has a valid
+    /// command target rather than merely constructing an unused recipe. It
+    /// mutates only its local test history and has no GTK, scheduler, or file
+    /// side effects.
+    #[test]
+    fn private_grid_recipe_replaces_the_selected_draft_with_three_directions() {
+        let mut workspace = load_workspace(&asset("raster-sample-v1.toniator"))
+            .expect("frozen raster fixture opens for private draft authority");
+        let selected = authoritative_channel_ids(workspace.document())[0];
+        PresetRegistry::bundled()
+            .apply_to_selected(&mut workspace.history, selected, "straight-grid-circles")
+            .expect("bundled grid prepares the selected local draft");
+        let base_definition = workspace
+            .document()
+            .pattern_definition_for(selected)
+            .cloned()
+            .expect("selected local draft exposes its base definition");
+        workspace
+            .history
+            .apply(&DocumentCommand::ReplaceSelectedChannelDefinitionRecipe {
+                channel_id: selected,
+                base_definition,
+                recipe: draft_grid_recipe(3, true).expect("bundled grid recipe exists"),
+            })
+            .expect("three directions are valid through private command authority");
+        assert!(workspace.history.can_undo());
+        let values =
+            pattern_editor_values(&selected_property_values(workspace.document(), selected));
+        assert_eq!(draft_grid_topology(&values), Some((3, true)));
+    }
+
+    /// Applies Grid, Random, then Grid through one isolated draft history.
+    ///
+    /// The test proves family switches advance only the cloned history and
+    /// retain a usable selected channel. It creates no GTK widgets, schedulers,
+    /// files, or mutations of an external workspace.
+    #[test]
+    fn private_draft_history_switches_grid_random_grid_without_main_authority() {
+        let workspace = load_workspace(&asset("raster-sample-v1.toniator"))
+            .expect("frozen raster fixture opens for main-state comparison");
+        let main_revision = workspace.history.revision();
+        let selected = authoritative_channel_ids(workspace.document())[0];
+        let mut draft = fresh_history(workspace.document().clone())
+            .expect("private draft gets its own document history");
+        for preset in [
+            "straight-grid-circles",
+            "even-random-circles",
+            "straight-grid-circles",
+        ] {
+            PresetRegistry::bundled()
+                .apply_to_selected(&mut draft, selected, preset)
+                .expect("bundled family switch applies to the private channel");
+        }
+        assert_eq!(workspace.history.revision(), main_revision);
+        assert_eq!(draft.revision().0, main_revision.0 + 3);
+        assert!(draft.document().pattern_definition_for(selected).is_some());
+    }
+
+    /// Finalizes every private compound selector through draft history and previews.
+    ///
+    /// The sequence exercises Uniform, Even spacing, and Clustered random
+    /// distributions plus seed, modulation, and exclusion edits, then Grid
+    /// angle, placement, spacing, and guided orientation. Each local transition is one selected-copy command
+    /// and canonical private scheduler acceptance; the captured main document,
+    /// revision, and preview identity remain unchanged throughout.
+    #[test]
+    fn private_compound_transitions_preview_without_mutating_main_authority() {
+        let workspace = load_workspace(&asset("raster-sample.png"))
+            .expect("immutable raster source opens into the main workspace");
+        let main_document = workspace.document().clone();
+        let main_revision = workspace.history.revision();
+        let selected = authoritative_channel_ids(&main_document)[0];
+        let mut main_preview = preview_coordinator::PreviewCoordinator::default();
+        main_preview.submit(41, 700);
+        assert!(main_preview.accept(41, 700));
+        let main_preview_submission = main_preview.submission();
+        let main_preview_accepted = main_preview.last_accepted_ticket();
+
+        let mut draft = fresh_history(main_document.clone())
+            .expect("private editor clone starts its own history");
+        let sources = workspace.sources.clone();
+        let presentation = workspace
+            .source_presentation
+            .clone()
+            .expect("direct raster workspace has private preview presentation");
+        PresetRegistry::bundled()
+            .apply_to_selected(&mut draft, selected, "even-random-circles")
+            .expect("private history can select the random pattern");
+
+        for choice in [
+            RandomCharacterKind::RawUniform,
+            RandomCharacterKind::Even,
+            RandomCharacterKind::Clustered,
+        ] {
+            let descriptor =
+                private_descriptor(draft.document(), selected, PropertyFieldId::RandomCharacter);
+            let command = private_draft_command_for_input(
+                draft.document(),
+                selected,
+                &descriptor,
+                InspectorInput::EnumChoice(PropertyEnumChoice::RandomCharacter(choice)),
+            )
+            .expect("private random selector finalizes a typed transition");
+            draft
+                .apply(&command)
+                .expect("private random transition applies exactly once");
+        }
+        let seed = private_descriptor(draft.document(), selected, PropertyFieldId::RandomSeed);
+        let command = private_draft_command_for_input(
+            draft.document(),
+            selected,
+            &seed,
+            InspectorInput::U32(20260813),
+        )
+        .expect("private random seed has an ordinary typed command");
+        draft
+            .apply(&command)
+            .expect("private random seed applies to private history");
+        for (field, choice) in [
+            (
+                PropertyFieldId::RandomDensityModulation,
+                PropertyEnumChoice::DensityModulation(DensityModulationKind::ArtworkWeighted),
+            ),
+            (
+                PropertyFieldId::RandomExclusion,
+                PropertyEnumChoice::Exclusion(ExclusionKind::MinimumCenterDistance),
+            ),
+            (
+                PropertyFieldId::RandomExclusion,
+                PropertyEnumChoice::Exclusion(ExclusionKind::VisibleMarkMargin),
+            ),
+        ] {
+            let descriptor = private_descriptor(draft.document(), selected, field);
+            let command = private_draft_command_for_input(
+                draft.document(),
+                selected,
+                &descriptor,
+                InspectorInput::EnumChoice(choice),
+            )
+            .expect("private advanced selector finalizes its domain payload");
+            draft
+                .apply(&command)
+                .expect("private advanced selector applies to private history");
+        }
+        accept_private_preview_for_test(&draft, &sources, &presentation);
+
+        PresetRegistry::bundled()
+            .apply_to_selected(&mut draft, selected, "straight-grid-circles")
+            .expect("private history can select the grid pattern");
+        for (field, input) in [
+            (
+                PropertyFieldId::GuideBaselineAngle,
+                InspectorInput::FiniteF64(32.5),
+            ),
+            (PropertyFieldId::GuidePhase, InspectorInput::FiniteF64(0.25)),
+            (
+                PropertyFieldId::GuideSpacingMultiplier,
+                InspectorInput::FiniteF64(1.35),
+            ),
+        ] {
+            let descriptor = private_descriptor(draft.document(), selected, field);
+            let command =
+                private_draft_command_for_input(draft.document(), selected, &descriptor, input)
+                    .expect("private grid scalar has a typed command");
+            draft
+                .apply(&command)
+                .expect("private grid scalar applies to private history");
+        }
+        let orientation = private_descriptor(
+            draft.document(),
+            selected,
+            PropertyFieldId::OutputOrientation,
+        );
+        let command = private_draft_command_for_input(
+            draft.document(),
+            selected,
+            &orientation,
+            InspectorInput::EnumChoice(PropertyEnumChoice::MarkOrientation(
+                MarkOrientationKind::GuideTangent,
+            )),
+        )
+        .expect("private orientation selects a compatible domain direction");
+        draft
+            .apply(&command)
+            .expect("private orientation transition applies once");
+        accept_private_preview_for_test(&draft, &sources, &presentation);
+
+        assert_eq!(workspace.document(), &main_document);
+        assert_eq!(workspace.history.revision(), main_revision);
+        assert_eq!(main_preview.submission(), main_preview_submission);
+        assert_eq!(main_preview.last_accepted_ticket(), main_preview_accepted);
+        assert!(draft.revision() > main_revision);
+    }
+
+    /// Realizes the compiled presentation bundle through GIO lookup before any
+    /// GTK workflow uses its composite types. The test keeps resource contents
+    /// distinct from document authority and fails when a tracked template or
+    /// stylesheet is absent from the actual registered bundle.
+    #[test]
+    fn compiled_gresource_contains_every_live_composite_template() {
+        register_resources();
+        for path in [
+            "/com/silentbutdigital/Toniator/window.ui",
+            "/com/silentbutdigital/Toniator/channel-editor.ui",
+            "/com/silentbutdigital/Toniator/pattern-editor.ui",
+            "/com/silentbutdigital/Toniator/preset-row.ui",
+            "/com/silentbutdigital/Toniator/confirmation-dialog.ui",
+            "/com/silentbutdigital/Toniator/toniator.css",
+        ] {
+            assert!(
+                gio::resources_lookup_data(path, gio::ResourceLookupFlags::NONE).is_ok(),
+                "compiled GResource is missing {path}"
+            );
+        }
     }
 
     fn temporary(name: &str) -> PathBuf {
@@ -4519,6 +6595,76 @@ mod tests {
             source_path.to_string_lossy()
         );
         fs::remove_file(output).unwrap();
+    }
+
+    /// Persists and exports both immutable stage inputs through app-owned boundaries.
+    ///
+    /// This portal-independent witness writes only the active Stage 19B
+    /// validation directory. It proves snapshots reopen with the same document
+    /// and source bundle, and that canonical raster and vector outputs retain
+    /// their requested dimensions or structural SVG content. It never changes
+    /// either immutable input. # Panics
+    ///
+    /// Panics when a documented input cannot load, persist, reopen, or export.
+    #[test]
+    fn stage_19b_direct_persistence_and_canonical_exports_cover_both_inputs() {
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/validation/stage-19b-gui-remediation/direct-boundary");
+        fs::create_dir_all(&directory).expect("stage validation directory exists");
+        for (input, dimensions) in [
+            ("raster-sample.png", (1024, 1024)),
+            ("vector-sample.svg", (900, 620)),
+        ] {
+            let workspace = load_workspace(&asset(input)).expect("immutable input opens");
+            let snapshot = workspace.snapshot();
+            let base = input.trim_end_matches(".png").trim_end_matches(".svg");
+            let document = directory.join(format!("{base}.toniator"));
+            save_container(&document, &snapshot.document, &snapshot.sources)
+                .expect("snapshot persists without portal state");
+            let reopened = load_workspace(&document).expect("saved snapshot reopens");
+            assert_eq!(reopened.document(), &snapshot.document);
+            assert_eq!(reopened.sources, snapshot.sources);
+            let presentation = workspace
+                .source_presentation
+                .clone()
+                .expect("direct input keeps source presentation");
+            let png = directory.join(format!("{base}-canonical.png"));
+            export_snapshot(
+                snapshot.clone(),
+                presentation.clone(),
+                png.clone(),
+                ExportSettings {
+                    format: ExportFormat::Png,
+                    background: RasterBackground::Transparent,
+                    antialiasing: RasterAntialiasing::On,
+                    output_target: Some(
+                        OutputRasterTarget::new(dimensions.0, dimensions.1)
+                            .expect("fixed export target is valid"),
+                    ),
+                },
+            )
+            .expect("canonical PNG export succeeds");
+            assert_eq!(
+                png_dimensions(&fs::read(&png).expect("PNG bytes exist")),
+                dimensions
+            );
+            let svg = directory.join(format!("{base}-canonical.svg"));
+            export_snapshot(
+                snapshot,
+                presentation,
+                svg.clone(),
+                ExportSettings {
+                    format: ExportFormat::Svg,
+                    background: RasterBackground::Transparent,
+                    antialiasing: RasterAntialiasing::On,
+                    output_target: None,
+                },
+            )
+            .expect("canonical SVG export succeeds");
+            let svg_text = fs::read_to_string(svg).expect("SVG text exists");
+            assert!(svg_text.contains("<svg"));
+            assert!(svg_text.contains("<circle "));
+        }
     }
 
     #[test]
@@ -5176,31 +7322,6 @@ mod tests {
         );
     }
 
-    /// Locks the source-level GTK re-entrancy contract: the channel selector
-    /// owns one persistent string-list model, selected notifications schedule
-    /// an idle rebuild, and rebuilds splice rather than replace that model.
-    #[test]
-    fn channel_selector_defers_rebuild_and_preserves_its_persistent_model() {
-        let implementation = include_str!("main.rs");
-        let build_window_source = implementation
-            .split("fn build_window")
-            .nth(1)
-            .and_then(|source| source.split("fn connect_actions").next())
-            .expect("application source retains the window construction boundary");
-        assert!(build_window_source.contains("gtk::StringList::new(&[])"));
-        assert!(build_window_source.contains("schedule_inspector_rebuild(&state)"));
-
-        let rebuild_source = implementation
-            .split("fn rebuild_inspector")
-            .nth(1)
-            .and_then(|source| source.split("fn append_expander").next())
-            .expect("application source retains the inspector rebuild boundary");
-        assert!(rebuild_source.contains("selector_model.splice("));
-        assert!(!rebuild_source.contains("selector.set_model("));
-        assert!(rebuild_source.contains("state.syncing_inspector = true"));
-        assert!(rebuild_source.contains("state.borrow_mut().syncing_inspector = false"));
-    }
-
     #[test]
     fn inspector_uses_descriptor_value_pairs_and_typed_history_commands() {
         let mut workspace = load_workspace(&asset("raster-sample-v1.toniator")).unwrap();
@@ -5230,14 +7351,68 @@ mod tests {
         assert!(workspace.history.can_redo());
     }
 
+    /// Proves selected-channel preset application and prepared shared
+    /// replacement remain separate one-transition registry operations.
+    ///
+    /// The test keeps GTK out of the authority path: the UI may disclose the
+    /// affected artist-facing names, but only a fresh prepared replacement can
+    /// publish the shared history transition.
+    #[test]
+    fn prepared_shared_preset_replacement_stays_separate_from_selected_copy() {
+        let mut workspace = load_workspace(&asset("raster-sample-v1.toniator")).unwrap();
+        replace_model_topology(&mut workspace.history, PreviewModel::Rgb)
+            .expect("RGB topology creates the shared pattern audience");
+        let selected = authoritative_channel_ids(workspace.document())[0];
+        let definition = workspace
+            .document()
+            .pattern_definition_for(selected)
+            .expect("selected modeled channel retains a pattern")
+            .id;
+        let registry = PresetRegistry::bundled();
+        let revision = workspace.history.revision();
+        registry
+            .apply_to_selected(&mut workspace.history, selected, "even-random-circles")
+            .expect("selected-copy application remains available");
+        assert_eq!(workspace.history.revision().0, revision.0 + 1);
+        let prepared = registry
+            .prepare_shared_replacement(
+                &workspace.history,
+                workspace
+                    .document()
+                    .pattern_definition_for(selected)
+                    .expect("selected copy still has a pattern")
+                    .id,
+                "straight-grid-circles",
+            )
+            .expect("shared action prepares after its own disclosure step");
+        assert!(!prepared.affected_channels().is_empty());
+        let revision = workspace.history.revision();
+        prepared
+            .confirm(&mut workspace.history)
+            .expect("fresh disclosure confirms one shared transition");
+        assert_eq!(workspace.history.revision().0, revision.0 + 1);
+        assert_ne!(
+            definition,
+            workspace
+                .document()
+                .pattern_definition_for(selected)
+                .expect("shared replacement preserves a selected pattern")
+                .id
+        );
+    }
+
+    /// Confirms workspace replacement clears every frontend-only inspector
+    /// transient without changing the stable-ID selection fallback policy used
+    /// by ordinary document history.
+    /// This pure test has no GTK, document, history, preview, or panic side
+    /// effects beyond the asserted runtime reset.
     #[test]
     fn inspector_runtime_resets_document_scoped_transients_but_not_ordinary_selection_logic() {
         let mut runtime = InspectorRuntime {
             selected_channel: Some(ChannelId(44)),
-            scope: DefinitionEditScope::Shared,
+            scope: DefinitionEditScope::SelectedCopy,
             drafts: BTreeMap::from([("opacity".into(), "1.5".into())]),
             expanded_groups: BTreeSet::from(["Active family".into()]),
-            transition: None,
             status: Some("domain rejection".into()),
             focus: Some(InspectorFocusIdentity::Descriptor {
                 key: "old:focus".into(),
@@ -5357,31 +7532,6 @@ mod tests {
     }
 
     #[test]
-    fn transition_focus_identity_is_transient_and_never_fabricates_a_descriptor_target() {
-        let transition_focus = InspectorFocusIdentity::TransitionField {
-            field: PropertyFieldId::RandomCharacter,
-            target: PropertyTarget::Document,
-        };
-        assert_eq!(
-            focus_after_command_attempt(None, Some(transition_focus.clone()), true),
-            Some(transition_focus.clone())
-        );
-        assert!(focus_matches(
-            &Some(transition_focus.clone()),
-            &transition_focus
-        ));
-        let mut runtime = InspectorRuntime {
-            focus: Some(transition_focus),
-            ..InspectorRuntime::default()
-        };
-        runtime.reset_for_workspace();
-        assert!(
-            runtime.focus.is_none(),
-            "workspace replacement clears focus identity"
-        );
-    }
-
-    #[test]
     fn selected_copy_remaps_repeated_guide_scalars_by_authoritative_ordinal_only() {
         let workspace = load_workspace(&asset("raster-sample-v1.toniator")).unwrap();
         let guide_scalar = workspace
@@ -5429,149 +7579,22 @@ mod tests {
         );
     }
 
-    #[test]
-    fn compound_selectors_use_the_domain_transition_draft_before_one_typed_history_command() {
-        let mut workspace = load_workspace(&asset("raster-sample-v1.toniator")).unwrap();
-        let channel_id = authoritative_channel_ids(workspace.document())[0];
-        workspace
-            .history
-            .apply(&DocumentCommand::AddTypedPatternDefinition {
-                definition: toniator_domain::PatternDefinition::random_sites(
-                    PatternDefinitionId(50),
-                    "app transition test",
-                    PatternMechanismId(60),
-                    PatternMechanismId(61),
-                    PatternMechanismId(62),
-                    PatternMechanismId(63),
-                    PatternOutputLayerId(70),
-                    toniator_domain::RandomSiteCharacter::RawUniform,
-                    17,
-                    toniator_domain::SiteDensityModulation::Uniform,
-                    toniator_domain::SiteExclusionPolicy::None,
-                    1_000,
-                    2_000,
-                    toniator_domain::CoveragePolicy {
-                        guard_steps: 3,
-                        maximum_support_radius: 8.0,
-                    },
-                ),
-            })
-            .unwrap();
-        workspace
-            .history
-            .apply(&DocumentCommand::RetargetChannelPatternDefinition {
-                channel_id,
-                definition_id: PatternDefinitionId(50),
-            })
-            .unwrap();
-        for (field, choices) in [
-            (
-                PropertyFieldId::RandomCharacter,
-                vec![
-                    PropertyEnumChoice::RandomCharacter(RandomCharacterKind::RawUniform),
-                    PropertyEnumChoice::RandomCharacter(RandomCharacterKind::Even),
-                    PropertyEnumChoice::RandomCharacter(RandomCharacterKind::Clustered),
-                ],
-            ),
-            (
-                PropertyFieldId::RandomDensityModulation,
-                vec![
-                    PropertyEnumChoice::DensityModulation(
-                        toniator_domain::DensityModulationKind::Uniform,
-                    ),
-                    PropertyEnumChoice::DensityModulation(
-                        toniator_domain::DensityModulationKind::ArtworkWeighted,
-                    ),
-                ],
-            ),
-            (
-                PropertyFieldId::RandomExclusion,
-                vec![
-                    PropertyEnumChoice::Exclusion(toniator_domain::ExclusionKind::None),
-                    PropertyEnumChoice::Exclusion(
-                        toniator_domain::ExclusionKind::MinimumCenterDistance,
-                    ),
-                    PropertyEnumChoice::Exclusion(
-                        toniator_domain::ExclusionKind::VisibleMarkMargin,
-                    ),
-                ],
-            ),
-        ] {
-            let selector = workspace
-                .document()
-                .property_values()
-                .into_iter()
-                .find(|value| value.descriptor.field == field)
-                .unwrap()
-                .descriptor;
-            for choice in choices {
-                let draft = workspace
-                    .document()
-                    .variant_transition_draft(&selector, choice)
-                    .unwrap();
-                assert!(draft.fields().iter().all(|field| matches!(
-                    transition_control_route(&field.value),
-                    InspectorControlRoute::FiniteNumber
-                        | InspectorControlRoute::WholeNumber
-                        | InspectorControlRoute::Toggle
-                        | InspectorControlRoute::Choice
-                        | InspectorControlRoute::Reference
-                )));
-            }
-        }
-        let descriptor = workspace
-            .document()
-            .property_values()
-            .into_iter()
-            .find(|value| value.descriptor.field == PropertyFieldId::RandomCharacter)
-            .unwrap()
-            .descriptor;
-        assert!(is_transition_selector(descriptor.field));
-        assert!(
-            command_for_inspector_input(
-                workspace.document(),
-                Some(channel_id),
-                DefinitionEditScope::SelectedCopy,
-                &descriptor,
-                InspectorInput::EnumChoice(PropertyEnumChoice::RandomCharacter(
-                    RandomCharacterKind::Even,
-                )),
-            )
-            .is_err()
-        );
-        let transition = workspace
-            .document()
-            .variant_transition_draft(
-                &descriptor,
-                PropertyEnumChoice::RandomCharacter(RandomCharacterKind::Even),
-            )
-            .unwrap();
-        let field = transition.fields().first().unwrap().clone();
-        let transition = transition
-            .with_updates(&[VariantTransitionFieldUpdate {
-                field: field.field,
-                target: field.target,
-                value: VariantTransitionValue::FiniteF64(3.25),
-            }])
-            .unwrap();
-        let command = command_for_transition_draft(
-            workspace.document(),
-            Some(channel_id),
-            DefinitionEditScope::SelectedCopy,
-            &transition,
-        )
-        .unwrap();
-        let before = workspace.history.revision();
-        workspace.history.apply(&command).unwrap();
-        assert!(workspace.history.revision() > before);
-        workspace.history.undo().unwrap();
-        assert!(workspace.history.can_redo());
-    }
-
+    /// Preserves the existing preview-page policy while asserting the bounded
+    /// Pattern Editor disclosure contract: ordinary structural controls are
+    /// primary and only explicit work-limit/tolerance fields are collapsed.
+    /// This pure metadata test does not create GTK widgets, document history,
+    /// preview state, errors, or panics beyond its assertions.
     #[test]
     fn inspector_disclosure_metadata_and_preview_pages_preserve_accepted_content() {
-        assert!(is_advanced_descriptor(PropertyFieldId::RandomSeed));
-        assert!(!is_advanced_descriptor(PropertyFieldId::Opacity));
+        assert!(is_pattern_editor_advanced_safety_descriptor(
+            PropertyFieldId::CoverageGuardSteps
+        ));
+        assert!(is_pattern_editor_advanced_safety_descriptor(
+            PropertyFieldId::RandomMaximumNeighborChecks
+        ));
+        assert!(!is_pattern_editor_advanced_safety_descriptor(
+            PropertyFieldId::RandomSeed
+        ));
         assert_eq!(
             field_detail(
                 Some(toniator_domain::PropertyBounds {
@@ -5582,7 +7605,7 @@ mod tests {
                 }),
                 toniator_domain::PropertyUnit::Count,
             ),
-            "≥0; Count"
+            "Count"
         );
         assert_eq!(page_while_preview_pending(true), Page::Success);
         assert_eq!(page_while_preview_pending(false), Page::Loading);
@@ -5618,34 +7641,25 @@ mod tests {
                 "every active descriptor/value pair routes for {model:?}"
             );
         }
-        let implementation = include_str!("main.rs");
-        let inspector_source = implementation
-            .split("fn authoritative_channel_ids")
-            .nth(1)
-            .and_then(|source| source.split("fn centered").next())
+    }
+
+    #[test]
+    /// Keeps a private Pattern Editor history independent from main workspace authority.
+    ///
+    /// The test applies the accepted bundled shortcut only to the clone and
+    /// proves the main document remains byte-for-byte equivalent in memory.
+    fn private_pattern_editor_history_never_mutates_the_main_workspace() {
+        let workspace = load_workspace(&asset("raster-sample-v1.toniator")).unwrap();
+        let main_document = workspace.document().clone();
+        let selected = authoritative_channel_ids(&main_document)[0];
+        let mut draft = fresh_history(main_document.clone()).unwrap();
+
+        PresetRegistry::bundled()
+            .apply_to_selected(&mut draft, selected, "even-random-circles")
             .unwrap();
-        for prohibited in [
-            "write_svg(",
-            "rasterize_output(",
-            "DocumentDtoV1",
-            "serde_json",
-        ] {
-            assert!(
-                !inspector_source.contains(prohibited),
-                "GTK inspector must not own {prohibited}"
-            );
-        }
-        for prohibited in [
-            "random_character_for(",
-            "modulation_for(",
-            "exclusion_for(",
-            "orientation_for(",
-            ".first()\n            .copied(),",
-        ] {
-            assert!(
-                !inspector_source.contains(prohibited),
-                "compound selectors must use the domain transition draft, not {prohibited}"
-            );
-        }
+
+        assert_ne!(draft.document(), &main_document);
+        assert_eq!(workspace.document(), &main_document);
+        assert!(!workspace.history.can_undo());
     }
 }

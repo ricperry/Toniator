@@ -1,0 +1,15 @@
+using Gtk 4.0;
+
+template $ToniatorConfirmationContent : Gtk.Box {
+  orientation: vertical;
+  spacing: 8;
+  margin-top: 12;
+  margin-bottom: 12;
+  margin-start: 12;
+  margin-end: 12;
+
+  Gtk.Label confirmation_detail {
+    xalign: 0;
+    wrap: true;
+  }
+}

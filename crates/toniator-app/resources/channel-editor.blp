@@ -1,0 +1,21 @@
+using Gtk 4.0;
+
+template $ToniatorChannelEditor : Gtk.Box {
+  orientation: vertical;
+  spacing: 12;
+  margin-top: 12;
+  margin-bottom: 12;
+  margin-start: 12;
+  margin-end: 12;
+
+  Gtk.Label editor_status {
+    xalign: 0;
+    wrap: true;
+    styles [ "dim-label" ]
+  }
+
+  Gtk.Box editor_content {
+    orientation: vertical;
+    spacing: 12;
+  }
+}

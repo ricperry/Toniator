@@ -1,0 +1,19 @@
+using Gtk 4.0;
+
+template $ToniatorPresetRow : Gtk.Box {
+  orientation: vertical;
+  spacing: 4;
+  margin-top: 8;
+  margin-bottom: 8;
+
+  Gtk.Label preset_name {
+    xalign: 0;
+    styles [ "heading" ]
+  }
+
+  Gtk.Label preset_description {
+    xalign: 0;
+    wrap: true;
+    styles [ "dim-label" ]
+  }
+}

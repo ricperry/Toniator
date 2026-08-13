@@ -46,7 +46,8 @@ while IFS=$'\t' read -r package dependency; do
         toniator-cli:toniator-io | \
         toniator-app:toniator-domain | \
         toniator-app:toniator-engine | \
-        toniator-app:toniator-io)
+        toniator-app:toniator-io | \
+        toniator-app:toniator-patterns)
             ;;
         *)
             fail "forbidden workspace dependency: $package -> $dependency"

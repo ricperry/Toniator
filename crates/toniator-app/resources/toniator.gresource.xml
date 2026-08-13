@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/com/silentbutdigital/Toniator">
+    <file preprocess="xml-stripblanks">window.ui</file>
+    <file preprocess="xml-stripblanks">channel-editor.ui</file>
+    <file preprocess="xml-stripblanks">pattern-editor.ui</file>
+    <file preprocess="xml-stripblanks">preset-row.ui</file>
+    <file preprocess="xml-stripblanks">confirmation-dialog.ui</file>
+    <file>toniator.css</file>
+  </gresource>
+</gresources>

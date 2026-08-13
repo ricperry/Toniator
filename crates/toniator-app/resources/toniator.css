@@ -6,3 +6,13 @@
 .toniator-viewer-rgb { background: #000000; }
 .toniator-viewer-cmyk { background: #ffffff; }
 .toniator-viewer-source-color-alpha { background: #808080; }
+
+/* The draft preview never consumes the controls' scroll allocation. */
+.toniator-draft-preview {
+  min-height: 120px;
+  min-width: 1px;
+}
+
+.toniator-draft-controls {
+  min-height: 180px;
+}

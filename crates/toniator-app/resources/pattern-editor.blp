@@ -1,0 +1,43 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $ToniatorPatternEditorShell : Gtk.Box {
+  orientation: vertical;
+  spacing: 12;
+  vexpand: true;
+  margin-top: 12;
+  margin-bottom: 12;
+  margin-start: 12;
+  margin-end: 12;
+
+  Gtk.Label draft_status {
+    xalign: 0;
+    wrap: true;
+    styles [ "dim-label" ]
+  }
+
+  Gtk.Picture draft_preview {
+    content-fit: contain;
+    hexpand: true;
+    vexpand: false;
+    valign: start;
+    can-shrink: true;
+    width-request: 280;
+    height-request: 160;
+    styles [ "toniator-draft-preview" ]
+  }
+
+  Gtk.ScrolledWindow draft_scroll {
+    vexpand: true;
+    hscrollbar-policy: never;
+    min-content-height: 180;
+    propagate-natural-height: false;
+    styles [ "toniator-draft-controls" ]
+  }
+
+  Gtk.Box draft_actions {
+    orientation: horizontal;
+    spacing: 12;
+    halign: end;
+  }
+}
