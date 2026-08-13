@@ -20,6 +20,17 @@ export, include both project-wide inputs from `assets/` in its acceptance
 scope. Preserve their bytes, keep derived output under `target/validation/`,
 and apply the SVG live-text/font rule in `assets/README.md`.
 
+Route every stage that changes or reviews `toniator-app`, GTK behavior, preview
+presentation, keyboard/focus/input, accessibility exposure, or a UI regression
+through `$gtk-wayland-debug` by default. Require a bounded affected-path run
+with semantic AT-SPI state, relevant WayVNC input, before/after grim screenshots,
+logs, and an evidence bundle; stop the private session at handoff. Skip this
+only for demonstrably headless-only work or behavior the harness cannot run.
+Treat automated Sway/wlroots results as strong evidence, never as human manual
+review or GNOME Shell/Mutter acceptance. Request manual desktop inspection only
+for unreproducible or specifically human-, Mutter-, portal-, or
+compositor-policy-dependent risk.
+
 Use one writer for one short bounded stage. The parent settles the stage
 decision, grants exact paths and acceptance checks, then reviews the writer's
 report and evidence before handing off any later stage. A report is evidence,

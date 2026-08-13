@@ -1,0 +1,10 @@
+schema_version = 1
+
+[repository]
+namespace = "toniator"
+
+[cargo]
+manifest_path = "Cargo.toml"
+
+[files]
+ignore = ["/assets/raster-sample-edited-v1.toniator"]

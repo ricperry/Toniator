@@ -17,10 +17,37 @@
 - Read applicable `.codex-work/` evidence before broad exploration, then
   validate it against the current checkout. Evidence is not durable product
   documentation.
+- Treat `.agents/skills/gtk-wayland-debug` as a first-class development tool
+  for the remainder of Toniator development. Use it by default for work that
+  changes or reviews `toniator-app`, GTK behavior, preview presentation,
+  keyboard/focus/input, accessibility exposure, or a UI regression. Prefer
+  AT-SPI for semantic state, WayVNC for input, grim for pixels, and process
+  logs/backtraces for diagnostics; collect an evidence bundle and stop the
+  private session at handoff. Skip it only for work that is demonstrably
+  headless-only or when the affected behavior cannot run in the harness.
+- Keep its evidence boundary explicit: automated Sway/wlroots results are
+  strong semantic, visual, input, and diagnostic evidence, but not human manual
+  review or GNOME Shell/Mutter acceptance. Ask for manual desktop inspection
+  only when the private harness cannot reproduce the behavior or the remaining
+  risk is specifically human-, Mutter-, portal-, or compositor-policy-dependent.
 - Read `docs/GREENFIELD_REWRITE_PLAN.md` and `ProgressTracker.md` before
   choosing scope. Treat the plan as the approved stage contract and the
   tracker as the current ledger, both subordinate to the protected normative
   specifications.
+- On every future Rust edit, ensure each touched non-trivial named function,
+  method, and test has literal `///` documentation that states its present-tense
+  responsibility and relevant authority boundaries, invariants, bounds, side
+  effects, and `# Errors`, `# Panics`, or `# Safety` conditions. Do not use
+  computed `#[doc = ...]` attributes for this purpose. Apply this rule on touch;
+  do not initiate a repository-wide documentation pass without explicit
+  authorization.
+- Use semantic-map for the architecture-sensitive work described by its skill.
+  Whenever it is inadequate or less efficient than standard codebase
+  exploration, append an evidence-backed observation to
+  `.codex-work/semantic-map/USAGE_EVALUATION.md` before handoff. Record the
+  semantic-map attempt, the standard fallback, observable command/output or
+  round-trip cost, limitations, and a proposed improvement. Do not count the
+  act of documenting the observation as semantic-map inefficiency.
 - Update `ProgressTracker.md` at every stage transition. The parent owns
   accepted/complete transitions and checkpoint hashes; evidence cannot
   substitute for user acceptance or a commit. Plan or roadmap changes require

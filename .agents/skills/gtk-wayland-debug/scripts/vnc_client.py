@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""Drive loopback-only WayVNC and terminate its Twisted helper cleanly."""
+
+from __future__ import annotations
+
+import argparse
+import importlib.metadata
+import os
+import sys
+
+
+def load_api():
+    """Import VNCDoTool with a concise installation error."""
+    try:
+        from vncdotool import api
+    except ImportError as error:
+        raise SystemExit(
+            f"VNCDoTool import failed: {error}. Install vncdotool."
+        ) from error
+    return api
+
+
+def parser() -> argparse.ArgumentParser:
+    """Build the private VNC helper command parser."""
+    command_parser = argparse.ArgumentParser()
+    subparsers = command_parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("check")
+    subparsers.add_parser("version")
+
+    click_parser = subparsers.add_parser("click")
+    click_parser.add_argument("x", type=int)
+    click_parser.add_argument("y", type=int)
+    click_parser.add_argument("button", type=int, nargs="?", default=1)
+
+    type_parser = subparsers.add_parser("type")
+    type_parser.add_argument("text")
+    return command_parser
+
+
+def main() -> int:
+    """Execute one unauthenticated VNC input primitive against loopback."""
+    arguments = parser().parse_args()
+    api = load_api()
+    if arguments.command == "check":
+        return 0
+    if arguments.command == "version":
+        print(f"vncdotool={importlib.metadata.version('vncdotool')}")
+        return 0
+
+    server = os.environ.get("TONIATOR_VNC_SERVER", "127.0.0.1::5901")
+    if not (server.startswith("127.0.0.1::") or server.startswith("localhost::")):
+        raise SystemExit(f"refusing non-loopback VNC server: {server}")
+    try:
+        with api.connect(server, timeout=15) as client:
+            if arguments.command == "click":
+                if arguments.button < 1 or arguments.button > 8:
+                    raise SystemExit("mouse button must be between 1 and 8")
+                if arguments.x < 0 or arguments.y < 0:
+                    raise SystemExit("mouse coordinates must be non-negative")
+                client.mouseMove(arguments.x, arguments.y)
+                client.mousePress(arguments.button)
+            elif arguments.command == "type":
+                for character in arguments.text:
+                    if character == "\r":
+                        continue
+                    key = {"-": "minus", "\n": "enter", "\t": "tab"}.get(character, character)
+                    client.keyPress(key)
+            else:
+                raise AssertionError(f"unhandled command: {arguments.command}")
+    finally:
+        api.shutdown()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
