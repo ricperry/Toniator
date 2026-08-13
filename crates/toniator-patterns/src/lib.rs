@@ -14,7 +14,8 @@ use toniator_domain::{
     SiteExclusionPolicy, SourceMapping, StraightGuideDimension, VisibleMarkSizingPolicy,
 };
 pub use toniator_geometry::{
-    AffineTransform2D, Bounds, CanonicalCircleMark, GuideInstanceId, GuideIntersectionProvenance,
+    AffineTransform2D, Bounds, CanonicalCircleMark, FamilySite, FamilySiteError, FamilySiteId,
+    FamilySiteProvenance, FamilySiteSet, GuideInstanceId, GuideIntersectionProvenance,
     IntersectionSite, Point2, SiteId, SiteScope, StraightGuide, Vector2, projection_range,
 };
 use toniator_sampling::{
@@ -390,67 +391,60 @@ pub struct PatternPipelinePlan {
 }
 
 /// A family result flowing into modulation and ordered realization. Renderers
-/// consume only the canonical marks emitted by realizers, never this enum.
+/// consume only the canonical marks emitted by realizers, never this value.
 #[derive(Clone, Debug, PartialEq)]
-pub enum TypedFamilyOutput {
-    GuideIntersections {
-        family: FamilyCapability,
-        output: GridFamilyOutput,
-    },
-    GeneralizedStraightGuides {
-        family: FamilyCapability,
-        output: GridFamilyOutput,
-        product_provenance: Vec<GeneralizedSiteProvenance>,
-    },
-    RandomSites {
-        family: FamilyCapability,
-        output: GridFamilyOutput,
-        product_provenance: Vec<RandomSiteProvenance>,
-        diagnostics: RandomSiteDiagnostics,
-    },
+pub struct TypedFamilyOutput {
+    family: FamilyCapability,
+    sites: FamilySiteSet,
+    diagnostics: Option<RandomSiteDiagnostics>,
+    structure: TypedFamilyStructure,
+}
+
+/// Truthful non-site metadata retained for the current circle compatibility adapter.
+#[derive(Clone, Debug, PartialEq)]
+struct TypedFamilyStructure {
+    coverage: Vec<GuideCoverage>,
+    guides: Vec<StraightGuide>,
+    support_radius: f64,
+    guard_steps: u32,
+    antialias_margin: f64,
+    generation_domain: Bounds,
 }
 
 impl TypedFamilyOutput {
+    /// Returns the immutable structural capability that produced this derived output.
     pub fn family(&self) -> &FamilyCapability {
-        match self {
-            Self::GuideIntersections { family, .. }
-            | Self::GeneralizedStraightGuides { family, .. }
-            | Self::RandomSites { family, .. } => family,
-        }
+        &self.family
     }
 
+    /// Returns the existing family identity; site interchange adds no cache identity.
     pub fn family_fingerprint(&self) -> &str {
-        match self {
-            Self::GuideIntersections { output, .. }
-            | Self::GeneralizedStraightGuides { output, .. }
-            | Self::RandomSites { output, .. } => &output.family_fingerprint,
-        }
+        self.sites.family_fingerprint()
     }
 
-    pub fn grid(&self) -> &GridFamilyOutput {
-        match self {
-            Self::GuideIntersections { output, .. }
-            | Self::GeneralizedStraightGuides { output, .. }
-            | Self::RandomSites { output, .. } => output,
-        }
+    /// Returns the sole truthful reusable site authority for this family result.
+    pub fn site_set(&self) -> &FamilySiteSet {
+        &self.sites
+    }
+
+    /// Returns bounded random-process diagnostics only for random-site products.
+    pub fn random_diagnostics(&self) -> Option<&RandomSiteDiagnostics> {
+        self.diagnostics.as_ref()
     }
 }
 
 /// Provenance that survives explicit modulation and ordered output realization.
 /// It is intentionally adjacent to, rather than mixed into, canonical marks.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TypedRealizationProvenance {
     pub structural: StructuralProductProvenance,
     pub modulation: PatternModulation,
     pub ordered_output_layer_ids: Vec<PatternOutputLayerId>,
     pub ordered_output_prototypes: Vec<MarkPrototype>,
     pub ordered_output_orientations: Vec<MarkOrientation>,
-    /// Exact generalized product provenance retained beside the canonical
-    /// circle adapter; no realizer reconstructs it from finite guides.
-    pub site_product_provenance: Vec<GeneralizedSiteProvenance>,
-    /// Random-site provenance remains adjacent to canonical marks so render
-    /// algorithms do not acquire a source-distribution branch.
-    pub random_site_product_provenance: Vec<RandomSiteProvenance>,
+    /// Truthful evaluator-derived sites remain adjacent to canonical marks;
+    /// realizers consume only their private current-circle compatibility view.
+    pub site_set: FamilySiteSet,
 }
 
 /// A realization plus its typed provenance. Renderers consume `output` only.
@@ -819,11 +813,24 @@ pub fn evaluate_typed_family_product_with_source_cancellable(
 ) -> Result<TypedFamilyOutput, PatternPipelineError> {
     if family.product == StructuralProductCapability::RandomSites {
         let output = evaluate_random_sites_cancellable(family, request, source, is_cancelled)?;
-        return Ok(TypedFamilyOutput::RandomSites {
+        let site_set = FamilySiteSet::new(
+            output.family_fingerprint,
+            family.provenance.mechanism_ids[3],
+            output.sites,
+        )
+        .map_err(family_site_error)?;
+        return Ok(TypedFamilyOutput {
             family: family.clone(),
-            product_provenance: output.provenance,
-            diagnostics: output.diagnostics,
-            output: output.grid,
+            sites: site_set,
+            diagnostics: Some(output.diagnostics),
+            structure: TypedFamilyStructure {
+                coverage: Vec::new(),
+                guides: Vec::new(),
+                support_radius: request.support_radius,
+                guard_steps: request.guard_steps,
+                antialias_margin: ANTIALIAS_MARGIN,
+                generation_domain: output.generation_domain,
+            },
         });
     }
     let legacy_dimensions = family.dimensions.as_slice()
@@ -862,82 +869,129 @@ pub fn evaluate_typed_family_product_with_source_cancellable(
             is_cancelled,
         )
         .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
-        let product_provenance = output
-            .sites
-            .iter()
-            .map(|site| site.provenance.clone())
-            .collect();
-        return Ok(TypedFamilyOutput::GeneralizedStraightGuides {
-            family: family.clone(),
-            output: generalized_as_grid_output(output, request.support_radius, request.guard_steps),
-            product_provenance,
-        });
-    }
-    let output = evaluate_straight_grid_cancellable(request, is_cancelled)
-        .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
-    Ok(TypedFamilyOutput::GuideIntersections {
-        family: family.clone(),
-        output,
-    })
-}
-
-fn generalized_as_grid_output(
-    output: GeneralizedStraightGuideOutput,
-    support_radius: f64,
-    guard_steps: u32,
-) -> GridFamilyOutput {
-    let sites = output
-        .sites
-        .into_iter()
-        .map(|site| {
-            let (first, second, contributors) = match site.provenance {
-                GeneralizedSiteProvenance::Intersection { contributors } => {
-                    let first = contributors
-                        .first()
-                        .copied()
-                        .expect("intersection provenance has contributors");
-                    let second = contributors.get(1).copied().unwrap_or(first);
-                    (first, second, contributors)
-                }
-                GeneralizedSiteProvenance::AlongGuide {
-                    guide_id, sequence, ..
-                } => (
-                    guide_id,
-                    GuideInstanceId {
-                        dimension_id: guide_id.dimension_id,
-                        index: sequence,
-                    },
-                    vec![guide_id],
-                ),
-            };
-            IntersectionSite {
-                id: SiteId {
-                    first_dimension_id: first.dimension_id,
-                    first_index: first.index,
-                    second_dimension_id: second.dimension_id,
-                    second_index: second.index,
-                },
-                position: site.position,
-                scope: site.scope,
-                provenance: GuideIntersectionProvenance { contributors },
-            }
-        })
-        .collect();
-    GridFamilyOutput {
-        family_fingerprint: output.family_fingerprint,
-        guard_steps,
-        support_radius,
-        antialias_margin: ANTIALIAS_MARGIN,
-        generation_domain: Bounds::from_points(
+        let site_set = family_sites_from_generalized(&output, family.provenance.mechanism_ids[1])?;
+        let generation_domain = Bounds::from_points(
             output
                 .guides
                 .iter()
                 .flat_map(|guide| [guide.start, guide.end]),
         )
-        .expect("generalized finite guides produce bounds"),
-        coverage: output.coverage,
-        guides: output.guides,
+        .expect("generalized finite guides produce bounds");
+        return Ok(TypedFamilyOutput {
+            family: family.clone(),
+            sites: site_set,
+            diagnostics: None,
+            structure: TypedFamilyStructure {
+                coverage: output.coverage,
+                guides: output.guides,
+                support_radius: request.support_radius,
+                guard_steps: request.guard_steps,
+                antialias_margin: ANTIALIAS_MARGIN,
+                generation_domain,
+            },
+        });
+    }
+    let output = evaluate_straight_grid_cancellable(request, is_cancelled)
+        .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
+    let site_set = family_sites_from_grid(&output, family.provenance.mechanism_ids[1])?;
+    Ok(TypedFamilyOutput {
+        family: family.clone(),
+        sites: site_set,
+        diagnostics: None,
+        structure: TypedFamilyStructure::from_grid(&output),
+    })
+}
+
+/// Converts a validated family-site failure into the typed evaluation error boundary.
+fn family_site_error(error: FamilySiteError) -> PatternPipelineError {
+    PatternPipelineError::new(error.path(), error.message())
+}
+
+/// Publishes existing straight intersections through the shared site authority.
+fn family_sites_from_grid(
+    output: &GridFamilyOutput,
+    product_mechanism_id: PatternMechanismId,
+) -> Result<FamilySiteSet, PatternPipelineError> {
+    FamilySiteSet::new(
+        output.family_fingerprint.clone(),
+        product_mechanism_id,
+        output
+            .sites
+            .iter()
+            .enumerate()
+            .map(|(ordinal, site)| FamilySite {
+                id: FamilySiteId {
+                    mechanism_id: product_mechanism_id,
+                    ordinal,
+                },
+                position: site.position,
+                scope: site.scope,
+                provenance: FamilySiteProvenance::GuideIntersection {
+                    contributors: site.provenance.contributors.clone(),
+                },
+            })
+            .collect(),
+    )
+    .map_err(family_site_error)
+}
+
+/// Publishes generalized guide products without fabricating intersection facts.
+fn family_sites_from_generalized(
+    output: &GeneralizedStraightGuideOutput,
+    product_mechanism_id: PatternMechanismId,
+) -> Result<FamilySiteSet, PatternPipelineError> {
+    let sites = output
+        .sites
+        .iter()
+        .enumerate()
+        .map(|(ordinal, site)| FamilySite {
+            id: FamilySiteId {
+                mechanism_id: product_mechanism_id,
+                ordinal,
+            },
+            position: site.position,
+            scope: site.scope,
+            provenance: match &site.provenance {
+                GeneralizedSiteProvenance::Intersection { contributors } => {
+                    FamilySiteProvenance::GuideIntersection {
+                        contributors: contributors.clone(),
+                    }
+                }
+                GeneralizedSiteProvenance::AlongGuide {
+                    guide_id,
+                    guide_order,
+                    sequence,
+                    absolute_arc_position_bits,
+                    local_arc_position_bits,
+                } => FamilySiteProvenance::AlongGuide {
+                    guide_id: *guide_id,
+                    guide_order: *guide_order,
+                    sequence: *sequence,
+                    absolute_arc_position_bits: *absolute_arc_position_bits,
+                    local_arc_position_bits: *local_arc_position_bits,
+                },
+            },
+        })
+        .collect();
+    FamilySiteSet::new(
+        output.family_fingerprint.clone(),
+        product_mechanism_id,
         sites,
+    )
+    .map_err(family_site_error)
+}
+
+impl TypedFamilyStructure {
+    /// Captures straight-grid metadata without exposing it as generic site output.
+    fn from_grid(output: &GridFamilyOutput) -> Self {
+        Self {
+            coverage: output.coverage.clone(),
+            guides: output.guides.clone(),
+            support_radius: output.support_radius,
+            guard_steps: output.guard_steps,
+            antialias_margin: output.antialias_margin,
+            generation_domain: output.generation_domain,
+        }
     }
 }
 
@@ -965,8 +1019,9 @@ pub struct RandomSiteProvenance {
 }
 
 struct RandomSiteEvaluation {
-    grid: GridFamilyOutput,
-    provenance: Vec<RandomSiteProvenance>,
+    family_fingerprint: String,
+    generation_domain: Bounds,
+    sites: Vec<FamilySite>,
     diagnostics: RandomSiteDiagnostics,
 }
 
@@ -1114,6 +1169,7 @@ impl StablePrng {
     }
 }
 
+/// Evaluates bounded random sites and publishes only truthful random provenance.
 fn evaluate_random_sites_cancellable(
     family: &FamilyCapability,
     request: &GridInspectRequest,
@@ -1304,26 +1360,17 @@ fn evaluate_random_sites_cancellable(
     let sites: Vec<_> = accepted
         .iter()
         .enumerate()
-        .map(|(index, (point, _, scope))| IntersectionSite {
-            id: SiteId {
-                first_dimension_id: family.provenance.mechanism_ids[3].0,
-                first_index: i64::try_from(index).expect("candidate limit bounds site index"),
-                second_dimension_id: family.provenance.mechanism_ids[0].0,
-                second_index: i64::from(random.seed),
+        .map(|(index, (point, _, scope))| FamilySite {
+            id: FamilySiteId {
+                mechanism_id: family.provenance.mechanism_ids[3],
+                ordinal: index,
             },
             position: *point,
             scope: *scope,
-            provenance: GuideIntersectionProvenance {
-                contributors: vec![
-                    GuideInstanceId {
-                        dimension_id: family.provenance.mechanism_ids[0].0,
-                        index: i64::from(random.seed),
-                    },
-                    GuideInstanceId {
-                        dimension_id: family.provenance.mechanism_ids[3].0,
-                        index: i64::try_from(index).expect("candidate limit bounds site index"),
-                    },
-                ],
+            provenance: FamilySiteProvenance::Random {
+                candidate_ordinal: provenance[index].candidate_ordinal,
+                accepted_ordinal: provenance[index].accepted_ordinal,
+                exclusion_neighbor_ordinal: provenance[index].exclusion_neighbor_ordinal,
             },
         })
         .collect();
@@ -1342,17 +1389,9 @@ fn evaluate_random_sites_cancellable(
         guard_sites: sites.len() - canvas_sites,
     };
     Ok(RandomSiteEvaluation {
-        grid: GridFamilyOutput {
-            family_fingerprint: random_family_fingerprint(family, request, weighted_source),
-            guard_steps: request.guard_steps,
-            support_radius: request.support_radius,
-            antialias_margin: ANTIALIAS_MARGIN,
-            generation_domain: padded,
-            coverage: Vec::new(),
-            guides: Vec::new(),
-            sites,
-        },
-        provenance,
+        family_fingerprint: random_family_fingerprint(family, request, weighted_source),
+        generation_domain: padded,
+        sites,
         diagnostics,
     })
 }
@@ -1564,7 +1603,8 @@ pub fn realize_typed_mapped_outputs(
     response: MarkResponse,
 ) -> Result<TypedRealization<MappedCircularMarkRealization>, PatternPipelineError> {
     let provenance = realization_provenance(family, plan)?;
-    realize_mapped_circular_marks(family.grid(), source, canvas, mapping, response)
+    let compatibility = adapt_family_sites_for_current_circular_marks(family);
+    realize_mapped_circular_marks(&compatibility, source, canvas, mapping, response)
         .map(|mut output| {
             output.realization_fingerprint =
                 orientation_identity(&output.realization_fingerprint, family, &provenance);
@@ -1583,7 +1623,8 @@ pub fn realize_typed_source_color_outputs(
     response: MarkResponse,
 ) -> Result<TypedRealization<SourceColorCircularMarkRealization>, PatternPipelineError> {
     let provenance = realization_provenance(family, plan)?;
-    realize_source_color_circular_marks(family.grid(), source, canvas, mapping, response)
+    let compatibility = adapt_family_sites_for_current_circular_marks(family);
+    realize_source_color_circular_marks(&compatibility, source, canvas, mapping, response)
         .map(|mut output| {
             output.realization_fingerprint =
                 orientation_identity(&output.realization_fingerprint, family, &provenance);
@@ -1604,8 +1645,9 @@ pub fn realize_typed_diagnostic_outputs(
     response: MarkResponse,
 ) -> Result<TypedRealization<CircularMarkRealization>, PatternPipelineError> {
     let provenance = realization_provenance(family, plan)?;
+    let compatibility = adapt_family_sites_for_current_circular_marks(family);
     realize_circular_marks(
-        family.grid(),
+        &compatibility,
         source,
         canvas,
         placement,
@@ -1620,12 +1662,33 @@ pub fn realize_typed_diagnostic_outputs(
     .map_err(|error| PatternPipelineError::new(error.path(), error.message()))
 }
 
+/// Preserves accepted realization fingerprints while excluding diagnostic site provenance.
 fn orientation_identity(
     legacy_identity: &str,
     family: &TypedFamilyOutput,
     provenance: &TypedRealizationProvenance,
 ) -> String {
-    if matches!(family, TypedFamilyOutput::GuideIntersections { .. }) {
+    if family.family().product == StructuralProductCapability::GuideIntersections
+        && family.family().dimensions.as_slice()
+            == [
+                StraightGuideDimension {
+                    id: FIRST_DIMENSION_ID,
+                    baseline_angle_degrees: 0.0,
+                    phase: 0.0,
+                    repetition: toniator_domain::StraightGuideRepetition {
+                        spacing_multiplier: 1.0,
+                    },
+                },
+                StraightGuideDimension {
+                    id: SECOND_DIMENSION_ID,
+                    baseline_angle_degrees: 90.0,
+                    phase: 0.0,
+                    repetition: toniator_domain::StraightGuideRepetition {
+                        spacing_multiplier: 1.0,
+                    },
+                },
+            ]
+    {
         return legacy_identity.to_owned();
     }
     let mut bytes = legacy_identity.as_bytes().to_vec();
@@ -1661,6 +1724,7 @@ fn orientation_identity(
     fnv1a64(bytes)
 }
 
+/// Binds a compatible typed plan to truthful family sites before current realization.
 fn realization_provenance(
     family: &TypedFamilyOutput,
     plan: &PatternPipelinePlan,
@@ -1691,25 +1755,101 @@ fn realization_provenance(
                     .iter()
                     .map(|output| output.orientation.clone())
                     .collect(),
-                site_product_provenance: match family {
-                    TypedFamilyOutput::GuideIntersections { .. } => Vec::new(),
-                    TypedFamilyOutput::GeneralizedStraightGuides {
-                        product_provenance, ..
-                    } => product_provenance.clone(),
-                    TypedFamilyOutput::RandomSites { .. } => Vec::new(),
-                },
-                random_site_product_provenance: match family {
-                    TypedFamilyOutput::RandomSites {
-                        product_provenance, ..
-                    } => product_provenance.clone(),
-                    _ => Vec::new(),
-                },
+                site_set: family.site_set().clone(),
             })
         }
         _ => Err(PatternPipelineError::new(
             "pattern.output_layers.capability",
             "ordered output realization has no compatible circular-mark layer",
         )),
+    }
+}
+
+/// Adapts truthful family sites only at the current circle-realization seam.
+///
+/// This private compatibility object preserves accepted `SiteId` and
+/// contributor bytes for existing canonical circles. It is deliberately never
+/// published as structural output, persisted, or used for cache identity.
+fn adapt_family_sites_for_current_circular_marks(family: &TypedFamilyOutput) -> GridFamilyOutput {
+    let sites = family
+        .site_set()
+        .iter()
+        .map(|site| {
+            let (id, contributors) = match &site.provenance {
+                FamilySiteProvenance::GuideIntersection { contributors } => {
+                    let first = contributors[0];
+                    let second = contributors[1];
+                    (
+                        SiteId {
+                            first_dimension_id: first.dimension_id,
+                            first_index: first.index,
+                            second_dimension_id: second.dimension_id,
+                            second_index: second.index,
+                        },
+                        contributors.clone(),
+                    )
+                }
+                FamilySiteProvenance::AlongGuide {
+                    guide_id, sequence, ..
+                } => (
+                    SiteId {
+                        first_dimension_id: guide_id.dimension_id,
+                        first_index: guide_id.index,
+                        second_dimension_id: guide_id.dimension_id,
+                        second_index: *sequence,
+                    },
+                    vec![*guide_id],
+                ),
+                FamilySiteProvenance::Random {
+                    accepted_ordinal, ..
+                } => {
+                    let random = family
+                        .family()
+                        .random
+                        .as_ref()
+                        .expect("random site provenance requires a random family capability");
+                    let process = family.family().provenance.mechanism_ids[0];
+                    let product = family.site_set().product_mechanism_id();
+                    let accepted = i64::try_from(*accepted_ordinal)
+                        .expect("accepted random-site ordinal fits i64");
+                    let seed = i64::from(random.seed);
+                    (
+                        SiteId {
+                            first_dimension_id: product.0,
+                            first_index: accepted,
+                            second_dimension_id: process.0,
+                            second_index: seed,
+                        },
+                        vec![
+                            GuideInstanceId {
+                                dimension_id: process.0,
+                                index: seed,
+                            },
+                            GuideInstanceId {
+                                dimension_id: product.0,
+                                index: accepted,
+                            },
+                        ],
+                    )
+                }
+            };
+            IntersectionSite {
+                id,
+                position: site.position,
+                scope: site.scope,
+                provenance: GuideIntersectionProvenance { contributors },
+            }
+        })
+        .collect();
+    GridFamilyOutput {
+        family_fingerprint: family.family_fingerprint().to_owned(),
+        guard_steps: family.structure.guard_steps,
+        support_radius: family.structure.support_radius,
+        antialias_margin: family.structure.antialias_margin,
+        generation_domain: family.structure.generation_domain,
+        coverage: family.structure.coverage.clone(),
+        guides: family.structure.guides.clone(),
+        sites,
     }
 }
 
@@ -4133,7 +4273,11 @@ mod typed_pipeline_tests {
         let expected = evaluate_straight_grid(&request()).unwrap();
         let generic = evaluate_typed_family(&definition, &request()).unwrap();
         assert_eq!(generic.family_fingerprint(), expected.family_fingerprint);
-        assert_eq!(generic.grid(), &expected);
+        assert_eq!(generic.site_set().len(), expected.sites.len());
+        assert_eq!(
+            generic.site_set().sites()[0].position,
+            expected.sites[0].position
+        );
 
         let realization = realize_typed_mapped_outputs(
             &generic,

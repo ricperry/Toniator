@@ -1,10 +1,20 @@
 use std::collections::BTreeSet;
 
-use toniator_domain::{CanvasSpec, DensityMetric2D};
-use toniator_geometry::{SiteId, Vector2};
-use toniator_patterns::{
-    ANTIALIAS_MARGIN, GridInspectRequest, directional_spacing, evaluate_straight_grid,
+use toniator_domain::{
+    CanvasSpec, CoveragePolicy, DensityMetric2D, GeneralizedSiteProduct, GuideDimensionId,
+    MarkOrientation, PatternDefinition, PatternDefinitionId, PatternMechanismId,
+    PatternOutputLayerId, RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy,
+    StraightGuideDimension, StraightGuideRepetition,
 };
+use toniator_geometry::{FamilySiteProvenance, SiteId, Vector2};
+use toniator_patterns::{
+    ANTIALIAS_MARGIN, GridInspectRequest, MarkResponse, StructuralProductCapability,
+    directional_spacing, evaluate_straight_grid, evaluate_typed_family,
+    evaluate_typed_family_product_cancellable,
+    evaluate_typed_family_product_with_source_cancellable, realize_typed_mapped_outputs,
+    resolve_pattern_pipeline,
+};
+use toniator_sampling::{SourceFormatHint, decode_source};
 
 fn request(rotation_degrees: f64, translation_x: f64, translation_y: f64) -> GridInspectRequest {
     GridInspectRequest {
@@ -334,4 +344,400 @@ fn candidate_position(
         input.canvas.width / 2.0 + cosine * local_x - sine * local_y + input.translation_x,
         input.canvas.height / 2.0 + sine * local_x + cosine * local_y + input.translation_y,
     )
+}
+
+/// Builds the independent generalized straight definition used to exercise truthful site forms.
+fn generalized_definition(product: GeneralizedSiteProduct) -> PatternDefinition {
+    PatternDefinition::generalized_straight_guides(
+        PatternDefinitionId(71),
+        "truthful generalized sites",
+        PatternMechanismId(72),
+        PatternMechanismId(73),
+        PatternOutputLayerId(74),
+        vec![
+            StraightGuideDimension {
+                id: GuideDimensionId(11),
+                baseline_angle_degrees: 17.0,
+                phase: 1.25,
+                repetition: StraightGuideRepetition {
+                    spacing_multiplier: 1.0,
+                },
+            },
+            StraightGuideDimension {
+                id: GuideDimensionId(12),
+                baseline_angle_degrees: 89.5,
+                phase: -2.5,
+                repetition: StraightGuideRepetition {
+                    spacing_multiplier: 0.75,
+                },
+            },
+            StraightGuideDimension {
+                id: GuideDimensionId(13),
+                baseline_angle_degrees: 137.0,
+                phase: 0.0,
+                repetition: StraightGuideRepetition {
+                    spacing_multiplier: 1.0,
+                },
+            },
+        ],
+        product,
+        MarkOrientation::Fixed,
+        CoveragePolicy {
+            guard_steps: 2,
+            maximum_support_radius: 4.5,
+        },
+    )
+}
+
+/// Builds three coincident phase-zero guide dimensions so the evaluator must merge
+/// their shared center into one genuine three-contributor intersection site.
+fn concurrent_multiway_definition() -> PatternDefinition {
+    PatternDefinition::generalized_straight_guides(
+        PatternDefinitionId(75),
+        "concurrent multiway sites",
+        PatternMechanismId(76),
+        PatternMechanismId(77),
+        PatternOutputLayerId(78),
+        vec![
+            StraightGuideDimension {
+                id: GuideDimensionId(21),
+                baseline_angle_degrees: 0.0,
+                phase: 0.0,
+                repetition: StraightGuideRepetition {
+                    spacing_multiplier: 1.0,
+                },
+            },
+            StraightGuideDimension {
+                id: GuideDimensionId(22),
+                baseline_angle_degrees: 60.0,
+                phase: 0.0,
+                repetition: StraightGuideRepetition {
+                    spacing_multiplier: 1.0,
+                },
+            },
+            StraightGuideDimension {
+                id: GuideDimensionId(23),
+                baseline_angle_degrees: 120.0,
+                phase: 0.0,
+                repetition: StraightGuideRepetition {
+                    spacing_multiplier: 1.0,
+                },
+            },
+        ],
+        GeneralizedSiteProduct::Intersections {
+            dimensions: vec![
+                GuideDimensionId(21),
+                GuideDimensionId(22),
+                GuideDimensionId(23),
+            ],
+            merge_epsilon: 1e-9,
+        },
+        MarkOrientation::Fixed,
+        CoveragePolicy {
+            guard_steps: 2,
+            maximum_support_radius: 4.5,
+        },
+    )
+}
+
+/// Builds one random definition while retaining the existing deterministic process IDs.
+fn random_definition(
+    character: RandomSiteCharacter,
+    modulation: SiteDensityModulation,
+) -> PatternDefinition {
+    PatternDefinition::random_sites(
+        PatternDefinitionId(81),
+        "truthful random sites",
+        PatternMechanismId(82),
+        PatternMechanismId(83),
+        PatternMechanismId(84),
+        PatternMechanismId(85),
+        PatternOutputLayerId(86),
+        character,
+        0x1234_5678,
+        modulation,
+        SiteExclusionPolicy::None,
+        64,
+        16_000_000,
+        CoveragePolicy {
+            guard_steps: 2,
+            maximum_support_radius: 4.5,
+        },
+    )
+}
+
+/// Proves every typed family variant exposes one truthful shared site set.
+#[test]
+fn typed_family_outputs_publish_truthful_family_site_sets() {
+    let grid = PatternDefinition::supported_straight_grid(
+        PatternDefinitionId(61),
+        "straight",
+        PatternMechanismId(62),
+        PatternMechanismId(63),
+        PatternOutputLayerId(64),
+        CoveragePolicy {
+            guard_steps: 2,
+            maximum_support_radius: 4.5,
+        },
+    );
+    let straight = evaluate_typed_family(&grid, &request(17.0, 3.25, -4.5)).unwrap();
+    assert_eq!(
+        straight.family().product,
+        StructuralProductCapability::GuideIntersections
+    );
+    assert!(straight.random_diagnostics().is_none());
+    assert!(straight.site_set().sites().iter().all(|site| matches!(site.provenance, FamilySiteProvenance::GuideIntersection { ref contributors } if contributors.len() == 2)));
+
+    let multiway =
+        evaluate_typed_family(&concurrent_multiway_definition(), &request(0.0, 0.0, 0.0)).unwrap();
+    assert!(multiway.site_set().sites().iter().all(|site| matches!(site.provenance, FamilySiteProvenance::GuideIntersection { ref contributors } if contributors.len() >= 2)));
+    assert!(multiway.site_set().sites().iter().any(|site| matches!(&site.provenance, FamilySiteProvenance::GuideIntersection { contributors } if contributors.len() >= 3 && contributors.iter().copied().collect::<std::collections::BTreeSet<_>>().len() == contributors.len())));
+
+    let along = generalized_definition(GeneralizedSiteProduct::AlongGuides {
+        dimensions: vec![GuideDimensionId(11), GuideDimensionId(13)],
+        interval_multiplier: 0.75,
+        phase: 0.5,
+    });
+    let along = evaluate_typed_family(&along, &request(17.0, 3.25, -4.5)).unwrap();
+    assert!(
+        along
+            .site_set()
+            .sites()
+            .iter()
+            .all(|site| matches!(site.provenance, FamilySiteProvenance::AlongGuide { .. }))
+    );
+
+    let source = decode_source(
+        &std::fs::read("../../assets/raster-sample.png").unwrap(),
+        SourceFormatHint::Png,
+    )
+    .unwrap();
+    for (character, modulation) in [
+        (
+            RandomSiteCharacter::RawUniform,
+            SiteDensityModulation::Uniform,
+        ),
+        (
+            RandomSiteCharacter::Even {
+                minimum_center_distance: 8.0,
+            },
+            SiteDensityModulation::Uniform,
+        ),
+        (
+            RandomSiteCharacter::Clustered {
+                cluster_density: 0.1,
+                cluster_spread: 4.0,
+                cluster_strength: 0.9,
+            },
+            SiteDensityModulation::Uniform,
+        ),
+        (
+            RandomSiteCharacter::RawUniform,
+            SiteDensityModulation::ArtworkWeighted {
+                mapping: toniator_domain::SourceMapping::canonical(
+                    toniator_domain::SourceMappingComponent::Luminance,
+                ),
+                strength: 0.8,
+                response: toniator_domain::ArtworkWeightResponse::Linear,
+            },
+        ),
+    ] {
+        let definition = random_definition(character, modulation.clone());
+        let plan = resolve_pattern_pipeline(&definition).unwrap();
+        let output = evaluate_typed_family_product_with_source_cancellable(
+            &plan.family,
+            &request(17.0, 3.25, -4.5),
+            (!matches!(modulation, SiteDensityModulation::Uniform)).then_some(&source),
+            &|| false,
+        )
+        .unwrap();
+        assert!(output.random_diagnostics().is_some());
+        assert!(
+            output
+                .site_set()
+                .sites()
+                .iter()
+                .all(|site| matches!(site.provenance, FamilySiteProvenance::Random { .. }))
+        );
+    }
+}
+
+/// Proves the private circle seam alone preserves accepted legacy ID and contributor bytes.
+#[test]
+fn current_circle_compatibility_adapter_preserves_accepted_site_id_and_contributor_bytes() {
+    let source = decode_source(
+        &std::fs::read("../../assets/raster-sample.png").unwrap(),
+        SourceFormatHint::Png,
+    )
+    .unwrap();
+    let response = MarkResponse {
+        minimum_size: 2.0,
+        maximum_size: 9.0,
+    };
+    let mapping =
+        toniator_domain::SourceMapping::canonical(toniator_domain::SourceMappingComponent::Red);
+    let along_definition = generalized_definition(GeneralizedSiteProduct::AlongGuides {
+        dimensions: vec![GuideDimensionId(11)],
+        interval_multiplier: 0.75,
+        phase: 0.5,
+    });
+    let along_plan = resolve_pattern_pipeline(&along_definition).unwrap();
+    let along = evaluate_typed_family_product_cancellable(
+        &along_plan.family,
+        &request(17.0, 3.25, -4.5),
+        &|| false,
+    )
+    .unwrap();
+    let along_realization = realize_typed_mapped_outputs(
+        &along,
+        &along_plan,
+        &source,
+        &request(17.0, 3.25, -4.5).canvas,
+        mapping,
+        response,
+    )
+    .unwrap();
+    for (site, mark) in along
+        .site_set()
+        .sites()
+        .iter()
+        .zip(&along_realization.output.marks)
+    {
+        let FamilySiteProvenance::AlongGuide {
+            guide_id, sequence, ..
+        } = site.provenance
+        else {
+            panic!("along-guide provenance");
+        };
+        assert_eq!(
+            mark.source_site_id.first_dimension_id,
+            guide_id.dimension_id
+        );
+        assert_eq!(mark.source_site_id.first_index, guide_id.index);
+        assert_eq!(
+            mark.source_site_id.second_dimension_id,
+            guide_id.dimension_id
+        );
+        assert_eq!(mark.source_site_id.second_index, sequence);
+        assert_eq!(mark.provenance.contributors, vec![guide_id]);
+    }
+    let intersection_plan = resolve_pattern_pipeline(&concurrent_multiway_definition()).unwrap();
+    let intersections = evaluate_typed_family_product_cancellable(
+        &intersection_plan.family,
+        &request(0.0, 0.0, 0.0),
+        &|| false,
+    )
+    .unwrap();
+    let intersection_realization = realize_typed_mapped_outputs(
+        &intersections,
+        &intersection_plan,
+        &source,
+        &request(0.0, 0.0, 0.0).canvas,
+        mapping,
+        response,
+    )
+    .unwrap();
+    for (site, mark) in intersections
+        .site_set()
+        .sites()
+        .iter()
+        .zip(&intersection_realization.output.marks)
+    {
+        let FamilySiteProvenance::GuideIntersection { ref contributors } = site.provenance else {
+            panic!("intersection provenance");
+        };
+        assert!(contributors.len() >= 2);
+        assert_eq!(
+            mark.source_site_id.first_dimension_id,
+            contributors[0].dimension_id
+        );
+        assert_eq!(mark.source_site_id.first_index, contributors[0].index);
+        assert_eq!(
+            mark.source_site_id.second_dimension_id,
+            contributors[1].dimension_id
+        );
+        assert_eq!(mark.source_site_id.second_index, contributors[1].index);
+        assert_eq!(
+            mark.provenance.contributors.as_slice(),
+            contributors.as_slice()
+        );
+    }
+    let multiway = intersections
+        .site_set()
+        .sites()
+        .iter()
+        .zip(&intersection_realization.output.marks)
+        .find(|(site, _)| matches!(&site.provenance, FamilySiteProvenance::GuideIntersection { contributors } if contributors.len() >= 3))
+        .expect("concurrent guides produce a multiway intersection");
+    let FamilySiteProvenance::GuideIntersection { contributors } = &multiway.0.provenance else {
+        panic!("multiway intersection provenance");
+    };
+    assert_eq!(
+        multiway.1.provenance.contributors.as_slice(),
+        contributors.as_slice()
+    );
+    assert_eq!(
+        multiway.1.source_site_id.first_dimension_id,
+        contributors[0].dimension_id
+    );
+    assert_eq!(multiway.1.source_site_id.first_index, contributors[0].index);
+    assert_eq!(
+        multiway.1.source_site_id.second_dimension_id,
+        contributors[1].dimension_id
+    );
+    assert_eq!(
+        multiway.1.source_site_id.second_index,
+        contributors[1].index
+    );
+    let random_definition = random_definition(
+        RandomSiteCharacter::RawUniform,
+        SiteDensityModulation::Uniform,
+    );
+    let random_plan = resolve_pattern_pipeline(&random_definition).unwrap();
+    let random = evaluate_typed_family_product_cancellable(
+        &random_plan.family,
+        &request(17.0, 3.25, -4.5),
+        &|| false,
+    )
+    .unwrap();
+    let random_realization = realize_typed_mapped_outputs(
+        &random,
+        &random_plan,
+        &source,
+        &request(17.0, 3.25, -4.5).canvas,
+        mapping,
+        response,
+    )
+    .unwrap();
+    for (site, mark) in random
+        .site_set()
+        .sites()
+        .iter()
+        .zip(&random_realization.output.marks)
+    {
+        let FamilySiteProvenance::Random {
+            accepted_ordinal, ..
+        } = site.provenance
+        else {
+            panic!("random provenance");
+        };
+        assert_eq!(mark.source_site_id.first_dimension_id, 85);
+        assert_eq!(mark.source_site_id.first_index, accepted_ordinal as i64);
+        assert_eq!(mark.source_site_id.second_dimension_id, 82);
+        assert_eq!(mark.source_site_id.second_index, 0x1234_5678);
+        assert_eq!(
+            mark.provenance.contributors[0],
+            toniator_geometry::GuideInstanceId {
+                dimension_id: 82,
+                index: 0x1234_5678
+            }
+        );
+        assert_eq!(
+            mark.provenance.contributors[1],
+            toniator_geometry::GuideInstanceId {
+                dimension_id: 85,
+                index: accepted_ordinal as i64
+            }
+        );
+    }
 }

@@ -99,8 +99,9 @@ fn output_with_seed(mut definition: PatternDefinition, seed: u32) -> TypedFamily
     output(&definition)
 }
 
+/// Computes the observed lower pair distance from truthful evaluator sites.
 fn pairwise_minimum(output: &TypedFamilyOutput) -> f64 {
-    let sites = &output.grid().sites;
+    let sites = output.site_set().sites();
     sites
         .iter()
         .enumerate()
@@ -153,6 +154,7 @@ fn raw_even_and_clustered_are_seeded_distinct_and_even_is_not_an_alias() {
 }
 
 #[test]
+/// Proves zero-seed normalization and process metrics remain deterministic.
 fn zero_seed_is_repeatable_distinct_and_quality_metrics_separate_processes() {
     let raw_definition = definition(
         RandomSiteCharacter::RawUniform,
@@ -192,7 +194,7 @@ fn zero_seed_is_repeatable_distinct_and_quality_metrics_separate_processes() {
     );
     let occupancy = |value: &TypedFamilyOutput| {
         let mut cells = std::collections::BTreeSet::new();
-        for site in &value.grid().sites {
+        for site in value.site_set().sites() {
             cells.insert((
                 (site.position.x / 20.0).floor() as i32,
                 (site.position.y / 20.0).floor() as i32,
@@ -206,6 +208,7 @@ fn zero_seed_is_repeatable_distinct_and_quality_metrics_separate_processes() {
 }
 
 #[test]
+/// Proves exclusion constraints and bounded unsatisfied diagnostics remain truthful.
 fn center_and_visible_mark_exclusion_preserve_spacing_and_report_unsatisfiable_density() {
     let center = output(&definition(
         RandomSiteCharacter::RawUniform,
@@ -232,16 +235,11 @@ fn center_and_visible_mark_exclusion_preserve_spacing_and_report_unsatisfiable_d
         SiteExclusionPolicy::None,
         1,
     ));
-    let TypedFamilyOutput::RandomSites {
-        diagnostics,
-        product_provenance,
-        ..
-    } = constrained
-    else {
-        panic!("expected random sites");
-    };
+    let diagnostics = constrained
+        .random_diagnostics()
+        .expect("random diagnostics");
     assert!(diagnostics.achieved_sites < diagnostics.requested_sites);
-    assert_eq!(diagnostics.achieved_sites, product_provenance.len());
+    assert_eq!(diagnostics.achieved_sites, constrained.site_set().len());
     assert_eq!(
         diagnostics.canvas_sites + diagnostics.guard_sites,
         diagnostics.achieved_sites
@@ -250,6 +248,7 @@ fn center_and_visible_mark_exclusion_preserve_spacing_and_report_unsatisfiable_d
 }
 
 #[test]
+/// Proves natural random sites remain the authority before both circle realizers.
 fn natural_random_product_publishes_sites_before_mapped_and_source_color_realization() {
     let constrained_definition = definition(
         RandomSiteCharacter::RawUniform,
@@ -261,20 +260,11 @@ fn natural_random_product_publishes_sites_before_mapped_and_source_color_realiza
     let family =
         evaluate_typed_family_product_cancellable(&plan.family, &natural_request(), &|| false)
             .unwrap();
-    let TypedFamilyOutput::RandomSites {
-        diagnostics,
-        product_provenance,
-        output,
-        ..
-    } = &family
-    else {
-        panic!("expected typed random-site product");
-    };
+    let diagnostics = family.random_diagnostics().expect("random diagnostics");
     assert!(diagnostics.requested_sites >= 10_404);
     assert!(diagnostics.achieved_sites > 0);
     assert!(diagnostics.canvas_sites > 0);
-    assert_eq!(diagnostics.achieved_sites, output.sites.len());
-    assert_eq!(diagnostics.achieved_sites, product_provenance.len());
+    assert_eq!(diagnostics.achieved_sites, family.site_set().len());
     assert!(
         diagnostics.rejected_by_density
             + diagnostics.rejected_by_exclusion
@@ -307,7 +297,7 @@ fn natural_random_product_publishes_sites_before_mapped_and_source_color_realiza
         response,
     )
     .unwrap();
-    assert_eq!(mapped.output.marks.len(), output.sites.len());
+    assert_eq!(mapped.output.marks.len(), family.site_set().len());
     assert!(mapped.output.marks.iter().any(|mark| mark.radius > 0.0));
     let source_color = realize_typed_source_color_outputs(
         &family,
@@ -319,7 +309,7 @@ fn natural_random_product_publishes_sites_before_mapped_and_source_color_realiza
     )
     .unwrap();
     assert!(!source_color.output.marks.is_empty());
-    assert!(source_color.output.marks.len() <= output.sites.len());
+    assert!(source_color.output.marks.len() <= family.site_set().len());
     assert!(
         source_color
             .output
@@ -330,6 +320,7 @@ fn natural_random_product_publishes_sites_before_mapped_and_source_color_realiza
 }
 
 #[test]
+/// Measures bounded natural distributions from truthful site sets without adapters.
 fn natural_random_distribution_metrics_are_bounded_and_structurally_distinct() {
     let source_path = format!(
         "{}/../../assets/raster-sample.png",
@@ -393,7 +384,7 @@ fn natural_random_distribution_metrics_are_bounded_and_structurally_distinct() {
     let weighted = evaluate(&weighted_definition, true);
     let occupancy = |value: &TypedFamilyOutput| {
         let mut bins = std::collections::BTreeMap::<(i32, i32), usize>::new();
-        for site in &value.grid().sites {
+        for site in value.site_set().sites() {
             if !(0.0..=1024.0).contains(&site.position.x)
                 || !(0.0..=1024.0).contains(&site.position.y)
             {
@@ -409,8 +400,8 @@ fn natural_random_distribution_metrics_are_bounded_and_structurally_distinct() {
     };
     let response_mean = |value: &TypedFamilyOutput| {
         value
-            .grid()
-            .sites
+            .site_set()
+            .sites()
             .iter()
             .map(|site| {
                 source
@@ -418,18 +409,15 @@ fn natural_random_distribution_metrics_are_bounded_and_structurally_distinct() {
                     .unwrap()
             })
             .sum::<f64>()
-            / value.grid().sites.len() as f64
+            / value.site_set().len() as f64
     };
     fn random(value: &TypedFamilyOutput) -> &RandomSiteDiagnostics {
-        match value {
-            TypedFamilyOutput::RandomSites { diagnostics, .. } => diagnostics,
-            _ => panic!("expected random sites"),
-        }
+        value.random_diagnostics().expect("random diagnostics")
     }
     for value in [&raw, &even, &clustered, &weighted] {
         assert!(random(value).canvas_sites > 0);
         assert!(random(value).achieved_sites > 0);
-        assert_eq!(random(value).achieved_sites, value.grid().sites.len());
+        assert_eq!(random(value).achieved_sites, value.site_set().len());
     }
     let (raw_bins, _raw_peak) = occupancy(&raw);
     let (even_bins, _even_peak) = occupancy(&even);
@@ -528,6 +516,7 @@ fn artwork_weighting_uses_decoded_pixel_identity_only_for_weighted_structure() {
 }
 
 #[test]
+/// Proves artwork response changes only the truthful random structural result.
 fn artwork_weight_response_changes_accepted_density_for_both_project_fields() {
     let mapping = SourceMapping {
         component: SourceMappingComponent::Luminance,
@@ -594,8 +583,8 @@ fn artwork_weight_response_changes_accepted_density_for_both_project_fields() {
         .unwrap();
         let mean = |value: &TypedFamilyOutput| {
             value
-                .grid()
-                .sites
+                .site_set()
+                .sites()
                 .iter()
                 .map(|site| {
                     field
@@ -603,11 +592,11 @@ fn artwork_weight_response_changes_accepted_density_for_both_project_fields() {
                         .unwrap()
                 })
                 .sum::<f64>()
-                / value.grid().sites.len() as f64
+                / value.site_set().len() as f64
         };
         assert!(mean(&linear) > mean(&raw));
         assert_ne!(linear.family_fingerprint(), smoothstep.family_fingerprint());
-        assert_ne!(linear.grid().sites, smoothstep.grid().sites);
+        assert_ne!(linear.site_set().sites(), smoothstep.site_set().sites());
     }
 }
 

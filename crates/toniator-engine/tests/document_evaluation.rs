@@ -3335,6 +3335,213 @@ fn random_family_cache_identity_and_scheduler_transactions_are_conditional_on_we
     }
 }
 
+/// Exercises the Stage 20A site interchange through complete-document cache,
+/// history, and scheduler publication boundaries without changing their authority.
+#[test]
+fn stage20a_family_site_interchange_preserves_complete_document_cache_and_output_identity() {
+    let source_id = SourceReferenceId::new("fixture-source").unwrap();
+    let bytes = fs::read("../../assets/raster-sample.png").unwrap();
+    let mut history = DocumentHistory::new(generalized_session_named(
+        HalftoneChannelModel::Rgb,
+        GeneralizedConfiguration::AlongGuide,
+    ));
+    let baseline = evaluate(EvaluationRequest::new(
+        history.session().document_evaluation_snapshot(),
+        ResolvedSource::new(source_id.clone(), bytes.clone(), SourceFormatHint::Png).unwrap(),
+    ))
+    .unwrap();
+    let scheduler = EvaluationScheduler::new().unwrap();
+    let first = submit_and_accept(
+        &scheduler,
+        history.session(),
+        EvaluationRequest::new(
+            history.session().document_evaluation_snapshot(),
+            ResolvedSource::new(source_id.clone(), bytes.clone(), SourceFormatHint::Png).unwrap(),
+        ),
+    );
+    assert_eq!(
+        first.result().unwrap().scene().identity(),
+        baseline.scene().identity()
+    );
+    assert_eq!(
+        first.result().unwrap().raster().pixels(),
+        baseline.raster().pixels()
+    );
+    let repeated = submit_and_accept(
+        &scheduler,
+        history.session(),
+        EvaluationRequest::new(
+            history.session().document_evaluation_snapshot(),
+            ResolvedSource::new(source_id.clone(), bytes.clone(), SourceFormatHint::Png).unwrap(),
+        ),
+    );
+    assert_eq!(
+        repeated.cache_diagnostics().unwrap().aggregate,
+        toniator_engine::CacheDiagnostics {
+            decoded_source: CacheDisposition::Hit,
+            family: CacheDisposition::Hit,
+            realization: CacheDisposition::Hit,
+            scene: CacheDisposition::Hit,
+            raster: CacheDisposition::Hit,
+        }
+    );
+    let base = history
+        .document()
+        .pattern_definitions()
+        .iter()
+        .find(|definition| definition.id == PatternDefinitionId(1))
+        .unwrap()
+        .clone();
+    history
+        .apply(&DocumentCommand::EditSharedPatternDefinition {
+            definition_id: PatternDefinitionId(1),
+            base_definition: base,
+            edit: PatternDefinitionEdit::SetCoverageGuardSteps { guard_steps: 3 },
+        })
+        .unwrap();
+    assert!(
+        !scheduler
+            .accept_completion(&repeated, history.session())
+            .unwrap()
+    );
+    history.undo().unwrap();
+    let restored = submit_and_accept(
+        &scheduler,
+        history.session(),
+        EvaluationRequest::new(
+            history.session().document_evaluation_snapshot(),
+            ResolvedSource::new(source_id, bytes, SourceFormatHint::Png).unwrap(),
+        ),
+    );
+    assert_eq!(
+        restored.result().unwrap().scene().identity(),
+        baseline.scene().identity()
+    );
+    assert_eq!(
+        restored.result().unwrap().raster().pixels(),
+        baseline.raster().pixels()
+    );
+    scheduler.shutdown().unwrap();
+}
+
+/// Locks both immutable natural inputs to accepted complete-document circle
+/// identities while treating source SVG live text structurally, never as pixels.
+#[test]
+fn stage20a_natural_png_and_svg_inputs_preserve_current_circle_outputs() {
+    let definition = random_definition(
+        RandomSiteCharacter::Even {
+            minimum_center_distance: 8.0,
+        },
+        SiteDensityModulation::Uniform,
+        SiteExclusionPolicy::None,
+        64,
+    );
+    let raster_bytes = fs::read("../../assets/raster-sample.png").unwrap();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&raster_bytes)),
+        "324ac232e319002a13fbcfac46538ca5d7e8ba8a127eea2eaf20e8ddb3ed2ef2"
+    );
+    let raster_session = random_session(
+        HalftoneChannelModel::Rgb,
+        1024.0,
+        1024.0,
+        definition.clone(),
+    );
+    let raster_result = evaluate(EvaluationRequest::new(
+        raster_session.document_evaluation_snapshot(),
+        ResolvedSource::new(
+            SourceReferenceId::new("fixture-source").unwrap(),
+            raster_bytes,
+            SourceFormatHint::Png,
+        )
+        .unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(
+        (
+            raster_result.source_identity().width,
+            raster_result.source_identity().height
+        ),
+        (1024, 1024)
+    );
+    let raster_svg = write_svg(raster_result.scene());
+    let raster_identity = raster_result.scene().identity();
+    assert_eq!(
+        format!(
+            "{}|{}|{}",
+            raster_identity.family_fingerprint(),
+            raster_identity.realization_fingerprint(),
+            raster_identity.scene_fingerprint()
+        ),
+        "family:Rgb:Red:1:fnv1a64:362aedb40f0f839f:Green:2:fnv1a64:362aedb40f0f839f:Blue:3:fnv1a64:362aedb40f0f839f|realization:Rgb:Red:1:fnv1a64:1e0c7281d8b76bf0:Green:2:fnv1a64:bd90d174a377ce3b:Blue:3:fnv1a64:0c4f8869317e9c01|fnv1a64:88c5e8210e66dd16"
+    );
+    assert_eq!(
+        format!("{:x}", Sha256::digest(raster_result.raster().pixels())),
+        "37c334f2f1faefb23c1625411710e709741d310d0beb1f36183ff95b0eb1393e"
+    );
+    assert_eq!(
+        format!("{:x}", Sha256::digest(raster_svg.as_bytes())),
+        "6f28bf7d84d24cf7a9cbc43bf1f0c4a38982b736b4b9aae408f357921a97dd94"
+    );
+
+    let vector_bytes = fs::read("../../assets/vector-sample.svg").unwrap();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&vector_bytes)),
+        "42eb5e23111a5dbad66f2b1802a7cc06391c7ede829b99eb28aeb1ac91596e2e"
+    );
+    let text = std::str::from_utf8(&vector_bytes).unwrap();
+    assert!(text.contains("<text"));
+    assert!(text.contains(">T<"));
+    let vector_session = random_session(HalftoneChannelModel::Rgb, 900.0, 620.0, definition);
+    let evaluate_vector = || {
+        evaluate(EvaluationRequest::new(
+            vector_session.document_evaluation_snapshot(),
+            ResolvedSource::new(
+                SourceReferenceId::new("fixture-source").unwrap(),
+                vector_bytes.clone(),
+                SourceFormatHint::Svg,
+            )
+            .unwrap(),
+        ))
+        .unwrap()
+    };
+    let first_vector = evaluate_vector();
+    let second_vector = evaluate_vector();
+    let diagnostic = first_vector
+        .source_identity()
+        .svg_text
+        .as_ref()
+        .expect("SVG decode records live-text diagnostics");
+    assert!(diagnostic.has_live_text_node);
+    assert!(diagnostic.rendered_glyph_coverage);
+    assert_eq!(
+        diagnostic.font_policy,
+        "system sans-serif fallback required"
+    );
+    assert_eq!(
+        (
+            first_vector.source_identity().width,
+            first_vector.source_identity().height
+        ),
+        (900, 620)
+    );
+    assert_eq!(
+        first_vector.scene().identity(),
+        second_vector.scene().identity()
+    );
+    assert_eq!(
+        first_vector.raster().pixels(),
+        second_vector.raster().pixels()
+    );
+    let first_svg = write_svg(first_vector.scene());
+    let second_svg = write_svg(second_vector.scene());
+    assert_eq!(first_svg, second_svg);
+    assert!(first_svg.contains("<circle "));
+    assert!(first_svg.contains("<clipPath id=\"canvas-clip\""));
+    assert_eq!(first_svg.matches("clip-path=").count(), 1);
+    assert!(!first_svg.contains("<text"));
+}
+
 #[test]
 fn scheduler_reuses_all_but_the_edited_mapping_realization() {
     let mut session = session(HalftoneChannelModel::Rgb);

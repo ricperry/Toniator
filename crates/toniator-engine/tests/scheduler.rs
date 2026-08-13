@@ -183,6 +183,39 @@ fn scheduled_raster_and_svg_baselines_match_synchronous_results_exactly() {
     }
 }
 
+/// Confirms site interchange leaves the diagnostic scheduler's accepted-cache
+/// and latest-ticket authority unchanged for both immutable source formats.
+#[test]
+fn stage20a_site_interchange_keeps_diagnostic_scheduler_cache_and_latest_ticket_behavior() {
+    let scheduler = ChannelDiagnosticScheduler::new().unwrap();
+    for (path, format) in [
+        ("../../assets/raster-sample.png", SourceFormatHint::Png),
+        ("../../assets/vector-sample.svg", SourceFormatHint::Svg),
+    ] {
+        let bytes: Arc<[u8]> = std::fs::read(path).unwrap().into();
+        let session = session();
+        let first = submit_and_accept(
+            &scheduler,
+            &session,
+            request(&session, Arc::clone(&bytes), format),
+        );
+        let first_result = first.result().unwrap().clone();
+        let repeated = submit_and_accept(&scheduler, &session, request(&session, bytes, format));
+        assert_diagnostics(
+            &repeated,
+            CacheDiagnostics {
+                decoded_source: CacheDisposition::Hit,
+                family: CacheDisposition::Hit,
+                realization: CacheDisposition::Hit,
+                scene: CacheDisposition::Hit,
+                raster: CacheDisposition::Hit,
+            },
+        );
+        assert_eq!(repeated.result(), Some(&first_result));
+    }
+    scheduler.shutdown().unwrap();
+}
+
 #[test]
 fn accepted_cache_obeys_the_complete_reuse_matrix_and_keeps_outputs_exact() {
     let bytes: Arc<[u8]> = std::fs::read("../../assets/raster-sample.png")
