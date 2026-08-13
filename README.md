@@ -247,6 +247,20 @@ and injected WayVNC keyboard/pointer actions did not reach GTK. The user
 accepted the implementation checkpoint; this evidence boundary remains in
 force.
 
+Stage 20A is complete at implementation checkpoint `b7fbd81`. The headless
+geometry/pattern interchange now publishes `FamilySiteSet` as the truthful,
+deterministic derived-site authority for typed family results, and
+`TypedFamilyOutput` is an opaque result carrying actual generalized,
+along-guide, and random provenance. A private circle compatibility adapter
+retains the accepted canonical circle IDs and contributor bytes without
+publishing fabricated structural output. Schema, persistence, cache keys,
+canonical circle/render behavior, and GTK behavior are unchanged. Focused
+complete-document checks cover cache/output identity and the immutable PNG at
+1024×1024 plus structural/live-text SVG evidence at 900×620; read-only review
+passed. The checkpoint is headless-only and claims no GTK evidence. Stage 20B
+(canonical curve/path geometry) is the next planning boundary; all remaining
+Stage 20+ mechanisms remain planned.
+
 Low-resolution fixtures and outputs are supplementary only. Every future stage
 that exercises source loading, sampling, rendering, preview, or export must
 also test the immutable PNG at its natural 1024×1024 dimensions and the SVG at

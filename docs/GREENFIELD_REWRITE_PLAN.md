@@ -1739,8 +1739,24 @@ library management, and Stage 20+ work remain planned.
 
 ## Stage 20+ — Advanced reusable mechanisms
 
-**Status: Planned.** Continue through separately approved headless mechanism
-and GTK exposure checkpoints: curved/procedural guide generators and coverage,
+**Stage 20A — Complete at commit `b7fbd81`.** The accepted headless
+geometry/pattern interchange publishes `FamilySiteSet` as the one
+deterministic, truthful derived-site authority for each typed family result.
+`TypedFamilyOutput` is an opaque result; generalized intersections,
+along-guide sites, and random sites retain their actual provenance rather than
+being represented as fabricated intersections. A private compatibility adapter
+is used only by the existing circular realizers, preserving accepted circle
+IDs, contributor bytes, realization/cache identity, canonical PNG/SVG output,
+and UI behavior. No schema, persistence, cache-key, canonical primitive,
+renderer, or GTK workflow changed. Focused complete-document cache/output
+checks cover natural 1024×1024 PNG and 900×620 SVG inputs, treating SVG live
+text structurally; read-only review passed. No GTK evidence was required for
+this headless-only checkpoint.
+
+**Remaining Stage 20+ — Planned.** Stage 20B (canonical curve/path geometry)
+is the next planning boundary and requires a fresh bounded contract after this
+checkpoint. Continue only through separately approved headless mechanism and
+GTK exposure checkpoints: curved/procedural guide generators and coverage,
 connected/network topology, regions and ordinary Voronoi, reusable region
 offset/collapse behavior, composite output mechanisms, user-authored paths or
 structures, multiframe sources, and simple transitions.

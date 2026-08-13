@@ -1,6 +1,6 @@
 # Toniator Progress Tracker
 
-Last updated: **2026-08-12**. The durable execution contract is
+Last updated: **2026-08-13**. The durable execution contract is
 [GREENFIELD_REWRITE_PLAN.md](docs/GREENFIELD_REWRITE_PLAN.md). Normative
 architecture remains in the five protected [Project Specification files](Project%20Specification/Addendum.md).
 
@@ -324,11 +324,22 @@ canonical output instead. The report was generated from the implementation
 tree immediately before the local checkpoint, whose exact accepted SHA is
 `b0b84e4`.
 
-**Stage 20+ — Planned.** Add curved/procedural guides, connected/network output,
-regions/Voronoi and reusable offsetting, composite output mechanisms,
-user-authored structures, multiframe sources, and transitions only through the
-typed schema, generic evaluator, headless commands/descriptors, canonical
-geometry, and final-consumer clipping.
+**Stage 20A — Complete at commit `b7fbd81`.** The headless evaluator now
+publishes `FamilySiteSet` as the truthful deterministic derived-site authority
+for each typed family result. `TypedFamilyOutput` is opaque, generalized and
+random products retain their actual provenance, and a private circle
+compatibility adapter preserves the existing canonical circle realization
+without publishing fabricated structural facts. Schema, persistence, cache
+keys, canonical circle/render/UI behavior, and GTK behavior are unchanged.
+Focused natural-resolution PNG and structural/live-text SVG evidence, the
+complete-document cache/output checks, and read-only implementation review
+passed. This was a headless-only checkpoint, so it has no GTK evidence.
+
+**Remaining Stage 20+ — Planned.** Stage 20B (canonical curve/path geometry)
+is the next planning boundary. Later curved/procedural guides,
+connected/network output, regions/Voronoi and reusable offsetting, composite
+output mechanisms, user-authored structures, multiframe sources, and
+transitions remain planned and require their own reviewed contracts.
 
 ## Maintenance rules
 
