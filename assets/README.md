@@ -18,6 +18,23 @@ The video fixture is not part of the current still-image Stage 6 evaluation
 gate. Exercise it only in a later explicitly approved multiframe or animation
 stage.
 
+## Authorized current-format `.toniator` test case
+
+`HolidayMugs_2024_2025.toniator` is a tracked real-world current-format
+`.toniator` test case authorized for current-format validation and round-trip
+checks. It is not an immutable migration/source baseline and must not be
+regenerated or treated as a byte-frozen v1 fixture without a separate policy
+decision.
+
+| File | Role | SHA-256 |
+| --- | --- | --- |
+| `HolidayMugs_2024_2025.toniator` | Authorized current-format real-world test case. | `717fd7e03cba2c92d2730db05028c39b7a8e8de8e0bcc7054abcb3c56d5e5947` |
+
+Stage 20B acceptance ran `toniator validate -i` against this file and confirmed
+container version 1, document schema version 2, revision zero, and no migration.
+That validates the checked-in case; it does not make the file a Stage 20B curve
+geometry input or claim render, round-trip, GTK, or visual acceptance.
+
 ## Immutable Stage 12 v1 persistence fixtures
 
 `raster-sample-v1.toniator` and `vector-sample-v1.toniator` are permanent,

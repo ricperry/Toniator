@@ -1735,7 +1735,7 @@ WayVNC keyboard/pointer actions did not reach GTK. Direct boundary tests cover
 canonical output, but these results do not claim manual GNOME Shell/Mutter or
 exhaustive usability acceptance. The accepted implementation checkpoint is
 `b0b84e4`; **Save as Preset...** remains disabled and preset authoring,
-library management, and Stage 20+ work remain planned.
+library management, and Stage 20C+ work remain planned.
 
 ## Stage 20+ — Advanced reusable mechanisms
 
@@ -1753,13 +1753,28 @@ checks cover natural 1024×1024 PNG and 900×620 SVG inputs, treating SVG live
 text structurally; read-only review passed. No GTK evidence was required for
 this headless-only checkpoint.
 
-**Remaining Stage 20+ — Planned.** Stage 20B (canonical curve/path geometry)
-is the next planning boundary and requires a fresh bounded contract after this
-checkpoint. Continue only through separately approved headless mechanism and
-GTK exposure checkpoints: curved/procedural guide generators and coverage,
+**Stage 20B — Complete in the Stage 20B acceptance checkpoint.** The user approved the bounded canonical
+curve/path geometry contract in
+[`STAGE_20B_CANONICAL_CURVE_PATH_PLAN.md`](STAGE_20B_CANONICAL_CURVE_PATH_PLAN.md).
+This headless geometry-only checkpoint adds validated finite line/polyline and
+cubic Bézier path mathematics, deterministic bounded evaluation, bounds,
+arc-length lookup, intersections, and ordered clipping without introducing a
+persisted structure, consumer, canonical render-output variant, or
+canvas-created topology. Exactly one `desktop_implementer` completed the
+implementation allowlist; focused verification and independent read-only review
+pass. User acceptance is complete. The single acceptance checkpoint includes
+the implementation, the authorized current-format real-world `.toniator`
+fixture, and durable documentation; this text intentionally does not invent a
+self-referential checkpoint hash. Stage 20C is the next planning-only boundary
+and is not started. Semantic-map was not used because direct source, `rg`,
+Cargo, Git, and the architecture validator were more efficient for this
+isolated new geometry subsystem.
+
+**Later Stage 20C+ — Planned.** Curved/procedural guide generators and coverage,
 connected/network topology, regions and ordinary Voronoi, reusable region
 offset/collapse behavior, composite output mechanisms, user-authored paths or
-structures, multiframe sources, and simple transitions.
+structures, multiframe sources, simple transitions, and Stage 20C+ remain
+planned and require their own approved contracts.
 
 Every mechanism must enter through the Stage 14 typed schema, Stage 15 generic
 pipeline, Stage 17 command/descriptor contract, canonical geometry, and

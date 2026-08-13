@@ -7,6 +7,13 @@ use std::{collections::BTreeSet, error::Error, fmt};
 use serde::Serialize;
 use toniator_domain::{GuideDimensionId, PatternMechanismId};
 
+mod curves;
+
+pub use curves::{
+    CubicBezierSegment, CurveError, CurvePath, CurveSegment, IntersectionKind, LineSegment,
+    PathArcLength, PathClosure, PathIntersection, PathLocation, SegmentIntersection,
+};
+
 /// A finite document- or pattern-local point.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct Point2 {

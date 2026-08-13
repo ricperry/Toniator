@@ -4,16 +4,18 @@
 
 **Approved roadmap scope.** The approved roadmap in
 `docs/GREENFIELD_REWRITE_PLAN.md` / `ProgressTracker.md` records Stage 20A as
-complete and the **remaining Stage 20+ work as Planned**: curved or procedural
+complete, Stage 20B as complete in the single Stage 20B acceptance checkpoint,
+and the **remaining Stage 20C+ work as Planned**: curved or procedural
 guide generators and coverage; connected or
 network topology; regions, ordinary Voronoi, reusable offset/collapse;
 composite outputs; user-authored paths or structures; multiframe sources; and
 simple transitions. Stage 19B is complete at implementation checkpoint
 `b0b84e4`. Stage 20A is complete at implementation checkpoint `b7fbd81`.
 
-This document records the approved decomposition after the Stage 20A
-checkpoint. It does not accept, start, complete, or reorder the remaining
-Stage 20+ roadmap. Stage 20B is the next planning boundary.
+This document records the approved decomposition after the Stage 20B
+acceptance checkpoint. Stage 20C is the next planning-only boundary and is not
+started; this document does not authorize its implementation or reorder the
+remaining Stage 20C+ roadmap.
 
 | Authority | Present responsibility | Stage 20+ rule |
 |---|---|---|
@@ -62,8 +64,9 @@ use the earliest class it changes, never a convenient lower-cost cache class.
 
 Stage 20A established the truthful, common derived site interchange. Curves,
 random distributions, straight intersections and future authored structures can
-now produce sites without claiming the same guide contributors. The next
-dependency is reusable curve/path geometry and document-owned structures.
+now produce sites without claiming the same guide contributors. The reusable
+curve/path geometry dependency is now accepted; the next dependency is
+document-owned structures.
 Curved
 guide coverage consumes them; graph/topology and Voronoi consume the common
 site set independently; generic region operations consume canonical regions;
@@ -87,13 +90,13 @@ faces, cells, maze boundaries or topology. Persist schema, stable resource IDs,
 seeds and topology-program parameters; regenerate sites, adjacency, paths,
 faces, cells, offsets, caches and scheduler results.
 
-## Remaining planned checkpoints after Stage 20A
+## Remaining planned checkpoints after Stage 20B
 
 | Label | Outcome | Non-goals | Layers / dependencies | Verification | GTK | Stop / Goal candidacy |
 |---|---|---|---|---|---|---|
 | 20A Structural Site Interchange | **Complete at `b7fbd81`:** deterministic `FamilySiteSet`, truthful provenance, accepted output parity. | Schema, paths, graphs, regions, rendering, UI. | geometry/patterns; accepted evaluator/cache. | Site contracts; family/realization/PNG/SVG/cache parity on both baselines. | None. | Historical authority; no further implementation. |
-| 20B Canonical Curve/Path Geometry | Reusable polyline/Bézier segments, arc length, tangents, bounds, intersections, clipping. | Authoring schema, curved families, strokes. | geometry; 20A. | Property, degeneracy, clipping tests. | None. | **Next planning boundary; Planned, requires fresh contract.** |
-| 20C Document-owned Authored Structures | Stable reusable open paths/closed shapes, commands/descriptors and persistence. | Curves-only storage, direct manipulation, output algorithms. | domain/io/patterns; 20B. | Validation, history, descriptor, save/reload/reference tests. | None. | Parent review; needs replanning. |
+| 20B Canonical Curve/Path Geometry | **Complete in the Stage 20B acceptance checkpoint:** reusable polyline/Bézier segments, arc length, tangents, bounds, intersections, and clipping. | Authoring schema, curved families, strokes. | geometry; 20A. | Property, degeneracy, clipping tests. | None. | Historical accepted authority; no further implementation. |
+| 20C Document-owned Authored Structures | Stable reusable open paths/closed shapes, commands/descriptors and persistence. | Curves-only storage, direct manipulation, output algorithms. | domain/io/patterns; 20B. | Validation, history, descriptor, save/reload/reference tests. | None. | **Next planning-only boundary; not started; requires fresh contract and user approval.** |
 | 20D Curved/Procedural Guide Mechanisms | Guide prototypes plus repetition/coverage, reusing dimensions without a curves family. | Shape marks, strokes, topology. | domain/patterns/geometry; 20A–20C. | Coverage, IDs, cancellation, cache/invalidation, persistence. | None. | Parent review; needs replanning. |
 | 20E User-shape Mark Realization | Authored closed structures as ordinary site marks through canonical geometry. | Renderer modes, preset magic, GTK. | patterns/geometry/render; 20A/20C. | Public evaluator, canonical PNG/SVG, round-trip. | None. | Parent review; needs replanning. |
 | 20F Guide/shape editor exposure | Descriptor-driven private-draft exposure for 20C–20E. | Frontend evaluator, preset library/Save & Apply. | app; accepted commands/descriptors. | GTK Wayland plus command/persistence/export checks. | Yes. | Parent/user GNOME review; normal prompt/review. |

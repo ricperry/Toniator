@@ -335,16 +335,33 @@ Focused natural-resolution PNG and structural/live-text SVG evidence, the
 complete-document cache/output checks, and read-only implementation review
 passed. This was a headless-only checkpoint, so it has no GTK evidence.
 
-**Remaining Stage 20+ — Planned.** Stage 20B (canonical curve/path geometry)
-is the next planning boundary. Later curved/procedural guides,
+**Stage 20B — Complete in the Stage 20B acceptance checkpoint.** The bounded headless
+geometry-only contract for finite line/polyline and cubic Bézier paths,
+deterministic evaluation, bounds, arc-length lookup, intersections, and ordered
+clipping is implemented. Exactly one `desktop_implementer` owned the
+implementation allowlist; focused tests, dependent checks, strict lint,
+architecture validation, and independent read-only review pass. The geometry
+capability adds no schema, persistence, cache, render/export, CLI, GTK, fixture
+semantics, or later-stage authority. The checkpoint additionally tracks the
+authorized current-format real-world `.toniator` validation case and this
+durable documentation; the fixture is acceptance data, not a Stage 20B geometry
+input. The checkpoint is intentionally named rather than self-referenced by hash.
+Stage 20C is the next planning-only boundary and has not started.
+
+**Remaining Stage 20C+ — Planned.** Curved/procedural guides,
 connected/network output, regions/Voronoi and reusable offsetting, composite
-output mechanisms, user-authored structures, multiframe sources, and
-transitions remain planned and require their own reviewed contracts.
+output mechanisms, user-authored structures, multiframe sources, transitions,
+and Stage 20C+ remain planned and require their own reviewed contracts.
 
 ## Maintenance rules
 
 - Use only these status words: Planned, In progress, Implemented awaiting
   review, Accepted awaiting checkpoint, and Complete at commit `<hash>`.
+- For this closeout, Stage 20B is **Complete in the Stage 20B acceptance
+  checkpoint**. That single local checkpoint contains all tracked Stage 20B
+  implementation, fixture, and durable documentation; it is not split into a
+  separate implementation and documentation checkpoint and is not named by a
+  self-referential hash.
 - The parent owns accepted/complete transitions and checkpoint hashes. A writer
   reports proposed status; evidence cannot substitute for user acceptance or a
   commit.

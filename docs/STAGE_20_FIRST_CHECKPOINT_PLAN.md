@@ -5,7 +5,9 @@
 **Complete at implementation checkpoint `b7fbd81`.** User acceptance and
 parent review are complete. This document records the executed Stage 20A
 contract and verified outcome; it does not authorize Stage 20B. Stage 19B is
-complete at `b0b84e4`, and the remaining Stage 20+ work remains planned.
+complete at `b0b84e4`, and the remaining Stage 20+ work was planned at the
+time of this Stage 20A record. The current Stage 20B/20C status is maintained
+in the roadmap and tracker.
 
 **Executed goal.** Establish `FamilySiteSet` as the one deterministic,
 truthful derived-site authority for typed family results, while retaining
@@ -247,7 +249,8 @@ added only the parent-owned Stage 20A **In progress** lines in the durable
 plan/tracker; the only allowed preexisting dirt was those lines, these three
 approved planning documents, and user-owned
 `assets/HolidayMugs_2024_2025.toniator`. The writer rechecked those facts,
-Stage 19B complete/20+ planned, protected paths, `AGENTS.md`, roadmap/tracker,
+Stage 19B complete/20+ planned at the historical Stage 20A start gate,
+protected paths, `AGENTS.md`, roadmap/tracker,
 this plan/decomposition, applicable Addendum/PatternSchema/ModuleStructure
 sections and checkout-matching evidence. Any mismatch would have stopped the
 run. Checkpointing these planning documents before implementation would have
@@ -270,8 +273,10 @@ call a stage accepted.
 **Checkpoint/commit gate.** The implementation checkpoint is `b7fbd81`.
 Documentation closeout remains separate; push is never implied.
 
-**Final stop gate.** Stage 20A is complete at `b7fbd81`; do not begin Stage
-20B. Stage 20B is the next planning boundary and remains Planned.
+**Final stop gate (Stage 20A historical record).** Stage 20A is complete at
+`b7fbd81`; at that closeout, Stage 20B was the next planning boundary and
+remained Planned. The current Stage 20B and Stage 20C status is maintained in
+the roadmap and tracker; this historical record does not authorize later work.
 
 The executed authority allowed only the allowlisted implementation, test, and
 evidence changes and iteration on failures. It did not authorize path expansion,

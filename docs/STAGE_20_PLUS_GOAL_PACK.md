@@ -36,6 +36,20 @@ set of viable parent options. Preserve the worktree. Do not change schema,
 persistence, identity, renderer or product semantics merely to keep the Goal
 alive.
 
+## Stage 20B closeout and next boundary
+
+Stage 20B is complete in the single Stage 20B acceptance checkpoint, whose
+direct parent is the Stage 20A documentation checkpoint `e7e2dca`. The
+checkpoint contains the geometry implementation, the authorized current-format
+real-world `.toniator` fixture, and durable documentation; no self-referential
+checkpoint hash is required here. Its finite line/polyline and cubic Bézier
+construction, deterministic evaluation, bounds, arc-length lookup,
+intersections, and ordered clipping remain geometry-only and do not add
+document-owned structures, persistence, consumers, or later-stage authority.
+
+Stage 20C is the next planning-only boundary and is not started. Do not begin
+implementation until a fresh decision-complete contract is approved.
+
 ## Later Goal candidates
 
 Do not execute a later Goal until the prerequisite checkpoint is accepted and
@@ -43,8 +57,8 @@ fresh planning validates its contract against actual implementation evidence.
 
 | Checkpoint | Intended durable objective | Verification surface | Accepted dependencies | Known unresolved decisions | Goal readiness |
 |---|---|---|---|---|---|
-| 20B | Reusable canonical curve/path geometry. | Geometry/degeneracy/clip tests. | 20A. | Path primitive vocabulary. | **next planning boundary; Planned, needs fresh contract** |
-| 20C | Persisted reusable authored open/closed structures. | Commands/descriptors/history/round-trip. | 20B. | Structure ownership and commands. | needs replanning after prior checkpoint |
+| 20B | Reusable canonical curve/path geometry. | Geometry/degeneracy/clip tests. | 20A. | Path primitive vocabulary. | **Complete in the Stage 20B acceptance checkpoint** |
+| 20C | Persisted reusable authored open/closed structures. | Commands/descriptors/history/round-trip. | 20B. | Structure ownership and commands. | **next planning-only boundary; not started; requires fresh contract and user approval** |
 | 20D | Generic curved/procedural guide generation and coverage. | Coverage/identity/cancel/cache/persistence. | 20A–20C. | Prototypes/repetition. | needs replanning after prior checkpoint |
 | 20E | User-shape mark realization from authored structures. | Canonical geometry and PNG/SVG parity. | 20A, 20C. | Shape response semantics. | needs replanning after prior checkpoint |
 | 20F | GTK guide/shape editor exposure. | GTK Sway plus command/export checks. | 20C–20E. | Direct-manipulation UX. | not a Goal candidate |
