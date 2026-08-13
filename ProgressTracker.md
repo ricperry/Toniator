@@ -358,7 +358,15 @@ checkpoint on 2026-08-13. The checkpoint includes the implementation and
 synchronized durable documentation and is intentionally named rather than
 self-referenced by hash.
 
-**Remaining Stage 20D+ — Planned.** Curved/procedural guides,
+**Stage 20D — Planned under the approved planning contract.** The user approved
+the bounded decision-complete curved/procedural guide-generation and coverage
+contract in `Stage20D_planning_contract.md` on 2026-08-13. Its local planning
+checkpoint contains only the approved contract and synchronized durable
+planning documentation. Implementation has not started and requires a separate
+explicit request; the checkpoint authorizes no source edit, push, Stage 20E,
+or later work.
+
+**Remaining Stage 20E+ — Planned.** Closed-shape realization,
 connected/network output, regions/Voronoi and reusable offsetting, composite
 output mechanisms, multiframe sources, transitions, and later Stage 20+
 capabilities remain planned and require their own reviewed contracts.
@@ -376,6 +384,9 @@ capabilities remain planned and require their own reviewed contracts.
   checkpoint**. That single local checkpoint contains all tracked Stage 20C
   implementation and synchronized durable documentation and is intentionally
   named rather than self-referenced by hash.
+- Stage 20D remains **Planned under the approved planning contract**. Its named
+  planning checkpoint approves only the contract and synchronized planning
+  documentation; it is not an implementation or acceptance transition.
 - The parent owns accepted/complete transitions and checkpoint hashes. A writer
   reports proposed status; evidence cannot substitute for user acceptance or a
   commit.

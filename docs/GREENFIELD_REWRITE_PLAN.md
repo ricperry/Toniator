@@ -1780,11 +1780,23 @@ checkpoint on 2026-08-13. The checkpoint includes the implementation and
 synchronized durable documentation and is intentionally named rather than
 self-referenced by hash.
 
-**Later Stage 20D+ — Planned.** Curved/procedural guide generators and coverage,
-connected/network topology, regions and ordinary Voronoi, reusable region
-offset/collapse behavior, composite output mechanisms, multiframe sources,
-simple transitions, and later Stage 20+ work remain planned and require their
-own approved contracts.
+**Stage 20D — Planned under the approved planning contract.** The bounded
+decision-complete contract in
+[`Stage20D_planning_contract.md`](../Stage20D_planning_contract.md) defines
+generic authored-open-path and circular-arc guide prototypes, baseline/phase
+transforms, Single and TransformStack repetition, exact conservative coverage,
+existing guide-site product consumption, identity/invalidation, current-v2
+persistence, focused tests, and its implementation/review gates. The user
+approved this planning contract on 2026-08-13. Its named local planning
+checkpoint contains only the contract and synchronized durable planning
+documentation; Stage 20D implementation remains unstarted and requires a
+separate explicit request.
+
+**Later Stage 20E+ — Planned.** Closed-shape realization, connected/network
+topology, regions and ordinary Voronoi, reusable region offset/collapse
+behavior, composite output mechanisms, multiframe sources, simple transitions,
+and later Stage 20+ work remain planned and require their own approved
+contracts.
 
 Every mechanism must enter through the Stage 14 typed schema, Stage 15 generic
 pipeline, Stage 17 command/descriptor contract, canonical geometry, and
