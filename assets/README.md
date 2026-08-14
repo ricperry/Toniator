@@ -28,26 +28,25 @@ decision.
 
 | File | Role | SHA-256 |
 | --- | --- | --- |
-| `HolidayMugs_2024_2025.toniator` | Authorized current-format real-world test case. | `717fd7e03cba2c92d2730db05028c39b7a8e8de8e0bcc7054abcb3c56d5e5947` |
+| `HolidayMugs_2024_2025.toniator` | Authorized current-format real-world test case. | `a49d695aa545d1f4af31fe766851e5001c841b0c988b675b8f85d77b7d322f83` |
 
-Stage 20B acceptance ran `toniator validate -i` against this file and confirmed
-container version 1, document schema version 2, revision zero, and no migration.
-That validates the checked-in case; it does not make the file a Stage 20B curve
-geometry input or claim render, round-trip, GTK, or visual acceptance.
+Stage 20E1 rewrote this current case with container version 1 and document
+schema version 3. It exercises normalized fill persistence; it is not a frozen
+source or migration baseline.
 
-## Immutable Stage 12 v1 persistence fixtures
+## Current normalized-fill persistence fixtures
 
-`raster-sample-v1.toniator` and `vector-sample-v1.toniator` are permanent,
-byte-for-byte v1 migration inputs. They were written by the accepted Stage 12
-writer from the two immutable still-image baselines with their intrinsic
-canvases and the 10-pixel nominal-spacing RGB template. Future migration tests
-must consume these committed bytes and must never regenerate purported v1
-fixtures with a later writer.
+`raster-sample.toniator` and `vector-sample.toniator` are current schema-v3
+containers derived from the immutable still-image baselines at their intrinsic
+canvases. Their per-channel 2.0/9.0 legacy diameters become
+0.1414213562373095/0.6363961030678927 fill against their 10×10 representative
+nominal cell, preserving average mark diameters. They are current-format
+validation inputs, not migration fixtures.
 
 | File | SHA-256 |
 | --- | --- |
-| `raster-sample-v1.toniator` | `9efac3250e2c4a6650648fd2f5c3820283ea0bf5703459ea996204197aee2a8f` |
-| `vector-sample-v1.toniator` | `34fc138e8d194c57dc239986da2df73f603fb4f51adaa5e7698170582bf6e4ea` |
+| `raster-sample.toniator` | `de6075e68b43a63b248b7e260e3d9af9cb1aa1f3245f647fef4923e4401b7600` |
+| `vector-sample.toniator` | `8c410eda2a5dc7e975de81d7af02c5d68c1b92be7e5cfc53c54448d496edba51` |
 
 ## Stage 10 small-preview regressions
 

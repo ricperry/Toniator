@@ -373,10 +373,28 @@ move authority into the frontend. Private Sway/AT-SPI evidence is automated
 only and does not claim manual GNOME/Mutter acceptance. The acceptance
 checkpoint is intentionally named rather than self-referenced by hash.
 
-**Remaining Stage 20E+ — Planned.** Closed-shape realization,
-connected/network output, regions/Voronoi and reusable offsetting, composite
-output mechanisms, multiframe sources, transitions, and later Stage 20+
-capabilities remain planned and require their own reviewed contracts.
+**Stage 20E1 — Complete in the Stage 20E1 acceptance checkpoint.** The accepted
+bounded contract in `docs/STAGE_20E1_NORMALIZED_MARK_FILL_PLAN.md` replaces the
+temporary absolute mark-size and 4.5 support-capability model with deterministic
+per-site nominal cell bases, normalized `0.0..=2.0` fill, derived conservative
+coverage, a breaking current-format transition, and synchronized existing
+GUI/CLI controls. Current documents use schema v3 only and presets use format
+v2 only; obsolete document-v1/v2 and preset-v1 decoders are not retained.
+Focused verification, native PNG/SVG validation, private control evidence, and
+the independent repair re-review all pass. The re-review specifically confirms
+family-aware support preflight, removal of the unit-diameter fallback, and
+deterministic rejection of parallel or near-parallel contributors. No authored
+shape or Stage 20E2 implementation was performed.
+
+**Stage 20E2 — Planned; not started.** Its approved contract in
+`docs/STAGE_20E2_USER_SHAPE_MARK_PLAN.md` is now unblocked by accepted Stage
+20E1 and is ready for a separate implementation request. No Stage 20E2 work is
+included in this acceptance checkpoint.
+
+**Remaining Stage 20F+ — Planned.** GTK guide/shape authoring and pending-preview
+feedback, connected/network output, regions/Voronoi and reusable offsetting,
+composite output mechanisms, multiframe sources, transitions, and later Stage
+20+ capabilities require their own gates.
 
 ## Maintenance rules
 
@@ -394,8 +412,8 @@ capabilities remain planned and require their own reviewed contracts.
 - Stage 20D is **Complete in the Stage 20D acceptance checkpoint**, whose
   direct planning parent is `453104e39204afc1e10397b9d5bbf551dd85deac`; the
   acceptance checkpoint is intentionally named rather than self-referenced by
-  hash. Stage 20E+ remain **Planned** and require their own reviewed
-  contracts.
+  hash. Stage 20E1 is **Complete in the Stage 20E1 acceptance checkpoint**;
+  Stage 20E2 is **Planned and not started** under its approved contract.
 - The parent owns accepted/complete transitions and checkpoint hashes. A writer
   reports proposed status; evidence cannot substitute for user acceptance or a
   commit.

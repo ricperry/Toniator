@@ -1,7 +1,7 @@
 use toniator_domain::PatternMechanismId;
 use toniator_geometry::{
     AffineTransform2D, Bounds, FamilySite, FamilySiteId, FamilySiteProvenance, FamilySiteSet,
-    GuideInstanceId, Point2, SiteScope, Vector2,
+    GuideInstanceId, NominalCellBasis, Point2, SiteScope, Vector2,
 };
 
 #[test]
@@ -58,6 +58,8 @@ fn family_site_set_contract_rejects_invalid_ids_order_positions_and_provenance()
             ordinal,
         },
         position: Point2::new(ordinal as f64, 2.0),
+        nominal_cell_basis: NominalCellBasis::new(Vector2::new(1.0, 0.0), Vector2::new(0.0, 1.0))
+            .unwrap(),
         scope: SiteScope::Canvas,
         provenance: FamilySiteProvenance::GuideIntersection {
             contributors: vec![
@@ -83,6 +85,11 @@ fn family_site_set_contract_rejects_invalid_ids_order_positions_and_provenance()
                     ordinal: 1,
                 },
                 position: Point2::new(3.0, 4.0),
+                nominal_cell_basis: NominalCellBasis::new(
+                    Vector2::new(1.0, 0.0),
+                    Vector2::new(0.0, 1.0),
+                )
+                .unwrap(),
                 scope: SiteScope::Guard,
                 provenance: FamilySiteProvenance::AlongGuide {
                     guide_id: GuideInstanceId {
@@ -101,6 +108,11 @@ fn family_site_set_contract_rejects_invalid_ids_order_positions_and_provenance()
                     ordinal: 2,
                 },
                 position: Point2::new(5.0, 6.0),
+                nominal_cell_basis: NominalCellBasis::new(
+                    Vector2::new(1.0, 0.0),
+                    Vector2::new(0.0, 1.0),
+                )
+                .unwrap(),
                 scope: SiteScope::Canvas,
                 provenance: FamilySiteProvenance::Random {
                     candidate_ordinal: 5,
@@ -174,6 +186,8 @@ fn family_site_set_contract_rejects_invalid_ids_order_positions_and_provenance()
             ordinal: 0,
         },
         position: Point2::new(0.0, 0.0),
+        nominal_cell_basis: NominalCellBasis::new(Vector2::new(1.0, 0.0), Vector2::new(0.0, 1.0))
+            .unwrap(),
         scope: SiteScope::Canvas,
         provenance: FamilySiteProvenance::AlongGuide {
             guide_id: GuideInstanceId {
@@ -200,6 +214,8 @@ fn family_site_set_contract_rejects_invalid_ids_order_positions_and_provenance()
             ordinal: 0,
         },
         position: Point2::new(0.0, 0.0),
+        nominal_cell_basis: NominalCellBasis::new(Vector2::new(1.0, 0.0), Vector2::new(0.0, 1.0))
+            .unwrap(),
         scope: SiteScope::Canvas,
         provenance: FamilySiteProvenance::Random {
             candidate_ordinal: 1,

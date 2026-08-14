@@ -23,7 +23,7 @@ pub use scheduler::{
 };
 
 use toniator_domain::{
-    CanvasSpec, ChannelId, EvaluationSnapshot, EvaluationToken, PatternDefinition,
+    CanvasSpec, ChannelId, ChannelState, EvaluationSnapshot, EvaluationToken, PatternDefinition,
     PatternMechanism, PatternOutputLayer, SourceComponent, SourcePlacement, SourceReference,
     SourceReferenceId,
 };
@@ -40,7 +40,8 @@ use toniator_patterns::{
     MappedCircularMarkRealization, PatternPipelineError, SourceColorCircularMarkRealization,
     TypedFamilyOutput, TypedRealization, evaluate_straight_grid,
     evaluate_typed_family_product_with_source_cancellable, family_requires_decoded_source,
-    realize_circular_marks, realize_typed_mapped_outputs, realize_typed_source_color_outputs,
+    maximum_nominal_cell_diameter, realize_circular_marks, realize_typed_mapped_outputs,
+    realize_typed_source_color_outputs,
 };
 pub use toniator_render::{
     GeometryOutput, OutputRasterTarget, PreviewRasterTarget, RasterAntialiasing, RasterBackground,
@@ -262,9 +263,18 @@ struct FamilyCacheKey {
     translation: (u64, u64),
     guard_steps: u32,
     definition: FamilyDefinitionKey,
-    maximum_support_radius: u64,
+    required_support_radius: u64,
     max_family_candidates: usize,
     structural_source: Option<RealizationSourceIdentity>,
+}
+
+/// Reports whether an existing family key has identical structural inputs and an envelope at least as broad.
+fn family_key_supports(candidate: &FamilyCacheKey, requested: &FamilyCacheKey) -> bool {
+    let candidate_support = f64::from_bits(candidate.required_support_radius);
+    let requested_support = f64::from_bits(requested.required_support_radius);
+    let mut comparable = candidate.clone();
+    comparable.required_support_radius = requested.required_support_radius;
+    comparable == *requested && candidate_support >= requested_support
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -300,7 +310,7 @@ struct RealizationCacheKey {
     canvas: (u64, u64),
     source_component: u8,
     placement: u8,
-    response: (u64, u64),
+    response: (u64, u64, u64),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -692,8 +702,9 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
     let plan = toniator_patterns::resolve_document_pattern_pipeline(document, definition)
         .map_err(EvaluationError::from_pipeline)?;
     let response = MarkResponse {
-        minimum_size: channel.mark_geometry_response.minimum_size,
-        maximum_size: channel.mark_geometry_response.maximum_size,
+        minimum_fill: channel.mark_geometry_response.minimum_fill,
+        maximum_fill: channel.mark_geometry_response.maximum_fill,
+        rotation_offset_degrees: channel.mark_geometry_response.rotation_offset_degrees,
     };
     let source_key = SourceCacheKey {
         reference_id: request.source.reference_id().as_str().to_owned(),
@@ -735,7 +746,13 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
                 .map(resolved_guide_identity),
             ..family_definition_key(definition)
         },
-        maximum_support_radius: definition.coverage.maximum_support_radius.to_bits(),
+        required_support_radius: required_support_radius_legacy(
+            document.canvas(),
+            channel,
+            definition,
+            &plan.family,
+        )?
+        .to_bits(),
         max_family_candidates: limits.max_family_candidates(),
         structural_source: family_requires_decoded_source(&plan.family)
             .then(|| realization_source_identity(source.identity())),
@@ -747,11 +764,18 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
         translation_x: channel.layout.translation_x,
         translation_y: channel.layout.translation_y,
         guard_steps: definition.coverage.guard_steps,
-        support_radius: definition.coverage.maximum_support_radius,
+        support_radius: required_support_radius_legacy(
+            document.canvas(),
+            channel,
+            definition,
+            &plan.family,
+        )?,
         max_family_candidates: limits.max_family_candidates(),
     };
     let (family, family_disposition) = match &cache.family {
-        Some((key, family)) if *key == family_key => (Arc::clone(family), CacheDisposition::Hit),
+        Some((key, family)) if family_key_supports(key, &family_key) => {
+            (Arc::clone(family), CacheDisposition::Hit)
+        }
         _ => (
             Arc::new(evaluate_generic_family_stage(
                 &plan.family,
@@ -770,8 +794,9 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
         source_component: source_component_key(channel.source_mapping.component),
         placement: placement_key(channel.source_mapping.placement),
         response: (
-            response.minimum_size.to_bits(),
-            response.maximum_size.to_bits(),
+            response.minimum_fill.to_bits(),
+            response.maximum_fill.to_bits(),
+            response.rotation_offset_degrees.to_bits(),
         ),
     };
     let (realization, realization_disposition) = evaluate_stage(
@@ -1704,11 +1729,11 @@ fn evaluate_cached_document_impl(
             limits,
             &plan.family,
             &source,
-        );
+        )?;
         let (family, disposition) = match accepted
             .families
             .iter()
-            .find(|(candidate, _)| *candidate == key)
+            .find(|(candidate, _)| document_family_key_supports(candidate, &key))
         {
             Some((_, family)) => (Arc::clone(family), CacheDisposition::Hit),
             None => (
@@ -1721,7 +1746,12 @@ fn evaluate_cached_document_impl(
                         translation_x: channel.layout.translation_x,
                         translation_y: channel.layout.translation_y,
                         guard_steps: definition.coverage.guard_steps,
-                        support_radius: definition.coverage.maximum_support_radius,
+                        support_radius: required_support_radius_modeled(
+                            document.canvas(),
+                            channel,
+                            definition,
+                            &plan.family,
+                        )?,
                         max_family_candidates: limits.max_family_candidates(),
                     },
                     &source,
@@ -1743,8 +1773,12 @@ fn evaluate_cached_document_impl(
                 channel.mapping.bias.to_bits()
             ),
             response: (
-                channel.mark_geometry_response.minimum_size.to_bits(),
-                channel.mark_geometry_response.maximum_size.to_bits(),
+                channel.mark_geometry_response.minimum_fill.to_bits(),
+                channel.mark_geometry_response.maximum_fill.to_bits(),
+                channel
+                    .mark_geometry_response
+                    .rotation_offset_degrees
+                    .to_bits(),
             ),
             sampled_paint: matches!(channel.paint, ChannelPaint::SampledSource),
         };
@@ -1912,8 +1946,9 @@ fn evaluate_document_channel(
     plan: &toniator_patterns::PatternPipelinePlan,
 ) -> Result<DocumentRealization, EvaluationError> {
     let response = MarkResponse {
-        minimum_size: channel.mark_geometry_response.minimum_size,
-        maximum_size: channel.mark_geometry_response.maximum_size,
+        minimum_fill: channel.mark_geometry_response.minimum_fill,
+        maximum_fill: channel.mark_geometry_response.maximum_fill,
+        rotation_offset_degrees: channel.mark_geometry_response.rotation_offset_degrees,
     };
     let realization = match channel.paint {
         ChannelPaint::Solid(_) => DocumentRealization::Mapped(
@@ -2001,7 +2036,7 @@ struct DocumentFamilyContentKey {
     rotation: u64,
     translation: (u64, u64),
     guard_steps: u32,
-    support_radius: u64,
+    required_support_radius: u64,
     definition: FamilyDefinitionKey,
     structural_source: Option<RealizationSourceIdentity>,
 }
@@ -2012,11 +2047,26 @@ struct DocumentFamilyCacheKey {
     candidate_limit: usize,
 }
 
+/// Reports whether a document-family cache entry has identical content and a sufficiently broad envelope.
+fn document_family_key_supports(
+    candidate: &DocumentFamilyCacheKey,
+    requested: &DocumentFamilyCacheKey,
+) -> bool {
+    let candidate_support = f64::from_bits(candidate.content.required_support_radius);
+    let requested_support = f64::from_bits(requested.content.required_support_radius);
+    let mut comparable = candidate.clone();
+    comparable.content.required_support_radius = requested.content.required_support_radius;
+    comparable == *requested && candidate_support >= requested_support
+}
+
 /// Builds one modeled-channel family cache key including resolved authored guide content.
 ///
 /// This remains a cache identity only: document capability resolution supplies `family`,
-/// and source decoding remains owned by the caller.  No errors are produced because all
-/// supplied values have already crossed their authoritative validation boundaries.
+/// and source decoding remains owned by the caller.
+///
+/// # Errors
+///
+/// Returns the family nominal-cell preflight error before cache lookup or allocation.
 fn document_family_cache_key(
     canvas: &CanvasSpec,
     definition: &toniator_domain::PatternDefinition,
@@ -2024,8 +2074,8 @@ fn document_family_cache_key(
     limits: EvaluationLimits,
     family: &FamilyCapability,
     source: &SourceField,
-) -> DocumentFamilyCacheKey {
-    DocumentFamilyCacheKey {
+) -> Result<DocumentFamilyCacheKey, EvaluationError> {
+    Ok(DocumentFamilyCacheKey {
         content: DocumentFamilyContentKey {
             canvas: (canvas.width.to_bits(), canvas.height.to_bits()),
             density: (
@@ -2038,7 +2088,10 @@ fn document_family_cache_key(
                 channel.layout.translation_y.to_bits(),
             ),
             guard_steps: definition.coverage.guard_steps,
-            support_radius: definition.coverage.maximum_support_radius.to_bits(),
+            required_support_radius: required_support_radius_modeled(
+                canvas, channel, definition, family,
+            )?
+            .to_bits(),
             definition: FamilyDefinitionKey {
                 resolved_guide_content: family.generic_guides.as_ref().map(resolved_guide_identity),
                 ..family_definition_key(definition)
@@ -2047,7 +2100,52 @@ fn document_family_cache_key(
                 .then(|| realization_source_identity(source.identity())),
         },
         candidate_limit: limits.max_family_candidates(),
-    }
+    })
+}
+
+/// Derives the conservative circular support required by one legacy channel's normalized fill.
+fn required_support_radius_legacy(
+    canvas: &CanvasSpec,
+    channel: &ChannelState,
+    definition: &toniator_domain::PatternDefinition,
+    family: &FamilyCapability,
+) -> Result<f64, EvaluationError> {
+    required_support_radius_from_fill(
+        canvas,
+        &channel.layout.density,
+        channel.mark_geometry_response.maximum_fill,
+        definition.coverage.additional_margin,
+        family,
+    )
+}
+
+/// Derives the conservative circular support required by one modeled channel's normalized fill.
+fn required_support_radius_modeled(
+    canvas: &CanvasSpec,
+    channel: &ModeledChannelState,
+    definition: &toniator_domain::PatternDefinition,
+    family: &FamilyCapability,
+) -> Result<f64, EvaluationError> {
+    required_support_radius_from_fill(
+        canvas,
+        &channel.layout.density,
+        channel.mark_geometry_response.maximum_fill,
+        definition.coverage.additional_margin,
+        family,
+    )
+}
+
+/// Computes the conservative family-specific nominal-cell bound before any allocation.
+fn required_support_radius_from_fill(
+    canvas: &CanvasSpec,
+    density: &toniator_domain::DensityMetric2D,
+    maximum_fill: f64,
+    additional_margin: f64,
+    family: &FamilyCapability,
+) -> Result<f64, EvaluationError> {
+    let diameter = maximum_nominal_cell_diameter(family, canvas, density)
+        .map_err(EvaluationError::from_pipeline)?;
+    Ok(maximum_fill * diameter / 2.0 + additional_margin)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2056,7 +2154,7 @@ struct DocumentRealizationCacheKey {
     contract: RealizationContractKey,
     source_identity: RealizationSourceIdentity,
     mapping: String,
-    response: (u64, u64),
+    response: (u64, u64, u64),
     sampled_paint: bool,
 }
 
@@ -2152,7 +2250,7 @@ pub(crate) mod test_support {
                 PatternOutputLayerId(1),
                 CoveragePolicy {
                     guard_steps: 2,
-                    maximum_support_radius: 4.5,
+                    additional_margin: 4.5,
                 },
             )],
             vec![ChannelState {
@@ -2179,8 +2277,9 @@ pub(crate) mod test_support {
                     opacity: 0.72,
                 },
                 mark_geometry_response: MarkGeometryResponse {
-                    minimum_size: 2.0,
-                    maximum_size: 9.0,
+                    minimum_fill: 2.0,
+                    maximum_fill: 9.0,
+                    rotation_offset_degrees: 0.0,
                 },
                 source_mapping: ChannelSourceMapping {
                     component: SourceComponent::Luminance,
@@ -2531,10 +2630,22 @@ mod cache_key_tests {
                 mechanisms: vec![],
                 resolved_guide_content: None,
             },
-            maximum_support_radius: 4.5_f64.to_bits(),
+            required_support_radius: 4.5_f64.to_bits(),
             max_family_candidates: EvaluationLimits::DEFAULT_MAX_FAMILY_CANDIDATES,
             structural_source: None,
         }
+    }
+
+    /// Proves a lower maximum fill reuses a broad family envelope while a wider request misses.
+    #[test]
+    fn family_cache_reuses_only_an_envelope_broad_enough_for_normalized_fill() {
+        let mut broad = family(true);
+        broad.required_support_radius = 8.0_f64.to_bits();
+        let mut narrow = broad.clone();
+        narrow.required_support_radius = 4.0_f64.to_bits();
+
+        assert!(family_key_supports(&broad, &narrow));
+        assert!(!family_key_supports(&narrow, &broad));
     }
 
     fn contract(layer_id: u64) -> RealizationContractKey {
@@ -2566,7 +2677,7 @@ mod cache_key_tests {
             canvas: (900.0_f64.to_bits(), 600.0_f64.to_bits()),
             source_component: 1,
             placement: 1,
-            response: (2.0_f64.to_bits(), 9.0_f64.to_bits()),
+            response: (2.0_f64.to_bits(), 9.0_f64.to_bits(), 0.0_f64.to_bits()),
         }
     }
 
@@ -2616,7 +2727,7 @@ mod cache_key_tests {
             toniator_domain::PatternOutputLayerId(1),
             toniator_domain::CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         );
         let mut renamed = definition.clone();

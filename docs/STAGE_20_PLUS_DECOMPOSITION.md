@@ -7,18 +7,24 @@
 complete, Stage 20B as complete in the single Stage 20B acceptance checkpoint,
 Stage 20C as complete in its single named acceptance checkpoint, and Stage 20D
 as complete in the Stage 20D acceptance checkpoint. The **remaining Stage 20E+
-work is Planned**: user-shape realization; connected or network topology;
+work is complete or Planned by its own contract**: Stage 20E1 normalized mark
+fill/coverage is complete in its named acceptance checkpoint; Stage 20E2
+user-shape realization is approved, Planned, and not started; connected or
+network topology;
 regions, ordinary Voronoi, reusable offset/collapse; composite outputs;
 multiframe sources; and simple transitions. Stage 19B is complete at
 implementation checkpoint `b0b84e4`. Stage 20A is complete at implementation
 checkpoint `b7fbd81`.
 
-This document records the approved decomposition after the Stage 20D
-acceptance checkpoint. Stage 20C's named checkpoint has direct parent
-`08d970a`; its own hash is intentionally not self-referenced here. The Stage
-20D acceptance checkpoint is also intentionally named rather than
-self-referenced by hash. This document does not authorize Stage 20E+
-implementation or reorder the remaining roadmap.
+This document records the approved Stage 20E split and Stage 20E1 acceptance
+after the Stage 20D acceptance checkpoint. The Stage 20E1 checkpoint records
+normalized fill, per-site nominal bases, family-aware coverage preflight, the
+current document-schema-v3/preset-v2-only transition, and synchronized existing
+GUI/CLI controls; its independent repair re-review is PASS. Stage 20C's named
+checkpoint has direct parent `08d970a`; its own hash is intentionally not
+self-referenced here. The Stage 20D acceptance checkpoint is also intentionally
+named rather than self-referenced by hash. The accepted Stage 20E1 checkpoint
+does not authorize implementation of 20E2 or reorder the remaining roadmap.
 
 | Authority | Present responsibility | Stage 20+ rule |
 |---|---|---|
@@ -83,14 +89,15 @@ already-canonical kinds. Frame sources and transitions are deliberately
 separate temporal/source work.
 
 ```text
-20A site interchange ─ 20B curve/path geometry ─ 20C authored structures ─ 20D curved guides
-                                                              ├─ 20E shape marks ─ 20F GTK exposure
+    20A site interchange ─ 20B curve/path geometry ─ 20C authored structures ─ 20D curved guides
+                                                              ├─ 20E1 normalized fill/coverage
+                                                              │     └─ 20E2 shape marks ─ 20F GTK exposure
                                                               ├─ 20G guide paths/strokes ─ 20J GTK exposure
                                                               └─ 20L arrangement faces
 20A site interchange ─ 20H adjacency ─ 20I network programs ─ 20J GTK exposure
 20A site interchange ─ 20K ordinary Voronoi ─┐
 20B/20D curved guides ─ 20L arrangement faces ─┴─ 20M offset/collapse ─ 20N GTK region exposure
-20E shape marks + 20G strokes + 20K Voronoi ─ 20O core composite outputs ─ later bounded exposure
+20E2 shape marks + 20G strokes + 20K Voronoi ─ 20O core composite outputs ─ later bounded exposure
 20P frame-source abstraction ─ 20Q frame export ─ 20R transitions ─ 20S GTK exposure
 ```
 
@@ -107,8 +114,9 @@ faces, cells, offsets, caches and scheduler results.
 | 20B Canonical Curve/Path Geometry | **Complete in the Stage 20B acceptance checkpoint:** reusable polyline/Bézier segments, arc length, tangents, bounds, intersections, and clipping. | Authoring schema, curved families, strokes. | geometry; 20A. | Property, degeneracy, clipping tests. | None. | Historical accepted authority; no further implementation. |
 | 20C Document-owned Authored Structures | **Complete in the single named Stage 20C acceptance checkpoint:** document-owned open paths/closed shapes, authoritative commands/descriptors/history, deterministic current-v2 persistence, and exact conversion to Stage 20B construction geometry. The checkpoint's direct parent is `08d970a`; its own hash is intentionally not self-referenced. | Consumers, evaluators, caches, canonical output, rendering/export, CLI, GTK, presets, schema-version changes, and later stages. | domain/io/geometry; 20B. | Validation, history, descriptor, save/reload, and exact conversion tests passed. | None. | Historical accepted authority; no further implementation. |
 | 20D Curved/Procedural Guide Mechanisms | **Complete in the Stage 20D acceptance checkpoint:** authored-open-path and circular-arc guide prototypes, bounded repetition/coverage, existing guide-site product consumption, document-aware identity/invalidation, cancellation/cache behavior, and deterministic current-v2 persistence. | Shape marks, strokes, topology, GTK editing. | domain/patterns/geometry/engine/io; 20A–20C. | Coverage, IDs, cancellation, cache/invalidation, persistence. | None; app correction was presentation-only. | Historical accepted authority; no further implementation. |
-| 20E User-shape Mark Realization | Authored closed structures as ordinary site marks through canonical geometry. | Renderer modes, preset magic, GTK. | patterns/geometry/render; 20A/20C. | Public evaluator, canonical PNG/SVG, round-trip. | None. | Parent review; needs replanning. |
-| 20F Guide/shape editor exposure | Descriptor-driven private-draft exposure for 20C–20E. | Frontend evaluator, preset library/Save & Apply. | app; accepted commands/descriptors. | GTK Wayland plus command/persistence/export checks. | Yes. | Parent/user GNOME review; normal prompt/review. |
+| 20E1 Normalized Mark Fill and Coverage | Per-site nominal cell basis, normalized 0..2 fill, corrected coverage, current document-schema-v3/preset-v2-only transition, and synchronized existing GUI/CLI controls. | Authored shapes, renderer algorithms, response curves/polarity, progress UI. | domain/geometry/patterns/engine/io/cli plus bounded app; 20A/20D. | Basis/formulas, edge coverage, cache/cancel, schema/fixtures, natural PNG/SVG, private GTK controls; independent repair re-review PASS. | Existing controls only. | **Complete in the Stage 20E1 acceptance checkpoint; no Stage 20E2 work.** |
+| 20E2 User-shape Mark Realization | Authored closed structures as ordinary site marks through canonical geometry. | Renderer modes, preset magic, GTK authoring. | patterns/geometry/render/domain/io/engine; 20A/20C/20E1. | Public evaluator, canonical PNG/SVG, round-trip. | Consume/compile only. | Approved contract; **Planned and not started; ready for a separate implementation request.** |
+| 20F Guide/shape editor exposure | Descriptor-driven private-draft exposure for 20C–20E2 plus an indeterminate pending-preview indicator. | Frontend evaluator, preset library/Save & Apply, fractional engine progress. | app; accepted commands/descriptors. | GTK Wayland plus command/persistence/export checks. | Yes. | Parent/user GNOME review; normal prompt/review. |
 | 20G Connected Guide Paths and Strokes | Guide path output, canonical strokes, channel thickness response. | Networks/mazes. | geometry/patterns/render; 20B/20D. | Path, clip, PNG/SVG parity. | None. | Planned after dependencies; needs fresh contract. |
 | 20H Site Adjacency Graphs | Deterministic mechanism-neutral adjacency over `FamilySiteSet`. | Connection program/rendering. | geometry/patterns; 20A. | Graph invariants/order/degeneracy/cache identity. | None. | Planned after dependency contract; needs fresh contract. |
 | 20I Connection Programs and Networks | Generic masks/walks/tree/maze programs yielding paths. | Named maze renderer/preset-only topology. | domain/patterns/geometry; 20H. | Seed/replay, topology legality, persistence. | None. | Parent review; needs replanning. |
@@ -130,8 +138,8 @@ branch, preset-only bypass or test-only authority is permitted.
 
 | Probe | Missing primitive introduction / convergence | Eventual serialized-schema path | Evaluator / geometry path | UI surfaces | Requires renderer/preset special case? | Normal-authority proof |
 |---|---|---|---|---|---|---|
-| Weighted random sites + user mark | Existing random/weighting/source; **20A** sites, **20C** shape resource, **20E** shape marks, **20F** UI. Schema-only after 20E. | `RandomSites → RandomSiteProduct → output layer(structure ID)`. | `site_set()` → modulation/sampling → canonical closed-shape mark. | Pattern Editor mechanisms/layers; channel mapping/response/transform. | **No.** | Public command, save/reopen, engine evaluation, canonical output; preset name has no effect. |
-| Fully controlled ordered grid + reusable mark | Existing dimensions/intersections; **20A** sites, **20C/20E** mark. Schema-only after 20E. | `StraightGuideDimensions + SelectedGuideIntersections + structure-reference layer`. | Coverage → site set → realization → final consumer clip. | Existing guide descriptors plus future mark selector. | **No.** | Three-dimension command/history/reload/public evaluator proves no grid renderer mode. |
+| Weighted random sites + user mark | Existing random/weighting/source; **20A** sites, **20C** shape resource, **20E1** fill basis, **20E2** shape marks, **20F** UI. Schema-only after 20E2. | `RandomSites → RandomSiteProduct → output layer(structure ID)`. | `site_set()` → modulation/sampling → canonical closed-shape mark. | Pattern Editor mechanisms/layers; channel mapping/response/transform. | **No.** | Public command, save/reopen, engine evaluation, canonical output; preset name has no effect. |
+| Fully controlled ordered grid + reusable mark | Existing dimensions/intersections; **20A** sites, **20C/20E2** mark and **20E1** fill basis. Schema-only after 20E2. | `StraightGuideDimensions + SelectedGuideIntersections + structure-reference layer`. | Coverage → site set → realization → final consumer clip. | Existing guide descriptors plus future mark selector. | **No.** | Three-dimension command/history/reload/public evaluator proves no grid renderer mode. |
 | Curved/linear crosshatching channels | **20B** paths, **20C** structures, **20D** curved guides, **20G** strokes, **20J** UI. Schema-only after 20G. | Per-channel straight/curve prototypes and ordered path layers. | Guide coverage → guide paths → canonical strokes → channel compositor. | Pattern Editor guides/layers; channel transforms/appearance. | **No.** | Two normal channel definitions persist/evaluate/export with no crosshatch mode. |
 | Triangular grid feeding maze | **20A** sites, **20H** adjacency, **20I** programs, **20J** UI. Schema-only after 20I. | Three dimensions → selected intersections → graph-capable program. | `FamilySiteSet →` graph → maze/tree → canonical paths. | Dimension/topology descriptors and thickness. | **No.** | Saved three-dimension deterministic seed/replay via public graph/path evaluator. |
 | Random Voronoi + offset cells + residual marks | **20A** sites, **20K** Voronoi, **20M** offset, **20O** composite, **20N** UI. Schema-only after 20O. | Random sites → Voronoi treatment + ordinary mark layers. | Guard-inclusive sites → geometry Voronoi → generic offset → canonical regions/marks. | Output/treatment descriptors and channel inset/modulation. | **No.** | Schema round-trip/engine scene prove no Voronoi placement settings or special route. |

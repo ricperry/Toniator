@@ -67,8 +67,11 @@ narrow post-review `toniator-app` compilation correction adds presentation
 labels for the new typed guide fields, choices, and authored references only;
 it does not expose Stage 20D editing UI or move authority into the frontend.
 Private Sway/AT-SPI evidence is automated only and does not claim manual
-GNOME/Mutter acceptance. Stage 20E and later remain planning-only and require
-their own reviewed contracts.
+GNOME/Mutter acceptance. Stage 20E1 is complete in its named acceptance
+checkpoint, with the independent repair re-review PASS and current
+document-schema-v3/preset-v2-only normalized-fill controls recorded below.
+Stage 20E2 is now unblocked but remains Planned and not started under its
+approved contract.
 
 ## Later Goal candidates
 
@@ -80,8 +83,9 @@ fresh planning validates its contract against actual implementation evidence.
 | 20B | Reusable canonical curve/path geometry. | Geometry/degeneracy/clip tests. | 20A. | Path primitive vocabulary. | **Complete in the Stage 20B acceptance checkpoint** |
 | 20C | Persisted reusable authored open/closed structures. | Commands/descriptors/history/round-trip and exact Stage 20B conversion. | 20B. | None within the accepted bounded contract. | **Complete in the single named Stage 20C acceptance checkpoint; direct parent `08d970a`; checkpoint hash intentionally not self-referenced** |
 | 20D | Generic curved/procedural guide generation and coverage. | Coverage/identity/cancel/cache/persistence. | 20A–20C. | Prototypes/repetition. | **Complete in the Stage 20D acceptance checkpoint** |
-| 20E | User-shape mark realization from authored structures. | Canonical geometry and PNG/SVG parity. | 20A, 20C. | Shape response semantics. | needs replanning after prior checkpoint |
-| 20F | GTK guide/shape editor exposure. | GTK Sway plus command/export checks. | 20C–20E. | Direct-manipulation UX. | not a Goal candidate |
+| 20E1 | Normalized mark fill, per-site nominal basis, coverage correction, current document-schema-v3/preset-v2-only transition, and existing GUI/CLI controls. | Formula/coverage/cache/schema/fixture/natural-output and bounded GTK control checks. | 20A, 20D. | None within the approved contract. | **Complete in the Stage 20E1 acceptance checkpoint; independent repair re-review PASS** |
+| 20E2 | User-shape mark realization from authored structures. | Canonical geometry and PNG/SVG parity. | 20A, 20C, accepted 20E1. | None within the approved contract; revalidate after 20E1. | approved contract; **Planned and not started; ready for a separate implementation request** |
+| 20F | GTK guide/shape editor exposure and pending-preview indicator. | GTK Sway plus command/export checks. | 20C–20E2. | Direct-manipulation UX. | not a Goal candidate |
 | 20G | Canonical connected guide paths/strokes. | Path/stroke/export tests. | 20B, 20D. | Stroke/crossing defaults. | planned after dependencies |
 | 20H | Mechanism-neutral deterministic adjacency. | Graph order/degeneracy/cache tests. | 20A. | Neighbor policy. | planned after dependency contract |
 | 20I | Generic network/maze connection programs. | Seed/replay/topology/persistence. | 20H. | Algorithms/crossings. | needs replanning after prior checkpoint |
@@ -90,7 +94,7 @@ fresh planning validates its contract against actual implementation evidence.
 | 20L | Guide-arrangement face generation. | Arrangement/coverage/degeneracy. | 20B, 20D, 20K. | Face semantics. | needs replanning after prior checkpoint |
 | 20M | Reusable region offset/collapse. | Crossing/winding/collapse properties. | 20K and/or 20L. | Cleanup/collapse policy. | needs replanning after prior checkpoint |
 | 20N | GTK region controls. | GTK and normal export checks. | 20K–20M. | Editor workflow. | not a Goal candidate |
-| 20O | Ordered composites of canonical output kinds. | Ordering/persistence/PNG/SVG parity. | 20E/20G/20K. | Ordering/source filters. | needs replanning after prior checkpoint |
+| 20O | Ordered composites of canonical output kinds. | Ordering/persistence/PNG/SVG parity. | 20E2/20G/20K. | Ordering/source filters. | needs replanning after prior checkpoint |
 | 20P | Still/multiframe source abstraction. | Decode/cache/round-trip. | Parent media decision. | Backend/formats. | needs replanning after prior checkpoint |
 | 20Q | Bounded frame-sequence export. | Deterministic numbered PNG/SVG. | 20P. | CLI policy. | planned after dependency contract |
 | 20R | Bounded start/end interpolation. | Interpolation/frame parity. | 20Q. | Interpolated subset. | needs replanning after prior checkpoint |

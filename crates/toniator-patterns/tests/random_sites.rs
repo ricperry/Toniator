@@ -76,7 +76,7 @@ fn definition(
         16_000_000,
         CoveragePolicy {
             guard_steps: 2,
-            maximum_support_radius: 4.0,
+            additional_margin: 4.0,
         },
     )
 }
@@ -285,8 +285,9 @@ fn natural_random_product_publishes_sites_before_mapped_and_source_color_realiza
         bias: 0.0,
     };
     let response = MarkResponse {
-        minimum_size: 2.0,
-        maximum_size: 9.0,
+        minimum_fill: 2.0,
+        maximum_fill: 9.0,
+        rotation_offset_degrees: 0.0,
     };
     let mapped = realize_typed_mapped_outputs(
         &family,

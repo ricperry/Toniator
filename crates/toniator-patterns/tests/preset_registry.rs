@@ -54,7 +54,7 @@ fn registry_validation_rejects_duplicate_ids() {
             name: "Grid".into(),
             coverage: toniator_domain::CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         }),
     };
@@ -77,7 +77,7 @@ fn invalid_recipe_reference_is_rejected_without_publishing_history() {
             name: "Invalid".into(),
             coverage: toniator_domain::CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
             dimensions: vec![GuideDimensionDraft {
                 baseline_angle_degrees: 0.0,
@@ -114,7 +114,7 @@ fn recipe_compound_variants_use_transition_drafts_and_preserve_payloads() {
             name: "Compound random".into(),
             coverage: toniator_domain::CoveragePolicy {
                 guard_steps: 3,
-                maximum_support_radius: 5.0,
+                additional_margin: 5.0,
             },
             character: RandomSiteCharacter::Clustered {
                 cluster_density: 0.5,
@@ -153,7 +153,7 @@ fn recipe_compound_variants_use_transition_drafts_and_preserve_payloads() {
             name: "Guided grid".into(),
             coverage: toniator_domain::CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
             dimensions: vec![
                 GuideDimensionDraft {

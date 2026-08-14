@@ -248,6 +248,8 @@ pub enum SiteScope {
 pub struct IntersectionSite {
     pub id: SiteId,
     pub position: Point2,
+    /// Per-site longer cell diagonal captured before realization; it never changes site identity.
+    pub nominal_cell_diameter: f64,
     pub scope: SiteScope,
     pub provenance: GuideIntersectionProvenance,
 }
@@ -296,8 +298,56 @@ pub enum FamilySiteProvenance {
 pub struct FamilySite {
     pub id: FamilySiteId,
     pub position: Point2,
+    pub nominal_cell_basis: NominalCellBasis,
     pub scope: SiteScope,
     pub provenance: FamilySiteProvenance,
+}
+
+/// Immutable local cell axes used only to normalize ordinary mark fill.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NominalCellBasis {
+    pub axis_a: Vector2,
+    pub axis_b: Vector2,
+}
+
+impl NominalCellBasis {
+    /// Builds a finite positive nominal cell basis without changing site identity or provenance.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable family-site diagnostic when an axis or either diagonal is not finite and positive.
+    pub fn new(axis_a: Vector2, axis_b: Vector2) -> Result<Self, FamilySiteError> {
+        let basis = Self { axis_a, axis_b };
+        if !basis.is_valid() {
+            return Err(FamilySiteError::new(
+                "family_sites.nominal_cell_basis",
+                "nominal cell axes and diameter must be finite and positive",
+            ));
+        }
+        Ok(basis)
+    }
+
+    /// Returns the longer local cell diagonal used by normalized mark fill.
+    pub fn diameter(self) -> f64 {
+        let positive = Vector2::new(self.axis_a.x + self.axis_b.x, self.axis_a.y + self.axis_b.y);
+        let negative = Vector2::new(self.axis_a.x - self.axis_b.x, self.axis_a.y - self.axis_b.y);
+        positive
+            .x
+            .hypot(positive.y)
+            .max(negative.x.hypot(negative.y))
+    }
+
+    /// Reports whether both ordered axes and the derived diameter satisfy the immutable basis contract.
+    pub fn is_valid(self) -> bool {
+        self.axis_a.x.is_finite()
+            && self.axis_a.y.is_finite()
+            && self.axis_b.x.is_finite()
+            && self.axis_b.y.is_finite()
+            && self.axis_a.x.hypot(self.axis_a.y) > 0.0
+            && self.axis_b.x.hypot(self.axis_b.y) > 0.0
+            && self.diameter().is_finite()
+            && self.diameter() > 0.0
+    }
 }
 
 /// Stable validation failure for a reusable family-site set.
@@ -395,6 +445,12 @@ impl FamilySiteSet {
                 return Err(FamilySiteError::new(
                     "family_sites.position",
                     "family site position must be finite",
+                ));
+            }
+            if !site.nominal_cell_basis.is_valid() {
+                return Err(FamilySiteError::new(
+                    "family_sites.nominal_cell_basis",
+                    "nominal cell axes and diameter must be finite and positive",
                 ));
             }
             Self::validate_provenance(&site.provenance)?;

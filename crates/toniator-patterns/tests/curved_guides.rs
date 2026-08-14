@@ -27,7 +27,7 @@ fn definition(
         MarkOrientation::Fixed,
         CoveragePolicy {
             guard_steps: 1,
-            maximum_support_radius: 4.5,
+            additional_margin: 4.5,
         },
     )
 }

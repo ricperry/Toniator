@@ -23,7 +23,7 @@ fn session() -> DocumentSession {
             PatternOutputLayerId(1),
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         )],
         vec![ChannelState {
@@ -50,8 +50,9 @@ fn session() -> DocumentSession {
                 opacity: 0.75,
             },
             mark_geometry_response: MarkGeometryResponse {
-                minimum_size: 2.0,
-                maximum_size: 9.0,
+                minimum_fill: 2.0,
+                maximum_fill: 9.0,
+                rotation_offset_degrees: 0.0,
             },
             source_mapping: ChannelSourceMapping {
                 component: SourceComponent::Luminance,
@@ -93,7 +94,7 @@ fn successful_commands_mutate_once_and_advance_revision_once() {
         (
             DocumentCommand::SetMarkGeometryField {
                 channel_id: CHANNEL_ID,
-                edit: toniator_domain::MarkGeometryFieldEdit::MaximumSize(8.5),
+                edit: toniator_domain::MarkGeometryFieldEdit::MaximumFill(8.5),
             },
             InvalidationLevel::Realization,
         ),
@@ -136,7 +137,7 @@ fn successful_commands_mutate_once_and_advance_revision_once() {
     assert_eq!(channel.layout.rotation_degrees, 20.0);
     assert_eq!(channel.layout.translation_x, 2.0);
     assert_eq!(channel.layout.translation_y, 0.0);
-    assert_eq!(channel.mark_geometry_response.maximum_size, 8.5);
+    assert_eq!(channel.mark_geometry_response.maximum_fill, 8.5);
     assert_eq!(channel.appearance.color.blue, 0.6);
     assert_eq!(channel.appearance.opacity, 0.4);
     assert!(!channel.appearance.visible);
@@ -165,7 +166,7 @@ fn failed_commands_preserve_exact_document_and_revision() {
         },
         DocumentCommand::SetMarkGeometryField {
             channel_id: CHANNEL_ID,
-            edit: toniator_domain::MarkGeometryFieldEdit::MinimumSize(-1.0),
+            edit: toniator_domain::MarkGeometryFieldEdit::MinimumFill(-1.0),
         },
         DocumentCommand::SetColorComponent {
             channel_id: CHANNEL_ID,

@@ -86,7 +86,7 @@ fn stage20d_session() -> DocumentSession {
         MarkOrientation::Fixed,
         CoveragePolicy {
             guard_steps: 1,
-            maximum_support_radius: 4.5,
+            additional_margin: 4.5,
         },
     );
     let structure = AuthoredStructure::new(
@@ -146,8 +146,9 @@ fn stage20d_legacy_diagnostic_session() -> DocumentSession {
                 opacity: 1.0,
             },
             mark_geometry_response: MarkGeometryResponse {
-                minimum_size: 1.0,
-                maximum_size: 4.5,
+                minimum_fill: 1.0,
+                maximum_fill: 4.5,
+                rotation_offset_degrees: 0.0,
             },
             source_mapping: ChannelSourceMapping {
                 component: SourceComponent::Luminance,
@@ -339,7 +340,7 @@ fn stage17_history_command_cache_matrix_preserves_earliest_layers_and_restoratio
     let realization = history
         .apply(&DocumentCommand::SetMarkGeometryField {
             channel_id: ChannelId(1),
-            edit: MarkGeometryFieldEdit::MinimumSize(1.0),
+            edit: MarkGeometryFieldEdit::MinimumFill(1.0),
         })
         .unwrap();
     assert_eq!(realization.invalidation, InvalidationLevel::Realization);
@@ -789,8 +790,9 @@ fn stage17_structural_session(fixture: Stage17StructuralFixture) -> DocumentSess
 
 fn is_pattern_definition_leaf(field: PropertyFieldId) -> bool {
     match field {
+        PropertyFieldId::MarkRotationOffsetDegrees => false,
         PropertyFieldId::CoverageGuardSteps
-        | PropertyFieldId::CoverageMaximumSupportRadius
+        | PropertyFieldId::CoverageAdditionalMargin
         | PropertyFieldId::GuideBaselineAngle
         | PropertyFieldId::GuidePhase
         | PropertyFieldId::GuideSpacingMultiplier
@@ -840,8 +842,8 @@ fn is_pattern_definition_leaf(field: PropertyFieldId) -> bool {
         | PropertyFieldId::RotationDegrees
         | PropertyFieldId::TranslationX
         | PropertyFieldId::TranslationY
-        | PropertyFieldId::MarkMinimumSize
-        | PropertyFieldId::MarkMaximumSize
+        | PropertyFieldId::MarkMinimumFill
+        | PropertyFieldId::MarkMaximumFill
         | PropertyFieldId::LegacyMappingComponent
         | PropertyFieldId::LegacyMappingPlacement
         | PropertyFieldId::ModeledMappingComponent
@@ -880,10 +882,10 @@ fn stage17_every_pattern_definition_leaf_obeys_its_cache_contract() {
         },
         Case {
             name: "coverage support",
-            field: PropertyFieldId::CoverageMaximumSupportRadius,
+            field: PropertyFieldId::CoverageAdditionalMargin,
             fixture: Stage17StructuralFixture::Intersections,
-            edit: PatternDefinitionEdit::SetCoverageMaximumSupportRadius {
-                maximum_support_radius: 5.0,
+            edit: PatternDefinitionEdit::SetCoverageAdditionalMargin {
+                additional_margin: 5.0,
             },
             accepts_transition: true,
         },
@@ -1376,7 +1378,7 @@ fn session_with_canvas(model: HalftoneChannelModel, width: f64, height: f64) -> 
         PatternOutputLayerId(1),
         CoveragePolicy {
             guard_steps: 2,
-            maximum_support_radius: 4.5,
+            additional_margin: 4.5,
         },
     );
     let channel = ChannelState {
@@ -1403,8 +1405,9 @@ fn session_with_canvas(model: HalftoneChannelModel, width: f64, height: f64) -> 
             opacity: 1.0,
         },
         mark_geometry_response: MarkGeometryResponse {
-            minimum_size: 2.0,
-            maximum_size: 9.0,
+            minimum_fill: 2.0,
+            maximum_fill: 9.0,
+            rotation_offset_degrees: 0.0,
         },
         source_mapping: ChannelSourceMapping {
             component: SourceComponent::Luminance,
@@ -1619,7 +1622,7 @@ fn generalized_session_named(
         orientation,
         CoveragePolicy {
             guard_steps: 2,
-            maximum_support_radius: 4.5,
+            additional_margin: 4.5,
         },
     );
     let source = SourceReferenceId::new("fixture-source").unwrap();
@@ -1647,8 +1650,9 @@ fn generalized_session_named(
             opacity: 1.0,
         },
         mark_geometry_response: MarkGeometryResponse {
-            minimum_size: 2.0,
-            maximum_size: 9.0,
+            minimum_fill: 2.0,
+            maximum_fill: 9.0,
+            rotation_offset_degrees: 0.0,
         },
         source_mapping: ChannelSourceMapping {
             component: SourceComponent::Luminance,
@@ -2635,6 +2639,95 @@ fn generalized_intersection_and_along_products_share_the_complete_cache_and_cons
     }
 }
 
+/// Proves engine preflight reserves a repeated along-guide envelope before complete realization.
+#[test]
+fn engine_preflights_multiplier_ten_along_guides_before_realization() {
+    let source_id = SourceReferenceId::new("multiplier-ten-source").unwrap();
+    let definition = PatternDefinition::generalized_straight_guides(
+        PatternDefinitionId(601),
+        "multiplier-ten along guides",
+        PatternMechanismId(602),
+        PatternMechanismId(603),
+        PatternOutputLayerId(604),
+        vec![StraightGuideDimension {
+            id: GuideDimensionId(605),
+            baseline_angle_degrees: 0.0,
+            phase: 0.0,
+            repetition: StraightGuideRepetition {
+                spacing_multiplier: 10.0,
+            },
+        }],
+        GeneralizedSiteProduct::AlongGuides {
+            dimensions: vec![GuideDimensionId(605)],
+            interval_multiplier: 10.0,
+            phase: 0.0,
+        },
+        MarkOrientation::Fixed,
+        CoveragePolicy {
+            guard_steps: 1,
+            additional_margin: 0.0,
+        },
+    );
+    let document = Document::with_source(
+        DocumentId(601),
+        CanvasSpec {
+            width: 100.0,
+            height: 100.0,
+        },
+        SourceReference::Assigned(source_id.clone()),
+        vec![definition],
+        vec![ChannelState {
+            id: ChannelId(601),
+            pattern_definition_id: PatternDefinitionId(601),
+            layout: ChannelPatternLayout {
+                density: DensityMetric2D {
+                    across_x: 10.0,
+                    across_y: 10.0,
+                    aspect_locked: true,
+                },
+                rotation_degrees: 0.0,
+                translation_x: 0.0,
+                translation_y: 0.0,
+            },
+            appearance: ChannelAppearance {
+                visible: true,
+                color: ColorValue {
+                    red: 0.0,
+                    green: 0.0,
+                    blue: 0.0,
+                    alpha: 1.0,
+                },
+                opacity: 1.0,
+            },
+            mark_geometry_response: MarkGeometryResponse {
+                minimum_fill: 0.0,
+                maximum_fill: 1.0,
+                rotation_offset_degrees: 0.0,
+            },
+            source_mapping: ChannelSourceMapping {
+                component: SourceComponent::Luminance,
+                placement: SourcePlacement::StretchToCanvas,
+            },
+        }],
+    )
+    .unwrap();
+    let session = DocumentSession::new(document).unwrap();
+    let result = evaluate_channel_diagnostic(ChannelDiagnosticRequest::new(
+        session.evaluation_snapshot(ChannelId(601)).unwrap(),
+        ResolvedSource::new(
+            source_id,
+            std::fs::read("../../assets/raster-sample.png").unwrap(),
+            SourceFormatHint::Png,
+        )
+        .unwrap(),
+    ))
+    .expect("engine preflight must cover multiplier-ten realized marks");
+    let toniator_engine::GeometryOutput::CircularMarks(marks) =
+        result.scene().layers()[0].geometry();
+    assert!(!marks.is_empty());
+    assert!(marks.iter().all(|mark| mark.radius <= 550.0));
+}
+
 #[test]
 fn generalized_history_and_scheduler_keep_authority_and_reject_stale_publication() {
     let source_id = SourceReferenceId::new("fixture-source").unwrap();
@@ -3065,7 +3158,7 @@ fn random_definition(
         16_000_000,
         CoveragePolicy {
             guard_steps: 2,
-            maximum_support_radius: 4.5,
+            additional_margin: 4.5,
         },
     )
 }

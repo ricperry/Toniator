@@ -18,8 +18,8 @@ pub use toniator_geometry::{
     AffineTransform2D, Bounds, CanonicalCircleMark, CurveError, CurvePath, CurveSegment,
     FamilySite, FamilySiteError, FamilySiteId, FamilySiteProvenance, FamilySiteSet,
     GuideInstanceId, GuideIntersectionProvenance, GuidePathInstance, GuidePathLocationProvenance,
-    GuidePathSet, IntersectionSite, PathLocation, Point2, SiteId, SiteScope, StraightGuide,
-    Vector2, projection_range, resolve_guide_prototype,
+    GuidePathSet, IntersectionSite, NominalCellBasis, PathLocation, Point2, SiteId, SiteScope,
+    StraightGuide, Vector2, projection_range, resolve_guide_prototype,
 };
 use toniator_sampling::{
     SampledSourcePaint, SamplingError, SourceComponent, SourceField, SourceMappingComponent,
@@ -171,7 +171,7 @@ impl PresetRegistry {
                         name: "Even random circles".into(),
                         coverage: toniator_domain::CoveragePolicy {
                             guard_steps: 2,
-                            maximum_support_radius: 4.5,
+                            additional_margin: 0.0,
                         },
                         character: RandomSiteCharacter::Even {
                             minimum_center_distance: 8.0,
@@ -196,7 +196,7 @@ impl PresetRegistry {
                         name: "Straight grid circles".into(),
                         coverage: toniator_domain::CoveragePolicy {
                             guard_steps: 2,
-                            maximum_support_radius: 4.5,
+                            additional_margin: 0.0,
                         },
                         dimensions: vec![
                             GuideDimensionDraft {
@@ -448,6 +448,11 @@ impl TypedFamilyOutput {
     /// Returns Stage 20D's truthful reusable finite guide authority when this family produces it.
     pub fn guide_path_set(&self) -> Option<&GuidePathSet> {
         self.structure.guide_path_set.as_ref()
+    }
+
+    /// Returns the conservative support radius used to allocate this immutable family envelope.
+    pub fn planned_support_radius(&self) -> f64 {
+        self.structure.support_radius
     }
 }
 
@@ -946,8 +951,9 @@ pub fn evaluate_typed_family_product_with_source_cancellable(
     }
     if family.product == StructuralProductCapability::RandomSites {
         let output = evaluate_random_sites_cancellable(family, request, source, is_cancelled)?;
+        let fingerprint = family_site_fingerprint(&output.family_fingerprint, &output.sites);
         let site_set = FamilySiteSet::new(
-            output.family_fingerprint,
+            fingerprint,
             family.provenance.mechanism_ids[3],
             output.sites,
         )
@@ -1003,7 +1009,12 @@ pub fn evaluate_typed_family_product_with_source_cancellable(
             is_cancelled,
         )
         .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
-        let site_set = family_sites_from_generalized(&output, family.provenance.mechanism_ids[1])?;
+        let site_set = family_sites_from_generalized(
+            &output,
+            family,
+            request,
+            family.provenance.mechanism_ids[1],
+        )?;
         let generation_domain = Bounds::from_points(
             output
                 .guides
@@ -1268,6 +1279,8 @@ fn evaluate_generic_curve_guides_cancellable(
                 family.merge_epsilon.unwrap_or(0.0),
                 canvas,
                 document_domain,
+                &request.canvas,
+                &request.density,
                 family.provenance.mechanism_ids[1],
                 request.max_family_candidates,
                 is_cancelled,
@@ -1300,8 +1313,12 @@ fn evaluate_generic_curve_guides_cancellable(
         }
         StructuralProductCapability::RandomSites => unreachable!(),
     };
-    let site_set = FamilySiteSet::new(fingerprint, family.provenance.mechanism_ids[1], sites)
-        .map_err(family_site_error)?;
+    let site_set = FamilySiteSet::new(
+        family_site_fingerprint(&fingerprint, &sites),
+        family.provenance.mechanism_ids[1],
+        sites,
+    )
+    .map_err(family_site_error)?;
     Ok(TypedFamilyOutput {
         family: family.clone(),
         sites: site_set,
@@ -1449,11 +1466,13 @@ fn curve_intersection_sites(
     epsilon: f64,
     canvas: Bounds,
     generation_domain: Bounds,
+    canvas_spec: &CanvasSpec,
+    density: &DensityMetric2D,
     product_id: PatternMechanismId,
     limit: usize,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<FamilySite>, PatternPipelineError> {
-    let mut raw = Vec::<(Point2, Vec<GuidePathLocationProvenance>)>::new();
+    let mut raw = Vec::<(Point2, Vec<GuidePathLocationProvenance>, NominalCellBasis)>::new();
     for (offset, &left) in selected.iter().enumerate() {
         for &right in &selected[offset + 1..] {
             for first in &grouped[left] {
@@ -1476,6 +1495,39 @@ fn curve_intersection_sites(
                         if site_scope(point, canvas, generation_domain).is_none() {
                             continue;
                         }
+                        let first_tangent = first
+                            .path
+                            .unit_tangent_at(contact.first_location())
+                            .map_err(|_| {
+                                PatternPipelineError::new(
+                                    "pattern.family.curved_guides.tangent",
+                                    "curved intersections require nonstationary tangents",
+                                )
+                            })?;
+                        let second_tangent = second
+                            .path
+                            .unit_tangent_at(contact.second_location())
+                            .map_err(|_| {
+                                PatternPipelineError::new(
+                                    "pattern.family.curved_guides.tangent",
+                                    "curved intersections require nonstationary tangents",
+                                )
+                            })?;
+                        let first_spacing = directional_spacing(
+                            canvas_spec,
+                            density,
+                            first_tangent.perpendicular(),
+                        )?;
+                        let second_spacing = directional_spacing(
+                            canvas_spec,
+                            density,
+                            second_tangent.perpendicular(),
+                        )?;
+                        let basis = NominalCellBasis::new(
+                            first_tangent.scale(second_spacing),
+                            second_tangent.scale(first_spacing),
+                        )
+                        .map_err(family_site_error)?;
                         raw.push((
                             point,
                             vec![
@@ -1490,6 +1542,7 @@ fn curve_intersection_sites(
                                     parameter_bits: contact.second_location().parameter().to_bits(),
                                 },
                             ],
+                            basis,
                         ));
                         if raw.len() > limit {
                             return Err(PatternPipelineError::new(
@@ -1503,7 +1556,7 @@ fn curve_intersection_sites(
         }
     }
     let mut output: Vec<FamilySite> = Vec::new();
-    for (point, mut contributors) in raw {
+    for (point, mut contributors, basis) in raw {
         if let Some(existing) = output
             .iter_mut()
             .find(|site| ((site.position.x - point.x).hypot(site.position.y - point.y)) <= epsilon)
@@ -1518,6 +1571,13 @@ fn curve_intersection_sites(
                     }
                 }
             }
+            if basis
+                .diameter()
+                .total_cmp(&existing.nominal_cell_basis.diameter())
+                .is_lt()
+            {
+                existing.nominal_cell_basis = basis;
+            }
             continue;
         }
         contributors.dedup();
@@ -1527,6 +1587,7 @@ fn curve_intersection_sites(
                 ordinal: output.len(),
             },
             position: point,
+            nominal_cell_basis: basis,
             // Contacts outside the document coverage envelope were excluded before
             // raw accumulation, so they cannot consume merge work or become Guard sites.
             scope: site_scope(point, canvas, generation_domain).expect("filtered envelope"),
@@ -1618,6 +1679,11 @@ fn curve_along_sites(
                         ordinal: output.len(),
                     },
                     position: point,
+                    nominal_cell_basis: NominalCellBasis::new(
+                        tangent.scale(spacing),
+                        normal.scale(directional_spacing(canvas_spec, density, normal)?),
+                    )
+                    .map_err(family_site_error)?,
                     scope,
                     provenance: FamilySiteProvenance::CurveAlongGuide {
                         location: GuidePathLocationProvenance {
@@ -1656,6 +1722,177 @@ fn site_scope(point: Point2, canvas: Bounds, generation_domain: Bounds) -> Optio
                 .contains(point)
                 .then_some(SiteScope::Guard)
         })
+}
+
+/// Derives a deterministic square-equivalent basis from the active document density.
+fn density_cell_basis(
+    canvas: &CanvasSpec,
+    density: &DensityMetric2D,
+) -> Result<NominalCellBasis, PatternPipelineError> {
+    let area = (canvas.width / density.across_x) * (canvas.height / density.across_y);
+    let side = area.sqrt();
+    NominalCellBasis::new(Vector2::new(side, 0.0), Vector2::new(0.0, side))
+        .map_err(family_site_error)
+}
+
+/// Derives an intersection cell basis from ordered contributing straight guides and their resolved spacing.
+fn straight_intersection_basis(
+    guides: &[StraightGuide],
+    coverage: &[GuideCoverage],
+    contributors: &[GuideInstanceId],
+) -> Result<NominalCellBasis, PatternPipelineError> {
+    let mut best: Option<(f64, NominalCellBasis)> = None;
+    for (left_index, left) in contributors.iter().enumerate() {
+        for right in &contributors[left_index + 1..] {
+            let Some(left_guide) = guides.iter().find(|guide| guide.id == *left) else {
+                continue;
+            };
+            let Some(right_guide) = guides.iter().find(|guide| guide.id == *right) else {
+                continue;
+            };
+            let Some(left_spacing) = coverage
+                .iter()
+                .find(|value| value.dimension_id == left.dimension_id)
+                .map(|value| value.spacing)
+            else {
+                continue;
+            };
+            let Some(right_spacing) = coverage
+                .iter()
+                .find(|value| value.dimension_id == right.dimension_id)
+                .map(|value| value.spacing)
+            else {
+                continue;
+            };
+            let cross = left_guide.tangent.x.mul_add(
+                right_guide.tangent.y,
+                -left_guide.tangent.y * right_guide.tangent.x,
+            );
+            if !cross.is_finite() || cross.abs() <= 1.0e-12 {
+                continue;
+            }
+            let Ok(basis) = NominalCellBasis::new(
+                left_guide.tangent.scale(right_spacing),
+                right_guide.tangent.scale(left_spacing),
+            ) else {
+                continue;
+            };
+            let candidate = basis.diameter();
+            if best.is_none_or(|(diameter, _)| candidate < diameter) {
+                best = Some((candidate, basis));
+            }
+        }
+    }
+    best.map(|(_, basis)| basis).ok_or_else(|| {
+        PatternPipelineError::new(
+            "pattern.family.nominal_cell_basis",
+            "guide intersection lacks a finite nonparallel contributor basis",
+        )
+    })
+}
+
+/// Bounds every possible Stage 20E1 nominal-cell diagonal before family allocation.
+///
+/// # Errors
+///
+/// Returns a stable pipeline error when validated density or repetition inputs cannot produce a
+/// finite positive conservative bound.
+pub fn maximum_nominal_cell_diameter(
+    family: &FamilyCapability,
+    canvas: &CanvasSpec,
+    density: &DensityMetric2D,
+) -> Result<f64, PatternPipelineError> {
+    let spacing_x = canvas.width / density.across_x;
+    let spacing_y = canvas.height / density.across_y;
+    if !spacing_x.is_finite() || !spacing_y.is_finite() || spacing_x <= 0.0 || spacing_y <= 0.0 {
+        return Err(PatternPipelineError::new(
+            "pattern.family.nominal_cell_basis",
+            "density must produce finite positive nominal-cell spacing",
+        ));
+    }
+    let rectangular_diagonal = spacing_x.hypot(spacing_y);
+    let maximum_directional_spacing = spacing_x.max(spacing_y);
+    let selected_spacing_bound = |dimensions: &[StraightGuideDimension]| {
+        family
+            .site_selection
+            .iter()
+            .filter_map(|id| dimensions.iter().find(|dimension| dimension.id == *id))
+            .try_fold(0.0_f64, |maximum, dimension| {
+                let radians = dimension.baseline_angle_degrees.to_radians();
+                let normal = Vector2::new(radians.cos(), radians.sin());
+                directional_spacing(canvas, density, normal)
+                    .map(|spacing| maximum.max(spacing * dimension.repetition.spacing_multiplier))
+            })
+    };
+    let generic_spacing_bound = || {
+        family
+            .generic_guides
+            .as_ref()
+            .expect("generic branch checked above")
+            .dimensions
+            .iter()
+            .filter(|dimension| family.site_selection.contains(&dimension.id))
+            .try_fold(0.0_f64, |maximum, dimension| match dimension.repetition {
+                GuideRepetition::Single => Ok(maximum),
+                GuideRepetition::TransformStack {
+                    direction_degrees,
+                    spacing_multiplier,
+                } => {
+                    let angle = (dimension.baseline_angle_degrees + direction_degrees).to_radians();
+                    directional_spacing(canvas, density, Vector2::new(angle.cos(), angle.sin()))
+                        .map(|spacing| maximum.max(spacing * spacing_multiplier))
+                }
+            })
+    };
+    let maximum = match family.product {
+        StructuralProductCapability::RandomSites => rectangular_diagonal,
+        StructuralProductCapability::GuideIntersections => {
+            if family.generic_guides.is_some() {
+                2.0 * generic_spacing_bound()?.max(maximum_directional_spacing)
+            } else {
+                2.0 * selected_spacing_bound(&family.dimensions)?
+            }
+        }
+        StructuralProductCapability::AlongGuideSites => {
+            let along_multiplier = family.along_interval_multiplier.unwrap_or(1.0);
+            if family.generic_guides.is_some() {
+                maximum_directional_spacing * (along_multiplier + 1.0)
+            } else {
+                let resolved_spacing = selected_spacing_bound(&family.dimensions)?;
+                resolved_spacing * (along_multiplier + 1.0)
+            }
+        }
+    };
+    (maximum.is_finite() && maximum > 0.0)
+        .then_some(maximum)
+        .ok_or_else(|| {
+            PatternPipelineError::new(
+                "pattern.family.nominal_cell_basis",
+                "family inputs cannot produce a finite positive nominal-cell bound",
+            )
+        })
+}
+
+/// Extends a family fingerprint with every published site's exact nominal basis and diameter.
+fn family_site_fingerprint(base: &str, sites: &[FamilySite]) -> String {
+    let mut bytes = base.as_bytes().to_vec();
+    bytes.extend(b"|nominal-cell-basis-v1");
+    for site in sites {
+        bytes.extend(site.id.mechanism_id.0.to_le_bytes());
+        bytes.extend(
+            u64::try_from(site.id.ordinal)
+                .expect("usize fits u64")
+                .to_le_bytes(),
+        );
+        bytes.extend(site.position.x.to_bits().to_le_bytes());
+        bytes.extend(site.position.y.to_bits().to_le_bytes());
+        bytes.extend(site.nominal_cell_basis.axis_a.x.to_bits().to_le_bytes());
+        bytes.extend(site.nominal_cell_basis.axis_a.y.to_bits().to_le_bytes());
+        bytes.extend(site.nominal_cell_basis.axis_b.x.to_bits().to_le_bytes());
+        bytes.extend(site.nominal_cell_basis.axis_b.y.to_bits().to_le_bytes());
+        bytes.extend(site.nominal_cell_basis.diameter().to_bits().to_le_bytes());
+    }
+    format!("{base}:nominal-cell-basis:{}", fnv1a64(bytes))
 }
 
 /// Hashes complete resolved generic guide intent and layout inputs under the fixed Stage 20D identity prefix.
@@ -1790,25 +2027,34 @@ fn family_sites_from_grid(
     output: &GridFamilyOutput,
     product_mechanism_id: PatternMechanismId,
 ) -> Result<FamilySiteSet, PatternPipelineError> {
-    FamilySiteSet::new(
-        output.family_fingerprint.clone(),
-        product_mechanism_id,
-        output
-            .sites
-            .iter()
-            .enumerate()
-            .map(|(ordinal, site)| FamilySite {
+    let sites = output
+        .sites
+        .iter()
+        .enumerate()
+        .map(|(ordinal, site)| {
+            let nominal_cell_basis = straight_intersection_basis(
+                &output.guides,
+                &output.coverage,
+                &site.provenance.contributors,
+            )?;
+            Ok(FamilySite {
                 id: FamilySiteId {
                     mechanism_id: product_mechanism_id,
                     ordinal,
                 },
                 position: site.position,
+                nominal_cell_basis,
                 scope: site.scope,
                 provenance: FamilySiteProvenance::GuideIntersection {
                     contributors: site.provenance.contributors.clone(),
                 },
             })
-            .collect(),
+        })
+        .collect::<Result<Vec<_>, PatternPipelineError>>()?;
+    FamilySiteSet::new(
+        family_site_fingerprint(&output.family_fingerprint, &sites),
+        product_mechanism_id,
+        sites,
     )
     .map_err(family_site_error)
 }
@@ -1816,20 +2062,52 @@ fn family_sites_from_grid(
 /// Publishes generalized guide products without fabricating intersection facts.
 fn family_sites_from_generalized(
     output: &GeneralizedStraightGuideOutput,
+    family: &FamilyCapability,
+    request: &GridInspectRequest,
     product_mechanism_id: PatternMechanismId,
 ) -> Result<FamilySiteSet, PatternPipelineError> {
     let sites = output
         .sites
         .iter()
         .enumerate()
-        .map(|(ordinal, site)| FamilySite {
-            id: FamilySiteId {
-                mechanism_id: product_mechanism_id,
-                ordinal,
-            },
-            position: site.position,
-            scope: site.scope,
-            provenance: match &site.provenance {
+        .map(|(ordinal, site)| {
+            let nominal_cell_basis = match &site.provenance {
+                GeneralizedSiteProvenance::Intersection { contributors } => {
+                    straight_intersection_basis(&output.guides, &output.coverage, contributors)?
+                }
+                GeneralizedSiteProvenance::AlongGuide { guide_id, .. } => {
+                    let guide = output
+                        .guides
+                        .iter()
+                        .find(|guide| guide.id == *guide_id)
+                        .ok_or_else(|| {
+                            PatternPipelineError::new(
+                                "pattern.family.nominal_cell_basis",
+                                "along-guide site lacks its resolved guide",
+                            )
+                        })?;
+                    let transverse_spacing = output
+                        .coverage
+                        .iter()
+                        .find(|value| value.dimension_id == guide_id.dimension_id)
+                        .map(|value| value.spacing)
+                        .ok_or_else(|| {
+                            PatternPipelineError::new(
+                                "pattern.family.nominal_cell_basis",
+                                "along-guide site lacks resolved transverse spacing",
+                            )
+                        })?;
+                    let along_interval =
+                        directional_spacing(&request.canvas, &request.density, guide.normal)?
+                            * family.along_interval_multiplier.unwrap_or(1.0);
+                    NominalCellBasis::new(
+                        guide.tangent.scale(along_interval),
+                        guide.normal.scale(transverse_spacing),
+                    )
+                    .map_err(family_site_error)?
+                }
+            };
+            let provenance = match &site.provenance {
                 GeneralizedSiteProvenance::Intersection { contributors } => {
                     FamilySiteProvenance::GuideIntersection {
                         contributors: contributors.clone(),
@@ -1848,11 +2126,21 @@ fn family_sites_from_generalized(
                     absolute_arc_position_bits: *absolute_arc_position_bits,
                     local_arc_position_bits: *local_arc_position_bits,
                 },
-            },
+            };
+            Ok(FamilySite {
+                id: FamilySiteId {
+                    mechanism_id: product_mechanism_id,
+                    ordinal,
+                },
+                position: site.position,
+                nominal_cell_basis,
+                scope: site.scope,
+                provenance,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, PatternPipelineError>>()?;
     FamilySiteSet::new(
-        output.family_fingerprint.clone(),
+        family_site_fingerprint(&output.family_fingerprint, &sites),
         product_mechanism_id,
         sites,
     )
@@ -2236,6 +2524,7 @@ fn evaluate_random_sites_cancellable(
             exclusion_neighbor_ordinal: None,
         });
     }
+    let nominal_cell_basis = density_cell_basis(&request.canvas, &request.density)?;
     let sites: Vec<_> = accepted
         .iter()
         .enumerate()
@@ -2245,6 +2534,7 @@ fn evaluate_random_sites_cancellable(
                 ordinal: index,
             },
             position: *point,
+            nominal_cell_basis,
             scope: *scope,
             provenance: FamilySiteProvenance::Random {
                 candidate_ordinal: provenance[index].candidate_ordinal,
@@ -2742,6 +3032,7 @@ fn adapt_family_sites_for_current_circular_marks(family: &TypedFamilyOutput) -> 
             IntersectionSite {
                 id,
                 position: site.position,
+                nominal_cell_diameter: site.nominal_cell_basis.diameter(),
                 scope: site.scope,
                 provenance: GuideIntersectionProvenance { contributors },
             }
@@ -3493,8 +3784,9 @@ impl CircularMarkRealization {
 /// The bounded diameter response used to realize canonical radii.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct MarkResponse {
-    pub minimum_size: f64,
-    pub maximum_size: f64,
+    pub minimum_fill: f64,
+    pub maximum_fill: f64,
+    pub rotation_offset_degrees: f64,
 }
 
 /// A realization-boundary failure. Family generation errors remain `GridError`.
@@ -3560,7 +3852,13 @@ pub fn realize_circular_marks(
                 "effective mark ink must be finite",
             ));
         }
-        let radius = radius_from_ink_with_support(ink, response, family.support_radius)?;
+        let radius = radius_from_ink_with_diameter(ink, response, site.nominal_cell_diameter)?;
+        if radius > family.support_radius {
+            return Err(RealizationError::new(
+                "realization.family.support_radius",
+                "realized radius exceeds the planned family support",
+            ));
+        }
         let mark = CanonicalCircleMark::new(
             site.id,
             site.position,
@@ -3614,7 +3912,13 @@ pub fn realize_mapped_circular_marks(
     let mut marks = Vec::with_capacity(family.sites.len());
     for site in &family.sites {
         let ink = source.sample_mapping_response(site.position, canvas, mapping)?;
-        let radius = radius_from_ink_with_support(ink, response, family.support_radius)?;
+        let radius = radius_from_ink_with_diameter(ink, response, site.nominal_cell_diameter)?;
+        if radius > family.support_radius {
+            return Err(RealizationError::new(
+                "realization.family.support_radius",
+                "realized radius exceeds the planned family support",
+            ));
+        }
         let mark = CanonicalCircleMark::new(
             site.id,
             site.position,
@@ -3673,7 +3977,13 @@ pub fn realize_source_color_circular_marks(
             continue;
         };
         let radius =
-            radius_from_ink_with_support(sample.response, response, family.support_radius)?;
+            radius_from_ink_with_diameter(sample.response, response, site.nominal_cell_diameter)?;
+        if radius > family.support_radius {
+            return Err(RealizationError::new(
+                "realization.family.support_radius",
+                "realized radius exceeds the planned family support",
+            ));
+        }
         let mark = CanonicalCircleMark::new(
             site.id,
             site.position,
@@ -3706,9 +4016,12 @@ pub fn realize_source_color_circular_marks(
         ))
 }
 
-/// Maps an effective mark-ink response linearly to radius using the authored
-/// diameter bounds. Source sampling owns component polarity and alpha handling.
-pub fn radius_from_ink(ink: f64, response: MarkResponse) -> Result<f64, RealizationError> {
+/// Maps an effective mark response to radius using one finite nominal cell diameter.
+pub fn radius_from_ink_with_diameter(
+    ink: f64,
+    response: MarkResponse,
+    nominal_cell_diameter: f64,
+) -> Result<f64, RealizationError> {
     validate_response_basic(response)?;
     if !ink.is_finite() {
         return Err(RealizationError::new(
@@ -3717,59 +4030,56 @@ pub fn radius_from_ink(ink: f64, response: MarkResponse) -> Result<f64, Realizat
         ));
     }
     let ink = ink.clamp(0.0, 1.0);
-    Ok((response.minimum_size + ink * (response.maximum_size - response.minimum_size)) / 2.0)
-}
-
-fn radius_from_ink_with_support(
-    ink: f64,
-    response: MarkResponse,
-    maximum_support_radius: f64,
-) -> Result<f64, RealizationError> {
-    validate_response(response, maximum_support_radius)?;
-    if !ink.is_finite() {
+    if !nominal_cell_diameter.is_finite() || nominal_cell_diameter <= 0.0 {
         return Err(RealizationError::new(
-            "realization.ink",
-            "effective mark ink must be finite",
+            "realization.nominal_cell_diameter",
+            "nominal cell diameter must be finite and positive",
         ));
     }
-    let ink = ink.clamp(0.0, 1.0);
-    Ok((response.minimum_size + ink * (response.maximum_size - response.minimum_size)) / 2.0)
+    Ok(
+        (response.minimum_fill + ink * (response.maximum_fill - response.minimum_fill))
+            * nominal_cell_diameter
+            / 2.0,
+    )
 }
 
 fn validate_response(
     response: MarkResponse,
-    maximum_support_radius: f64,
+    additional_margin: f64,
 ) -> Result<(), RealizationError> {
     validate_response_basic(response)?;
-    if !maximum_support_radius.is_finite() || maximum_support_radius < 0.0 {
+    if !additional_margin.is_finite() || additional_margin < 0.0 {
         return Err(RealizationError::new(
             "realization.family.support_radius",
             "family support capability must be finite and nonnegative",
         ));
     }
-    if response.maximum_size / 2.0 > maximum_support_radius {
+    if response.maximum_fill > 2.0 {
         return Err(RealizationError::new(
-            "realization.response.maximum_size",
-            "maximum diameter exceeds the family support capability",
+            "realization.response.maximum_fill",
+            "maximum fill must not exceed 2.0",
         ));
     }
     Ok(())
 }
 
 fn validate_response_basic(response: MarkResponse) -> Result<(), RealizationError> {
-    if !response.minimum_size.is_finite() || !response.maximum_size.is_finite() {
-        return Err(RealizationError::new(
-            "realization.response",
-            "diameters must be finite",
-        ));
-    }
-    if response.minimum_size < 0.0
-        || response.maximum_size < 0.0
-        || response.minimum_size > response.maximum_size
+    if !response.minimum_fill.is_finite()
+        || !response.maximum_fill.is_finite()
+        || !response.rotation_offset_degrees.is_finite()
     {
         return Err(RealizationError::new(
             "realization.response",
-            "diameters must be nonnegative and minimum must not exceed maximum",
+            "fill response and rotation offset must be finite",
+        ));
+    }
+    if response.minimum_fill < 0.0
+        || response.maximum_fill > 2.0
+        || response.minimum_fill > response.maximum_fill
+    {
+        return Err(RealizationError::new(
+            "realization.response",
+            "fill values must be within 0.0..=2.0 and minimum must not exceed maximum",
         ));
     }
     Ok(())
@@ -3803,8 +4113,9 @@ fn realization_fingerprint(
         .chain([format, placement, component])
         .chain(source.identity().width.to_le_bytes())
         .chain(source.identity().height.to_le_bytes())
-        .chain(response.minimum_size.to_bits().to_le_bytes())
-        .chain(response.maximum_size.to_bits().to_le_bytes())
+        .chain(response.minimum_fill.to_bits().to_le_bytes())
+        .chain(response.maximum_fill.to_bits().to_le_bytes())
+        .chain(response.rotation_offset_degrees.to_bits().to_le_bytes())
     {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
@@ -3881,8 +4192,9 @@ fn realization_identity_prefix(
     bytes.push(u8::from(mapping.inverted));
     bytes.extend(mapping.gain.to_bits().to_le_bytes());
     bytes.extend(mapping.bias.to_bits().to_le_bytes());
-    bytes.extend(response.minimum_size.to_bits().to_le_bytes());
-    bytes.extend(response.maximum_size.to_bits().to_le_bytes());
+    bytes.extend(response.minimum_fill.to_bits().to_le_bytes());
+    bytes.extend(response.maximum_fill.to_bits().to_le_bytes());
+    bytes.extend(response.rotation_offset_degrees.to_bits().to_le_bytes());
     bytes
 }
 
@@ -4069,8 +4381,9 @@ mod realization_tests {
             height: 1.0,
         };
         let response = MarkResponse {
-            minimum_size: 2.0,
-            maximum_size: 9.0,
+            minimum_fill: 2.0,
+            maximum_fill: 9.0,
+            rotation_offset_degrees: 0.0,
         };
         let luminance = realize_circular_marks(
             &grid,
@@ -4118,34 +4431,48 @@ mod realization_tests {
     }
 
     #[test]
-    fn diameter_response_uses_effective_ink_and_stores_radius() {
+    fn normalized_diameter_response_requires_an_explicit_nominal_cell() {
         let response = MarkResponse {
-            minimum_size: 2.0,
-            maximum_size: 9.0,
+            minimum_fill: 0.2,
+            maximum_fill: 0.9,
+            rotation_offset_degrees: 0.0,
         };
-        assert_eq!(radius_from_ink(0.0, response).unwrap(), 1.0);
-        assert_eq!(radius_from_ink(0.5, response).unwrap(), 2.75);
-        assert_eq!(radius_from_ink(1.0, response).unwrap(), 4.5);
-        assert!(radius_from_ink(f64::NAN, response).is_err());
+        assert_eq!(
+            radius_from_ink_with_diameter(0.0, response, 10.0).unwrap(),
+            1.0
+        );
+        assert_eq!(
+            radius_from_ink_with_diameter(0.5, response, 10.0).unwrap(),
+            2.75
+        );
+        assert_eq!(
+            radius_from_ink_with_diameter(1.0, response, 10.0).unwrap(),
+            4.5
+        );
+        assert!(radius_from_ink_with_diameter(f64::NAN, response, 10.0).is_err());
         assert!(
-            radius_from_ink(
+            radius_from_ink_with_diameter(
                 0.5,
                 MarkResponse {
-                    minimum_size: -1.0,
-                    maximum_size: 9.0
-                }
+                    minimum_fill: -1.0,
+                    maximum_fill: 0.9,
+                    rotation_offset_degrees: 0.0,
+                },
+                10.0,
             )
             .is_err()
         );
         assert!(
-            radius_from_ink(
+            radius_from_ink_with_diameter(
                 0.5,
                 MarkResponse {
-                    minimum_size: 0.5,
-                    maximum_size: 12.0,
-                }
+                    minimum_fill: 0.5,
+                    maximum_fill: 2.1,
+                    rotation_offset_degrees: 0.0,
+                },
+                10.0,
             )
-            .is_ok()
+            .is_err()
         );
     }
 
@@ -4163,8 +4490,9 @@ mod realization_tests {
             SourcePlacement::StretchToCanvas,
             SourceComponent::Luminance,
             MarkResponse {
-                minimum_size: 2.0,
-                maximum_size: 9.0,
+                minimum_fill: 2.0,
+                maximum_fill: 9.0,
+                rotation_offset_degrees: 0.0,
             },
         )
         .unwrap();
@@ -4175,8 +4503,9 @@ mod realization_tests {
             SourcePlacement::StretchToCanvas,
             SourceComponent::Luminance,
             MarkResponse {
-                minimum_size: 3.0,
-                maximum_size: 8.0,
+                minimum_fill: 3.0,
+                maximum_fill: 8.0,
+                rotation_offset_degrees: 0.0,
             },
         )
         .unwrap();
@@ -4223,12 +4552,13 @@ mod realization_tests {
             SourcePlacement::StretchToCanvas,
             SourceComponent::Luminance,
             MarkResponse {
-                minimum_size: 2.0,
-                maximum_size: 9.1,
+                minimum_fill: 2.0,
+                maximum_fill: 9.1,
+                rotation_offset_degrees: 0.0,
             },
         )
         .expect_err("family support is authoritative at direct realization");
-        assert_eq!(error.path(), "realization.response.maximum_size");
+        assert_eq!(error.path(), "realization.response.maximum_fill");
 
         let mut wider_family = family;
         wider_family.support_radius = 6.0;
@@ -4239,8 +4569,9 @@ mod realization_tests {
             SourcePlacement::StretchToCanvas,
             SourceComponent::Luminance,
             MarkResponse {
-                minimum_size: 0.5,
-                maximum_size: 12.0,
+                minimum_fill: 0.5,
+                maximum_fill: 12.0,
+                rotation_offset_degrees: 0.0,
             },
         )
         .expect("declared support permits diameters below 2 and above 9");
@@ -4266,8 +4597,9 @@ mod realization_tests {
             SourcePlacement::StretchToCanvas,
             SourceComponent::Luminance,
             MarkResponse {
-                minimum_size: 2.0,
-                maximum_size: 9.0,
+                minimum_fill: 2.0,
+                maximum_fill: 9.0,
+                rotation_offset_degrees: 0.0,
             },
         )
         .unwrap();
@@ -4279,8 +4611,9 @@ mod realization_tests {
             SourcePlacement::StretchToCanvas,
             SourceComponent::Luminance,
             MarkResponse {
-                minimum_size: 2.0,
-                maximum_size: 9.0,
+                minimum_fill: 2.0,
+                maximum_fill: 9.0,
+                rotation_offset_degrees: 0.0,
             },
         )
         .unwrap();
@@ -4327,8 +4660,9 @@ mod realization_tests {
             height: 1.0,
         };
         let response = MarkResponse {
-            minimum_size: 2.0,
-            maximum_size: 9.0,
+            minimum_fill: 2.0,
+            maximum_fill: 9.0,
+            rotation_offset_degrees: 0.0,
         };
         let mapping = SourceMapping::canonical(SourceMappingComponent::Red);
         let first =
@@ -4364,13 +4698,14 @@ mod realization_tests {
                 &canvas,
                 mapping,
                 MarkResponse {
-                    minimum_size: 2.0,
-                    maximum_size: 9.1
+                    minimum_fill: 2.0,
+                    maximum_fill: 9.1,
+                    rotation_offset_degrees: 0.0,
                 },
             )
             .unwrap_err()
             .path(),
-            "realization.response.maximum_size"
+            "realization.response.maximum_fill"
         );
     }
 
@@ -4391,8 +4726,9 @@ mod realization_tests {
             height: 1.0,
         };
         let response = MarkResponse {
-            minimum_size: 2.0,
-            maximum_size: 9.0,
+            minimum_fill: 2.0,
+            maximum_fill: 9.0,
+            rotation_offset_degrees: 0.0,
         };
         let mapping = SourceMapping::canonical(SourceMappingComponent::Alpha);
         let realization =
@@ -4463,8 +4799,9 @@ mod realization_tests {
         };
         let mapping = SourceMapping::canonical(SourceMappingComponent::Alpha);
         let response = MarkResponse {
-            minimum_size: 2.0,
-            maximum_size: 9.0,
+            minimum_fill: 2.0,
+            maximum_fill: 9.0,
+            rotation_offset_degrees: 0.0,
         };
         let realization =
             realize_source_color_circular_marks(&family, &source, &canvas, mapping, response)
@@ -4506,8 +4843,9 @@ mod realization_tests {
             &canvas,
             SourceMapping::canonical(SourceMappingComponent::Alpha),
             MarkResponse {
-                minimum_size: 2.0,
-                maximum_size: 9.0,
+                minimum_fill: 2.0,
+                maximum_fill: 9.0,
+                rotation_offset_degrees: 0.0,
             },
         )
         .unwrap();
@@ -4533,8 +4871,9 @@ mod realization_tests {
             height: 1.0,
         };
         let response = MarkResponse {
-            minimum_size: 2.0,
-            maximum_size: 9.0,
+            minimum_fill: 2.0,
+            maximum_fill: 9.0,
+            rotation_offset_degrees: 0.0,
         };
         for (legacy_component, mapping_component) in [
             (
@@ -4595,8 +4934,9 @@ mod realization_tests {
             height: 60.0,
         };
         let response = MarkResponse {
-            minimum_size: 2.0,
-            maximum_size: 9.0,
+            minimum_fill: 2.0,
+            maximum_fill: 9.0,
+            rotation_offset_degrees: 0.0,
         };
         for (name, hint, expected_hash) in [
             (
@@ -4809,6 +5149,7 @@ pub fn evaluate_straight_grid_cancellable(
                     second_index,
                 },
                 position,
+                nominal_cell_diameter: spacing_x.hypot(spacing_y),
                 scope: if document_canvas.contains(position) {
                     SiteScope::Canvas
                 } else {
@@ -5106,6 +5447,53 @@ mod coverage_tests {
             "coverage.candidate_limit"
         );
     }
+
+    /// Proves nominal intersection bases reject parallel and near-parallel contributor tangents.
+    #[test]
+    fn straight_intersection_basis_rejects_parallel_contributors() {
+        let first = GuideInstanceId::new(GuideDimensionId(1), 0);
+        let second = GuideInstanceId::new(GuideDimensionId(2), 0);
+        let guides = vec![
+            StraightGuide {
+                id: first,
+                normal: Vector2::new(0.0, 1.0),
+                tangent: Vector2::new(1.0, 0.0),
+                offset: 0.0,
+                anchor: Point2::new(0.0, 0.0),
+                start: Point2::new(0.0, 0.0),
+                end: Point2::new(1.0, 0.0),
+            },
+            StraightGuide {
+                id: second,
+                normal: Vector2::new(0.0, 1.0),
+                tangent: Vector2::new(1.0, 1.0e-13),
+                offset: 1.0,
+                anchor: Point2::new(0.0, 1.0),
+                start: Point2::new(0.0, 1.0),
+                end: Point2::new(1.0, 1.0),
+            },
+        ];
+        let coverage = vec![
+            GuideCoverage {
+                dimension_id: 1,
+                spacing: 1.0,
+                normalized_phase: 0.0,
+                first_index: 0,
+                last_index: 0,
+            },
+            GuideCoverage {
+                dimension_id: 2,
+                spacing: 1.0,
+                normalized_phase: 0.0,
+                first_index: 0,
+                last_index: 0,
+            },
+        ];
+
+        let error = straight_intersection_basis(&guides, &coverage, &[first, second])
+            .expect_err("near-parallel contributors do not define a nominal cell");
+        assert_eq!(error.path(), "pattern.family.nominal_cell_basis");
+    }
 }
 
 #[cfg(test)]
@@ -5128,7 +5516,7 @@ mod typed_pipeline_tests {
             PatternOutputLayerId(13),
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         )
     }
@@ -5192,8 +5580,9 @@ mod typed_pipeline_tests {
             &request().canvas,
             SourceMapping::canonical(SourceMappingComponent::Red),
             MarkResponse {
-                minimum_size: 2.0,
-                maximum_size: 9.0,
+                minimum_fill: 2.0,
+                maximum_fill: 9.0,
+                rotation_offset_degrees: 0.0,
             },
         )
         .unwrap();
@@ -5292,7 +5681,7 @@ mod generalized_straight_guide_tests {
             },
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         )
     }
@@ -5360,7 +5749,7 @@ mod generalized_straight_guide_tests {
             MarkOrientation::Fixed,
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         );
         toniator_domain::validate_pattern_definition(&along).unwrap();
@@ -5476,7 +5865,7 @@ mod generalized_straight_guide_tests {
             MarkOrientation::Fixed,
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         );
         let plan = resolve_pattern_pipeline(&along).unwrap();
@@ -5569,7 +5958,7 @@ mod generalized_straight_guide_tests {
             MarkOrientation::Fixed,
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         );
         toniator_domain::validate_pattern_definition(&along).unwrap();
@@ -5697,8 +6086,9 @@ mod generalized_straight_guide_tests {
             &grid_request.canvas,
             SourceMapping::canonical(SourceMappingComponent::Red),
             MarkResponse {
-                minimum_size: 2.0,
-                maximum_size: 9.0,
+                minimum_fill: 2.0,
+                maximum_fill: 9.0,
+                rotation_offset_degrees: 0.0,
             },
         )
         .unwrap();
@@ -5715,8 +6105,9 @@ mod generalized_straight_guide_tests {
             &grid_request.canvas,
             SourceMapping::canonical(SourceMappingComponent::Red),
             MarkResponse {
-                minimum_size: 2.0,
-                maximum_size: 9.0,
+                minimum_fill: 2.0,
+                maximum_fill: 9.0,
+                rotation_offset_degrees: 0.0,
             },
         )
         .unwrap();
@@ -5727,8 +6118,9 @@ mod generalized_straight_guide_tests {
             &grid_request.canvas,
             SourceMapping::canonical(SourceMappingComponent::Red),
             MarkResponse {
-                minimum_size: 2.0,
-                maximum_size: 9.0,
+                minimum_fill: 2.0,
+                maximum_fill: 9.0,
+                rotation_offset_degrees: 0.0,
             },
         )
         .unwrap();

@@ -173,7 +173,7 @@ fn capabilities_loaded_random_and_guide_documents_disclose_only_compatible_field
         128,
         CoveragePolicy {
             guard_steps: 2,
-            maximum_support_radius: 4.5,
+            additional_margin: 4.5,
         },
     );
     let random_document = Document::with_source_and_topology(
@@ -218,7 +218,7 @@ fn capabilities_loaded_random_and_guide_documents_disclose_only_compatible_field
         },
         CoveragePolicy {
             guard_steps: 2,
-            maximum_support_radius: 4.5,
+            additional_margin: 4.5,
         },
     );
     let guide_document = Document::with_source_and_topology(
@@ -351,7 +351,7 @@ fn legacy_cli_parity_document() -> Document {
         PatternOutputLayerId(1),
         CoveragePolicy {
             guard_steps: 2,
-            maximum_support_radius: 4.5,
+            additional_margin: 4.5,
         },
     );
     Document::with_source(
@@ -386,8 +386,9 @@ fn legacy_cli_parity_document() -> Document {
                 opacity: 1.0,
             },
             mark_geometry_response: MarkGeometryResponse {
-                minimum_size: 2.0,
-                maximum_size: 4.5,
+                minimum_fill: 2.0,
+                maximum_fill: 4.5,
+                rotation_offset_degrees: 0.0,
             },
             source_mapping: ChannelSourceMapping {
                 component: SourceComponent::Luminance,
@@ -638,7 +639,7 @@ fn cli_headless_descriptor_commands_share_typed_contracts_and_fail_atomically() 
         },
         CoveragePolicy {
             guard_steps: 2,
-            maximum_support_radius: 4.5,
+            additional_margin: 4.5,
         },
     );
     let mut guide =
@@ -768,7 +769,7 @@ fn cli_headless_descriptor_commands_share_typed_contracts_and_fail_atomically() 
         MarkOrientation::Fixed,
         CoveragePolicy {
             guard_steps: 2,
-            maximum_support_radius: 4.5,
+            additional_margin: 4.5,
         },
     );
     let mut along =
@@ -821,7 +822,7 @@ fn cli_headless_descriptor_commands_share_typed_contracts_and_fail_atomically() 
         128,
         CoveragePolicy {
             guard_steps: 2,
-            maximum_support_radius: 4.5,
+            additional_margin: 4.5,
         },
     );
     let mut random = DocumentHistory::new(
@@ -940,7 +941,7 @@ fn cli_headless_descriptor_commands_share_typed_contracts_and_fail_atomically() 
         128,
         CoveragePolicy {
             guard_steps: 2,
-            maximum_support_radius: 4.5,
+            additional_margin: 4.5,
         },
     );
     let mut even = DocumentHistory::new(
@@ -1145,7 +1146,7 @@ fn generate_stage17_low_resolution_evidence() {
             MarkOrientation::Fixed,
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         ),
         &[],
@@ -1195,7 +1196,7 @@ fn generate_stage17_low_resolution_evidence() {
             },
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         ),
         &[],
@@ -1226,7 +1227,7 @@ fn generate_stage17_low_resolution_evidence() {
             32,
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         ),
         &[
@@ -1268,7 +1269,7 @@ fn generate_stage17_low_resolution_evidence() {
             96,
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         ),
         &[PatternDefinitionEdit::SetRandomSeed {
@@ -1306,7 +1307,7 @@ fn generate_stage17_low_resolution_evidence() {
             32,
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         ),
         &[
@@ -1362,7 +1363,7 @@ fn generate_stage17_low_resolution_evidence() {
             32,
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         ),
         &[
@@ -1429,7 +1430,7 @@ fn generate_stage17_low_resolution_evidence() {
             32,
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         ),
         &[
@@ -1490,7 +1491,7 @@ fn generate_stage17_low_resolution_evidence() {
             32,
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         ),
         &[
@@ -1849,7 +1850,7 @@ fn natural_random_definition(
         16_000_000,
         CoveragePolicy {
             guard_steps: 2,
-            maximum_support_radius: 4.5,
+            additional_margin: 4.5,
         },
     )
 }
@@ -2601,7 +2602,7 @@ fn low_resolution_parity_document(
         PatternOutputLayerId(1),
         CoveragePolicy {
             guard_steps: 2,
-            maximum_support_radius: 4.5,
+            additional_margin: 4.5,
         },
     );
     let legacy = Document::with_source(
@@ -2624,8 +2625,9 @@ fn low_resolution_parity_document(
                 opacity: 1.0,
             },
             mark_geometry_response: MarkGeometryResponse {
-                minimum_size: 2.0,
-                maximum_size: 9.0,
+                minimum_fill: 2.0,
+                maximum_fill: 9.0,
+                rotation_offset_degrees: 0.0,
             },
             source_mapping: ChannelSourceMapping {
                 component: SourceComponent::Luminance,
@@ -2644,8 +2646,9 @@ fn low_resolution_parity_document(
                         pattern_definition_id: PatternDefinitionId(1),
                         layout,
                         mark_geometry_response: MarkGeometryResponse {
-                            minimum_size: 2.0,
-                            maximum_size: 9.0,
+                            minimum_fill: 2.0,
+                            maximum_fill: 9.0,
+                            rotation_offset_degrees: 0.0,
                         },
                     },
                 )
@@ -3391,7 +3394,7 @@ fn parity_document(
             PatternOutputLayerId(1),
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         )],
         vec![ChannelState {
@@ -3409,8 +3412,9 @@ fn parity_document(
                 opacity: 1.0,
             },
             mark_geometry_response: MarkGeometryResponse {
-                minimum_size: 2.0,
-                maximum_size: 9.0,
+                minimum_fill: 2.0,
+                maximum_fill: 9.0,
+                rotation_offset_degrees: 0.0,
             },
             source_mapping: ChannelSourceMapping {
                 component: SourceComponent::Luminance,
@@ -3426,8 +3430,9 @@ fn parity_document(
                 pattern_definition_id: PatternDefinitionId(1),
                 layout,
                 mark_geometry_response: MarkGeometryResponse {
-                    minimum_size: 2.0,
-                    maximum_size: 9.0,
+                    minimum_fill: 2.0,
+                    maximum_fill: 9.0,
+                    rotation_offset_degrees: 0.0,
                 },
             },
         )

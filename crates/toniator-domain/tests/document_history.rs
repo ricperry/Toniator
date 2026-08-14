@@ -28,7 +28,7 @@ fn document() -> Document {
             PatternOutputLayerId(3),
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 5.0,
+                additional_margin: 5.0,
             },
         )],
         vec![legacy_channel()],
@@ -54,7 +54,7 @@ fn shared_history() -> DocumentHistory {
             PatternOutputLayerId(3),
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 5.0,
+                additional_margin: 5.0,
             },
         )],
         vec![legacy_channel(), second],
@@ -73,7 +73,7 @@ fn definition_commands_require_history_and_history_records_their_exact_inverse()
                 name: "history only".into(),
                 coverage: CoveragePolicy {
                     guard_steps: 2,
-                    maximum_support_radius: 5.0,
+                    additional_margin: 5.0,
                 },
             },
         },
@@ -131,7 +131,7 @@ fn typed_definition_commands_allocate_copy_share_and_history_atomically() {
             name: "independent".into(),
             coverage: CoveragePolicy {
                 guard_steps: 4,
-                maximum_support_radius: 6.0,
+                additional_margin: 6.0,
             },
         },
     };
@@ -240,7 +240,7 @@ fn definition_commands_cover_retarget_remove_unshared_stale_and_semantic_noops()
                 name: "other".into(),
                 coverage: CoveragePolicy {
                     guard_steps: 2,
-                    maximum_support_radius: 5.0,
+                    additional_margin: 5.0,
                 },
             },
         })
@@ -252,7 +252,7 @@ fn definition_commands_cover_retarget_remove_unshared_stale_and_semantic_noops()
                 name: "too-small-support".into(),
                 coverage: CoveragePolicy {
                     guard_steps: 2,
-                    maximum_support_radius: 4.0,
+                    additional_margin: 4.0,
                 },
             },
         })
@@ -315,7 +315,7 @@ fn definition_commands_cover_retarget_remove_unshared_stale_and_semantic_noops()
                 name: "branch".into(),
                 coverage: CoveragePolicy {
                     guard_steps: 2,
-                    maximum_support_radius: 5.0,
+                    additional_margin: 5.0,
                 },
             },
         })
@@ -390,8 +390,9 @@ fn legacy_channel() -> ChannelState {
             opacity: 0.75,
         },
         mark_geometry_response: MarkGeometryResponse {
-            minimum_size: 2.0,
-            maximum_size: 9.0,
+            minimum_fill: 2.0,
+            maximum_fill: 9.0,
+            rotation_offset_degrees: 0.0,
         },
         source_mapping: ChannelSourceMapping {
             component: SourceComponent::Luminance,
@@ -427,8 +428,9 @@ fn template() -> ChannelTopologyTemplate {
         pattern_definition_id: PATTERN_ID,
         layout: layout(),
         mark_geometry_response: MarkGeometryResponse {
-            minimum_size: 2.0,
-            maximum_size: 9.0,
+            minimum_fill: 2.0,
+            maximum_fill: 9.0,
+            rotation_offset_degrees: 0.0,
         },
     }
 }
@@ -445,8 +447,9 @@ fn modeled_channel(
         pattern_definition_id: PATTERN_ID,
         layout: layout(),
         mark_geometry_response: MarkGeometryResponse {
-            minimum_size: 2.0,
-            maximum_size: 9.0,
+            minimum_fill: 2.0,
+            maximum_fill: 9.0,
+            rotation_offset_degrees: 0.0,
         },
         mapping: SourceMapping::canonical(component),
         paint,
@@ -533,7 +536,7 @@ fn history_round_trips_every_command_with_exact_documents_and_results() {
         &mut history,
         DocumentCommand::SetMarkGeometryField {
             channel_id: CHANNEL_ID,
-            edit: toniator_domain::MarkGeometryFieldEdit::MaximumSize(8.0),
+            edit: toniator_domain::MarkGeometryFieldEdit::MaximumFill(8.0),
         },
     );
     round_trip(

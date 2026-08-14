@@ -60,7 +60,7 @@ fn generalized_document(
         orientation,
         CoveragePolicy {
             guard_steps: 2,
-            maximum_support_radius: 8.0,
+            additional_margin: 8.0,
         },
     );
     let channel = |id| ChannelState {
@@ -87,8 +87,9 @@ fn generalized_document(
             opacity: 1.0,
         },
         mark_geometry_response: MarkGeometryResponse {
-            minimum_size: 0.0,
-            maximum_size: 8.0,
+            minimum_fill: 0.0,
+            maximum_fill: 8.0,
+            rotation_offset_degrees: 0.0,
         },
         source_mapping: ChannelSourceMapping {
             component: SourceComponent::Luminance,
@@ -144,7 +145,7 @@ fn shared_copy_exhaustion_document(
         orientation,
         CoveragePolicy {
             guard_steps: 2,
-            maximum_support_radius: 8.0,
+            additional_margin: 8.0,
         },
     );
     let mut channels = shared_document().channels().unwrap().to_vec();
@@ -218,12 +219,12 @@ fn descriptors_are_deterministic_duplicate_free_and_backed_by_commands() {
         first
             .iter()
             .find(|descriptor| {
-                descriptor.field == PropertyFieldId::CoverageMaximumSupportRadius
+                descriptor.field == PropertyFieldId::CoverageAdditionalMargin
                     && descriptor.target == definition_target
             })
             .unwrap()
             .structural_support,
-        StructuralSupportConstraint::DefinesMaximumMarkSupportRadius
+        StructuralSupportConstraint::MaximumFillDefinesCoverage
     );
     assert_eq!(
         first
@@ -329,7 +330,7 @@ fn transition_fixture() -> Document {
                 2_000,
                 CoveragePolicy {
                     guard_steps: 3,
-                    maximum_support_radius: 8.0,
+                    additional_margin: 8.0,
                 },
             ),
         })
@@ -1181,13 +1182,17 @@ fn representative_descriptor_command(field: PropertyFieldId) -> DocumentCommand 
             edited_axis: TranslationEditedAxis::Y,
             value: 1.0,
         },
-        PropertyFieldId::MarkMinimumSize => DocumentCommand::SetMarkGeometryField {
+        PropertyFieldId::MarkMinimumFill => DocumentCommand::SetMarkGeometryField {
             channel_id: ChannelId(1),
-            edit: MarkGeometryFieldEdit::MinimumSize(1.0),
+            edit: MarkGeometryFieldEdit::MinimumFill(1.0),
         },
-        PropertyFieldId::MarkMaximumSize => DocumentCommand::SetMarkGeometryField {
+        PropertyFieldId::MarkMaximumFill => DocumentCommand::SetMarkGeometryField {
             channel_id: ChannelId(1),
-            edit: MarkGeometryFieldEdit::MaximumSize(7.0),
+            edit: MarkGeometryFieldEdit::MaximumFill(7.0),
+        },
+        PropertyFieldId::MarkRotationOffsetDegrees => DocumentCommand::SetMarkGeometryField {
+            channel_id: ChannelId(1),
+            edit: MarkGeometryFieldEdit::RotationOffsetDegrees(0.0),
         },
         PropertyFieldId::LegacyMappingComponent => DocumentCommand::SetLegacyMappingField {
             channel_id: ChannelId(1),
@@ -1240,9 +1245,9 @@ fn representative_descriptor_command(field: PropertyFieldId) -> DocumentCommand 
         PropertyFieldId::CoverageGuardSteps => {
             structural(PatternDefinitionEdit::SetCoverageGuardSteps { guard_steps: 3 })
         }
-        PropertyFieldId::CoverageMaximumSupportRadius => {
-            structural(PatternDefinitionEdit::SetCoverageMaximumSupportRadius {
-                maximum_support_radius: 7.0,
+        PropertyFieldId::CoverageAdditionalMargin => {
+            structural(PatternDefinitionEdit::SetCoverageAdditionalMargin {
+                additional_margin: 7.0,
             })
         }
         PropertyFieldId::GuideBaselineAngle => {
@@ -1550,7 +1555,7 @@ fn every_contract_field_has_one_real_leaf_projection_and_non_fields_are_explicit
                     name: "new".into(),
                     coverage: CoveragePolicy {
                         guard_steps: 1,
-                        maximum_support_radius: 1.0,
+                        additional_margin: 1.0,
                     },
                 },
             },
@@ -2348,7 +2353,7 @@ fn typed_random_definition_construction_and_each_mechanism_edit_are_history_atom
         2_000,
         CoveragePolicy {
             guard_steps: 3,
-            maximum_support_radius: 8.0,
+            additional_margin: 8.0,
         },
     );
     assert!(
@@ -2450,7 +2455,7 @@ fn random_process_leaves_follow_the_active_character_and_preserve_history() {
         2_000,
         CoveragePolicy {
             guard_steps: 3,
-            maximum_support_radius: 8.0,
+            additional_margin: 8.0,
         },
     );
     history
@@ -2746,7 +2751,7 @@ fn artwork_weight_leaves_are_active_only_for_weighted_modulation() {
         2_000,
         CoveragePolicy {
             guard_steps: 3,
-            maximum_support_radius: 8.0,
+            additional_margin: 8.0,
         },
     );
     history
@@ -3014,7 +3019,7 @@ fn exclusion_leaves_expose_the_conservative_visible_mark_contract() {
         2_000,
         CoveragePolicy {
             guard_steps: 3,
-            maximum_support_radius: 8.0,
+            additional_margin: 8.0,
         },
     );
     history
@@ -3175,7 +3180,7 @@ fn exclusion_leaves_expose_the_conservative_visible_mark_contract() {
         assert_eq!(descriptor.command_kind(), kind);
         assert_eq!(
             descriptor.structural_support,
-            StructuralSupportConstraint::VisibleMarkMarginUsesMaximumSupportRadius
+            StructuralSupportConstraint::VisibleMarkMarginUsesMaximumRealizedSupport
         );
     }
     apply(
@@ -3288,7 +3293,7 @@ fn random_product_work_leaves_have_nonzero_discrete_contracts() {
                 2_000,
                 CoveragePolicy {
                     guard_steps: 3,
-                    maximum_support_radius: 8.0,
+                    additional_margin: 8.0,
                 },
             ),
         })

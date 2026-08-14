@@ -1800,11 +1800,29 @@ Sway/AT-SPI evidence is automated only and does not claim manual GNOME/Mutter
 acceptance. The acceptance checkpoint is intentionally named rather than
 self-referenced by hash.
 
-**Later Stage 20E+ — Planned.** Closed-shape realization, connected/network
-topology, regions and ordinary Voronoi, reusable region offset/collapse
-behavior, composite output mechanisms, multiframe sources, simple transitions,
-and later Stage 20+ work remain planned and require their own approved
-contracts.
+**Stage 20E1 — Complete in the Stage 20E1 acceptance checkpoint.**
+[`STAGE_20E1_NORMALIZED_MARK_FILL_PLAN.md`](STAGE_20E1_NORMALIZED_MARK_FILL_PLAN.md)
+replaces the temporary absolute mark-size/support-capability model with a
+per-site nominal cell basis, normalized 0..2 fill response, complete derived
+coverage, an intentional current-format transition, and synchronized existing
+GUI/CLI controls. Current documents are schema v3 only and presets are format
+v2 only; obsolete document-v1/v2 and preset-v1 decoders are rejected rather
+than migrated. Focused verification and the independent repair re-review PASS;
+the accepted checkpoint includes family-aware coverage preflight, explicit
+per-site nominal diameters, and deterministic parallel/near-parallel contributor
+rejection. It does not implement authored shapes or renderer algorithms.
+
+**Stage 20E2 — Approved contract, Planned and not started.**
+[`STAGE_20E2_USER_SHAPE_MARK_PLAN.md`](STAGE_20E2_USER_SHAPE_MARK_PLAN.md)
+defines authored closed structures as ordinary canonical site marks. Its Stage
+20E1 dependency is satisfied; it is ready for a separate implementation request
+and must be revalidated against the accepted checkout before work begins. No
+Stage 20E2 implementation is included here.
+
+**Later Stage 20F+ — Planned.** GTK shape/guide exposure and pending-preview
+feedback, connected/network topology, regions and ordinary Voronoi, reusable
+region offset/collapse behavior, composite output mechanisms, multiframe
+sources, simple transitions, and later Stage 20+ work require their own gates.
 
 Every mechanism must enter through the Stage 14 typed schema, Stage 15 generic
 pipeline, Stage 17 command/descriptor contract, canonical geometry, and

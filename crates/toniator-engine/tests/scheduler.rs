@@ -38,7 +38,7 @@ fn session() -> DocumentSession {
                 PatternOutputLayerId(1),
                 CoveragePolicy {
                     guard_steps: 2,
-                    maximum_support_radius: 4.5,
+                    additional_margin: 4.5,
                 },
             )],
             vec![ChannelState {
@@ -65,8 +65,9 @@ fn session() -> DocumentSession {
                     opacity: 0.72,
                 },
                 mark_geometry_response: MarkGeometryResponse {
-                    minimum_size: 2.0,
-                    maximum_size: 9.0,
+                    minimum_fill: 2.0,
+                    maximum_fill: 9.0,
+                    rotation_offset_degrees: 0.0,
                 },
                 source_mapping: ChannelSourceMapping {
                     component: SourceComponent::Luminance,
@@ -282,7 +283,7 @@ fn accepted_cache_obeys_the_complete_reuse_matrix_and_keeps_outputs_exact() {
     session
         .apply(&DocumentCommand::SetMarkGeometryField {
             channel_id: CHANNEL_ID,
-            edit: toniator_domain::MarkGeometryFieldEdit::MaximumSize(8.0),
+            edit: toniator_domain::MarkGeometryFieldEdit::MaximumFill(8.0),
         })
         .unwrap();
     let response = submit_and_accept(

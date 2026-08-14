@@ -44,8 +44,9 @@ fn channel() -> ChannelState {
             opacity: 0.75,
         },
         mark_geometry_response: MarkGeometryResponse {
-            minimum_size: 2.0,
-            maximum_size: 9.0,
+            minimum_fill: 2.0,
+            maximum_fill: 9.0,
+            rotation_offset_degrees: 0.0,
         },
         source_mapping: ChannelSourceMapping {
             component: SourceComponent::Luminance,
@@ -63,7 +64,7 @@ fn definition() -> PatternDefinition {
         PatternOutputLayerId(3),
         CoveragePolicy {
             guard_steps: 2,
-            maximum_support_radius: 4.5,
+            additional_margin: 4.5,
         },
     )
 }
@@ -97,13 +98,13 @@ fn default_document_factory_builds_the_accepted_modeled_document_at_revision_zer
     let definition = &document.pattern_definitions()[0];
     assert!(document.validate().is_ok());
     assert_eq!(definition.coverage.guard_steps, 2);
-    assert_eq!(definition.coverage.maximum_support_radius, 4.5);
+    assert_eq!(definition.coverage.additional_margin, 4.5);
     for channel in document.channel_topology().unwrap().channels() {
         assert_eq!(channel.layout.density.across_x, 102.4);
         assert_eq!(channel.layout.density.across_y, 62.0);
         assert!(channel.layout.density.aspect_locked);
-        assert_eq!(channel.mark_geometry_response.minimum_size, 2.0);
-        assert_eq!(channel.mark_geometry_response.maximum_size, 9.0);
+        assert_eq!(channel.mark_geometry_response.minimum_fill, 2.0);
+        assert_eq!(channel.mark_geometry_response.maximum_fill, 9.0);
     }
     let history = DocumentHistory::new(DocumentSession::new(document).unwrap());
     assert_eq!(history.revision().0, 0);
@@ -246,10 +247,10 @@ fn typed_pattern_roots_require_unique_ordered_mechanisms_layers_and_finite_cover
         "pattern_definitions.family",
     );
     let mut invalid_coverage = valid;
-    invalid_coverage.coverage.maximum_support_radius = f64::INFINITY;
+    invalid_coverage.coverage.additional_margin = f64::INFINITY;
     assert_path(
         document_with(canvas(), vec![invalid_coverage], vec![channel()]),
-        "pattern_definitions.coverage.maximum_support_radius",
+        "pattern_definitions.coverage.additional_margin",
     );
 
     let first = definition();
@@ -264,7 +265,7 @@ fn typed_pattern_roots_require_unique_ordered_mechanisms_layers_and_finite_cover
         PatternOutputLayerId(4),
         CoveragePolicy {
             guard_steps: 2,
-            maximum_support_radius: 4.5,
+            additional_margin: 4.5,
         },
     );
     assert_path(
@@ -283,7 +284,7 @@ fn typed_pattern_roots_require_unique_ordered_mechanisms_layers_and_finite_cover
         PatternOutputLayerId(3),
         CoveragePolicy {
             guard_steps: 2,
-            maximum_support_radius: 4.5,
+            additional_margin: 4.5,
         },
     );
     assert_path(
@@ -303,14 +304,14 @@ fn definition_allocation_rejects_invalid_drafts_and_each_exhausted_id_space_atom
             name: " ".into(),
             coverage: CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         },
         PatternDefinitionDraft {
             name: "invalid".into(),
             coverage: CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: f64::NAN,
+                additional_margin: f64::NAN,
             },
         },
     ] {
@@ -334,7 +335,7 @@ fn definition_allocation_rejects_invalid_drafts_and_each_exhausted_id_space_atom
             PatternOutputLayerId(3),
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         ),
         PatternDefinition::supported_straight_grid(
@@ -345,7 +346,7 @@ fn definition_allocation_rejects_invalid_drafts_and_each_exhausted_id_space_atom
             PatternOutputLayerId(3),
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         ),
         PatternDefinition::supported_straight_grid(
@@ -356,7 +357,7 @@ fn definition_allocation_rejects_invalid_drafts_and_each_exhausted_id_space_atom
             PatternOutputLayerId(u64::MAX),
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         ),
     ];
@@ -373,7 +374,7 @@ fn definition_allocation_rejects_invalid_drafts_and_each_exhausted_id_space_atom
                         name: "new".into(),
                         coverage: CoveragePolicy {
                             guard_steps: 2,
-                            maximum_support_radius: 4.5
+                            additional_margin: 4.5
                         },
                     },
                 })
@@ -561,32 +562,32 @@ fn rejects_every_stage_two_document_validation_rule() {
         (
             {
                 let mut value = channel();
-                value.mark_geometry_response.minimum_size = -0.1;
+                value.mark_geometry_response.minimum_fill = -0.1;
                 value
             },
-            "channel.pattern.mark_geometry_response.minimum_size",
+            "channel.pattern.mark_geometry_response.minimum_fill",
         ),
         (
             {
                 let mut value = channel();
-                value.mark_geometry_response.maximum_size = f64::NAN;
+                value.mark_geometry_response.maximum_fill = f64::NAN;
                 value
             },
-            "channel.pattern.mark_geometry_response.maximum_size",
+            "channel.pattern.mark_geometry_response.maximum_fill",
         ),
         (
             {
                 let mut value = channel();
-                value.mark_geometry_response.maximum_size = -0.1;
+                value.mark_geometry_response.maximum_fill = -0.1;
                 value
             },
-            "channel.pattern.mark_geometry_response.maximum_size",
+            "channel.pattern.mark_geometry_response.maximum_fill",
         ),
         (
             {
                 let mut value = channel();
-                value.mark_geometry_response.minimum_size = 9.0;
-                value.mark_geometry_response.maximum_size = 2.0;
+                value.mark_geometry_response.minimum_fill = 9.0;
+                value.mark_geometry_response.maximum_fill = 2.0;
                 value
             },
             "channel.pattern.mark_geometry_response",
@@ -643,7 +644,7 @@ fn commands_return_the_required_invalidation_and_affected_channel() {
         (
             DocumentCommand::SetMarkGeometryField {
                 channel_id: CHANNEL_ID,
-                edit: toniator_domain::MarkGeometryFieldEdit::MaximumSize(8.5),
+                edit: toniator_domain::MarkGeometryFieldEdit::MaximumFill(8.5),
             },
             InvalidationLevel::Realization,
         ),
@@ -736,27 +737,27 @@ fn stage_six_source_reference_snapshot_and_diameter_contracts_are_authoritative(
     );
 
     let mut below_baseline = channel();
-    below_baseline.mark_geometry_response.minimum_size = 0.25;
-    below_baseline.mark_geometry_response.maximum_size = 1.0;
+    below_baseline.mark_geometry_response.minimum_fill = 0.25;
+    below_baseline.mark_geometry_response.maximum_fill = 1.0;
     assert!(document_with(canvas(), vec![definition()], vec![below_baseline]).is_ok());
     let mut too_large = channel();
-    too_large.mark_geometry_response.maximum_size = 9.01;
+    too_large.mark_geometry_response.maximum_fill = 9.01;
     assert_path(
         document_with(canvas(), vec![definition()], vec![too_large]),
-        "channel.pattern.mark_geometry_response.maximum_size",
+        "channel.pattern.mark_geometry_response.maximum_fill",
     );
     let mut larger_definition = definition();
-    larger_definition.coverage.maximum_support_radius = 6.0;
+    larger_definition.coverage.additional_margin = 6.0;
     let mut above_baseline = channel();
-    above_baseline.mark_geometry_response.minimum_size = 10.0;
-    above_baseline.mark_geometry_response.maximum_size = 12.0;
+    above_baseline.mark_geometry_response.minimum_fill = 10.0;
+    above_baseline.mark_geometry_response.maximum_fill = 12.0;
     assert!(document_with(canvas(), vec![larger_definition], vec![above_baseline]).is_ok());
 
     let mut invalid_capability = definition();
-    invalid_capability.coverage.maximum_support_radius = f64::NAN;
+    invalid_capability.coverage.additional_margin = f64::NAN;
     assert_path(
         document_with(canvas(), vec![invalid_capability], vec![channel()]),
-        "pattern_definitions.coverage.maximum_support_radius",
+        "pattern_definitions.coverage.additional_margin",
     );
 
     let mut unsupported = definition();
@@ -1063,7 +1064,7 @@ fn atomic_replacement_rejects_every_invalid_modeled_state_without_mutation() {
     let mut channels = explicit_rgb([ChannelId(10), ChannelId(11), ChannelId(12)])
         .channels()
         .to_vec();
-    channels[0].mark_geometry_response.maximum_size = 9.1;
+    channels[0].mark_geometry_response.maximum_fill = 9.1;
     invalid_cases.push(ChannelTopology::new(channels));
 
     let mut channels = explicit_rgb([ChannelId(10), ChannelId(11), ChannelId(12)])
@@ -1406,7 +1407,7 @@ fn paint_model_compatibility_and_per_channel_invalidation_are_enforced() {
         session
             .apply(&DocumentCommand::SetMarkGeometryField {
                 channel_id: ChannelId(10),
-                edit: toniator_domain::MarkGeometryFieldEdit::MaximumSize(8.0),
+                edit: toniator_domain::MarkGeometryFieldEdit::MaximumFill(8.0),
             })
             .expect("valid response")
             .invalidation,
@@ -1419,7 +1420,7 @@ fn paint_model_compatibility_and_per_channel_invalidation_are_enforced() {
             .expect("topology remains authoritative")
             .channels()[0]
             .mark_geometry_response
-            .maximum_size,
+            .maximum_fill,
         8.0
     );
     for command in [

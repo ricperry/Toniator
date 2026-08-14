@@ -101,10 +101,10 @@ struct DocumentCreateArgs {
     offset_y: f64,
     #[arg(long)]
     guard_steps: u32,
-    #[arg(long)]
-    size_min: f64,
-    #[arg(long)]
-    size_max: f64,
+    #[arg(long, default_value_t = 0.0)]
+    fill_min: f64,
+    #[arg(long, default_value_t = 1.0)]
+    fill_max: f64,
     #[arg(long)]
     opacity: Option<f64>,
 }
@@ -176,10 +176,10 @@ struct MarksArgs {
     max_family_candidates: usize,
     #[arg(long, value_enum)]
     source_component: CliSourceComponent,
-    #[arg(long)]
-    size_min: f64,
-    #[arg(long)]
-    size_max: f64,
+    #[arg(long, default_value_t = 0.0)]
+    fill_min: f64,
+    #[arg(long, default_value_t = 1.0)]
+    fill_max: f64,
     #[arg(long)]
     color: String,
     #[arg(long)]
@@ -216,9 +216,9 @@ struct RenderArgs {
     #[arg(long, default_value_t = 1_048_576)]
     max_family_candidates: usize,
     #[arg(long)]
-    size_min: Option<f64>,
+    fill_min: Option<f64>,
     #[arg(long)]
-    size_max: Option<f64>,
+    fill_max: Option<f64>,
     /// Override opacity for every canonical channel in the selected topology.
     #[arg(long)]
     opacity: Option<f64>,
@@ -441,8 +441,8 @@ fn document_create(arguments: DocumentCreateArgs) -> Result<(), CliError> {
         arguments.offset_x,
         arguments.offset_y,
         arguments.guard_steps,
-        arguments.size_min,
-        arguments.size_max,
+        arguments.fill_min,
+        arguments.fill_max,
         arguments.opacity,
     )?;
     let embedded = EmbeddedSource::new(
@@ -480,8 +480,8 @@ fn build_document(
     offset_x: f64,
     offset_y: f64,
     guard_steps: u32,
-    size_min: f64,
-    size_max: f64,
+    fill_min: f64,
+    fill_max: f64,
     opacity: Option<f64>,
 ) -> Result<Document, CliError> {
     let legacy = Document::with_source(
@@ -496,7 +496,7 @@ fn build_document(
             PatternOutputLayerId(1),
             CoveragePolicy {
                 guard_steps,
-                maximum_support_radius: 4.5,
+                additional_margin: 0.0,
             },
         )],
         vec![ChannelState {
@@ -523,8 +523,9 @@ fn build_document(
                 opacity: 1.0,
             },
             mark_geometry_response: MarkGeometryResponse {
-                minimum_size: size_min,
-                maximum_size: size_max,
+                minimum_fill: fill_min,
+                maximum_fill: fill_max,
+                rotation_offset_degrees: 0.0,
             },
             source_mapping: ChannelSourceMapping {
                 component: SourceComponent::Luminance,
@@ -547,8 +548,9 @@ fn build_document(
                 translation_y: offset_y,
             },
             mark_geometry_response: MarkGeometryResponse {
-                minimum_size: size_min,
-                maximum_size: size_max,
+                minimum_fill: fill_min,
+                maximum_fill: fill_max,
+                rotation_offset_degrees: 0.0,
             },
         },
     )?;
@@ -589,8 +591,8 @@ fn render(arguments: RenderArgs) -> Result<(), CliError> {
             || arguments.offset_x.is_some()
             || arguments.offset_y.is_some()
             || arguments.guard_steps.is_some()
-            || arguments.size_min.is_some()
-            || arguments.size_max.is_some()
+            || arguments.fill_min.is_some()
+            || arguments.fill_max.is_some()
             || arguments.opacity.is_some()
         {
             return Err(CliError::new(
@@ -695,18 +697,8 @@ fn render(arguments: RenderArgs) -> Result<(), CliError> {
                 "--guard-steps is required for direct-source rendering",
             )
         })?,
-        arguments.size_min.ok_or_else(|| {
-            CliError::new(
-                "size_min",
-                "--size-min is required for direct-source rendering",
-            )
-        })?,
-        arguments.size_max.ok_or_else(|| {
-            CliError::new(
-                "size_max",
-                "--size-max is required for direct-source rendering",
-            )
-        })?,
+        arguments.fill_min.unwrap_or(0.0),
+        arguments.fill_max.unwrap_or(1.0),
         arguments.opacity,
     )?;
     let session = DocumentSession::new(document)?;
@@ -808,8 +800,9 @@ fn inspect_marks(arguments: MarksArgs) -> Result<(), CliError> {
         source_component: arguments.source_component.into(),
         placement: SourcePlacement::StretchToCanvas,
         response: MarkResponse {
-            minimum_size: arguments.size_min,
-            maximum_size: arguments.size_max,
+            minimum_fill: arguments.fill_min,
+            maximum_fill: arguments.fill_max,
+            rotation_offset_degrees: 0.0,
         },
     };
     let output = inspect_circular_marks(&request)?;
@@ -1046,7 +1039,7 @@ fn validate(arguments: ValidateArgs) -> Result<(), CliError> {
             PatternOutputLayerId(1),
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 0.0,
             },
         )],
         vec![ChannelState {
@@ -1073,8 +1066,9 @@ fn validate(arguments: ValidateArgs) -> Result<(), CliError> {
                 opacity,
             },
             mark_geometry_response: MarkGeometryResponse {
-                minimum_size: 2.0,
-                maximum_size: 9.0,
+                minimum_fill: 0.0,
+                maximum_fill: 1.0,
+                rotation_offset_degrees: 0.0,
             },
             source_mapping: ChannelSourceMapping {
                 component: SourceComponent::Luminance,

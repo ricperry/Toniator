@@ -29,7 +29,7 @@ fn request(bytes: Vec<u8>, format: SourceFormatHint) -> ChannelDiagnosticRequest
             PatternOutputLayerId(1),
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         )],
         vec![ChannelState {
@@ -56,8 +56,9 @@ fn request(bytes: Vec<u8>, format: SourceFormatHint) -> ChannelDiagnosticRequest
                 opacity: 0.72,
             },
             mark_geometry_response: MarkGeometryResponse {
-                minimum_size: 2.0,
-                maximum_size: 9.0,
+                minimum_fill: 2.0,
+                maximum_fill: 9.0,
+                rotation_offset_degrees: 0.0,
             },
             source_mapping: ChannelSourceMapping {
                 component: SourceComponent::Luminance,
@@ -144,7 +145,7 @@ fn source_mismatch_is_rejected_before_decode_or_geometry() {
             PatternOutputLayerId(1),
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         )],
         vec![ChannelState {
@@ -171,8 +172,9 @@ fn source_mismatch_is_rejected_before_decode_or_geometry() {
                 opacity: 1.0,
             },
             mark_geometry_response: MarkGeometryResponse {
-                minimum_size: 2.0,
-                maximum_size: 9.0,
+                minimum_fill: 2.0,
+                maximum_fill: 9.0,
+                rotation_offset_degrees: 0.0,
             },
             source_mapping: ChannelSourceMapping {
                 component: SourceComponent::Luminance,
@@ -206,7 +208,7 @@ fn unassigned_source_reference_fails_at_the_authoritative_boundary() {
             PatternOutputLayerId(1),
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         )],
         vec![ChannelState {
@@ -233,8 +235,9 @@ fn unassigned_source_reference_fails_at_the_authoritative_boundary() {
                 opacity: 1.0,
             },
             mark_geometry_response: MarkGeometryResponse {
-                minimum_size: 2.0,
-                maximum_size: 9.0,
+                minimum_fill: 2.0,
+                maximum_fill: 9.0,
+                rotation_offset_degrees: 0.0,
             },
             source_mapping: ChannelSourceMapping {
                 component: SourceComponent::Alpha,

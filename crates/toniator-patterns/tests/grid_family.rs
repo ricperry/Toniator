@@ -384,7 +384,7 @@ fn generalized_definition(product: GeneralizedSiteProduct) -> PatternDefinition 
         MarkOrientation::Fixed,
         CoveragePolicy {
             guard_steps: 2,
-            maximum_support_radius: 4.5,
+            additional_margin: 4.5,
         },
     )
 }
@@ -435,7 +435,7 @@ fn concurrent_multiway_definition() -> PatternDefinition {
         MarkOrientation::Fixed,
         CoveragePolicy {
             guard_steps: 2,
-            maximum_support_radius: 4.5,
+            additional_margin: 4.5,
         },
     )
 }
@@ -461,7 +461,7 @@ fn random_definition(
         16_000_000,
         CoveragePolicy {
             guard_steps: 2,
-            maximum_support_radius: 4.5,
+            additional_margin: 4.5,
         },
     )
 }
@@ -477,7 +477,7 @@ fn typed_family_outputs_publish_truthful_family_site_sets() {
         PatternOutputLayerId(64),
         CoveragePolicy {
             guard_steps: 2,
-            maximum_support_radius: 4.5,
+            additional_margin: 4.5,
         },
     );
     let straight = evaluate_typed_family(&grid, &request(17.0, 3.25, -4.5)).unwrap();
@@ -571,8 +571,9 @@ fn current_circle_compatibility_adapter_preserves_accepted_site_id_and_contribut
     )
     .unwrap();
     let response = MarkResponse {
-        minimum_size: 2.0,
-        maximum_size: 9.0,
+        minimum_fill: 2.0,
+        maximum_fill: 9.0,
+        rotation_offset_degrees: 0.0,
     };
     let mapping =
         toniator_domain::SourceMapping::canonical(toniator_domain::SourceMappingComponent::Red);

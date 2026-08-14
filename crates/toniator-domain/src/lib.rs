@@ -408,16 +408,18 @@ pub struct ChannelAppearance {
     pub opacity: f64,
 }
 
-/// The current minimal mark-size response contract.
+/// The normalized mark-fill response contract shared by every ordinary family.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MarkGeometryResponse {
-    pub minimum_size: f64,
-    pub maximum_size: f64,
+    pub minimum_fill: f64,
+    pub maximum_fill: f64,
+    pub rotation_offset_degrees: f64,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MarkGeometryFieldEdit {
-    MinimumSize(f64),
-    MaximumSize(f64),
+    MinimumFill(f64),
+    MaximumFill(f64),
+    RotationOffsetDegrees(f64),
 }
 
 /// The source component selected by a channel's authoritative source mapping.
@@ -595,7 +597,7 @@ impl ChannelTopology {
         template: ChannelTopologyTemplate,
     ) -> Result<Self, ValidationError> {
         validate_layout(&template.layout)?;
-        validate_mark_response(&template.mark_geometry_response, None)?;
+        validate_mark_response(&template.mark_geometry_response)?;
 
         Ok(Self::new(
             model
@@ -922,7 +924,7 @@ pub struct PatternModulation;
 #[derive(Clone, Debug, PartialEq)]
 pub struct CoveragePolicy {
     pub guard_steps: u32,
-    pub maximum_support_radius: f64,
+    pub additional_margin: f64,
 }
 
 /// Structural pattern authority owned by the document.
@@ -1238,8 +1240,9 @@ impl Document {
             translation_y: 0.0,
         };
         let response = MarkGeometryResponse {
-            minimum_size: 2.0,
-            maximum_size: 9.0,
+            minimum_fill: 0.0,
+            maximum_fill: 1.0,
+            rotation_offset_degrees: 0.0,
         };
         let definition = PatternDefinition::supported_straight_grid(
             PatternDefinitionId(1),
@@ -1249,7 +1252,7 @@ impl Document {
             PatternOutputLayerId(1),
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 0.0,
             },
         );
         let template = ChannelTopologyTemplate {
@@ -1546,8 +1549,9 @@ impl Document {
                 PropertyFieldId::RotationDegrees,
                 PropertyFieldId::TranslationX,
                 PropertyFieldId::TranslationY,
-                PropertyFieldId::MarkMinimumSize,
-                PropertyFieldId::MarkMaximumSize,
+                PropertyFieldId::MarkMinimumFill,
+                PropertyFieldId::MarkMaximumFill,
+                PropertyFieldId::MarkRotationOffsetDegrees,
                 PropertyFieldId::Opacity,
                 PropertyFieldId::Visibility,
                 PropertyFieldId::DefinitionSelection,
@@ -1607,7 +1611,7 @@ impl Document {
             let definition_target = PropertyTarget::Definition(definition.id);
             for field in [
                 PropertyFieldId::CoverageGuardSteps,
-                PropertyFieldId::CoverageMaximumSupportRadius,
+                PropertyFieldId::CoverageAdditionalMargin,
             ] {
                 descriptors.push(descriptor_from_contract(field, definition_target));
             }
@@ -1749,7 +1753,7 @@ impl Document {
                             target,
                             DescriptorRuntimeContext::Exclusion {
                                 dependency: if visible { PropertyDependency::VisibleMarkExclusion } else { PropertyDependency::RandomProcess },
-                                support: if visible { StructuralSupportConstraint::VisibleMarkMarginUsesMaximumSupportRadius } else { StructuralSupportConstraint::None },
+                                support: if visible { StructuralSupportConstraint::VisibleMarkMarginUsesMaximumRealizedSupport } else { StructuralSupportConstraint::None },
                             },
                         ));
                         match policy {
@@ -1915,11 +1919,14 @@ impl Document {
                     PropertyFieldId::TranslationY => {
                         PropertyCurrentValueKind::FiniteF64(channel.layout().translation_y)
                     }
-                    PropertyFieldId::MarkMinimumSize => {
-                        PropertyCurrentValueKind::FiniteF64(channel.mark().minimum_size)
+                    PropertyFieldId::MarkMinimumFill => {
+                        PropertyCurrentValueKind::FiniteF64(channel.mark().minimum_fill)
                     }
-                    PropertyFieldId::MarkMaximumSize => {
-                        PropertyCurrentValueKind::FiniteF64(channel.mark().maximum_size)
+                    PropertyFieldId::MarkMaximumFill => {
+                        PropertyCurrentValueKind::FiniteF64(channel.mark().maximum_fill)
+                    }
+                    PropertyFieldId::MarkRotationOffsetDegrees => {
+                        PropertyCurrentValueKind::FiniteF64(channel.mark().rotation_offset_degrees)
                     }
                     PropertyFieldId::Opacity => {
                         PropertyCurrentValueKind::FiniteF64(channel.opacity())
@@ -2006,10 +2013,8 @@ impl Document {
                     PropertyFieldId::CoverageGuardSteps => {
                         PropertyCurrentValueKind::U32(definition.coverage.guard_steps)
                     }
-                    PropertyFieldId::CoverageMaximumSupportRadius => {
-                        PropertyCurrentValueKind::FiniteF64(
-                            definition.coverage.maximum_support_radius,
-                        )
+                    PropertyFieldId::CoverageAdditionalMargin => {
+                        PropertyCurrentValueKind::FiniteF64(definition.coverage.additional_margin)
                     }
                     _ => unreachable!("definition descriptor field"),
                 }
@@ -2672,8 +2677,8 @@ impl Document {
                 )?;
                 self.apply_recipe_edit(
                     definition_id,
-                    PatternDefinitionEdit::SetCoverageMaximumSupportRadius {
-                        maximum_support_radius: coverage.maximum_support_radius,
+                    PatternDefinitionEdit::SetCoverageAdditionalMargin {
+                        additional_margin: coverage.additional_margin,
                     },
                 )?;
                 for (index, authored) in dimensions.iter().enumerate() {
@@ -2841,8 +2846,8 @@ impl Document {
                 )?;
                 self.apply_recipe_edit(
                     definition_id,
-                    PatternDefinitionEdit::SetCoverageMaximumSupportRadius {
-                        maximum_support_radius: coverage.maximum_support_radius,
+                    PatternDefinitionEdit::SetCoverageAdditionalMargin {
+                        additional_margin: coverage.additional_margin,
                     },
                 )?;
                 self.apply_recipe_edit(
@@ -3640,8 +3645,8 @@ fn validate_definition_draft(draft: &PatternDefinitionDraft) -> Result<(), Valid
         ));
     }
     validate_nonnegative_finite(
-        draft.coverage.maximum_support_radius,
-        "pattern_definitions.coverage.maximum_support_radius",
+        draft.coverage.additional_margin,
+        "pattern_definitions.coverage.additional_margin",
     )
 }
 
@@ -3784,9 +3789,9 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
         PatternDefinitionEdit::SetCoverageGuardSteps { guard_steps } => {
             definition.coverage.guard_steps = *guard_steps
         }
-        PatternDefinitionEdit::SetCoverageMaximumSupportRadius {
-            maximum_support_radius,
-        } => definition.coverage.maximum_support_radius = *maximum_support_radius,
+        PatternDefinitionEdit::SetCoverageAdditionalMargin { additional_margin } => {
+            definition.coverage.additional_margin = *additional_margin
+        }
         PatternDefinitionEdit::SetGuideBaselineAngle {
             mechanism_id,
             dimension_id,
@@ -4556,11 +4561,11 @@ fn remap_definition_edit_for_duplicate(
                 guard_steps: *guard_steps,
             }
         }
-        PatternDefinitionEdit::SetCoverageMaximumSupportRadius {
-            maximum_support_radius,
-        } => PatternDefinitionEdit::SetCoverageMaximumSupportRadius {
-            maximum_support_radius: *maximum_support_radius,
-        },
+        PatternDefinitionEdit::SetCoverageAdditionalMargin { additional_margin } => {
+            PatternDefinitionEdit::SetCoverageAdditionalMargin {
+                additional_margin: *additional_margin,
+            }
+        }
         PatternDefinitionEdit::SetGuideBaselineAngle {
             mechanism_id,
             dimension_id,
@@ -4961,12 +4966,12 @@ fn validate_definition_edit(
     validate_property_field_projection(edit.field_projection())?;
     match edit {
         PatternDefinitionEdit::SetCoverageGuardSteps { .. } => Ok(()),
-        PatternDefinitionEdit::SetCoverageMaximumSupportRadius {
-            maximum_support_radius,
-        } => validate_nonnegative_finite(
-            *maximum_support_radius,
-            "pattern_definitions.coverage.maximum_support_radius",
-        ),
+        PatternDefinitionEdit::SetCoverageAdditionalMargin { additional_margin } => {
+            validate_nonnegative_finite(
+                *additional_margin,
+                "pattern_definitions.coverage.additional_margin",
+            )
+        }
         PatternDefinitionEdit::SetGuideBaselineAngle {
             mechanism_id,
             dimension_id,
@@ -5856,16 +5861,14 @@ fn validate_channel(
         "channel.appearance.color.alpha",
     )?;
     validate_unit_component(channel.appearance.opacity, "channel.appearance.opacity")?;
-    validate_mark_response(
-        &channel.mark_geometry_response,
-        Some(definition.coverage.maximum_support_radius),
-    )
+    let _ = definition;
+    validate_mark_response(&channel.mark_geometry_response)
 }
 
 fn validate_definition(definition: &PatternDefinition) -> Result<(), ValidationError> {
     validate_nonnegative_finite(
-        definition.coverage.maximum_support_radius,
-        "pattern_definitions.coverage.maximum_support_radius",
+        definition.coverage.additional_margin,
+        "pattern_definitions.coverage.additional_margin",
     )?;
     let mut mechanism_ids = HashSet::new();
     for mechanism in &definition.mechanisms {
@@ -6570,30 +6573,27 @@ fn validate_layout(layout: &ChannelPatternLayout) -> Result<(), ValidationError>
     validate_finite(layout.translation_y, "channel.pattern.layout.translation_y")
 }
 
-fn validate_mark_response(
-    response: &MarkGeometryResponse,
-    maximum_support_radius: Option<f64>,
-) -> Result<(), ValidationError> {
-    validate_nonnegative_finite(
-        response.minimum_size,
-        "channel.pattern.mark_geometry_response.minimum_size",
+fn validate_mark_response(response: &MarkGeometryResponse) -> Result<(), ValidationError> {
+    validate_range_finite(
+        response.minimum_fill,
+        0.0,
+        2.0,
+        "channel.pattern.mark_geometry_response.minimum_fill",
     )?;
-    validate_nonnegative_finite(
-        response.maximum_size,
-        "channel.pattern.mark_geometry_response.maximum_size",
+    validate_range_finite(
+        response.maximum_fill,
+        0.0,
+        2.0,
+        "channel.pattern.mark_geometry_response.maximum_fill",
     )?;
-    if response.minimum_size > response.maximum_size {
+    validate_finite(
+        response.rotation_offset_degrees,
+        "channel.pattern.mark_geometry_response.rotation_offset_degrees",
+    )?;
+    if response.minimum_fill > response.maximum_fill {
         return Err(ValidationError::new(
             "channel.pattern.mark_geometry_response",
-            "minimum_size must not exceed maximum_size",
-        ));
-    }
-    if let Some(maximum_support_radius) = maximum_support_radius
-        && response.maximum_size / 2.0 > maximum_support_radius
-    {
-        return Err(ValidationError::new(
-            "channel.pattern.mark_geometry_response.maximum_size",
-            "maximum_size exceeds the pattern definition support capability",
+            "minimum_fill must not exceed maximum_fill",
         ));
     }
     Ok(())
@@ -6633,10 +6633,8 @@ fn validate_topology(
                 "channel references a missing pattern definition",
             ))?;
         validate_layout(&channel.layout)?;
-        validate_mark_response(
-            &channel.mark_geometry_response,
-            Some(definition.coverage.maximum_support_radius),
-        )?;
+        let _ = definition;
+        validate_mark_response(&channel.mark_geometry_response)?;
         validate_unit_component(channel.opacity, "channel.appearance.opacity")?;
         validate_source_mapping(channel.mapping)?;
         validate_paint(model, channel.role, &channel.paint)?;
@@ -6699,6 +6697,24 @@ fn validate_nonnegative_finite(value: f64, path: &'static str) -> Result<(), Val
         Ok(())
     } else {
         Err(ValidationError::new(path, "value must not be negative"))
+    }
+}
+
+/// Validates one bounded finite scalar without assigning geometric meaning.
+fn validate_range_finite(
+    value: f64,
+    minimum: f64,
+    maximum: f64,
+    path: &'static str,
+) -> Result<(), ValidationError> {
+    validate_finite(value, path)?;
+    if (minimum..=maximum).contains(&value) {
+        Ok(())
+    } else {
+        Err(ValidationError::new(
+            path,
+            "value must be within the declared bounds",
+        ))
     }
 }
 
@@ -6795,8 +6811,9 @@ pub enum PropertyFieldId {
     RotationDegrees,
     TranslationX,
     TranslationY,
-    MarkMinimumSize,
-    MarkMaximumSize,
+    MarkMinimumFill,
+    MarkMaximumFill,
+    MarkRotationOffsetDegrees,
     LegacyMappingComponent,
     LegacyMappingPlacement,
     ModeledMappingComponent,
@@ -6813,7 +6830,7 @@ pub enum PropertyFieldId {
     Visibility,
     DefinitionSelection,
     CoverageGuardSteps,
-    CoverageMaximumSupportRadius,
+    CoverageAdditionalMargin,
     GuideBaselineAngle,
     GuidePhase,
     GuideSpacingMultiplier,
@@ -6869,8 +6886,9 @@ pub const PROPERTY_FIELD_IDS: &[PropertyFieldId] = &[
     PropertyFieldId::RotationDegrees,
     PropertyFieldId::TranslationX,
     PropertyFieldId::TranslationY,
-    PropertyFieldId::MarkMinimumSize,
-    PropertyFieldId::MarkMaximumSize,
+    PropertyFieldId::MarkMinimumFill,
+    PropertyFieldId::MarkMaximumFill,
+    PropertyFieldId::MarkRotationOffsetDegrees,
     PropertyFieldId::LegacyMappingComponent,
     PropertyFieldId::LegacyMappingPlacement,
     PropertyFieldId::ModeledMappingComponent,
@@ -6887,7 +6905,7 @@ pub const PROPERTY_FIELD_IDS: &[PropertyFieldId] = &[
     PropertyFieldId::Visibility,
     PropertyFieldId::DefinitionSelection,
     PropertyFieldId::CoverageGuardSteps,
-    PropertyFieldId::CoverageMaximumSupportRadius,
+    PropertyFieldId::CoverageAdditionalMargin,
     PropertyFieldId::GuideBaselineAngle,
     PropertyFieldId::GuidePhase,
     PropertyFieldId::GuideSpacingMultiplier,
@@ -7088,11 +7106,10 @@ pub enum PropertyApplicability {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StructuralSupportConstraint {
     None,
-    /// This field declares the definition-wide maximum support envelope that
-    /// mark response and conservative visible-mark exclusion must respect.
-    DefinesMaximumMarkSupportRadius,
-    MarkResponseMustFitDefinitionMaximumSupport,
-    VisibleMarkMarginUsesMaximumSupportRadius,
+    /// The active maximum fill derives the conservative family coverage envelope.
+    MaximumFillDefinesCoverage,
+    /// Visible-mark exclusion derives its separation from active realized support.
+    VisibleMarkMarginUsesMaximumRealizedSupport,
 }
 
 /// Validation shape for stable references. Collection fields carry their
@@ -7174,7 +7191,7 @@ pub enum PropertyCommandKind {
     SetOutputOrientation,
     SetOutputOrientationDimension,
     SetCoverageGuardSteps,
-    SetCoverageMaximumSupportRadius,
+    SetCoverageAdditionalMargin,
 }
 
 /// A deterministic read-only descriptor derived from the validated current
@@ -8371,7 +8388,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::TranslationX | PropertyFieldId::TranslationY => {
                 PropertyCommandKind::SetTranslationAxis
             }
-            PropertyFieldId::MarkMinimumSize | PropertyFieldId::MarkMaximumSize => {
+            PropertyFieldId::MarkMinimumFill
+            | PropertyFieldId::MarkMaximumFill
+            | PropertyFieldId::MarkRotationOffsetDegrees => {
                 PropertyCommandKind::SetMarkGeometryField
             }
             PropertyFieldId::LegacyMappingComponent | PropertyFieldId::LegacyMappingPlacement => {
@@ -8467,8 +8486,8 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
                 PropertyCommandKind::SetOutputOrientationDimension
             }
             PropertyFieldId::CoverageGuardSteps => PropertyCommandKind::SetCoverageGuardSteps,
-            PropertyFieldId::CoverageMaximumSupportRadius => {
-                PropertyCommandKind::SetCoverageMaximumSupportRadius
+            PropertyFieldId::CoverageAdditionalMargin => {
+                PropertyCommandKind::SetCoverageAdditionalMargin
             }
         },
         value_kind: match field {
@@ -8536,9 +8555,8 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::ExclusionMinimumCenterDistance
             | PropertyFieldId::RandomMaximumAttempts
             | PropertyFieldId::RandomMaximumNeighborChecks => positive_bounds(),
-            PropertyFieldId::MarkMinimumSize
-            | PropertyFieldId::MarkMaximumSize
-            | PropertyFieldId::CoverageMaximumSupportRadius
+            PropertyFieldId::MarkMinimumFill | PropertyFieldId::MarkMaximumFill => fill_bounds(),
+            PropertyFieldId::CoverageAdditionalMargin
             | PropertyFieldId::ModeledMappingGain
             | PropertyFieldId::ArtworkWeightMappingGain
             | PropertyFieldId::VisibleMarkMargin
@@ -8558,18 +8576,16 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::GuideSpacingMultiplier
             | PropertyFieldId::AlongGuideIntervalMultiplier
             | PropertyFieldId::RandomClusterDensity => PropertyUnit::Density,
-            PropertyFieldId::RotationDegrees | PropertyFieldId::GuideBaselineAngle => {
-                PropertyUnit::Degrees
-            }
+            PropertyFieldId::RotationDegrees
+            | PropertyFieldId::MarkRotationOffsetDegrees
+            | PropertyFieldId::GuideBaselineAngle => PropertyUnit::Degrees,
             PropertyFieldId::GuideArcStartAngle
             | PropertyFieldId::GuideArcSweepAngle
             | PropertyFieldId::GuideStackDirection => PropertyUnit::Degrees,
             PropertyFieldId::GuidePhase | PropertyFieldId::AlongGuidePhase => PropertyUnit::Phase,
             PropertyFieldId::TranslationX
             | PropertyFieldId::TranslationY
-            | PropertyFieldId::MarkMinimumSize
-            | PropertyFieldId::MarkMaximumSize
-            | PropertyFieldId::CoverageMaximumSupportRadius
+            | PropertyFieldId::CoverageAdditionalMargin
             | PropertyFieldId::IntersectionMergeEpsilon
             | PropertyFieldId::RandomEvenMinimumCenterDistance
             | PropertyFieldId::RandomClusterSpread
@@ -8671,8 +8687,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
         },
         invalidation: match field {
             PropertyFieldId::SourceReference => InvalidationLevel::Source,
-            PropertyFieldId::MarkMinimumSize
-            | PropertyFieldId::MarkMaximumSize
+            PropertyFieldId::MarkMinimumFill
+            | PropertyFieldId::MarkMaximumFill
+            | PropertyFieldId::MarkRotationOffsetDegrees
             | PropertyFieldId::LegacyMappingComponent
             | PropertyFieldId::LegacyMappingPlacement
             | PropertyFieldId::ModeledMappingComponent
@@ -8696,7 +8713,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
         copy_on_edit_escalates_to_family: matches!(
             field,
             PropertyFieldId::CoverageGuardSteps
-                | PropertyFieldId::CoverageMaximumSupportRadius
+                | PropertyFieldId::CoverageAdditionalMargin
                 | PropertyFieldId::GuideBaselineAngle
                 | PropertyFieldId::GuidePhase
                 | PropertyFieldId::GuideSpacingMultiplier
@@ -8741,16 +8758,13 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
                 | PropertyFieldId::OutputOrientationDimension
         ),
         structural_support: match field {
-            PropertyFieldId::MarkMinimumSize | PropertyFieldId::MarkMaximumSize => {
-                StructuralSupportConstraint::MarkResponseMustFitDefinitionMaximumSupport
-            }
-            PropertyFieldId::CoverageMaximumSupportRadius => {
-                StructuralSupportConstraint::DefinesMaximumMarkSupportRadius
+            PropertyFieldId::MarkMaximumFill => {
+                StructuralSupportConstraint::MaximumFillDefinesCoverage
             }
             PropertyFieldId::RandomExclusion
             | PropertyFieldId::VisibleMarkMargin
             | PropertyFieldId::VisibleMarkSizingPolicy => {
-                StructuralSupportConstraint::VisibleMarkMarginUsesMaximumSupportRadius
+                StructuralSupportConstraint::VisibleMarkMarginUsesMaximumRealizedSupport
             }
             _ => StructuralSupportConstraint::None,
         },
@@ -8969,6 +8983,16 @@ const fn nonnegative_bounds() -> Option<PropertyBounds> {
         minimum_inclusive: true,
         maximum: None,
         maximum_inclusive: false,
+    })
+}
+
+/// Returns the exact normalized fill interval exposed by descriptor metadata.
+const fn fill_bounds() -> Option<PropertyBounds> {
+    Some(PropertyBounds {
+        minimum: Some(0.0),
+        minimum_inclusive: true,
+        maximum: Some(2.0),
+        maximum_inclusive: true,
     })
 }
 const fn unit_bounds() -> Option<PropertyBounds> {
@@ -9263,8 +9287,8 @@ pub enum PatternDefinitionEdit {
     SetCoverageGuardSteps {
         guard_steps: u32,
     },
-    SetCoverageMaximumSupportRadius {
-        maximum_support_radius: f64,
+    SetCoverageAdditionalMargin {
+        additional_margin: f64,
     },
     SetGuideBaselineAngle {
         mechanism_id: PatternMechanismId,
@@ -9653,11 +9677,9 @@ impl PatternDefinitionEdit {
                 PropertyFieldId::CoverageGuardSteps,
                 PropertyFieldValue::U32(*guard_steps),
             ),
-            Edit::SetCoverageMaximumSupportRadius {
-                maximum_support_radius,
-            } => (
-                PropertyFieldId::CoverageMaximumSupportRadius,
-                PropertyFieldValue::FiniteF64(*maximum_support_radius),
+            Edit::SetCoverageAdditionalMargin { additional_margin } => (
+                PropertyFieldId::CoverageAdditionalMargin,
+                PropertyFieldValue::FiniteF64(*additional_margin),
             ),
             Edit::SetGuideBaselineAngle {
                 baseline_angle_degrees,
@@ -10001,12 +10023,16 @@ impl DocumentCommand {
             ),
             Command::SetMarkGeometryField { edit, .. } => one(
                 match edit {
-                    MarkGeometryFieldEdit::MinimumSize(_) => PropertyFieldId::MarkMinimumSize,
-                    MarkGeometryFieldEdit::MaximumSize(_) => PropertyFieldId::MarkMaximumSize,
+                    MarkGeometryFieldEdit::MinimumFill(_) => PropertyFieldId::MarkMinimumFill,
+                    MarkGeometryFieldEdit::MaximumFill(_) => PropertyFieldId::MarkMaximumFill,
+                    MarkGeometryFieldEdit::RotationOffsetDegrees(_) => {
+                        PropertyFieldId::MarkRotationOffsetDegrees
+                    }
                 },
                 PropertyFieldValue::FiniteF64(match edit {
-                    MarkGeometryFieldEdit::MinimumSize(value)
-                    | MarkGeometryFieldEdit::MaximumSize(value) => *value,
+                    MarkGeometryFieldEdit::MinimumFill(value)
+                    | MarkGeometryFieldEdit::MaximumFill(value)
+                    | MarkGeometryFieldEdit::RotationOffsetDegrees(value) => *value,
                 }),
             ),
             Command::SetColorComponent {
@@ -10496,10 +10522,14 @@ impl DocumentCommand {
                     .expect("validated channel")
                     .clone();
                 match edit {
-                    MarkGeometryFieldEdit::MinimumSize(value) => response.minimum_size = *value,
-                    MarkGeometryFieldEdit::MaximumSize(value) => response.maximum_size = *value,
+                    MarkGeometryFieldEdit::MinimumFill(value) => response.minimum_fill = *value,
+                    MarkGeometryFieldEdit::MaximumFill(value) => response.maximum_fill = *value,
+                    MarkGeometryFieldEdit::RotationOffsetDegrees(value) => {
+                        response.rotation_offset_degrees = *value
+                    }
                 }
-                validate_mark_response(&response, Some(definition.coverage.maximum_support_radius))
+                let _ = definition;
+                validate_mark_response(&response)
             }
             Self::SetColorComponent {
                 channel_id, value, ..
@@ -10805,11 +10835,14 @@ impl DocumentCommand {
                         TranslationEditedAxis::Y => channel.layout.translation_y = *value,
                     },
                     Self::SetMarkGeometryField { edit, .. } => match edit {
-                        MarkGeometryFieldEdit::MinimumSize(value) => {
-                            channel.mark_geometry_response.minimum_size = *value
+                        MarkGeometryFieldEdit::MinimumFill(value) => {
+                            channel.mark_geometry_response.minimum_fill = *value
                         }
-                        MarkGeometryFieldEdit::MaximumSize(value) => {
-                            channel.mark_geometry_response.maximum_size = *value
+                        MarkGeometryFieldEdit::MaximumFill(value) => {
+                            channel.mark_geometry_response.maximum_fill = *value
+                        }
+                        MarkGeometryFieldEdit::RotationOffsetDegrees(value) => {
+                            channel.mark_geometry_response.rotation_offset_degrees = *value
                         }
                     },
                     Self::SetColorComponent {
@@ -10863,11 +10896,14 @@ impl DocumentCommand {
                         TranslationEditedAxis::Y => channel.layout.translation_y = *value,
                     },
                     Self::SetMarkGeometryField { edit, .. } => match edit {
-                        MarkGeometryFieldEdit::MinimumSize(value) => {
-                            channel.mark_geometry_response.minimum_size = *value
+                        MarkGeometryFieldEdit::MinimumFill(value) => {
+                            channel.mark_geometry_response.minimum_fill = *value
                         }
-                        MarkGeometryFieldEdit::MaximumSize(value) => {
-                            channel.mark_geometry_response.maximum_size = *value
+                        MarkGeometryFieldEdit::MaximumFill(value) => {
+                            channel.mark_geometry_response.maximum_fill = *value
+                        }
+                        MarkGeometryFieldEdit::RotationOffsetDegrees(value) => {
+                            channel.mark_geometry_response.rotation_offset_degrees = *value
                         }
                     },
                     Self::SetColorComponent {
@@ -11335,7 +11371,7 @@ mod history_tests {
             PatternOutputLayerId(1),
             CoveragePolicy {
                 guard_steps: 0,
-                maximum_support_radius: 5.0,
+                additional_margin: 5.0,
             },
         );
         let document = Document::new(
@@ -11369,8 +11405,9 @@ mod history_tests {
                     opacity: 1.0,
                 },
                 mark_geometry_response: MarkGeometryResponse {
-                    minimum_size: 0.0,
-                    maximum_size: 10.0,
+                    minimum_fill: 0.0,
+                    maximum_fill: 1.0,
+                    rotation_offset_degrees: 0.0,
                 },
                 source_mapping: ChannelSourceMapping {
                     component: SourceComponent::Luminance,

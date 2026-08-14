@@ -53,7 +53,7 @@ fn legacy_document() -> (Document, SourceBundle) {
             PatternOutputLayerId(91),
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         )],
         vec![ChannelState {
@@ -80,8 +80,9 @@ fn legacy_document() -> (Document, SourceBundle) {
                 opacity: 0.5,
             },
             mark_geometry_response: MarkGeometryResponse {
-                minimum_size: 1.0,
-                maximum_size: 8.0,
+                minimum_fill: 1.0,
+                maximum_fill: 8.0,
+                rotation_offset_degrees: 0.0,
             },
             source_mapping: ChannelSourceMapping {
                 component: SourceComponent::Alpha,
@@ -146,7 +147,7 @@ fn generalized_v2_definition_round_trips_without_serializing_runtime_state() {
         },
         CoveragePolicy {
             guard_steps: 2,
-            maximum_support_radius: 4.5,
+            additional_margin: 4.5,
         },
     );
     document = Document::with_source(
@@ -200,7 +201,7 @@ fn random_site_v2_definition_round_trips_without_changing_existing_v2_forms() {
         16_000_000,
         CoveragePolicy {
             guard_steps: 2,
-            maximum_support_radius: 4.5,
+            additional_margin: 4.5,
         },
     );
     let document = Document::with_source(
@@ -473,7 +474,7 @@ fn stage17_command_installed_guide_raw_and_even_v2_matrix_is_deterministic() {
             orientation,
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         )
     };
@@ -521,7 +522,7 @@ fn stage17_command_installed_guide_raw_and_even_v2_matrix_is_deterministic() {
             128,
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         ),
         PatternDefinition::random_sites(
@@ -542,7 +543,7 @@ fn stage17_command_installed_guide_raw_and_even_v2_matrix_is_deterministic() {
             128,
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         ),
         PatternDefinition::random_sites(
@@ -565,7 +566,7 @@ fn stage17_command_installed_guide_raw_and_even_v2_matrix_is_deterministic() {
             128,
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         ),
         PatternDefinition::random_sites(
@@ -594,7 +595,7 @@ fn stage17_command_installed_guide_raw_and_even_v2_matrix_is_deterministic() {
             128,
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         ),
         PatternDefinition::random_sites(
@@ -613,7 +614,7 @@ fn stage17_command_installed_guide_raw_and_even_v2_matrix_is_deterministic() {
             128,
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         ),
         PatternDefinition::random_sites(
@@ -635,7 +636,7 @@ fn stage17_command_installed_guide_raw_and_even_v2_matrix_is_deterministic() {
             128,
             CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         ),
     ];
@@ -750,7 +751,7 @@ fn stage17_selected_shared_copy_persistence_restores_exact_ids_and_bytes() {
         },
         CoveragePolicy {
             guard_steps: 2,
-            maximum_support_radius: 4.5,
+            additional_margin: 4.5,
         },
     );
     let shared = Document::with_source(
@@ -1351,8 +1352,9 @@ fn modeled_round_trip_retains_nondefault_fields_and_arbitrary_stable_ids() {
             channel.layout.translation_x = -(index as f64) - 0.25;
             channel.layout.translation_y = index as f64 + 0.75;
             channel.mark_geometry_response = MarkGeometryResponse {
-                minimum_size: 1.5,
-                maximum_size: 8.5,
+                minimum_fill: 1.5,
+                maximum_fill: 8.5,
+                rotation_offset_degrees: 0.0,
             };
             channel.mapping.component = if index % 2 == 0 {
                 SourceMappingComponent::Luminance
@@ -1970,7 +1972,7 @@ fn stage20d_guide_definitions_round_trip_references_variants_order_and_numeric_b
         MarkOrientation::Fixed,
         CoveragePolicy {
             guard_steps: 2,
-            maximum_support_radius: 4.5,
+            additional_margin: 4.5,
         },
     );
     let document = Document::with_source_and_authored_structures(
@@ -2068,7 +2070,7 @@ fn stage20d_invalid_or_closed_guide_references_reject_before_document_commit() {
         MarkOrientation::Fixed,
         CoveragePolicy {
             guard_steps: 1,
-            maximum_support_radius: 4.5,
+            additional_margin: 4.5,
         },
     );
     let document = Document::with_source_and_authored_structures(

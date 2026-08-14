@@ -33,11 +33,10 @@ use toniator_domain::{
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 pub const CONTAINER_VERSION: u32 = 1;
-pub const DOCUMENT_SCHEMA_VERSION: u32 = 2;
+pub const DOCUMENT_SCHEMA_VERSION: u32 = 3;
 /// Standalone pure-schema preset JSON format version. It is deliberately
 /// independent from the `.toniator` container and document schema versions.
-pub const PRESET_FORMAT_VERSION: u32 = 1;
-const DOCUMENT_SCHEMA_VERSION_V1: u32 = 1;
+pub const PRESET_FORMAT_VERSION: u32 = 2;
 pub const MAX_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_DOCUMENT_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_SOURCE_BYTES: u64 = 128 * 1024 * 1024;
@@ -529,61 +528,8 @@ pub fn load(path: &Path) -> Result<LoadedDocument, LoadError> {
         });
     }
     let (current, manifest, report) = match envelope.document_schema_version {
-        DOCUMENT_SCHEMA_VERSION_V1 => {
-            // This private parser is intentionally immutable Stage 12 input.
-            let stored: StoredDocumentDtoV1 =
-                serde_json::from_slice(&document_bytes).map_err(|error| LoadError::Json {
-                    context: error.to_string(),
-                })?;
-            let manifest = stored.source.clone();
-            let current = migrate_v1(stored)?;
-            let generated_definitions = current
-                .document
-                .pattern_definitions
-                .iter()
-                .map(|definition| MigrationDefinitionReport {
-                    definition_id: PatternDefinitionId(definition.id),
-                    mechanism_ids: definition
-                        .mechanisms
-                        .iter()
-                        .map(|mechanism| match mechanism {
-                            PatternMechanismDtoV2::StraightGuides { id }
-                            | PatternMechanismDtoV2::GuideIntersections { id, .. }
-                            | PatternMechanismDtoV2::StraightGuideDimensions { id, .. }
-                            | PatternMechanismDtoV2::GuideDimensions { id, .. }
-                            | PatternMechanismDtoV2::SelectedGuideIntersections { id, .. }
-                            | PatternMechanismDtoV2::AlongGuideSites { id, .. }
-                            | PatternMechanismDtoV2::RandomSiteProcess { id, .. }
-                            | PatternMechanismDtoV2::SiteDensityModulation { id, .. }
-                            | PatternMechanismDtoV2::SiteExclusion { id, .. }
-                            | PatternMechanismDtoV2::RandomSiteProduct { id, .. } => {
-                                PatternMechanismId(*id)
-                            }
-                        })
-                        .collect(),
-                    output_layer_ids: definition
-                        .output_layers
-                        .iter()
-                        .map(|layer| match layer {
-                            PatternOutputLayerDtoV2::CircularMarks { id, .. }
-                            | PatternOutputLayerDtoV2::MarkPrototype { id, .. } => {
-                                PatternOutputLayerId(*id)
-                            }
-                        })
-                        .collect(),
-                })
-                .collect();
-            (
-                current,
-                manifest,
-                MigrationReport {
-                    migrated_v1: true,
-                    generated_definitions,
-                },
-            )
-        }
         DOCUMENT_SCHEMA_VERSION => {
-            let stored: StoredDocumentDtoV2 =
+            let stored: StoredDocumentDtoV3 =
                 serde_json::from_slice(&document_bytes).map_err(|error| LoadError::Json {
                     context: error.to_string(),
                 })?;
@@ -693,13 +639,13 @@ pub fn save(path: &Path, document: &Document, sources: &SourceBundle) -> Result<
         SourceReference::Assigned(id) => id,
         SourceReference::Unassigned => {
             return Err(SaveError::SourceDocumentMismatch {
-                context: "v2 saving requires an assigned document source".into(),
+                context: "v3 saving requires an assigned document source".into(),
             });
         }
     };
     if sources.len() != 1 {
         return Err(SaveError::SourceDocumentMismatch {
-            context: "v2 saving requires exactly one embedded source".into(),
+            context: "v3 saving requires exactly one embedded source".into(),
         });
     }
     let source = sources
@@ -712,7 +658,7 @@ pub fn save(path: &Path, document: &Document, sources: &SourceBundle) -> Result<
             context: error.context().into(),
         }
     })?;
-    let dto = StoredDocumentDtoV2::from_domain(document, source, entry_name.clone())?;
+    let dto = StoredDocumentDtoV3::from_domain(document, source, entry_name.clone())?;
     let mut document_json = serde_json::to_vec(&dto).map_err(|error| SaveError::Archive {
         context: error.to_string(),
     })?;
@@ -890,23 +836,6 @@ fn save_domain_error(error: ValidationError) -> SaveError {
     }
 }
 
-fn migrate_v1(stored: StoredDocumentDtoV1) -> Result<CurrentDocumentDto, LoadError> {
-    // The envelope was dispatched before this immutable parser; retaining these
-    // reads keeps its complete v1 DTO interpretation explicit.
-    let _container_version = stored.container_version;
-    let _document_schema_version = stored.document_schema_version;
-    Ok(CurrentDocumentDto {
-        document: stored.document.migrate()?,
-    })
-}
-
-#[derive(Deserialize)]
-struct StoredDocumentDtoV1 {
-    container_version: u32,
-    document_schema_version: u32,
-    document: DocumentDtoV1,
-    source: SourceManifestDtoV1,
-}
 #[derive(Deserialize)]
 struct VersionEnvelope {
     container_version: u32,
@@ -931,22 +860,22 @@ struct PresetMetadataDto {
 enum PresetRecipeDto {
     StraightGrid {
         name: String,
-        coverage: CoverageDtoV2,
+        coverage: CoverageDtoV3,
     },
     GeneralizedStraightGuides {
         name: String,
-        coverage: CoverageDtoV2,
+        coverage: CoverageDtoV3,
         dimensions: Vec<GuideDimensionDraftDto>,
         product: GeneralizedSiteProductDraftDto,
         orientation: MarkOrientationDraftDto,
     },
     RandomSites {
         name: String,
-        coverage: CoverageDtoV2,
-        character: RandomSiteCharacterDtoV2,
+        coverage: CoverageDtoV3,
+        character: RandomSiteCharacterDtoV3,
         seed: u32,
-        density_modulation: SiteDensityModulationDtoV2,
-        exclusion: SiteExclusionPolicyDtoV2,
+        density_modulation: SiteDensityModulationDtoV3,
+        exclusion: SiteExclusionPolicyDtoV3,
         maximum_attempts: u32,
         maximum_neighbor_checks: u32,
     },
@@ -978,7 +907,7 @@ enum MarkOrientationDraftDto {
     GuideNormal { dimension_index: usize },
 }
 #[derive(Clone, Serialize, Deserialize)]
-struct SourceManifestDtoV1 {
+struct SourceManifestDto {
     id: String,
     entry_name: String,
     format: EmbeddedSourceFormatDto,
@@ -987,18 +916,18 @@ struct SourceManifestDtoV1 {
     display_name: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
-struct StoredDocumentDtoV2 {
+struct StoredDocumentDtoV3 {
     container_version: u32,
     document_schema_version: u32,
-    document: DocumentDtoV2,
-    source: SourceManifestDtoV1,
+    document: DocumentDtoV3,
+    source: SourceManifestDto,
 }
 #[derive(Serialize, Deserialize)]
 struct CurrentDocumentDto {
-    document: DocumentDtoV2,
+    document: DocumentDtoV3,
 }
 
-impl StoredDocumentDtoV2 {
+impl StoredDocumentDtoV3 {
     fn from_domain(
         document: &Document,
         source: &EmbeddedSource,
@@ -1007,8 +936,8 @@ impl StoredDocumentDtoV2 {
         Ok(Self {
             container_version: CONTAINER_VERSION,
             document_schema_version: DOCUMENT_SCHEMA_VERSION,
-            document: DocumentDtoV2::from_domain(document)?,
-            source: SourceManifestDtoV1 {
+            document: DocumentDtoV3::from_domain(document)?,
+            source: SourceManifestDto {
                 id: source.id().as_str().into(),
                 entry_name,
                 format: source.format().into(),
@@ -1021,36 +950,28 @@ impl StoredDocumentDtoV2 {
 }
 
 #[derive(Serialize, Deserialize)]
-struct DocumentDtoV1 {
+struct DocumentDtoV3 {
     id: u64,
     canvas: CanvasDto,
     source_reference_id: String,
-    pattern_definitions: Vec<PatternDefinitionDto>,
-    channel_configuration: ChannelConfigurationDto,
-}
-#[derive(Serialize, Deserialize)]
-struct DocumentDtoV2 {
-    id: u64,
-    canvas: CanvasDto,
-    source_reference_id: String,
-    pattern_definitions: Vec<PatternDefinitionDtoV2>,
+    pattern_definitions: Vec<PatternDefinitionDtoV3>,
     channel_configuration: ChannelConfigurationDto,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    authored_structures: Vec<AuthoredStructureDtoV2>,
+    authored_structures: Vec<AuthoredStructureDtoV3>,
 }
 
 /// Current-v2 persistence representation of one document-owned authored structure.
 #[derive(Serialize, Deserialize)]
-struct AuthoredStructureDtoV2 {
+struct AuthoredStructureDtoV3 {
     id: u64,
-    kind: AuthoredStructureKindDtoV2,
-    segments: Vec<AuthoredCurveSegmentDtoV2>,
+    kind: AuthoredStructureKindDtoV3,
+    segments: Vec<AuthoredCurveSegmentDtoV3>,
 }
 
 /// Current-v2 persistence representation of declared authored-structure topology.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum AuthoredStructureKindDtoV2 {
+enum AuthoredStructureKindDtoV3 {
     OpenPath,
     ClosedShape,
 }
@@ -1058,22 +979,22 @@ enum AuthoredStructureKindDtoV2 {
 /// Current-v2 persistence representation of one explicit authored construction segment.
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum AuthoredCurveSegmentDtoV2 {
+enum AuthoredCurveSegmentDtoV3 {
     Line {
-        start: AuthoredPointDtoV2,
-        end: AuthoredPointDtoV2,
+        start: AuthoredPointDtoV3,
+        end: AuthoredPointDtoV3,
     },
     CubicBezier {
-        start: AuthoredPointDtoV2,
-        control_1: AuthoredPointDtoV2,
-        control_2: AuthoredPointDtoV2,
-        end: AuthoredPointDtoV2,
+        start: AuthoredPointDtoV3,
+        control_1: AuthoredPointDtoV3,
+        control_2: AuthoredPointDtoV3,
+        end: AuthoredPointDtoV3,
     },
 }
 
 /// Current-v2 persistence representation of one authored finite coordinate pair.
 #[derive(Serialize, Deserialize)]
-struct AuthoredPointDtoV2 {
+struct AuthoredPointDtoV3 {
     x: f64,
     y: f64,
 }
@@ -1083,27 +1004,18 @@ struct CanvasDto {
     height: f64,
 }
 #[derive(Serialize, Deserialize)]
-struct PatternDefinitionDto {
+struct PatternDefinitionDtoV3 {
     id: u64,
     name: String,
-    structure: PatternStructureDto,
-    output: PatternOutputDto,
-    guard_steps: u32,
-    maximum_support_radius: f64,
-}
-#[derive(Serialize, Deserialize)]
-struct PatternDefinitionDtoV2 {
-    id: u64,
-    name: String,
-    family: PatternFamilyDtoV2,
-    mechanisms: Vec<PatternMechanismDtoV2>,
-    output_layers: Vec<PatternOutputLayerDtoV2>,
-    modulation: PatternModulationDtoV2,
-    coverage: CoverageDtoV2,
+    family: PatternFamilyDtoV3,
+    mechanisms: Vec<PatternMechanismDtoV3>,
+    output_layers: Vec<PatternOutputLayerDtoV3>,
+    modulation: PatternModulationDtoV3,
+    coverage: CoverageDtoV3,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum PatternFamilyDtoV2 {
+enum PatternFamilyDtoV3 {
     GuideIntersections {
         guide_mechanism_id: u64,
         site_mechanism_id: u64,
@@ -1117,7 +1029,7 @@ enum PatternFamilyDtoV2 {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum PatternMechanismDtoV2 {
+enum PatternMechanismDtoV3 {
     StraightGuides {
         id: u64,
     },
@@ -1127,11 +1039,11 @@ enum PatternMechanismDtoV2 {
     },
     StraightGuideDimensions {
         id: u64,
-        dimensions: Vec<StraightGuideDimensionDtoV2>,
+        dimensions: Vec<StraightGuideDimensionDtoV3>,
     },
     GuideDimensions {
         id: u64,
-        dimensions: Vec<GuideDimensionDtoV2>,
+        dimensions: Vec<GuideDimensionDtoV3>,
     },
     SelectedGuideIntersections {
         id: u64,
@@ -1148,18 +1060,18 @@ enum PatternMechanismDtoV2 {
     },
     RandomSiteProcess {
         id: u64,
-        character: RandomSiteCharacterDtoV2,
+        character: RandomSiteCharacterDtoV3,
         seed: u32,
     },
     SiteDensityModulation {
         id: u64,
         base_site_process_id: u64,
-        modulation: SiteDensityModulationDtoV2,
+        modulation: SiteDensityModulationDtoV3,
     },
     SiteExclusion {
         id: u64,
         density_modulation_id: u64,
-        policy: SiteExclusionPolicyDtoV2,
+        policy: SiteExclusionPolicyDtoV3,
     },
     RandomSiteProduct {
         id: u64,
@@ -1176,7 +1088,7 @@ const fn default_random_site_neighbor_checks() -> u32 {
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum RandomSiteCharacterDtoV2 {
+enum RandomSiteCharacterDtoV3 {
     RawUniform,
     Even {
         minimum_center_distance: f64,
@@ -1189,60 +1101,60 @@ enum RandomSiteCharacterDtoV2 {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum SiteDensityModulationDtoV2 {
+enum SiteDensityModulationDtoV3 {
     Uniform,
     ArtworkWeighted {
         mapping: SourceMappingDto,
         strength: f64,
-        response: ArtworkWeightResponseDtoV2,
+        response: ArtworkWeightResponseDtoV3,
     },
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum ArtworkWeightResponseDtoV2 {
+enum ArtworkWeightResponseDtoV3 {
     Linear,
     Smoothstep,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum SiteExclusionPolicyDtoV2 {
+enum SiteExclusionPolicyDtoV3 {
     None,
     MinimumCenterDistance {
         minimum: f64,
     },
     VisibleMarkMargin {
         margin: f64,
-        sizing: VisibleMarkSizingPolicyDtoV2,
+        sizing: VisibleMarkSizingPolicyDtoV3,
     },
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum VisibleMarkSizingPolicyDtoV2 {
+enum VisibleMarkSizingPolicyDtoV3 {
     MaximumSupportRadius,
 }
 #[derive(Serialize, Deserialize)]
-struct StraightGuideDimensionDtoV2 {
+struct StraightGuideDimensionDtoV3 {
     id: u64,
     baseline_angle_degrees: f64,
     phase: f64,
     spacing_multiplier: f64,
 }
 #[derive(Serialize, Deserialize)]
-struct GuideDimensionDtoV2 {
+struct GuideDimensionDtoV3 {
     id: u64,
     baseline_angle_degrees: f64,
     phase: f64,
-    prototype: GuidePrototypeDtoV2,
-    repetition: GuideRepetitionDtoV2,
+    prototype: GuidePrototypeDtoV3,
+    repetition: GuideRepetitionDtoV3,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum GuidePrototypeDtoV2 {
+enum GuidePrototypeDtoV3 {
     AuthoredOpenPath {
         structure_id: u64,
     },
     CircularArc {
-        center: AuthoredPointDtoV2,
+        center: AuthoredPointDtoV3,
         radius: f64,
         start_angle_degrees: f64,
         sweep_angle_degrees: f64,
@@ -1250,7 +1162,7 @@ enum GuidePrototypeDtoV2 {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum GuideRepetitionDtoV2 {
+enum GuideRepetitionDtoV3 {
     Single,
     TransformStack {
         direction_degrees: f64,
@@ -1258,15 +1170,15 @@ enum GuideRepetitionDtoV2 {
     },
 }
 
-impl GuideDimensionDtoV2 {
+impl GuideDimensionDtoV3 {
     /// Projects one generic guide dimension into persisted intent without resolving resources.
     fn from_domain(value: &GuideDimension) -> Self {
         Self {
             id: value.id.0,
             baseline_angle_degrees: value.baseline_angle_degrees,
             phase: value.phase,
-            prototype: GuidePrototypeDtoV2::from_domain(&value.prototype),
-            repetition: GuideRepetitionDtoV2::from_domain(&value.repetition),
+            prototype: GuidePrototypeDtoV3::from_domain(&value.prototype),
+            repetition: GuideRepetitionDtoV3::from_domain(&value.repetition),
         }
     }
 
@@ -1282,8 +1194,8 @@ impl GuideDimensionDtoV2 {
     }
 }
 
-impl GuidePrototypeDtoV2 {
-    /// Projects a persisted generic-guide prototype into deterministic current-v2 fields.
+impl GuidePrototypeDtoV3 {
+    /// Projects a persisted generic-guide prototype into deterministic current-v3 fields.
     fn from_domain(value: &GuidePrototype) -> Self {
         match value {
             GuidePrototype::AuthoredOpenPath { structure_id } => Self::AuthoredOpenPath {
@@ -1295,7 +1207,7 @@ impl GuidePrototypeDtoV2 {
                 start_angle_degrees,
                 sweep_angle_degrees,
             } => Self::CircularArc {
-                center: AuthoredPointDtoV2::from_domain(*center),
+                center: AuthoredPointDtoV3::from_domain(*center),
                 radius: *radius,
                 start_angle_degrees: *start_angle_degrees,
                 sweep_angle_degrees: *sweep_angle_degrees,
@@ -1324,8 +1236,8 @@ impl GuidePrototypeDtoV2 {
     }
 }
 
-impl GuideRepetitionDtoV2 {
-    /// Projects a bounded generic-guide repetition variant into current-v2 intent fields.
+impl GuideRepetitionDtoV3 {
+    /// Projects a bounded generic-guide repetition variant into current-v3 intent fields.
     fn from_domain(value: &GuideRepetition) -> Self {
         match value {
             GuideRepetition::Single => Self::Single,
@@ -1355,7 +1267,7 @@ impl GuideRepetitionDtoV2 {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum PatternOutputLayerDtoV2 {
+enum PatternOutputLayerDtoV3 {
     CircularMarks {
         id: u64,
         site_mechanism_id: u64,
@@ -1363,32 +1275,32 @@ enum PatternOutputLayerDtoV2 {
     MarkPrototype {
         id: u64,
         site_mechanism_id: u64,
-        prototype: MarkPrototypeDtoV2,
-        orientation: MarkOrientationDtoV2,
+        prototype: MarkPrototypeDtoV3,
+        orientation: MarkOrientationDtoV3,
     },
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum MarkPrototypeDtoV2 {
+enum MarkPrototypeDtoV3 {
     Circle,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum MarkOrientationDtoV2 {
+enum MarkOrientationDtoV3 {
     Fixed,
     GuideTangent { dimension_id: u64 },
     GuideNormal { dimension_id: u64 },
 }
 #[derive(Serialize, Deserialize)]
-struct PatternModulationDtoV2 {}
+struct PatternModulationDtoV3 {}
 #[derive(Serialize, Deserialize)]
-struct CoverageDtoV2 {
+struct CoverageDtoV3 {
     guard_steps: u32,
-    maximum_support_radius: f64,
+    additional_margin: f64,
 }
 
 impl PresetEnvelopeDto {
-    /// Converts a pure-schema preset record into the standalone v1 DTO.
+    /// Converts a pure-schema preset record into the standalone v2 DTO.
     fn from_domain(value: &PresetRecord) -> Self {
         Self {
             preset_format_version: PRESET_FORMAT_VERSION,
@@ -1443,9 +1355,9 @@ impl PresetEnvelopeDto {
 impl PresetRecipeDto {
     /// Converts an ID-free recipe into its stable standalone representation.
     fn from_domain(value: &PatternDefinitionRecipe) -> Self {
-        let coverage = |coverage: &CoveragePolicy| CoverageDtoV2 {
+        let coverage = |coverage: &CoveragePolicy| CoverageDtoV3 {
             guard_steps: coverage.guard_steps,
-            maximum_support_radius: coverage.maximum_support_radius,
+            additional_margin: coverage.additional_margin,
         };
         match value {
             PatternDefinitionRecipe::StraightGrid(draft) => Self::StraightGrid {
@@ -1484,10 +1396,10 @@ impl PresetRecipeDto {
             } => Self::RandomSites {
                 name: name.clone(),
                 coverage: coverage(definition_coverage),
-                character: RandomSiteCharacterDtoV2::from_domain(character),
+                character: RandomSiteCharacterDtoV3::from_domain(character),
                 seed: *seed,
-                density_modulation: SiteDensityModulationDtoV2::from_domain(density_modulation),
-                exclusion: SiteExclusionPolicyDtoV2::from_domain(exclusion),
+                density_modulation: SiteDensityModulationDtoV3::from_domain(density_modulation),
+                exclusion: SiteExclusionPolicyDtoV3::from_domain(exclusion),
                 maximum_attempts: *maximum_attempts,
                 maximum_neighbor_checks: *maximum_neighbor_checks,
             },
@@ -1496,9 +1408,9 @@ impl PresetRecipeDto {
 
     /// Rebuilds an ID-free recipe without allocating document-owned IDs.
     fn into_domain(self) -> PatternDefinitionRecipe {
-        let coverage_from = |value: CoverageDtoV2| CoveragePolicy {
+        let coverage_from = |value: CoverageDtoV3| CoveragePolicy {
             guard_steps: value.guard_steps,
-            maximum_support_radius: value.maximum_support_radius,
+            additional_margin: value.additional_margin,
         };
         match self {
             Self::StraightGrid { name, coverage } => {
@@ -1676,8 +1588,9 @@ struct AppearanceDto {
 }
 #[derive(Serialize, Deserialize)]
 struct MarkResponseDto {
-    minimum_size: f64,
-    maximum_size: f64,
+    minimum_fill: f64,
+    maximum_fill: f64,
+    rotation_offset_degrees: f64,
 }
 #[derive(Serialize, Deserialize)]
 struct LegacySourceMappingDto {
@@ -1733,18 +1646,6 @@ macro_rules! dto_enum { ($dto:ident, $domain:ident { $($variant:ident),+ $(,)? }
     impl From<$domain> for $dto { fn from(value: $domain) -> Self { match value { $($domain::$variant => Self::$variant),+ } } }
     impl From<$dto> for $domain { fn from(value: $dto) -> Self { match value { $($dto::$variant => Self::$variant),+ } } }
 }; }
-#[derive(Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum PatternStructureDto {
-    StraightGrid,
-    Unsupported,
-}
-#[derive(Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum PatternOutputDto {
-    CircularMarks,
-    Unsupported,
-}
 dto_enum!(
     HalftoneChannelModelDto,
     HalftoneChannelModel {
@@ -1783,92 +1684,19 @@ dto_enum!(
     }
 );
 
-impl DocumentDtoV1 {
-    /// Migrates immutable v1 document fields into the current v2 DTO with an empty authored store.
-    ///
-    /// # Errors
-    ///
-    /// Returns a stable load error when legacy typed-definition allocation cannot be represented;
-    /// authored structures never exist in this immutable v1 input path.
-    fn migrate(self) -> Result<DocumentDtoV2, LoadError> {
-        let mut definitions = Vec::with_capacity(self.pattern_definitions.len());
-        for definition in self.pattern_definitions {
-            if !matches!(definition.structure, PatternStructureDto::StraightGrid)
-                || !matches!(definition.output, PatternOutputDto::CircularMarks)
-            {
-                return Err(LoadError::DomainValidation {
-                    context: "v1 definition does not map to the supported typed v2 mechanisms"
-                        .into(),
-                });
-            }
-            let guide_mechanism_id = definition
-                .id
-                .checked_mul(2)
-                .and_then(|value| value.checked_sub(1))
-                .ok_or_else(|| LoadError::DomainValidation {
-                    context: "v1 definition ID cannot allocate deterministic typed mechanism IDs"
-                        .into(),
-                })?;
-            let site_mechanism_id =
-                definition
-                    .id
-                    .checked_mul(2)
-                    .ok_or_else(|| LoadError::DomainValidation {
-                        context:
-                            "v1 definition ID cannot allocate deterministic typed mechanism IDs"
-                                .into(),
-                    })?;
-            definitions.push(PatternDefinitionDtoV2 {
-                id: definition.id,
-                name: definition.name,
-                family: PatternFamilyDtoV2::GuideIntersections {
-                    guide_mechanism_id,
-                    site_mechanism_id,
-                },
-                mechanisms: vec![
-                    PatternMechanismDtoV2::StraightGuides {
-                        id: guide_mechanism_id,
-                    },
-                    PatternMechanismDtoV2::GuideIntersections {
-                        id: site_mechanism_id,
-                        guide_mechanism_id,
-                    },
-                ],
-                output_layers: vec![PatternOutputLayerDtoV2::CircularMarks {
-                    id: definition.id,
-                    site_mechanism_id,
-                }],
-                modulation: PatternModulationDtoV2 {},
-                coverage: CoverageDtoV2 {
-                    guard_steps: definition.guard_steps,
-                    maximum_support_radius: definition.maximum_support_radius,
-                },
-            });
-        }
-        Ok(DocumentDtoV2 {
-            id: self.id,
-            canvas: self.canvas,
-            source_reference_id: self.source_reference_id,
-            pattern_definitions: definitions,
-            channel_configuration: self.channel_configuration,
-            authored_structures: Vec::new(),
-        })
-    }
-}
-
-impl DocumentDtoV2 {
-    /// Projects an authoritative document into deterministic current-v2 persistence without runtime state.
+impl DocumentDtoV3 {
+    /// Projects an authoritative document into deterministic current-v3 persistence without runtime state.
     ///
     /// # Errors
     ///
     /// Returns a save error for an unassigned source or incoherent channel configuration before an
-    /// archive is written; an empty authored store is omitted to preserve accepted old-v2 bytes.
+    /// archive is written; an empty authored store is omitted to preserve accepted old-v3 bytes.
     fn from_domain(document: &Document) -> Result<Self, SaveError> {
         let source_reference_id = match document.source() {
             SourceReference::Assigned(id) => id.as_str().to_owned(),
             SourceReference::Unassigned => {
                 return Err(SaveError::SourceDocumentMismatch {
-                    context: "v2 saving requires an assigned document source".into(),
+                    context: "v3 saving requires an assigned document source".into(),
                 });
             }
         };
@@ -1904,13 +1732,13 @@ impl DocumentDtoV2 {
             pattern_definitions: document
                 .pattern_definitions()
                 .iter()
-                .map(PatternDefinitionDtoV2::from_domain)
+                .map(PatternDefinitionDtoV3::from_domain)
                 .collect(),
             channel_configuration,
             authored_structures: document
                 .authored_structures()
                 .iter()
-                .map(AuthoredStructureDtoV2::from_domain)
+                .map(AuthoredStructureDtoV3::from_domain)
                 .collect(),
         })
     }
@@ -1925,12 +1753,12 @@ impl DocumentDtoV2 {
         let definitions = self
             .pattern_definitions
             .into_iter()
-            .map(PatternDefinitionDtoV2::into_domain)
+            .map(PatternDefinitionDtoV3::into_domain)
             .collect();
         let authored_structures = self
             .authored_structures
             .into_iter()
-            .map(AuthoredStructureDtoV2::into_domain)
+            .map(AuthoredStructureDtoV3::into_domain)
             .collect::<Result<Vec<_>, _>>()?;
         match self.channel_configuration {
             ChannelConfigurationDto::Legacy { channels } => {
@@ -1972,16 +1800,16 @@ impl DocumentDtoV2 {
     }
 }
 
-impl AuthoredStructureDtoV2 {
-    /// Projects one validated domain-owned structure into deterministic current-v2 persistence fields.
+impl AuthoredStructureDtoV3 {
+    /// Projects one validated domain-owned structure into deterministic current-v3 persistence fields.
     fn from_domain(value: &AuthoredStructure) -> Self {
         Self {
             id: value.id().0,
-            kind: AuthoredStructureKindDtoV2::from_domain(value.kind()),
+            kind: AuthoredStructureKindDtoV3::from_domain(value.kind()),
             segments: value
                 .segments()
                 .iter()
-                .map(AuthoredCurveSegmentDtoV2::from_domain)
+                .map(AuthoredCurveSegmentDtoV3::from_domain)
                 .collect(),
         }
     }
@@ -1997,14 +1825,14 @@ impl AuthoredStructureDtoV2 {
             self.kind.into_domain(),
             self.segments
                 .into_iter()
-                .map(AuthoredCurveSegmentDtoV2::into_domain)
+                .map(AuthoredCurveSegmentDtoV3::into_domain)
                 .collect(),
         )
     }
 }
 
-impl AuthoredStructureKindDtoV2 {
-    /// Converts declared domain topology into its stable current-v2 string representation.
+impl AuthoredStructureKindDtoV3 {
+    /// Converts declared domain topology into its stable current-v3 string representation.
     fn from_domain(value: AuthoredStructureKind) -> Self {
         match value {
             AuthoredStructureKind::OpenPath => Self::OpenPath,
@@ -2012,7 +1840,7 @@ impl AuthoredStructureKindDtoV2 {
         }
     }
 
-    /// Converts stable current-v2 topology into its domain-owned enum.
+    /// Converts stable current-v3 topology into its domain-owned enum.
     fn into_domain(self) -> AuthoredStructureKind {
         match self {
             Self::OpenPath => AuthoredStructureKind::OpenPath,
@@ -2021,13 +1849,13 @@ impl AuthoredStructureKindDtoV2 {
     }
 }
 
-impl AuthoredCurveSegmentDtoV2 {
-    /// Projects one explicit domain segment into the matching tagged current-v2 representation.
+impl AuthoredCurveSegmentDtoV3 {
+    /// Projects one explicit domain segment into the matching tagged current-v3 representation.
     fn from_domain(value: &AuthoredCurveSegment) -> Self {
         match value {
             AuthoredCurveSegment::Line { start, end } => Self::Line {
-                start: AuthoredPointDtoV2::from_domain(*start),
-                end: AuthoredPointDtoV2::from_domain(*end),
+                start: AuthoredPointDtoV3::from_domain(*start),
+                end: AuthoredPointDtoV3::from_domain(*end),
             },
             AuthoredCurveSegment::CubicBezier {
                 start,
@@ -2035,15 +1863,15 @@ impl AuthoredCurveSegmentDtoV2 {
                 control_2,
                 end,
             } => Self::CubicBezier {
-                start: AuthoredPointDtoV2::from_domain(*start),
-                control_1: AuthoredPointDtoV2::from_domain(*control_1),
-                control_2: AuthoredPointDtoV2::from_domain(*control_2),
-                end: AuthoredPointDtoV2::from_domain(*end),
+                start: AuthoredPointDtoV3::from_domain(*start),
+                control_1: AuthoredPointDtoV3::from_domain(*control_1),
+                control_2: AuthoredPointDtoV3::from_domain(*control_2),
+                end: AuthoredPointDtoV3::from_domain(*end),
             },
         }
     }
 
-    /// Converts one tagged current-v2 segment without inferring closure, winding, or render semantics.
+    /// Converts one tagged current-v3 segment without inferring closure, winding, or render semantics.
     fn into_domain(self) -> AuthoredCurveSegment {
         match self {
             Self::Line { start, end } => AuthoredCurveSegment::Line {
@@ -2065,8 +1893,8 @@ impl AuthoredCurveSegmentDtoV2 {
     }
 }
 
-impl AuthoredPointDtoV2 {
-    /// Projects one authored coordinate pair into deterministic current-v2 numeric fields.
+impl AuthoredPointDtoV3 {
+    /// Projects one authored coordinate pair into deterministic current-v3 numeric fields.
     fn from_domain(value: AuthoredPoint2) -> Self {
         Self {
             x: value.x,
@@ -2083,26 +1911,26 @@ impl AuthoredPointDtoV2 {
     }
 }
 
-impl PatternDefinitionDtoV2 {
+impl PatternDefinitionDtoV3 {
     fn from_domain(value: &PatternDefinition) -> Self {
         Self {
             id: value.id.0,
             name: value.name.clone(),
-            family: PatternFamilyDtoV2::from_domain(&value.family),
+            family: PatternFamilyDtoV3::from_domain(&value.family),
             mechanisms: value
                 .mechanisms
                 .iter()
-                .map(PatternMechanismDtoV2::from_domain)
+                .map(PatternMechanismDtoV3::from_domain)
                 .collect(),
             output_layers: value
                 .output_layers
                 .iter()
-                .map(PatternOutputLayerDtoV2::from_domain)
+                .map(PatternOutputLayerDtoV3::from_domain)
                 .collect(),
-            modulation: PatternModulationDtoV2 {},
-            coverage: CoverageDtoV2 {
+            modulation: PatternModulationDtoV3 {},
+            coverage: CoverageDtoV3 {
                 guard_steps: value.coverage.guard_steps,
-                maximum_support_radius: value.coverage.maximum_support_radius,
+                additional_margin: value.coverage.additional_margin,
             },
         }
     }
@@ -2114,22 +1942,22 @@ impl PatternDefinitionDtoV2 {
             mechanisms: self
                 .mechanisms
                 .into_iter()
-                .map(PatternMechanismDtoV2::into_domain)
+                .map(PatternMechanismDtoV3::into_domain)
                 .collect(),
             output_layers: self
                 .output_layers
                 .into_iter()
-                .map(PatternOutputLayerDtoV2::into_domain)
+                .map(PatternOutputLayerDtoV3::into_domain)
                 .collect(),
             modulation: toniator_domain::PatternModulation,
             coverage: CoveragePolicy {
                 guard_steps: self.coverage.guard_steps,
-                maximum_support_radius: self.coverage.maximum_support_radius,
+                additional_margin: self.coverage.additional_margin,
             },
         }
     }
 }
-impl PatternFamilyDtoV2 {
+impl PatternFamilyDtoV3 {
     fn from_domain(value: &toniator_domain::PatternFamily) -> Self {
         match value {
             toniator_domain::PatternFamily::GuideIntersections {
@@ -2175,7 +2003,7 @@ impl PatternFamilyDtoV2 {
         }
     }
 }
-impl PatternMechanismDtoV2 {
+impl PatternMechanismDtoV3 {
     fn from_domain(value: &toniator_domain::PatternMechanism) -> Self {
         match value {
             toniator_domain::PatternMechanism::StraightGuides { id } => {
@@ -2193,7 +2021,7 @@ impl PatternMechanismDtoV2 {
                     id: id.0,
                     dimensions: dimensions
                         .iter()
-                        .map(StraightGuideDimensionDtoV2::from_domain)
+                        .map(StraightGuideDimensionDtoV3::from_domain)
                         .collect(),
                 }
             }
@@ -2202,7 +2030,7 @@ impl PatternMechanismDtoV2 {
                     id: id.0,
                     dimensions: dimensions
                         .iter()
-                        .map(GuideDimensionDtoV2::from_domain)
+                        .map(GuideDimensionDtoV3::from_domain)
                         .collect(),
                 }
             }
@@ -2236,7 +2064,7 @@ impl PatternMechanismDtoV2 {
                 seed,
             } => Self::RandomSiteProcess {
                 id: id.0,
-                character: RandomSiteCharacterDtoV2::from_domain(character),
+                character: RandomSiteCharacterDtoV3::from_domain(character),
                 seed: *seed,
             },
             toniator_domain::PatternMechanism::SiteDensityModulation {
@@ -2246,7 +2074,7 @@ impl PatternMechanismDtoV2 {
             } => Self::SiteDensityModulation {
                 id: id.0,
                 base_site_process_id: base_site_process_id.0,
-                modulation: SiteDensityModulationDtoV2::from_domain(modulation),
+                modulation: SiteDensityModulationDtoV3::from_domain(modulation),
             },
             toniator_domain::PatternMechanism::SiteExclusion {
                 id,
@@ -2255,7 +2083,7 @@ impl PatternMechanismDtoV2 {
             } => Self::SiteExclusion {
                 id: id.0,
                 density_modulation_id: density_modulation_id.0,
-                policy: SiteExclusionPolicyDtoV2::from_domain(policy),
+                policy: SiteExclusionPolicyDtoV3::from_domain(policy),
             },
             toniator_domain::PatternMechanism::RandomSiteProduct {
                 id,
@@ -2287,7 +2115,7 @@ impl PatternMechanismDtoV2 {
                     id: PatternMechanismId(id),
                     dimensions: dimensions
                         .into_iter()
-                        .map(StraightGuideDimensionDtoV2::into_domain)
+                        .map(StraightGuideDimensionDtoV3::into_domain)
                         .collect(),
                 }
             }
@@ -2296,7 +2124,7 @@ impl PatternMechanismDtoV2 {
                     id: PatternMechanismId(id),
                     dimensions: dimensions
                         .into_iter()
-                        .map(GuideDimensionDtoV2::into_domain)
+                        .map(GuideDimensionDtoV3::into_domain)
                         .collect(),
                 }
             }
@@ -2366,7 +2194,7 @@ impl PatternMechanismDtoV2 {
     }
 }
 
-impl RandomSiteCharacterDtoV2 {
+impl RandomSiteCharacterDtoV3 {
     fn from_domain(value: &RandomSiteCharacter) -> Self {
         match value {
             RandomSiteCharacter::RawUniform => Self::RawUniform,
@@ -2407,7 +2235,7 @@ impl RandomSiteCharacterDtoV2 {
     }
 }
 
-impl SiteDensityModulationDtoV2 {
+impl SiteDensityModulationDtoV3 {
     fn from_domain(value: &SiteDensityModulation) -> Self {
         match value {
             SiteDensityModulation::Uniform => Self::Uniform,
@@ -2418,7 +2246,7 @@ impl SiteDensityModulationDtoV2 {
             } => Self::ArtworkWeighted {
                 mapping: SourceMappingDto::from_domain(*mapping),
                 strength: *strength,
-                response: ArtworkWeightResponseDtoV2::from_domain(response),
+                response: ArtworkWeightResponseDtoV3::from_domain(response),
             },
         }
     }
@@ -2438,7 +2266,7 @@ impl SiteDensityModulationDtoV2 {
     }
 }
 
-impl ArtworkWeightResponseDtoV2 {
+impl ArtworkWeightResponseDtoV3 {
     fn from_domain(value: &ArtworkWeightResponse) -> Self {
         match value {
             ArtworkWeightResponse::Linear => Self::Linear,
@@ -2453,7 +2281,7 @@ impl ArtworkWeightResponseDtoV2 {
     }
 }
 
-impl SiteExclusionPolicyDtoV2 {
+impl SiteExclusionPolicyDtoV3 {
     fn from_domain(value: &SiteExclusionPolicy) -> Self {
         match value {
             SiteExclusionPolicy::None => Self::None,
@@ -2462,7 +2290,7 @@ impl SiteExclusionPolicyDtoV2 {
             }
             SiteExclusionPolicy::VisibleMarkMargin { margin, sizing } => Self::VisibleMarkMargin {
                 margin: *margin,
-                sizing: VisibleMarkSizingPolicyDtoV2::from_domain(*sizing),
+                sizing: VisibleMarkSizingPolicyDtoV3::from_domain(*sizing),
             },
         }
     }
@@ -2480,7 +2308,7 @@ impl SiteExclusionPolicyDtoV2 {
     }
 }
 
-impl VisibleMarkSizingPolicyDtoV2 {
+impl VisibleMarkSizingPolicyDtoV3 {
     fn from_domain(value: VisibleMarkSizingPolicy) -> Self {
         match value {
             VisibleMarkSizingPolicy::MaximumSupportRadius => Self::MaximumSupportRadius,
@@ -2492,7 +2320,7 @@ impl VisibleMarkSizingPolicyDtoV2 {
         }
     }
 }
-impl PatternOutputLayerDtoV2 {
+impl PatternOutputLayerDtoV3 {
     fn from_domain(value: &toniator_domain::PatternOutputLayer) -> Self {
         match value {
             toniator_domain::PatternOutputLayer::CircularMarks {
@@ -2510,8 +2338,8 @@ impl PatternOutputLayerDtoV2 {
             } => Self::MarkPrototype {
                 id: id.0,
                 site_mechanism_id: site_mechanism_id.0,
-                prototype: MarkPrototypeDtoV2::from_domain(prototype),
-                orientation: MarkOrientationDtoV2::from_domain(orientation),
+                prototype: MarkPrototypeDtoV3::from_domain(prototype),
+                orientation: MarkOrientationDtoV3::from_domain(orientation),
             },
         }
     }
@@ -2539,7 +2367,7 @@ impl PatternOutputLayerDtoV2 {
     }
 }
 
-impl StraightGuideDimensionDtoV2 {
+impl StraightGuideDimensionDtoV3 {
     fn from_domain(value: &StraightGuideDimension) -> Self {
         Self {
             id: value.id.0,
@@ -2559,7 +2387,7 @@ impl StraightGuideDimensionDtoV2 {
         }
     }
 }
-impl MarkPrototypeDtoV2 {
+impl MarkPrototypeDtoV3 {
     fn from_domain(value: &MarkPrototype) -> Self {
         match value {
             MarkPrototype::Circle => Self::Circle,
@@ -2571,7 +2399,7 @@ impl MarkPrototypeDtoV2 {
         }
     }
 }
-impl MarkOrientationDtoV2 {
+impl MarkOrientationDtoV3 {
     fn from_domain(value: &MarkOrientation) -> Self {
         match value {
             MarkOrientation::Fixed => Self::Fixed,
@@ -2690,14 +2518,16 @@ impl AppearanceDto {
 impl MarkResponseDto {
     fn from_domain(value: &MarkGeometryResponse) -> Self {
         Self {
-            minimum_size: value.minimum_size,
-            maximum_size: value.maximum_size,
+            minimum_fill: value.minimum_fill,
+            maximum_fill: value.maximum_fill,
+            rotation_offset_degrees: value.rotation_offset_degrees,
         }
     }
     fn into_domain(self) -> MarkGeometryResponse {
         MarkGeometryResponse {
-            minimum_size: self.minimum_size,
-            maximum_size: self.maximum_size,
+            minimum_fill: self.minimum_fill,
+            maximum_fill: self.maximum_fill,
+            rotation_offset_degrees: self.rotation_offset_degrees,
         }
     }
 }

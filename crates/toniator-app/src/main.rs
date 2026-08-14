@@ -1496,10 +1496,12 @@ fn inspector_group(field: PropertyFieldId) -> &'static str {
         | PropertyFieldId::RotationDegrees
         | PropertyFieldId::TranslationX
         | PropertyFieldId::TranslationY => "Transform",
-        PropertyFieldId::MarkMinimumSize | PropertyFieldId::MarkMaximumSize => "Marks",
+        PropertyFieldId::MarkMinimumFill
+        | PropertyFieldId::MarkMaximumFill
+        | PropertyFieldId::MarkRotationOffsetDegrees => "Marks",
         PropertyFieldId::DefinitionSelection => "Pattern",
         PropertyFieldId::CoverageGuardSteps
-        | PropertyFieldId::CoverageMaximumSupportRadius
+        | PropertyFieldId::CoverageAdditionalMargin
         | PropertyFieldId::GuideBaselineAngle
         | PropertyFieldId::GuidePhase
         | PropertyFieldId::GuideSpacingMultiplier
@@ -1525,8 +1527,9 @@ fn inspector_field_label(field: PropertyFieldId) -> String {
         PropertyFieldId::RotationDegrees => "Rotation".into(),
         PropertyFieldId::TranslationX => "X offset".into(),
         PropertyFieldId::TranslationY => "Y offset".into(),
-        PropertyFieldId::MarkMinimumSize => "Minimum mark size".into(),
-        PropertyFieldId::MarkMaximumSize => "Maximum mark size".into(),
+        PropertyFieldId::MarkMinimumFill => "Minimum fill".into(),
+        PropertyFieldId::MarkMaximumFill => "Maximum fill".into(),
+        PropertyFieldId::MarkRotationOffsetDegrees => "Rotation offset".into(),
         PropertyFieldId::LegacyMappingComponent | PropertyFieldId::ModeledMappingComponent => {
             "Source component".into()
         }
@@ -1545,7 +1548,7 @@ fn inspector_field_label(field: PropertyFieldId) -> String {
         PropertyFieldId::Visibility => "Visible".into(),
         PropertyFieldId::DefinitionSelection => "Pattern".into(),
         PropertyFieldId::CoverageGuardSteps => "Coverage guard steps".into(),
-        PropertyFieldId::CoverageMaximumSupportRadius => "Maximum support radius".into(),
+        PropertyFieldId::CoverageAdditionalMargin => "Additional margin".into(),
         PropertyFieldId::GuideBaselineAngle => "Direction angle".into(),
         PropertyFieldId::GuidePhase => "Direction offset".into(),
         PropertyFieldId::GuideSpacingMultiplier => "Direction spacing".into(),
@@ -1722,7 +1725,7 @@ fn is_pattern_editor_advanced_safety_descriptor(field: PropertyFieldId) -> bool 
     matches!(
         field,
         PropertyFieldId::CoverageGuardSteps
-            | PropertyFieldId::CoverageMaximumSupportRadius
+            | PropertyFieldId::CoverageAdditionalMargin
             | PropertyFieldId::IntersectionMergeEpsilon
             | PropertyFieldId::RandomDensityModulation
             | PropertyFieldId::ArtworkWeightMappingComponent
@@ -4434,13 +4437,17 @@ fn command_for_inspector_input(
             edited_axis: TranslationEditedAxis::Y,
             value: f64_value(input)?,
         }),
-        PropertyFieldId::MarkMinimumSize => Ok(DocumentCommand::SetMarkGeometryField {
+        PropertyFieldId::MarkMinimumFill => Ok(DocumentCommand::SetMarkGeometryField {
             channel_id: channel_id()?,
-            edit: MarkGeometryFieldEdit::MinimumSize(f64_value(input)?),
+            edit: MarkGeometryFieldEdit::MinimumFill(f64_value(input)?),
         }),
-        PropertyFieldId::MarkMaximumSize => Ok(DocumentCommand::SetMarkGeometryField {
+        PropertyFieldId::MarkMaximumFill => Ok(DocumentCommand::SetMarkGeometryField {
             channel_id: channel_id()?,
-            edit: MarkGeometryFieldEdit::MaximumSize(f64_value(input)?),
+            edit: MarkGeometryFieldEdit::MaximumFill(f64_value(input)?),
+        }),
+        PropertyFieldId::MarkRotationOffsetDegrees => Ok(DocumentCommand::SetMarkGeometryField {
+            channel_id: channel_id()?,
+            edit: MarkGeometryFieldEdit::RotationOffsetDegrees(f64_value(input)?),
         }),
         PropertyFieldId::ColorRed => Ok(DocumentCommand::SetColorComponent {
             channel_id: channel_id()?,
@@ -4616,9 +4623,9 @@ fn structural_command_for_input(
         PropertyFieldId::CoverageGuardSteps => PatternDefinitionEdit::SetCoverageGuardSteps {
             guard_steps: count(input)?,
         },
-        PropertyFieldId::CoverageMaximumSupportRadius => {
-            PatternDefinitionEdit::SetCoverageMaximumSupportRadius {
-                maximum_support_radius: number(input)?,
+        PropertyFieldId::CoverageAdditionalMargin => {
+            PatternDefinitionEdit::SetCoverageAdditionalMargin {
+                additional_margin: number(input)?,
             }
         }
         PropertyFieldId::GuideBaselineAngle => PatternDefinitionEdit::SetGuideBaselineAngle {

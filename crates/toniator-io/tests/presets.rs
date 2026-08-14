@@ -32,7 +32,7 @@ fn preset_round_trips_through_versioned_standalone_io() {
             name: "Round-trip grid".into(),
             coverage: CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         }),
     };
@@ -56,7 +56,7 @@ fn preset_io_rejects_invalid_serialized_and_save_inputs() {
     let unknown = directory.join("unknown-version.preset.json");
     fs::write(
         &unknown,
-        r#"{"preset_format_version":99,"metadata":{"id":"x","name":"X","category":"Test","description":"Test","thumbnail":null},"recipe":{"kind":"straight_grid","name":"Grid","coverage":{"guard_steps":2,"maximum_support_radius":4.5}}}"#,
+        r#"{"preset_format_version":99,"metadata":{"id":"x","name":"X","category":"Test","description":"Test","thumbnail":null},"recipe":{"kind":"straight_grid","name":"Grid","coverage":{"guard_steps":2,"additional_margin":4.5}}}"#,
     )
     .unwrap();
     assert!(load_preset(&unknown).is_err());
@@ -73,7 +73,7 @@ fn preset_io_rejects_invalid_serialized_and_save_inputs() {
             name: "Grid".into(),
             coverage: CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
         }),
     };
@@ -91,7 +91,7 @@ fn preset_io_rejects_invalid_serialized_and_save_inputs() {
             name: "Bad index".into(),
             coverage: CoveragePolicy {
                 guard_steps: 2,
-                maximum_support_radius: 4.5,
+                additional_margin: 4.5,
             },
             dimensions: vec![GuideDimensionDraft {
                 baseline_angle_degrees: 0.0,

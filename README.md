@@ -235,7 +235,7 @@ immediate bundled Even Random Circles and Straight Grid Circles application,
 visible Undo/Redo, and a separate private-draft Pattern Editor over the accepted
 headless command/history/scheduler and canonical preview, PNG, and SVG paths.
 `Save as Preset...` remains disabled; preset authoring, library management, and
-the remaining Stage 20E+ mechanisms remain planned.
+the remaining Stage 20E2+ mechanisms remain planned.
 
 Stage-owned validation under
 `target/validation/stage-19b-gui-remediation/` includes private Sway/AT-SPI
@@ -289,8 +289,17 @@ post-review `toniator-app` compilation correction adds presentation labels for
 the new typed guide fields, choices, and authored references only; it does not
 add Stage 20D editing UI or move authority into the frontend. Private
 Sway/AT-SPI evidence is automated only and does not claim manual GNOME/Mutter
-acceptance. Stage 20E+ mechanisms remain planned and require their own
-reviewed contracts.
+acceptance. Stage 20E1 is complete in the Stage 20E1 acceptance checkpoint.
+
+Stage 20E1 replaces the temporary absolute mark-size/support-capability model
+with per-site nominal cell bases, normalized `0.0..=2.0` fill, derived
+family-aware coverage, and synchronized existing GUI/CLI controls (`Minimum
+fill`, `Maximum fill`, and `Rotation offset`). Current documents use schema v3
+only and presets use format v2 only; obsolete schemas are rejected rather than
+migrated. The independent repair re-review is PASS. No authored-shape or Stage
+20E2 implementation is included. Stage 20E2 is Planned and not started, with
+its approved contract ready for a separate implementation request; later Stage
+20F+ mechanisms remain planned under their own gates.
 
 Low-resolution fixtures and outputs are supplementary only. Every future stage
 that exercises source loading, sampling, rendering, preview, or export must
