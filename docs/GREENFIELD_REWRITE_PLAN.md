@@ -1812,12 +1812,19 @@ the accepted checkpoint includes family-aware coverage preflight, explicit
 per-site nominal diameters, and deterministic parallel/near-parallel contributor
 rejection. It does not implement authored shapes or renderer algorithms.
 
-**Stage 20E2 — Approved contract, Planned and not started.**
+**Stage 20E2 — Complete at commit `0c6b6a2e268f9306835038be747352a0cd64044c`.**
 [`STAGE_20E2_USER_SHAPE_MARK_PLAN.md`](STAGE_20E2_USER_SHAPE_MARK_PLAN.md)
-defines authored closed structures as ordinary canonical site marks. Its Stage
-20E1 dependency is satisfied; it is ready for a separate implementation request
-and must be revalidated against the accepted checkout before work begins. No
-Stage 20E2 implementation is included here.
+defines authored closed structures as ordinary canonical site marks. The
+implementation adds document-owned typed shape references, exact normalized
+closed-path realization, shared canonical preview/PNG/SVG consumption,
+even-odd fill, bounded/cancellable path work, complete identity, and additive
+current document-v3/preset-v2 persistence. Focused verification and intrinsic
+immutable-source artifacts pass. The independent review's sampled-paint and
+identity findings were repaired, and the focused repair re-review plus final
+zero-alpha engine-to-render review found no confirmed remaining issue. The user
+explicitly accepted Stage 20E2 on 2026-08-14. The local implementation
+checkpoint contains the reviewed implementation and deliberate HolidayMugs
+fixture/checksum update; Stage 20F+ remains separately gated.
 
 **Later Stage 20F+ — Planned.** GTK shape/guide exposure and pending-preview
 feedback, connected/network topology, regions and ordinary Voronoi, reusable

@@ -70,8 +70,12 @@ Private Sway/AT-SPI evidence is automated only and does not claim manual
 GNOME/Mutter acceptance. Stage 20E1 is complete in its named acceptance
 checkpoint, with the independent repair re-review PASS and current
 document-schema-v3/preset-v2-only normalized-fill controls recorded below.
-Stage 20E2 is now unblocked but remains Planned and not started under its
-approved contract.
+Stage 20E2 is complete at implementation checkpoint
+`0c6b6a2e268f9306835038be747352a0cd64044c`: document-owned authored closed
+shapes now realize as ordinary canonical site marks with even-odd preview,
+PNG, and SVG consumers, bounded cancellation, complete identity, and additive
+current document-v3/preset-v2 persistence. Stage 20F remains Planned and
+requires a fresh contract and separate implementation request.
 
 ## Later Goal candidates
 
@@ -84,8 +88,8 @@ fresh planning validates its contract against actual implementation evidence.
 | 20C | Persisted reusable authored open/closed structures. | Commands/descriptors/history/round-trip and exact Stage 20B conversion. | 20B. | None within the accepted bounded contract. | **Complete in the single named Stage 20C acceptance checkpoint; direct parent `08d970a`; checkpoint hash intentionally not self-referenced** |
 | 20D | Generic curved/procedural guide generation and coverage. | Coverage/identity/cancel/cache/persistence. | 20A–20C. | Prototypes/repetition. | **Complete in the Stage 20D acceptance checkpoint** |
 | 20E1 | Normalized mark fill, per-site nominal basis, coverage correction, current document-schema-v3/preset-v2-only transition, and existing GUI/CLI controls. | Formula/coverage/cache/schema/fixture/natural-output and bounded GTK control checks. | 20A, 20D. | None within the approved contract. | **Complete in the Stage 20E1 acceptance checkpoint; independent repair re-review PASS** |
-| 20E2 | User-shape mark realization from authored structures. | Canonical geometry and PNG/SVG parity. | 20A, 20C, accepted 20E1. | None within the approved contract; revalidate after 20E1. | approved contract; **Planned and not started; ready for a separate implementation request** |
-| 20F | GTK guide/shape editor exposure and pending-preview indicator. | GTK Sway plus command/export checks. | 20C–20E2. | Direct-manipulation UX. | not a Goal candidate |
+| 20E2 | User-shape mark realization from authored structures. | Canonical geometry, limits/cancellation/cache, deterministic persistence, and PNG/SVG parity. | 20A, 20C, accepted 20E1. | None within the accepted contract. | **Complete at `0c6b6a2e268f9306835038be747352a0cd64044c`; independent repair re-review PASS** |
+| 20F | GTK guide/shape editor exposure and pending-preview indicator. | GTK Sway plus command/export checks. | Accepted 20C–20E2 checkpoints. | Direct-manipulation UX. | planned; requires a fresh contract and separate implementation request |
 | 20G | Canonical connected guide paths/strokes. | Path/stroke/export tests. | 20B, 20D. | Stroke/crossing defaults. | planned after dependencies |
 | 20H | Mechanism-neutral deterministic adjacency. | Graph order/degeneracy/cache tests. | 20A. | Neighbor policy. | planned after dependency contract |
 | 20I | Generic network/maze connection programs. | Seed/replay/topology/persistence. | 20H. | Algorithms/crossings. | needs replanning after prior checkpoint |

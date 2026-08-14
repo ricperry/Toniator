@@ -235,7 +235,7 @@ immediate bundled Even Random Circles and Straight Grid Circles application,
 visible Undo/Redo, and a separate private-draft Pattern Editor over the accepted
 headless command/history/scheduler and canonical preview, PNG, and SVG paths.
 `Save as Preset...` remains disabled; preset authoring, library management, and
-the remaining Stage 20E2+ mechanisms remain planned.
+the remaining Stage 20F+ mechanisms remain planned.
 
 Stage-owned validation under
 `target/validation/stage-19b-gui-remediation/` includes private Sway/AT-SPI
@@ -296,10 +296,19 @@ with per-site nominal cell bases, normalized `0.0..=2.0` fill, derived
 family-aware coverage, and synchronized existing GUI/CLI controls (`Minimum
 fill`, `Maximum fill`, and `Rotation offset`). Current documents use schema v3
 only and presets use format v2 only; obsolete schemas are rejected rather than
-migrated. The independent repair re-review is PASS. No authored-shape or Stage
-20E2 implementation is included. Stage 20E2 is Planned and not started, with
-its approved contract ready for a separate implementation request; later Stage
-20F+ mechanisms remain planned under their own gates.
+migrated. The independent repair re-review is PASS.
+
+Stage 20E2 is complete at implementation checkpoint
+`0c6b6a2e268f9306835038be747352a0cd64044c`. It realizes document-owned authored
+closed shapes as ordinary family-site marks with exact normalized line/cubic
+geometry, Fixed/Tangent/Normal orientation plus channel rotation, explicit
+even-odd fill, shared preview/PNG/SVG canonical consumers, bounded cancellable
+path work, and complete realization/cache/scene identity. Current document-v3
+and preset-v2 persistence remain additive without obsolete decoders or
+migration. Focused verification, both immutable intrinsic source-artwork
+witnesses, private Sway app consumption, independent repair re-review, and the
+final zero-alpha engine-to-render review pass. Shape authoring and later Stage
+20F+ mechanisms remain separately gated.
 
 Low-resolution fixtures and outputs are supplementary only. Every future stage
 that exercises source loading, sampling, rendering, preview, or export must

@@ -2,13 +2,15 @@
 
 ## Status and dependency gate
 
-**Approved contract; Planned and not started.** Stage 20E1 is accepted in its
-named acceptance checkpoint, so this dependency is unblocked. This contract is
-ready for a separate implementation request; do not begin it automatically.
-Before relying on semantic-map, run `semantic-map update --full` and verify
-freshness against the accepted checkout. Revalidate this contract before work
-begins; material drift returns it to planning instead of being guessed by a
-writer.
+**Complete at commit `0c6b6a2e268f9306835038be747352a0cd64044c`.** The
+bounded implementation and focused verification satisfy this contract. An
+independent read-only review found three
+sampled-paint and identity gaps; the bounded repair, repair re-review, and final
+engine-to-render zero-alpha witness close them without confirmed remaining
+findings. The user explicitly accepted Stage 20E2 on 2026-08-14, and the local
+implementation checkpoint contains the reviewed implementation and deliberate
+HolidayMugs fixture/checksum update. No Stage 20F+ work is authorized by this
+transition.
 
 ## Outcome
 

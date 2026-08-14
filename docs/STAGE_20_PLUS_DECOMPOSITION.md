@@ -6,11 +6,12 @@
 `docs/GREENFIELD_REWRITE_PLAN.md` / `ProgressTracker.md` records Stage 20A as
 complete, Stage 20B as complete in the single Stage 20B acceptance checkpoint,
 Stage 20C as complete in its single named acceptance checkpoint, and Stage 20D
-as complete in the Stage 20D acceptance checkpoint. The **remaining Stage 20E+
-work is complete or Planned by its own contract**: Stage 20E1 normalized mark
-fill/coverage is complete in its named acceptance checkpoint; Stage 20E2
-user-shape realization is approved, Planned, and not started; connected or
-network topology;
+as complete in the Stage 20D acceptance checkpoint. Stage 20E1 normalized mark
+fill/coverage is complete in its named acceptance checkpoint, and Stage 20E2
+user-shape realization is complete at implementation checkpoint
+`0c6b6a2e268f9306835038be747352a0cd64044c`. The **remaining Stage 20F+ work is
+Planned by its own contract**: GTK guide/shape exposure; connected or network
+topology;
 regions, ordinary Voronoi, reusable offset/collapse; composite outputs;
 multiframe sources; and simple transitions. Stage 19B is complete at
 implementation checkpoint `b0b84e4`. Stage 20A is complete at implementation
@@ -23,8 +24,9 @@ current document-schema-v3/preset-v2-only transition, and synchronized existing
 GUI/CLI controls; its independent repair re-review is PASS. Stage 20C's named
 checkpoint has direct parent `08d970a`; its own hash is intentionally not
 self-referenced here. The Stage 20D acceptance checkpoint is also intentionally
-named rather than self-referenced by hash. The accepted Stage 20E1 checkpoint
-does not authorize implementation of 20E2 or reorder the remaining roadmap.
+named rather than self-referenced by hash. The accepted Stage 20E2 checkpoint
+adds ordinary canonical authored-shape marks without authoring UI and does not
+authorize Stage 20F+ implementation or reorder the remaining roadmap.
 
 | Authority | Present responsibility | Stage 20+ rule |
 |---|---|---|
@@ -40,7 +42,8 @@ Current types now separate the shared site contract: `PatternFamily`,
 `PatternMechanism`, `PatternOutputLayer`, opaque `TypedFamilyOutput`,
 `FamilySiteSet`, `FamilySiteProvenance`, `GridFamilyOutput`,
 `GeneralizedStraightGuideOutput`, `GeneralizedSite`, `RandomSiteProvenance`,
-`SiteId`, `IntersectionSite`, `SiteScope`, and `CanonicalCircleMark` exist.
+`SiteId`, `IntersectionSite`, `SiteScope`, `CanonicalCircleMark`,
+`CanonicalPathMark`, and the ordered `CanonicalMark` union exist.
 Generalized along-guide and random results retain truthful provenance in
 `FamilySiteSet`; the existing circle realization receives only a private
 compatibility view. Stage 20C adds document-owned authored open paths and
@@ -48,9 +51,11 @@ closed shapes, their authoritative commands/descriptors/history, current-v2
 persistence, and an exact conversion boundary to Stage 20B `CurvePath`
 construction geometry. Stage 20D adds authored-open-path and circular-arc
 guide prototypes, bounded repetition, deterministic coverage, existing
-guide-site product consumption, and document-aware identity/invalidation. No
-closed-shape mark realization, graph, region, canonical stroke/path/region,
-Voronoi, or multiframe/transition authority exists yet.
+guide-site product consumption, and document-aware identity/invalidation. Stage
+20E2 adds ordinary canonical authored-shape marks, exact normalized line/cubic
+realization, even-odd preview/PNG/SVG consumption, bounded cancellation, and
+complete identity. No connected-path/stroke, graph, region, Voronoi, or
+multiframe/transition authority exists yet.
 
 ## Ten-concern separation audit
 
@@ -106,7 +111,7 @@ faces, cells, maze boundaries or topology. Persist schema, stable resource IDs,
 seeds and topology-program parameters; regenerate sites, adjacency, paths,
 faces, cells, offsets, caches and scheduler results.
 
-## Remaining planned checkpoints after Stage 20D
+## Stage 20 milestones and remaining planned checkpoints
 
 | Label | Outcome | Non-goals | Layers / dependencies | Verification | GTK | Stop / Goal candidacy |
 |---|---|---|---|---|---|---|
@@ -115,7 +120,7 @@ faces, cells, offsets, caches and scheduler results.
 | 20C Document-owned Authored Structures | **Complete in the single named Stage 20C acceptance checkpoint:** document-owned open paths/closed shapes, authoritative commands/descriptors/history, deterministic current-v2 persistence, and exact conversion to Stage 20B construction geometry. The checkpoint's direct parent is `08d970a`; its own hash is intentionally not self-referenced. | Consumers, evaluators, caches, canonical output, rendering/export, CLI, GTK, presets, schema-version changes, and later stages. | domain/io/geometry; 20B. | Validation, history, descriptor, save/reload, and exact conversion tests passed. | None. | Historical accepted authority; no further implementation. |
 | 20D Curved/Procedural Guide Mechanisms | **Complete in the Stage 20D acceptance checkpoint:** authored-open-path and circular-arc guide prototypes, bounded repetition/coverage, existing guide-site product consumption, document-aware identity/invalidation, cancellation/cache behavior, and deterministic current-v2 persistence. | Shape marks, strokes, topology, GTK editing. | domain/patterns/geometry/engine/io; 20A–20C. | Coverage, IDs, cancellation, cache/invalidation, persistence. | None; app correction was presentation-only. | Historical accepted authority; no further implementation. |
 | 20E1 Normalized Mark Fill and Coverage | Per-site nominal cell basis, normalized 0..2 fill, corrected coverage, current document-schema-v3/preset-v2-only transition, and synchronized existing GUI/CLI controls. | Authored shapes, renderer algorithms, response curves/polarity, progress UI. | domain/geometry/patterns/engine/io/cli plus bounded app; 20A/20D. | Basis/formulas, edge coverage, cache/cancel, schema/fixtures, natural PNG/SVG, private GTK controls; independent repair re-review PASS. | Existing controls only. | **Complete in the Stage 20E1 acceptance checkpoint; no Stage 20E2 work.** |
-| 20E2 User-shape Mark Realization | Authored closed structures as ordinary site marks through canonical geometry. | Renderer modes, preset magic, GTK authoring. | patterns/geometry/render/domain/io/engine; 20A/20C/20E1. | Public evaluator, canonical PNG/SVG, round-trip. | Consume/compile only. | Approved contract; **Planned and not started; ready for a separate implementation request.** |
+| 20E2 User-shape Mark Realization | **Complete at `0c6b6a2e268f9306835038be747352a0cd64044c`:** authored closed structures as ordinary site marks through exact canonical geometry, even-odd preview/PNG/SVG, bounded cancellation, complete identity, and additive document-v3/preset-v2 persistence. | Renderer modes, preset magic, GTK authoring. | patterns/geometry/render/domain/io/engine; 20A/20C/20E1. | Public evaluator, limits/cancellation/cache, canonical PNG/SVG, deterministic round-trip, independent repair re-review. | Consume/compile only. | Historical accepted authority; no further implementation. |
 | 20F Guide/shape editor exposure | Descriptor-driven private-draft exposure for 20C–20E2 plus an indeterminate pending-preview indicator. | Frontend evaluator, preset library/Save & Apply, fractional engine progress. | app; accepted commands/descriptors. | GTK Wayland plus command/persistence/export checks. | Yes. | Parent/user GNOME review; normal prompt/review. |
 | 20G Connected Guide Paths and Strokes | Guide path output, canonical strokes, channel thickness response. | Networks/mazes. | geometry/patterns/render; 20B/20D. | Path, clip, PNG/SVG parity. | None. | Planned after dependencies; needs fresh contract. |
 | 20H Site Adjacency Graphs | Deterministic mechanism-neutral adjacency over `FamilySiteSet`. | Connection program/rendering. | geometry/patterns; 20A. | Graph invariants/order/degeneracy/cache identity. | None. | Planned after dependency contract; needs fresh contract. |

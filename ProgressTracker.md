@@ -1,6 +1,6 @@
 # Toniator Progress Tracker
 
-Last updated: **2026-08-13**. The durable execution contract is
+Last updated: **2026-08-14**. The durable execution contract is
 [GREENFIELD_REWRITE_PLAN.md](docs/GREENFIELD_REWRITE_PLAN.md). Normative
 architecture remains in the five protected [Project Specification files](Project%20Specification/Addendum.md).
 
@@ -386,10 +386,25 @@ family-aware support preflight, removal of the unit-diameter fallback, and
 deterministic rejection of parallel or near-parallel contributors. No authored
 shape or Stage 20E2 implementation was performed.
 
-**Stage 20E2 — Planned; not started.** Its approved contract in
-`docs/STAGE_20E2_USER_SHAPE_MARK_PLAN.md` is now unblocked by accepted Stage
-20E1 and is ready for a separate implementation request. No Stage 20E2 work is
-included in this acceptance checkpoint.
+**Stage 20E2 — Complete at commit
+`0c6b6a2e268f9306835038be747352a0cd64044c`.** The accepted bounded
+implementation adds explicit document-owned authored-closed-shape mark
+references, exact
+bounds-center normalization and Fixed/Tangent/Normal realization, truthful
+canonical closed paths, even-odd native/preview/SVG consumers, request-wide
+transformed-segment and flattened-edge limits, cooperative cancellation, and
+complete cache/scene identity. Current document-v3 and preset-v2 persistence
+remain additive with no obsolete decoder or migration. Focused headless tests,
+strict affected-crate lint, architecture validation, both immutable intrinsic
+source-artwork PNG/SVG witnesses, and a private Sway app-consumption smoke check
+pass. The independent read-only review found three sampled-paint/identity gaps;
+the bounded repair and focused re-review close all three without further
+findings. A final reviewed engine-to-render zero-alpha witness also proves site
+cardinality and hidden-RGB suppression. The automated Sway evidence is not
+manual GNOME/Mutter acceptance. The user explicitly accepted Stage 20E2 on
+2026-08-14; its local implementation checkpoint includes the reviewed code,
+focused tests, and deliberate HolidayMugs fixture/checksum update. Stage 20F+
+work remains excluded.
 
 **Remaining Stage 20F+ — Planned.** GTK guide/shape authoring and pending-preview
 feedback, connected/network output, regions/Voronoi and reusable offsetting,
@@ -413,7 +428,8 @@ composite output mechanisms, multiframe sources, transitions, and later Stage
   direct planning parent is `453104e39204afc1e10397b9d5bbf551dd85deac`; the
   acceptance checkpoint is intentionally named rather than self-referenced by
   hash. Stage 20E1 is **Complete in the Stage 20E1 acceptance checkpoint**;
-  Stage 20E2 is **Planned and not started** under its approved contract.
+  Stage 20E2 is **Complete at commit
+  `0c6b6a2e268f9306835038be747352a0cd64044c`** under its approved contract.
 - The parent owns accepted/complete transitions and checkpoint hashes. A writer
   reports proposed status; evidence cannot substitute for user acceptance or a
   commit.
