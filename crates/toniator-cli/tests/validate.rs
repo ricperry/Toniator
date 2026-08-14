@@ -21,9 +21,9 @@ use toniator_domain::{
     property_field_contract,
 };
 use toniator_engine::{
-    ChannelDiagnosticRequest, ChannelDiagnosticScheduler, EvaluationLimits, EvaluationRequest,
-    EvaluationScheduler, GeometryOutput, RenderScene, ResolvedSource, SiteScope, SourceFormatHint,
-    encode_png, evaluate_channel_diagnostic, evaluate_with_limits, write_svg,
+    CanonicalMark, ChannelDiagnosticRequest, ChannelDiagnosticScheduler, EvaluationLimits,
+    EvaluationRequest, EvaluationScheduler, GeometryOutput, RenderScene, ResolvedSource, SiteScope,
+    SourceFormatHint, encode_png, evaluate_channel_diagnostic, evaluate_with_limits, write_svg,
 };
 use toniator_io::{EmbeddedSource, EmbeddedSourceFormat, SourceBundle, load, save};
 
@@ -2023,6 +2023,7 @@ struct Stage17OutputHashes {
     svg: String,
 }
 
+/// Evaluates one modeled Stage 17 fixture and writes deterministic derived evidence.
 fn capture_stage17_evaluation(
     case_root: &Path,
     state: &str,
@@ -2086,6 +2087,7 @@ fn capture_stage17_evaluation(
         .filter(|layer| layer.visible())
         .map(|layer| match layer.geometry() {
             GeometryOutput::CircularMarks(marks) => marks.len(),
+            GeometryOutput::CanonicalMarks(marks) => marks.len(),
         })
         .sum::<usize>();
     let circle_count = svg.matches("<circle ").count();
@@ -2093,12 +2095,24 @@ fn capture_stage17_evaluation(
     let positive_radii = scene
         .layers()
         .iter()
-        .map(|layer| match layer.geometry() {
+        .map(|layer| {
+            match layer.geometry() {
             GeometryOutput::CircularMarks(marks) => (
                 layer.channel_id(),
                 marks.len(),
                 marks.iter().filter(|mark| mark.radius > 0.0).count(),
             ),
+            GeometryOutput::CanonicalMarks(marks) => (
+                layer.channel_id(),
+                marks.len(),
+                marks
+                    .iter()
+                    .filter(|mark| {
+                        matches!(mark, CanonicalMark::Circle { radius, .. } if *radius > 0.0)
+                    })
+                    .count(),
+            ),
+        }
         })
         .collect::<Vec<_>>();
     assert_eq!(clip_count, 1, "{state} SVG uses one canvas clip");
@@ -2134,6 +2148,7 @@ fn capture_stage17_evaluation(
     hashes
 }
 
+/// Evaluates one retained legacy Stage 17 fixture through its diagnostic adapter.
 fn capture_stage17_legacy_evaluation(
     case_root: &Path,
     state: &str,
@@ -2184,6 +2199,7 @@ fn capture_stage17_legacy_evaluation(
         .filter(|layer| layer.visible())
         .map(|layer| match layer.geometry() {
             GeometryOutput::CircularMarks(marks) => marks.len(),
+            GeometryOutput::CanonicalMarks(marks) => marks.len(),
         })
         .sum::<usize>();
     let circle_count = svg.matches("<circle ").count();
@@ -2191,12 +2207,24 @@ fn capture_stage17_legacy_evaluation(
     let positive_radii = scene
         .layers()
         .iter()
-        .map(|layer| match layer.geometry() {
+        .map(|layer| {
+            match layer.geometry() {
             GeometryOutput::CircularMarks(marks) => (
                 layer.channel_id(),
                 marks.len(),
                 marks.iter().filter(|mark| mark.radius > 0.0).count(),
             ),
+            GeometryOutput::CanonicalMarks(marks) => (
+                layer.channel_id(),
+                marks.len(),
+                marks
+                    .iter()
+                    .filter(|mark| {
+                        matches!(mark, CanonicalMark::Circle { radius, .. } if *radius > 0.0)
+                    })
+                    .count(),
+            ),
+        }
         })
         .collect::<Vec<_>>();
     assert_eq!(clip_count, 1, "{state} legacy SVG uses one canvas clip");
@@ -2231,6 +2259,7 @@ fn capture_stage17_legacy_evaluation(
     hashes
 }
 
+/// Summarizes both retained and generalized canonical marks for derived validation evidence.
 fn structural_product_summary(
     document: &Document,
     source_bytes: &[u8],
@@ -2247,28 +2276,49 @@ fn structural_product_summary(
         .find(|definition| definition.id == definition_id)
         .unwrap();
     let scene = evaluate_scene_for_evidence(document, source_bytes, format);
-    let marks = scene
-        .layers()
-        .iter()
-        .flat_map(|layer| match layer.geometry() {
-            GeometryOutput::CircularMarks(marks) => marks.iter(),
-        })
-        .collect::<Vec<_>>();
-    let canvas_marks = marks
-        .iter()
-        .filter(|mark| mark.scope == SiteScope::Canvas)
-        .count();
-    let provenance_count = marks.len();
+    let (realized_mark_count, canvas_marks) =
+        scene
+            .layers()
+            .iter()
+            .fold((0usize, 0usize), |(total, canvas), layer| {
+                match layer.geometry() {
+                    GeometryOutput::CircularMarks(marks) => (
+                        total + marks.len(),
+                        canvas
+                            + marks
+                                .iter()
+                                .filter(|mark| mark.scope == SiteScope::Canvas)
+                                .count(),
+                    ),
+                    GeometryOutput::CanonicalMarks(marks) => (
+                        total + marks.len(),
+                        canvas
+                            + marks
+                                .iter()
+                                .filter(|mark| match mark {
+                                    CanonicalMark::Circle { scope, .. } => {
+                                        *scope == SiteScope::Canvas
+                                    }
+                                    CanonicalMark::ClosedPath(mark) => {
+                                        mark.scope == SiteScope::Canvas
+                                    }
+                                })
+                                .count(),
+                    ),
+                }
+            });
+    let provenance_count = realized_mark_count;
     format!(
         "authority=engine-canonical-scene;family_fingerprint={};coverage={:?};mechanism_count={};output_layer_count={};realized_mark_count={};canvas_mark_count={canvas_marks};provenance_count={provenance_count}",
         scene.identity().family_fingerprint(),
         definition.coverage,
         definition.mechanisms.len(),
         definition.output_layers.len(),
-        marks.len(),
+        realized_mark_count,
     )
 }
 
+/// Evaluates a current document through the authoritative modeled or legacy path for evidence.
 fn evaluate_scene_for_evidence(
     document: &Document,
     source_bytes: &[u8],
@@ -2300,17 +2350,38 @@ fn evaluate_scene_for_evidence(
     }
 }
 
+/// Serializes stable source-site identities for retained or generalized canonical scene geometry.
 fn canonical_geometry_summary(scene: &toniator_engine::RenderScene) -> String {
     let mut output = String::new();
     for layer in scene.layers() {
-        let GeometryOutput::CircularMarks(marks) = layer.geometry();
-        output.push_str(&format!(
-            "channel={:?};mark_count={}\n",
-            layer.channel_id(),
-            marks.len()
-        ));
-        for mark in marks {
-            output.push_str(&format!("{:?}\n", mark.source_site_id));
+        match layer.geometry() {
+            GeometryOutput::CircularMarks(marks) => {
+                output.push_str(&format!(
+                    "channel={:?};mark_count={}\n",
+                    layer.channel_id(),
+                    marks.len()
+                ));
+                for mark in marks {
+                    output.push_str(&format!("{:?}\n", mark.source_site_id));
+                }
+            }
+            GeometryOutput::CanonicalMarks(marks) => {
+                output.push_str(&format!(
+                    "channel={:?};mark_count={}\n",
+                    layer.channel_id(),
+                    marks.len()
+                ));
+                for mark in marks {
+                    match mark {
+                        CanonicalMark::Circle { source_site_id, .. } => {
+                            output.push_str(&format!("{:?}\n", source_site_id));
+                        }
+                        CanonicalMark::ClosedPath(mark) => {
+                            output.push_str(&format!("{:?}\n", mark.source_site_id));
+                        }
+                    }
+                }
+            }
         }
     }
     output
@@ -2349,6 +2420,7 @@ fn raw_rgba_summary(width: u32, height: u32, pixels: &[u8]) -> String {
     )
 }
 
+/// Measures current circle-shaped random output while accepting generalized canonical mark storage.
 fn natural_random_metrics(container: &Path) -> String {
     let loaded = load(container).unwrap();
     let document = loaded.document();
@@ -2362,20 +2434,45 @@ fn natural_random_metrics(container: &Path) -> String {
         .layers()
         .iter()
         .flat_map(|layer| match layer.geometry() {
-            GeometryOutput::CircularMarks(marks) => marks.iter(),
+            GeometryOutput::CircularMarks(marks) => marks
+                .iter()
+                .map(|mark| {
+                    (
+                        mark.center,
+                        mark.radius,
+                        mark.scope,
+                        format!("{:?}", mark.source_site_id),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .into_iter(),
+            GeometryOutput::CanonicalMarks(marks) => marks
+                .iter()
+                .filter_map(|mark| match mark {
+                    CanonicalMark::Circle {
+                        source_site_id,
+                        center,
+                        radius,
+                        scope,
+                        ..
+                    } => Some((*center, *radius, *scope, format!("{:?}", source_site_id))),
+                    CanonicalMark::ClosedPath(_) => None,
+                })
+                .collect::<Vec<_>>()
+                .into_iter(),
         })
         .collect::<Vec<_>>();
     let canvas_marks = marks
         .iter()
-        .filter(|mark| mark.scope == SiteScope::Canvas)
+        .filter(|mark| mark.2 == SiteScope::Canvas)
         .collect::<Vec<_>>();
     let guard_marks = marks.len() - canvas_marks.len();
     let mut bins = [0usize; 32 * 32];
     for mark in &canvas_marks {
-        let x = ((mark.center.x / document.canvas().width) * 32.0)
+        let x = ((mark.0.x / document.canvas().width) * 32.0)
             .floor()
             .clamp(0.0, 31.0) as usize;
-        let y = ((mark.center.y / document.canvas().height) * 32.0)
+        let y = ((mark.0.y / document.canvas().height) * 32.0)
             .floor()
             .clamp(0.0, 31.0) as usize;
         bins[y * 32 + x] += 1;
@@ -2396,10 +2493,10 @@ fn natural_random_metrics(container: &Path) -> String {
             .map(|mark| {
                 canvas_marks
                     .iter()
-                    .filter(|other| other.source_site_id != mark.source_site_id)
+                    .filter(|other| other.3 != mark.3)
                     .map(|other| {
-                        let dx = other.center.x - mark.center.x;
-                        let dy = other.center.y - mark.center.y;
+                        let dx = other.0.x - mark.0.x;
+                        let dy = other.0.y - mark.0.y;
                         dx.mul_add(dx, dy * dy).sqrt()
                     })
                     .fold(f64::INFINITY, f64::min)
@@ -2407,11 +2504,11 @@ fn natural_random_metrics(container: &Path) -> String {
             .sum::<f64>()
             / nearest_sample as f64
     };
-    let positive_radii = canvas_marks.iter().filter(|mark| mark.radius > 0.0).count();
+    let positive_radii = canvas_marks.iter().filter(|mark| mark.1 > 0.0).count();
     let radius_mean = if canvas_marks.is_empty() {
         0.0
     } else {
-        canvas_marks.iter().map(|mark| mark.radius).sum::<f64>() / canvas_marks.len() as f64
+        canvas_marks.iter().map(|mark| mark.1).sum::<f64>() / canvas_marks.len() as f64
     };
     let channel = &document.channel_topology().unwrap().channels()[0];
     format!(
@@ -2423,7 +2520,7 @@ fn natural_random_metrics(container: &Path) -> String {
         sha256_hex(
             marks
                 .iter()
-                .map(|mark| format!("{:?}\n", mark.source_site_id))
+                .map(|mark| format!("{}\n", mark.3))
                 .collect::<String>()
                 .as_bytes(),
         ),

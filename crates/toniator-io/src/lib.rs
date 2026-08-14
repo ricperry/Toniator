@@ -18,17 +18,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use toniator_domain::{
     ArtworkWeightResponse, AuthoredCurveSegment, AuthoredPoint2, AuthoredStructure,
-    AuthoredStructureId, AuthoredStructureKind, CanvasSpec, ChannelAppearance, ChannelId,
-    ChannelPaint, ChannelPatternLayout, ChannelSourceMapping, ChannelState, ChannelTopology,
-    ColorValue, CoveragePolicy, DensityMetric2D, Document, DocumentId, GeneralizedSiteProductDraft,
-    GuideDimension, GuideDimensionDraft, GuideDimensionId, GuidePrototype, GuideRepetition,
-    HalftoneChannelModel, HalftoneChannelRole, MarkGeometryResponse, MarkOrientation,
-    MarkOrientationDraft, MarkPrototype, ModeledChannelState, PatternDefinition,
-    PatternDefinitionDraft, PatternDefinitionId, PatternDefinitionRecipe, PatternMechanismId,
-    PatternOutputLayerId, PresetMetadata, PresetRecord, RandomSiteCharacter, SiteDensityModulation,
-    SiteExclusionPolicy, SourceComponent, SourceMapping, SourceMappingComponent, SourcePlacement,
-    SourceReference, SourceReferenceId, StraightGuideDimension, StraightGuideRepetition,
-    ValidationError, VisibleMarkSizingPolicy,
+    AuthoredStructureDraft, AuthoredStructureId, AuthoredStructureKind, CanvasSpec,
+    ChannelAppearance, ChannelId, ChannelPaint, ChannelPatternLayout, ChannelSourceMapping,
+    ChannelState, ChannelTopology, ColorValue, CoveragePolicy, DensityMetric2D, Document,
+    DocumentId, GeneralizedSiteProductDraft, GuideDimension, GuideDimensionDraft, GuideDimensionId,
+    GuidePrototype, GuideRepetition, HalftoneChannelModel, HalftoneChannelRole,
+    MarkGeometryResponse, MarkOrientation, MarkOrientationDraft, MarkPrototype,
+    ModeledChannelState, PatternDefinition, PatternDefinitionDraft, PatternDefinitionId,
+    PatternDefinitionRecipe, PatternMechanismId, PatternOutputLayerId, PresetMetadata,
+    PresetRecord, RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy, SourceComponent,
+    SourceMapping, SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId,
+    StraightGuideDimension, StraightGuideRepetition, ValidationError, VisibleMarkSizingPolicy,
 };
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
@@ -879,6 +879,10 @@ enum PresetRecipeDto {
         maximum_attempts: u32,
         maximum_neighbor_checks: u32,
     },
+    AuthoredClosedShapeMarks {
+        definition: Box<PresetRecipeDto>,
+        segments: Vec<AuthoredCurveSegmentDtoV3>,
+    },
 }
 #[derive(Serialize, Deserialize)]
 struct GuideDimensionDraftDto {
@@ -1283,6 +1287,7 @@ enum PatternOutputLayerDtoV3 {
 #[serde(rename_all = "snake_case")]
 enum MarkPrototypeDtoV3 {
     Circle,
+    AuthoredClosedShape { structure_id: u64 },
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -1316,6 +1321,11 @@ impl PresetEnvelopeDto {
     }
 
     /// Converts a validated-format DTO into ordinary domain schema data.
+    ///
+    /// # Errors
+    ///
+    /// Returns stable metadata or embedded-recipe validation context without
+    /// allocating any document-owned identities.
     fn into_domain(self) -> Result<PresetRecord, PresetIoError> {
         let metadata = PresetMetadata {
             id: self.metadata.id,
@@ -1347,7 +1357,7 @@ impl PresetEnvelopeDto {
         }
         Ok(PresetRecord {
             metadata,
-            recipe: self.recipe.into_domain(),
+            recipe: self.recipe.into_domain()?,
         })
     }
 }
@@ -1403,29 +1413,43 @@ impl PresetRecipeDto {
                 maximum_attempts: *maximum_attempts,
                 maximum_neighbor_checks: *maximum_neighbor_checks,
             },
+            PatternDefinitionRecipe::AuthoredClosedShapeMarks { definition, shape } => {
+                Self::AuthoredClosedShapeMarks {
+                    definition: Box::new(Self::from_domain(definition)),
+                    segments: shape
+                        .segments()
+                        .iter()
+                        .map(AuthoredCurveSegmentDtoV3::from_domain)
+                        .collect(),
+                }
+            }
         }
     }
 
     /// Rebuilds an ID-free recipe without allocating document-owned IDs.
-    fn into_domain(self) -> PatternDefinitionRecipe {
+    ///
+    /// # Errors
+    ///
+    /// Returns stable preset validation context when an embedded authored shape is invalid.
+    fn into_domain(self) -> Result<PatternDefinitionRecipe, PresetIoError> {
         let coverage_from = |value: CoverageDtoV3| CoveragePolicy {
             guard_steps: value.guard_steps,
             additional_margin: value.additional_margin,
         };
         match self {
-            Self::StraightGrid { name, coverage } => {
-                PatternDefinitionRecipe::StraightGrid(PatternDefinitionDraft {
+            Self::StraightGrid { name, coverage } => Ok(PatternDefinitionRecipe::StraightGrid(
+                PatternDefinitionDraft {
                     name,
                     coverage: coverage_from(coverage),
-                })
-            }
+                },
+            )),
             Self::GeneralizedStraightGuides {
                 name,
                 coverage: stored_coverage,
                 dimensions,
                 product,
                 orientation,
-            } => PatternDefinitionRecipe::GeneralizedStraightGuides {
+            } => Ok(PatternDefinitionRecipe::GeneralizedStraightGuides {
                 name,
                 coverage: coverage_from(stored_coverage),
                 dimensions: dimensions
@@ -1438,7 +1462,7 @@ impl PresetRecipeDto {
                     .collect(),
                 product: product.into_domain(),
                 orientation: orientation.into_domain(),
-            },
+            }),
             Self::RandomSites {
                 name,
                 coverage: stored_coverage,
@@ -1448,7 +1472,7 @@ impl PresetRecipeDto {
                 exclusion,
                 maximum_attempts,
                 maximum_neighbor_checks,
-            } => PatternDefinitionRecipe::RandomSites {
+            } => Ok(PatternDefinitionRecipe::RandomSites {
                 name,
                 coverage: coverage_from(stored_coverage),
                 character: character.into_domain(),
@@ -1457,7 +1481,26 @@ impl PresetRecipeDto {
                 exclusion: exclusion.into_domain(),
                 maximum_attempts,
                 maximum_neighbor_checks,
-            },
+            }),
+            Self::AuthoredClosedShapeMarks {
+                definition,
+                segments,
+            } => {
+                let shape = AuthoredStructureDraft::new(
+                    AuthoredStructureKind::ClosedShape,
+                    segments
+                        .into_iter()
+                        .map(AuthoredCurveSegmentDtoV3::into_domain)
+                        .collect(),
+                )
+                .map_err(|error| PresetIoError {
+                    context: error.to_string(),
+                })?;
+                Ok(PatternDefinitionRecipe::AuthoredClosedShapeMarks {
+                    definition: Box::new(definition.into_domain()?),
+                    shape,
+                })
+            }
         }
     }
 }
@@ -2388,14 +2431,23 @@ impl StraightGuideDimensionDtoV3 {
     }
 }
 impl MarkPrototypeDtoV3 {
+    /// Serializes the exact persisted mark variant and its explicit resource reference.
     fn from_domain(value: &MarkPrototype) -> Self {
         match value {
             MarkPrototype::Circle => Self::Circle,
+            MarkPrototype::AuthoredClosedShape { structure_id } => Self::AuthoredClosedShape {
+                structure_id: structure_id.0,
+            },
         }
     }
+
+    /// Restores the exact persisted mark variant without resolving document resources.
     fn into_domain(self) -> MarkPrototype {
         match self {
             Self::Circle => MarkPrototype::Circle,
+            Self::AuthoredClosedShape { structure_id } => MarkPrototype::AuthoredClosedShape {
+                structure_id: toniator_domain::AuthoredStructureId(structure_id),
+            },
         }
     }
 }

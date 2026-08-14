@@ -15,10 +15,11 @@ use toniator_domain::{
     SourceMapping, StraightGuideDimension, VisibleMarkSizingPolicy,
 };
 pub use toniator_geometry::{
-    AffineTransform2D, Bounds, CanonicalCircleMark, CurveError, CurvePath, CurveSegment,
-    FamilySite, FamilySiteError, FamilySiteId, FamilySiteProvenance, FamilySiteSet,
-    GuideInstanceId, GuideIntersectionProvenance, GuidePathInstance, GuidePathLocationProvenance,
-    GuidePathSet, IntersectionSite, NominalCellBasis, PathLocation, Point2, SiteId, SiteScope,
+    AffineTransform2D, Bounds, CanonicalCircleMark, CanonicalFillRule, CanonicalMark,
+    CanonicalPathMark, CurveError, CurvePath, CurveSegment, FamilySite, FamilySiteError,
+    FamilySiteId, FamilySiteProvenance, FamilySiteSet, GuideInstanceId,
+    GuideIntersectionProvenance, GuidePathInstance, GuidePathLocationProvenance, GuidePathSet,
+    IntersectionSite, NominalCellBasis, PathClosure, PathLocation, Point2, SiteId, SiteScope,
     StraightGuide, Vector2, projection_range, resolve_guide_prototype,
 };
 use toniator_sampling::{
@@ -41,6 +42,87 @@ pub const BUNDLED_PRESET_REGISTRY_VERSION: u32 = 1;
 pub struct PresetRegistry {
     version: u32,
     entries: Vec<PresetRecord>,
+}
+
+#[cfg(test)]
+mod stage20e2_shape_work_tests {
+    use std::cell::Cell;
+
+    use super::*;
+    use toniator_geometry::{LineSegment, PathClosure};
+
+    /// Builds a finite four-segment closed path for cancellation and normalization checks.
+    fn square_path() -> CurvePath {
+        let points = [
+            Point2::new(-1.0, -1.0),
+            Point2::new(1.0, -1.0),
+            Point2::new(1.0, 1.0),
+            Point2::new(-1.0, 1.0),
+        ];
+        CurvePath::new(
+            (0..4)
+                .map(|index| {
+                    CurveSegment::Line(
+                        LineSegment::new(points[index], points[(index + 1) % 4])
+                            .expect("square endpoints are finite"),
+                    )
+                })
+                .collect(),
+            PathClosure::Closed,
+        )
+        .expect("the square is exactly closed")
+    }
+
+    /// Fixes inclusive transformed-segment limits plus zero, overflow, and over-limit errors.
+    #[test]
+    fn transformed_segment_preflight_is_exact_and_checked() {
+        assert_eq!(
+            preflight_transformed_curve_segment_instances(4, 8, 32)
+                .expect("the exact limit is inclusive"),
+            32
+        );
+        for result in [
+            preflight_transformed_curve_segment_instances(4, 8, 31),
+            preflight_transformed_curve_segment_instances(4, 8, 0),
+            preflight_transformed_curve_segment_instances(usize::MAX, 2, usize::MAX),
+        ] {
+            assert_eq!(
+                result.expect_err("invalid bounded work must fail").path(),
+                "realization.mark.segment_limit"
+            );
+        }
+    }
+
+    /// Proves both prototype scanning and per-site segment transformation poll cancellation.
+    #[test]
+    fn closed_shape_segment_work_cancels_without_returning_partial_geometry() {
+        let path = square_path();
+        let checks = Cell::new(0_u32);
+        let error = path_reference_radius(&path, Point2::new(0.0, 0.0), &|| {
+            let next = checks.get() + 1;
+            checks.set(next);
+            next >= 2
+        })
+        .expect_err("prototype scanning must observe cancellation");
+        assert_eq!(error.path(), "evaluation.cancelled");
+
+        checks.set(0);
+        let error = transform_closed_shape(
+            &path,
+            Point2::new(0.0, 0.0),
+            2.0,
+            30.0,
+            Point2::new(10.0, 20.0),
+            &|| {
+                let next = checks.get() + 1;
+                checks.set(next);
+                next >= 3
+            },
+        )
+        .expect_err("segment transformation must observe cancellation");
+        assert_eq!(error.path(), "evaluation.cancelled");
+        assert_eq!(checks.get(), 3);
+    }
 }
 
 /// Validation failure for pure metadata/registry structure before any document
@@ -450,6 +532,14 @@ impl TypedFamilyOutput {
         self.structure.guide_path_set.as_ref()
     }
 
+    /// Returns retained straight-guide authority for per-site mark orientation.
+    ///
+    /// This exposes derived family data read-only; realization may consume it
+    /// but never synthesize a guide for a site missing the requested contributor.
+    pub fn straight_guides(&self) -> &[StraightGuide] {
+        &self.structure.guides
+    }
+
     /// Returns the conservative support radius used to allocate this immutable family envelope.
     pub fn planned_support_radius(&self) -> f64 {
         self.structure.support_radius
@@ -525,6 +615,10 @@ impl From<GridError> for PatternPipelineError {
 /// family/output compatibility boundary shared by document and diagnostic
 /// evaluation; unsupported combinations fail before any source decode or
 /// cache transaction can occur.
+///
+/// # Errors
+///
+/// Returns stable family, mechanism, output, or capability diagnostics.
 pub fn resolve_pattern_pipeline(
     definition: &PatternDefinition,
 ) -> Result<PatternPipelinePlan, PatternPipelineError> {
@@ -661,12 +755,12 @@ pub fn resolve_pattern_pipeline(
             PatternOutputLayer::MarkPrototype {
                 id,
                 site_mechanism_id: source_id,
-                prototype: toniator_domain::MarkPrototype::Circle,
+                prototype,
                 orientation,
             } if *source_id == site_mechanism_id => ordered_outputs.push(OutputCapability {
                 layer_id: *id,
                 consumes: product,
-                prototype: MarkPrototype::Circle,
+                prototype: prototype.clone(),
                 orientation: orientation.clone(),
             }),
             _ => {
@@ -774,6 +868,11 @@ pub fn resolve_document_pattern_pipeline(
     Ok(plan)
 }
 
+/// Resolves the fixed random mechanism chain and its ordinary typed mark prototype capability.
+///
+/// # Errors
+///
+/// Returns stable family-reference, ordering, or output compatibility diagnostics.
 fn resolve_random_site_pipeline(
     definition: &PatternDefinition,
 ) -> Result<PatternPipelinePlan, PatternPipelineError> {
@@ -832,14 +931,14 @@ fn resolve_random_site_pipeline(
         PatternOutputLayer::MarkPrototype {
             id,
             site_mechanism_id,
-            prototype: MarkPrototype::Circle,
+            prototype,
             orientation: MarkOrientation::Fixed,
         },
     ] = definition.output_layers.as_slice()
     else {
         return Err(PatternPipelineError::new(
             "pattern.output_layers.capability",
-            "random-site products require one fixed circle mark output",
+            "random-site products require one fixed mark-prototype output",
         ));
     };
     if *site_mechanism_id != site_product_id {
@@ -881,7 +980,7 @@ fn resolve_random_site_pipeline(
         ordered_outputs: vec![OutputCapability {
             layer_id: *id,
             consumes: product,
-            prototype: MarkPrototype::Circle,
+            prototype: prototype.clone(),
             orientation: MarkOrientation::Fixed,
         }],
     })
@@ -2831,7 +2930,512 @@ pub fn realize_typed_diagnostic_outputs(
     .map_err(|error| PatternPipelineError::new(error.path(), error.message()))
 }
 
-/// Preserves accepted realization fingerprints while excluding diagnostic site provenance.
+/// Immutable request inputs for one generalized canonical mark realization.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CanonicalMarkRequest {
+    /// Complete source mapping that determines canonical response and solid-mark size.
+    pub mapping: SourceMapping,
+    /// Selects sampled-source paint while retaining `mapping` as the sole mapping authority.
+    pub sampled_paint: bool,
+    /// Defines normalized diameter and the channel rotation applied after requested orientation.
+    pub response: MarkResponse,
+    /// Bounds checked site-by-authored-segment expansion before canonical-mark allocation.
+    pub max_transformed_curve_segment_instances: usize,
+}
+
+/// Realizes one ordered typed output layer into truthful canonical circle or closed-path marks.
+///
+/// The document resolves the closed-shape resource before this function runs; family sites,
+/// source response, and final canonical geometry remain immutable inputs. The current
+/// single-layer contract rejects unsupported plans before a partial output can escape.
+///
+/// # Errors
+///
+/// Returns stable provenance, resource, response, normalization, orientation, or work-limit
+/// diagnostics without returning partial marks.
+pub fn realize_typed_canonical_marks(
+    document: &Document,
+    family: &TypedFamilyOutput,
+    plan: &PatternPipelinePlan,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    request: CanonicalMarkRequest,
+) -> Result<TypedRealization<CanonicalMarkRealization>, PatternPipelineError> {
+    realize_typed_canonical_marks_cancellable(
+        document,
+        family,
+        plan,
+        source,
+        canvas,
+        request,
+        &|| false,
+    )
+}
+
+/// Realizes generalized canonical marks while polling the caller-owned cancellation probe.
+///
+/// # Errors
+///
+/// Returns cancellation or any stable canonical realization diagnostic without partial output.
+pub fn realize_typed_canonical_marks_cancellable(
+    document: &Document,
+    family: &TypedFamilyOutput,
+    plan: &PatternPipelinePlan,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    request: CanonicalMarkRequest,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<TypedRealization<CanonicalMarkRealization>, PatternPipelineError> {
+    let provenance = realization_provenance(family, plan)?;
+    let [output] = plan.ordered_outputs.as_slice() else {
+        return Err(PatternPipelineError::new(
+            "pattern.output_layers.capability",
+            "canonical mark realization requires exactly one ordered output layer",
+        ));
+    };
+    let prototype_path = match &output.prototype {
+        MarkPrototype::Circle => None,
+        MarkPrototype::AuthoredClosedShape { structure_id } => {
+            let structure =
+                document
+                    .authored_structure(*structure_id)
+                    .ok_or(PatternPipelineError::new(
+                        "pattern.output_layers.prototype.reference",
+                        "authored closed-shape mark resource is missing",
+                    ))?;
+            let path = CurvePath::from_authored_structure(structure).map_err(|_| {
+                PatternPipelineError::new(
+                    "pattern.output_layers.prototype.geometry",
+                    "authored closed-shape mark resource is not finite closed geometry",
+                )
+            })?;
+            if path.closure() != PathClosure::Closed {
+                return Err(PatternPipelineError::new(
+                    "pattern.output_layers.prototype.kind",
+                    "authored mark resource must be a closed shape",
+                ));
+            }
+            let bounds = path.bounds().map_err(|_| {
+                PatternPipelineError::new(
+                    "pattern.output_layers.prototype.bounds",
+                    "authored closed-shape bounds must remain finite",
+                )
+            })?;
+            let anchor = Point2::new(
+                (bounds.min.x + bounds.max.x) / 2.0,
+                (bounds.min.y + bounds.max.y) / 2.0,
+            );
+            let radius = path_reference_radius(&path, anchor, is_cancelled)?;
+            Some((path, anchor, radius, *structure_id))
+        }
+    };
+    if let Some((path, _, _, _)) = &prototype_path {
+        preflight_transformed_curve_segment_instances(
+            family.site_set().len(),
+            path.segments().len(),
+            request.max_transformed_curve_segment_instances,
+        )?;
+    }
+    let orientations = family
+        .site_set()
+        .iter()
+        .map(|site| {
+            if is_cancelled() {
+                return Err(PatternPipelineError::new(
+                    "evaluation.cancelled",
+                    "realization was cancelled",
+                ));
+            }
+            site_orientation_degrees(
+                family,
+                site,
+                &output.orientation,
+                request.response.rotation_offset_degrees,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut marks = Vec::with_capacity(family.site_set().len());
+    let mut paints = request
+        .sampled_paint
+        .then(|| Vec::with_capacity(family.site_set().len()));
+    for (site, orientation) in family.site_set().iter().zip(orientations) {
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "realization was cancelled",
+            ));
+        }
+        let (ink, sampled_paint) = if request.sampled_paint {
+            let sample = source
+                .sample_source_color(site.position, canvas, request.mapping)
+                .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
+            (
+                sample.response,
+                Some(match sample.paint {
+                    Some(paint) => (paint, false),
+                    None => (
+                        SampledSourcePaint {
+                            red: 0.0,
+                            green: 0.0,
+                            blue: 0.0,
+                            alpha: 1.0,
+                        },
+                        true,
+                    ),
+                }),
+            )
+        } else {
+            (
+                source
+                    .sample_mapping_response(site.position, canvas, request.mapping)
+                    .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?,
+                None,
+            )
+        };
+        let radius = if sampled_paint.is_some_and(|(_, suppressed)| suppressed) {
+            0.0
+        } else {
+            radius_from_ink_with_diameter(ink, request.response, site.nominal_cell_basis.diameter())
+                .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?
+        };
+        if radius > family.planned_support_radius() {
+            return Err(PatternPipelineError::new(
+                "realization.family.support_radius",
+                "realized mark radius exceeds the planned family support",
+            ));
+        }
+        let mark = match &prototype_path {
+            None => CanonicalMark::Circle {
+                source_site_id: site.id,
+                center: site.position,
+                radius,
+                scope: site.scope,
+                provenance: site.provenance.clone(),
+                fill_rule: CanonicalFillRule::EvenOdd,
+            },
+            Some((path, anchor, reference_radius, _)) => {
+                let scale = radius / reference_radius;
+                let transformed = transform_closed_shape(
+                    path,
+                    *anchor,
+                    scale,
+                    orientation,
+                    site.position,
+                    is_cancelled,
+                )?;
+                CanonicalMark::ClosedPath(
+                    CanonicalPathMark::new(
+                        site.id,
+                        transformed,
+                        site.scope,
+                        site.provenance.clone(),
+                        CanonicalFillRule::EvenOdd,
+                    )
+                    .map_err(|_| {
+                        PatternPipelineError::new(
+                            "realization.mark",
+                            "transformed authored closed shape must remain finite and closed",
+                        )
+                    })?,
+                )
+            }
+        };
+        marks.push(mark);
+        if let Some((paint, _)) = sampled_paint {
+            paints
+                .as_mut()
+                .expect("sampled paint mode initialized paint storage")
+                .push(paint);
+        }
+    }
+    let mut bytes = family.family_fingerprint().as_bytes().to_vec();
+    bytes.extend(b"|stage-20e2-canonical-mark-v3");
+    append_output_capability_identity(&mut bytes, output);
+    match &prototype_path {
+        None => bytes.push(0),
+        Some((path, anchor, reference_radius, _)) => {
+            bytes.push(1);
+            append_curve_path_identity(&mut bytes, path);
+            bytes.extend(anchor.x.to_bits().to_le_bytes());
+            bytes.extend(anchor.y.to_bits().to_le_bytes());
+            bytes.extend(reference_radius.to_bits().to_le_bytes());
+            append_fill_rule_identity(&mut bytes, CanonicalFillRule::EvenOdd);
+        }
+    }
+    append_source_identity(&mut bytes, source);
+    append_source_mapping_identity(&mut bytes, request.mapping);
+    bytes.push(u8::from(request.sampled_paint));
+    bytes.extend(request.response.minimum_fill.to_bits().to_le_bytes());
+    bytes.extend(request.response.maximum_fill.to_bits().to_le_bytes());
+    bytes.extend(
+        request
+            .response
+            .rotation_offset_degrees
+            .to_bits()
+            .to_le_bytes(),
+    );
+    for mark in &marks {
+        append_canonical_mark_identity(&mut bytes, mark);
+    }
+    let realization = CanonicalMarkRealization {
+        family_fingerprint: family.family_fingerprint().to_owned(),
+        realization_fingerprint: fnv1a64(bytes),
+        source_identity: source.identity().clone(),
+        response: request.response,
+        marks,
+        paints,
+    };
+    Ok(TypedRealization {
+        provenance,
+        output: realization,
+    })
+}
+
+/// Preflights the exact site-by-segment expansion without allocating any canonical paths.
+///
+/// # Errors
+///
+/// Returns the stable transformed-segment limit diagnostic for a zero limit, multiplication
+/// overflow, or a product above the inclusive configured bound.
+fn preflight_transformed_curve_segment_instances(
+    site_count: usize,
+    segment_count: usize,
+    limit: usize,
+) -> Result<usize, PatternPipelineError> {
+    if limit == 0 {
+        return Err(PatternPipelineError::new(
+            "realization.mark.segment_limit",
+            "transformed curve-segment instance limit exceeded",
+        ));
+    }
+    let instances = site_count
+        .checked_mul(segment_count)
+        .ok_or(PatternPipelineError::new(
+            "realization.mark.segment_limit",
+            "transformed curve-segment instance count overflows",
+        ))?;
+    if instances > limit {
+        return Err(PatternPipelineError::new(
+            "realization.mark.segment_limit",
+            "transformed curve-segment instance limit exceeded",
+        ));
+    }
+    Ok(instances)
+}
+
+/// Computes the conservative exact-control-point reference radius about one bounds-center anchor.
+///
+/// # Errors
+///
+/// Returns cancellation or the stable finite, nonzero-radius diagnostic without publishing work.
+fn path_reference_radius(
+    path: &CurvePath,
+    anchor: Point2,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<f64, PatternPipelineError> {
+    let mut maximum = 0.0_f64;
+    for segment in path.segments() {
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "realization was cancelled",
+            ));
+        }
+        let points = match segment {
+            CurveSegment::Line(line) => vec![line.start(), line.end()],
+            CurveSegment::CubicBezier(cubic) => vec![
+                cubic.start(),
+                cubic.control_1(),
+                cubic.control_2(),
+                cubic.end(),
+            ],
+        };
+        for point in points {
+            let radius = ((point.x - anchor.x).powi(2) + (point.y - anchor.y).powi(2)).sqrt();
+            if !radius.is_finite() {
+                return Err(PatternPipelineError::new(
+                    "pattern.output_layers.prototype.radius",
+                    "authored closed-shape reference radius must remain finite",
+                ));
+            }
+            maximum = maximum.max(radius);
+        }
+    }
+    (maximum > 0.0)
+        .then_some(maximum)
+        .ok_or(PatternPipelineError::new(
+            "pattern.output_layers.prototype.radius",
+            "authored closed-shape prototype requires a nonzero reference radius",
+        ))
+}
+
+/// Scales a closed path about its canonical anchor and translates that anchor to one family site.
+///
+/// # Errors
+///
+/// Returns cancellation or stable non-finite/closure transform diagnostics without a partial path.
+fn transform_closed_shape(
+    path: &CurvePath,
+    anchor: Point2,
+    scale: f64,
+    orientation_degrees: f64,
+    destination: Point2,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<CurvePath, PatternPipelineError> {
+    if !scale.is_finite()
+        || scale < 0.0
+        || !orientation_degrees.is_finite()
+        || !destination.is_finite()
+    {
+        return Err(PatternPipelineError::new(
+            "realization.mark.transform",
+            "closed-shape scale and destination must be finite",
+        ));
+    }
+    let radians = orientation_degrees.to_radians();
+    let (sin, cos) = radians.sin_cos();
+    let map = |point: Point2| {
+        let x = (point.x - anchor.x) * scale;
+        let y = (point.y - anchor.y) * scale;
+        Point2::new(
+            destination.x + cos * x - sin * y,
+            destination.y + sin * x + cos * y,
+        )
+    };
+    let mut segments = Vec::with_capacity(path.segments().len());
+    for segment in path.segments() {
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "realization was cancelled",
+            ));
+        }
+        let transformed = match segment {
+            CurveSegment::Line(line) => {
+                toniator_geometry::LineSegment::new(map(line.start()), map(line.end()))
+                    .map(CurveSegment::Line)
+            }
+            CurveSegment::CubicBezier(cubic) => toniator_geometry::CubicBezierSegment::new(
+                map(cubic.start()),
+                map(cubic.control_1()),
+                map(cubic.control_2()),
+                map(cubic.end()),
+            )
+            .map(CurveSegment::CubicBezier),
+        }
+        .map_err(|_| {
+            PatternPipelineError::new(
+                "realization.mark.transform",
+                "transformed closed-shape coordinates must remain finite",
+            )
+        })?;
+        segments.push(transformed);
+    }
+    CurvePath::new(segments, PathClosure::Closed).map_err(|_| {
+        PatternPipelineError::new(
+            "realization.mark.transform",
+            "transformed closed-shape path must retain exact closure",
+        )
+    })
+}
+
+/// Resolves a requested fixed/tangent/normal orientation from the exact site contributor.
+///
+/// # Errors
+///
+/// Returns stable missing-contributor, guide, location, or tangent diagnostics.
+fn site_orientation_degrees(
+    family: &TypedFamilyOutput,
+    site: &FamilySite,
+    orientation: &MarkOrientation,
+    rotation_offset_degrees: f64,
+) -> Result<f64, PatternPipelineError> {
+    let vector = match orientation {
+        MarkOrientation::Fixed => return Ok(rotation_offset_degrees),
+        MarkOrientation::GuideTangent { dimension_id }
+        | MarkOrientation::GuideNormal { dimension_id } => {
+            let requested = dimension_id.0;
+            let guide_id = match &site.provenance {
+                FamilySiteProvenance::GuideIntersection { contributors } => contributors
+                    .iter()
+                    .find(|id| id.dimension_id == requested)
+                    .copied(),
+                FamilySiteProvenance::AlongGuide { guide_id, .. } => {
+                    (guide_id.dimension_id == requested).then_some(*guide_id)
+                }
+                FamilySiteProvenance::CurveGuideIntersection { contributors } => contributors
+                    .iter()
+                    .find(|entry| entry.guide_id.dimension_id == requested)
+                    .map(|entry| entry.guide_id),
+                FamilySiteProvenance::CurveAlongGuide { location, .. } => {
+                    (location.guide_id.dimension_id == requested).then_some(location.guide_id)
+                }
+                FamilySiteProvenance::Random { .. } => None,
+            }
+            .ok_or(PatternPipelineError::new(
+                "realization.orientation.contributor",
+                "requested orientation dimension is absent from this site provenance",
+            ))?;
+            if let Some(guide) = family
+                .straight_guides()
+                .iter()
+                .find(|guide| guide.id == guide_id)
+            {
+                guide.tangent
+            } else {
+                let location = match &site.provenance {
+                    FamilySiteProvenance::CurveGuideIntersection { contributors } => {
+                        contributors.iter().find(|entry| entry.guide_id == guide_id)
+                    }
+                    FamilySiteProvenance::CurveAlongGuide { location, .. }
+                        if location.guide_id == guide_id =>
+                    {
+                        Some(location)
+                    }
+                    _ => None,
+                }
+                .ok_or(PatternPipelineError::new(
+                    "realization.orientation.guide",
+                    "site contributor lacks retained guide tangent location",
+                ))?;
+                let guide = family
+                    .guide_path_set()
+                    .and_then(|set| set.guides().iter().find(|guide| guide.id == guide_id))
+                    .ok_or(PatternPipelineError::new(
+                        "realization.orientation.guide",
+                        "site contributor lacks retained curve guide",
+                    ))?;
+                guide
+                    .path
+                    .unit_tangent_at(
+                        PathLocation::new(
+                            location.segment_index,
+                            f64::from_bits(location.parameter_bits),
+                        )
+                        .map_err(|_| {
+                            PatternPipelineError::new(
+                                "realization.orientation.location",
+                                "curve contributor has invalid location",
+                            )
+                        })?,
+                    )
+                    .map_err(|_| {
+                        PatternPipelineError::new(
+                            "realization.orientation.tangent",
+                            "curve contributor has no finite tangent",
+                        )
+                    })?
+            }
+        }
+    };
+    let degrees = vector.y.atan2(vector.x).to_degrees();
+    let normal = matches!(orientation, MarkOrientation::GuideNormal { .. })
+        .then_some(90.0)
+        .unwrap_or(0.0);
+    Ok(degrees + normal + rotation_offset_degrees)
+}
+
+/// Extends retained realization identity with ordered prototype and orientation capability data.
 fn orientation_identity(
     legacy_identity: &str,
     family: &TypedFamilyOutput,
@@ -2875,9 +3479,13 @@ fn orientation_identity(
         .zip(&provenance.ordered_output_orientations)
     {
         bytes.extend(layer_id.0.to_le_bytes());
-        bytes.push(match prototype {
-            MarkPrototype::Circle => 1,
-        });
+        match prototype {
+            MarkPrototype::Circle => bytes.push(1),
+            MarkPrototype::AuthoredClosedShape { structure_id } => {
+                bytes.push(2);
+                bytes.extend(structure_id.0.to_le_bytes());
+            }
+        }
         match orientation {
             MarkOrientation::Fixed => bytes.push(1),
             MarkOrientation::GuideTangent { dimension_id } => {
@@ -2894,6 +3502,10 @@ fn orientation_identity(
 }
 
 /// Binds a compatible typed plan to truthful family sites before current realization.
+///
+/// # Errors
+///
+/// Returns stable family or ordered-output provenance mismatch diagnostics.
 fn realization_provenance(
     family: &TypedFamilyOutput,
     plan: &PatternPipelinePlan,
@@ -3719,6 +4331,23 @@ pub struct CircularMarkRealization {
     pub marks: Vec<CanonicalCircleMark>,
 }
 
+/// Immutable generalized canonical mark realization for current typed output layers.
+///
+/// This is the Stage 20E2 realization boundary: it consumes existing family
+/// sites and resolved document resources, and never allocates or reorders sites.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CanonicalMarkRealization {
+    pub family_fingerprint: String,
+    pub realization_fingerprint: String,
+    pub source_identity: toniator_sampling::SourceIdentity,
+    pub response: MarkResponse,
+    pub marks: Vec<CanonicalMark>,
+    pub paints: Option<Vec<SampledSourcePaint>>,
+}
+
+/// The exact nonzero upper bound for transformed authored curve-segment instances.
+pub const MAX_TRANSFORMED_CURVE_SEGMENT_INSTANCES: usize = 1_048_576;
+
 /// Immutable scalar-field realization for an explicit Stage 9 source mapping.
 /// This is deliberately distinct from the retained Stage 3–8 single-channel
 /// realization so its new mapping identity cannot alter accepted results.
@@ -4209,6 +4838,266 @@ fn mapping_component_code(component: SourceMappingComponent) -> u8 {
         SourceMappingComponent::Black => 7,
         SourceMappingComponent::Alpha => 8,
         SourceMappingComponent::Luminance => 9,
+    }
+}
+
+/// Appends every source identity discriminator used to derive canonical geometry or sampled paint.
+fn append_source_identity(bytes: &mut Vec<u8>, source: &SourceField) {
+    let identity = source.identity();
+    bytes.push(match identity.format {
+        toniator_sampling::SourceFormat::Png => 1,
+        toniator_sampling::SourceFormat::Svg => 2,
+    });
+    append_identity_text(bytes, identity.content_hash.as_str());
+    append_identity_text(bytes, identity.decoded_pixel_hash.as_str());
+    bytes.extend(identity.width.to_le_bytes());
+    bytes.extend(identity.height.to_le_bytes());
+}
+
+/// Delimits one textual identity field so adjacent variable-length values remain unambiguous.
+fn append_identity_text(bytes: &mut Vec<u8>, value: &str) {
+    bytes.extend(
+        u64::try_from(value.len())
+            .expect("string length fits u64")
+            .to_le_bytes(),
+    );
+    bytes.extend(value.bytes());
+}
+
+/// Appends the full source-mapping contract that determines response and sampled paint.
+fn append_source_mapping_identity(bytes: &mut Vec<u8>, mapping: SourceMapping) {
+    bytes.push(mapping_component_code(mapping.component));
+    bytes.push(match mapping.placement {
+        SourcePlacement::StretchToCanvas => 1,
+    });
+    bytes.push(u8::from(mapping.inverted));
+    bytes.extend(mapping.gain.to_bits().to_le_bytes());
+    bytes.extend(mapping.bias.to_bits().to_le_bytes());
+}
+
+/// Appends the complete ordered output-layer contract before derived canonical geometry.
+fn append_output_capability_identity(bytes: &mut Vec<u8>, output: &OutputCapability) {
+    bytes.extend(output.layer_id.0.to_le_bytes());
+    bytes.push(match output.consumes {
+        StructuralProductCapability::GuideIntersections => 1,
+        StructuralProductCapability::AlongGuideSites => 2,
+        StructuralProductCapability::RandomSites => 3,
+    });
+    match &output.prototype {
+        MarkPrototype::Circle => bytes.push(1),
+        MarkPrototype::AuthoredClosedShape { structure_id } => {
+            bytes.push(2);
+            bytes.extend(structure_id.0.to_le_bytes());
+        }
+    }
+    match output.orientation {
+        MarkOrientation::Fixed => bytes.push(1),
+        MarkOrientation::GuideTangent { dimension_id } => {
+            bytes.push(2);
+            bytes.extend(dimension_id.0.to_le_bytes());
+        }
+        MarkOrientation::GuideNormal { dimension_id } => {
+            bytes.push(3);
+            bytes.extend(dimension_id.0.to_le_bytes());
+        }
+    }
+}
+
+/// Appends one ordered generalized canonical mark, including geometry and truthful site provenance.
+fn append_canonical_mark_identity(bytes: &mut Vec<u8>, mark: &CanonicalMark) {
+    match mark {
+        CanonicalMark::Circle {
+            source_site_id,
+            center,
+            radius,
+            scope,
+            provenance,
+            fill_rule,
+        } => {
+            bytes.push(1);
+            append_family_site_identity(bytes, *source_site_id);
+            append_site_scope_identity(bytes, *scope);
+            append_family_site_provenance_identity(bytes, provenance);
+            append_fill_rule_identity(bytes, *fill_rule);
+            bytes.extend(center.x.to_bits().to_le_bytes());
+            bytes.extend(center.y.to_bits().to_le_bytes());
+            bytes.extend(radius.to_bits().to_le_bytes());
+        }
+        CanonicalMark::ClosedPath(mark) => {
+            bytes.push(2);
+            append_family_site_identity(bytes, mark.source_site_id);
+            append_site_scope_identity(bytes, mark.scope);
+            append_family_site_provenance_identity(bytes, &mark.provenance);
+            append_fill_rule_identity(bytes, mark.fill_rule);
+            append_curve_path_identity(bytes, &mark.path);
+        }
+    }
+}
+
+/// Appends the stable evaluator-emission identifier of one canonical mark.
+fn append_family_site_identity(bytes: &mut Vec<u8>, site_id: FamilySiteId) {
+    bytes.extend(site_id.mechanism_id.0.to_le_bytes());
+    bytes.extend(
+        u64::try_from(site_id.ordinal)
+            .expect("usize fits u64")
+            .to_le_bytes(),
+    );
+}
+
+/// Appends the final-canvas scope discriminator without changing structural provenance.
+fn append_site_scope_identity(bytes: &mut Vec<u8>, scope: SiteScope) {
+    bytes.push(match scope {
+        SiteScope::Canvas => 1,
+        SiteScope::Guard => 2,
+    });
+}
+
+/// Appends the complete variant and payload of the family authority that emitted a site.
+fn append_family_site_provenance_identity(bytes: &mut Vec<u8>, provenance: &FamilySiteProvenance) {
+    match provenance {
+        FamilySiteProvenance::GuideIntersection { contributors } => {
+            bytes.push(1);
+            append_guide_instances_identity(bytes, contributors);
+        }
+        FamilySiteProvenance::AlongGuide {
+            guide_id,
+            guide_order,
+            sequence,
+            absolute_arc_position_bits,
+            local_arc_position_bits,
+        } => {
+            bytes.push(2);
+            append_guide_instance_identity(bytes, *guide_id);
+            bytes.extend(
+                u64::try_from(*guide_order)
+                    .expect("usize fits u64")
+                    .to_le_bytes(),
+            );
+            bytes.extend(sequence.to_le_bytes());
+            bytes.extend(absolute_arc_position_bits.to_le_bytes());
+            bytes.extend(local_arc_position_bits.to_le_bytes());
+        }
+        FamilySiteProvenance::Random {
+            candidate_ordinal,
+            accepted_ordinal,
+            exclusion_neighbor_ordinal,
+        } => {
+            bytes.push(3);
+            for value in [candidate_ordinal, accepted_ordinal] {
+                bytes.extend(u64::try_from(*value).expect("usize fits u64").to_le_bytes());
+            }
+            match exclusion_neighbor_ordinal {
+                Some(value) => {
+                    bytes.push(1);
+                    bytes.extend(u64::try_from(*value).expect("usize fits u64").to_le_bytes());
+                }
+                None => bytes.push(0),
+            }
+        }
+        FamilySiteProvenance::CurveGuideIntersection { contributors } => {
+            bytes.push(4);
+            bytes.extend(
+                u64::try_from(contributors.len())
+                    .expect("usize fits u64")
+                    .to_le_bytes(),
+            );
+            for contributor in contributors {
+                append_guide_path_location_identity(bytes, contributor);
+            }
+        }
+        FamilySiteProvenance::CurveAlongGuide {
+            location,
+            guide_order,
+            sequence,
+            absolute_arc_position_bits,
+            local_arc_position_bits,
+        } => {
+            bytes.push(5);
+            append_guide_path_location_identity(bytes, location);
+            bytes.extend(
+                u64::try_from(*guide_order)
+                    .expect("usize fits u64")
+                    .to_le_bytes(),
+            );
+            bytes.extend(sequence.to_le_bytes());
+            bytes.extend(absolute_arc_position_bits.to_le_bytes());
+            bytes.extend(local_arc_position_bits.to_le_bytes());
+        }
+    }
+}
+
+/// Appends an ordered straight-guide contributor sequence with a length delimiter.
+fn append_guide_instances_identity(bytes: &mut Vec<u8>, contributors: &[GuideInstanceId]) {
+    bytes.extend(
+        u64::try_from(contributors.len())
+            .expect("usize fits u64")
+            .to_le_bytes(),
+    );
+    for contributor in contributors {
+        append_guide_instance_identity(bytes, *contributor);
+    }
+}
+
+/// Appends one exact dimension/index guide contributor.
+fn append_guide_instance_identity(bytes: &mut Vec<u8>, guide_id: GuideInstanceId) {
+    bytes.extend(guide_id.dimension_id.to_le_bytes());
+    bytes.extend(guide_id.index.to_le_bytes());
+}
+
+/// Appends one exact curve-guide contributor location.
+fn append_guide_path_location_identity(
+    bytes: &mut Vec<u8>,
+    location: &GuidePathLocationProvenance,
+) {
+    append_guide_instance_identity(bytes, location.guide_id);
+    bytes.extend(
+        u64::try_from(location.segment_index)
+            .expect("usize fits u64")
+            .to_le_bytes(),
+    );
+    bytes.extend(location.parameter_bits.to_le_bytes());
+}
+
+/// Appends explicit even-odd fill semantics rather than relying on a renderer default.
+fn append_fill_rule_identity(bytes: &mut Vec<u8>, fill_rule: CanonicalFillRule) {
+    bytes.push(match fill_rule {
+        CanonicalFillRule::EvenOdd => 1,
+    });
+}
+
+/// Appends path closure, ordered segment kinds, and every construction-point bit exactly.
+fn append_curve_path_identity(bytes: &mut Vec<u8>, path: &CurvePath) {
+    bytes.push(match path.closure() {
+        PathClosure::Open => 1,
+        PathClosure::Closed => 2,
+    });
+    bytes.extend(
+        u64::try_from(path.segments().len())
+            .expect("usize fits u64")
+            .to_le_bytes(),
+    );
+    for segment in path.segments() {
+        match segment {
+            CurveSegment::Line(line) => {
+                bytes.push(1);
+                for point in [line.start(), line.end()] {
+                    bytes.extend(point.x.to_bits().to_le_bytes());
+                    bytes.extend(point.y.to_bits().to_le_bytes());
+                }
+            }
+            CurveSegment::CubicBezier(cubic) => {
+                bytes.push(2);
+                for point in [
+                    cubic.start(),
+                    cubic.control_1(),
+                    cubic.control_2(),
+                    cubic.end(),
+                ] {
+                    bytes.extend(point.x.to_bits().to_le_bytes());
+                    bytes.extend(point.y.to_bits().to_le_bytes());
+                }
+            }
+        }
     }
 }
 

@@ -23,10 +23,12 @@ use toniator_domain::{
 };
 use toniator_engine::{
     CacheDisposition, ChannelDiagnosticRequest, EvaluationCompletion, EvaluationLimits,
-    EvaluationRequest, EvaluationScheduler, PreviewRasterTarget, ResolvedSource, SourceFormatHint,
-    encode_png, evaluate, evaluate_channel_diagnostic, evaluate_with_limits, write_svg,
+    EvaluationRequest, EvaluationScheduler, PreviewRasterTarget, RasterSurface, ResolvedSource,
+    SourceFormatHint, encode_png, evaluate, evaluate_channel_diagnostic, evaluate_with_limits,
+    write_svg,
 };
 use toniator_io::{EmbeddedSource, EmbeddedSourceFormat, SourceBundle, load, save};
+use toniator_patterns::{CanonicalFillRule, PathClosure};
 
 fn wait_for_latest(scheduler: &EvaluationScheduler) -> EvaluationCompletion {
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -111,6 +113,442 @@ fn stage20d_session() -> DocumentSession {
         .unwrap(),
     )
     .unwrap()
+}
+
+/// Builds one modeled shape-mark session whose retained family site comes from two authored
+/// straight guides; only the mark resource varies between tests.
+fn stage20e2_session(shape_segments: Vec<AuthoredCurveSegment>) -> DocumentSession {
+    let source_id = SourceReferenceId::new("fixture-source").unwrap();
+    let base = Document::new_default_document(
+        CanvasSpec {
+            width: 100.0,
+            height: 100.0,
+        },
+        SourceReference::Assigned(source_id),
+    )
+    .unwrap();
+    let mut definition = PatternDefinition::generalized_guides(
+        PatternDefinitionId(1),
+        "shape marks",
+        PatternMechanismId(1),
+        PatternMechanismId(2),
+        PatternOutputLayerId(1),
+        vec![
+            GuideDimension {
+                id: GuideDimensionId(1),
+                baseline_angle_degrees: 0.0,
+                phase: 0.0,
+                prototype: GuidePrototype::AuthoredOpenPath {
+                    structure_id: AuthoredStructureId(6),
+                },
+                repetition: GuideRepetition::Single,
+            },
+            GuideDimension {
+                id: GuideDimensionId(2),
+                baseline_angle_degrees: 90.0,
+                phase: 0.0,
+                prototype: GuidePrototype::AuthoredOpenPath {
+                    structure_id: AuthoredStructureId(7),
+                },
+                repetition: GuideRepetition::Single,
+            },
+        ],
+        GeneralizedSiteProduct::Intersections {
+            dimensions: vec![GuideDimensionId(1), GuideDimensionId(2)],
+            merge_epsilon: 0.0,
+        },
+        MarkOrientation::GuideTangent {
+            dimension_id: GuideDimensionId(2),
+        },
+        CoveragePolicy {
+            guard_steps: 1,
+            additional_margin: 4.5,
+        },
+    );
+    let PatternOutputLayer::MarkPrototype { prototype, .. } = &mut definition.output_layers[0]
+    else {
+        unreachable!("generalized guides own a typed mark output")
+    };
+    *prototype = toniator_domain::MarkPrototype::AuthoredClosedShape {
+        structure_id: AuthoredStructureId(8),
+    };
+    let horizontal_guide = AuthoredStructure::new(
+        AuthoredStructureId(6),
+        AuthoredStructureKind::OpenPath,
+        vec![AuthoredCurveSegment::Line {
+            start: AuthoredPoint2 { x: 0.0, y: 50.0 },
+            end: AuthoredPoint2 { x: 100.0, y: 50.0 },
+        }],
+    )
+    .unwrap();
+    let vertical_guide = AuthoredStructure::new(
+        AuthoredStructureId(7),
+        AuthoredStructureKind::OpenPath,
+        vec![AuthoredCurveSegment::Line {
+            start: AuthoredPoint2 { x: 50.0, y: 0.0 },
+            end: AuthoredPoint2 { x: 50.0, y: 100.0 },
+        }],
+    )
+    .unwrap();
+    let shape = AuthoredStructure::new(
+        AuthoredStructureId(8),
+        AuthoredStructureKind::ClosedShape,
+        shape_segments,
+    )
+    .unwrap();
+    DocumentSession::new(
+        Document::with_source_topology_and_authored_structures(
+            base.id(),
+            base.canvas().clone(),
+            base.source().clone(),
+            vec![definition],
+            base.channel_model().unwrap(),
+            base.channel_topology().unwrap().clone(),
+            vec![horizontal_guide, vertical_guide, shape],
+        )
+        .unwrap(),
+    )
+    .unwrap()
+}
+
+/// Returns a nonzero-extent, zero-area two-segment closed line path accepted by the E2 contract.
+fn stage20e2_zero_area_shape() -> Vec<AuthoredCurveSegment> {
+    let left = AuthoredPoint2 { x: -2.0, y: 0.0 };
+    let right = AuthoredPoint2 { x: 2.0, y: 0.0 };
+    vec![
+        AuthoredCurveSegment::Line {
+            start: left,
+            end: right,
+        },
+        AuthoredCurveSegment::Line {
+            start: right,
+            end: left,
+        },
+    ]
+}
+
+/// Returns a self-intersecting four-segment bow-tie used to exercise even-odd path output.
+fn stage20e2_bow_tie_shape() -> Vec<AuthoredCurveSegment> {
+    let points = [
+        AuthoredPoint2 { x: -2.0, y: -2.0 },
+        AuthoredPoint2 { x: 2.0, y: 2.0 },
+        AuthoredPoint2 { x: -2.0, y: 2.0 },
+        AuthoredPoint2 { x: 2.0, y: -2.0 },
+    ];
+    (0..4)
+        .map(|index| AuthoredCurveSegment::Line {
+            start: points[index],
+            end: points[(index + 1) % 4],
+        })
+        .collect()
+}
+
+/// Exercises one self-intersecting authored prototype through canonical geometry, native raster,
+/// and editable SVG while retaining exact family IDs, provenance, closure, and even-odd fill.
+#[test]
+fn stage20e2_shape_marks_flow_through_shared_canonical_consumers() {
+    let session = stage20e2_session(stage20e2_bow_tie_shape());
+    let bytes = fs::read("../../assets/raster-sample.png").unwrap();
+    let result = evaluate(EvaluationRequest::new(
+        session.document_evaluation_snapshot(),
+        ResolvedSource::new(
+            SourceReferenceId::new("fixture-source").unwrap(),
+            bytes,
+            SourceFormatHint::Png,
+        )
+        .unwrap(),
+    ))
+    .expect("the authored shape document evaluates");
+    let mut mark_count = 0_usize;
+    for layer in result.scene().layers() {
+        let toniator_engine::GeometryOutput::CanonicalMarks(marks) = layer.geometry() else {
+            panic!("shape-bearing typed outputs must use canonical mark geometry")
+        };
+        assert!(!marks.is_empty());
+        for mark in marks {
+            let toniator_engine::CanonicalMark::ClosedPath(path) = mark else {
+                panic!("the authored prototype must not regress to circles")
+            };
+            assert_eq!(path.path.closure(), PathClosure::Closed);
+            assert_eq!(path.fill_rule, CanonicalFillRule::EvenOdd);
+            assert!(path.bounds.min.is_finite() && path.bounds.max.is_finite());
+            assert_eq!(path.path.segments().len(), 4);
+            mark_count += 1;
+        }
+    }
+    assert!(mark_count > 0);
+    let svg = write_svg(result.scene());
+    assert_eq!(svg.matches("fill-rule=\"evenodd\"").count(), mark_count);
+    assert_eq!(svg.matches("<path ").count(), mark_count);
+    assert!(
+        result
+            .raster()
+            .pixels()
+            .chunks_exact(4)
+            .any(|pixel| pixel[3] > 0),
+        "raw native RGBA output must retain visible coverage"
+    );
+}
+
+/// Fixes the request-wide transformed-segment boundary and proves an over-limit replacement
+/// cannot publish partial cache state over a prior accepted zero-area shape realization.
+#[test]
+fn stage20e2_segment_limit_is_request_wide_and_failure_preserves_accepted_cache() {
+    let mut history = DocumentHistory::new(stage20e2_session(stage20e2_zero_area_shape()));
+    let bytes = fs::read("../../assets/raster-sample.png").unwrap();
+    let request = |history: &DocumentHistory| {
+        EvaluationRequest::new(
+            history.session().document_evaluation_snapshot(),
+            ResolvedSource::new(
+                SourceReferenceId::new("fixture-source").unwrap(),
+                bytes.clone(),
+                SourceFormatHint::Png,
+            )
+            .unwrap(),
+        )
+    };
+    let exact_limits = EvaluationLimits::default()
+        .with_max_transformed_curve_segment_instances(6)
+        .unwrap();
+    evaluate_with_limits(request(&history), exact_limits)
+        .expect("one site by two segments by three channels fits the exact limit");
+    let under_limit = EvaluationLimits::default()
+        .with_max_transformed_curve_segment_instances(5)
+        .unwrap();
+    let Err(under_limit_error) = evaluate_with_limits(request(&history), under_limit) else {
+        panic!("the request-wide segment product must exceed five")
+    };
+    assert_eq!(under_limit_error.path(), "realization.mark.segment_limit");
+
+    let scheduler = EvaluationScheduler::new_with_limits(exact_limits).unwrap();
+    submit_and_accept(&scheduler, history.session(), request(&history));
+    let base_structure = history
+        .document()
+        .authored_structure(AuthoredStructureId(8))
+        .unwrap()
+        .clone();
+    history
+        .apply(&DocumentCommand::ReplaceAuthoredStructure {
+            base_structure,
+            replacement: AuthoredStructureDraft::new(
+                AuthoredStructureKind::ClosedShape,
+                stage20e2_bow_tie_shape(),
+            )
+            .unwrap(),
+        })
+        .unwrap();
+    let failed_ticket = scheduler.submit(request(&history)).unwrap();
+    let failed = wait_for_latest(&scheduler);
+    assert_eq!(failed.ticket(), failed_ticket);
+    assert_eq!(
+        failed
+            .error()
+            .expect("the larger shape exceeds the accepted scheduler limit")
+            .path(),
+        "realization.mark.segment_limit"
+    );
+    history.undo().unwrap();
+    let reused = submit_and_accept(&scheduler, history.session(), request(&history));
+    let diagnostics = reused.cache_diagnostics().unwrap();
+    assert_eq!(diagnostics.aggregate.realization, CacheDisposition::Hit);
+    assert_eq!(diagnostics.aggregate.scene, CacheDisposition::Hit);
+    assert_eq!(diagnostics.aggregate.raster, CacheDisposition::Hit);
+    scheduler.shutdown().unwrap();
+}
+
+/// Proves a same-ID authored-shape content replacement preserves the family cache while missing
+/// realization/scene/raster exactly once, after which the accepted replacement is fully reusable.
+#[test]
+fn stage20e2_shape_content_participates_in_realization_and_downstream_cache_identity() {
+    let mut history = DocumentHistory::new(stage20e2_session(stage20e2_zero_area_shape()));
+    let source_id = SourceReferenceId::new("fixture-source").unwrap();
+    let bytes = fs::read("../../assets/raster-sample.png").unwrap();
+    let request = |history: &DocumentHistory| {
+        EvaluationRequest::new(
+            history.session().document_evaluation_snapshot(),
+            ResolvedSource::new(source_id.clone(), bytes.clone(), SourceFormatHint::Png).unwrap(),
+        )
+    };
+    let limits = EvaluationLimits::default()
+        .with_max_transformed_curve_segment_instances(6)
+        .unwrap();
+    let scheduler = EvaluationScheduler::new_with_limits(limits).unwrap();
+    let baseline = submit_and_accept(&scheduler, history.session(), request(&history));
+    let baseline_identity = baseline.result().unwrap().scene().identity().clone();
+    let base_structure = history
+        .document()
+        .authored_structure(AuthoredStructureId(8))
+        .unwrap()
+        .clone();
+    let left = AuthoredPoint2 { x: -3.0, y: 1.0 };
+    let right = AuthoredPoint2 { x: 3.0, y: 1.0 };
+    history
+        .apply(&DocumentCommand::ReplaceAuthoredStructure {
+            base_structure,
+            replacement: AuthoredStructureDraft::new(
+                AuthoredStructureKind::ClosedShape,
+                vec![
+                    AuthoredCurveSegment::Line {
+                        start: left,
+                        end: right,
+                    },
+                    AuthoredCurveSegment::Line {
+                        start: right,
+                        end: left,
+                    },
+                ],
+            )
+            .unwrap(),
+        })
+        .unwrap();
+    let changed = submit_and_accept(&scheduler, history.session(), request(&history));
+    let diagnostics = changed.cache_diagnostics().unwrap();
+    assert_eq!(diagnostics.aggregate.decoded_source, CacheDisposition::Hit);
+    assert_eq!(diagnostics.aggregate.family, CacheDisposition::Hit);
+    assert_eq!(diagnostics.aggregate.realization, CacheDisposition::Miss);
+    assert_eq!(diagnostics.aggregate.scene, CacheDisposition::Miss);
+    assert_eq!(diagnostics.aggregate.raster, CacheDisposition::Miss);
+    assert_ne!(
+        changed.result().unwrap().scene().identity(),
+        &baseline_identity
+    );
+    let repeated = submit_and_accept(&scheduler, history.session(), request(&history));
+    assert_eq!(
+        repeated.cache_diagnostics().unwrap().aggregate,
+        toniator_engine::CacheDiagnostics {
+            decoded_source: CacheDisposition::Hit,
+            family: CacheDisposition::Hit,
+            realization: CacheDisposition::Hit,
+            scene: CacheDisposition::Hit,
+            raster: CacheDisposition::Hit,
+        }
+    );
+    scheduler.shutdown().unwrap();
+}
+
+/// Proves sampled-source paint uses canonical authored paths and preserves every family site;
+/// exact-zero source alpha becomes invisible zero-scale geometry without exposing hidden RGB.
+#[test]
+fn stage20e2_sampled_source_paint_keeps_canonical_shape_topology() {
+    let rgb = stage20e2_session(stage20e2_bow_tie_shape());
+    let document = rgb.document();
+    let mut definitions = document.pattern_definitions().to_vec();
+    let PatternMechanism::GuideDimensions { dimensions, .. } = &mut definitions[0].mechanisms[0]
+    else {
+        panic!("shape fixture owns generic guide dimensions")
+    };
+    dimensions[0].repetition = GuideRepetition::TransformStack {
+        direction_degrees: 90.0,
+        spacing_multiplier: 1.0,
+    };
+    dimensions[1].repetition = GuideRepetition::TransformStack {
+        direction_degrees: 0.0,
+        spacing_multiplier: 1.0,
+    };
+    let seed = &document.channel_topology().unwrap().channels()[0];
+    let topology = document
+        .canonical_channel_topology(
+            HalftoneChannelModel::SourceColorAlpha,
+            ChannelTopologyTemplate {
+                pattern_definition_id: seed.pattern_definition_id,
+                layout: seed.layout.clone(),
+                mark_geometry_response: seed.mark_geometry_response.clone(),
+            },
+        )
+        .unwrap();
+    let sampled = DocumentSession::new(
+        Document::with_source_topology_and_authored_structures(
+            document.id(),
+            document.canvas().clone(),
+            document.source().clone(),
+            definitions,
+            HalftoneChannelModel::SourceColorAlpha,
+            topology,
+            document.authored_structures().to_vec(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let bytes = fs::read("../../assets/raster-sample.png").unwrap();
+    let result = evaluate(EvaluationRequest::new(
+        sampled.document_evaluation_snapshot(),
+        ResolvedSource::new(
+            SourceReferenceId::new("fixture-source").unwrap(),
+            bytes,
+            SourceFormatHint::Png,
+        )
+        .unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(
+        result.scene().model(),
+        Some(HalftoneChannelModel::SourceColorAlpha)
+    );
+    assert_eq!(result.scene().layers().len(), 1);
+    let toniator_engine::GeometryOutput::CanonicalMarks(marks) =
+        result.scene().layers()[0].geometry()
+    else {
+        panic!("sampled authored output must retain canonical path geometry")
+    };
+    assert!(!marks.is_empty());
+    assert!(
+        marks
+            .iter()
+            .all(|mark| matches!(mark, toniator_engine::CanonicalMark::ClosedPath(_)))
+    );
+    let visible_colors = result
+        .raster()
+        .pixels()
+        .chunks_exact(4)
+        .filter(|pixel| pixel[3] > 0)
+        .map(|pixel| (pixel[0], pixel[1], pixel[2]))
+        .collect::<BTreeSet<_>>();
+    assert!(
+        visible_colors.len() > 1,
+        "sampled-source path marks retain source-derived paint variation"
+    );
+
+    let transparent_png = encode_png(
+        &RasterSurface::new(1, 1, vec![255, 0, 255, 0])
+            .expect("one hidden-magenta transparent source pixel is valid RGBA"),
+    )
+    .unwrap();
+    let transparent = evaluate(EvaluationRequest::new(
+        sampled.document_evaluation_snapshot(),
+        ResolvedSource::new(
+            SourceReferenceId::new("fixture-source").unwrap(),
+            transparent_png,
+            SourceFormatHint::Png,
+        )
+        .unwrap(),
+    ))
+    .unwrap();
+    let toniator_engine::GeometryOutput::CanonicalMarks(transparent_marks) =
+        transparent.scene().layers()[0].geometry()
+    else {
+        panic!("zero-alpha sampled output must retain canonical path geometry")
+    };
+    assert_eq!(transparent_marks.len(), marks.len());
+    assert!(transparent_marks.iter().all(|mark| {
+        matches!(
+            mark,
+            toniator_engine::CanonicalMark::ClosedPath(path) if path.bounds.min == path.bounds.max
+        )
+    }));
+    assert!(
+        transparent
+            .raster()
+            .pixels()
+            .iter()
+            .all(|value| *value == 0)
+    );
+    let transparent_svg = write_svg(transparent.scene());
+    assert_eq!(
+        transparent_svg.matches("<path ").count(),
+        transparent_marks.len()
+    );
+    assert!(transparent_svg.contains("fill=\"#000000\""));
+    assert!(!transparent_svg.contains("fill=\"#ff00ff\""));
 }
 
 /// Builds a legacy single-channel snapshot so the public diagnostic entry proves document-aware guide resolution.
@@ -788,6 +1226,7 @@ fn stage17_structural_session(fixture: Stage17StructuralFixture) -> DocumentSess
     }
 }
 
+/// Classifies property descriptors whose edits invalidate the active pattern-definition authority.
 fn is_pattern_definition_leaf(field: PropertyFieldId) -> bool {
     match field {
         PropertyFieldId::MarkRotationOffsetDegrees => false,
@@ -833,6 +1272,7 @@ fn is_pattern_definition_leaf(field: PropertyFieldId) -> bool {
         | PropertyFieldId::RandomMaximumNeighborChecks
         | PropertyFieldId::OutputSiteProduct
         | PropertyFieldId::OutputPrototype
+        | PropertyFieldId::OutputAuthoredClosedShape
         | PropertyFieldId::OutputOrientation
         | PropertyFieldId::OutputOrientationDimension => true,
         PropertyFieldId::SourceReference
@@ -2723,7 +3163,10 @@ fn engine_preflights_multiplier_ten_along_guides_before_realization() {
     ))
     .expect("engine preflight must cover multiplier-ten realized marks");
     let toniator_engine::GeometryOutput::CircularMarks(marks) =
-        result.scene().layers()[0].geometry();
+        result.scene().layers()[0].geometry()
+    else {
+        panic!("the retained legacy diagnostic output must remain a circle adapter");
+    };
     assert!(!marks.is_empty());
     assert!(marks.iter().all(|mark| mark.radius <= 550.0));
 }
@@ -3195,20 +3638,42 @@ fn random_session(
     DocumentSession::new(document).unwrap()
 }
 
+/// Verifies random current mark output remains visibly nonempty through native scene and SVG consumers.
 fn assert_nonempty_random_native_output(result: &toniator_engine::EvaluationResult, label: &str) {
     let mut positive_marks = 0usize;
     for layer in result.scene().layers() {
         assert!(layer.visible(), "{label}: enabled channel was hidden");
-        let toniator_engine::GeometryOutput::CircularMarks(marks) = layer.geometry();
-        assert!(
-            !marks.is_empty(),
-            "{label}: enabled channel had no canonical marks"
-        );
-        assert!(
-            marks.iter().any(|mark| mark.radius > 0.0),
-            "{label}: enabled channel had no positive-radius canonical marks"
-        );
-        positive_marks += marks.iter().filter(|mark| mark.radius > 0.0).count();
+        match layer.geometry() {
+            toniator_engine::GeometryOutput::CircularMarks(marks) => {
+                assert!(
+                    !marks.is_empty(),
+                    "{label}: enabled channel had no canonical marks"
+                );
+                assert!(
+                    marks.iter().any(|mark| mark.radius > 0.0),
+                    "{label}: enabled channel had no positive-radius canonical marks"
+                );
+                positive_marks += marks.iter().filter(|mark| mark.radius > 0.0).count();
+            }
+            toniator_engine::GeometryOutput::CanonicalMarks(marks) => {
+                assert!(
+                    !marks.is_empty(),
+                    "{label}: enabled channel had no generalized canonical marks"
+                );
+                let circles = marks
+                    .iter()
+                    .filter_map(|mark| match mark {
+                        toniator_engine::CanonicalMark::Circle { radius, .. } => Some(*radius),
+                        toniator_engine::CanonicalMark::ClosedPath(_) => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert!(
+                    circles.iter().any(|radius| *radius > 0.0),
+                    "{label}: enabled channel had no positive-radius canonical marks"
+                );
+                positive_marks += circles.iter().filter(|radius| **radius > 0.0).count();
+            }
+        }
     }
     assert!(
         positive_marks > 0,

@@ -28,7 +28,7 @@ decision.
 
 | File | Role | SHA-256 |
 | --- | --- | --- |
-| `HolidayMugs_2024_2025.toniator` | Authorized current-format real-world test case. | `a49d695aa545d1f4af31fe766851e5001c841b0c988b675b8f85d77b7d322f83` |
+| `HolidayMugs_2024_2025.toniator` | Authorized current-format real-world test case. | `2aa4e45107e90f0fc5762babfae372586a2c3a8bcdf12f3dd602477727440f50` |
 
 Stage 20E1 rewrote this current case with container version 1 and document
 schema version 3. It exercises normalized fill persistence; it is not a frozen

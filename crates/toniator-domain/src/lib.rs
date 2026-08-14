@@ -316,11 +316,14 @@ pub enum MarkOrientation {
     GuideNormal { dimension_id: GuideDimensionId },
 }
 
-/// The only Stage 16A prototype.  It is intentionally explicit rather than
-/// relying on a renderer-specific "circle" fallback.
+/// The persisted filled-mark prototype selected by one output layer.
+///
+/// A shape variant carries its document-scoped resource identity explicitly;
+/// callers never infer a structure from a family, preset, or renderer mode.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MarkPrototype {
     Circle,
+    AuthoredClosedShape { structure_id: AuthoredStructureId },
 }
 
 /// A stable identifier for a channel owned by a document.
@@ -1430,7 +1433,10 @@ impl Document {
             .find(|structure| structure.id == id)
     }
 
-    /// Reports whether any generic guide definition shares this authored structure reference.
+    /// Reports whether any guide or mark output shares this authored structure reference.
+    ///
+    /// The document owns this referential-integrity boundary; evaluators and
+    /// renderers must not retain resources that this method permits removing.
     fn authored_structure_is_referenced(&self, id: AuthoredStructureId) -> bool {
         self.pattern_definitions.iter().any(|definition| {
             definition.mechanisms.iter().any(|mechanism| {
@@ -1440,6 +1446,14 @@ impl Document {
                             dimension.prototype,
                             GuidePrototype::AuthoredOpenPath { structure_id } if structure_id == id
                         ))
+                )
+            }) || definition.output_layers.iter().any(|layer| {
+                matches!(
+                    layer,
+                    PatternOutputLayer::MarkPrototype {
+                        prototype: MarkPrototype::AuthoredClosedShape { structure_id },
+                        ..
+                    } if *structure_id == id
                 )
             })
         })
@@ -1805,6 +1819,18 @@ impl Document {
                     ) {
                         descriptors.push(descriptor_from_contract(
                             PropertyFieldId::OutputOrientationDimension,
+                            target,
+                        ));
+                    }
+                    if matches!(
+                        layer,
+                        PatternOutputLayer::MarkPrototype {
+                            prototype: MarkPrototype::AuthoredClosedShape { .. },
+                            ..
+                        }
+                    ) {
+                        descriptors.push(descriptor_from_contract(
+                            PropertyFieldId::OutputAuthoredClosedShape,
                             target,
                         ));
                     }
@@ -2206,8 +2232,20 @@ impl Document {
                     ) => PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::MarkPrototype(
                         match prototype {
                             MarkPrototype::Circle => MarkPrototypeKind::Circle,
+                            MarkPrototype::AuthoredClosedShape { .. } => {
+                                MarkPrototypeKind::AuthoredClosedShape
+                            }
                         },
                     )),
+                    (
+                        PropertyFieldId::OutputAuthoredClosedShape,
+                        PatternOutputLayer::MarkPrototype {
+                            prototype: MarkPrototype::AuthoredClosedShape { structure_id },
+                            ..
+                        },
+                    ) => PropertyCurrentValueKind::Reference(
+                        PropertyReferenceValue::AuthoredStructure(*structure_id),
+                    ),
                     (
                         PropertyFieldId::OutputOrientation,
                         PatternOutputLayer::MarkPrototype { orientation, .. },
@@ -2478,17 +2516,70 @@ impl Document {
         &self,
         channel_id: ChannelId,
         recipe: &PatternDefinitionRecipe,
-    ) -> Result<PatternDefinition, ValidationError> {
-        let neutral = self.allocate_neutral_definition_from_recipe(recipe)?;
+    ) -> Result<MaterializedPatternDefinitionRecipe, ValidationError> {
+        let (definition_recipe, shape_draft) = match recipe {
+            PatternDefinitionRecipe::AuthoredClosedShapeMarks { definition, shape } => {
+                (definition.as_ref(), Some(shape))
+            }
+            _ => (recipe, None),
+        };
+        let neutral = self.allocate_neutral_definition_from_recipe(definition_recipe)?;
         let mut candidate = self.clone();
         candidate.pattern_definitions.push(neutral.clone());
         candidate.retarget_channel(channel_id, neutral.id);
-        candidate.apply_recipe_controls(neutral.id, recipe)?;
-        candidate.definition(neutral.id).cloned().ok_or_else(|| {
+        candidate.apply_recipe_controls(neutral.id, definition_recipe)?;
+        let authored_structure = if let Some(shape_draft) = shape_draft {
+            let definition = candidate
+                .pattern_definitions
+                .iter_mut()
+                .find(|definition| definition.id == neutral.id)
+                .expect("fresh recipe definition");
+            if let [
+                PatternOutputLayer::CircularMarks {
+                    id,
+                    site_mechanism_id,
+                },
+            ] = definition.output_layers.as_slice()
+            {
+                definition.output_layers = vec![PatternOutputLayer::MarkPrototype {
+                    id: *id,
+                    site_mechanism_id: *site_mechanism_id,
+                    prototype: MarkPrototype::Circle,
+                    orientation: MarkOrientation::Fixed,
+                }];
+                validate_definition(definition)?;
+            }
+            let structure_id = next_authored_structure_id(&candidate.authored_structures)?;
+            let structure = AuthoredStructure::new(
+                structure_id,
+                AuthoredStructureKind::ClosedShape,
+                shape_draft.segments().to_vec(),
+            )?;
+            candidate.authored_structures.push(structure.clone());
+            candidate.apply_recipe_transition(
+                neutral.id,
+                PropertyFieldId::OutputPrototype,
+                PropertyEnumChoice::MarkPrototype(MarkPrototypeKind::AuthoredClosedShape),
+                vec![(
+                    PropertyFieldId::OutputAuthoredClosedShape,
+                    VariantTransitionValue::StableReference(Some(
+                        PropertyReferenceValue::AuthoredStructure(structure_id),
+                    )),
+                )],
+            )?;
+            Some(structure)
+        } else {
+            None
+        };
+        let definition = candidate.definition(neutral.id).cloned().ok_or_else(|| {
             ValidationError::new(
                 "pattern_definitions.recipe",
                 "recipe materialization lost its fresh definition",
             )
+        })?;
+        Ok(MaterializedPatternDefinitionRecipe {
+            definition,
+            authored_structure,
         })
     }
 
@@ -2631,6 +2722,9 @@ impl Document {
                 );
                 validate_definition(&definition)?;
                 Ok(definition)
+            }
+            PatternDefinitionRecipe::AuthoredClosedShapeMarks { .. } => {
+                unreachable!("shape recipe wrapper is removed before neutral allocation")
             }
         }
     }
@@ -2902,6 +2996,9 @@ impl Document {
                 let _ = (modulation_id, exclusion_id);
                 Ok(())
             }
+            PatternDefinitionRecipe::AuthoredClosedShapeMarks { .. } => {
+                unreachable!("shape recipe wrapper is removed before control application")
+            }
         }
     }
 
@@ -2974,6 +3071,12 @@ impl Document {
         self.apply_recipe_edit(definition_id, edit)
     }
 
+    /// Allocates fresh definition-internal identities while retaining external authored-resource
+    /// references and remapping only definition-owned guide orientation references.
+    ///
+    /// # Errors
+    ///
+    /// Returns stable ID-exhaustion or structural-family diagnostics without publishing a clone.
     fn duplicate_definition(
         &self,
         source: &PatternDefinition,
@@ -3074,17 +3177,20 @@ impl Document {
                     ));
                 }
             };
-            return Ok(PatternDefinition::generalized_guides(
-                id,
-                source.name.clone(),
-                guide_id,
-                site_id,
-                output_id,
-                remapped.into_iter().map(|(_, value)| value).collect(),
-                product,
-                orientation,
-                source.coverage.clone(),
-            ));
+            return retain_duplicated_mark_prototype(
+                source,
+                PatternDefinition::generalized_guides(
+                    id,
+                    source.name.clone(),
+                    guide_id,
+                    site_id,
+                    output_id,
+                    remapped.into_iter().map(|(_, value)| value).collect(),
+                    product,
+                    orientation,
+                    source.coverage.clone(),
+                ),
+            );
         }
         if let [
             PatternMechanism::StraightGuideDimensions { dimensions, .. },
@@ -3183,17 +3289,20 @@ impl Document {
                     ));
                 }
             };
-            return Ok(PatternDefinition::generalized_straight_guides(
-                id,
-                source.name.clone(),
-                guide_id,
-                site_id,
-                output_id,
-                remapped.into_iter().map(|(_, value)| value).collect(),
-                product,
-                orientation,
-                source.coverage.clone(),
-            ));
+            return retain_duplicated_mark_prototype(
+                source,
+                PatternDefinition::generalized_straight_guides(
+                    id,
+                    source.name.clone(),
+                    guide_id,
+                    site_id,
+                    output_id,
+                    remapped.into_iter().map(|(_, value)| value).collect(),
+                    product,
+                    orientation,
+                    source.coverage.clone(),
+                ),
+            );
         }
         if let PatternFamily::RandomSites { .. } = source.family {
             let id = self.allocate_definition_id()?;
@@ -3236,22 +3345,25 @@ impl Document {
                     "random definition has an incompatible mechanism chain",
                 ));
             };
-            return Ok(PatternDefinition::random_sites(
-                id,
-                source.name.clone(),
-                base_id,
-                modulation_id,
-                exclusion_id,
-                site_id,
-                output_id,
-                character.clone(),
-                *seed,
-                modulation.clone(),
-                policy.clone(),
-                *maximum_attempts,
-                *maximum_neighbor_checks,
-                source.coverage.clone(),
-            ));
+            return retain_duplicated_mark_prototype(
+                source,
+                PatternDefinition::random_sites(
+                    id,
+                    source.name.clone(),
+                    base_id,
+                    modulation_id,
+                    exclusion_id,
+                    site_id,
+                    output_id,
+                    character.clone(),
+                    *seed,
+                    modulation.clone(),
+                    policy.clone(),
+                    *maximum_attempts,
+                    *maximum_neighbor_checks,
+                    source.coverage.clone(),
+                ),
+            );
         }
         let draft = PatternDefinitionDraft {
             name: source.name.clone(),
@@ -3447,7 +3559,52 @@ impl Document {
     }
 }
 
-/// Resolves every authored generic-guide reference through the owning document store.
+/// Copies the external mark resource selection onto a structurally remapped typed duplicate.
+///
+/// Definition-owned output IDs and guide-orientation references remain those allocated by the
+/// duplicate constructor; only the prototype variant and its document-owned structure ID persist.
+///
+/// # Errors
+///
+/// Returns the stable output-layer diagnostic if either definition is not the one-layer typed
+/// mark family already required by the duplication branch.
+fn retain_duplicated_mark_prototype(
+    source: &PatternDefinition,
+    mut duplicate: PatternDefinition,
+) -> Result<PatternDefinition, ValidationError> {
+    let [
+        PatternOutputLayer::MarkPrototype {
+            prototype: source_prototype,
+            ..
+        },
+    ] = source.output_layers.as_slice()
+    else {
+        return Err(ValidationError::new(
+            "pattern_definitions.output_layers",
+            "typed definition duplication requires one mark-prototype output",
+        ));
+    };
+    let [
+        PatternOutputLayer::MarkPrototype {
+            prototype: duplicate_prototype,
+            ..
+        },
+    ] = duplicate.output_layers.as_mut_slice()
+    else {
+        return Err(ValidationError::new(
+            "pattern_definitions.output_layers",
+            "typed definition duplication requires one mark-prototype output",
+        ));
+    };
+    *duplicate_prototype = source_prototype.clone();
+    Ok(duplicate)
+}
+
+/// Resolves every authored guide and mark reference through the owning document store.
+///
+/// # Errors
+///
+/// Returns stable missing-resource or wrong-kind diagnostics without changing either authority.
 fn validate_definition_guide_references(
     definition: &PatternDefinition,
     structures: &[AuthoredStructure],
@@ -3473,6 +3630,28 @@ fn validate_definition_guide_references(
                     "authored guide prototypes require an open path",
                 ));
             }
+        }
+    }
+    for layer in &definition.output_layers {
+        let PatternOutputLayer::MarkPrototype {
+            prototype: MarkPrototype::AuthoredClosedShape { structure_id },
+            ..
+        } = layer
+        else {
+            continue;
+        };
+        let structure = structures
+            .iter()
+            .find(|structure| structure.id == *structure_id)
+            .ok_or(ValidationError::new(
+                "pattern_definitions.output_layers.prototype.reference",
+                "authored closed-shape mark references a missing structure",
+            ))?;
+        if structure.kind != AuthoredStructureKind::ClosedShape {
+            return Err(ValidationError::new(
+                "pattern_definitions.output_layers.prototype.kind",
+                "authored closed-shape marks require a closed shape",
+            ));
         }
     }
     Ok(())
@@ -3784,6 +3963,10 @@ fn recipe_exclusion_transition(
     }
 }
 
+/// Applies one already validated structural edit to a private definition candidate in place.
+///
+/// Callers retain publication and complete-document reference validation; inactive targets are
+/// deliberately left unchanged so validation can reject them before this mutation seam is used.
 fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefinitionEdit) {
     match edit {
         PatternDefinitionEdit::SetCoverageGuardSteps { guard_steps } => {
@@ -4446,6 +4629,24 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
                 *current = prototype.clone();
             }
         }
+        PatternDefinitionEdit::SetOutputAuthoredClosedShape {
+            output_layer_id,
+            structure_id,
+        } => {
+            if let Some(PatternOutputLayer::MarkPrototype {
+                prototype:
+                    MarkPrototype::AuthoredClosedShape {
+                        structure_id: current,
+                    },
+                ..
+            }) = definition
+                .output_layers
+                .iter_mut()
+                .find(|layer| layer.id() == *output_layer_id)
+            {
+                *current = *structure_id;
+            }
+        }
         PatternDefinitionEdit::SetOutputOrientation {
             output_layer_id,
             orientation,
@@ -4548,6 +4749,7 @@ fn apply_guide_stack_scalar(
     }
 }
 
+/// Remaps definition-owned IDs in one validated edit while retaining external resource references.
 fn remap_definition_edit_for_duplicate(
     source: &PatternDefinition,
     duplicate: &PatternDefinition,
@@ -4869,6 +5071,13 @@ fn remap_definition_edit_for_duplicate(
             output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
             prototype: prototype.clone(),
         },
+        PatternDefinitionEdit::SetOutputAuthoredClosedShape {
+            output_layer_id,
+            structure_id,
+        } => PatternDefinitionEdit::SetOutputAuthoredClosedShape {
+            output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
+            structure_id: *structure_id,
+        },
         PatternDefinitionEdit::SetOutputOrientation {
             output_layer_id,
             orientation,
@@ -4959,6 +5168,11 @@ fn remap_orientation(
     }
 }
 
+/// Validates one structural edit against the active typed variant without mutating its definition.
+///
+/// # Errors
+///
+/// Returns a stable target, inactive-field, bound, or reference diagnostic before candidate edit.
 fn validate_definition_edit(
     definition: &PatternDefinition,
     edit: &PatternDefinitionEdit,
@@ -5371,18 +5585,23 @@ fn validate_definition_edit(
         }
         PatternDefinitionEdit::SetOutputMarkPrototype {
             output_layer_id,
-            prototype,
+            prototype: _,
         } => {
             validate_mark_prototype_output_target(definition, *output_layer_id)?;
-            if matches!(prototype, MarkPrototype::Circle) {
-                Ok(())
-            } else {
-                Err(ValidationError::new(
-                    "pattern_definitions.output_layers.prototype",
-                    "unsupported mark prototype",
-                ))
-            }
+            Ok(())
         }
+        PatternDefinitionEdit::SetOutputAuthoredClosedShape {
+            output_layer_id, ..
+        } => match validate_mark_prototype_output_target(definition, *output_layer_id)? {
+            PatternOutputLayer::MarkPrototype {
+                prototype: MarkPrototype::AuthoredClosedShape { .. },
+                ..
+            } => Ok(()),
+            _ => Err(ValidationError::new(
+                "pattern_definitions.output_layers.prototype.reference",
+                "field is inactive for the current mark prototype",
+            )),
+        },
         PatternDefinitionEdit::SetOutputOrientation {
             output_layer_id,
             orientation,
@@ -5865,6 +6084,11 @@ fn validate_channel(
     validate_mark_response(&channel.mark_geometry_response)
 }
 
+/// Validates one complete typed pattern definition and its ordered family/output capability chain.
+///
+/// # Errors
+///
+/// Returns the first stable family, mechanism, output, coverage, or payload diagnostic.
 fn validate_definition(definition: &PatternDefinition) -> Result<(), ValidationError> {
     validate_nonnegative_finite(
         definition.coverage.additional_margin,
@@ -5950,16 +6174,35 @@ fn validate_definition(definition: &PatternDefinition) -> Result<(), ValidationE
             "family root requires ordered straight-guide and intersection mechanisms",
         ));
     }
-    if !matches!(definition.output_layers.as_slice(), [PatternOutputLayer::CircularMarks { site_mechanism_id, .. }] if *site_mechanism_id == root_site_id)
-    {
+    let has_compatible_output = match definition.output_layers.as_slice() {
+        [
+            PatternOutputLayer::CircularMarks {
+                site_mechanism_id, ..
+            },
+        ] => *site_mechanism_id == root_site_id,
+        [
+            PatternOutputLayer::MarkPrototype {
+                site_mechanism_id,
+                orientation: MarkOrientation::Fixed,
+                ..
+            },
+        ] => *site_mechanism_id == root_site_id,
+        _ => false,
+    };
+    if !has_compatible_output {
         return Err(ValidationError::new(
             "pattern_definitions.output_layers",
-            "ordered circular-mark output requires the family intersection mechanism",
+            "ordered mark output requires the family intersection mechanism",
         ));
     }
     Ok(())
 }
 
+/// Validates one random-site mechanism chain and its compatible typed mark output in stored order.
+///
+/// # Errors
+///
+/// Returns a stable identity, ordering, payload, work-limit, or output-capability diagnostic.
 fn validate_random_site_definition(
     definition: &PatternDefinition,
     base_id: PatternMechanismId,
@@ -6027,7 +6270,6 @@ fn validate_random_site_definition(
     let [
         PatternOutputLayer::MarkPrototype {
             site_mechanism_id,
-            prototype: MarkPrototype::Circle,
             orientation: MarkOrientation::Fixed,
             ..
         },
@@ -6035,7 +6277,7 @@ fn validate_random_site_definition(
     else {
         return Err(ValidationError::new(
             "pattern_definitions.output_layers",
-            "random-site products require exactly one fixed circle mark layer",
+            "random-site products require exactly one fixed mark prototype layer",
         ));
     };
     if *site_mechanism_id != site_id {
@@ -6380,6 +6622,10 @@ fn validate_site_mechanism_ids(
 }
 
 /// Validates the unchanged mark output against generic stable guide dimension IDs.
+///
+/// # Errors
+///
+/// Returns a stable output-layer or orientation-reference diagnostic.
 fn validate_generalized_output_layers_ids(
     layers: &[PatternOutputLayer],
     site_id: PatternMechanismId,
@@ -6388,7 +6634,6 @@ fn validate_generalized_output_layers_ids(
     let [
         PatternOutputLayer::MarkPrototype {
             site_mechanism_id,
-            prototype: MarkPrototype::Circle,
             orientation,
             ..
         },
@@ -6396,7 +6641,7 @@ fn validate_generalized_output_layers_ids(
     else {
         return Err(ValidationError::new(
             "pattern_definitions.output_layers",
-            "generalized guide products require exactly one circle mark prototype layer",
+            "generalized guide products require exactly one mark prototype layer",
         ));
     };
     if *site_mechanism_id != site_id {
@@ -6470,6 +6715,11 @@ fn validate_site_mechanism(
     }
 }
 
+/// Validates one straight-guide family output against the selected product and dimension IDs.
+///
+/// # Errors
+///
+/// Returns a stable output-layer, site-product, or orientation-reference diagnostic.
 fn validate_generalized_output_layers(
     layers: &[PatternOutputLayer],
     site_id: PatternMechanismId,
@@ -6478,7 +6728,6 @@ fn validate_generalized_output_layers(
     let [
         PatternOutputLayer::MarkPrototype {
             site_mechanism_id,
-            prototype: MarkPrototype::Circle,
             orientation,
             ..
         },
@@ -6486,7 +6735,7 @@ fn validate_generalized_output_layers(
     else {
         return Err(ValidationError::new(
             "pattern_definitions.output_layers",
-            "generalized straight-guide products require exactly one circle mark prototype layer",
+            "generalized straight-guide products require exactly one mark prototype layer",
         ));
     };
     if *site_mechanism_id != site_id {
@@ -6871,6 +7120,7 @@ pub enum PropertyFieldId {
     RandomMaximumNeighborChecks,
     OutputSiteProduct,
     OutputPrototype,
+    OutputAuthoredClosedShape,
     OutputOrientation,
     OutputOrientationDimension,
 }
@@ -6946,6 +7196,7 @@ pub const PROPERTY_FIELD_IDS: &[PropertyFieldId] = &[
     PropertyFieldId::RandomMaximumNeighborChecks,
     PropertyFieldId::OutputSiteProduct,
     PropertyFieldId::OutputPrototype,
+    PropertyFieldId::OutputAuthoredClosedShape,
     PropertyFieldId::OutputOrientation,
     PropertyFieldId::OutputOrientationDimension,
 ];
@@ -7012,6 +7263,7 @@ pub enum ExclusionKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MarkPrototypeKind {
     Circle,
+    AuthoredClosedShape,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MarkOrientationKind {
@@ -7071,6 +7323,7 @@ pub enum PropertyDependency {
     MinimumCenterExclusion,
     VisibleMarkExclusion,
     MarkPrototypeOutput,
+    AuthoredClosedShapeMark,
     GuidedOutputOrientation,
 }
 
@@ -7095,6 +7348,7 @@ pub enum PropertyApplicability {
     MinimumCenterExclusion,
     VisibleMarkExclusion,
     MarkPrototypeOutput,
+    AuthoredClosedShapeMark,
     GuidedOutputOrientation,
     CurrentPaint,
     CurrentDensityModulation,
@@ -7188,6 +7442,7 @@ pub enum PropertyCommandKind {
     SetRandomMaximumNeighborChecks,
     SetOutputSiteProduct,
     SetOutputMarkPrototype,
+    SetOutputAuthoredClosedShape,
     SetOutputOrientation,
     SetOutputOrientationDimension,
     SetCoverageGuardSteps,
@@ -7653,6 +7908,11 @@ fn transition_field(
     }
 }
 
+/// Resolves the complete explicit payload fields for one supported compound selector transition.
+///
+/// # Errors
+///
+/// Returns stable selector, target, or variant diagnostics without mutating the document.
 fn transition_fields_for(
     document: &Document,
     selector: &PropertyDescriptor,
@@ -7684,6 +7944,14 @@ fn transition_fields_for(
             PropertyEnumChoice::MarkOrientation(base),
             PropertyEnumChoice::MarkOrientation(choice),
         ) => orientation_transition_fields(document, definition_id, output_layer_id, base, choice),
+        (
+            PropertyFieldId::OutputPrototype,
+            PropertyTarget::OutputLayer(definition_id, output_layer_id),
+            PropertyEnumChoice::MarkPrototype(base),
+            PropertyEnumChoice::MarkPrototype(choice),
+        ) => {
+            mark_prototype_transition_fields(document, definition_id, output_layer_id, base, choice)
+        }
         _ => Err(ValidationError::new(
             "transition_draft.selector",
             "selector target or choice does not support compound transition drafts",
@@ -7927,6 +8195,11 @@ fn exclusion_transition_fields(
     }
 }
 
+/// Builds the optional guide-dimension reference required by one orientation transition.
+///
+/// # Errors
+///
+/// Returns stable definition/output target diagnostics for an incompatible selector.
 fn orientation_transition_fields(
     document: &Document,
     definition_id: PatternDefinitionId,
@@ -7985,6 +8258,67 @@ fn orientation_transition_fields(
     };
     Ok(vec![transition_field(
         PropertyFieldId::OutputOrientationDimension,
+        PropertyTarget::OutputLayer(definition_id, output_layer_id),
+        VariantTransitionValue::StableReference(existing),
+        reference_choices,
+    )])
+}
+
+/// Builds the explicit stable-reference payload required when a mark output switches variants.
+///
+/// # Errors
+///
+/// Returns stable target diagnostics when the output layer is absent or not a typed mark layer.
+fn mark_prototype_transition_fields(
+    document: &Document,
+    definition_id: PatternDefinitionId,
+    output_layer_id: PatternOutputLayerId,
+    base: MarkPrototypeKind,
+    choice: MarkPrototypeKind,
+) -> Result<Vec<VariantTransitionField>, ValidationError> {
+    let definition = document.definition(definition_id).ok_or_else(|| {
+        ValidationError::new(
+            "transition_draft.target",
+            "transition definition is missing",
+        )
+    })?;
+    let layer = definition
+        .output_layers
+        .iter()
+        .find(|layer| layer.id() == output_layer_id)
+        .ok_or_else(|| {
+            ValidationError::new(
+                "transition_draft.target",
+                "transition output layer is missing",
+            )
+        })?;
+    let PatternOutputLayer::MarkPrototype { prototype, .. } = layer else {
+        return Err(ValidationError::new(
+            "transition_draft.target",
+            "selector is not a mark-prototype output",
+        ));
+    };
+    if choice == MarkPrototypeKind::Circle {
+        return Ok(Vec::new());
+    }
+    let existing = if base == choice {
+        match prototype {
+            MarkPrototype::AuthoredClosedShape { structure_id } => {
+                Some(PropertyReferenceValue::AuthoredStructure(*structure_id))
+            }
+            MarkPrototype::Circle => unreachable!("base selector is current"),
+        }
+    } else {
+        None
+    };
+    let reference_choices = document
+        .authored_structures()
+        .iter()
+        .filter(|structure| structure.kind() == AuthoredStructureKind::ClosedShape)
+        .map(|structure| PropertyReferenceValue::AuthoredStructure(structure.id()))
+        .collect();
+    Ok(vec![transition_field(
+        PropertyFieldId::OutputAuthoredClosedShape,
         PropertyTarget::OutputLayer(definition_id, output_layer_id),
         VariantTransitionValue::StableReference(existing),
         reference_choices,
@@ -8168,6 +8502,11 @@ fn transition_reference(
     }
 }
 
+/// Converts one complete validated transition draft into the existing typed structural edit.
+///
+/// # Errors
+///
+/// Returns a stable selector, payload-kind, or missing-reference diagnostic.
 fn transition_draft_edit(
     draft: &VariantTransitionDraft,
 ) -> Result<PatternDefinitionEdit, ValidationError> {
@@ -8349,6 +8688,32 @@ fn transition_draft_edit(
                 orientation,
             })
         }
+        (
+            PropertyFieldId::OutputPrototype,
+            PropertyTarget::OutputLayer(_, output_layer_id),
+            PropertyEnumChoice::MarkPrototype(choice),
+        ) => {
+            let prototype = match choice {
+                MarkPrototypeKind::Circle => MarkPrototype::Circle,
+                MarkPrototypeKind::AuthoredClosedShape => {
+                    match transition_reference(draft, PropertyFieldId::OutputAuthoredClosedShape)? {
+                        PropertyReferenceValue::AuthoredStructure(structure_id) => {
+                            MarkPrototype::AuthoredClosedShape { structure_id }
+                        }
+                        _ => {
+                            return Err(ValidationError::new(
+                                "transition_draft.reference",
+                                "authored mark prototype requires a closed-shape structure",
+                            ));
+                        }
+                    }
+                }
+            };
+            Ok(PatternDefinitionEdit::SetOutputMarkPrototype {
+                output_layer_id,
+                prototype,
+            })
+        }
         _ => Err(ValidationError::new(
             "transition_draft.selector",
             "transition draft selector/choice is invalid",
@@ -8481,6 +8846,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             }
             PropertyFieldId::OutputSiteProduct => PropertyCommandKind::SetOutputSiteProduct,
             PropertyFieldId::OutputPrototype => PropertyCommandKind::SetOutputMarkPrototype,
+            PropertyFieldId::OutputAuthoredClosedShape => {
+                PropertyCommandKind::SetOutputAuthoredClosedShape
+            }
             PropertyFieldId::OutputOrientation => PropertyCommandKind::SetOutputOrientation,
             PropertyFieldId::OutputOrientationDimension => {
                 PropertyCommandKind::SetOutputOrientationDimension
@@ -8497,7 +8865,8 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::AlongGuideDimensions
             | PropertyFieldId::OutputSiteProduct
             | PropertyFieldId::OutputOrientationDimension
-            | PropertyFieldId::GuideAuthoredStructure => PropertyValueKind::StableIdReference,
+            | PropertyFieldId::GuideAuthoredStructure
+            | PropertyFieldId::OutputAuthoredClosedShape => PropertyValueKind::StableIdReference,
             PropertyFieldId::DensityAspectLocked
             | PropertyFieldId::ModeledMappingInverted
             | PropertyFieldId::ArtworkWeightMappingInverted
@@ -8680,6 +9049,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::OutputSiteProduct
             | PropertyFieldId::OutputPrototype
             | PropertyFieldId::OutputOrientation => PropertyApplicability::MarkPrototypeOutput,
+            PropertyFieldId::OutputAuthoredClosedShape => {
+                PropertyApplicability::AuthoredClosedShapeMark
+            }
             PropertyFieldId::OutputOrientationDimension => {
                 PropertyApplicability::GuidedOutputOrientation
             }
@@ -8699,6 +9071,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::ModeledMappingBias
             | PropertyFieldId::OutputSiteProduct
             | PropertyFieldId::OutputPrototype
+            | PropertyFieldId::OutputAuthoredClosedShape
             | PropertyFieldId::OutputOrientation
             | PropertyFieldId::OutputOrientationDimension => InvalidationLevel::Realization,
             PropertyFieldId::Paint
@@ -8754,6 +9127,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
                 | PropertyFieldId::RandomMaximumNeighborChecks
                 | PropertyFieldId::OutputSiteProduct
                 | PropertyFieldId::OutputPrototype
+                | PropertyFieldId::OutputAuthoredClosedShape
                 | PropertyFieldId::OutputOrientation
                 | PropertyFieldId::OutputOrientationDimension
         ),
@@ -8785,7 +9159,8 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::DefinitionSelection
             | PropertyFieldId::OutputSiteProduct
             | PropertyFieldId::OutputOrientationDimension
-            | PropertyFieldId::GuideAuthoredStructure => PropertyReferenceConstraint::Singular,
+            | PropertyFieldId::GuideAuthoredStructure
+            | PropertyFieldId::OutputAuthoredClosedShape => PropertyReferenceConstraint::Singular,
             _ => PropertyReferenceConstraint::NotReference,
         },
         choice_policy: match field {
@@ -8851,8 +9226,10 @@ const VISIBLE_MARK_SIZING_POLICY_CHOICES: &[PropertyEnumChoice] =
     &[PropertyEnumChoice::VisibleMarkSizingPolicy(
         VisibleMarkSizingPolicy::MaximumSupportRadius,
     )];
-const MARK_PROTOTYPE_CHOICES: &[PropertyEnumChoice] =
-    &[PropertyEnumChoice::MarkPrototype(MarkPrototypeKind::Circle)];
+const MARK_PROTOTYPE_CHOICES: &[PropertyEnumChoice] = &[
+    PropertyEnumChoice::MarkPrototype(MarkPrototypeKind::Circle),
+    PropertyEnumChoice::MarkPrototype(MarkPrototypeKind::AuthoredClosedShape),
+];
 const MARK_ORIENTATION_CHOICES: &[PropertyEnumChoice] = &[
     PropertyEnumChoice::MarkOrientation(MarkOrientationKind::Fixed),
     PropertyEnumChoice::MarkOrientation(MarkOrientationKind::GuideTangent),
@@ -8889,6 +9266,9 @@ const fn dependency_for_contract(
         PropertyApplicability::MinimumCenterExclusion => PropertyDependency::MinimumCenterExclusion,
         PropertyApplicability::VisibleMarkExclusion => PropertyDependency::VisibleMarkExclusion,
         PropertyApplicability::MarkPrototypeOutput => PropertyDependency::MarkPrototypeOutput,
+        PropertyApplicability::AuthoredClosedShapeMark => {
+            PropertyDependency::AuthoredClosedShapeMark
+        }
         PropertyApplicability::GuidedOutputOrientation => {
             PropertyDependency::GuidedOutputOrientation
         }
@@ -9082,6 +9462,21 @@ pub enum PatternDefinitionRecipe {
         maximum_attempts: u32,
         maximum_neighbor_checks: u32,
     },
+    /// Wraps one ordinary ID-free family recipe with a validated closed-shape payload.
+    /// Materialization allocates both the document-owned structure and the definition
+    /// atomically, then installs the ordinary typed output reference.
+    AuthoredClosedShapeMarks {
+        definition: Box<PatternDefinitionRecipe>,
+        shape: AuthoredStructureDraft,
+    },
+}
+
+/// One unpublished recipe result whose optional resource and definition must
+/// be installed together before authoritative validation can succeed.
+#[derive(Clone, Debug, PartialEq)]
+struct MaterializedPatternDefinitionRecipe {
+    definition: PatternDefinition,
+    authored_structure: Option<AuthoredStructure>,
 }
 
 /// A metadata/recipe pair crossing registry and persistence boundaries.
@@ -9277,6 +9672,27 @@ pub fn validate_preset_record(record: &PresetRecord) -> Result<(), ValidationErr
             }
             Ok(())
         }
+        PatternDefinitionRecipe::AuthoredClosedShapeMarks { definition, shape } => {
+            if shape.kind() != AuthoredStructureKind::ClosedShape {
+                return Err(ValidationError::new(
+                    "preset.recipe.shape.kind",
+                    "authored mark recipes require a closed-shape payload",
+                ));
+            }
+            if matches!(
+                definition.as_ref(),
+                PatternDefinitionRecipe::AuthoredClosedShapeMarks { .. }
+            ) {
+                return Err(ValidationError::new(
+                    "preset.recipe.definition",
+                    "authored mark recipe wrappers cannot be nested",
+                ));
+            }
+            validate_preset_record(&PresetRecord {
+                metadata: record.metadata.clone(),
+                recipe: definition.as_ref().clone(),
+            })
+        }
     }
 }
 
@@ -9462,6 +9878,11 @@ pub enum PatternDefinitionEdit {
     SetOutputMarkPrototype {
         output_layer_id: PatternOutputLayerId,
         prototype: MarkPrototype,
+    },
+    /// Retargets the active authored closed-shape mark without changing its variant.
+    SetOutputAuthoredClosedShape {
+        output_layer_id: PatternOutputLayerId,
+        structure_id: AuthoredStructureId,
     },
     SetOutputOrientation {
         output_layer_id: PatternOutputLayerId,
@@ -9905,8 +10326,15 @@ impl PatternDefinitionEdit {
                 PropertyFieldValue::EnumChoice(PropertyEnumChoice::MarkPrototype(
                     match prototype {
                         MarkPrototype::Circle => MarkPrototypeKind::Circle,
+                        MarkPrototype::AuthoredClosedShape { .. } => {
+                            MarkPrototypeKind::AuthoredClosedShape
+                        }
                     },
                 )),
+            ),
+            Edit::SetOutputAuthoredClosedShape { .. } => (
+                PropertyFieldId::OutputAuthoredClosedShape,
+                PropertyFieldValue::StableIdReference,
             ),
             Edit::SetOutputOrientation { orientation, .. } => (
                 PropertyFieldId::OutputOrientation,
@@ -10467,11 +10895,11 @@ impl DocumentCommand {
                             "shared replacement targets an unlinked definition",
                         )
                     })?;
-                let mut replacement =
-                    document.allocate_definition_from_recipe(channel_id, recipe)?;
+                let materialized = document.allocate_definition_from_recipe(channel_id, recipe)?;
+                let mut replacement = materialized.definition;
                 replacement.id = *definition_id;
                 validate_definition(&replacement)?;
-                if &replacement == base_definition {
+                if &replacement == base_definition && materialized.authored_structure.is_none() {
                     return Err(ValidationError::new(
                         "pattern_definitions.recipe",
                         "shared replacement is a semantic no-op",
@@ -10691,9 +11119,13 @@ impl DocumentCommand {
             Self::ReplaceSelectedChannelDefinitionRecipe {
                 channel_id, recipe, ..
             } => {
-                let definition = document
+                let materialized = document
                     .allocate_definition_from_recipe(*channel_id, recipe)
                     .expect("command validation materialized a recipe");
+                if let Some(structure) = materialized.authored_structure {
+                    document.authored_structures.push(structure);
+                }
+                let definition = materialized.definition;
                 let definition_id = definition.id;
                 document.pattern_definitions.push(definition);
                 document.retarget_channel(*channel_id, definition_id);
@@ -10769,7 +11201,7 @@ impl DocumentCommand {
                 recipe,
                 ..
             } => {
-                let mut replacement = document
+                let materialized = document
                     .allocate_definition_from_recipe(
                         *document
                             .linked_channels(*definition_id)
@@ -10778,6 +11210,10 @@ impl DocumentCommand {
                         recipe,
                     )
                     .expect("command validation materialized a recipe");
+                if let Some(structure) = materialized.authored_structure {
+                    document.authored_structures.push(structure);
+                }
+                let mut replacement = materialized.definition;
                 replacement.id = *definition_id;
                 let definition = document
                     .pattern_definitions
@@ -10997,9 +11433,28 @@ impl DocumentCommand {
                 Self::ReplaceAuthoredStructure { base_structure, .. } => before
                     .channel_ids()
                     .into_iter()
-                    .filter(|channel_id| before.pattern_definition_id_for(*channel_id).is_some_and(|definition_id| {
-                        before.definition(definition_id).is_some_and(|definition| definition.mechanisms.iter().any(|mechanism| matches!(mechanism, PatternMechanism::GuideDimensions { dimensions, .. } if dimensions.iter().any(|dimension| matches!(dimension.prototype, GuidePrototype::AuthoredOpenPath { structure_id } if structure_id == base_structure.id())))))
-                    }))
+                    .filter(|channel_id| {
+                        before
+                            .pattern_definition_id_for(*channel_id)
+                            .is_some_and(|definition_id| {
+                                before.definition(definition_id).is_some_and(|definition| {
+                                    definition.mechanisms.iter().any(|mechanism| matches!(mechanism,
+                                PatternMechanism::GuideDimensions { dimensions, .. }
+                                    if dimensions.iter().any(|dimension| matches!(
+                                        dimension.prototype,
+                                        GuidePrototype::AuthoredOpenPath { structure_id }
+                                            if structure_id == base_structure.id()
+                                    ))
+                            )) || definition.output_layers.iter().any(|layer| matches!(
+                                layer,
+                                PatternOutputLayer::MarkPrototype {
+                                    prototype: MarkPrototype::AuthoredClosedShape { structure_id },
+                                    ..
+                                } if *structure_id == base_structure.id()
+                            ))
+                                })
+                            })
+                    })
                     .collect(),
                 Self::RetargetChannelPatternDefinition { channel_id, .. }
                 | Self::ReplaceSelectedChannelDefinitionTopology { channel_id, .. }

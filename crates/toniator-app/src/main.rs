@@ -1591,6 +1591,7 @@ fn inspector_field_label(field: PropertyFieldId) -> String {
         PropertyFieldId::RandomMaximumNeighborChecks => "Maximum neighbor checks".into(),
         PropertyFieldId::OutputSiteProduct => "Mark placement".into(),
         PropertyFieldId::OutputPrototype => "Mark prototype".into(),
+        PropertyFieldId::OutputAuthoredClosedShape => "Closed shape reference".into(),
         PropertyFieldId::OutputOrientation => "Mark orientation".into(),
         PropertyFieldId::OutputOrientationDimension => "Orientation guide dimension".into(),
     }
@@ -1644,6 +1645,9 @@ fn enum_choice_label(choice: PropertyEnumChoice) -> &'static str {
             toniator_domain::VisibleMarkSizingPolicy::MaximumSupportRadius,
         ) => "Maximum support radius",
         PropertyEnumChoice::MarkPrototype(toniator_domain::MarkPrototypeKind::Circle) => "Circle",
+        PropertyEnumChoice::MarkPrototype(
+            toniator_domain::MarkPrototypeKind::AuthoredClosedShape,
+        ) => "Authored closed shape",
         PropertyEnumChoice::MarkOrientation(MarkOrientationKind::Fixed) => "Fixed",
         PropertyEnumChoice::MarkOrientation(MarkOrientationKind::GuideTangent) => "Guide tangent",
         PropertyEnumChoice::MarkOrientation(MarkOrientationKind::GuideNormal) => "Guide normal",

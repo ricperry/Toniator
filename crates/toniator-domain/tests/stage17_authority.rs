@@ -1142,6 +1142,7 @@ fn field_contracts_are_exhaustive_and_descriptors_emit_contract_metadata() {
     }
 }
 
+/// Builds one valid representative command for every property descriptor's command authority.
 fn representative_descriptor_command(field: PropertyFieldId) -> DocumentCommand {
     let straight_base = shared_document().pattern_definitions()[0].clone();
     let along_base = along_guide_document().pattern_definitions()[0].clone();
@@ -1498,6 +1499,12 @@ fn representative_descriptor_command(field: PropertyFieldId) -> DocumentCommand 
             structural(PatternDefinitionEdit::SetOutputMarkPrototype {
                 output_layer_id: PatternOutputLayerId(30),
                 prototype: MarkPrototype::Circle,
+            })
+        }
+        PropertyFieldId::OutputAuthoredClosedShape => {
+            structural(PatternDefinitionEdit::SetOutputAuthoredClosedShape {
+                output_layer_id: PatternOutputLayerId(30),
+                structure_id: AuthoredStructureId(1),
             })
         }
         PropertyFieldId::OutputOrientation => {

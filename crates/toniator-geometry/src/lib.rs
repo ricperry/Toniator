@@ -597,6 +597,79 @@ pub struct CanonicalCircleMark {
     pub provenance: GuideIntersectionProvenance,
 }
 
+/// Explicit fill behavior for canonical closed mark geometry.
+///
+/// The renderer consumes this immutable semantic rather than deriving winding
+/// behavior from source artwork or a frontend setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum CanonicalFillRule {
+    EvenOdd,
+}
+
+/// A renderer-independent closed curve mark realized from one existing family site.
+///
+/// The stored path remains editable cubic/line construction geometry. Bounds,
+/// source identity, scope, and provenance are retained so no consumer recreates
+/// sites or changes closure topology while clipping to its canvas.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CanonicalPathMark {
+    pub source_site_id: FamilySiteId,
+    pub path: CurvePath,
+    pub bounds: Bounds,
+    pub scope: SiteScope,
+    pub provenance: FamilySiteProvenance,
+    pub fill_rule: CanonicalFillRule,
+}
+
+impl CanonicalPathMark {
+    /// Creates one finite closed path mark after validating its exact geometry bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns the existing curve error when the path is open or its bounds
+    /// cannot remain finite; no consumer-side clipping or topology repair occurs.
+    pub fn new(
+        source_site_id: FamilySiteId,
+        path: CurvePath,
+        scope: SiteScope,
+        provenance: FamilySiteProvenance,
+        fill_rule: CanonicalFillRule,
+    ) -> Result<Self, CurveError> {
+        if path.closure() != PathClosure::Closed {
+            return Err(CurveError::new(
+                "canonical.path_mark.closure",
+                "canonical filled path marks require a closed curve path",
+            ));
+        }
+        let bounds = path.bounds()?;
+        Ok(Self {
+            source_site_id,
+            path,
+            bounds,
+            scope,
+            provenance,
+            fill_rule,
+        })
+    }
+}
+
+/// Truthful canonical filled mark geometry shared by typed shape and circle outputs.
+///
+/// Unlike the retained Stage 3 diagnostic circle adapter, every variant retains
+/// the family-emission ID and provenance that the family evaluator published.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CanonicalMark {
+    Circle {
+        source_site_id: FamilySiteId,
+        center: Point2,
+        radius: f64,
+        scope: SiteScope,
+        provenance: FamilySiteProvenance,
+        fill_rule: CanonicalFillRule,
+    },
+    ClosedPath(CanonicalPathMark),
+}
+
 impl CanonicalCircleMark {
     pub fn new(
         source_site_id: SiteId,

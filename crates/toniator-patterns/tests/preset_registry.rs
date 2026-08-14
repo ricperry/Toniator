@@ -1,9 +1,10 @@
 use toniator_domain::{
-    ArtworkWeightResponse, CanvasSpec, ChannelId, Document, DocumentHistory, DocumentSession,
+    ArtworkWeightResponse, AuthoredCurveSegment, AuthoredPoint2, AuthoredStructureDraft,
+    AuthoredStructureKind, CanvasSpec, ChannelId, Document, DocumentHistory, DocumentSession,
     GeneralizedSiteProductDraft, GuideDimensionDraft, MarkOrientation, MarkOrientationDraft,
-    PatternDefinitionRecipe, PatternMechanism, PresetMetadata, PresetRecord, RandomSiteCharacter,
-    SiteDensityModulation, SiteExclusionPolicy, SourceMapping, SourceMappingComponent,
-    SourceReference,
+    MarkPrototype, PatternDefinitionDraft, PatternDefinitionRecipe, PatternMechanism,
+    PatternOutputLayer, PresetMetadata, PresetRecord, RandomSiteCharacter, SiteDensityModulation,
+    SiteExclusionPolicy, SourceMapping, SourceMappingComponent, SourceReference,
 };
 use toniator_patterns::{BUNDLED_PRESET_REGISTRY_VERSION, PresetRegistry};
 
@@ -319,4 +320,74 @@ fn stale_shared_disclosure_rejects_before_dispatch_and_fresh_prepare_confirms() 
         confirmed.affected_channels,
         vec![ChannelId(2), ChannelId(3)]
     );
+}
+
+/// Materializes an ID-free shape preset as one document resource plus one typed definition,
+/// then proves undo and redo publish or remove both pieces as a single history transition.
+#[test]
+fn shape_preset_materialization_is_atomic_and_uses_an_ordinary_typed_reference() {
+    let points = [
+        AuthoredPoint2 { x: -2.0, y: -1.0 },
+        AuthoredPoint2 { x: 2.0, y: -1.0 },
+        AuthoredPoint2 { x: 0.0, y: 3.0 },
+    ];
+    let shape = AuthoredStructureDraft::new(
+        AuthoredStructureKind::ClosedShape,
+        (0..3)
+            .map(|index| AuthoredCurveSegment::Line {
+                start: points[index],
+                end: points[(index + 1) % 3],
+            })
+            .collect(),
+    )
+    .expect("the triangle fixture is a finite closed shape");
+    let registry = PresetRegistry::new(
+        1,
+        vec![PresetRecord {
+            metadata: PresetMetadata {
+                id: "shape-grid".into(),
+                name: "Shape Grid".into(),
+                category: "Test".into(),
+                description: "Atomic shape materialization fixture.".into(),
+                thumbnail: None,
+            },
+            recipe: PatternDefinitionRecipe::AuthoredClosedShapeMarks {
+                definition: Box::new(PatternDefinitionRecipe::StraightGrid(
+                    PatternDefinitionDraft {
+                        name: "Triangle grid".into(),
+                        coverage: toniator_domain::CoveragePolicy {
+                            guard_steps: 2,
+                            additional_margin: 4.5,
+                        },
+                    },
+                )),
+                shape,
+            },
+        }],
+    )
+    .expect("the shape registry entry is valid");
+    let mut history = history();
+    let before = history.document().clone();
+    let result = registry
+        .apply_to_selected(&mut history, ChannelId(1), "shape-grid")
+        .expect("shape preset materialization succeeds");
+    assert_eq!(result.affected_channels, vec![ChannelId(1)]);
+    assert_eq!(history.document().authored_structures().len(), 1);
+    let structure = &history.document().authored_structures()[0];
+    let definition = history
+        .document()
+        .pattern_definition_for(ChannelId(1))
+        .expect("the selected channel targets the materialized definition");
+    assert!(matches!(
+        definition.output_layers.as_slice(),
+        [PatternOutputLayer::MarkPrototype {
+            prototype: MarkPrototype::AuthoredClosedShape { structure_id },
+            ..
+        }] if *structure_id == structure.id()
+    ));
+    let after = history.document().clone();
+    history.undo().expect("the atomic preset transition undoes");
+    assert_eq!(history.document(), &before);
+    history.redo().expect("the atomic preset transition redoes");
+    assert_eq!(history.document(), &after);
 }

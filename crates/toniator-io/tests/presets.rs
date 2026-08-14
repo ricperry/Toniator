@@ -1,6 +1,7 @@
 use std::{fs, path::PathBuf};
 
 use toniator_domain::{
+    AuthoredCurveSegment, AuthoredPoint2, AuthoredStructureDraft, AuthoredStructureKind,
     CoveragePolicy, GuideDimensionDraft, MarkOrientationDraft, PatternDefinitionDraft,
     PatternDefinitionRecipe, PresetMetadata, PresetRecord,
 };
@@ -10,9 +11,60 @@ use toniator_io::{PRESET_FORMAT_VERSION, load_preset, save_preset};
 /// project inputs untouched.
 fn validation_directory() -> PathBuf {
     let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/validation/stage-19a/preset-io");
+        .join("../../target/validation/stage-20e2/preset-io");
     fs::create_dir_all(&directory).unwrap();
     directory
+}
+
+/// Round-trips a preset-v2 ID-free self-intersecting shape recipe without allocating IDs.
+#[test]
+fn authored_closed_shape_preset_round_trips_as_embedded_recipe_geometry() {
+    let points = [
+        AuthoredPoint2 { x: -1.0, y: -1.0 },
+        AuthoredPoint2 { x: 1.0, y: 1.0 },
+        AuthoredPoint2 { x: -1.0, y: 1.0 },
+        AuthoredPoint2 { x: 1.0, y: -1.0 },
+    ];
+    let shape = AuthoredStructureDraft::new(
+        AuthoredStructureKind::ClosedShape,
+        (0..4)
+            .map(|index| AuthoredCurveSegment::Line {
+                start: points[index],
+                end: points[(index + 1) % 4],
+            })
+            .collect(),
+    )
+    .expect("the bow-tie fixture is a finite closed shape");
+    let preset = PresetRecord {
+        metadata: PresetMetadata {
+            id: "shape-round-trip".into(),
+            name: "Shape Round Trip".into(),
+            category: "Test".into(),
+            description: "ID-free authored-shape preset fixture.".into(),
+            thumbnail: None,
+        },
+        recipe: PatternDefinitionRecipe::AuthoredClosedShapeMarks {
+            definition: Box::new(PatternDefinitionRecipe::StraightGrid(
+                PatternDefinitionDraft {
+                    name: "Bow-tie grid".into(),
+                    coverage: CoveragePolicy {
+                        guard_steps: 2,
+                        additional_margin: 4.5,
+                    },
+                },
+            )),
+            shape,
+        },
+    };
+    let path = validation_directory().join("shape-round-trip.preset.json");
+    save_preset(&path, &preset).expect("the valid shape preset saves");
+    assert_eq!(
+        load_preset(&path).expect("the current shape preset reloads"),
+        preset
+    );
+    let text = fs::read_to_string(path).expect("the derived preset remains readable");
+    assert!(text.contains("\"kind\": \"authored_closed_shape_marks\""));
+    assert!(!text.contains("structure_id"));
 }
 
 /// Serializes and reloads an ordinary pure-schema record through the standalone

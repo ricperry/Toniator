@@ -435,6 +435,7 @@ fn multi_layer_order_visibility_and_source_over_are_preserved() {
     assert!(!svg.contains("channel-3"));
 }
 
+/// Proves truthful contributor changes participate in retained canonical scene identity.
 #[test]
 fn scene_identity_covers_canonical_provenance() {
     let first = scene(
@@ -447,7 +448,9 @@ fn scene_identity_covers_canonical_provenance() {
         },
         1.0,
     );
-    let GeometryOutput::CircularMarks(mut marks) = first.layers()[0].geometry().clone();
+    let GeometryOutput::CircularMarks(mut marks) = first.layers()[0].geometry().clone() else {
+        panic!("fixture scene retains circular geometry");
+    };
     marks[0].provenance.contributors[1].index = 99;
     let second = RenderScene::new(
         first.canvas().clone(),

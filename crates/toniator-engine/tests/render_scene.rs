@@ -12,6 +12,7 @@ use toniator_engine::{
 
 const CHANNEL_ID: ChannelId = ChannelId(1);
 
+/// Builds the retained legacy diagnostic request used by render identity regression witnesses.
 fn request(bytes: Vec<u8>, format: SourceFormatHint) -> ChannelDiagnosticRequest {
     let source_id = SourceReferenceId::new("baseline-source").unwrap();
     let document = Document::with_source(
@@ -74,6 +75,7 @@ fn request(bytes: Vec<u8>, format: SourceFormatHint) -> ChannelDiagnosticRequest
     )
 }
 
+/// Preserves accepted legacy-circle diagnostic identities after generalized marks were introduced.
 #[test]
 fn document_derived_evaluation_matches_accepted_stage_five_identities_and_geometry() {
     for (path, format, realization, scene, decoded) in [
@@ -104,7 +106,9 @@ fn document_derived_evaluation_matches_accepted_stage_five_identities_and_geomet
         );
         assert_eq!(result.scene().identity().scene_fingerprint(), scene);
         assert_eq!(result.source_identity().decoded_pixel_hash, decoded);
-        let GeometryOutput::CircularMarks(marks) = result.scene().layers()[0].geometry();
+        let GeometryOutput::CircularMarks(marks) = result.scene().layers()[0].geometry() else {
+            panic!("accepted Stage 5 diagnostic definition must retain the legacy circle adapter");
+        };
         assert_eq!(marks.len(), 6_185);
         assert_eq!(
             marks

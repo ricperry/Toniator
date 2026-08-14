@@ -32,11 +32,11 @@ use toniator_domain::{
     HalftoneChannelModel, HalftoneChannelRole, ModeledChannelState,
 };
 pub use toniator_patterns::{
-    CanonicalCircleMark, CircularMarkRealization, MarkResponse, Point2, RealizationError, SiteId,
-    SiteScope,
+    CanonicalCircleMark, CanonicalMark, CanonicalMarkRealization, CircularMarkRealization,
+    MarkResponse, Point2, RealizationError, SiteId, SiteScope,
 };
 use toniator_patterns::{
-    CurveSegment, FamilyCapability, GenericGuideCapability, GridFamilyOutput,
+    CurvePath, CurveSegment, FamilyCapability, GenericGuideCapability, GridFamilyOutput,
     MappedCircularMarkRealization, PatternPipelineError, SourceColorCircularMarkRealization,
     TypedFamilyOutput, TypedRealization, evaluate_straight_grid,
     evaluate_typed_family_product_with_source_cancellable, family_requires_decoded_source,
@@ -46,8 +46,8 @@ use toniator_patterns::{
 pub use toniator_render::{
     GeometryOutput, OutputRasterTarget, PreviewRasterTarget, RasterAntialiasing, RasterBackground,
     RasterSurface, RenderError, RenderLayer, RenderScene, SceneIdentity, encode_png,
-    linear_to_srgb, raster_output_identity, rasterize, rasterize_output, rasterize_preview,
-    srgb_to_linear, write_svg,
+    linear_to_srgb, raster_output_identity, rasterize, rasterize_cancellable, rasterize_output,
+    rasterize_preview, rasterize_preview_cancellable, srgb_to_linear, write_svg,
 };
 use toniator_sampling::decode_source;
 pub use toniator_sampling::{
@@ -165,11 +165,18 @@ pub struct ChannelDiagnosticRequest {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EvaluationLimits {
     max_family_candidates: usize,
+    max_flattened_raster_edges: usize,
+    max_transformed_curve_segment_instances: usize,
 }
 
 impl EvaluationLimits {
     pub const DEFAULT_MAX_FAMILY_CANDIDATES: usize = 1_048_576;
 
+    /// Builds the complete nonzero default E2 work policy with a caller-selected family bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns `coverage.candidate_limit` when family work is disabled.
     pub fn new(max_family_candidates: usize) -> Result<Self, EvaluationError> {
         if max_family_candidates == 0 {
             return Err(EvaluationError::new(
@@ -179,19 +186,107 @@ impl EvaluationLimits {
         }
         Ok(Self {
             max_family_candidates,
+            max_flattened_raster_edges: toniator_render::DEFAULT_MAX_FLATTENED_RASTER_EDGES,
+            max_transformed_curve_segment_instances:
+                toniator_patterns::MAX_TRANSFORMED_CURVE_SEGMENT_INSTANCES,
         })
     }
 
     pub const fn max_family_candidates(self) -> usize {
         self.max_family_candidates
     }
+
+    /// Replaces the concrete raster edge budget while retaining the existing family candidate limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable evaluation diagnostic when the required finite raster bound is disabled.
+    pub fn with_max_flattened_raster_edges(
+        mut self,
+        value: usize,
+    ) -> Result<Self, EvaluationError> {
+        if value == 0 {
+            return Err(EvaluationError::new(
+                "raster.limits.flattened_edges",
+                "configured flattened raster edge limit must be nonzero",
+            ));
+        }
+        self.max_flattened_raster_edges = value;
+        Ok(self)
+    }
+
+    /// Returns the request-wide upper bound shared by all adaptive canonical path rasterization.
+    pub const fn max_flattened_raster_edges(self) -> usize {
+        self.max_flattened_raster_edges
+    }
+
+    /// Replaces the pre-allocation transformed authored-segment instance bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns the stable segment-limit diagnostic when the required bound is disabled.
+    pub fn with_max_transformed_curve_segment_instances(
+        mut self,
+        value: usize,
+    ) -> Result<Self, EvaluationError> {
+        if value == 0 {
+            return Err(EvaluationError::new(
+                "realization.mark.segment_limit",
+                "configured transformed curve-segment limit must be nonzero",
+            ));
+        }
+        self.max_transformed_curve_segment_instances = value;
+        Ok(self)
+    }
+
+    /// Returns the exact checked transformed authored-segment instance limit.
+    pub const fn max_transformed_curve_segment_instances(self) -> usize {
+        self.max_transformed_curve_segment_instances
+    }
 }
 
 impl Default for EvaluationLimits {
+    /// Supplies exact finite family, transformed-segment, and flattened-edge defaults.
     fn default() -> Self {
         Self {
             max_family_candidates: Self::DEFAULT_MAX_FAMILY_CANDIDATES,
+            max_flattened_raster_edges: toniator_render::DEFAULT_MAX_FLATTENED_RASTER_EDGES,
+            max_transformed_curve_segment_instances:
+                toniator_patterns::MAX_TRANSFORMED_CURVE_SEGMENT_INSTANCES,
         }
+    }
+}
+
+#[cfg(test)]
+mod stage20e2_limit_tests {
+    use super::*;
+
+    /// Fixes both Stage 20E2 defaults and rejects disabled transformed or flattened work bounds.
+    #[test]
+    fn evaluation_limits_keep_exact_nonzero_shape_work_bounds() {
+        let defaults = EvaluationLimits::default();
+        assert_eq!(
+            defaults.max_transformed_curve_segment_instances(),
+            toniator_patterns::MAX_TRANSFORMED_CURVE_SEGMENT_INSTANCES
+        );
+        assert_eq!(
+            defaults.max_flattened_raster_edges(),
+            toniator_render::DEFAULT_MAX_FLATTENED_RASTER_EDGES
+        );
+        assert_eq!(
+            defaults
+                .with_max_transformed_curve_segment_instances(0)
+                .unwrap_err()
+                .path(),
+            "realization.mark.segment_limit"
+        );
+        assert_eq!(
+            defaults
+                .with_max_flattened_raster_edges(0)
+                .unwrap_err()
+                .path(),
+            "raster.limits.flattened_edges"
+        );
     }
 }
 
@@ -327,6 +422,7 @@ struct SceneCacheKey {
 struct RasterCacheKey {
     scene: SceneCacheKey,
     transparent_raster_contract: &'static str,
+    max_flattened_raster_edges: usize,
 }
 
 const TRANSPARENT_RASTER_CONTRACT_ID: &str = "toniator-render-transparent-raster-v1";
@@ -656,9 +752,13 @@ fn evaluate_generic_family_stage(
     }
 }
 
-/// Evaluates the same ordered Stage 3 -> Stage 4 -> Stage 5 path as
-/// [`evaluate_channel_diagnostic`], checking cancellation only between
-/// existing pipeline stages.
+/// Evaluates the same ordered diagnostic path as [`evaluate_channel_diagnostic`] with accepted
+/// cache reuse and caller-owned cancellation through family, realization, and raster work.
+///
+/// # Errors
+///
+/// Returns cancellation or the first stable decode, family, realization, scene, or raster failure
+/// without publishing a cache transaction.
 fn evaluate_channel_diagnostic_cached_with_cancellation(
     request: ChannelDiagnosticRequest,
     cancellation: &dyn CancellationProbe,
@@ -848,6 +948,7 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
     let raster_key = RasterCacheKey {
         scene: scene_key.clone(),
         transparent_raster_contract: TRANSPARENT_RASTER_CONTRACT_ID,
+        max_flattened_raster_edges: limits.max_flattened_raster_edges(),
     };
     let (raster, raster_disposition) =
         evaluate_stage(EvaluationStage::Raster, cancellation, || {
@@ -855,9 +956,15 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
                 Some((key, raster)) if *key == raster_key => {
                     Ok((Arc::clone(raster), CacheDisposition::Hit))
                 }
-                _ => rasterize(&scene, RasterBackground::Transparent)
-                    .map(|raster| (Arc::new(raster), CacheDisposition::Miss))
-                    .map_err(EvaluationError::from_render),
+                _ => rasterize_cancellable(
+                    &scene,
+                    RasterBackground::Transparent,
+                    toniator_render::RasterizationLimits::new(limits.max_flattened_raster_edges())
+                        .expect("EvaluationLimits validates raster edge bounds"),
+                    &|| cancellation.is_cancelled(),
+                )
+                .map(|raster| (Arc::new(raster), CacheDisposition::Miss))
+                .map_err(EvaluationError::from_render),
             }
         })?;
     let diagnostics = CacheDiagnostics {
@@ -990,11 +1097,89 @@ fn realization_source_identity(value: &SourceIdentity) -> RealizationSourceIdent
     }
 }
 
+/// Captures ordered output and modulation authority for realization-cache discrimination.
 fn realization_contract_key(value: &PatternDefinition) -> RealizationContractKey {
     RealizationContractKey {
         output_layers: value.output_layers.clone(),
         modulation: value.modulation.clone(),
     }
+}
+
+/// Hashes resolved authored closed-shape content so a resource replacement cannot reuse stale marks.
+///
+/// The typed definition retains a stable resource ID, but cache reuse additionally depends on the
+/// resource's exact closure, segment kinds, and construction-point bits. Missing or malformed
+/// resources fail before a cache candidate can be selected or a transaction can publish.
+///
+/// # Errors
+///
+/// Returns stable missing-resource or malformed-geometry diagnostics.
+fn resolved_shape_content_identity(
+    document: &toniator_domain::Document,
+    definition: &PatternDefinition,
+) -> Result<String, EvaluationError> {
+    let mut bytes = b"toniator-stage-20e2-resolved-shape-content-v1".to_vec();
+    for output in &definition.output_layers {
+        let PatternOutputLayer::MarkPrototype { prototype, .. } = output else {
+            continue;
+        };
+        let toniator_domain::MarkPrototype::AuthoredClosedShape { structure_id } = prototype else {
+            continue;
+        };
+        let structure = document
+            .authored_structure(*structure_id)
+            .ok_or(EvaluationError::new(
+                "evaluation.mark_shape.reference",
+                "authored closed-shape mark resource is missing",
+            ))?;
+        let path = CurvePath::from_authored_structure(structure).map_err(|_| {
+            EvaluationError::new(
+                "evaluation.mark_shape.geometry",
+                "authored closed-shape mark resource is not valid curve geometry",
+            )
+        })?;
+        bytes.extend(structure_id.0.to_le_bytes());
+        bytes.push(match path.closure() {
+            toniator_patterns::PathClosure::Open => 1,
+            toniator_patterns::PathClosure::Closed => 2,
+        });
+        bytes.extend(
+            u64::try_from(path.segments().len())
+                .expect("usize fits u64")
+                .to_le_bytes(),
+        );
+        for segment in path.segments() {
+            match segment {
+                CurveSegment::Line(line) => {
+                    bytes.push(1);
+                    for point in [line.start(), line.end()] {
+                        bytes.extend(point.x.to_bits().to_le_bytes());
+                        bytes.extend(point.y.to_bits().to_le_bytes());
+                    }
+                }
+                CurveSegment::CubicBezier(cubic) => {
+                    bytes.push(2);
+                    for point in [
+                        cubic.start(),
+                        cubic.control_1(),
+                        cubic.control_2(),
+                        cubic.end(),
+                    ] {
+                        bytes.extend(point.x.to_bits().to_le_bytes());
+                        bytes.extend(point.y.to_bits().to_le_bytes());
+                    }
+                }
+            }
+        }
+    }
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    Ok(format!(
+        "toniator-stage-20e2-shape-content-v1:fnv1a64:{hash:016x}"
+    ))
 }
 
 fn source_component_key(value: SourceComponent) -> u8 {
@@ -1612,6 +1797,12 @@ fn evaluate_cached_document_with_test_observer(
     evaluate_cached_document_impl(request, limits, accepted, cancellation, decode_observer)
 }
 
+/// Evaluates one complete modeled document into private cache candidates under request-wide limits.
+///
+/// # Errors
+///
+/// Returns cancellation or the first stable validation, source, family, realization, scene, or
+/// raster diagnostic; callers receive no partial result or transaction.
 fn evaluate_cached_document_impl(
     request: EvaluationRequest,
     limits: EvaluationLimits,
@@ -1703,6 +1894,8 @@ fn evaluate_cached_document_impl(
     let mut realizations = Vec::with_capacity(topology.channels().len());
     let mut family_dispositions = Vec::with_capacity(topology.channels().len());
     let mut realization_dispositions = Vec::with_capacity(topology.channels().len());
+    let mut remaining_transformed_curve_segment_instances =
+        limits.max_transformed_curve_segment_instances();
     for channel in topology.channels() {
         if cancellation.is_cancelled() {
             return Err(EvaluationRunError::Cancelled);
@@ -1763,6 +1956,7 @@ fn evaluate_cached_document_impl(
         let realization_key = DocumentRealizationCacheKey {
             family_content: key.content.clone(),
             contract: realization_contract_key(definition),
+            resolved_shape_content: resolved_shape_content_identity(document, definition)?,
             source_identity: realization_source_identity(source.identity()),
             mapping: format!(
                 "{:?}:{:?}:{}:{}:{}",
@@ -1781,6 +1975,7 @@ fn evaluate_cached_document_impl(
                     .to_bits(),
             ),
             sampled_paint: matches!(channel.paint, ChannelPaint::SampledSource),
+            max_transformed_curve_segment_instances: remaining_transformed_curve_segment_instances,
         };
         let (realization, realization_disposition) = match accepted
             .realizations
@@ -1789,14 +1984,37 @@ fn evaluate_cached_document_impl(
         {
             Some((_, realization)) => (Arc::clone(realization), CacheDisposition::Hit),
             None => (
-                Arc::new(evaluate_stage(
-                    EvaluationStage::Realization,
-                    cancellation,
-                    || evaluate_document_channel(document, channel, &source, &family, &plan),
-                )?),
+                Arc::new(
+                    match evaluate_stage(EvaluationStage::Realization, cancellation, || {
+                        evaluate_document_channel(
+                            document,
+                            definition,
+                            channel,
+                            &source,
+                            &family,
+                            &plan,
+                            remaining_transformed_curve_segment_instances,
+                            &|| cancellation.is_cancelled(),
+                        )
+                    }) {
+                        Err(EvaluationRunError::Evaluation(error))
+                            if error.path() == "evaluation.cancelled" =>
+                        {
+                            return Err(EvaluationRunError::Cancelled);
+                        }
+                        result => result?,
+                    },
+                ),
                 CacheDisposition::Miss,
             ),
         };
+        remaining_transformed_curve_segment_instances =
+            remaining_transformed_curve_segment_instances
+                .checked_sub(transformed_curve_segment_instances(&realization)?)
+                .ok_or(EvaluationError::new(
+                    "realization.mark.segment_limit",
+                    "transformed curve-segment instance limit exceeded",
+                ))?;
         summaries.push(ChannelEvaluationSummary {
             role: channel.role,
             channel_id: channel.id,
@@ -1847,14 +2065,16 @@ fn evaluate_cached_document_impl(
     };
     let raster_key = match request.preview_target {
         Some(target) => format!(
-            "{}:{TRANSPARENT_RASTER_CONTRACT_ID}:preview-v1:{model:?}:{}x{}",
+            "{}:{TRANSPARENT_RASTER_CONTRACT_ID}:preview-v1:{model:?}:{}x{}:edges={}",
             scene.identity().scene_fingerprint(),
             target.width(),
-            target.height()
+            target.height(),
+            limits.max_flattened_raster_edges()
         ),
         None => format!(
-            "{}:{TRANSPARENT_RASTER_CONTRACT_ID}:{model:?}",
-            scene.identity().scene_fingerprint()
+            "{}:{TRANSPARENT_RASTER_CONTRACT_ID}:{model:?}:edges={}",
+            scene.identity().scene_fingerprint(),
+            limits.max_flattened_raster_edges()
         ),
     };
     let (raster, raster_disposition) = match &accepted.raster {
@@ -1865,8 +2085,24 @@ fn evaluate_cached_document_impl(
                 cancellation,
                 || {
                     match request.preview_target {
-                        Some(target) => rasterize_preview(&scene, target),
-                        None => rasterize(&scene, RasterBackground::Transparent),
+                        Some(target) => rasterize_preview_cancellable(
+                            &scene,
+                            target,
+                            toniator_render::RasterizationLimits::new(
+                                limits.max_flattened_raster_edges(),
+                            )
+                            .expect("EvaluationLimits validates raster edge bounds"),
+                            &|| cancellation.is_cancelled(),
+                        ),
+                        None => rasterize_cancellable(
+                            &scene,
+                            RasterBackground::Transparent,
+                            toniator_render::RasterizationLimits::new(
+                                limits.max_flattened_raster_edges(),
+                            )
+                            .expect("EvaluationLimits validates raster edge bounds"),
+                            &|| cancellation.is_cancelled(),
+                        ),
                     }
                     .map_err(EvaluationError::from_render)
                 },
@@ -1931,51 +2167,120 @@ fn evaluate_cached_document_impl(
 enum DocumentRealization {
     Mapped(TypedRealization<MappedCircularMarkRealization>),
     SourceColor(TypedRealization<SourceColorCircularMarkRealization>),
+    Canonical(TypedRealization<CanonicalMarkRealization>),
 }
+/// Returns the complete immutable realization fingerprint for any retained or canonical variant.
 fn document_realization_identity(value: &DocumentRealization) -> &str {
     match value {
         DocumentRealization::Mapped(value) => &value.output.realization_fingerprint,
         DocumentRealization::SourceColor(value) => &value.output.realization_fingerprint,
+        DocumentRealization::Canonical(value) => &value.output.realization_fingerprint,
     }
 }
+
+/// Counts authored path segment instances in one completed channel realization for the
+/// request-wide evaluation budget; circle and retained adapter outputs consume no path work.
+///
+/// # Errors
+///
+/// Returns the stable segment-limit diagnostic if a maliciously large completed value overflows.
+fn transformed_curve_segment_instances(
+    value: &DocumentRealization,
+) -> Result<usize, EvaluationError> {
+    let DocumentRealization::Canonical(value) = value else {
+        return Ok(0);
+    };
+    value.output.marks.iter().try_fold(0_usize, |total, mark| {
+        let count = match mark {
+            CanonicalMark::Circle { .. } => 0,
+            CanonicalMark::ClosedPath(path) => path.path.segments().len(),
+        };
+        total.checked_add(count).ok_or(EvaluationError::new(
+            "realization.mark.segment_limit",
+            "transformed curve-segment instance count overflows",
+        ))
+    })
+}
+/// Realizes one document channel through either the retained legacy circle adapter or truthful marks.
+///
+/// Mark-prototype layers always publish generalized canonical geometry, while legacy
+/// `CircularMarks` remain on their diagnostic compatibility path. The caller has completed
+/// document-level reference validation, but this boundary still returns a stable error before
+/// cache transaction publication when the typed family or source cannot realize the layer.
+///
+/// # Errors
+///
+/// Returns the first stable source, response, cancellation, segment-limit, or realization error.
+#[allow(clippy::too_many_arguments)]
 fn evaluate_document_channel(
     document: &toniator_domain::Document,
+    definition: &PatternDefinition,
     channel: &ModeledChannelState,
     source: &SourceField,
     family: &TypedFamilyOutput,
     plan: &toniator_patterns::PatternPipelinePlan,
+    max_transformed_curve_segment_instances: usize,
+    is_cancelled: &dyn Fn() -> bool,
 ) -> Result<DocumentRealization, EvaluationError> {
     let response = MarkResponse {
         minimum_fill: channel.mark_geometry_response.minimum_fill,
         maximum_fill: channel.mark_geometry_response.maximum_fill,
         rotation_offset_degrees: channel.mark_geometry_response.rotation_offset_degrees,
     };
-    let realization = match channel.paint {
-        ChannelPaint::Solid(_) => DocumentRealization::Mapped(
-            realize_typed_mapped_outputs(
+    let realization = if matches!(
+        definition.output_layers.as_slice(),
+        [PatternOutputLayer::MarkPrototype { .. }]
+    ) {
+        DocumentRealization::Canonical(
+            toniator_patterns::realize_typed_canonical_marks_cancellable(
+                document,
                 family,
                 plan,
                 source,
                 document.canvas(),
-                channel.mapping,
-                response,
+                toniator_patterns::CanonicalMarkRequest {
+                    mapping: channel.mapping,
+                    sampled_paint: matches!(channel.paint, ChannelPaint::SampledSource),
+                    response,
+                    max_transformed_curve_segment_instances,
+                },
+                is_cancelled,
             )
             .map_err(EvaluationError::from_pipeline)?,
-        ),
-        ChannelPaint::SampledSource => DocumentRealization::SourceColor(
-            realize_typed_source_color_outputs(
-                family,
-                plan,
-                source,
-                document.canvas(),
-                channel.mapping,
-                response,
-            )
-            .map_err(EvaluationError::from_pipeline)?,
-        ),
+        )
+    } else {
+        match channel.paint {
+            ChannelPaint::Solid(_) => DocumentRealization::Mapped(
+                realize_typed_mapped_outputs(
+                    family,
+                    plan,
+                    source,
+                    document.canvas(),
+                    channel.mapping,
+                    response,
+                )
+                .map_err(EvaluationError::from_pipeline)?,
+            ),
+            ChannelPaint::SampledSource => DocumentRealization::SourceColor(
+                realize_typed_source_color_outputs(
+                    family,
+                    plan,
+                    source,
+                    document.canvas(),
+                    channel.mapping,
+                    response,
+                )
+                .map_err(EvaluationError::from_pipeline)?,
+            ),
+        }
     };
     Ok(realization)
 }
+/// Converts one completed channel realization into a renderer-owned layer without resource lookup.
+///
+/// # Errors
+///
+/// Returns stable layer validation failures before a scene can publish.
 fn document_render_layer(
     channel: &ModeledChannelState,
     realization: DocumentRealization,
@@ -2012,6 +2317,35 @@ fn document_render_layer(
                 .collect(),
         )
         .map_err(EvaluationError::from_render),
+        DocumentRealization::Canonical(value) => match channel.paint {
+            ChannelPaint::Solid(ref color) => RenderLayer::new(
+                channel.id,
+                channel.visible,
+                color.clone(),
+                channel.opacity,
+                GeometryOutput::CanonicalMarks(value.output.marks),
+            )
+            .map_err(EvaluationError::from_render),
+            ChannelPaint::SampledSource => RenderLayer::new_source_color_geometry(
+                channel.id,
+                channel.visible,
+                channel.opacity,
+                value.output.marks,
+                value
+                    .output
+                    .paints
+                    .expect("sampled canonical realization retains paint")
+                    .into_iter()
+                    .map(|paint| toniator_domain::ColorValue {
+                        red: paint.red,
+                        green: paint.green,
+                        blue: paint.blue,
+                        alpha: paint.alpha,
+                    })
+                    .collect(),
+            )
+            .map_err(EvaluationError::from_render),
+        },
     }
 }
 fn aggregate_document_identity<'a>(
@@ -2152,10 +2486,12 @@ fn required_support_radius_from_fill(
 struct DocumentRealizationCacheKey {
     family_content: DocumentFamilyContentKey,
     contract: RealizationContractKey,
+    resolved_shape_content: String,
     source_identity: RealizationSourceIdentity,
     mapping: String,
     response: (u64, u64, u64),
     sampled_paint: bool,
+    max_transformed_curve_segment_instances: usize,
 }
 
 #[derive(Clone, Default)]
@@ -2211,11 +2547,14 @@ pub(crate) mod test_support {
     };
 
     use toniator_domain::{
-        CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternLayout, ChannelSourceMapping,
-        ChannelState, ChannelTopologyTemplate, ColorValue, CoveragePolicy, DensityMetric2D,
-        Document, DocumentCommand, DocumentId, DocumentSession, HalftoneChannelModel,
-        MarkGeometryResponse, PatternDefinition, PatternDefinitionId, PatternMechanismId,
-        PatternOutputLayerId, SourceComponent, SourcePlacement, SourceReference, SourceReferenceId,
+        AuthoredCurveSegment, AuthoredPoint2, AuthoredStructure, AuthoredStructureId,
+        AuthoredStructureKind, CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternLayout,
+        ChannelSourceMapping, ChannelState, ChannelTopologyTemplate, ColorValue, CoveragePolicy,
+        DensityMetric2D, Document, DocumentCommand, DocumentId, DocumentSession,
+        GeneralizedSiteProduct, GuideDimensionId, HalftoneChannelModel, MarkGeometryResponse,
+        MarkOrientation, MarkPrototype, PatternDefinition, PatternDefinitionId, PatternMechanismId,
+        PatternOutputLayer, PatternOutputLayerId, SourceComponent, SourcePlacement,
+        SourceReference, SourceReferenceId, StraightGuideDimension, StraightGuideRepetition,
     };
 
     use super::*;
@@ -2316,6 +2655,90 @@ pub(crate) mod test_support {
             .apply(&DocumentCommand::ReplaceChannelTopology { model, topology })
             .unwrap();
         session
+    }
+
+    /// Builds a current-format modeled document whose typed output realizes one closed shape.
+    fn modeled_shape_session() -> DocumentSession {
+        let source_id = SourceReferenceId::new("cancellation-test-source").unwrap();
+        let base = Document::new_default_document(
+            CanvasSpec {
+                width: 100.0,
+                height: 100.0,
+            },
+            SourceReference::Assigned(source_id),
+        )
+        .unwrap();
+        let mut definition = PatternDefinition::generalized_straight_guides(
+            PatternDefinitionId(1),
+            "shape cancellation",
+            PatternMechanismId(1),
+            PatternMechanismId(2),
+            PatternOutputLayerId(1),
+            vec![
+                StraightGuideDimension {
+                    id: GuideDimensionId(1),
+                    baseline_angle_degrees: 0.0,
+                    phase: 0.0,
+                    repetition: StraightGuideRepetition {
+                        spacing_multiplier: 1.0,
+                    },
+                },
+                StraightGuideDimension {
+                    id: GuideDimensionId(2),
+                    baseline_angle_degrees: 90.0,
+                    phase: 0.0,
+                    repetition: StraightGuideRepetition {
+                        spacing_multiplier: 1.0,
+                    },
+                },
+            ],
+            GeneralizedSiteProduct::Intersections {
+                dimensions: vec![GuideDimensionId(1), GuideDimensionId(2)],
+                merge_epsilon: 0.0,
+            },
+            MarkOrientation::Fixed,
+            CoveragePolicy {
+                guard_steps: 1,
+                additional_margin: 0.0,
+            },
+        );
+        let PatternOutputLayer::MarkPrototype { prototype, .. } = &mut definition.output_layers[0]
+        else {
+            unreachable!("generalized straight guides own a typed mark output")
+        };
+        *prototype = MarkPrototype::AuthoredClosedShape {
+            structure_id: AuthoredStructureId(1),
+        };
+        let points = [
+            AuthoredPoint2 { x: -1.0, y: -1.0 },
+            AuthoredPoint2 { x: 1.0, y: -1.0 },
+            AuthoredPoint2 { x: 1.0, y: 1.0 },
+            AuthoredPoint2 { x: -1.0, y: 1.0 },
+        ];
+        let shape = AuthoredStructure::new(
+            AuthoredStructureId(1),
+            AuthoredStructureKind::ClosedShape,
+            (0..points.len())
+                .map(|index| AuthoredCurveSegment::Line {
+                    start: points[index],
+                    end: points[(index + 1) % points.len()],
+                })
+                .collect(),
+        )
+        .unwrap();
+        DocumentSession::new(
+            Document::with_source_topology_and_authored_structures(
+                base.id(),
+                base.canvas().clone(),
+                base.source().clone(),
+                vec![definition],
+                base.channel_model().unwrap(),
+                base.channel_topology().unwrap().clone(),
+                vec![shape],
+            )
+            .unwrap(),
+        )
+        .unwrap()
     }
 
     fn document_request(session: &DocumentSession, bytes: Arc<[u8]>) -> EvaluationRequest {
@@ -2541,6 +2964,59 @@ pub(crate) mod test_support {
         }
     }
 
+    /// Proves a superseded authored-shape realization publishes neither a completion nor cache
+    /// transaction, while its newest replacement becomes reusable only after explicit acceptance.
+    #[test]
+    fn authored_shape_scheduler_cancellation_does_not_publish_partial_cache_state() {
+        let (gate, entered) =
+            EvaluationStageGate::new(EvaluationStage::Realization, EvaluationCheckpoint::After);
+        let scheduler =
+            EvaluationScheduler::new_with_test_gate(EvaluationLimits::default(), Arc::clone(&gate))
+                .unwrap();
+        let session = modeled_shape_session();
+        let bytes = valid_document_bytes();
+        let stale_ticket = scheduler
+            .submit(document_request(&session, Arc::clone(&bytes)))
+            .unwrap();
+        entered.recv_timeout(GUARD).unwrap();
+        let newest_ticket = scheduler
+            .submit(document_request(&session, Arc::clone(&bytes)))
+            .unwrap();
+        gate.release();
+
+        let newest = wait_for_document_completion(&scheduler);
+        assert_ne!(stale_ticket, newest_ticket);
+        assert_eq!(newest.ticket(), newest_ticket);
+        assert_eq!(
+            newest.cache_diagnostics().unwrap().aggregate,
+            CacheDiagnostics {
+                decoded_source: CacheDisposition::Miss,
+                family: CacheDisposition::Miss,
+                realization: CacheDisposition::Miss,
+                scene: CacheDisposition::Miss,
+                raster: CacheDisposition::Miss,
+            },
+            "cancelled work must not become a cache authority"
+        );
+        assert!(scheduler.accept_completion(&newest, &session).unwrap());
+
+        let repeated_ticket = scheduler.submit(document_request(&session, bytes)).unwrap();
+        let repeated = wait_for_document_completion(&scheduler);
+        assert_eq!(repeated.ticket(), repeated_ticket);
+        assert_eq!(
+            repeated.cache_diagnostics().unwrap().aggregate,
+            CacheDiagnostics {
+                decoded_source: CacheDisposition::Hit,
+                family: CacheDisposition::Hit,
+                realization: CacheDisposition::Hit,
+                scene: CacheDisposition::Hit,
+                raster: CacheDisposition::Hit,
+            }
+        );
+        assert!(scheduler.accept_completion(&repeated, &session).unwrap());
+        scheduler.shutdown().unwrap();
+    }
+
     #[test]
     fn complete_scheduler_reports_checked_ticket_exhaustion_without_panicking() {
         let scheduler = EvaluationScheduler::new().unwrap();
@@ -2708,11 +3184,15 @@ mod cache_key_tests {
         assert_ne!(
             RasterCacheKey {
                 scene: first_scene,
-                transparent_raster_contract: TRANSPARENT_RASTER_CONTRACT_ID
+                transparent_raster_contract: TRANSPARENT_RASTER_CONTRACT_ID,
+                max_flattened_raster_edges: EvaluationLimits::default()
+                    .max_flattened_raster_edges(),
             },
             RasterCacheKey {
                 scene: second_scene,
-                transparent_raster_contract: TRANSPARENT_RASTER_CONTRACT_ID
+                transparent_raster_contract: TRANSPARENT_RASTER_CONTRACT_ID,
+                max_flattened_raster_edges: EvaluationLimits::default()
+                    .max_flattened_raster_edges(),
             },
         );
     }
