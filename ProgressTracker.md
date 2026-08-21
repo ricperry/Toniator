@@ -418,11 +418,17 @@ current schema, preset, evaluator/cache, and canonical-output authority. A real 
 construction-gesture crash, ineffective new-resource application, and an overly
 narrow editor; the same implementation writer repaired those failures. Focused
 verification and independent test and UX reviews pass. The user explicitly
-accepted Stage 20F on 2026-08-21. Publication and Stage 20G remain excluded
-until their respective gates.
+accepted Stage 20F on 2026-08-21. Publication remains excluded; Stage 20G is
+separately gated below.
 
-**Remaining Stage 20G+ — Planned.** The approved order is 20G effective pattern
-authority; 20H capability projection; 20I canonical paths/strokes; 20J path
+**Stage 20G — Complete at commit
+`de1320ba359beee42223ef994baebfd9ecd94c9c`.** The bounded contract and
+accepted implementation are documented in
+`docs/STAGE_20G_EFFECTIVE_PATTERN_AUTHORITY_PLAN.md`. The user explicitly
+accepted Stage 20G on 2026-08-21; publication remains separate.
+
+**Remaining Stage 20H+ — Planned.** The approved remaining order is 20H
+capability projection; 20I canonical paths/strokes; 20J path
 offset; 20K parametric curves; 20L adjacency; 20M connection programs; 20N
 Voronoi; 20O guide faces; 20P region realization; 20Q composites; 20R gallery
 recipes; 20S Pattern Wizard; and 20T–20W temporal work. Each requires its own

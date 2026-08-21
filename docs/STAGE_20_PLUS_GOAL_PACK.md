@@ -78,7 +78,8 @@ current document-v3/preset-v2 persistence. Stage 20F is **Complete at commit
 `7117e24b8c9e2e723c3c23e7e9050dc71277d15c`**. Its two provisional private-draft resource editors expose authored
 open guides and closed mark shapes; they are technical entry points, not the
 final Pattern Wizard workflow. The user accepted Stage 20F on 2026-08-21; that
-acceptance does not authorize Stage 20G.
+acceptance did not itself authorize Stage 20G. Stage 20G was separately
+authorized and accepted as recorded below.
 
 ## Later Goal candidates
 
@@ -92,8 +93,8 @@ fresh planning validates its contract against actual implementation evidence.
 | 20D | Generic curved/procedural guide generation and coverage. | Coverage/identity/cancel/cache/persistence. | 20A–20C. | Prototypes/repetition. | **Complete in the Stage 20D acceptance checkpoint** |
 | 20E1 | Normalized mark fill, per-site nominal basis, coverage correction, current document-schema-v3/preset-v2-only transition, and existing GUI/CLI controls. | Formula/coverage/cache/schema/fixture/natural-output and bounded GTK control checks. | 20A, 20D. | None within the approved contract. | **Complete in the Stage 20E1 acceptance checkpoint; independent repair re-review PASS** |
 | 20E2 | User-shape mark realization from authored structures. | Canonical geometry, limits/cancellation/cache, deterministic persistence, and PNG/SVG parity. | 20A, 20C, accepted 20E1. | None within the accepted contract. | **Complete at `0c6b6a2e268f9306835038be747352a0cd64044c`; independent repair re-review PASS** |
-| 20F | Provisional private-draft guide/shape resource editors and pending-preview feedback. | Focused editor/domain/geometry checks and private Sway evidence. | Accepted 20C–20E2 checkpoints. | Final wizard workflow; automated Sway is not a claim of separate GNOME/Mutter inspection. | **Complete at `7117e24b8c9e2e723c3c23e7e9050dc71277d15c`**; not authorization for 20G. |
-| 20G | Effective Pattern Authority: document base recipe/settings, optional channel replacement, typed deltas, reset/inherit, and current-only persistence. | Inheritance/delta/reset/stale/history/invalidation/save-reopen tests. | domain/io; protected specification direction. | Exact implementation contract. | Planned; separate contract and gate. |
+| 20F | Provisional private-draft guide/shape resource editors and pending-preview feedback. | Focused editor/domain/geometry checks and private Sway evidence. | Accepted 20C–20E2 checkpoints. | Final wizard workflow; automated Sway is not a claim of separate GNOME/Mutter inspection. | **Complete at `7117e24b8c9e2e723c3c23e7e9050dc71277d15c`**; Stage 20G was separately authorized. |
+| 20G | Effective Pattern Authority: document base recipe/settings, optional channel replacement, typed deltas, reset/inherit, and current-only persistence. | Inheritance/delta/reset/stale/history/invalidation/save-reopen tests plus intrinsic raster/vector/Holiday render witnesses. | domain/io; protected specification direction. | [`STAGE_20G_EFFECTIVE_PATTERN_AUTHORITY_PLAN.md`](STAGE_20G_EFFECTIVE_PATTERN_AUTHORITY_PLAN.md). | **Complete at `de1320ba359beee42223ef994baebfd9ecd94c9c`**; user accepted on 2026-08-21. |
 | 20H | Capability Projection Foundation: validated recipe/primitives to typed read-only capabilities. | Resolver and unsupported-page omission tests. | 20G. | Capability vocabulary extensions. | Planned; separate contract and gate. |
 | 20I | Canonical Paths and Strokes: raw guide/path output, stacked realization, typed strokes, clipping, identity, PNG/SVG parity. | Path/stroke/clip/identity/canonical-output tests. | 20B, 20D, 20G. | Exact stroke defaults. | Planned; separate contract and gate. |
 | 20J | Path Offset and Constant Gap: deterministic line/cubic offsets, joins, endpoint/collapse policy. | Offset/collapse/finite/determinism tests. | 20I. | Exact joins and limits. | Planned; separate contract and gate. |

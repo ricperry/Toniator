@@ -1,6 +1,7 @@
 # Stage 20G — Effective Pattern Authority
 
-Status: **Implemented awaiting review** (implementation verified, 2026-08-21)
+Status: **Complete at commit `de1320ba359beee42223ef994baebfd9ecd94c9c`**
+(user accepted, 2026-08-21)
 
 Stage 20G moves the shared recipe, density, layout rotation, shape rotation and
 mark response into `DocumentPatternSettings`. Each ordered channel retains its
@@ -104,5 +105,5 @@ in `.codex-work/evidence/stage-20g-implemented-awaiting-review.md`.
 
 Non-goals: capability projection, inheritance UI, Pattern Wizard, paths,
 regions, new response branches, compatibility adapters, changes to protected
-specifications, and Stage 20H+ work. The stage stops at **Implemented awaiting
-review**; review, acceptance, checkpointing and publication are separate gates.
+specifications, and Stage 20H+ work. Stage 20G is accepted at the implementation
+checkpoint above; publication and every later stage remain separate gates.
