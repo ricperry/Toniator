@@ -10,7 +10,9 @@ Noted exceptions can be found in `Addendum.md`.
 
 ## 1. Purpose
 
-This document defines the schema used to describe a Toniator pattern independently of any GTK widget, channel color, renderer, export format, or saved-document compatibility layer.
+This document defines the structural recipe used to describe a Toniator
+pattern independently of any GTK widget, channel appearance, renderer, export
+format, or saved-document compatibility layer.
 
 The schema must support:
 
@@ -27,7 +29,12 @@ The schema must support:
 - Exact canvas coverage at arbitrary rotation, offset, density, and aspect.
 - A shared canonical geometry pipeline for preview, PNG, and SVG.
 
-The pattern schema describes **what structural pattern exists and how it is realized**. Per-channel density, rotation, offset, mark size, line thickness, color, opacity, and visibility are defined in `ChannelSchema.md`.
+The pattern schema describes **what structural pattern exists and how it is
+realized**. The document owns the base recipe, base density/detail, base
+pattern and shape rotation, and base output-specific response range. A channel
+may replace the recipe and add typed scalar deltas; the domain resolves the
+effective instance described in `ChannelSchema.md`. Translation, source
+mapping, color, opacity, and visibility remain channel-specific.
 
 ---
 
@@ -64,7 +71,10 @@ pub struct PatternDefinition {
 }
 ```
 
-`PatternDefinition` is structural. It does not contain channel color, opacity, visibility, rotation, offset, density, mark-size response, line-thickness response, or cell-inset response.
+`PatternDefinition` is structural. It does not contain color, opacity,
+visibility, translation, density, pattern rotation, shape rotation, mark-size
+response, line-thickness response, or cell-inset response. Those values are
+held by document base settings and, where allowed, channel deltas.
 
 Named patterns such as “Rectangular Dots,” “Triangular Dots,” “Random Stippling,” “Maze,” “Curved Lines,” or “Voronoi Cells” should normally be presets over this schema rather than independent renderer implementations.
 
@@ -488,7 +498,10 @@ pub enum MarkPrototype {
 }
 ```
 
-Mark size, per-channel rotation response, and color are not stored here. They are channel-instance settings.
+Mark size, shape rotation, and color are not stored here. Size is an effective
+document-base plus optional output-response-delta value. Shape rotation is the
+document base plus an optional additive mark-realization channel delta; color
+remains channel-specific.
 
 ---
 
@@ -712,7 +725,9 @@ pub enum SamplingStrategy {
 }
 ```
 
-The pattern definition declares the supported modulation strategy. The channel instance supplies output-specific ranges such as:
+The pattern definition declares the supported modulation strategy. The
+domain-resolved document base plus matching channel delta supplies
+output-specific ranges such as:
 
 - Minimum and maximum mark size.
 - Minimum and maximum line thickness.
@@ -762,7 +777,8 @@ maximum mark radius
 
 ### 15.2 Channel transform and inverse-domain planning
 
-Coverage planning receives the channel’s density metric, rotation, and offset.
+Coverage planning receives the domain-resolved effective density metric and
+pattern rotation plus the channel's translation.
 
 Required order:
 
@@ -922,14 +938,15 @@ Requirements:
 ## 19. Evaluation sequence
 
 ```text
-PatternDefinition
+DocumentPatternSettings
 + ChannelPatternInstance
 + SourceArtwork
 + Canvas
         ↓
 Validate schema
         ↓
-Resolve density metric and channel transform
+Resolve and validate the effective recipe, density metric, response, and
+transform in the domain
         ↓
 Plan padded local generation domain
         ↓
@@ -939,7 +956,7 @@ Produce GuideSet and SiteSet
         ↓
 Evaluate PatternOutputSchema
         ↓
-Apply channel-specific size/thickness/inset response
+Apply effective output-specific size/thickness/inset response
         ↓
 Create canonical geometry
         ↓
@@ -1004,7 +1021,8 @@ Preview / PNG / SVG
 
 The pattern architecture is acceptable when:
 
-- A 900 × 600 document can request 90.0 across X and 60.0 across Y without storing a 10-pixel spacing.
+- A 900 × 600 document can request 90.0 across X and 60.0 across Y in its
+  base metric without storing a 10-pixel spacing.
 - Rotating, offsetting, or changing aspect recomputes generation and leaves no edge gaps.
 - A three-guide triangular grid uses the same family infrastructure as a two-guide grid.
 - Curved guide intersections can drive marks or Voronoi without a new site-placement implementation.
@@ -1013,4 +1031,7 @@ The pattern architecture is acceptable when:
 - Preview, PNG, and SVG use identical canonical geometry.
 - Cell shrinking uses the same region-offset infrastructure for Voronoi and guide-derived cells.
 - Every stochastic result is repeatable.
+- A channel without an override evaluates the document base recipe, while a
+  replacement recipe and typed delta affect only that channel and are resolved
+  by the domain before evaluation.
 - Every stage can be tested headlessly without GTK.

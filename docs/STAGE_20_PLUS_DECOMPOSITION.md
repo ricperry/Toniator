@@ -9,11 +9,10 @@ Stage 20C as complete in its single named acceptance checkpoint, and Stage 20D
 as complete in the Stage 20D acceptance checkpoint. Stage 20E1 normalized mark
 fill/coverage is complete in its named acceptance checkpoint, and Stage 20E2
 user-shape realization is complete at implementation checkpoint
-`0c6b6a2e268f9306835038be747352a0cd64044c`. The **remaining Stage 20F+ work is
-Planned by its own contract**: GTK guide/shape exposure; connected or network
-topology;
-regions, ordinary Voronoi, reusable offset/collapse; composite outputs;
-multiframe sources; and simple transitions. Stage 19B is complete at
+`0c6b6a2e268f9306835038be747352a0cd64044c`. **Stage 20F is Complete at commit
+`7117e24b8c9e2e723c3c23e7e9050dc71277d15c`**; its provisional resource-editor entry points do not approve
+the final wizard workflow. Stages 20G–20W are Planned by their own contracts.
+Stage 19B is complete at
 implementation checkpoint `b0b84e4`. Stage 20A is complete at implementation
 checkpoint `b7fbd81`.
 
@@ -61,16 +60,16 @@ multiframe/transition authority exists yet.
 
 | Concern | Current authority | Missing or coupled issue | Intended boundary | Invalidation / cache class |
 |---|---|---|---|---|
-| Source/sample | `SourceReference`, sampling fields, decoder identity and conditional artwork-weighted random input | Frame selection does not exist; source values must not become a renderer setting. | 20P source/frame contract; existing sampling stays reusable. | **Source/modulation:** decode always keys logical+content identity; only declared structural weighting reaches family. |
+| Source/sample | `SourceReference`, sampling fields, decoder identity and conditional artwork-weighted random input | Frame selection does not exist; source values must not become a renderer setting. | 20T source/frame contract; existing sampling stays reusable. | **Source/modulation:** decode always keys logical+content identity; only declared structural weighting reaches family. |
 | Guide/procedural structure | `StraightGuideDimensions`, selected intersections, along-guide sites and coverage planners | Straight and future curved prototypes lack a shared path/repetition substrate. | 20B–20D. | **Structural:** guide prototype, dimensions, coverage and phase miss family/downstream. |
 | Sites/distribution | `TypedFamilyOutput` and `FamilySiteSet`; `GridFamilyOutput` remains a dedicated diagnostic/compatibility type | Site interchange is now truthful and mechanism-neutral; future consumers must not depend on the private circle adapter. | 20B and later consumers. | **Structural:** site process/selection/seed/weighting changes miss family. |
-| Adjacency/topology | None; only guide/site provenance exists | No reusable graph; no topology can consume random and grid sites alike. | 20H graph, 20I programs. | **Structural:** graph rule/program/seed miss family-derived topology and downstream. |
-| Regions/cells/faces | None | No canonical region, Voronoi or guide-face output; canvas must not create cells. | 20K–20M. | **Structural:** region source/treatment changes miss realization/downstream; final clip stays consumer-only. |
-| Modulation/sampling | `PatternModulation` boundary, source mapping and mark response; random weighting is explicitly structural | Current modulation is minimal and must not be conflated with site generation or presentation. | Extend only after output kinds exist, beginning with 20E/20G/20N/20O. | **Modulation/source** when sampled values alter geometry/paint; artwork-weighted placement is explicitly structural. |
-| Realization | `PatternOutputLayer`, typed circular realization and `CanonicalCircleMark` | Current output is circles only and receives an intersection-shaped compatibility input. | 20E, 20G, 20K, 20O. | **Realization:** prototype, geometry response, path/region treatment miss realization/downstream while retaining family. |
-| Per-channel transforms/controls | `ChannelPatternLayout`, appearance, mapping, descriptor/command/history authority | Structural transform is distinct from mark response and presentation; future controls need the same descriptors. | Existing authority is reused; expose new fields only with their headless checkpoint then 20F/20J/20N/20S. | Layout is **structural**; mark size/thickness/inset is **realization**; sampled response is **modulation/source**; opacity/visibility/color are **presentation**. |
-| Canonical geometry/render/export | geometry canonical circles; renderer scene; engine preview/raster/SVG consumers | Canonical paths/regions/strokes are missing; renderer must not generate them. | 20B, 20E, 20G, 20K–20O. | Canonical content follows structural/realization changes; raster target/AA/background are **presentation** consumers. |
-| Persistence/presets/UI | domain/IO current-v2 authored structures and pure preset records; app private drafts/commands/descriptors | Temporal values lack schema; presets/UI must not own evaluator state. | Each mechanism checkpoint after 20C; 20F/20J/20N/20S UI. | Persisted structural/realization/modulation/presentation values use their existing invalidation class; never persist derived sites/topology/caches. |
+| Adjacency/topology | None; only guide/site provenance exists | No reusable graph; no topology can consume random and grid sites alike. | 20L adjacency, 20M programs. | **Structural:** graph rule/program/seed miss family-derived topology and downstream. |
+| Regions/cells/faces | None | No canonical region, Voronoi or guide-face output; canvas must not create cells. | 20N–20P. | **Structural:** region source/treatment changes miss realization/downstream; final clip stays consumer-only. |
+| Modulation/sampling | `PatternModulation` boundary, source mapping and mark response; random weighting is explicitly structural | Current modulation is minimal and must not be conflated with site generation or presentation. | Extend only after output kinds exist, beginning with 20I/20N/20Q. | **Modulation/source** when sampled values alter geometry/paint; artwork-weighted placement is explicitly structural. |
+| Realization | `PatternOutputLayer`, typed circular realization and `CanonicalCircleMark` | Current output is circles only and receives an intersection-shaped compatibility input. | 20E2 marks, 20I paths, 20N–20P regions, 20Q composites. | **Realization:** prototype, geometry response, path/region treatment miss realization/downstream while retaining family. |
+| Per-channel transforms/controls | `ChannelPatternLayout`, appearance, mapping, descriptor/command/history authority | Effective document/channel authority is not implemented; future controls need the same descriptors. | 20G domain authority, then 20S wizard exposure and 20W transition exposure. | Effective layout is **structural**; output response is **realization**; sampled response is **modulation/source**; opacity/visibility/color are **presentation**. |
+| Canonical geometry/render/export | geometry canonical circles; renderer scene; engine preview/raster/SVG consumers | Canonical paths/regions/strokes are missing; renderer must not generate them. | 20I paths/strokes, 20N–20P regions, 20Q composites. | Canonical content follows structural/realization changes; raster target/AA/background are **presentation** consumers. |
+| Persistence/presets/UI | domain/IO current-v2 authored structures and pure preset records; app private drafts/commands/descriptors | Temporal values lack schema; presets/UI must not own evaluator state. | 20G–20R headless authority, 20S Pattern Wizard, and 20W transition exposure. | Persisted structural/realization/modulation/presentation values use their existing invalidation class; never persist derived sites/topology/caches. |
 
 The classification is deliberate: structural values select source structure,
 guides, sites, topology and regions; realization values select marks, paths,
@@ -81,29 +80,25 @@ use the earliest class it changes, never a convenient lower-cost cache class.
 
 ## Dependency narrative
 
-Stage 20A established the truthful, common derived site interchange. Curves,
-random distributions, straight intersections and future authored structures can
-now produce sites without claiming the same guide contributors. The reusable
-curve/path geometry dependency, document-owned authored-structure boundary,
-and curved/procedural guide coverage are now accepted. Stage 20D consumes the
-first two and publishes bounded guide products through the shared site
-boundary. Shape realization, graph/topology, and Voronoi remain planned; they
-consume the accepted site and guide authorities independently. Generic region
-operations consume canonical regions; composite output combines
-already-canonical kinds. Frame sources and transitions are deliberately
-separate temporal/source work.
+Stage 20A established the truthful common site interchange; Stages 20B–20E2
+established reusable curve/path geometry, authored structures, curved guides,
+and authored-shape marks. Stage 20F adds only provisional private-draft
+resource-editing exposure. It is not the final Pattern Wizard.
+
+The next dependency is effective document/channel authority. Only after that
+authority and a headless capability projection exist may the roadmap add paths,
+graphs, regions, offsets, composites, and finally the capability-driven
+Pattern Wizard. A wizard page never creates its own engine semantics.
 
 ```text
-    20A site interchange ─ 20B curve/path geometry ─ 20C authored structures ─ 20D curved guides
-                                                              ├─ 20E1 normalized fill/coverage
-                                                              │     └─ 20E2 shape marks ─ 20F GTK exposure
-                                                              ├─ 20G guide paths/strokes ─ 20J GTK exposure
-                                                              └─ 20L arrangement faces
-20A site interchange ─ 20H adjacency ─ 20I network programs ─ 20J GTK exposure
-20A site interchange ─ 20K ordinary Voronoi ─┐
-20B/20D curved guides ─ 20L arrangement faces ─┴─ 20M offset/collapse ─ 20N GTK region exposure
-20E2 shape marks + 20G strokes + 20K Voronoi ─ 20O core composite outputs ─ later bounded exposure
-20P frame-source abstraction ─ 20Q frame export ─ 20R transitions ─ 20S GTK exposure
+20A–20E2 accepted headless authority ─ 20F provisional resource editors
+                                      └─ 20G effective pattern authority ─ 20H capability projection
+                                                                             ├─ 20I paths/strokes ─ 20J path offset
+                                                                             ├─ 20K parametric curves
+                                                                             ├─ 20L adjacency ─ 20M connection programs
+                                                                             └─ 20N Voronoi ─ 20O guide faces ─ 20P region realization
+20E2 marks + 20I paths + 20N/20O regions ─ 20Q composite outputs ─ 20R gallery recipes ─ 20S Pattern Wizard
+20T frame source ─ 20U frame sequence ─ 20V transitions ─ 20W transition exposure
 ```
 
 Canvas bounds select coverage and apply final clipping, never sites, edges,
@@ -121,56 +116,33 @@ faces, cells, offsets, caches and scheduler results.
 | 20D Curved/Procedural Guide Mechanisms | **Complete in the Stage 20D acceptance checkpoint:** authored-open-path and circular-arc guide prototypes, bounded repetition/coverage, existing guide-site product consumption, document-aware identity/invalidation, cancellation/cache behavior, and deterministic current-v2 persistence. | Shape marks, strokes, topology, GTK editing. | domain/patterns/geometry/engine/io; 20A–20C. | Coverage, IDs, cancellation, cache/invalidation, persistence. | None; app correction was presentation-only. | Historical accepted authority; no further implementation. |
 | 20E1 Normalized Mark Fill and Coverage | Per-site nominal cell basis, normalized 0..2 fill, corrected coverage, current document-schema-v3/preset-v2-only transition, and synchronized existing GUI/CLI controls. | Authored shapes, renderer algorithms, response curves/polarity, progress UI. | domain/geometry/patterns/engine/io/cli plus bounded app; 20A/20D. | Basis/formulas, edge coverage, cache/cancel, schema/fixtures, natural PNG/SVG, private GTK controls; independent repair re-review PASS. | Existing controls only. | **Complete in the Stage 20E1 acceptance checkpoint; no Stage 20E2 work.** |
 | 20E2 User-shape Mark Realization | **Complete at `0c6b6a2e268f9306835038be747352a0cd64044c`:** authored closed structures as ordinary site marks through exact canonical geometry, even-odd preview/PNG/SVG, bounded cancellation, complete identity, and additive document-v3/preset-v2 persistence. | Renderer modes, preset magic, GTK authoring. | patterns/geometry/render/domain/io/engine; 20A/20C/20E1. | Public evaluator, limits/cancellation/cache, canonical PNG/SVG, deterministic round-trip, independent repair re-review. | Consume/compile only. | Historical accepted authority; no further implementation. |
-| 20F Guide/shape editor exposure | Descriptor-driven private-draft exposure for 20C–20E2 plus an indeterminate pending-preview indicator. | Frontend evaluator, preset library/Save & Apply, fractional engine progress. | app; accepted commands/descriptors. | GTK Wayland plus command/persistence/export checks. | Yes. | Parent/user GNOME review; normal prompt/review. |
-| 20G Connected Guide Paths and Strokes | Guide path output, canonical strokes, channel thickness response. | Networks/mazes. | geometry/patterns/render; 20B/20D. | Path, clip, PNG/SVG parity. | None. | Planned after dependencies; needs fresh contract. |
-| 20H Site Adjacency Graphs | Deterministic mechanism-neutral adjacency over `FamilySiteSet`. | Connection program/rendering. | geometry/patterns; 20A. | Graph invariants/order/degeneracy/cache identity. | None. | Planned after dependency contract; needs fresh contract. |
-| 20I Connection Programs and Networks | Generic masks/walks/tree/maze programs yielding paths. | Named maze renderer/preset-only topology. | domain/patterns/geometry; 20H. | Seed/replay, topology legality, persistence. | None. | Parent review; needs replanning. |
-| 20J Connected-output exposure | Command/descriptor surfaces for 20G–20I. | UI-owned graphs. | app; 20G–20I. | Private Sway plus authoritative output checks. | Yes. | Parent/user GNOME review; normal prompt/review. |
-| 20K Canonical Regions and ordinary Voronoi | Geometry-owned ordinary site-to-cell canonical regions. | Placement settings, power diagrams, guide faces. | geometry/patterns; 20A. | Grid/random guard/cell/canonical output tests. | None. | Planned after dependency contract; needs fresh contract. |
-| 20L Guide-arrangement Faces | Complete off-canvas guide faces. | Canvas-created boundaries/special renderer. | geometry/patterns; 20B/20D/20K concepts. | Arrangement, coverage, degeneracy tests. | None. | Parent review; needs replanning. |
-| 20M Reusable Region Offset/Collapse | Generic offset, split/dissolve, winding/collapse behavior. | Voronoi-only offset/artistic cleanup. | geometry; 20K and/or 20L. | Offset/crossing/collapse/clipping tests. | None. | Parent review; needs replanning. |
-| 20N Region editor exposure | Descriptor/command UI, channel inset response. | UI region mathematics. | app; 20K–20M. | Private Sway plus schema/evaluator/export checks. | Yes. | Parent/user GNOME review; normal prompt/review. |
-| 20O Composite Output Layers | Ordered canonical marks, paths and regions from typed layers. | Renderer artistic branches/hidden z-order. | domain/patterns/render/io; 20E/20G/20K. | Ordering, invalidation, persistence, PNG/SVG. | None in core; later bounded exposure only. | Parent review; needs replanning. |
-| 20P Frame-source Abstraction | Still/multiframe source and deterministic frame selection. | Timeline/interpolation. | domain/sampling/io/engine; parent media decision. | Decode identity/cache/persistence/natural inputs. | None. | Parent review; needs replanning. |
-| 20Q Frame-sequence Output | Bounded CLI/export sequence output. | Animation UI/arbitrary encoder. | engine/cli/render/io; 20P. | Numbered PNG/SVG deterministic artifacts. | None. | Planned after dependency contract; needs fresh contract. |
-| 20R Simple Start/End Transitions | Start/end definitions and bounded continuous interpolation. | Timeline/keyframes/hidden presets. | domain/engine/io; 20Q. | Interpolation, serialization, frame parity. | None. | Parent review; needs replanning. |
-| 20S Transition exposure | Minimal descriptor-driven start/end UI. | Frontend interpolation authority. | app; 20R. | GTK and canonical frame checks. | Yes. | Parent/user GNOME review; normal prompt/review. |
+| 20F Guide/shape editor exposure | **Complete at `7117e24b8c9e2e723c3c23e7e9050dc71277d15c`:** provisional private-draft editing of authored open guides and closed mark shapes. Direct inspector routes are resource-scoped technical exposure, not the final workflow. `GuideCustomAlongLayout` migrates in 20S. | Final gallery/wizard, document/channel inheritance, frontend evaluator. | app; accepted commands/descriptors. | Focused editor/domain/geometry checks plus private Sway evidence; automated Sway is not a claim of separate GNOME/Mutter inspection. | Yes. | User accepted on 2026-08-21; do not start 20G from this row. |
+| 20G Effective Pattern Authority | Document base recipe/settings, optional channel recipe replacement, typed additive deltas, explicit reset/inherit, domain effective-value validation, history/invalidation, and current-only persistence transition. | GTK-calculated effective values, obsolete schema/preset compatibility. | domain/io; protected schema revision. | Inheritance/delta/reset/stale/history/invalidation/save-reopen tests. | None. | Planned; separate contract and gate. |
+| 20H Capability Projection Foundation | Read-only typed capability resolver from validated recipes and accepted engine primitives. | Preset-name dispatch or GTK authority. | domain/patterns; 20G. | Resolver and unsupported-page omission witnesses. | None. | Planned; separate contract and gate. |
+| 20I Canonical Paths and Strokes | Raw guide/path output, stacked realization, canonical strokes, typed thickness response, clipping, cache identity, PNG/SVG parity. | Networks, offsets, regions. | geometry/patterns/render; 20B/20D/20G. | Path/stroke/clip/identity/canonical-output tests. | None. | Planned; separate contract and gate. |
+| 20J Path Offset and Constant Gap | Deterministic line/cubic offset, joins, endpoint policy, collapse limits, and constant-gap realization. | Region offset and UI exposure. | geometry/patterns; 20I. | Offset/collapse/finite/determinism tests. | None. | Planned; separate contract and gate. |
+| 20K Parametric Curves | Common parametric-curve contract, initially round and square spirals, with raw-path and sites-along-curve outputs. | Additional parametric forms. | domain/geometry/patterns; 20G/20H/20I. | Sampling/phase/winding/bounds/cancellation tests. | None. | Planned; separate contract and gate. |
+| 20L Site Adjacency | Deterministic mechanism-neutral adjacency over `FamilySiteSet`. | Connection rendering/program policy. | geometry/patterns; 20A. | Ordering/degeneracy/degree/distance/cache tests. | None. | Planned; separate contract and gate. |
+| 20M Connection Programs | Bounded nearest/random links and grid maze/tree programs producing canonical paths. | TSP and motifs. | domain/geometry/patterns/render; 20I/20L. | Replay/seed/legality/open-path/canonical-output tests. | None. | Planned; separate contract and gate. |
+| 20N Canonical Regions and Voronoi | Guard-inclusive ordinary Voronoi regions from grid or dispersion sites. | Guide cells, power diagrams, UI. | geometry/patterns/render; 20A/20G. | Guard/degeneracy/canonical-region/PNG-SVG tests. | None. | Planned; separate contract and gate. |
+| 20O Guide Arrangement Faces | Complete off-canvas faces from eligible closed guide arrangements. | Curved Triagrid/Tetragrid editing. | geometry/patterns; 20B/20D/20N. | Arrangement/coverage/degeneracy tests. | None. | Planned; separate contract and gate. |
+| 20P Region Realization | Scale and constant-gap region treatment, signed grow/neutral/shrink, winding, split/dissolve, collapse, and limits. | Path offsets and artistic cleanup policy outside the contract. | geometry/patterns/render; 20N/20O. | Offset/collapse/winding/clipping tests. | None. | Planned; separate contract and gate. |
+| 20Q Composite Outputs | Ordered typed marks, paths, and regions with source filters, persistence, invalidation, and canonical consumption. | Hidden renderer z-order or preset-only output. | domain/patterns/render/io; 20E2/20I/20N–20P. | Ordering/persistence/cache/PNG-SVG tests. | None. | Planned; separate contract and gate. |
+| 20R Capability Completion and Gallery Recipes | Capability witnesses and ordinary serialized baseline recipes; unsupported cards absent. | GTK gallery/wizard pages. | domain/patterns/io; 20H/20Q. | Recipe reconstruction and capability-completeness tests. | None. | Planned; separate contract and gate. |
+| 20S Pattern Wizard | Document/channel-scoped baseline gallery, Use as is/Edit, adaptive capability pages, Review, and nested Guide Curve/Shape Editors. Removes provisional direct routes and replaces automatic `GuideCustomAlongLayout` promotion with artist-selected guide use. | Frontend geometry/evaluator authority. | app; 20G/20H/20R. | Private Sway, AT-SPI, WayVNC, canonical-output, and human GNOME/Mutter review. | Yes. | Planned; separate contract and gate. |
+| 20T Frame-source | Still/multiframe source abstraction and deterministic frame selection. | Timeline/interpolation. | domain/sampling/io/engine. | Decode/identity/cache/persistence/natural-input tests. | None. | Planned; separate contract and gate. |
+| 20U Frame-sequence | Bounded CLI/export sequence output. | Animation UI/arbitrary encoder. | engine/cli/render/io; 20T. | Numbered PNG/SVG deterministic artifacts. | None. | Planned; separate contract and gate. |
+| 20V Transitions | Start/end definitions and bounded continuous interpolation. | Timeline/keyframes/hidden presets. | domain/engine/io; 20U. | Interpolation/serialization/frame-parity tests. | None. | Planned; separate contract and gate. |
+| 20W Transition exposure | Descriptor-driven transition UI. | Frontend interpolation authority. | app; 20V. | Private Sway and canonical-frame checks. | Yes. | Planned; separate contract and gate. |
 
-## Recipe capability matrix
+## Boundary decisions
 
-All recipes must use normal serialized schema and evaluator routes; no renderer
-branch, preset-only bypass or test-only authority is permitted.
-
-| Probe | Missing primitive introduction / convergence | Eventual serialized-schema path | Evaluator / geometry path | UI surfaces | Requires renderer/preset special case? | Normal-authority proof |
-|---|---|---|---|---|---|---|
-| Weighted random sites + user mark | Existing random/weighting/source; **20A** sites, **20C** shape resource, **20E1** fill basis, **20E2** shape marks, **20F** UI. Schema-only after 20E2. | `RandomSites → RandomSiteProduct → output layer(structure ID)`. | `site_set()` → modulation/sampling → canonical closed-shape mark. | Pattern Editor mechanisms/layers; channel mapping/response/transform. | **No.** | Public command, save/reopen, engine evaluation, canonical output; preset name has no effect. |
-| Fully controlled ordered grid + reusable mark | Existing dimensions/intersections; **20A** sites, **20C/20E2** mark and **20E1** fill basis. Schema-only after 20E2. | `StraightGuideDimensions + SelectedGuideIntersections + structure-reference layer`. | Coverage → site set → realization → final consumer clip. | Existing guide descriptors plus future mark selector. | **No.** | Three-dimension command/history/reload/public evaluator proves no grid renderer mode. |
-| Curved/linear crosshatching channels | **20B** paths, **20C** structures, **20D** curved guides, **20G** strokes, **20J** UI. Schema-only after 20G. | Per-channel straight/curve prototypes and ordered path layers. | Guide coverage → guide paths → canonical strokes → channel compositor. | Pattern Editor guides/layers; channel transforms/appearance. | **No.** | Two normal channel definitions persist/evaluate/export with no crosshatch mode. |
-| Triangular grid feeding maze | **20A** sites, **20H** adjacency, **20I** programs, **20J** UI. Schema-only after 20I. | Three dimensions → selected intersections → graph-capable program. | `FamilySiteSet →` graph → maze/tree → canonical paths. | Dimension/topology descriptors and thickness. | **No.** | Saved three-dimension deterministic seed/replay via public graph/path evaluator. |
-| Random Voronoi + offset cells + residual marks | **20A** sites, **20K** Voronoi, **20M** offset, **20O** composite, **20N** UI. Schema-only after 20O. | Random sites → Voronoi treatment + ordinary mark layers. | Guard-inclusive sites → geometry Voronoi → generic offset → canonical regions/marks. | Output/treatment descriptors and channel inset/modulation. | **No.** | Schema round-trip/engine scene prove no Voronoi placement settings or special route. |
-
-## Decisions, warnings and documentation
-
-| Parent decision | Latest decision checkpoint |
-|---|---|
-| Path command vocabulary/open-closed resource ownership | 20B/20C |
-| Curve/procedural prototypes and repetition strategies | 20D |
-| Direct-manipulation guide/shape UX | 20F |
-| Stroke caps, joins, smoothing and crossing defaults | 20G/20I |
-| Neighbor strategies and initial maze/tree programs | 20H/20I |
-| Region fill/outline, cleanup and collapse defaults | 20K–20M |
-| Composite ordering/source-filter semantics | 20O |
-| Fedora-native multiframe backend/formats | 20P |
-| Interpolation subset and transition UI | 20R/20S |
-
-Do not add a `Curves` family owning structures: share guide/repetition
-authority where evidence permits. Do not let Maze, Voronoi or a preset name
-dispatch a renderer. Do not persist regenerated topology/cells/caches. Do not
-let canvas clipping create structure or put source modulation in presentation
-cache identity.
-
-On every implementation touch, add literal `///` responsibility docs to each
-non-trivial changed Rust function/method/test (authority, invariants/bounds,
-side effects and relevant Errors/Panics/Safety), update durable plan/tracker
-only with parent authority, and record checkout-aware evidence without treating
-it as product authority.
+- TSP, aligned curved-guide sampling, user-defined motifs, additional
+  parametric forms, and the artistic value of Tetragrid remain deferred,
+  separately gated decisions.
+- The final wizard exposes only resolver-supported capability flags. No preset
+  name, thumbnail, or GTK branch selects engine behavior.
+- Canvas clipping never creates sites, edges, faces, cells, or topology; do
+  not persist regenerated topology, cells, caches, or previews.
+- Every future Rust touch retains the literal `///` documentation-on-touch
+  rule. Every stage keeps a separate review and user-acceptance gate.

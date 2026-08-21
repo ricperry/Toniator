@@ -1,6 +1,6 @@
 # Toniator Progress Tracker
 
-Last updated: **2026-08-14**. The durable execution contract is
+Last updated: **2026-08-21**. The durable execution contract is
 [GREENFIELD_REWRITE_PLAN.md](docs/GREENFIELD_REWRITE_PLAN.md). Normative
 architecture remains in the five protected [Project Specification files](Project%20Specification/Addendum.md).
 
@@ -406,10 +406,27 @@ manual GNOME/Mutter acceptance. The user explicitly accepted Stage 20E2 on
 focused tests, and deliberate HolidayMugs fixture/checksum update. Stage 20F+
 work remains excluded.
 
-**Remaining Stage 20F+ — Planned.** GTK guide/shape authoring and pending-preview
-feedback, connected/network output, regions/Voronoi and reusable offsetting,
-composite output mechanisms, multiframe sources, transitions, and later Stage
-20+ capabilities require their own gates.
+**Stage 20F — Complete at commit
+`7117e24b8c9e2e723c3c23e7e9050dc71277d15c`.** The bounded contract in
+`docs/STAGE_20F_GUIDE_SHAPE_EDITOR_PLAN.md` now exposes authored open guides
+only through provisional **Edit guide paths…** and authored closed marks only
+through provisional **Edit mark shapes…**. They are private-draft
+authored-resource editors, not the final Pattern Wizard. It includes reusable
+path editing, deterministic typed use disclosure, one-step private-history
+squash, and accessible main/draft pending-preview feedback while preserving
+current schema, preset, evaluator/cache, and canonical-output authority. A real GNOME/Mutter run exposed a
+construction-gesture crash, ineffective new-resource application, and an overly
+narrow editor; the same implementation writer repaired those failures. Focused
+verification and independent test and UX reviews pass. The user explicitly
+accepted Stage 20F on 2026-08-21. Publication and Stage 20G remain excluded
+until their respective gates.
+
+**Remaining Stage 20G+ — Planned.** The approved order is 20G effective pattern
+authority; 20H capability projection; 20I canonical paths/strokes; 20J path
+offset; 20K parametric curves; 20L adjacency; 20M connection programs; 20N
+Voronoi; 20O guide faces; 20P region realization; 20Q composites; 20R gallery
+recipes; 20S Pattern Wizard; and 20T–20W temporal work. Each requires its own
+contract, implementation, review, and acceptance gate.
 
 ## Maintenance rules
 

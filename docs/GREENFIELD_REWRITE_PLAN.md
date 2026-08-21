@@ -1,6 +1,6 @@
 # Toniator Greenfield Rewrite Plan
 
-Status: approved execution roadmap and stage contract (2026-08-08)
+Status: approved execution roadmap and stage contract (2026-08-21)
 
 This plan is subordinate to the normative files in `Project Specification/`.
 It records the approved order, scope, and gates for the rewrite; it does not
@@ -1826,10 +1826,30 @@ explicitly accepted Stage 20E2 on 2026-08-14. The local implementation
 checkpoint contains the reviewed implementation and deliberate HolidayMugs
 fixture/checksum update; Stage 20F+ remains separately gated.
 
-**Later Stage 20F+ — Planned.** GTK shape/guide exposure and pending-preview
-feedback, connected/network topology, regions and ordinary Voronoi, reusable
-region offset/collapse behavior, composite output mechanisms, multiframe
-sources, simple transitions, and later Stage 20+ work require their own gates.
+**Stage 20F — Complete at commit
+`7117e24b8c9e2e723c3c23e7e9050dc71277d15c`.**
+[`STAGE_20F_GUIDE_SHAPE_EDITOR_PLAN.md`](STAGE_20F_GUIDE_SHAPE_EDITOR_PLAN.md)
+defines the bounded two-modal descriptor-driven GTK workflow: the provisional
+**Edit guide paths…** action exposes authored open guides, while **Edit mark
+shapes…** exposes authored closed mark shapes. These are private-draft
+authored-resource editors, not the final Pattern Wizard. It includes reusable
+path editing, typed use disclosure, private-history squash, and accessible
+main/draft pending-preview feedback.
+It preserves current document schema v3, preset format v2, evaluator/cache and
+canonical-output contracts. A real GNOME/Mutter run exposed a
+construction-gesture crash, ineffective new-resource application, and an overly
+narrow editor; the same implementation writer repaired those failures. Focused
+verification and independent test and UX reviews pass. The user explicitly
+accepted Stage 20F on 2026-08-21. Publication and Stage 20G remain excluded
+until their respective gates.
+
+**Later Stage 20G+ — Planned.**
+[`STAGE_20_PLUS_DECOMPOSITION.md`](STAGE_20_PLUS_DECOMPOSITION.md) provides the
+detailed synchronized planned sequence: 20G effective pattern authority; 20H
+capability projection; 20I paths/strokes; 20J path offset; 20K parametric
+curves; 20L adjacency; 20M connection programs; 20N Voronoi; 20O guide faces;
+20P region realization; 20Q composites; 20R gallery recipes; 20S Pattern
+Wizard; and 20T–20W temporal work. Every row remains separately gated.
 
 Every mechanism must enter through the Stage 14 typed schema, Stage 15 generic
 pipeline, Stage 17 command/descriptor contract, canonical geometry, and

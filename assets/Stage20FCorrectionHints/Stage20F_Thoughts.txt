@@ -1,0 +1,43 @@
+There are too many per-channel tweaks. There should be a group of tweaks that are common to all channels:
+document-level pattern (invokes pattern wizard when clicked, then you pick a pattern and "accept" or "edit")
+document-level pattern rotation
+document-level shape rotation (if applicable)
+document-level minimum / maximum fill
+document-level density (detail)
+
+Each document-level item can be overridden in a channel, overrides are delta offsets, not replacement values
+channel-pattern override (invokes pattern wizard when clicked)
+channel-pattern rotation
+channel-level shape rotation (if applicable)
+channel-level minimum / maxiumum fill
+channel-level density (detail)
+
+A pattern consists of:
+Site Family: GRID or RANDOM
+
+GRID:
+	Guides (1 to 4, defaults to {1, 2} - enabled, {3, 4} disabled)
+		1 guide only: the grid must either be used for a linear/curves pattern
+			OR may be used with a spacing definition
+		2 guides: the grid crossings/intersections can be formed from any 2 curves
+		3 guides: the grid crossings are triangular and must intersect at the regular intervals so the intersections don't diverge, non-linear curves are non-applicable
+		4 guides: similar to the triangular grid crossings, the intersections must meet at regular intervals preventing divergent intersections. The utility of this pattern is to form anisotropic triangular cells. This would be the least frequently chosen grid pattern. Defer implementation on 4-guide grids, it may be removed altogether.
+		When a channel is enabled, a button is enabled to edit the channel. When clicked the channel editor pops up.
+			Channel Editor is just the Curve Shape editor. All it lets you do is define the curve with an accept or cancel button.
+		
+RANDOM (irregular??): (I keep calling it 'random' but irregular is probably a better term)
+	Does not use Guides, but random dispersions
+		Weighted or Unweighted (uniform/clustered)
+			Weighting comes from the source channel
+		Spacing strategy: minimum margin, average margin, overlaps okay, etc...
+		Dispersion algorithm: poisson disc, perlin noise, pure random, etc...
+
+CONNECTION STRATEGY:
+	Points: mark placed at each site. Sites defined by the grid intersections or spacing strategy, or by certain random dispersion algorithms. HERE IS WHERE THE MARK EDITOR GETS INVOKED. DO NOT INVOKE MARK EDITOR ELSEWHERE.
+	Stacked Curves: Duplicate curve stacks according to document/channel density setting
+	"Concentric" Curves: Uses the shrink/grow algorithm from Bezziator; crossings dissolve. Forms even gaps (contrast with "Stacked Curves" which may have uneven or even overlapping gaps)
+	Maze: Uses maze algorithm to connect adjacent grid (not random) points. Algorithm uses a random seed. Random seed can be set for each channel. Unavailable option for RANDOM family.
+	User-defined Motif: available for GRID family - deferred implementation.
+	Cells: The mark is formed by shrinking the cell using the shrink/grow algorithm from Bezziator.
+		VORONOI (default): Uses the sites defined by the GRID or RANDOM family to construct the voronoi pattern. (An example implementation is in `ToniatorLegacy/` work. The example implementation was crude and incomplete.)
+		CELL (available for GRID family, unavailable for RANDOM family): Uses the guides when guide channels >1. A cell is the smallest enclosed section formed by the guides.

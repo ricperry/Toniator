@@ -10,7 +10,8 @@ Noted exceptions can be found in `Addendum.md`.
 
 ## 1. Purpose
 
-This document defines the per-channel schema and the responsibilities of the channel editor.
+This document defines the channel schema, the document-to-channel effective
+pattern boundary, and the responsibilities of the channel editor.
 
 The pattern editor defines the structural pattern:
 
@@ -22,34 +23,40 @@ The pattern editor defines the structural pattern:
 - Voronoi as a downstream construction.
 - Region-offset support.
 
-The channel editor controls how one channel instantiates, sizes, transforms, colors, and displays that pattern:
+The document owns the base recipe and common pattern settings. The channel
+editor controls a selected channel's optional recipe replacement, applicable
+typed deltas, translation, source mapping, color, and display:
 
-- Density.
-- Density aspect and aspect locking.
-- Rotation.
+- Density/detail delta.
+- Pattern-rotation delta.
 - X and Y offset.
-- Shape size.
-- Curve or network thickness.
-- Region or Voronoi cell inset.
+- Output-specific geometry-response deltas.
 - Channel color.
 - Opacity.
 - Visibility.
 - Source-channel mapping and related channel presentation settings.
 
-The channel editor must not create a second pattern state or duplicate pattern mathematics.
+The channel editor must not create a second pattern state or duplicate pattern
+mathematics. The domain resolves and validates every effective value.
 
 ---
 
 ## 2. Architectural invariants
 
-1. Every channel owns one `ChannelPatternInstance`.
-2. A channel instance references one structural `PatternDefinition`.
-3. Pattern definitions may be shared across channels.
-4. Density, transform, geometry response, color, opacity, and visibility remain channel-specific.
+1. The document owns one base `DocumentPatternSettings` value.
+2. Every channel resolves one `EffectiveChannelPatternInstance` from that base
+   setting plus its optional replacement recipe and typed deltas.
+3. A channel recipe replacement references one structural `PatternDefinition`;
+   pattern definitions may be shared across channels.
+4. Rotation, density/detail, shape rotation, and output-specific response
+   ranges are inherited unless a channel supplies an applicable additive delta.
+   Translation, source mapping, color, opacity, and visibility remain
+   channel-specific.
 5. All user-authored and serialized numeric values are `f64`.
 6. Literal pixel spacing is never the canonical persisted density representation.
 7. Actual generated site counts are derived internal values.
-8. Changing density, rotation, offset, aspect, or source dimensions invalidates and regenerates family output.
+8. Changing an effective density, rotation, translation, aspect, or source
+   dimension invalidates and regenerates family output.
 9. Visibility does not destroy or reset channel state.
 10. Color and opacity do not alter canonical geometry.
 11. The channel editor dispatches document commands; widgets do not mutate hidden renderer or adapter state.
@@ -72,6 +79,20 @@ pub struct ChannelState {
 ```
 
 ```rust
+pub struct DocumentPatternSettings {
+    pub definition_id: PatternDefinitionId,
+    pub density: DensityMetric2D,
+    pub pattern_rotation_degrees: f64,
+    pub shape_rotation_degrees: f64,
+    pub geometry_response: PatternGeometryResponse,
+}
+```
+
+`DocumentPatternSettings` is the persisted base. `PatternGeometryResponse`
+is an output-specific typed union; it does not merge marks, paths, and regions
+into one untyped fill field.
+
+```rust
 pub struct ChannelAppearance {
     pub visible: bool,
     pub color: ColorValue,
@@ -87,13 +108,25 @@ pub struct ChannelAppearance {
 
 ```rust
 pub struct ChannelPatternInstance {
-    pub definition_id: PatternDefinitionId,
-    pub layout: ChannelPatternLayout,
-    pub geometry_response: ChannelGeometryResponse,
+    pub definition_override: Option<PatternDefinitionId>,
+    pub layout_delta: ChannelPatternLayoutDelta,
+    pub shape_rotation_delta_degrees: Option<f64>,
+    pub geometry_response_delta: Option<ChannelGeometryResponseDelta>,
 }
 ```
 
-The instance contains only channel-level configuration. Structural guide definitions, site-generation rules, connection topology, and region-source selection remain in the referenced pattern definition.
+The instance contains only optional channel-level variation. An absent override
+or delta inherits the document value; reset removes the stored override/delta.
+Structural guide definitions, site-generation rules, connection topology, and
+region-source selection remain in the resolved pattern definition.
+
+`shape_rotation_delta_degrees` adds to the document's
+`shape_rotation_degrees` only for mark realization. It is absent for inherited
+shape rotation and is invalid for outputs that do not realize marks.
+
+The domain exposes the resolved value as an
+`EffectiveChannelPatternInstance`. Consumers do not reconstruct it from
+widgets, serialized defaults, or cached preview state.
 
 ---
 
@@ -141,7 +174,11 @@ or:
 across_x = across_y × canvas_width / canvas_height
 ```
 
-The channel command must identify which control was authoritative during the edit.
+Both the document base-density command and a channel density-delta command must
+identify which control was authoritative during the edit. A document edit
+changes the base `DensityMetric2D`; a channel edit changes only its additive
+`DensityMetricDelta2D`. In either case, the command derives the companion axis
+when aspect lock is enabled rather than persisting a broken effective metric.
 
 When `aspect_locked = false`, `across_x` and `across_y` are independent.
 
@@ -232,13 +269,26 @@ The UI must not imply that the scalar is an exact count of sites across a canvas
 ## 6. Pattern layout transform
 
 ```rust
-pub struct ChannelPatternLayout {
-    pub density: DensityMetric2D,
-    pub rotation_degrees: f64,
+pub struct ChannelPatternLayoutDelta {
+    pub density: Option<DensityMetricDelta2D>,
+    pub rotation_degrees: Option<f64>,
     pub offset_x: f64,
     pub offset_y: f64,
 }
 ```
+
+```rust
+pub struct DensityMetricDelta2D {
+    pub across_x_delta: f64,
+    pub across_y_delta: f64,
+}
+```
+
+`density` and `rotation_degrees` are typed additive deltas. A density delta
+must preserve the base metric's aspect-lock invariant. `offset_x` and
+`offset_y` remain channel-owned translations. A later implementation may use a
+more compact serialized representation, but it must preserve the same explicit
+inherit/reset semantics and must not silently materialize a base value.
 
 ### 6.1 Rotation
 
@@ -297,14 +347,14 @@ Changing any of the following requires family regeneration:
 Required evaluation order:
 
 ```text
-Channel density and layout
+Effective density, pattern rotation, and channel translation
 → padded canvas
 → inverse transform into pattern-local coordinates
 → directional frequency resolution
 → family generation over the complete local domain
 → document-coordinate transform
 → pattern realization
-→ channel geometry response
+→ effective geometry response
 → exact canvas clipping
 ```
 
@@ -312,17 +362,42 @@ The implementation must never generate a finite grid for an unrotated canvas and
 
 ---
 
-## 8. Channel geometry response
+## 8. Effective geometry response
 
 ```rust
-pub enum ChannelGeometryResponse {
+pub enum PatternGeometryResponse {
     Marks(MarkGeometryResponse),
     Connected(ConnectedGeometryResponse),
     Regions(RegionGeometryResponse),
 }
+
+pub enum ChannelGeometryResponseDelta {
+    Marks(MarkGeometryResponseDelta),
+    Connected(ConnectedGeometryResponseDelta),
+    Regions(RegionGeometryResponseDelta),
+}
+
+pub struct MarkGeometryResponseDelta {
+    pub minimum_size_delta: Option<f64>,
+    pub maximum_size_delta: Option<f64>,
+}
+
+pub struct ConnectedGeometryResponseDelta {
+    pub minimum_thickness_delta: Option<f64>,
+    pub maximum_thickness_delta: Option<f64>,
+}
+
+pub struct RegionGeometryResponseDelta {
+    pub minimum_inset_delta: Option<f64>,
+    pub maximum_inset_delta: Option<f64>,
+}
 ```
 
-Only the branch compatible with the active pattern output is valid.
+The document stores a `PatternGeometryResponse`; the channel stores only a
+matching optional `ChannelGeometryResponseDelta`. Only the branch compatible
+with the effective pattern output is valid. Each response-delta field is an
+optional additive minimum or maximum scalar; an absent response delta inherits
+the complete document response.
 
 ### 8.1 Marks and shapes
 
@@ -332,7 +407,6 @@ pub struct MarkGeometryResponse {
     pub maximum_size: f64,
     pub response_curve: ResponseCurve,
     pub polarity: Polarity,
-    pub rotation_offset_degrees: f64,
 }
 ```
 
@@ -381,7 +455,11 @@ For Voronoi, the UI may say:
 
 Internally, the preferred operation is a signed region offset using reusable Bezziator-style shrink/grow infrastructure.
 
-The channel response does not change where Voronoi sites were generated.
+The channel response delta does not change where Voronoi sites were generated.
+Each delta applies only to a matching output-specific base response. A missing
+delta inherits the document response, and a reset removes only that delta.
+`response_curve` and `polarity` remain document-base, output-typed fields;
+they are not additive channel deltas.
 
 ---
 
@@ -471,36 +549,25 @@ Source mapping controls the field sampled by modulation and weighted site distri
 
 ---
 
-## 11. Shared versus independent pattern definitions
+## 11. Inheritance and recipe replacement
 
-```rust
-pub enum PatternLinkMode {
-    SharedDefinition,
-    IndependentDefinition,
-}
-```
+Every channel starts with the document recipe. An explicit
+`definition_override` replaces the recipe only for that selected channel; it
+does not mutate or relink the document base or any sibling channel. The
+replacement may reference a shared structural definition, including an exact
+copy created by an explicit copy-on-edit command.
 
-### Shared definition
+Per-channel state remains independent:
 
-Multiple channels reference the same structural `PatternDefinition`.
+- optional recipe replacement;
+- typed density/detail, pattern-rotation, shape-rotation, and response deltas;
+- translation;
+- color, opacity, and visibility; and
+- source mapping.
 
-Per-channel settings remain independent:
-
-- Density.
-- Rotation.
-- Offset.
-- Shape size or line thickness.
-- Cell inset.
-- Color.
-- Opacity.
-- Visibility.
-- Source mapping.
-
-### Independent definition
-
-A channel references its own copied or separately edited definition.
-
-Changing link mode must be an explicit document command and must never silently overwrite another channel’s definition.
+Removing a replacement restores the document recipe. Changing an override or
+copy relationship must be an explicit document command and must never silently
+overwrite another channel's definition.
 
 ---
 
@@ -520,24 +587,26 @@ Channel
 │   ├── Invert
 │   └── Gain/Bias
 ├── Pattern
-│   ├── Pattern selection
-│   ├── Link mode
+│   ├── Override document pattern
+│   ├── Reset to document pattern
 │   └── Edit Pattern…
-├── Density
-│   ├── Family-appropriate density controls
-│   ├── Aspect lock
-│   └── Derived estimate
+├── Override document settings
+│   ├── Density/detail delta
+│   ├── Pattern/shape rotation delta
+│   └── Typed response delta
 ├── Layout
-│   ├── Rotation
-│   ├── X offset
-│   └── Y offset
+│   ├── X translation
+│   └── Y translation
 └── Geometry
-    └── Shape size, line thickness, or cell inset
+    └── Output-specific effective response summary
 ```
 
 The UI must show only controls compatible with the active family and output schema.
 
-`Edit Pattern…` opens the structural pattern editor described in `PatternSchema.md`.
+`Edit Pattern…` opens the structural pattern workflow described in
+`PatternSchema.md`. The workflow may edit the document base or create an
+explicit selected-channel recipe replacement; it must not treat a channel as
+an independent hidden copy of the document settings.
 
 ---
 
@@ -546,6 +615,12 @@ The UI must show only controls compatible with the active family and output sche
 Every edit becomes a document command.
 
 ```rust
+pub enum DocumentPatternCommand {
+    SetDocumentPatternSettings {
+        settings: DocumentPatternSettings,
+    },
+}
+
 pub enum ChannelCommand {
     SetVisibility {
         channel: ChannelId,
@@ -562,15 +637,31 @@ pub enum ChannelCommand {
         opacity: f64,
     },
 
-    SetDensity {
+    SetDensityDelta {
         channel: ChannelId,
-        density: DensityMetric2D,
-        edited_axis: DensityEditedAxis,
+        delta: DensityMetricDelta2D,
     },
 
-    SetRotation {
+    ResetDensityDelta {
+        channel: ChannelId,
+    },
+
+    SetPatternRotationDelta {
         channel: ChannelId,
         degrees: f64,
+    },
+
+    ResetPatternRotationDelta {
+        channel: ChannelId,
+    },
+
+    SetShapeRotationDelta {
+        channel: ChannelId,
+        degrees: f64,
+    },
+
+    ResetShapeRotationDelta {
+        channel: ChannelId,
     },
 
     SetOffset {
@@ -579,9 +670,13 @@ pub enum ChannelCommand {
         y: f64,
     },
 
-    SetGeometryResponse {
+    SetGeometryResponseDelta {
         channel: ChannelId,
-        response: ChannelGeometryResponse,
+        delta: ChannelGeometryResponseDelta,
+    },
+
+    ResetGeometryResponseDelta {
+        channel: ChannelId,
     },
 
     SetSourceMapping {
@@ -589,14 +684,9 @@ pub enum ChannelCommand {
         mapping: ChannelSourceMapping,
     },
 
-    SetPatternDefinition {
+    SetPatternDefinitionOverride {
         channel: ChannelId,
-        definition_id: PatternDefinitionId,
-    },
-
-    SetPatternLinkMode {
-        channel: ChannelId,
-        mode: PatternLinkMode,
+        definition_id: Option<PatternDefinitionId>,
     },
 }
 ```
@@ -604,6 +694,11 @@ pub enum ChannelCommand {
 Requirements:
 
 - Commands validate before commit.
+- A document-pattern command resolves every affected channel through the
+  domain before publication and reports the resulting ordered channels and
+  strongest invalidation.
+- A channel-delta command validates the effective value against the current
+  document base; reset removes the delta instead of copying that base.
 - Undo records authoritative before-and-after state.
 - Transient widget text is not authoritative state.
 - Renderer adapters are read-only.
@@ -642,8 +737,8 @@ Family sites and guides may be reused if unchanged.
 
 ### Family regeneration
 
-- Density.
-- Rotation.
+- Effective density/detail.
+- Effective pattern rotation.
 - Offset.
 - Aspect.
 - Seed.
@@ -668,14 +763,18 @@ Requirements:
 
 - All authored numeric values serialize as `f64`.
 - Color hex is a UI representation; canonical color components serialize numerically.
-- Density serializes as `across_x`, `across_y`, and `aspect_locked`.
+- Document density serializes as `across_x`, `across_y`, and `aspect_locked`.
+- Channel density, pattern rotation, shape rotation, and geometry response
+  serialize only as explicit typed deltas or an explicit inherit/reset state;
+  they never serialize as copied effective base values.
 - Literal derived pixel spacing is not serialized.
 - Actual generated site counts are not serialized unless used only as an optional cache that can be discarded.
 - Pattern IDs are stable.
 - Channel IDs are stable.
 - Shared-definition references survive save/load.
 - Unknown schema versions fail clearly or migrate deterministically.
-- Visibility, color, opacity, density, transform, geometry response, and source mapping round-trip exactly.
+- Document settings, channel recipe replacements, channel deltas, translation,
+  visibility, color, opacity, and source mapping round-trip exactly.
 
 ---
 
@@ -717,13 +816,16 @@ A preview must not use a separate interpretation of density, rotation, or edge c
 
 The channel schema is acceptable when:
 
-- A 900 × 600 source can persist 90.0 across X and 60.0 across Y.
+- A 900 × 600 source can persist 90.0 across X and 60.0 across Y in the
+  document base metric.
 - SVG output scales without changing the authored density relationship.
 - Locking aspect maintains equal nominal document-space spacing.
 - Unlocking aspect permits independent X and Y density.
 - Random, one-guide, two-guide, three-guide, and four-guide families all consume the same density metric.
 - Rotating or offsetting a channel causes regeneration with no uncovered canvas edges.
-- Shape size, line thickness, and cell inset are per-channel and independent of family site placement.
+- Shape size, line thickness, and cell inset use output-specific document bases
+  plus matching channel deltas, independently of family site placement.
 - Color, opacity, and visibility can change without regenerating family geometry.
-- Two channels may share one pattern definition while using different density, rotation, offsets, colors, and size responses.
+- Two channels may inherit one document recipe or select replacement recipes
+  while using different typed deltas, translations, colors, and responses.
 - Save/load and undo/redo preserve all channel state exactly.

@@ -74,8 +74,11 @@ Stage 20E2 is complete at implementation checkpoint
 `0c6b6a2e268f9306835038be747352a0cd64044c`: document-owned authored closed
 shapes now realize as ordinary canonical site marks with even-odd preview,
 PNG, and SVG consumers, bounded cancellation, complete identity, and additive
-current document-v3/preset-v2 persistence. Stage 20F remains Planned and
-requires a fresh contract and separate implementation request.
+current document-v3/preset-v2 persistence. Stage 20F is **Complete at commit
+`7117e24b8c9e2e723c3c23e7e9050dc71277d15c`**. Its two provisional private-draft resource editors expose authored
+open guides and closed mark shapes; they are technical entry points, not the
+final Pattern Wizard workflow. The user accepted Stage 20F on 2026-08-21; that
+acceptance does not authorize Stage 20G.
 
 ## Later Goal candidates
 
@@ -89,20 +92,24 @@ fresh planning validates its contract against actual implementation evidence.
 | 20D | Generic curved/procedural guide generation and coverage. | Coverage/identity/cancel/cache/persistence. | 20A–20C. | Prototypes/repetition. | **Complete in the Stage 20D acceptance checkpoint** |
 | 20E1 | Normalized mark fill, per-site nominal basis, coverage correction, current document-schema-v3/preset-v2-only transition, and existing GUI/CLI controls. | Formula/coverage/cache/schema/fixture/natural-output and bounded GTK control checks. | 20A, 20D. | None within the approved contract. | **Complete in the Stage 20E1 acceptance checkpoint; independent repair re-review PASS** |
 | 20E2 | User-shape mark realization from authored structures. | Canonical geometry, limits/cancellation/cache, deterministic persistence, and PNG/SVG parity. | 20A, 20C, accepted 20E1. | None within the accepted contract. | **Complete at `0c6b6a2e268f9306835038be747352a0cd64044c`; independent repair re-review PASS** |
-| 20F | GTK guide/shape editor exposure and pending-preview indicator. | GTK Sway plus command/export checks. | Accepted 20C–20E2 checkpoints. | Direct-manipulation UX. | planned; requires a fresh contract and separate implementation request |
-| 20G | Canonical connected guide paths/strokes. | Path/stroke/export tests. | 20B, 20D. | Stroke/crossing defaults. | planned after dependencies |
-| 20H | Mechanism-neutral deterministic adjacency. | Graph order/degeneracy/cache tests. | 20A. | Neighbor policy. | planned after dependency contract |
-| 20I | Generic network/maze connection programs. | Seed/replay/topology/persistence. | 20H. | Algorithms/crossings. | needs replanning after prior checkpoint |
-| 20J | GTK connected-output exposure. | GTK evidence/canonical paths. | 20G–20I. | Interaction model. | not a Goal candidate |
-| 20K | Ordinary site-to-cell Voronoi regions. | Guard/cell/canonical output tests. | 20A. | Region presentation defaults. | planned after dependency contract |
-| 20L | Guide-arrangement face generation. | Arrangement/coverage/degeneracy. | 20B, 20D, 20K. | Face semantics. | needs replanning after prior checkpoint |
-| 20M | Reusable region offset/collapse. | Crossing/winding/collapse properties. | 20K and/or 20L. | Cleanup/collapse policy. | needs replanning after prior checkpoint |
-| 20N | GTK region controls. | GTK and normal export checks. | 20K–20M. | Editor workflow. | not a Goal candidate |
-| 20O | Ordered composites of canonical output kinds. | Ordering/persistence/PNG/SVG parity. | 20E2/20G/20K. | Ordering/source filters. | needs replanning after prior checkpoint |
-| 20P | Still/multiframe source abstraction. | Decode/cache/round-trip. | Parent media decision. | Backend/formats. | needs replanning after prior checkpoint |
-| 20Q | Bounded frame-sequence export. | Deterministic numbered PNG/SVG. | 20P. | CLI policy. | planned after dependency contract |
-| 20R | Bounded start/end interpolation. | Interpolation/frame parity. | 20Q. | Interpolated subset. | needs replanning after prior checkpoint |
-| 20S | GTK transition exposure. | GTK/canonical-frame checks. | 20R. | Start/end UX. | not a Goal candidate |
+| 20F | Provisional private-draft guide/shape resource editors and pending-preview feedback. | Focused editor/domain/geometry checks and private Sway evidence. | Accepted 20C–20E2 checkpoints. | Final wizard workflow; automated Sway is not a claim of separate GNOME/Mutter inspection. | **Complete at `7117e24b8c9e2e723c3c23e7e9050dc71277d15c`**; not authorization for 20G. |
+| 20G | Effective Pattern Authority: document base recipe/settings, optional channel replacement, typed deltas, reset/inherit, and current-only persistence. | Inheritance/delta/reset/stale/history/invalidation/save-reopen tests. | domain/io; protected specification direction. | Exact implementation contract. | Planned; separate contract and gate. |
+| 20H | Capability Projection Foundation: validated recipe/primitives to typed read-only capabilities. | Resolver and unsupported-page omission tests. | 20G. | Capability vocabulary extensions. | Planned; separate contract and gate. |
+| 20I | Canonical Paths and Strokes: raw guide/path output, stacked realization, typed strokes, clipping, identity, PNG/SVG parity. | Path/stroke/clip/identity/canonical-output tests. | 20B, 20D, 20G. | Exact stroke defaults. | Planned; separate contract and gate. |
+| 20J | Path Offset and Constant Gap: deterministic line/cubic offsets, joins, endpoint/collapse policy. | Offset/collapse/finite/determinism tests. | 20I. | Exact joins and limits. | Planned; separate contract and gate. |
+| 20K | Parametric Curves: common contract, initially round/square spirals, raw paths and sites along curves. | Sampling/phase/winding/bounds/cancellation tests. | 20G, 20H, 20I. | Additional parametric forms. | Planned; separate contract and gate. |
+| 20L | Site Adjacency: deterministic mechanism-neutral graph over `FamilySiteSet`. | Ordering/degeneracy/degree/distance/cache tests. | 20A. | Neighbor policy. | Planned; separate contract and gate. |
+| 20M | Connection Programs: bounded nearest/random links and grid maze/tree paths. | Replay/seed/legality/open-path/canonical-output tests. | 20I, 20L. | TSP and motifs deferred. | Planned; separate contract and gate. |
+| 20N | Canonical Regions and Voronoi: guard-inclusive ordinary regions from grid/dispersion sites. | Guard/degeneracy/canonical-region/PNG-SVG tests. | 20A, 20G. | Power diagrams and UI deferred. | Planned; separate contract and gate. |
+| 20O | Guide Arrangement Faces: complete off-canvas faces from eligible closed guides. | Arrangement/coverage/degeneracy tests. | 20B, 20D, 20N. | Curved Triagrid/Tetragrid editing deferred. | Planned; separate contract and gate. |
+| 20P | Region Realization: scale and constant-gap treatment, grow/shrink, winding, collapse. | Offset/collapse/winding/clipping tests. | 20N, 20O. | Artistic cleanup outside contract. | Planned; separate contract and gate. |
+| 20Q | Composite Outputs: ordered typed marks, paths, regions, filters, persistence, identity, canonical consumption. | Ordering/persistence/cache/PNG-SVG tests. | 20E2, 20I, 20N–20P. | Renderer z-order shortcuts excluded. | Planned; separate contract and gate. |
+| 20R | Capability Completion and Gallery Recipes: capability witnesses and ordinary serialized baseline recipes. | Recipe reconstruction/capability-completeness tests. | 20H, 20Q. | Gallery UI excluded. | Planned; separate contract and gate. |
+| 20S | Pattern Wizard: document/channel gallery, adaptive pages, review, nested curve/shape editors. | Private Sway, AT-SPI, WayVNC, canonical-output, GNOME/Mutter review. | 20G, 20H, 20R. | Final user workflow. | Planned; separate contract and gate. |
+| 20T | Frame-source: still/multiframe abstraction and deterministic selection. | Decode/identity/cache/persistence/natural-input tests. | No prior Stage 20 dependency. | Backend/formats. | Planned; separate contract and gate. |
+| 20U | Frame-sequence: bounded CLI/export sequences. | Numbered PNG/SVG deterministic artifacts. | 20T. | CLI policy. | Planned; separate contract and gate. |
+| 20V | Transitions: start/end definitions and bounded continuous interpolation. | Interpolation/serialization/frame-parity tests. | 20U. | Timeline/keyframes excluded. | Planned; separate contract and gate. |
+| 20W | Transition exposure: descriptor-driven transition UI. | Private Sway and canonical-frame checks. | 20V. | Human GNOME/Mutter review. | Planned; separate contract and gate. |
 
 Each future execution contract must be regenerated after its dependency is
 accepted. This table is an index, not authorization to begin work.

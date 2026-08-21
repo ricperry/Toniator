@@ -20,7 +20,7 @@ Examples include:
 
 - Density and density aspect.
 - Rotation.
-- X/Y translation or phase.
+- X/Y translation.
 - Shape size.
 - Curve, line, or network thickness.
 - Region or cell inset/outset.
@@ -970,7 +970,7 @@ These must regenerate guides/sites and every dependent stage:
 - Density X/Y.
 - Density aspect or lock.
 - Rotation.
-- X/Y translation or phase.
+- X/Y translation.
 - Canvas dimensions.
 - Channel-level placement seed.
 - Any setting affecting site placement.
@@ -990,7 +990,7 @@ Grid translation must update the pattern coordinate frame and regenerate suffici
 These should reuse family sites/guides where possible:
 
 - Shape size.
-- Shape orientation response.
+- Shape rotation.
 - Curve/network thickness.
 - Region/cell inset.
 - Geometry response curve or polarity.
@@ -1183,6 +1183,8 @@ Add or revise:
 - Composite output layers.
 - Presets as exposed-control configurations.
 - Grain/Petroglyph/Plasma/Pebbles/Pointillism adequacy tests.
+- Document-owned base pattern recipes and domain-resolved effective channel
+  recipes, as specified in section 15 of this addendum.
 
 ### `ChannelSchema.md`
 
@@ -1195,6 +1197,8 @@ Add or revise:
 - Family regeneration for density, rotation, and translation.
 - Stale-result rejection.
 - CLI mapping for primary channel settings.
+- Optional channel recipe replacement, typed additive deltas, and explicit
+  reset-to-inherit commands, as specified in section 15 of this addendum.
 
 ### `ArchitectureSchema.md`
 
@@ -1227,7 +1231,10 @@ Add:
 
 1. Continuous authored values use `f64`; discrete values use discrete types.
 2. Pattern definitions are static structural configurations.
-3. Channel settings control density, transform, geometry response, appearance, and simple start/end animation.
+3. The document owns a base pattern recipe and base typed pattern settings.
+   Channels may replace that recipe and add only typed scalar deltas; they
+   retain independent translation, source mapping, appearance, and simple
+   start/end animation.
 4. Families own guide and site generation.
 5. Voronoi only constructs cells from family sites.
 6. Canvas boundaries never form topology.
@@ -1243,7 +1250,49 @@ Add:
 
 ---
 
-## 15. Source-alpha interpretation
+## 15. Effective document pattern authority
+
+This section supersedes conflicting language in `PatternSchema.md` and
+`ChannelSchema.md` about every channel owning a fully independent pattern
+instance.
+
+The document owns one base structural pattern recipe and base settings for
+pattern rotation, shape rotation, density/detail, and an output-specific
+minimum/maximum response range. A channel may select an optional replacement
+recipe and may add an explicit typed delta to applicable density/detail,
+pattern-rotation, shape-rotation, or output-response scalars. A channel with
+no replacement or delta inherits the document value. Resetting a channel
+setting removes its delta and restores inheritance; it is not a hidden copy of
+the then-current document value.
+
+The document/domain layer resolves and validates an effective pattern instance
+before evaluation. GTK, CLI parsing, renderers, and exporters may project or
+request that result, but never calculate an alternative effective value.
+Invalid effective values are rejected at the command boundary rather than
+clamped or reinterpreted by a consumer.
+
+The following remain channel-specific and are not inherited through this
+mechanism:
+
+- translation;
+- source mapping;
+- color, opacity, and visibility; and
+- any later channel-only presentation state.
+
+Output-specific response values remain distinct typed fields. The artist may
+use common labels such as minimum and maximum fill, but mark fill/size,
+stroke-thickness response, and region inset/grow-shrink response are not one
+stored value or one interchangeable unit. Response curve and polarity remain
+document-base, output-typed fields; channels do not additively override them.
+
+Stage 20G owns the current-only document-schema transition, validation,
+history, invalidation, and persistence work for this authority. It does not
+restore obsolete document or preset compatibility. A preset-format transition
+is required only when its persisted recipe representation changes.
+
+---
+
+## 16. Source-alpha interpretation
 
 Decoded source pixels retain their raw straight (unassociated) sRGBA values,
 including hidden RGB where alpha is zero. Realization derives mapped scalar
