@@ -350,8 +350,44 @@ impl PresetRegistry {
             .pattern_definition_for(channel_id)
             .expect("document history preserves channel references")
             .clone();
-        history.apply(&DocumentCommand::ReplaceSelectedChannelDefinitionRecipe {
-            channel_id,
+        history.apply(
+            &DocumentCommand::ReplaceChannelPatternDefinitionOverrideRecipe {
+                base: history.document().pattern_settings().clone(),
+                channel_id,
+                base_definition,
+                recipe,
+            },
+        )
+    }
+
+    /// Materializes a preset as a fresh document-base definition.  The preset
+    /// remains ID-free; the domain allocates the definition and validates every
+    /// retained channel delta atomically.
+    pub fn apply_to_document_base(
+        &self,
+        history: &mut DocumentHistory,
+        id: &str,
+    ) -> Result<toniator_domain::CommandResult, DocumentSessionError> {
+        let recipe = self
+            .find(id)
+            .ok_or_else(|| {
+                DocumentSessionError::Validation(toniator_domain::ValidationError::new(
+                    "preset.id",
+                    "preset ID is not present in this registry",
+                ))
+            })?
+            .recipe
+            .clone();
+        let base = history.document().pattern_settings().clone();
+        let base_definition = history
+            .document()
+            .pattern_definitions()
+            .iter()
+            .find(|definition| definition.id == base.definition_id)
+            .expect("validated document base definition")
+            .clone();
+        history.apply(&DocumentCommand::ReplaceDocumentPatternDefinitionRecipe {
+            base,
             base_definition,
             recipe,
         })

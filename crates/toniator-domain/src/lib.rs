@@ -430,6 +430,81 @@ pub struct DensityMetric2D {
     pub aspect_locked: bool,
 }
 
+/// The document-owned shared pattern settings from which every channel derives
+/// its effective family and realization inputs.  `aspect_locked` belongs to
+/// this base density and channels can only contribute additive values.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DocumentPatternSettings {
+    pub definition_id: PatternDefinitionId,
+    pub density: DensityMetric2D,
+    pub pattern_rotation_degrees: f64,
+    pub shape_rotation_degrees: f64,
+    pub geometry_response: PatternGeometryResponse,
+}
+
+/// The presently supported output-response branch.  Future path and region
+/// responses intentionally do not exist in this current-format authority.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PatternGeometryResponse {
+    Marks(MarkGeometryResponse),
+}
+
+/// An optional additive density adjustment for one channel.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DensityMetricDelta2D {
+    pub across_x_delta: f64,
+    pub across_y_delta: f64,
+}
+
+/// The optional layout intent stored by a channel.  Translation remains
+/// absolute channel placement while density and rotation are relative to the
+/// document base.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChannelPatternLayoutDelta {
+    pub density: Option<DensityMetricDelta2D>,
+    pub rotation_degrees: Option<f64>,
+    pub translation_x: f64,
+    pub translation_y: f64,
+}
+
+/// A mark-only response delta.  An absent member explicitly inherits the
+/// corresponding document response value.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MarkGeometryResponseDelta {
+    pub minimum_fill_delta: Option<f64>,
+    pub maximum_fill_delta: Option<f64>,
+}
+
+/// The optional response-delta branch stored by a channel.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ChannelGeometryResponseDelta {
+    Marks(MarkGeometryResponseDelta),
+}
+
+/// The persisted pattern intent owned by one channel.  It never contains a
+/// resolved effective instance and therefore remains valid when its base
+/// changes only if the domain can resolve it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChannelPatternInstance {
+    pub definition_override: Option<PatternDefinitionId>,
+    pub layout_delta: ChannelPatternLayoutDelta,
+    pub shape_rotation_delta_degrees: Option<f64>,
+    pub geometry_response_delta: Option<ChannelGeometryResponseDelta>,
+}
+
+/// The sole resolved pattern input for one channel.  Engine and frontends read
+/// this projection and never recompute inheritance or arithmetic themselves.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EffectiveChannelPatternInstance {
+    pub definition_id: PatternDefinitionId,
+    pub density: DensityMetric2D,
+    pub pattern_rotation_degrees: f64,
+    pub translation_x: f64,
+    pub translation_y: f64,
+    pub shape_rotation_degrees: f64,
+    pub geometry_response: PatternGeometryResponse,
+}
+
 /// Per-channel placement controls.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChannelPatternLayout {
@@ -469,13 +544,11 @@ pub struct ChannelAppearance {
 pub struct MarkGeometryResponse {
     pub minimum_fill: f64,
     pub maximum_fill: f64,
-    pub rotation_offset_degrees: f64,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MarkGeometryFieldEdit {
     MinimumFill(f64),
     MaximumFill(f64),
-    RotationOffsetDegrees(f64),
 }
 
 /// The source component selected by a channel's authoritative source mapping.
@@ -611,9 +684,7 @@ pub enum ChannelPaint {
 /// factory. It deliberately has no role-specific geometry defaults.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChannelTopologyTemplate {
-    pub pattern_definition_id: PatternDefinitionId,
-    pub layout: ChannelPatternLayout,
-    pub mark_geometry_response: MarkGeometryResponse,
+    pub pattern_instance: ChannelPatternInstance,
 }
 
 /// One complete modeled channel in its authoritative ordered topology.
@@ -621,9 +692,7 @@ pub struct ChannelTopologyTemplate {
 pub struct ModeledChannelState {
     pub role: HalftoneChannelRole,
     pub id: ChannelId,
-    pub pattern_definition_id: PatternDefinitionId,
-    pub layout: ChannelPatternLayout,
-    pub mark_geometry_response: MarkGeometryResponse,
+    pub pattern_instance: ChannelPatternInstance,
     pub mapping: SourceMapping,
     pub paint: ChannelPaint,
     pub visible: bool,
@@ -652,8 +721,7 @@ impl ChannelTopology {
         model: HalftoneChannelModel,
         template: ChannelTopologyTemplate,
     ) -> Result<Self, ValidationError> {
-        validate_layout(&template.layout)?;
-        validate_mark_response(&template.mark_geometry_response)?;
+        validate_channel_pattern_instance(&template.pattern_instance)?;
 
         Ok(Self::new(
             model
@@ -714,9 +782,7 @@ impl ModeledChannelState {
         Self {
             role,
             id,
-            pattern_definition_id: template.pattern_definition_id,
-            layout: template.layout.clone(),
-            mark_geometry_response: template.mark_geometry_response.clone(),
+            pattern_instance: template.pattern_instance.clone(),
             mapping,
             paint,
             visible: true,
@@ -1242,10 +1308,8 @@ pub enum SourceReference {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChannelState {
     pub id: ChannelId,
-    pub pattern_definition_id: PatternDefinitionId,
-    pub layout: ChannelPatternLayout,
+    pub pattern_instance: ChannelPatternInstance,
     pub appearance: ChannelAppearance,
-    pub mark_geometry_response: MarkGeometryResponse,
     pub source_mapping: ChannelSourceMapping,
 }
 
@@ -1258,6 +1322,7 @@ pub struct Document {
     pattern_definitions: Vec<PatternDefinition>,
     channel_configuration: ChannelConfiguration,
     authored_structures: Vec<AuthoredStructure>,
+    pattern_settings: DocumentPatternSettings,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1285,20 +1350,19 @@ impl Document {
         canvas: CanvasSpec,
         source: SourceReference,
     ) -> Result<Self, ValidationError> {
-        let layout = ChannelPatternLayout {
+        let settings = DocumentPatternSettings {
+            definition_id: PatternDefinitionId(1),
             density: DensityMetric2D {
                 across_x: canvas.width / 10.0,
                 across_y: canvas.height / 10.0,
                 aspect_locked: true,
             },
-            rotation_degrees: 0.0,
-            translation_x: 0.0,
-            translation_y: 0.0,
-        };
-        let response = MarkGeometryResponse {
-            minimum_fill: 0.0,
-            maximum_fill: 1.0,
-            rotation_offset_degrees: 0.0,
+            pattern_rotation_degrees: 0.0,
+            shape_rotation_degrees: 0.0,
+            geometry_response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+                minimum_fill: 0.0,
+                maximum_fill: 1.0,
+            }),
         };
         let definition = PatternDefinition::supported_straight_grid(
             PatternDefinitionId(1),
@@ -1312,9 +1376,17 @@ impl Document {
             },
         );
         let template = ChannelTopologyTemplate {
-            pattern_definition_id: definition.id,
-            layout,
-            mark_geometry_response: response,
+            pattern_instance: ChannelPatternInstance {
+                definition_override: None,
+                layout_delta: ChannelPatternLayoutDelta {
+                    density: None,
+                    rotation_degrees: None,
+                    translation_x: 0.0,
+                    translation_y: 0.0,
+                },
+                shape_rotation_delta_degrees: None,
+                geometry_response_delta: None,
+            },
         };
         let topology = ChannelTopology::canonical(HalftoneChannelModel::Rgb, template)?;
         Self::with_source_and_topology(
@@ -1322,6 +1394,7 @@ impl Document {
             canvas,
             source,
             vec![definition],
+            settings,
             HalftoneChannelModel::Rgb,
             topology,
         )
@@ -1338,6 +1411,7 @@ impl Document {
         id: DocumentId,
         canvas: CanvasSpec,
         pattern_definitions: Vec<PatternDefinition>,
+        pattern_settings: DocumentPatternSettings,
         channels: Vec<ChannelState>,
     ) -> Result<Self, ValidationError> {
         Self::with_source(
@@ -1345,6 +1419,7 @@ impl Document {
             canvas,
             SourceReference::Unassigned,
             pattern_definitions,
+            pattern_settings,
             channels,
         )
     }
@@ -1361,6 +1436,7 @@ impl Document {
         canvas: CanvasSpec,
         source: SourceReference,
         pattern_definitions: Vec<PatternDefinition>,
+        pattern_settings: DocumentPatternSettings,
         channels: Vec<ChannelState>,
     ) -> Result<Self, ValidationError> {
         let document = Self {
@@ -1370,6 +1446,7 @@ impl Document {
             pattern_definitions,
             channel_configuration: ChannelConfiguration::Legacy(channels),
             authored_structures: Vec::new(),
+            pattern_settings,
         };
         document.validate()?;
         Ok(document)
@@ -1390,6 +1467,7 @@ impl Document {
         canvas: CanvasSpec,
         source: SourceReference,
         pattern_definitions: Vec<PatternDefinition>,
+        pattern_settings: DocumentPatternSettings,
         model: HalftoneChannelModel,
         topology: ChannelTopology,
     ) -> Result<Self, ValidationError> {
@@ -1400,6 +1478,7 @@ impl Document {
             pattern_definitions,
             channel_configuration: ChannelConfiguration::Topology { model, topology },
             authored_structures: Vec::new(),
+            pattern_settings,
         };
         document.validate()?;
         Ok(document)
@@ -1416,6 +1495,7 @@ impl Document {
         canvas: CanvasSpec,
         source: SourceReference,
         pattern_definitions: Vec<PatternDefinition>,
+        pattern_settings: DocumentPatternSettings,
         channels: Vec<ChannelState>,
         authored_structures: Vec<AuthoredStructure>,
     ) -> Result<Self, ValidationError> {
@@ -1426,6 +1506,7 @@ impl Document {
             pattern_definitions,
             channel_configuration: ChannelConfiguration::Legacy(channels),
             authored_structures,
+            pattern_settings,
         };
         document.validate()?;
         Ok(document)
@@ -1437,11 +1518,13 @@ impl Document {
     ///
     /// Returns any existing document validation failure or an authored-structure ID, topology,
     /// coordinate, continuity, closure, or document-wide limit diagnostic.
+    #[allow(clippy::too_many_arguments)] // Explicit persisted authorities stay visible at this schema boundary.
     pub fn with_source_topology_and_authored_structures(
         id: DocumentId,
         canvas: CanvasSpec,
         source: SourceReference,
         pattern_definitions: Vec<PatternDefinition>,
+        pattern_settings: DocumentPatternSettings,
         model: HalftoneChannelModel,
         topology: ChannelTopology,
         authored_structures: Vec<AuthoredStructure>,
@@ -1453,6 +1536,7 @@ impl Document {
             pattern_definitions,
             channel_configuration: ChannelConfiguration::Topology { model, topology },
             authored_structures,
+            pattern_settings,
         };
         document.validate()?;
         Ok(document)
@@ -1472,6 +1556,287 @@ impl Document {
 
     pub fn pattern_definitions(&self) -> &[PatternDefinition] {
         &self.pattern_definitions
+    }
+
+    /// Returns the persisted document-wide base settings.  This is the only
+    /// shared pattern authority; frontends must construct mutations through
+    /// domain commands rather than calculate channel inheritance themselves.
+    pub fn pattern_settings(&self) -> &DocumentPatternSettings {
+        &self.pattern_settings
+    }
+
+    /// Returns one channel's stored replacement and additive intent without
+    /// exposing a derived effective value as persistable state.
+    pub fn channel_pattern_instance(
+        &self,
+        channel_id: ChannelId,
+    ) -> Option<&ChannelPatternInstance> {
+        match &self.channel_configuration {
+            ChannelConfiguration::Legacy(channels) => channels
+                .iter()
+                .find(|channel| channel.id == channel_id)
+                .map(|channel| &channel.pattern_instance),
+            ChannelConfiguration::Topology { topology, .. } => topology
+                .channels
+                .iter()
+                .find(|channel| channel.id == channel_id)
+                .map(|channel| &channel.pattern_instance),
+        }
+    }
+
+    /// Resolves and validates the only effective pattern instance for a
+    /// channel.  No caller may recompute base inheritance, additive deltas,
+    /// aspect locking, or response compatibility.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable validation error for a missing channel/definition,
+    /// non-finite addition, invalid density, incompatible response, or mark
+    /// response bounds; it never mutates the document.
+    pub fn effective_channel_pattern(
+        &self,
+        channel_id: ChannelId,
+    ) -> Result<EffectiveChannelPatternInstance, ValidationError> {
+        if !self.has_channel(channel_id) {
+            return Err(ValidationError::new(
+                "channel.id",
+                "command targets a missing channel",
+            ));
+        }
+        let instance = self
+            .channel_pattern_instance(channel_id)
+            .ok_or(ValidationError::new(
+                "channel.pattern_instance",
+                "channel is missing persisted pattern intent",
+            ))?;
+        let definition_id = instance
+            .definition_override
+            .unwrap_or(self.pattern_settings.definition_id);
+        let definition = self.definition(definition_id).ok_or(ValidationError::new(
+            "channel.pattern.definition_id",
+            "channel resolves a missing pattern definition",
+        ))?;
+        let density_delta = instance.layout_delta.density.as_ref();
+        let density = DensityMetric2D {
+            across_x: self.pattern_settings.density.across_x
+                + density_delta.map_or(0.0, |value| value.across_x_delta),
+            across_y: self.pattern_settings.density.across_y
+                + density_delta.map_or(0.0, |value| value.across_y_delta),
+            aspect_locked: self.pattern_settings.density.aspect_locked,
+        };
+        let pattern_rotation_degrees = self.pattern_settings.pattern_rotation_degrees
+            + instance.layout_delta.rotation_degrees.unwrap_or(0.0);
+        let shape_rotation_degrees = self.pattern_settings.shape_rotation_degrees
+            + instance.shape_rotation_delta_degrees.unwrap_or(0.0);
+        let PatternGeometryResponse::Marks(base) = &self.pattern_settings.geometry_response;
+        let delta = match &instance.geometry_response_delta {
+            None => MarkGeometryResponseDelta {
+                minimum_fill_delta: None,
+                maximum_fill_delta: None,
+            },
+            Some(ChannelGeometryResponseDelta::Marks(delta)) => delta.clone(),
+        };
+        let response = MarkGeometryResponse {
+            minimum_fill: base.minimum_fill + delta.minimum_fill_delta.unwrap_or(0.0),
+            maximum_fill: base.maximum_fill + delta.maximum_fill_delta.unwrap_or(0.0),
+        };
+        let effective = EffectiveChannelPatternInstance {
+            definition_id,
+            density,
+            pattern_rotation_degrees,
+            translation_x: instance.layout_delta.translation_x,
+            translation_y: instance.layout_delta.translation_y,
+            shape_rotation_degrees,
+            geometry_response: PatternGeometryResponse::Marks(response),
+        };
+        validate_effective_pattern(&effective)?;
+        validate_effective_response_compatibility(definition, &effective.geometry_response)?;
+        Ok(effective)
+    }
+
+    /// Builds a stale-aware density-delta command from desired effective
+    /// values.  When the base owns an aspect lock both stored axes are derived
+    /// here, so frontends never subtract the document base.
+    pub fn set_channel_density_for_effective(
+        &self,
+        channel_id: ChannelId,
+        edited_axis: DensityEditedAxis,
+        desired: DensityMetric2D,
+    ) -> Result<DocumentCommand, ValidationError> {
+        validate_positive_finite(desired.across_x, "channel.pattern.desired_density.across_x")?;
+        validate_positive_finite(desired.across_y, "channel.pattern.desired_density.across_y")?;
+        let mut desired = desired;
+        if self.pattern_settings.density.aspect_locked {
+            let value = match edited_axis {
+                DensityEditedAxis::AcrossX => desired.across_x,
+                DensityEditedAxis::AcrossY => desired.across_y,
+            };
+            let paired = derive_density_axis(&self.canvas, value, edited_axis)?;
+            match edited_axis {
+                DensityEditedAxis::AcrossX => desired.across_y = paired,
+                DensityEditedAxis::AcrossY => desired.across_x = paired,
+            }
+        }
+        Ok(DocumentCommand::SetChannelDensityDelta {
+            base: self.pattern_settings.clone(),
+            channel_id,
+            density: DensityMetricDelta2D {
+                across_x_delta: desired.across_x - self.pattern_settings.density.across_x,
+                across_y_delta: desired.across_y - self.pattern_settings.density.across_y,
+            },
+        })
+    }
+
+    /// Builds an atomic document-base density edit and derives the locked
+    /// companion axis within domain authority.
+    pub fn set_document_density_axis(
+        &self,
+        edited_axis: DensityEditedAxis,
+        value: f64,
+    ) -> Result<DocumentCommand, ValidationError> {
+        validate_positive_finite(value, "document.pattern_settings.density")?;
+        let mut settings = self.pattern_settings.clone();
+        match edited_axis {
+            DensityEditedAxis::AcrossX => settings.density.across_x = value,
+            DensityEditedAxis::AcrossY => settings.density.across_y = value,
+        }
+        if settings.density.aspect_locked {
+            let paired = derive_density_axis(&self.canvas, value, edited_axis)?;
+            match edited_axis {
+                DensityEditedAxis::AcrossX => settings.density.across_y = paired,
+                DensityEditedAxis::AcrossY => settings.density.across_x = paired,
+            }
+        }
+        Ok(DocumentCommand::SetDocumentPatternSettings {
+            base: self.pattern_settings.clone(),
+            settings,
+        })
+    }
+
+    /// Builds an atomic document-owned aspect-lock transition without allowing
+    /// any channel to override the lock.
+    pub fn set_document_density_aspect_lock(
+        &self,
+        aspect_locked: bool,
+    ) -> Result<DocumentCommand, ValidationError> {
+        let mut settings = self.pattern_settings.clone();
+        settings.density.aspect_locked = aspect_locked;
+        if aspect_locked {
+            settings.density.across_y = derive_density_axis(
+                &self.canvas,
+                settings.density.across_x,
+                DensityEditedAxis::AcrossX,
+            )?;
+        }
+        Ok(DocumentCommand::SetDocumentPatternSettings {
+            base: self.pattern_settings.clone(),
+            settings,
+        })
+    }
+
+    /// Builds a stale-aware rotation-delta command from a desired effective
+    /// layout rotation without normalizing authored degrees.
+    pub fn set_channel_pattern_rotation_for_effective(
+        &self,
+        channel_id: ChannelId,
+        desired_rotation_degrees: f64,
+    ) -> Result<DocumentCommand, ValidationError> {
+        validate_finite(
+            desired_rotation_degrees,
+            "channel.pattern.desired_rotation_degrees",
+        )?;
+        Ok(DocumentCommand::SetChannelPatternRotationDelta {
+            base: self.pattern_settings.clone(),
+            channel_id,
+            rotation_degrees: desired_rotation_degrees
+                - self.pattern_settings.pattern_rotation_degrees,
+        })
+    }
+
+    /// Builds a stale-aware shape-rotation delta from desired effective
+    /// degrees without coupling the mark response branch to rotation.
+    pub fn set_channel_shape_rotation_for_effective(
+        &self,
+        channel_id: ChannelId,
+        desired_rotation_degrees: f64,
+    ) -> Result<DocumentCommand, ValidationError> {
+        validate_finite(
+            desired_rotation_degrees,
+            "channel.pattern.desired_shape_rotation_degrees",
+        )?;
+        Ok(DocumentCommand::SetChannelShapeRotationDelta {
+            base: self.pattern_settings.clone(),
+            channel_id,
+            rotation_degrees: desired_rotation_degrees
+                - self.pattern_settings.shape_rotation_degrees,
+        })
+    }
+
+    /// Builds a stale-aware mark-response delta from desired effective values.
+    pub fn set_channel_geometry_response_for_effective(
+        &self,
+        channel_id: ChannelId,
+        desired: PatternGeometryResponse,
+    ) -> Result<DocumentCommand, ValidationError> {
+        let (PatternGeometryResponse::Marks(base), PatternGeometryResponse::Marks(desired)) =
+            (&self.pattern_settings.geometry_response, desired);
+        validate_mark_response(&desired)?;
+        Ok(DocumentCommand::SetChannelGeometryResponseDelta {
+            base: self.pattern_settings.clone(),
+            channel_id,
+            geometry_response: ChannelGeometryResponseDelta::Marks(MarkGeometryResponseDelta {
+                minimum_fill_delta: Some(desired.minimum_fill - base.minimum_fill),
+                maximum_fill_delta: Some(desired.maximum_fill - base.maximum_fill),
+            }),
+        })
+    }
+
+    /// Builds a stale-aware mark-response field delta while retaining the
+    /// other optional member exactly as authored. This prevents a one-field
+    /// edit from materializing an inherited companion value.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error without mutation when the channel is
+    /// missing, the desired resolved response is invalid, or the stored base
+    /// cannot produce a finite delta.
+    pub fn set_channel_mark_response_field_for_effective(
+        &self,
+        channel_id: ChannelId,
+        edit: MarkGeometryFieldEdit,
+    ) -> Result<DocumentCommand, ValidationError> {
+        let effective = self.effective_channel_pattern(channel_id)?;
+        let PatternGeometryResponse::Marks(mut desired) = effective.geometry_response;
+        let PatternGeometryResponse::Marks(base) = &self.pattern_settings.geometry_response;
+        let instance = self
+            .channel_pattern_instance(channel_id)
+            .ok_or(ValidationError::new(
+                "channel.id",
+                "command targets a missing channel",
+            ))?;
+        let mut delta = match &instance.geometry_response_delta {
+            Some(ChannelGeometryResponseDelta::Marks(delta)) => delta.clone(),
+            None => MarkGeometryResponseDelta {
+                minimum_fill_delta: None,
+                maximum_fill_delta: None,
+            },
+        };
+        match edit {
+            MarkGeometryFieldEdit::MinimumFill(value) => {
+                desired.minimum_fill = value;
+                delta.minimum_fill_delta = Some(value - base.minimum_fill);
+            }
+            MarkGeometryFieldEdit::MaximumFill(value) => {
+                desired.maximum_fill = value;
+                delta.maximum_fill_delta = Some(value - base.maximum_fill);
+            }
+        }
+        validate_mark_response(&desired)?;
+        Ok(DocumentCommand::SetChannelGeometryResponseDelta {
+            base: self.pattern_settings.clone(),
+            channel_id,
+            geometry_response: ChannelGeometryResponseDelta::Marks(delta),
+        })
     }
 
     /// Returns document-owned authored structures in stable creation order.
@@ -1655,18 +2020,29 @@ impl Document {
             PropertyFieldId::SourceReference,
             PropertyTarget::Document,
         )];
+        for field in [
+            PropertyFieldId::DefinitionSelection,
+            PropertyFieldId::DensityAcrossX,
+            PropertyFieldId::DensityAcrossY,
+            PropertyFieldId::DensityAspectLocked,
+            PropertyFieldId::RotationDegrees,
+            PropertyFieldId::ShapeRotationDegrees,
+            PropertyFieldId::MarkMinimumFill,
+            PropertyFieldId::MarkMaximumFill,
+        ] {
+            descriptors.push(descriptor_from_contract(field, PropertyTarget::Document));
+        }
         for channel_id in self.channel_ids() {
             let target = PropertyTarget::Channel(channel_id);
             for field in [
                 PropertyFieldId::DensityAcrossX,
                 PropertyFieldId::DensityAcrossY,
-                PropertyFieldId::DensityAspectLocked,
                 PropertyFieldId::RotationDegrees,
                 PropertyFieldId::TranslationX,
                 PropertyFieldId::TranslationY,
                 PropertyFieldId::MarkMinimumFill,
                 PropertyFieldId::MarkMaximumFill,
-                PropertyFieldId::MarkRotationOffsetDegrees,
+                PropertyFieldId::ShapeRotationDegrees,
                 PropertyFieldId::Opacity,
                 PropertyFieldId::Visibility,
                 PropertyFieldId::DefinitionSelection,
@@ -1950,6 +2326,8 @@ impl Document {
             .into_iter()
             .map(|descriptor| PropertyCurrentValue {
                 value: self.property_value_for(&descriptor),
+                authored_value: self.authored_property_value_for(&descriptor),
+                inheritance: self.property_inheritance_for(&descriptor),
                 descriptor,
             })
             .collect()
@@ -2023,37 +2401,70 @@ impl Document {
                 PropertyFieldId::SourceReference => PropertyCurrentValueKind::Reference(
                     PropertyReferenceValue::Source(self.source.clone()),
                 ),
-                _ => unreachable!("only document descriptor is source reference"),
+                PropertyFieldId::DefinitionSelection => PropertyCurrentValueKind::Reference(
+                    PropertyReferenceValue::Definition(self.pattern_settings.definition_id),
+                ),
+                PropertyFieldId::DensityAcrossX => {
+                    PropertyCurrentValueKind::FiniteF64(self.pattern_settings.density.across_x)
+                }
+                PropertyFieldId::DensityAcrossY => {
+                    PropertyCurrentValueKind::FiniteF64(self.pattern_settings.density.across_y)
+                }
+                PropertyFieldId::DensityAspectLocked => {
+                    PropertyCurrentValueKind::Boolean(self.pattern_settings.density.aspect_locked)
+                }
+                PropertyFieldId::RotationDegrees => PropertyCurrentValueKind::FiniteF64(
+                    self.pattern_settings.pattern_rotation_degrees,
+                ),
+                PropertyFieldId::ShapeRotationDegrees => PropertyCurrentValueKind::FiniteF64(
+                    self.pattern_settings.shape_rotation_degrees,
+                ),
+                PropertyFieldId::MarkMinimumFill => {
+                    let PatternGeometryResponse::Marks(response) =
+                        &self.pattern_settings.geometry_response;
+                    PropertyCurrentValueKind::FiniteF64(response.minimum_fill)
+                }
+                PropertyFieldId::MarkMaximumFill => {
+                    let PatternGeometryResponse::Marks(response) =
+                        &self.pattern_settings.geometry_response;
+                    PropertyCurrentValueKind::FiniteF64(response.maximum_fill)
+                }
+                _ => unreachable!("document descriptor is not a document-base field"),
             },
             PropertyTarget::Channel(channel_id) => {
                 let channel = channel(channel_id).expect("active descriptor targets channel");
+                let effective = self
+                    .effective_channel_pattern(channel_id)
+                    .expect("active descriptor resolves an effective pattern");
                 match descriptor.field {
                     PropertyFieldId::DensityAcrossX => {
-                        PropertyCurrentValueKind::FiniteF64(channel.layout().density.across_x)
+                        PropertyCurrentValueKind::FiniteF64(effective.density.across_x)
                     }
                     PropertyFieldId::DensityAcrossY => {
-                        PropertyCurrentValueKind::FiniteF64(channel.layout().density.across_y)
+                        PropertyCurrentValueKind::FiniteF64(effective.density.across_y)
                     }
                     PropertyFieldId::DensityAspectLocked => {
-                        PropertyCurrentValueKind::Boolean(channel.layout().density.aspect_locked)
+                        PropertyCurrentValueKind::Boolean(effective.density.aspect_locked)
                     }
                     PropertyFieldId::RotationDegrees => {
-                        PropertyCurrentValueKind::FiniteF64(channel.layout().rotation_degrees)
+                        PropertyCurrentValueKind::FiniteF64(effective.pattern_rotation_degrees)
                     }
                     PropertyFieldId::TranslationX => {
-                        PropertyCurrentValueKind::FiniteF64(channel.layout().translation_x)
+                        PropertyCurrentValueKind::FiniteF64(effective.translation_x)
                     }
                     PropertyFieldId::TranslationY => {
-                        PropertyCurrentValueKind::FiniteF64(channel.layout().translation_y)
+                        PropertyCurrentValueKind::FiniteF64(effective.translation_y)
                     }
                     PropertyFieldId::MarkMinimumFill => {
-                        PropertyCurrentValueKind::FiniteF64(channel.mark().minimum_fill)
+                        let PatternGeometryResponse::Marks(response) = effective.geometry_response;
+                        PropertyCurrentValueKind::FiniteF64(response.minimum_fill)
                     }
                     PropertyFieldId::MarkMaximumFill => {
-                        PropertyCurrentValueKind::FiniteF64(channel.mark().maximum_fill)
+                        let PatternGeometryResponse::Marks(response) = effective.geometry_response;
+                        PropertyCurrentValueKind::FiniteF64(response.maximum_fill)
                     }
-                    PropertyFieldId::MarkRotationOffsetDegrees => {
-                        PropertyCurrentValueKind::FiniteF64(channel.mark().rotation_offset_degrees)
+                    PropertyFieldId::ShapeRotationDegrees => {
+                        PropertyCurrentValueKind::FiniteF64(effective.shape_rotation_degrees)
                     }
                     PropertyFieldId::Opacity => {
                         PropertyCurrentValueKind::FiniteF64(channel.opacity())
@@ -2062,7 +2473,7 @@ impl Document {
                         PropertyCurrentValueKind::Boolean(channel.visible())
                     }
                     PropertyFieldId::DefinitionSelection => PropertyCurrentValueKind::Reference(
-                        PropertyReferenceValue::Definition(channel.definition_id()),
+                        PropertyReferenceValue::Definition(effective.definition_id),
                     ),
                     PropertyFieldId::ColorRed => {
                         PropertyCurrentValueKind::FiniteF64(channel.color().red)
@@ -2376,6 +2787,150 @@ impl Document {
         }
     }
 
+    /// Reports whether a channel-facing effective value comes from the
+    /// document base or an explicitly stored delta/override. It is metadata
+    /// only and never changes the resolver's authority.
+    fn property_inheritance_for(&self, descriptor: &PropertyDescriptor) -> PropertyInheritance {
+        let PropertyTarget::Channel(channel_id) = descriptor.target else {
+            return PropertyInheritance::NotApplicable;
+        };
+        let Some(instance) = self.channel_pattern_instance(channel_id) else {
+            return PropertyInheritance::NotApplicable;
+        };
+        match descriptor.field {
+            PropertyFieldId::DensityAcrossX | PropertyFieldId::DensityAcrossY => {
+                if instance.layout_delta.density.is_some() {
+                    PropertyInheritance::Explicit
+                } else {
+                    PropertyInheritance::Inherited
+                }
+            }
+            PropertyFieldId::RotationDegrees => {
+                if instance.layout_delta.rotation_degrees.is_some() {
+                    PropertyInheritance::Explicit
+                } else {
+                    PropertyInheritance::Inherited
+                }
+            }
+            PropertyFieldId::ShapeRotationDegrees => {
+                if instance.shape_rotation_delta_degrees.is_some() {
+                    PropertyInheritance::Explicit
+                } else {
+                    PropertyInheritance::Inherited
+                }
+            }
+            PropertyFieldId::MarkMinimumFill => match &instance.geometry_response_delta {
+                Some(ChannelGeometryResponseDelta::Marks(delta))
+                    if delta.minimum_fill_delta.is_some() =>
+                {
+                    PropertyInheritance::Explicit
+                }
+                _ => PropertyInheritance::Inherited,
+            },
+            PropertyFieldId::MarkMaximumFill => match &instance.geometry_response_delta {
+                Some(ChannelGeometryResponseDelta::Marks(delta))
+                    if delta.maximum_fill_delta.is_some() =>
+                {
+                    PropertyInheritance::Explicit
+                }
+                _ => PropertyInheritance::Inherited,
+            },
+            PropertyFieldId::DefinitionSelection => {
+                if instance.definition_override.is_some() {
+                    PropertyInheritance::Explicit
+                } else {
+                    PropertyInheritance::Inherited
+                }
+            }
+            _ => PropertyInheritance::NotApplicable,
+        }
+    }
+
+    /// Projects optional raw Stage 20G intent without replacing the effective
+    /// display value. `None` represents inherited absence and is therefore
+    /// suitable for reset affordances without frontend subtraction.
+    fn authored_property_value_for(
+        &self,
+        descriptor: &PropertyDescriptor,
+    ) -> Option<PropertyCurrentValueKind> {
+        match descriptor.target {
+            PropertyTarget::Document => match descriptor.field {
+                PropertyFieldId::DefinitionSelection => Some(PropertyCurrentValueKind::Reference(
+                    PropertyReferenceValue::Definition(self.pattern_settings.definition_id),
+                )),
+                PropertyFieldId::DensityAcrossX => Some(PropertyCurrentValueKind::FiniteF64(
+                    self.pattern_settings.density.across_x,
+                )),
+                PropertyFieldId::DensityAcrossY => Some(PropertyCurrentValueKind::FiniteF64(
+                    self.pattern_settings.density.across_y,
+                )),
+                PropertyFieldId::DensityAspectLocked => Some(PropertyCurrentValueKind::Boolean(
+                    self.pattern_settings.density.aspect_locked,
+                )),
+                PropertyFieldId::RotationDegrees => Some(PropertyCurrentValueKind::FiniteF64(
+                    self.pattern_settings.pattern_rotation_degrees,
+                )),
+                PropertyFieldId::ShapeRotationDegrees => Some(PropertyCurrentValueKind::FiniteF64(
+                    self.pattern_settings.shape_rotation_degrees,
+                )),
+                PropertyFieldId::MarkMinimumFill => {
+                    let PatternGeometryResponse::Marks(response) =
+                        &self.pattern_settings.geometry_response;
+                    Some(PropertyCurrentValueKind::FiniteF64(response.minimum_fill))
+                }
+                PropertyFieldId::MarkMaximumFill => {
+                    let PatternGeometryResponse::Marks(response) =
+                        &self.pattern_settings.geometry_response;
+                    Some(PropertyCurrentValueKind::FiniteF64(response.maximum_fill))
+                }
+                _ => None,
+            },
+            PropertyTarget::Channel(channel_id) => {
+                let instance = self.channel_pattern_instance(channel_id)?;
+                match descriptor.field {
+                    PropertyFieldId::DefinitionSelection => {
+                        instance.definition_override.map(|value| {
+                            PropertyCurrentValueKind::Reference(PropertyReferenceValue::Definition(
+                                value,
+                            ))
+                        })
+                    }
+                    PropertyFieldId::DensityAcrossX => instance
+                        .layout_delta
+                        .density
+                        .as_ref()
+                        .map(|value| PropertyCurrentValueKind::FiniteF64(value.across_x_delta)),
+                    PropertyFieldId::DensityAcrossY => instance
+                        .layout_delta
+                        .density
+                        .as_ref()
+                        .map(|value| PropertyCurrentValueKind::FiniteF64(value.across_y_delta)),
+                    PropertyFieldId::RotationDegrees => instance
+                        .layout_delta
+                        .rotation_degrees
+                        .map(PropertyCurrentValueKind::FiniteF64),
+                    PropertyFieldId::ShapeRotationDegrees => instance
+                        .shape_rotation_delta_degrees
+                        .map(PropertyCurrentValueKind::FiniteF64),
+                    PropertyFieldId::MarkMinimumFill => match &instance.geometry_response_delta {
+                        Some(ChannelGeometryResponseDelta::Marks(delta)) => delta
+                            .minimum_fill_delta
+                            .map(PropertyCurrentValueKind::FiniteF64),
+                        None => None,
+                    },
+                    PropertyFieldId::MarkMaximumFill => match &instance.geometry_response_delta {
+                        Some(ChannelGeometryResponseDelta::Marks(delta)) => delta
+                            .maximum_fill_delta
+                            .map(PropertyCurrentValueKind::FiniteF64),
+                        None => None,
+                    },
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Mechanical bidirectional completeness gate for the active schema.
     pub fn validate_property_descriptors(&self) -> Result<(), ValidationError> {
         let descriptors = self.property_descriptors();
@@ -2454,45 +3009,10 @@ impl Document {
         self.channel_ids().contains(&channel_id)
     }
 
-    fn channel_layout(&self, channel_id: ChannelId) -> Option<&ChannelPatternLayout> {
-        match &self.channel_configuration {
-            ChannelConfiguration::Legacy(channels) => channels
-                .iter()
-                .find(|channel| channel.id == channel_id)
-                .map(|channel| &channel.layout),
-            ChannelConfiguration::Topology { topology, .. } => topology
-                .channels
-                .iter()
-                .find(|channel| channel.id == channel_id)
-                .map(|channel| &channel.layout),
-        }
-    }
-    fn channel_mark_response(&self, channel_id: ChannelId) -> Option<&MarkGeometryResponse> {
-        match &self.channel_configuration {
-            ChannelConfiguration::Legacy(channels) => channels
-                .iter()
-                .find(|channel| channel.id == channel_id)
-                .map(|channel| &channel.mark_geometry_response),
-            ChannelConfiguration::Topology { topology, .. } => topology
-                .channels
-                .iter()
-                .find(|channel| channel.id == channel_id)
-                .map(|channel| &channel.mark_geometry_response),
-        }
-    }
-
     fn pattern_definition_id_for(&self, channel_id: ChannelId) -> Option<PatternDefinitionId> {
-        match &self.channel_configuration {
-            ChannelConfiguration::Legacy(channels) => channels
-                .iter()
-                .find(|channel| channel.id == channel_id)
-                .map(|channel| channel.pattern_definition_id),
-            ChannelConfiguration::Topology { topology, .. } => topology
-                .channels
-                .iter()
-                .find(|channel| channel.id == channel_id)
-                .map(|channel| channel.pattern_definition_id),
-        }
+        self.effective_channel_pattern(channel_id)
+            .ok()
+            .map(|effective| effective.definition_id)
     }
 
     fn definition(&self, id: PatternDefinitionId) -> Option<&PatternDefinition> {
@@ -2505,19 +3025,10 @@ impl Document {
     /// order. Read-only callers use this to disclose a shared edit before its
     /// history-backed command is confirmed.
     pub fn linked_channels(&self, definition_id: PatternDefinitionId) -> Vec<ChannelId> {
-        match &self.channel_configuration {
-            ChannelConfiguration::Legacy(channels) => channels
-                .iter()
-                .filter(|channel| channel.pattern_definition_id == definition_id)
-                .map(|channel| channel.id)
-                .collect(),
-            ChannelConfiguration::Topology { topology, .. } => topology
-                .channels
-                .iter()
-                .filter(|channel| channel.pattern_definition_id == definition_id)
-                .map(|channel| channel.id)
-                .collect(),
-        }
+        self.channel_ids()
+            .into_iter()
+            .filter(|channel_id| self.pattern_definition_id_for(*channel_id) == Some(definition_id))
+            .collect()
     }
 
     fn allocate_definition_id(&self) -> Result<PatternDefinitionId, ValidationError> {
@@ -2701,11 +3212,17 @@ impl Document {
 
     /// Materializes an ID-free recipe through the existing descriptor, variant
     /// draft, edit, and validation boundaries. The neutral topology is first
-    /// attached to a private candidate; payload-bearing variants are assembled
-    /// only by `VariantTransitionDraft` before any command can publish it.
+    /// attached to a private candidate either as the document base or as one
+    /// channel override; payload-bearing variants are assembled only by
+    /// `VariantTransitionDraft` before any command can publish it.
+    ///
+    /// # Errors
+    ///
+    /// Returns stable allocation, recipe-topology, transition, authored-shape,
+    /// or definition validation errors without publishing the private candidate.
     fn allocate_definition_from_recipe(
         &self,
-        channel_id: ChannelId,
+        channel_id: Option<ChannelId>,
         recipe: &PatternDefinitionRecipe,
     ) -> Result<MaterializedPatternDefinitionRecipe, ValidationError> {
         let (definition_recipe, shape_draft) = match recipe {
@@ -2717,7 +3234,11 @@ impl Document {
         let neutral = self.allocate_neutral_definition_from_recipe(definition_recipe)?;
         let mut candidate = self.clone();
         candidate.pattern_definitions.push(neutral.clone());
-        candidate.retarget_channel(channel_id, neutral.id);
+        if let Some(channel_id) = channel_id {
+            candidate.retarget_channel(channel_id, neutral.id);
+        } else {
+            candidate.pattern_settings.definition_id = neutral.id;
+        }
         candidate.apply_recipe_controls(neutral.id, definition_recipe)?;
         let authored_structure = if let Some(shape_draft) = shape_draft {
             let definition = candidate
@@ -3570,7 +4091,8 @@ impl Document {
                     .iter_mut()
                     .find(|channel| channel.id == channel_id)
                     .expect("validated channel")
-                    .pattern_definition_id = definition_id
+                    .pattern_instance
+                    .definition_override = Some(definition_id)
             }
             ChannelConfiguration::Topology { topology, .. } => {
                 topology
@@ -3578,7 +4100,8 @@ impl Document {
                     .iter_mut()
                     .find(|channel| channel.id == channel_id)
                     .expect("validated channel")
-                    .pattern_definition_id = definition_id
+                    .pattern_instance
+                    .definition_override = Some(definition_id)
             }
         }
     }
@@ -3589,6 +4112,46 @@ impl Document {
                 channels.iter_mut().find(|channel| channel.id == channel_id)
             }
             ChannelConfiguration::Topology { .. } => None,
+        }
+    }
+
+    /// Returns one mutable channel instance while preserving the document as
+    /// the sole owner of its base settings and ordered configuration.
+    fn channel_pattern_instance_mut(
+        &mut self,
+        channel_id: ChannelId,
+    ) -> Option<&mut ChannelPatternInstance> {
+        match &mut self.channel_configuration {
+            ChannelConfiguration::Legacy(channels) => channels
+                .iter_mut()
+                .find(|channel| channel.id == channel_id)
+                .map(|channel| &mut channel.pattern_instance),
+            ChannelConfiguration::Topology { topology, .. } => topology
+                .channels
+                .iter_mut()
+                .find(|channel| channel.id == channel_id)
+                .map(|channel| &mut channel.pattern_instance),
+        }
+    }
+
+    /// Applies the retained absolute translation authority without creating a
+    /// second pattern-layout store.
+    fn apply_pattern_control(&mut self, command: &DocumentCommand) -> bool {
+        let channel_id = command.channel_id();
+        match command {
+            DocumentCommand::SetTranslationAxis {
+                edited_axis, value, ..
+            } => {
+                let instance = self
+                    .channel_pattern_instance_mut(channel_id)
+                    .expect("validated channel instance");
+                match edited_axis {
+                    TranslationEditedAxis::X => instance.layout_delta.translation_x = *value,
+                    TranslationEditedAxis::Y => instance.layout_delta.translation_y = *value,
+                }
+                true
+            }
+            _ => false,
         }
     }
 
@@ -3664,6 +4227,29 @@ impl Document {
             }
         }
 
+        validate_layout(&ChannelPatternLayout {
+            density: self.pattern_settings.density.clone(),
+            rotation_degrees: self.pattern_settings.pattern_rotation_degrees,
+            translation_x: 0.0,
+            translation_y: 0.0,
+        })?;
+        validate_finite(
+            self.pattern_settings.shape_rotation_degrees,
+            "document.pattern_settings.shape_rotation_degrees",
+        )?;
+        match &self.pattern_settings.geometry_response {
+            PatternGeometryResponse::Marks(response) => validate_mark_response(response)?,
+        }
+        if self
+            .definition(self.pattern_settings.definition_id)
+            .is_none()
+        {
+            return Err(ValidationError::new(
+                "document.pattern_settings.definition_id",
+                "document base references a missing pattern definition",
+            ));
+        }
+
         match &self.channel_configuration {
             ChannelConfiguration::Legacy(channels) => {
                 let mut channel_ids = HashSet::new();
@@ -3674,20 +4260,21 @@ impl Document {
                             "document-owned channel IDs must be unique",
                         ));
                     }
-                    let definition = self
-                        .pattern_definitions
-                        .iter()
-                        .find(|definition| definition.id == channel.pattern_definition_id)
-                        .ok_or(ValidationError::new(
-                            "channel.pattern.definition_id",
-                            "channel references a missing pattern definition",
-                        ))?;
+                    let definition =
+                        self.pattern_definition_for(channel.id)
+                            .ok_or(ValidationError::new(
+                                "channel.pattern.definition_id",
+                                "channel references a missing pattern definition",
+                            ))?;
                     validate_channel(channel, definition)?;
                 }
             }
             ChannelConfiguration::Topology { model, topology } => {
                 validate_topology(*model, topology, &self.pattern_definitions)?;
             }
+        }
+        for channel_id in self.channel_ids() {
+            self.effective_channel_pattern(channel_id)?;
         }
         Ok(())
     }
@@ -3733,7 +4320,7 @@ impl Document {
             // Copy-on-edit changes definition and internal stable IDs, so its
             // family key necessarily changes even for an output-only field.
             result.affected_channels = vec![*channel_id];
-            result.invalidation = InvalidationLevel::Family;
+            result.invalidation = Some(InvalidationLevel::Family);
         } else if matches!(
             command,
             DocumentCommand::EditSelectedChannelPatternDefinition { .. }
@@ -3744,7 +4331,7 @@ impl Document {
                 | DocumentCommand::EditSharedPatternDefinition { edit, .. } => edit,
                 _ => unreachable!(),
             };
-            result.invalidation = definition_edit_invalidation(edit);
+            result.invalidation = Some(definition_edit_invalidation(edit));
         }
         Ok((candidate, result))
     }
@@ -6294,9 +6881,9 @@ fn affected_topology_channels(
 
 fn validate_channel(
     channel: &ChannelState,
-    definition: &PatternDefinition,
+    _definition: &PatternDefinition,
 ) -> Result<(), ValidationError> {
-    validate_layout(&channel.layout)?;
+    validate_channel_pattern_instance(&channel.pattern_instance)?;
     validate_unit_component(channel.appearance.color.red, "channel.appearance.color.red")?;
     validate_unit_component(
         channel.appearance.color.green,
@@ -6311,8 +6898,7 @@ fn validate_channel(
         "channel.appearance.color.alpha",
     )?;
     validate_unit_component(channel.appearance.opacity, "channel.appearance.opacity")?;
-    let _ = definition;
-    validate_mark_response(&channel.mark_geometry_response)
+    Ok(())
 }
 
 /// Validates one complete typed pattern definition and its ordered family/output capability chain.
@@ -7008,34 +7594,6 @@ fn derive_density_axis(
     Ok(result)
 }
 
-fn set_density_axis(
-    density: &mut DensityMetric2D,
-    canvas: &CanvasSpec,
-    edited_axis: DensityEditedAxis,
-    value: f64,
-) -> Result<(), ValidationError> {
-    let paired = if density.aspect_locked {
-        Some(derive_density_axis(canvas, value, edited_axis)?)
-    } else {
-        None
-    };
-    match edited_axis {
-        DensityEditedAxis::AcrossX => {
-            density.across_x = value;
-            if let Some(value) = paired {
-                density.across_y = value;
-            }
-        }
-        DensityEditedAxis::AcrossY => {
-            density.across_y = value;
-            if let Some(value) = paired {
-                density.across_x = value;
-            }
-        }
-    }
-    Ok(())
-}
-
 fn validate_layout(layout: &ChannelPatternLayout) -> Result<(), ValidationError> {
     validate_positive_finite(
         layout.density.across_x,
@@ -7053,6 +7611,105 @@ fn validate_layout(layout: &ChannelPatternLayout) -> Result<(), ValidationError>
     validate_finite(layout.translation_y, "channel.pattern.layout.translation_y")
 }
 
+/// Validates stored channel-relative intent without resolving a document base.
+/// Every optional delta remains finite; positivity and mark bounds are checked
+/// only after additive composition by `effective_channel_pattern`.
+fn validate_channel_pattern_instance(
+    instance: &ChannelPatternInstance,
+) -> Result<(), ValidationError> {
+    validate_finite(
+        instance.layout_delta.translation_x,
+        "channel.pattern.layout_delta.translation_x",
+    )?;
+    validate_finite(
+        instance.layout_delta.translation_y,
+        "channel.pattern.layout_delta.translation_y",
+    )?;
+    if let Some(density) = &instance.layout_delta.density {
+        validate_finite(
+            density.across_x_delta,
+            "channel.pattern.layout_delta.density.across_x_delta",
+        )?;
+        validate_finite(
+            density.across_y_delta,
+            "channel.pattern.layout_delta.density.across_y_delta",
+        )?;
+    }
+    if let Some(rotation) = instance.layout_delta.rotation_degrees {
+        validate_finite(rotation, "channel.pattern.layout_delta.rotation_degrees")?;
+    }
+    if let Some(rotation) = instance.shape_rotation_delta_degrees {
+        validate_finite(rotation, "channel.pattern.shape_rotation_delta_degrees")?;
+    }
+    if let Some(ChannelGeometryResponseDelta::Marks(delta)) = &instance.geometry_response_delta {
+        if let Some(value) = delta.minimum_fill_delta {
+            validate_finite(
+                value,
+                "channel.pattern.geometry_response_delta.minimum_fill_delta",
+            )?;
+        }
+        if let Some(value) = delta.maximum_fill_delta {
+            validate_finite(
+                value,
+                "channel.pattern.geometry_response_delta.maximum_fill_delta",
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Validates a fully resolved Stage 20G instance after the document performs
+/// all finite additions.  This boundary intentionally neither clamps fill nor
+/// normalizes rotations, preserving authored intent exactly.
+fn validate_effective_pattern(
+    effective: &EffectiveChannelPatternInstance,
+) -> Result<(), ValidationError> {
+    validate_positive_finite(
+        effective.density.across_x,
+        "effective_pattern.density.across_x",
+    )?;
+    validate_positive_finite(
+        effective.density.across_y,
+        "effective_pattern.density.across_y",
+    )?;
+    validate_finite(
+        effective.pattern_rotation_degrees,
+        "effective_pattern.pattern_rotation_degrees",
+    )?;
+    validate_finite(effective.translation_x, "effective_pattern.translation_x")?;
+    validate_finite(effective.translation_y, "effective_pattern.translation_y")?;
+    validate_finite(
+        effective.shape_rotation_degrees,
+        "effective_pattern.shape_rotation_degrees",
+    )?;
+    match &effective.geometry_response {
+        PatternGeometryResponse::Marks(response) => validate_mark_response(response),
+    }
+}
+
+/// Confirms that the resolved definition can realize the persisted response
+/// branch. Stage 20G accepts marks only, so this rejects an empty or future
+/// non-mark output arrangement before an engine can evaluate it.
+///
+/// # Errors
+///
+/// Returns a validation error without mutation when a marks response does not
+/// have at least one mark-producing output layer.
+fn validate_effective_response_compatibility(
+    definition: &PatternDefinition,
+    response: &PatternGeometryResponse,
+) -> Result<(), ValidationError> {
+    match response {
+        PatternGeometryResponse::Marks(_) if definition.output_layers.is_empty() => {
+            Err(ValidationError::new(
+                "channel.pattern.geometry_response",
+                "marks response requires a mark-producing definition output",
+            ))
+        }
+        PatternGeometryResponse::Marks(_) => Ok(()),
+    }
+}
+
 fn validate_mark_response(response: &MarkGeometryResponse) -> Result<(), ValidationError> {
     validate_range_finite(
         response.minimum_fill,
@@ -7065,10 +7722,6 @@ fn validate_mark_response(response: &MarkGeometryResponse) -> Result<(), Validat
         0.0,
         2.0,
         "channel.pattern.mark_geometry_response.maximum_fill",
-    )?;
-    validate_finite(
-        response.rotation_offset_degrees,
-        "channel.pattern.mark_geometry_response.rotation_offset_degrees",
     )?;
     if response.minimum_fill > response.maximum_fill {
         return Err(ValidationError::new(
@@ -7105,16 +7758,17 @@ fn validate_topology(
                 "topology channel IDs must be unique",
             ));
         }
-        let definition = definitions
-            .iter()
-            .find(|definition| definition.id == channel.pattern_definition_id)
-            .ok_or(ValidationError::new(
+        if let Some(definition_id) = channel.pattern_instance.definition_override
+            && !definitions
+                .iter()
+                .any(|definition| definition.id == definition_id)
+        {
+            return Err(ValidationError::new(
                 "channel.pattern.definition_id",
-                "channel references a missing pattern definition",
-            ))?;
-        validate_layout(&channel.layout)?;
-        let _ = definition;
-        validate_mark_response(&channel.mark_geometry_response)?;
+                "channel override references a missing pattern definition",
+            ));
+        }
+        validate_channel_pattern_instance(&channel.pattern_instance)?;
         validate_unit_component(channel.opacity, "channel.appearance.opacity")?;
         validate_source_mapping(channel.mapping)?;
         validate_paint(model, channel.role, &channel.paint)?;
@@ -7259,7 +7913,9 @@ pub enum InvalidationLevel {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandResult {
     pub affected_channels: Vec<ChannelId>,
-    pub invalidation: InvalidationLevel,
+    /// `None` records a meaningful authority-only edit whose resolved current
+    /// evaluation inputs are unchanged.
+    pub invalidation: Option<InvalidationLevel>,
     /// A newly allocated authored structure ID, when this command creates a reusable structure.
     pub created_authored_structure_id: Option<AuthoredStructureId>,
 }
@@ -7293,7 +7949,7 @@ pub enum PropertyFieldId {
     TranslationY,
     MarkMinimumFill,
     MarkMaximumFill,
-    MarkRotationOffsetDegrees,
+    ShapeRotationDegrees,
     LegacyMappingComponent,
     LegacyMappingPlacement,
     ModeledMappingComponent,
@@ -7369,7 +8025,7 @@ pub const PROPERTY_FIELD_IDS: &[PropertyFieldId] = &[
     PropertyFieldId::TranslationY,
     PropertyFieldId::MarkMinimumFill,
     PropertyFieldId::MarkMaximumFill,
-    PropertyFieldId::MarkRotationOffsetDegrees,
+    PropertyFieldId::ShapeRotationDegrees,
     PropertyFieldId::LegacyMappingComponent,
     PropertyFieldId::LegacyMappingPlacement,
     PropertyFieldId::ModeledMappingComponent,
@@ -7621,18 +8277,19 @@ pub enum PropertyChoicePolicy {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PropertyCommandKind {
     SetSourceReference,
-    SetDensityAxis,
-    SetDensityAspectLock,
-    SetRotation,
+    SetChannelDensityDelta,
+    SetDocumentPatternSettings,
+    SetChannelPatternRotationDelta,
+    SetChannelShapeRotationDelta,
     SetTranslationAxis,
-    SetMarkGeometryField,
+    SetChannelGeometryResponseDelta,
     SetLegacyMappingField,
     SetModeledMappingField,
     SetPaint,
     SetColorComponent,
     SetOpacity,
     SetVisibility,
-    RetargetDefinition,
+    SetChannelPatternDefinitionOverride,
     SetGuideBaselineAngle,
     SetGuidePhase,
     SetGuideSpacingMultiplier,
@@ -7680,6 +8337,25 @@ pub enum PropertyCommandKind {
     SetCoverageAdditionalMargin,
 }
 
+/// Identifies the sole persisted authority edited through a descriptor.
+/// Effective values remain projections and are never an additional store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PropertyAuthority {
+    DocumentBase,
+    ChannelDelta,
+    ChannelSpecific,
+    StructuralDefinition,
+}
+
+/// Reports whether a displayed channel value is inherited, explicitly
+/// overridden, or unrelated to Stage 20G pattern authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PropertyInheritance {
+    NotApplicable,
+    Inherited,
+    Explicit,
+}
+
 /// A deterministic read-only descriptor derived from the validated current
 /// schema. `choices` uses stable discriminants, never localized labels.
 #[derive(Clone, Debug, PartialEq)]
@@ -7691,11 +8367,14 @@ pub struct PropertyDescriptor {
     pub bounds: Option<PropertyBounds>,
     pub unit: PropertyUnit,
     pub dependency: PropertyDependency,
+    pub applicability: PropertyApplicability,
     pub invalidation: InvalidationLevel,
     pub copy_on_edit_escalates_to_family: bool,
     pub structural_support: StructuralSupportConstraint,
     pub reference_constraint: PropertyReferenceConstraint,
     pub choice_policy: PropertyChoicePolicy,
+    pub authority: PropertyAuthority,
+    pub reset_capable: bool,
 }
 
 /// An immutable typed value paired with one active descriptor.  This is a
@@ -7704,6 +8383,8 @@ pub struct PropertyDescriptor {
 pub struct PropertyCurrentValue {
     pub descriptor: PropertyDescriptor,
     pub value: PropertyCurrentValueKind,
+    pub authored_value: Option<PropertyCurrentValueKind>,
+    pub inheritance: PropertyInheritance,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -7851,24 +8532,6 @@ enum ChannelPropertyState<'a> {
 }
 
 impl ChannelPropertyState<'_> {
-    fn layout(&self) -> &ChannelPatternLayout {
-        match self {
-            Self::Legacy(channel) => &channel.layout,
-            Self::Modeled(channel) => &channel.layout,
-        }
-    }
-    fn mark(&self) -> &MarkGeometryResponse {
-        match self {
-            Self::Legacy(channel) => &channel.mark_geometry_response,
-            Self::Modeled(channel) => &channel.mark_geometry_response,
-        }
-    }
-    fn definition_id(&self) -> PatternDefinitionId {
-        match self {
-            Self::Legacy(channel) => channel.pattern_definition_id,
-            Self::Modeled(channel) => channel.pattern_definition_id,
-        }
-    }
     fn opacity(&self) -> f64 {
         match self {
             Self::Legacy(channel) => channel.appearance.opacity,
@@ -8977,17 +9640,18 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
         command_kind: match field {
             PropertyFieldId::SourceReference => PropertyCommandKind::SetSourceReference,
             PropertyFieldId::DensityAcrossX | PropertyFieldId::DensityAcrossY => {
-                PropertyCommandKind::SetDensityAxis
+                PropertyCommandKind::SetChannelDensityDelta
             }
-            PropertyFieldId::DensityAspectLocked => PropertyCommandKind::SetDensityAspectLock,
-            PropertyFieldId::RotationDegrees => PropertyCommandKind::SetRotation,
+            PropertyFieldId::DensityAspectLocked => PropertyCommandKind::SetDocumentPatternSettings,
+            PropertyFieldId::RotationDegrees => PropertyCommandKind::SetChannelPatternRotationDelta,
             PropertyFieldId::TranslationX | PropertyFieldId::TranslationY => {
                 PropertyCommandKind::SetTranslationAxis
             }
-            PropertyFieldId::MarkMinimumFill
-            | PropertyFieldId::MarkMaximumFill
-            | PropertyFieldId::MarkRotationOffsetDegrees => {
-                PropertyCommandKind::SetMarkGeometryField
+            PropertyFieldId::MarkMinimumFill | PropertyFieldId::MarkMaximumFill => {
+                PropertyCommandKind::SetChannelGeometryResponseDelta
+            }
+            PropertyFieldId::ShapeRotationDegrees => {
+                PropertyCommandKind::SetChannelShapeRotationDelta
             }
             PropertyFieldId::LegacyMappingComponent | PropertyFieldId::LegacyMappingPlacement => {
                 PropertyCommandKind::SetLegacyMappingField
@@ -9004,7 +9668,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::ColorAlpha => PropertyCommandKind::SetColorComponent,
             PropertyFieldId::Opacity => PropertyCommandKind::SetOpacity,
             PropertyFieldId::Visibility => PropertyCommandKind::SetVisibility,
-            PropertyFieldId::DefinitionSelection => PropertyCommandKind::RetargetDefinition,
+            PropertyFieldId::DefinitionSelection => {
+                PropertyCommandKind::SetChannelPatternDefinitionOverride
+            }
             PropertyFieldId::GuideBaselineAngle => PropertyCommandKind::SetGuideBaselineAngle,
             PropertyFieldId::GuidePhase => PropertyCommandKind::SetGuidePhase,
             PropertyFieldId::GuideSpacingMultiplier => {
@@ -9177,7 +9843,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::AlongGuideIntervalMultiplier
             | PropertyFieldId::RandomClusterDensity => PropertyUnit::Density,
             PropertyFieldId::RotationDegrees
-            | PropertyFieldId::MarkRotationOffsetDegrees
+            | PropertyFieldId::ShapeRotationDegrees
             | PropertyFieldId::GuideBaselineAngle => PropertyUnit::Degrees,
             PropertyFieldId::GuideArcStartAngle
             | PropertyFieldId::GuideArcSweepAngle
@@ -9292,7 +9958,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::SourceReference => InvalidationLevel::Source,
             PropertyFieldId::MarkMinimumFill
             | PropertyFieldId::MarkMaximumFill
-            | PropertyFieldId::MarkRotationOffsetDegrees
+            | PropertyFieldId::ShapeRotationDegrees
             | PropertyFieldId::LegacyMappingComponent
             | PropertyFieldId::LegacyMappingPlacement
             | PropertyFieldId::ModeledMappingComponent
@@ -9537,11 +10203,14 @@ const fn descriptor_from_contract(
         bounds: contract.bounds,
         unit: contract.unit,
         dependency: dependency_for_contract(contract.applicability, PropertyDependency::Always),
+        applicability: contract.applicability,
         invalidation: contract.invalidation,
         copy_on_edit_escalates_to_family: contract.copy_on_edit_escalates_to_family,
         structural_support: contract.structural_support,
         reference_constraint: contract.reference_constraint,
         choice_policy: contract.choice_policy,
+        authority: property_authority(field, target),
+        reset_capable: property_reset_capable(field, target),
     }
 }
 
@@ -9572,12 +10241,81 @@ const fn descriptor_with_runtime_context(
         bounds: contract.bounds,
         unit: contract.unit,
         dependency,
+        applicability: contract.applicability,
         invalidation: contract.invalidation,
         copy_on_edit_escalates_to_family: contract.copy_on_edit_escalates_to_family,
         structural_support,
         reference_constraint: contract.reference_constraint,
         choice_policy: contract.choice_policy,
+        authority: property_authority(field, target),
+        reset_capable: property_reset_capable(field, target),
     }
+}
+
+/// Identifies the document base, optional channel delta, or independent
+/// authority represented by one stable field.
+const fn property_authority(field: PropertyFieldId, target: PropertyTarget) -> PropertyAuthority {
+    match target {
+        PropertyTarget::Document
+            if matches!(
+                field,
+                PropertyFieldId::DefinitionSelection
+                    | PropertyFieldId::DensityAcrossX
+                    | PropertyFieldId::DensityAcrossY
+                    | PropertyFieldId::DensityAspectLocked
+                    | PropertyFieldId::RotationDegrees
+                    | PropertyFieldId::ShapeRotationDegrees
+                    | PropertyFieldId::MarkMinimumFill
+                    | PropertyFieldId::MarkMaximumFill
+            ) =>
+        {
+            PropertyAuthority::DocumentBase
+        }
+        _ => match field {
+            PropertyFieldId::DensityAspectLocked => PropertyAuthority::DocumentBase,
+            PropertyFieldId::DensityAcrossX
+            | PropertyFieldId::DensityAcrossY
+            | PropertyFieldId::RotationDegrees
+            | PropertyFieldId::ShapeRotationDegrees
+            | PropertyFieldId::MarkMinimumFill
+            | PropertyFieldId::MarkMaximumFill
+            | PropertyFieldId::DefinitionSelection => PropertyAuthority::ChannelDelta,
+            PropertyFieldId::TranslationX
+            | PropertyFieldId::TranslationY
+            | PropertyFieldId::Opacity
+            | PropertyFieldId::Visibility
+            | PropertyFieldId::Paint
+            | PropertyFieldId::ColorRed
+            | PropertyFieldId::ColorGreen
+            | PropertyFieldId::ColorBlue
+            | PropertyFieldId::ColorAlpha
+            | PropertyFieldId::SourceReference
+            | PropertyFieldId::LegacyMappingComponent
+            | PropertyFieldId::LegacyMappingPlacement
+            | PropertyFieldId::ModeledMappingComponent
+            | PropertyFieldId::ModeledMappingPlacement
+            | PropertyFieldId::ModeledMappingInverted
+            | PropertyFieldId::ModeledMappingGain
+            | PropertyFieldId::ModeledMappingBias => PropertyAuthority::ChannelSpecific,
+            _ => PropertyAuthority::StructuralDefinition,
+        },
+    }
+}
+
+/// States whether reset removes optional Stage 20G channel intent for one
+/// field rather than copying its current effective value.
+const fn property_reset_capable(field: PropertyFieldId, target: PropertyTarget) -> bool {
+    matches!(target, PropertyTarget::Channel(_))
+        && matches!(
+            field,
+            PropertyFieldId::DensityAcrossX
+                | PropertyFieldId::DensityAcrossY
+                | PropertyFieldId::RotationDegrees
+                | PropertyFieldId::ShapeRotationDegrees
+                | PropertyFieldId::MarkMinimumFill
+                | PropertyFieldId::MarkMaximumFill
+                | PropertyFieldId::DefinitionSelection
+        )
 }
 
 const fn positive_bounds() -> Option<PropertyBounds> {
@@ -10134,6 +10872,82 @@ pub enum PatternDefinitionEdit {
 /// evaluator.
 #[derive(Clone, Debug, PartialEq)]
 pub enum DocumentCommand {
+    /// Replaces the document-owned settings after comparing an exact stale
+    /// base; all channel instances are revalidated atomically before publish.
+    SetDocumentPatternSettings {
+        base: DocumentPatternSettings,
+        settings: DocumentPatternSettings,
+    },
+    /// Materializes a fresh recipe definition and installs it as the document
+    /// base without changing any channel override/delta intent.
+    ReplaceDocumentPatternDefinitionRecipe {
+        base: DocumentPatternSettings,
+        base_definition: PatternDefinition,
+        recipe: PatternDefinitionRecipe,
+    },
+    /// Installs or replaces one explicit channel definition override.
+    SetChannelPatternDefinitionOverride {
+        base: DocumentPatternSettings,
+        channel_id: ChannelId,
+        definition_id: PatternDefinitionId,
+    },
+    /// Removes one explicit channel definition override without copying an
+    /// effective value into stored state.
+    ResetChannelPatternDefinitionOverride {
+        base: DocumentPatternSettings,
+        channel_id: ChannelId,
+    },
+    /// Materializes a fresh selected-channel override from an ID-free recipe.
+    ReplaceChannelPatternDefinitionOverrideRecipe {
+        base: DocumentPatternSettings,
+        channel_id: ChannelId,
+        base_definition: PatternDefinition,
+        recipe: PatternDefinitionRecipe,
+    },
+    /// Stores deltas derived by the domain from a desired effective density.
+    SetChannelDensityDelta {
+        base: DocumentPatternSettings,
+        channel_id: ChannelId,
+        density: DensityMetricDelta2D,
+    },
+    /// Removes stored density intent while retaining all other channel intent.
+    ResetChannelDensityDelta {
+        base: DocumentPatternSettings,
+        channel_id: ChannelId,
+    },
+    /// Stores a delta derived by the domain from a desired effective rotation.
+    SetChannelPatternRotationDelta {
+        base: DocumentPatternSettings,
+        channel_id: ChannelId,
+        rotation_degrees: f64,
+    },
+    /// Removes stored layout-rotation intent.
+    ResetChannelPatternRotationDelta {
+        base: DocumentPatternSettings,
+        channel_id: ChannelId,
+    },
+    /// Stores a delta derived by the domain from a desired effective shape rotation.
+    SetChannelShapeRotationDelta {
+        base: DocumentPatternSettings,
+        channel_id: ChannelId,
+        rotation_degrees: f64,
+    },
+    /// Removes stored shape-rotation intent.
+    ResetChannelShapeRotationDelta {
+        base: DocumentPatternSettings,
+        channel_id: ChannelId,
+    },
+    /// Stores mark-only deltas derived by the domain from desired effective response values.
+    SetChannelGeometryResponseDelta {
+        base: DocumentPatternSettings,
+        channel_id: ChannelId,
+        geometry_response: ChannelGeometryResponseDelta,
+    },
+    /// Removes stored mark-response intent.
+    ResetChannelGeometryResponseDelta {
+        base: DocumentPatternSettings,
+        channel_id: ChannelId,
+    },
     /// Adds one validated reusable authored structure with a fresh document-scoped ID.
     AddAuthoredStructure {
         draft: AuthoredStructureDraft,
@@ -10160,27 +10974,15 @@ pub enum DocumentCommand {
     AddTypedPatternDefinition {
         definition: PatternDefinition,
     },
-    /// Atomically introduces a complete, fresh typed definition and retargets
-    /// one selected channel. Family/topology conversion is intentionally not
-    /// represented as a field edit.
+    /// Atomically introduces a fresh structural definition for the bounded
+    /// Stage 20F resource-editor path. Ordinary recipe replacement uses the
+    /// explicit Stage 20G channel override command instead.
     ReplaceSelectedChannelDefinitionTopology {
         channel_id: ChannelId,
         base_definition: PatternDefinition,
         definition: PatternDefinition,
     },
-    /// Atomically materializes a fresh definition from an ID-free recipe and
-    /// retargets one selected channel. It is the default preset application
-    /// path and therefore never mutates linked channels.
-    ReplaceSelectedChannelDefinitionRecipe {
-        channel_id: ChannelId,
-        base_definition: PatternDefinition,
-        recipe: PatternDefinitionRecipe,
-    },
     DuplicatePatternDefinition {
-        definition_id: PatternDefinitionId,
-    },
-    RetargetChannelPatternDefinition {
-        channel_id: ChannelId,
         definition_id: PatternDefinitionId,
     },
     RemoveUnreferencedPatternDefinition {
@@ -10212,27 +11014,10 @@ pub enum DocumentCommand {
         base_definition: PatternDefinition,
         recipe: PatternDefinitionRecipe,
     },
-    SetDensityAxis {
-        channel_id: ChannelId,
-        edited_axis: DensityEditedAxis,
-        value: f64,
-    },
-    SetDensityAspectLock {
-        channel_id: ChannelId,
-        aspect_locked: bool,
-    },
-    SetRotation {
-        channel_id: ChannelId,
-        rotation_degrees: f64,
-    },
     SetTranslationAxis {
         channel_id: ChannelId,
         edited_axis: TranslationEditedAxis,
         value: f64,
-    },
-    SetMarkGeometryField {
-        channel_id: ChannelId,
-        edit: MarkGeometryFieldEdit,
     },
     SetColorComponent {
         channel_id: ChannelId,
@@ -10297,6 +11082,7 @@ pub struct PropertyCommandFieldProjection {
 /// omitted from descriptor/command completeness checks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NonFieldCommandOperation {
+    EffectivePatternAuthority,
     AddAuthoredStructure,
     DuplicateAuthoredStructure,
     ReplaceAuthoredStructure,
@@ -10304,7 +11090,6 @@ pub enum NonFieldCommandOperation {
     AddPatternDefinition,
     AddTypedPatternDefinition,
     ReplaceSelectedChannelDefinitionTopology,
-    ReplaceSelectedChannelDefinitionRecipe,
     ReplaceSharedPatternDefinitionRecipe,
     DuplicatePatternDefinition,
     RemoveUnreferencedPatternDefinition,
@@ -10598,6 +11383,23 @@ impl DocumentCommand {
             ])
         };
         match self {
+            Command::SetDocumentPatternSettings { .. }
+            | Command::ReplaceDocumentPatternDefinitionRecipe { .. }
+            | Command::SetChannelPatternDefinitionOverride { .. }
+            | Command::ResetChannelPatternDefinitionOverride { .. }
+            | Command::ReplaceChannelPatternDefinitionOverrideRecipe { .. }
+            | Command::SetChannelDensityDelta { .. }
+            | Command::ResetChannelDensityDelta { .. }
+            | Command::SetChannelPatternRotationDelta { .. }
+            | Command::ResetChannelPatternRotationDelta { .. }
+            | Command::SetChannelShapeRotationDelta { .. }
+            | Command::ResetChannelShapeRotationDelta { .. }
+            | Command::SetChannelGeometryResponseDelta { .. }
+            | Command::ResetChannelGeometryResponseDelta { .. } => {
+                DocumentCommandFieldClassification::NonField(
+                    NonFieldCommandOperation::EffectivePatternAuthority,
+                )
+            }
             Command::AddAuthoredStructure { .. } => DocumentCommandFieldClassification::NonField(
                 NonFieldCommandOperation::AddAuthoredStructure,
             ),
@@ -10629,11 +11431,6 @@ impl DocumentCommand {
                     NonFieldCommandOperation::ReplaceSelectedChannelDefinitionTopology,
                 )
             }
-            Command::ReplaceSelectedChannelDefinitionRecipe { .. } => {
-                DocumentCommandFieldClassification::NonField(
-                    NonFieldCommandOperation::ReplaceSelectedChannelDefinitionRecipe,
-                )
-            }
             Command::ReplaceSharedPatternDefinitionRecipe { .. } => {
                 DocumentCommandFieldClassification::NonField(
                     NonFieldCommandOperation::ReplaceSharedPatternDefinitionRecipe,
@@ -10652,25 +11449,6 @@ impl DocumentCommand {
             Command::ReplaceChannelTopology { .. } => DocumentCommandFieldClassification::NonField(
                 NonFieldCommandOperation::ReplaceChannelTopology,
             ),
-            Command::SetDensityAxis {
-                edited_axis, value, ..
-            } => one(
-                match edited_axis {
-                    DensityEditedAxis::AcrossX => PropertyFieldId::DensityAcrossX,
-                    DensityEditedAxis::AcrossY => PropertyFieldId::DensityAcrossY,
-                },
-                PropertyFieldValue::FiniteF64(*value),
-            ),
-            Command::SetDensityAspectLock { aspect_locked, .. } => one(
-                PropertyFieldId::DensityAspectLocked,
-                PropertyFieldValue::Boolean(*aspect_locked),
-            ),
-            Command::SetRotation {
-                rotation_degrees, ..
-            } => one(
-                PropertyFieldId::RotationDegrees,
-                PropertyFieldValue::FiniteF64(*rotation_degrees),
-            ),
             Command::SetTranslationAxis {
                 edited_axis, value, ..
             } => one(
@@ -10679,20 +11457,6 @@ impl DocumentCommand {
                     TranslationEditedAxis::Y => PropertyFieldId::TranslationY,
                 },
                 PropertyFieldValue::FiniteF64(*value),
-            ),
-            Command::SetMarkGeometryField { edit, .. } => one(
-                match edit {
-                    MarkGeometryFieldEdit::MinimumFill(_) => PropertyFieldId::MarkMinimumFill,
-                    MarkGeometryFieldEdit::MaximumFill(_) => PropertyFieldId::MarkMaximumFill,
-                    MarkGeometryFieldEdit::RotationOffsetDegrees(_) => {
-                        PropertyFieldId::MarkRotationOffsetDegrees
-                    }
-                },
-                PropertyFieldValue::FiniteF64(match edit {
-                    MarkGeometryFieldEdit::MinimumFill(value)
-                    | MarkGeometryFieldEdit::MaximumFill(value)
-                    | MarkGeometryFieldEdit::RotationOffsetDegrees(value) => *value,
-                }),
             ),
             Command::SetColorComponent {
                 component, value, ..
@@ -10715,10 +11479,6 @@ impl DocumentCommand {
             ),
             Command::SetSourceReference { .. } => one(
                 PropertyFieldId::SourceReference,
-                PropertyFieldValue::StableIdReference,
-            ),
-            Command::RetargetChannelPatternDefinition { .. } => one(
-                PropertyFieldId::DefinitionSelection,
                 PropertyFieldValue::StableIdReference,
             ),
             Command::SetLegacyMappingField { edit, .. } => one(
@@ -10796,16 +11556,17 @@ impl DocumentCommand {
     fn requires_history(&self) -> bool {
         matches!(
             self,
-            Self::AddAuthoredStructure { .. }
+            Self::SetDocumentPatternSettings { .. }
+                | Self::ReplaceDocumentPatternDefinitionRecipe { .. }
+                | Self::ReplaceChannelPatternDefinitionOverrideRecipe { .. }
+                | Self::AddAuthoredStructure { .. }
                 | Self::DuplicateAuthoredStructure { .. }
                 | Self::ReplaceAuthoredStructure { .. }
                 | Self::RemoveUnreferencedAuthoredStructure { .. }
                 | Self::AddPatternDefinition { .. }
                 | Self::AddTypedPatternDefinition { .. }
                 | Self::ReplaceSelectedChannelDefinitionTopology { .. }
-                | Self::ReplaceSelectedChannelDefinitionRecipe { .. }
                 | Self::DuplicatePatternDefinition { .. }
-                | Self::RetargetChannelPatternDefinition { .. }
                 | Self::RemoveUnreferencedPatternDefinition { .. }
                 | Self::EditSelectedChannelPatternDefinition { .. }
                 | Self::EditSharedPatternDefinition { .. }
@@ -10820,21 +11581,28 @@ impl DocumentCommand {
     fn channel_id(&self) -> ChannelId {
         match self {
             Self::ReplaceSelectedChannelDefinitionTopology { channel_id, .. }
-            | Self::ReplaceSelectedChannelDefinitionRecipe { channel_id, .. }
-            | Self::SetDensityAxis { channel_id, .. }
-            | Self::SetDensityAspectLock { channel_id, .. }
-            | Self::SetRotation { channel_id, .. }
+            | Self::SetChannelPatternDefinitionOverride { channel_id, .. }
+            | Self::ResetChannelPatternDefinitionOverride { channel_id, .. }
+            | Self::ReplaceChannelPatternDefinitionOverrideRecipe { channel_id, .. }
+            | Self::SetChannelDensityDelta { channel_id, .. }
+            | Self::ResetChannelDensityDelta { channel_id, .. }
+            | Self::SetChannelPatternRotationDelta { channel_id, .. }
+            | Self::ResetChannelPatternRotationDelta { channel_id, .. }
+            | Self::SetChannelShapeRotationDelta { channel_id, .. }
+            | Self::ResetChannelShapeRotationDelta { channel_id, .. }
+            | Self::SetChannelGeometryResponseDelta { channel_id, .. }
+            | Self::ResetChannelGeometryResponseDelta { channel_id, .. }
             | Self::SetTranslationAxis { channel_id, .. }
-            | Self::SetMarkGeometryField { channel_id, .. }
             | Self::SetColorComponent { channel_id, .. }
             | Self::SetOpacity { channel_id, .. }
             | Self::SetVisibility { channel_id, .. }
             | Self::SetLegacyMappingField { channel_id, .. }
             | Self::SetModeledMappingField { channel_id, .. }
             | Self::SetChannelPaint { channel_id, .. }
-            | Self::RetargetChannelPatternDefinition { channel_id, .. }
             | Self::EditSelectedChannelPatternDefinition { channel_id, .. } => *channel_id,
             Self::SetSourceReference { .. }
+            | Self::SetDocumentPatternSettings { .. }
+            | Self::ReplaceDocumentPatternDefinitionRecipe { .. }
             | Self::ReplaceChannelTopology { .. }
             | Self::AddAuthoredStructure { .. }
             | Self::DuplicateAuthoredStructure { .. }
@@ -10859,6 +11627,8 @@ impl DocumentCommand {
         if !matches!(
             self,
             Self::SetSourceReference { .. }
+                | Self::SetDocumentPatternSettings { .. }
+                | Self::ReplaceDocumentPatternDefinitionRecipe { .. }
                 | Self::ReplaceChannelTopology { .. }
                 | Self::AddAuthoredStructure { .. }
                 | Self::DuplicateAuthoredStructure { .. }
@@ -10883,6 +11653,150 @@ impl DocumentCommand {
         }
 
         match self {
+            Self::SetDocumentPatternSettings { base, settings } => {
+                if &document.pattern_settings != base {
+                    return Err(ValidationError::new(
+                        "document.pattern_settings.base",
+                        "document pattern settings base is stale",
+                    ));
+                }
+                validate_layout(&ChannelPatternLayout {
+                    density: settings.density.clone(),
+                    rotation_degrees: settings.pattern_rotation_degrees,
+                    translation_x: 0.0,
+                    translation_y: 0.0,
+                })?;
+                validate_finite(
+                    settings.shape_rotation_degrees,
+                    "document.pattern_settings.shape_rotation_degrees",
+                )?;
+                match &settings.geometry_response {
+                    PatternGeometryResponse::Marks(response) => validate_mark_response(response),
+                }
+            }
+            Self::ReplaceDocumentPatternDefinitionRecipe {
+                base,
+                base_definition,
+                recipe,
+            } => {
+                if &document.pattern_settings != base
+                    || document.definition(base.definition_id) != Some(base_definition)
+                {
+                    return Err(ValidationError::new(
+                        "document.pattern_settings.base",
+                        "document recipe replacement base is stale",
+                    ));
+                }
+                let _ = document.allocate_definition_from_recipe(None, recipe)?;
+                Ok(())
+            }
+            Self::SetChannelPatternDefinitionOverride {
+                base,
+                definition_id,
+                ..
+            } => {
+                if &document.pattern_settings != base {
+                    return Err(ValidationError::new(
+                        "document.pattern_settings.base",
+                        "channel command base is stale",
+                    ));
+                }
+                document
+                    .definition(*definition_id)
+                    .map(|_| ())
+                    .ok_or(ValidationError::new(
+                        "channel.pattern.definition_override",
+                        "override references a missing pattern definition",
+                    ))
+            }
+            Self::ResetChannelPatternDefinitionOverride { base, .. }
+            | Self::ResetChannelDensityDelta { base, .. }
+            | Self::ResetChannelPatternRotationDelta { base, .. }
+            | Self::ResetChannelShapeRotationDelta { base, .. }
+            | Self::ResetChannelGeometryResponseDelta { base, .. } => {
+                if &document.pattern_settings == base {
+                    Ok(())
+                } else {
+                    Err(ValidationError::new(
+                        "document.pattern_settings.base",
+                        "channel command base is stale",
+                    ))
+                }
+            }
+            Self::ReplaceChannelPatternDefinitionOverrideRecipe {
+                base,
+                base_definition,
+                recipe,
+                channel_id,
+            } => {
+                if &document.pattern_settings != base
+                    || document.definition(base_definition.id) != Some(base_definition)
+                {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.base",
+                        "channel override recipe base is stale",
+                    ));
+                }
+                let _ = document.allocate_definition_from_recipe(Some(*channel_id), recipe)?;
+                Ok(())
+            }
+            Self::SetChannelDensityDelta { base, density, .. } => {
+                if &document.pattern_settings != base {
+                    return Err(ValidationError::new(
+                        "document.pattern_settings.base",
+                        "channel command base is stale",
+                    ));
+                }
+                validate_finite(
+                    density.across_x_delta,
+                    "channel.pattern.density_delta.across_x_delta",
+                )?;
+                validate_finite(
+                    density.across_y_delta,
+                    "channel.pattern.density_delta.across_y_delta",
+                )
+            }
+            Self::SetChannelPatternRotationDelta {
+                base,
+                rotation_degrees,
+                ..
+            }
+            | Self::SetChannelShapeRotationDelta {
+                base,
+                rotation_degrees,
+                ..
+            } => {
+                if &document.pattern_settings != base {
+                    return Err(ValidationError::new(
+                        "document.pattern_settings.base",
+                        "channel command base is stale",
+                    ));
+                }
+                validate_finite(*rotation_degrees, "channel.pattern.rotation_delta")
+            }
+            Self::SetChannelGeometryResponseDelta {
+                base,
+                geometry_response,
+                ..
+            } => {
+                if &document.pattern_settings != base {
+                    return Err(ValidationError::new(
+                        "document.pattern_settings.base",
+                        "channel command base is stale",
+                    ));
+                }
+                match geometry_response {
+                    ChannelGeometryResponseDelta::Marks(delta) => {
+                        if let Some(value) = delta.minimum_fill_delta {
+                            validate_finite(value, "channel.pattern.mark_delta.minimum_fill")?;
+                        }
+                        if let Some(value) = delta.maximum_fill_delta {
+                            validate_finite(value, "channel.pattern.mark_delta.maximum_fill")?;
+                        }
+                        Ok(())
+                    }
+                }
+            }
             Self::AddAuthoredStructure { draft } => {
                 next_authored_structure_id(&document.authored_structures)?;
                 validate_authored_structure_segments(draft.kind, &draft.segments)
@@ -10976,22 +11890,6 @@ impl DocumentCommand {
                 }
                 validate_definition(definition)
             }
-            Self::ReplaceSelectedChannelDefinitionRecipe {
-                channel_id,
-                base_definition,
-                recipe,
-            } => {
-                if document.pattern_definition_id_for(*channel_id) != Some(base_definition.id)
-                    || document.definition(base_definition.id) != Some(base_definition)
-                {
-                    return Err(ValidationError::new(
-                        "pattern_definitions.base",
-                        "selected-channel definition base is stale",
-                    ));
-                }
-                document.allocate_definition_from_recipe(*channel_id, recipe)?;
-                Ok(())
-            }
             Self::DuplicatePatternDefinition { definition_id } => {
                 let source = document
                     .definition(*definition_id)
@@ -11000,24 +11898,6 @@ impl DocumentCommand {
                         "definition to duplicate does not exist",
                     ))?;
                 document.duplicate_definition(source)?;
-                Ok(())
-            }
-            Self::RetargetChannelPatternDefinition {
-                channel_id,
-                definition_id,
-            } => {
-                if document.definition(*definition_id).is_none() {
-                    return Err(ValidationError::new(
-                        "channel.pattern.definition_id",
-                        "channel retargets a missing pattern definition",
-                    ));
-                }
-                if document.pattern_definition_id_for(*channel_id) == Some(*definition_id) {
-                    return Err(ValidationError::new(
-                        "channel.pattern.definition_id",
-                        "definition retarget is a semantic no-op",
-                    ));
-                }
                 Ok(())
             }
             Self::RemoveUnreferencedPatternDefinition { definition_id } => {
@@ -11126,7 +12006,8 @@ impl DocumentCommand {
                             "shared replacement targets an unlinked definition",
                         )
                     })?;
-                let materialized = document.allocate_definition_from_recipe(channel_id, recipe)?;
+                let materialized =
+                    document.allocate_definition_from_recipe(Some(channel_id), recipe)?;
                 let mut replacement = materialized.definition;
                 replacement.id = *definition_id;
                 validate_definition(&replacement)?;
@@ -11138,58 +12019,7 @@ impl DocumentCommand {
                 }
                 Ok(())
             }
-            Self::SetDensityAxis {
-                edited_axis, value, ..
-            } => {
-                validate_positive_finite(*value, "channel.pattern.layout.density")?;
-                let layout = document
-                    .channel_layout(self.channel_id())
-                    .expect("validated channel");
-                if layout.density.aspect_locked {
-                    derive_density_axis(&document.canvas, *value, *edited_axis)?;
-                }
-                Ok(())
-            }
-            Self::SetDensityAspectLock { aspect_locked, .. } => {
-                if *aspect_locked {
-                    let layout = document
-                        .channel_layout(self.channel_id())
-                        .expect("validated channel");
-                    derive_density_axis(
-                        &document.canvas,
-                        layout.density.across_x,
-                        DensityEditedAxis::AcrossX,
-                    )?;
-                }
-                Ok(())
-            }
-            Self::SetRotation {
-                rotation_degrees, ..
-            } => validate_finite(*rotation_degrees, "channel.pattern.layout.rotation_degrees"),
             Self::SetTranslationAxis { .. } => Ok(()),
-            Self::SetMarkGeometryField { channel_id, edit } => {
-                let pattern_definition_id = document
-                    .pattern_definition_id_for(*channel_id)
-                    .expect("command channel existence was checked above");
-                let definition = document
-                    .pattern_definitions
-                    .iter()
-                    .find(|definition| definition.id == pattern_definition_id)
-                    .expect("document validation keeps channel definitions valid");
-                let mut response = document
-                    .channel_mark_response(*channel_id)
-                    .expect("validated channel")
-                    .clone();
-                match edit {
-                    MarkGeometryFieldEdit::MinimumFill(value) => response.minimum_fill = *value,
-                    MarkGeometryFieldEdit::MaximumFill(value) => response.maximum_fill = *value,
-                    MarkGeometryFieldEdit::RotationOffsetDegrees(value) => {
-                        response.rotation_offset_degrees = *value
-                    }
-                }
-                let _ = definition;
-                validate_mark_response(&response)
-            }
             Self::SetColorComponent {
                 channel_id, value, ..
             } => {
@@ -11285,6 +12115,133 @@ impl DocumentCommand {
     /// partial candidate; authoritative session/history code installs the completed clone atomically.
     fn apply_to_valid_document(&self, document: &mut Document) {
         match self {
+            Self::SetDocumentPatternSettings { settings, .. } => {
+                document.pattern_settings = settings.clone();
+                return;
+            }
+            Self::ReplaceDocumentPatternDefinitionRecipe { recipe, .. } => {
+                let materialized = document
+                    .allocate_definition_from_recipe(None, recipe)
+                    .expect("validated document recipe");
+                if let Some(structure) = materialized.authored_structure {
+                    document.authored_structures.push(structure);
+                }
+                let definition_id = materialized.definition.id;
+                document.pattern_definitions.push(materialized.definition);
+                document.pattern_settings.definition_id = definition_id;
+                return;
+            }
+            Self::SetChannelPatternDefinitionOverride {
+                channel_id,
+                definition_id,
+                ..
+            } => {
+                document
+                    .channel_pattern_instance_mut(*channel_id)
+                    .expect("validated channel")
+                    .definition_override = Some(*definition_id);
+                return;
+            }
+            Self::ResetChannelPatternDefinitionOverride { channel_id, .. } => {
+                document
+                    .channel_pattern_instance_mut(*channel_id)
+                    .expect("validated channel")
+                    .definition_override = None;
+                return;
+            }
+            Self::ReplaceChannelPatternDefinitionOverrideRecipe {
+                channel_id, recipe, ..
+            } => {
+                let materialized = document
+                    .allocate_definition_from_recipe(Some(*channel_id), recipe)
+                    .expect("validated override recipe");
+                if let Some(structure) = materialized.authored_structure {
+                    document.authored_structures.push(structure);
+                }
+                let definition_id = materialized.definition.id;
+                document.pattern_definitions.push(materialized.definition);
+                document
+                    .channel_pattern_instance_mut(*channel_id)
+                    .expect("validated channel")
+                    .definition_override = Some(definition_id);
+                return;
+            }
+            Self::SetChannelDensityDelta {
+                channel_id,
+                density,
+                ..
+            } => {
+                document
+                    .channel_pattern_instance_mut(*channel_id)
+                    .expect("validated channel")
+                    .layout_delta
+                    .density = Some(density.clone());
+                return;
+            }
+            Self::ResetChannelDensityDelta { channel_id, .. } => {
+                document
+                    .channel_pattern_instance_mut(*channel_id)
+                    .expect("validated channel")
+                    .layout_delta
+                    .density = None;
+                return;
+            }
+            Self::SetChannelPatternRotationDelta {
+                channel_id,
+                rotation_degrees,
+                ..
+            } => {
+                document
+                    .channel_pattern_instance_mut(*channel_id)
+                    .expect("validated channel")
+                    .layout_delta
+                    .rotation_degrees = Some(*rotation_degrees);
+                return;
+            }
+            Self::ResetChannelPatternRotationDelta { channel_id, .. } => {
+                document
+                    .channel_pattern_instance_mut(*channel_id)
+                    .expect("validated channel")
+                    .layout_delta
+                    .rotation_degrees = None;
+                return;
+            }
+            Self::SetChannelShapeRotationDelta {
+                channel_id,
+                rotation_degrees,
+                ..
+            } => {
+                document
+                    .channel_pattern_instance_mut(*channel_id)
+                    .expect("validated channel")
+                    .shape_rotation_delta_degrees = Some(*rotation_degrees);
+                return;
+            }
+            Self::ResetChannelShapeRotationDelta { channel_id, .. } => {
+                document
+                    .channel_pattern_instance_mut(*channel_id)
+                    .expect("validated channel")
+                    .shape_rotation_delta_degrees = None;
+                return;
+            }
+            Self::SetChannelGeometryResponseDelta {
+                channel_id,
+                geometry_response,
+                ..
+            } => {
+                document
+                    .channel_pattern_instance_mut(*channel_id)
+                    .expect("validated channel")
+                    .geometry_response_delta = Some(geometry_response.clone());
+                return;
+            }
+            Self::ResetChannelGeometryResponseDelta { channel_id, .. } => {
+                document
+                    .channel_pattern_instance_mut(*channel_id)
+                    .expect("validated channel")
+                    .geometry_response_delta = None;
+                return;
+            }
             Self::AddAuthoredStructure { draft } => {
                 let id = next_authored_structure_id(&document.authored_structures)
                     .expect("command validation allocated an authored structure ID");
@@ -11347,21 +12304,6 @@ impl DocumentCommand {
                 document.retarget_channel(*channel_id, definition.id);
                 return;
             }
-            Self::ReplaceSelectedChannelDefinitionRecipe {
-                channel_id, recipe, ..
-            } => {
-                let materialized = document
-                    .allocate_definition_from_recipe(*channel_id, recipe)
-                    .expect("command validation materialized a recipe");
-                if let Some(structure) = materialized.authored_structure {
-                    document.authored_structures.push(structure);
-                }
-                let definition = materialized.definition;
-                let definition_id = definition.id;
-                document.pattern_definitions.push(definition);
-                document.retarget_channel(*channel_id, definition_id);
-                return;
-            }
             Self::DuplicatePatternDefinition { definition_id } => {
                 let source = document
                     .definition(*definition_id)
@@ -11371,13 +12313,6 @@ impl DocumentCommand {
                     .duplicate_definition(&source)
                     .expect("validated duplicate allocation");
                 document.pattern_definitions.push(definition);
-                return;
-            }
-            Self::RetargetChannelPatternDefinition {
-                channel_id,
-                definition_id,
-            } => {
-                document.retarget_channel(*channel_id, *definition_id);
                 return;
             }
             Self::RemoveUnreferencedPatternDefinition { definition_id } => {
@@ -11434,10 +12369,12 @@ impl DocumentCommand {
             } => {
                 let materialized = document
                     .allocate_definition_from_recipe(
-                        *document
-                            .linked_channels(*definition_id)
-                            .first()
-                            .expect("validated shared definition link"),
+                        Some(
+                            *document
+                                .linked_channels(*definition_id)
+                                .first()
+                                .expect("validated shared definition link"),
+                        ),
                         recipe,
                     )
                     .expect("command validation materialized a recipe");
@@ -11467,51 +12404,15 @@ impl DocumentCommand {
             };
             return;
         }
-        let canvas = document.canvas.clone();
+        if document.apply_pattern_control(self) {
+            return;
+        }
         match &mut document.channel_configuration {
             ChannelConfiguration::Legacy(_) => {
                 let channel = document
                     .legacy_channel_mut(self.channel_id())
                     .expect("validated command must target an existing legacy channel");
                 match self {
-                    Self::SetDensityAxis {
-                        edited_axis, value, ..
-                    } => {
-                        set_density_axis(&mut channel.layout.density, &canvas, *edited_axis, *value)
-                            .expect("validated density axis")
-                    }
-                    Self::SetDensityAspectLock { aspect_locked, .. } => {
-                        if *aspect_locked {
-                            let paired = derive_density_axis(
-                                &canvas,
-                                channel.layout.density.across_x,
-                                DensityEditedAxis::AcrossX,
-                            )
-                            .expect("validated canvas");
-                            channel.layout.density.across_y = paired;
-                        }
-                        channel.layout.density.aspect_locked = *aspect_locked;
-                    }
-                    Self::SetRotation {
-                        rotation_degrees, ..
-                    } => channel.layout.rotation_degrees = *rotation_degrees,
-                    Self::SetTranslationAxis {
-                        edited_axis, value, ..
-                    } => match edited_axis {
-                        TranslationEditedAxis::X => channel.layout.translation_x = *value,
-                        TranslationEditedAxis::Y => channel.layout.translation_y = *value,
-                    },
-                    Self::SetMarkGeometryField { edit, .. } => match edit {
-                        MarkGeometryFieldEdit::MinimumFill(value) => {
-                            channel.mark_geometry_response.minimum_fill = *value
-                        }
-                        MarkGeometryFieldEdit::MaximumFill(value) => {
-                            channel.mark_geometry_response.maximum_fill = *value
-                        }
-                        MarkGeometryFieldEdit::RotationOffsetDegrees(value) => {
-                            channel.mark_geometry_response.rotation_offset_degrees = *value
-                        }
-                    },
                     Self::SetColorComponent {
                         component, value, ..
                     } => set_color_component(&mut channel.appearance.color, *component, *value),
@@ -11535,44 +12436,6 @@ impl DocumentCommand {
                     .find(|channel| channel.id == self.channel_id())
                     .expect("validated command must target an existing modeled channel");
                 match self {
-                    Self::SetDensityAxis {
-                        edited_axis, value, ..
-                    } => {
-                        set_density_axis(&mut channel.layout.density, &canvas, *edited_axis, *value)
-                            .expect("validated density axis")
-                    }
-                    Self::SetDensityAspectLock { aspect_locked, .. } => {
-                        if *aspect_locked {
-                            let paired = derive_density_axis(
-                                &canvas,
-                                channel.layout.density.across_x,
-                                DensityEditedAxis::AcrossX,
-                            )
-                            .expect("validated canvas");
-                            channel.layout.density.across_y = paired;
-                        }
-                        channel.layout.density.aspect_locked = *aspect_locked;
-                    }
-                    Self::SetRotation {
-                        rotation_degrees, ..
-                    } => channel.layout.rotation_degrees = *rotation_degrees,
-                    Self::SetTranslationAxis {
-                        edited_axis, value, ..
-                    } => match edited_axis {
-                        TranslationEditedAxis::X => channel.layout.translation_x = *value,
-                        TranslationEditedAxis::Y => channel.layout.translation_y = *value,
-                    },
-                    Self::SetMarkGeometryField { edit, .. } => match edit {
-                        MarkGeometryFieldEdit::MinimumFill(value) => {
-                            channel.mark_geometry_response.minimum_fill = *value
-                        }
-                        MarkGeometryFieldEdit::MaximumFill(value) => {
-                            channel.mark_geometry_response.maximum_fill = *value
-                        }
-                        MarkGeometryFieldEdit::RotationOffsetDegrees(value) => {
-                            channel.mark_geometry_response.rotation_offset_degrees = *value
-                        }
-                    },
                     Self::SetColorComponent {
                         component, value, ..
                     } => {
@@ -11611,6 +12474,56 @@ impl DocumentCommand {
     /// Authored resource replacements enumerate every current generic-guide consumer in channel
     /// order, while unreferenced resource operations retain the established empty result.
     fn result_for_transition(&self, before: &Document, after: &Document) -> CommandResult {
+        if matches!(
+            self,
+            Self::SetDocumentPatternSettings { .. }
+                | Self::ReplaceDocumentPatternDefinitionRecipe { .. }
+                | Self::SetChannelPatternDefinitionOverride { .. }
+                | Self::ResetChannelPatternDefinitionOverride { .. }
+                | Self::ReplaceChannelPatternDefinitionOverrideRecipe { .. }
+                | Self::SetChannelDensityDelta { .. }
+                | Self::ResetChannelDensityDelta { .. }
+                | Self::SetChannelPatternRotationDelta { .. }
+                | Self::ResetChannelPatternRotationDelta { .. }
+                | Self::SetChannelShapeRotationDelta { .. }
+                | Self::ResetChannelShapeRotationDelta { .. }
+                | Self::SetChannelGeometryResponseDelta { .. }
+                | Self::ResetChannelGeometryResponseDelta { .. }
+        ) {
+            let mut level = None;
+            let affected_channels = after
+                .channel_ids()
+                .into_iter()
+                .filter(|channel_id| {
+                    let old = before.effective_channel_pattern(*channel_id).ok();
+                    let new = after.effective_channel_pattern(*channel_id).ok();
+                    if old == new {
+                        return false;
+                    }
+                    let family = old.as_ref().zip(new.as_ref()).is_none_or(|(old, new)| {
+                        old.definition_id != new.definition_id
+                            || old.density != new.density
+                            || old.pattern_rotation_degrees != new.pattern_rotation_degrees
+                            || old.translation_x != new.translation_x
+                            || old.translation_y != new.translation_y
+                    });
+                    level = strongest_invalidation(
+                        level,
+                        if family {
+                            InvalidationLevel::Family
+                        } else {
+                            InvalidationLevel::Realization
+                        },
+                    );
+                    true
+                })
+                .collect();
+            return CommandResult {
+                affected_channels,
+                invalidation: level,
+                created_authored_structure_id: None,
+            };
+        }
         let invalidation = match self.field_classification() {
             DocumentCommandFieldClassification::DescriptorBacked(projections) => {
                 let projection = projections
@@ -11619,13 +12532,13 @@ impl DocumentCommand {
                 property_field_contract(projection.field).invalidation
             }
             DocumentCommandFieldClassification::NonField(operation) => match operation {
+                NonFieldCommandOperation::EffectivePatternAuthority => InvalidationLevel::Family,
                 NonFieldCommandOperation::AddAuthoredStructure
                 | NonFieldCommandOperation::DuplicateAuthoredStructure
                 | NonFieldCommandOperation::RemoveUnreferencedAuthoredStructure
                 | NonFieldCommandOperation::AddPatternDefinition
                 | NonFieldCommandOperation::AddTypedPatternDefinition
                 | NonFieldCommandOperation::ReplaceSelectedChannelDefinitionTopology
-                | NonFieldCommandOperation::ReplaceSelectedChannelDefinitionRecipe
                 | NonFieldCommandOperation::ReplaceSharedPatternDefinitionRecipe
                 | NonFieldCommandOperation::DuplicatePatternDefinition
                 | NonFieldCommandOperation::RemoveUnreferencedPatternDefinition => {
@@ -11687,9 +12600,7 @@ impl DocumentCommand {
                             })
                     })
                     .collect(),
-                Self::RetargetChannelPatternDefinition { channel_id, .. }
-                | Self::ReplaceSelectedChannelDefinitionTopology { channel_id, .. }
-                | Self::ReplaceSelectedChannelDefinitionRecipe { channel_id, .. }
+                Self::ReplaceSelectedChannelDefinitionTopology { channel_id, .. }
                 | Self::EditSelectedChannelPatternDefinition { channel_id, .. } => {
                     vec![*channel_id]
                 }
@@ -11701,7 +12612,29 @@ impl DocumentCommand {
                 }
                 _ => vec![self.channel_id()],
             },
-            invalidation,
+            invalidation: if matches!(
+                self,
+                Self::SetDocumentPatternSettings { .. }
+                    | Self::ReplaceDocumentPatternDefinitionRecipe { .. }
+                    | Self::SetChannelPatternDefinitionOverride { .. }
+                    | Self::ResetChannelPatternDefinitionOverride { .. }
+                    | Self::ReplaceChannelPatternDefinitionOverrideRecipe { .. }
+                    | Self::SetChannelDensityDelta { .. }
+                    | Self::ResetChannelDensityDelta { .. }
+                    | Self::SetChannelPatternRotationDelta { .. }
+                    | Self::ResetChannelPatternRotationDelta { .. }
+                    | Self::SetChannelShapeRotationDelta { .. }
+                    | Self::ResetChannelShapeRotationDelta { .. }
+                    | Self::SetChannelGeometryResponseDelta { .. }
+                    | Self::ResetChannelGeometryResponseDelta { .. }
+            ) && before.channel_ids().iter().all(|channel_id| {
+                before.effective_channel_pattern(*channel_id).ok()
+                    == after.effective_channel_pattern(*channel_id).ok()
+            }) {
+                None
+            } else {
+                Some(invalidation)
+            },
             created_authored_structure_id: match self {
                 Self::AddAuthoredStructure { .. } | Self::DuplicateAuthoredStructure { .. } => {
                     after.authored_structures.last().map(AuthoredStructure::id)
@@ -12103,10 +13036,9 @@ impl DocumentHistory {
         let result = CommandResult {
             affected_channels: retarget_result.affected_channels,
             invalidation: strongest_invalidation(
-                Some(duplicate_result.invalidation),
-                retarget_result.invalidation,
-            )
-            .expect("two transitions have invalidations"),
+                duplicate_result.invalidation,
+                retarget_result.invalidation.expect("retarget invalidates"),
+            ),
             created_authored_structure_id: Some(structure_id),
         };
         self.undo.push(HistoryEntry {
@@ -12188,10 +13120,9 @@ impl DocumentHistory {
         let result = CommandResult {
             affected_channels: attach_result.affected_channels,
             invalidation: strongest_invalidation(
-                Some(add_result.invalidation),
-                attach_result.invalidation,
-            )
-            .expect("add and attachment both invalidate"),
+                add_result.invalidation,
+                attach_result.invalidation.expect("attachment invalidates"),
+            ),
             created_authored_structure_id: Some(structure_id),
         };
         self.undo.push(HistoryEntry {
@@ -12301,12 +13232,13 @@ impl DocumentHistory {
             affected_channels: retarget_result.affected_channels,
             invalidation: strongest_invalidation(
                 strongest_invalidation(
-                    Some(duplicate_result.invalidation),
-                    retarget_result.invalidation,
+                    duplicate_result.invalidation,
+                    retarget_result.invalidation.expect("retarget invalidates"),
                 ),
-                replace_result.invalidation,
-            )
-            .expect("three transitions have invalidations"),
+                replace_result
+                    .invalidation
+                    .expect("replacement invalidates"),
+            ),
             created_authored_structure_id: Some(structure_id),
         };
         self.undo.push(HistoryEntry {
@@ -12387,9 +13319,7 @@ impl DocumentHistory {
             after: final_document.clone(),
             result: CommandResult {
                 affected_channels: result.affected_channels.clone(),
-                invalidation: result
-                    .invalidation
-                    .expect("changed drafts invalidate one layer"),
+                invalidation: result.invalidation,
                 created_authored_structure_id: None,
             },
         });
@@ -12434,21 +13364,43 @@ fn squash_result(before: &Document, after: &Document) -> DraftSquashResult {
         });
     let mut changed_channels = HashSet::new();
     for channel_id in &after_channel_ids {
+        let before_effective = before.effective_channel_pattern(*channel_id).ok();
+        let after_effective = after.effective_channel_pattern(*channel_id).ok();
+        if before_effective != after_effective {
+            changed_channels.insert(*channel_id);
+            let family = before_effective
+                .as_ref()
+                .zip(after_effective.as_ref())
+                .is_none_or(|(old, new)| {
+                    old.definition_id != new.definition_id
+                        || old.density != new.density
+                        || old.pattern_rotation_degrees != new.pattern_rotation_degrees
+                        || old.translation_x != new.translation_x
+                        || old.translation_y != new.translation_y
+                });
+            level = strongest_invalidation(
+                level,
+                if family {
+                    InvalidationLevel::Family
+                } else {
+                    InvalidationLevel::Realization
+                },
+            );
+            continue;
+        }
         match (
             before.modeled_channel(*channel_id),
             after.modeled_channel(*channel_id),
         ) {
             (Some(old), Some(new)) if old != new => {
-                changed_channels.insert(*channel_id);
-                if old.pattern_definition_id != new.pattern_definition_id
-                    || old.layout != new.layout
-                {
-                    level = strongest_invalidation(level, InvalidationLevel::Family);
-                } else if old.mark_geometry_response != new.mark_geometry_response {
-                    level = strongest_invalidation(level, InvalidationLevel::Realization);
-                } else if old.mapping != new.mapping {
+                if old.mapping != new.mapping {
+                    changed_channels.insert(*channel_id);
                     level = strongest_invalidation(level, InvalidationLevel::Source);
-                } else {
+                } else if old.paint != new.paint
+                    || old.visible != new.visible
+                    || old.opacity != new.opacity
+                {
+                    changed_channels.insert(*channel_id);
                     level = strongest_invalidation(level, InvalidationLevel::Presentation);
                 }
             }
@@ -12456,8 +13408,17 @@ fn squash_result(before: &Document, after: &Document) -> DraftSquashResult {
                 let old = before.channel(*channel_id);
                 let new = after.channel(*channel_id);
                 if old != new {
-                    changed_channels.insert(*channel_id);
-                    level = strongest_invalidation(level, InvalidationLevel::Presentation);
+                    if old.map(|value| value.source_mapping)
+                        != new.map(|value| value.source_mapping)
+                    {
+                        changed_channels.insert(*channel_id);
+                        level = strongest_invalidation(level, InvalidationLevel::Source);
+                    } else if old.map(|value| &value.appearance)
+                        != new.map(|value| &value.appearance)
+                    {
+                        changed_channels.insert(*channel_id);
+                        level = strongest_invalidation(level, InvalidationLevel::Presentation);
+                    }
                 }
             }
             _ => {}
@@ -12509,7 +13470,7 @@ fn squash_result(before: &Document, after: &Document) -> DraftSquashResult {
     DraftSquashResult {
         unchanged: false,
         affected_channels,
-        invalidation: level.or(Some(InvalidationLevel::Family)),
+        invalidation: level,
     }
 }
 
@@ -12561,6 +13522,7 @@ impl Error for DocumentSessionError {}
 mod history_tests {
     use super::*;
 
+    /// Builds one reversible current-authority history for revision-exhaustion witnesses.
     fn history() -> DocumentHistory {
         let definition = PatternDefinition::supported_straight_grid(
             PatternDefinitionId(1),
@@ -12580,18 +13542,32 @@ mod history_tests {
                 height: 10.0,
             },
             vec![definition],
+            DocumentPatternSettings {
+                definition_id: PatternDefinitionId(1),
+                density: DensityMetric2D {
+                    across_x: 1.0,
+                    across_y: 1.0,
+                    aspect_locked: true,
+                },
+                pattern_rotation_degrees: 0.0,
+                shape_rotation_degrees: 0.0,
+                geometry_response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+                    minimum_fill: 0.0,
+                    maximum_fill: 1.0,
+                }),
+            },
             vec![ChannelState {
                 id: ChannelId(1),
-                pattern_definition_id: PatternDefinitionId(1),
-                layout: ChannelPatternLayout {
-                    density: DensityMetric2D {
-                        across_x: 1.0,
-                        across_y: 1.0,
-                        aspect_locked: true,
+                pattern_instance: ChannelPatternInstance {
+                    definition_override: None,
+                    layout_delta: ChannelPatternLayoutDelta {
+                        density: None,
+                        rotation_degrees: None,
+                        translation_x: 0.0,
+                        translation_y: 0.0,
                     },
-                    rotation_degrees: 0.0,
-                    translation_x: 0.0,
-                    translation_y: 0.0,
+                    shape_rotation_delta_degrees: None,
+                    geometry_response_delta: None,
                 },
                 appearance: ChannelAppearance {
                     visible: true,
@@ -12602,11 +13578,6 @@ mod history_tests {
                         alpha: 1.0,
                     },
                     opacity: 1.0,
-                },
-                mark_geometry_response: MarkGeometryResponse {
-                    minimum_fill: 0.0,
-                    maximum_fill: 1.0,
-                    rotation_offset_degrees: 0.0,
                 },
                 source_mapping: ChannelSourceMapping {
                     component: SourceComponent::Luminance,

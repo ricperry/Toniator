@@ -5,10 +5,11 @@ use std::{error::Error, fmt, path::PathBuf, process::ExitCode};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use toniator_domain::{
-    CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternLayout, ChannelSourceMapping,
-    ChannelState, ChannelTopologyTemplate, ColorValue, CoveragePolicy, DensityMetric2D, Document,
-    DocumentCommand, DocumentId, DocumentSession, HalftoneChannelModel, MarkGeometryResponse,
-    PatternDefinition, PatternDefinitionId, PatternMechanismId, PatternOutputLayerId,
+    CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternInstance, ChannelPatternLayoutDelta,
+    ChannelSourceMapping, ChannelState, ChannelTopologyTemplate, ColorValue, CoveragePolicy,
+    DensityMetric2D, Document, DocumentCommand, DocumentId, DocumentPatternSettings,
+    DocumentSession, HalftoneChannelModel, MarkGeometryResponse, PatternDefinition,
+    PatternDefinitionId, PatternGeometryResponse, PatternMechanismId, PatternOutputLayerId,
     SourceComponent, SourcePlacement, SourceReference, SourceReferenceId, ValidationError,
 };
 use toniator_engine::{
@@ -470,6 +471,12 @@ fn document_create(arguments: DocumentCreateArgs) -> Result<(), CliError> {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Builds one source-backed modeled document through document-base pattern authority.
+///
+/// # Errors
+///
+/// Returns a stable domain or command error when the requested canvas, effective
+/// pattern values, topology, or optional opacity cannot form a valid document.
 fn build_document(
     source_reference: SourceReferenceId,
     canvas: CanvasSpec,
@@ -499,18 +506,32 @@ fn build_document(
                 additional_margin: 0.0,
             },
         )],
+        DocumentPatternSettings {
+            definition_id: PatternDefinitionId(1),
+            density: DensityMetric2D {
+                across_x: density_x,
+                across_y: density_y,
+                aspect_locked: true,
+            },
+            pattern_rotation_degrees: rotation,
+            shape_rotation_degrees: 0.0,
+            geometry_response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+                minimum_fill: fill_min,
+                maximum_fill: fill_max,
+            }),
+        },
         vec![ChannelState {
             id: ChannelId(1),
-            pattern_definition_id: PatternDefinitionId(1),
-            layout: ChannelPatternLayout {
-                density: DensityMetric2D {
-                    across_x: density_x,
-                    across_y: density_y,
-                    aspect_locked: true,
+            pattern_instance: ChannelPatternInstance {
+                definition_override: None,
+                layout_delta: ChannelPatternLayoutDelta {
+                    density: None,
+                    rotation_degrees: None,
+                    translation_x: offset_x,
+                    translation_y: offset_y,
                 },
-                rotation_degrees: rotation,
-                translation_x: offset_x,
-                translation_y: offset_y,
+                shape_rotation_delta_degrees: None,
+                geometry_response_delta: None,
             },
             appearance: ChannelAppearance {
                 visible: true,
@@ -522,11 +543,6 @@ fn build_document(
                 },
                 opacity: 1.0,
             },
-            mark_geometry_response: MarkGeometryResponse {
-                minimum_fill: fill_min,
-                maximum_fill: fill_max,
-                rotation_offset_degrees: 0.0,
-            },
             source_mapping: ChannelSourceMapping {
                 component: SourceComponent::Luminance,
                 placement: SourcePlacement::StretchToCanvas,
@@ -536,21 +552,16 @@ fn build_document(
     let topology = legacy.canonical_channel_topology(
         model,
         ChannelTopologyTemplate {
-            pattern_definition_id: PatternDefinitionId(1),
-            layout: ChannelPatternLayout {
-                density: DensityMetric2D {
-                    across_x: density_x,
-                    across_y: density_y,
-                    aspect_locked: true,
+            pattern_instance: ChannelPatternInstance {
+                definition_override: None,
+                layout_delta: ChannelPatternLayoutDelta {
+                    density: None,
+                    rotation_degrees: None,
+                    translation_x: offset_x,
+                    translation_y: offset_y,
                 },
-                rotation_degrees: rotation,
-                translation_x: offset_x,
-                translation_y: offset_y,
-            },
-            mark_geometry_response: MarkGeometryResponse {
-                minimum_fill: fill_min,
-                maximum_fill: fill_max,
-                rotation_offset_degrees: 0.0,
+                shape_rotation_delta_degrees: None,
+                geometry_response_delta: None,
             },
         },
     )?;
@@ -984,6 +995,12 @@ fn inspect_grid(arguments: GridArgs) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Validates either one current-format container or a command-line document construction.
+///
+/// # Errors
+///
+/// Returns a stable CLI diagnostic for conflicting arguments, obsolete or invalid
+/// persistence, invalid authored values, or document validation failure.
 fn validate(arguments: ValidateArgs) -> Result<(), CliError> {
     if let Some(input) = arguments.input {
         if arguments.canvas.is_some()
@@ -999,11 +1016,7 @@ fn validate(arguments: ValidateArgs) -> Result<(), CliError> {
         let loaded =
             load_document(&input).map_err(|error| CliError::new(error.path(), error.context()))?;
         let session = DocumentSession::new(loaded.document().clone())?;
-        let migrations = if loaded.migration_report().is_empty() {
-            "empty"
-        } else {
-            "v1-to-v2"
-        };
+        let migrations = "none";
         println!(
             "valid document (revision {}, container v{}, document v{}, migrations: {})",
             session.revision().0,
@@ -1042,18 +1055,32 @@ fn validate(arguments: ValidateArgs) -> Result<(), CliError> {
                 additional_margin: 0.0,
             },
         )],
+        DocumentPatternSettings {
+            definition_id: PatternDefinitionId(1),
+            density: DensityMetric2D {
+                across_x: density_x,
+                across_y: density_y,
+                aspect_locked: true,
+            },
+            pattern_rotation_degrees: 0.0,
+            shape_rotation_degrees: 0.0,
+            geometry_response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+                minimum_fill: 0.0,
+                maximum_fill: 1.0,
+            }),
+        },
         vec![ChannelState {
             id: ChannelId(1),
-            pattern_definition_id: PatternDefinitionId(1),
-            layout: ChannelPatternLayout {
-                density: DensityMetric2D {
-                    across_x: density_x,
-                    across_y: density_y,
-                    aspect_locked: true,
+            pattern_instance: ChannelPatternInstance {
+                definition_override: None,
+                layout_delta: ChannelPatternLayoutDelta {
+                    density: None,
+                    rotation_degrees: None,
+                    translation_x: 0.0,
+                    translation_y: 0.0,
                 },
-                rotation_degrees: 0.0,
-                translation_x: 0.0,
-                translation_y: 0.0,
+                shape_rotation_delta_degrees: None,
+                geometry_response_delta: None,
             },
             appearance: ChannelAppearance {
                 visible: true,
@@ -1064,11 +1091,6 @@ fn validate(arguments: ValidateArgs) -> Result<(), CliError> {
                     alpha: 1.0,
                 },
                 opacity,
-            },
-            mark_geometry_response: MarkGeometryResponse {
-                minimum_fill: 0.0,
-                maximum_fill: 1.0,
-                rotation_offset_degrees: 0.0,
             },
             source_mapping: ChannelSourceMapping {
                 component: SourceComponent::Luminance,

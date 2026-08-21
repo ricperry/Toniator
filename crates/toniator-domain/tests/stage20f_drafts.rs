@@ -94,6 +94,7 @@ fn document_with_typed_guide_and_mark_uses() -> Document {
         base.canvas().clone(),
         base.source().clone(),
         vec![definition],
+        base.pattern_settings().clone(),
         base.channel_model().expect("modeled document").to_owned(),
         base.channel_topology().expect("modeled document").clone(),
         vec![guide, mark],

@@ -4,6 +4,7 @@ use crate::{ExportFormat, LifecycleAction, SavedContent, Workspace};
 use toniator_engine::EvaluationCompletion;
 
 /// Carries worker results without granting workers GTK or document authority.
+#[allow(clippy::large_enum_variant)] // Save events deliberately own one authoritative document snapshot.
 pub(crate) enum AppEvent {
     /// Finishes one generation-scoped open request.
     Load {

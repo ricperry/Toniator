@@ -39,11 +39,11 @@ use toniator_domain::{
     ColorComponent, DensityEditedAxis, Document, DocumentCommand, DocumentHistory, DocumentSession,
     HalftoneChannelModel, LegacyMappingFieldEdit, MarkGeometryFieldEdit, MarkOrientationKind,
     MarkPrototype, ModeledMappingFieldEdit, PaintKind, PatternDefinitionEdit, PatternDefinitionId,
-    PatternMechanism, PatternMechanismId, PatternOutputLayerId, PropertyCurrentValue,
-    PropertyCurrentValueKind, PropertyDescriptor, PropertyEnumChoice, PropertyFieldId,
-    PropertyReferenceValue, PropertyTarget, PropertyValueKind, RandomCharacterKind,
-    SourceComponent, SourceMappingComponent, SourceReference, SourceReferenceId,
-    TranslationEditedAxis, VariantTransitionFieldUpdate, VariantTransitionValue,
+    PatternGeometryResponse, PatternMechanism, PatternMechanismId, PatternOutputLayerId,
+    PropertyCurrentValue, PropertyCurrentValueKind, PropertyDescriptor, PropertyEnumChoice,
+    PropertyFieldId, PropertyReferenceValue, PropertyTarget, PropertyValueKind,
+    RandomCharacterKind, SourceComponent, SourceMappingComponent, SourceReference,
+    SourceReferenceId, TranslationEditedAxis, VariantTransitionFieldUpdate, VariantTransitionValue,
 };
 #[cfg(test)]
 use toniator_domain::{DensityModulationKind, ExclusionKind};
@@ -345,7 +345,6 @@ impl Workspace {
             .and_then(|name| name.to_str())
             .unwrap_or("Untitled.toniator")
             .to_owned();
-        let migration_notice = !loaded.migration_report().is_empty();
         Ok(Self {
             history: fresh_history(document.clone())?,
             sources: sources.clone(),
@@ -356,7 +355,7 @@ impl Workspace {
                 format,
                 identity,
             }),
-            migration_notice,
+            migration_notice: false,
             savepoint: Some(SavedContent { document, sources }),
         })
     }
@@ -1457,6 +1456,10 @@ fn focus_with_collection_index(
     }
 }
 
+/// Selects document and active-definition descriptor values for one channel.
+///
+/// Effective definition identity comes only from the domain resolver; this
+/// presentation filter never reconstructs inheritance or persisted deltas.
 fn selected_property_values(
     document: &Document,
     channel_id: ChannelId,
@@ -1471,13 +1474,8 @@ fn selected_property_values(
             | PropertyTarget::Mechanism(id, _)
             | PropertyTarget::OutputLayer(id, _)
             | PropertyTarget::GuideDimension(id, _, _) => document
-                .channel(channel_id)
-                .map(|channel| channel.pattern_definition_id == id)
-                .or_else(|| {
-                    document
-                        .modeled_channel(channel_id)
-                        .map(|channel| channel.pattern_definition_id == id)
-                })
+                .effective_channel_pattern(channel_id)
+                .map(|pattern| pattern.definition_id == id)
                 .unwrap_or(false),
         })
         .collect()
@@ -1498,11 +1496,23 @@ fn is_structural_descriptor(descriptor: &PropertyDescriptor) -> bool {
 
 /// Returns only selected-channel instance and presentation values for the
 /// sidebar inspector. Structural values are deliberately excluded so the
-/// sidebar cannot become an alternate Pattern Editor.
+/// sidebar cannot become an alternate Pattern Editor. Stage 20G also keeps
+/// undisclosed document-base inheritance controls out of this existing
+/// channel workflow; source selection and the document-owned aspect lock are
+/// retained because they are the established controls at those locations.
 fn channel_inspector_values(values: &[PropertyCurrentValue]) -> Vec<PropertyCurrentValue> {
     values
         .iter()
-        .filter(|value| !is_structural_descriptor(&value.descriptor))
+        .filter(|value| {
+            !is_structural_descriptor(&value.descriptor)
+                && match value.descriptor.target {
+                    PropertyTarget::Document => matches!(
+                        value.descriptor.field,
+                        PropertyFieldId::SourceReference | PropertyFieldId::DensityAspectLocked
+                    ),
+                    _ => true,
+                }
+        })
         .cloned()
         .collect()
 }
@@ -1561,7 +1571,7 @@ fn descriptor_belongs_to_editor(field: &PropertyFieldId, purpose: PatternEditorP
             PatternEditorPurpose::Mark,
             PropertyFieldId::MarkMinimumFill
                 | PropertyFieldId::MarkMaximumFill
-                | PropertyFieldId::MarkRotationOffsetDegrees
+                | PropertyFieldId::ShapeRotationDegrees
                 | PropertyFieldId::OutputSiteProduct
                 | PropertyFieldId::OutputPrototype
                 | PropertyFieldId::OutputAuthoredClosedShape
@@ -1657,7 +1667,7 @@ fn inspector_group(field: PropertyFieldId) -> &'static str {
         | PropertyFieldId::TranslationY => "Transform",
         PropertyFieldId::MarkMinimumFill
         | PropertyFieldId::MarkMaximumFill
-        | PropertyFieldId::MarkRotationOffsetDegrees => "Marks",
+        | PropertyFieldId::ShapeRotationDegrees => "Marks",
         PropertyFieldId::DefinitionSelection => "Pattern",
         PropertyFieldId::CoverageGuardSteps
         | PropertyFieldId::CoverageAdditionalMargin
@@ -1688,7 +1698,7 @@ fn inspector_field_label(field: PropertyFieldId) -> String {
         PropertyFieldId::TranslationY => "Y offset".into(),
         PropertyFieldId::MarkMinimumFill => "Minimum fill".into(),
         PropertyFieldId::MarkMaximumFill => "Maximum fill".into(),
-        PropertyFieldId::MarkRotationOffsetDegrees => "Rotation offset".into(),
+        PropertyFieldId::ShapeRotationDegrees => "Shape rotation".into(),
         PropertyFieldId::LegacyMappingComponent | PropertyFieldId::ModeledMappingComponent => {
             "Source component".into()
         }
@@ -5738,6 +5748,12 @@ fn commit_inspector_input_with_focus(
     }
 }
 
+/// Builds one target-aware domain command from a validated inspector value without resolving deltas in GTK.
+///
+/// # Errors
+///
+/// Returns a displayable validation message when the value kind, descriptor target, reference,
+/// or domain-authored effective-value builder rejects the requested edit.
 fn command_for_inspector_input(
     document: &Document,
     selected_channel: Option<ChannelId>,
@@ -5768,24 +5784,53 @@ fn command_for_inspector_input(
     let channel_id =
         || channel_id.ok_or_else(|| "This field requires a selected channel.".to_owned());
     match descriptor.field {
-        PropertyFieldId::DensityAcrossX => Ok(DocumentCommand::SetDensityAxis {
-            channel_id: channel_id()?,
-            edited_axis: DensityEditedAxis::AcrossX,
-            value: f64_value(input)?,
-        }),
-        PropertyFieldId::DensityAcrossY => Ok(DocumentCommand::SetDensityAxis {
-            channel_id: channel_id()?,
-            edited_axis: DensityEditedAxis::AcrossY,
-            value: f64_value(input)?,
-        }),
-        PropertyFieldId::DensityAspectLocked => Ok(DocumentCommand::SetDensityAspectLock {
-            channel_id: channel_id()?,
-            aspect_locked: boolean(input)?,
-        }),
-        PropertyFieldId::RotationDegrees => Ok(DocumentCommand::SetRotation {
-            channel_id: channel_id()?,
-            rotation_degrees: f64_value(input)?,
-        }),
+        PropertyFieldId::DensityAcrossX | PropertyFieldId::DensityAcrossY => {
+            let axis = if descriptor.field == PropertyFieldId::DensityAcrossX {
+                DensityEditedAxis::AcrossX
+            } else {
+                DensityEditedAxis::AcrossY
+            };
+            let value = f64_value(input)?;
+            match descriptor.target {
+                PropertyTarget::Document => document
+                    .set_document_density_axis(axis, value)
+                    .map_err(|error| error.to_string()),
+                PropertyTarget::Channel(channel_id) => {
+                    let mut density = document
+                        .effective_channel_pattern(channel_id)
+                        .map_err(|error| error.to_string())?
+                        .density;
+                    match axis {
+                        DensityEditedAxis::AcrossX => density.across_x = value,
+                        DensityEditedAxis::AcrossY => density.across_y = value,
+                    }
+                    document
+                        .set_channel_density_for_effective(channel_id, axis, density)
+                        .map_err(|error| error.to_string())
+                }
+                _ => Err("Density requires document or channel authority.".to_owned()),
+            }
+        }
+        PropertyFieldId::DensityAspectLocked => document
+            .set_document_density_aspect_lock(boolean(input)?)
+            .map_err(|error| error.to_string()),
+        PropertyFieldId::RotationDegrees => {
+            let value = f64_value(input)?;
+            match descriptor.target {
+                PropertyTarget::Document => {
+                    let mut settings = document.pattern_settings().clone();
+                    settings.pattern_rotation_degrees = value;
+                    Ok(DocumentCommand::SetDocumentPatternSettings {
+                        base: document.pattern_settings().clone(),
+                        settings,
+                    })
+                }
+                PropertyTarget::Channel(channel_id) => document
+                    .set_channel_pattern_rotation_for_effective(channel_id, value)
+                    .map_err(|error| error.to_string()),
+                _ => Err("Pattern rotation requires document or channel authority.".to_owned()),
+            }
+        }
         PropertyFieldId::TranslationX => Ok(DocumentCommand::SetTranslationAxis {
             channel_id: channel_id()?,
             edited_axis: TranslationEditedAxis::X,
@@ -5796,18 +5841,49 @@ fn command_for_inspector_input(
             edited_axis: TranslationEditedAxis::Y,
             value: f64_value(input)?,
         }),
-        PropertyFieldId::MarkMinimumFill => Ok(DocumentCommand::SetMarkGeometryField {
-            channel_id: channel_id()?,
-            edit: MarkGeometryFieldEdit::MinimumFill(f64_value(input)?),
-        }),
-        PropertyFieldId::MarkMaximumFill => Ok(DocumentCommand::SetMarkGeometryField {
-            channel_id: channel_id()?,
-            edit: MarkGeometryFieldEdit::MaximumFill(f64_value(input)?),
-        }),
-        PropertyFieldId::MarkRotationOffsetDegrees => Ok(DocumentCommand::SetMarkGeometryField {
-            channel_id: channel_id()?,
-            edit: MarkGeometryFieldEdit::RotationOffsetDegrees(f64_value(input)?),
-        }),
+        PropertyFieldId::MarkMinimumFill | PropertyFieldId::MarkMaximumFill => {
+            let value = f64_value(input)?;
+            let edit = if descriptor.field == PropertyFieldId::MarkMinimumFill {
+                MarkGeometryFieldEdit::MinimumFill(value)
+            } else {
+                MarkGeometryFieldEdit::MaximumFill(value)
+            };
+            match descriptor.target {
+                PropertyTarget::Document => {
+                    let mut settings = document.pattern_settings().clone();
+                    let PatternGeometryResponse::Marks(response) = &mut settings.geometry_response;
+                    match edit {
+                        MarkGeometryFieldEdit::MinimumFill(value) => response.minimum_fill = value,
+                        MarkGeometryFieldEdit::MaximumFill(value) => response.maximum_fill = value,
+                    }
+                    Ok(DocumentCommand::SetDocumentPatternSettings {
+                        base: document.pattern_settings().clone(),
+                        settings,
+                    })
+                }
+                PropertyTarget::Channel(channel_id) => document
+                    .set_channel_mark_response_field_for_effective(channel_id, edit)
+                    .map_err(|error| error.to_string()),
+                _ => Err("Mark response requires document or channel authority.".to_owned()),
+            }
+        }
+        PropertyFieldId::ShapeRotationDegrees => {
+            let value = f64_value(input)?;
+            match descriptor.target {
+                PropertyTarget::Document => {
+                    let mut settings = document.pattern_settings().clone();
+                    settings.shape_rotation_degrees = value;
+                    Ok(DocumentCommand::SetDocumentPatternSettings {
+                        base: document.pattern_settings().clone(),
+                        settings,
+                    })
+                }
+                PropertyTarget::Channel(channel_id) => document
+                    .set_channel_shape_rotation_for_effective(channel_id, value)
+                    .map_err(|error| error.to_string()),
+                _ => Err("Shape rotation requires document or channel authority.".to_owned()),
+            }
+        }
         PropertyFieldId::ColorRed => Ok(DocumentCommand::SetColorComponent {
             channel_id: channel_id()?,
             component: ColorComponent::Red,
@@ -5843,12 +5919,24 @@ fn command_for_inspector_input(
             _ => Err("Expected a source reference.".to_owned()),
         },
         PropertyFieldId::DefinitionSelection => match reference(input)? {
-            PropertyReferenceValue::Definition(definition_id) => {
-                Ok(DocumentCommand::RetargetChannelPatternDefinition {
-                    channel_id: channel_id()?,
-                    definition_id,
-                })
-            }
+            PropertyReferenceValue::Definition(definition_id) => match descriptor.target {
+                PropertyTarget::Document => {
+                    let mut settings = document.pattern_settings().clone();
+                    settings.definition_id = definition_id;
+                    Ok(DocumentCommand::SetDocumentPatternSettings {
+                        base: document.pattern_settings().clone(),
+                        settings,
+                    })
+                }
+                PropertyTarget::Channel(channel_id) => {
+                    Ok(DocumentCommand::SetChannelPatternDefinitionOverride {
+                        base: document.pattern_settings().clone(),
+                        channel_id,
+                        definition_id,
+                    })
+                }
+                _ => Err("Definition selection requires document or channel authority.".to_owned()),
+            },
             _ => Err("Expected a pattern definition reference.".to_owned()),
         },
         PropertyFieldId::LegacyMappingComponent => match choice(input)? {
@@ -7193,9 +7281,7 @@ fn replace_model_topology(
             "document.channel_topology: model switching requires stored channel topology".to_owned()
         })?;
     let template = ChannelTopologyTemplate {
-        pattern_definition_id: channel.pattern_definition_id,
-        layout: channel.layout.clone(),
-        mark_geometry_response: channel.mark_geometry_response.clone(),
+        pattern_instance: channel.pattern_instance.clone(),
     };
     let topology = document
         .canonical_channel_topology(model.domain(), template)

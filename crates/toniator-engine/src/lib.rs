@@ -23,7 +23,7 @@ pub use scheduler::{
 };
 
 use toniator_domain::{
-    CanvasSpec, ChannelId, ChannelState, EvaluationSnapshot, EvaluationToken, PatternDefinition,
+    CanvasSpec, ChannelId, EvaluationSnapshot, EvaluationToken, PatternDefinition,
     PatternMechanism, PatternOutputLayer, SourceComponent, SourcePlacement, SourceReference,
     SourceReferenceId,
 };
@@ -56,6 +56,9 @@ pub use toniator_sampling::{
 };
 
 pub use toniator_patterns::{GridError, GridInspectRequest};
+
+/// The accepted mark-response ceiling reserved by family coverage so fill edits remain realization-only.
+const MAXIMUM_NORMALIZED_MARK_FILL: f64 = 2.0;
 
 /// Resolves source identity through the accepted sampling decoder.
 ///
@@ -771,6 +774,9 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
         "evaluation.channel_id",
         "evaluation targets a missing channel",
     ))?;
+    let effective = document
+        .effective_channel_pattern(channel_id)
+        .map_err(EvaluationError::from_domain)?;
     let source_id = match document.source() {
         SourceReference::Assigned(id) => id,
         SourceReference::Unassigned => {
@@ -791,7 +797,7 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
     let definition = document
         .pattern_definitions()
         .iter()
-        .find(|definition| definition.id == channel.pattern_definition_id)
+        .find(|definition| definition.id == effective.definition_id)
         .ok_or(EvaluationError::new(
             "evaluation.pattern_definition",
             "channel references a missing pattern definition",
@@ -802,9 +808,13 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
     let plan = toniator_patterns::resolve_document_pattern_pipeline(document, definition)
         .map_err(EvaluationError::from_pipeline)?;
     let response = MarkResponse {
-        minimum_fill: channel.mark_geometry_response.minimum_fill,
-        maximum_fill: channel.mark_geometry_response.maximum_fill,
-        rotation_offset_degrees: channel.mark_geometry_response.rotation_offset_degrees,
+        minimum_fill: match &effective.geometry_response {
+            toniator_domain::PatternGeometryResponse::Marks(response) => response.minimum_fill,
+        },
+        maximum_fill: match &effective.geometry_response {
+            toniator_domain::PatternGeometryResponse::Marks(response) => response.maximum_fill,
+        },
+        rotation_offset_degrees: effective.shape_rotation_degrees,
     };
     let source_key = SourceCacheKey {
         reference_id: request.source.reference_id().as_str().to_owned(),
@@ -828,14 +838,14 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
     let family_key = FamilyCacheKey {
         canvas: canvas_key(document.canvas()),
         density: (
-            channel.layout.density.across_x.to_bits(),
-            channel.layout.density.across_y.to_bits(),
+            effective.density.across_x.to_bits(),
+            effective.density.across_y.to_bits(),
         ),
-        aspect_locked: channel.layout.density.aspect_locked,
-        rotation: channel.layout.rotation_degrees.to_bits(),
+        aspect_locked: effective.density.aspect_locked,
+        rotation: effective.pattern_rotation_degrees.to_bits(),
         translation: (
-            channel.layout.translation_x.to_bits(),
-            channel.layout.translation_y.to_bits(),
+            effective.translation_x.to_bits(),
+            effective.translation_y.to_bits(),
         ),
         guard_steps: definition.coverage.guard_steps,
         definition: FamilyDefinitionKey {
@@ -848,7 +858,7 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
         },
         required_support_radius: required_support_radius_legacy(
             document.canvas(),
-            channel,
+            &effective,
             definition,
             &plan.family,
         )?
@@ -859,14 +869,14 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
     };
     let grid = GridInspectRequest {
         canvas: document.canvas().clone(),
-        density: channel.layout.density.clone(),
-        rotation_degrees: channel.layout.rotation_degrees,
-        translation_x: channel.layout.translation_x,
-        translation_y: channel.layout.translation_y,
+        density: effective.density.clone(),
+        rotation_degrees: effective.pattern_rotation_degrees,
+        translation_x: effective.translation_x,
+        translation_y: effective.translation_y,
         guard_steps: definition.coverage.guard_steps,
         support_radius: required_support_radius_legacy(
             document.canvas(),
-            channel,
+            &effective,
             definition,
             &plan.family,
         )?,
@@ -1243,6 +1253,10 @@ impl EvaluationError {
         self.message
     }
     fn from_sampling(error: toniator_sampling::SamplingError) -> Self {
+        Self::new(error.path(), error.message())
+    }
+    /// Preserves one domain validation path and message at the evaluation boundary.
+    fn from_domain(error: toniator_domain::ValidationError) -> Self {
         Self::new(error.path(), error.message())
     }
     fn from_pipeline(error: PatternPipelineError) -> Self {
@@ -1842,9 +1856,32 @@ fn evaluate_cached_document_impl(
         )
         .into());
     }
+    // Resolve once in document order before capabilities, decoding, or cache
+    // lookup.  The retained modeled channel contributes only mapping, paint,
+    // and presentation after this authority projection.
+    let resolved = topology
+        .channels()
+        .iter()
+        .map(|channel| {
+            let effective = document
+                .effective_channel_pattern(channel.id)
+                .map_err(EvaluationError::from_domain)?;
+            let definition = document
+                .pattern_definitions()
+                .iter()
+                .find(|value| value.id == effective.definition_id)
+                .ok_or(EvaluationError::new(
+                    "evaluation.pattern_definition",
+                    "channel resolves a missing pattern definition",
+                ))?;
+            let plan = toniator_patterns::resolve_document_pattern_pipeline(document, definition)
+                .map_err(EvaluationError::from_pipeline)?;
+            Ok::<_, EvaluationRunError>((channel, effective, definition, plan))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     // Complete document preflight intentionally precedes decode: a later
     // invalid topology channel cannot produce an acceptable partial result.
-    for channel in topology.channels() {
+    for (_channel, _, _, _) in &resolved {
         if cancellation.is_cancelled() {
             return Err(EvaluationRunError::Cancelled);
         }
@@ -1853,16 +1890,6 @@ fn evaluate_cached_document_impl(
         if cancellation.is_cancelled() {
             return Err(EvaluationRunError::Cancelled);
         }
-        let definition = document
-            .pattern_definitions()
-            .iter()
-            .find(|value| value.id == channel.pattern_definition_id)
-            .ok_or(EvaluationError::new(
-                "evaluation.pattern_definition",
-                "channel references a missing pattern definition",
-            ))?;
-        toniator_patterns::resolve_document_pattern_pipeline(document, definition)
-            .map_err(EvaluationError::from_pipeline)?;
     }
     let source_key = SourceCacheKey {
         reference_id: request.source.reference_id().as_str().to_owned(),
@@ -1896,7 +1923,7 @@ fn evaluate_cached_document_impl(
     let mut realization_dispositions = Vec::with_capacity(topology.channels().len());
     let mut remaining_transformed_curve_segment_instances =
         limits.max_transformed_curve_segment_instances();
-    for channel in topology.channels() {
+    for (channel, effective, definition, plan) in &resolved {
         if cancellation.is_cancelled() {
             return Err(EvaluationRunError::Cancelled);
         }
@@ -1905,20 +1932,10 @@ fn evaluate_cached_document_impl(
         if cancellation.is_cancelled() {
             return Err(EvaluationRunError::Cancelled);
         }
-        let definition = document
-            .pattern_definitions()
-            .iter()
-            .find(|value| value.id == channel.pattern_definition_id)
-            .ok_or(EvaluationError::new(
-                "evaluation.pattern_definition",
-                "channel references a missing pattern definition",
-            ))?;
-        let plan = toniator_patterns::resolve_document_pattern_pipeline(document, definition)
-            .map_err(EvaluationError::from_pipeline)?;
         let key = document_family_cache_key(
             document.canvas(),
             definition,
-            channel,
+            effective,
             limits,
             &plan.family,
             &source,
@@ -1934,14 +1951,14 @@ fn evaluate_cached_document_impl(
                     &plan.family,
                     &GridInspectRequest {
                         canvas: document.canvas().clone(),
-                        density: channel.layout.density.clone(),
-                        rotation_degrees: channel.layout.rotation_degrees,
-                        translation_x: channel.layout.translation_x,
-                        translation_y: channel.layout.translation_y,
+                        density: effective.density.clone(),
+                        rotation_degrees: effective.pattern_rotation_degrees,
+                        translation_x: effective.translation_x,
+                        translation_y: effective.translation_y,
                         guard_steps: definition.coverage.guard_steps,
                         support_radius: required_support_radius_modeled(
                             document.canvas(),
-                            channel,
+                            effective,
                             definition,
                             &plan.family,
                         )?,
@@ -1967,12 +1984,17 @@ fn evaluate_cached_document_impl(
                 channel.mapping.bias.to_bits()
             ),
             response: (
-                channel.mark_geometry_response.minimum_fill.to_bits(),
-                channel.mark_geometry_response.maximum_fill.to_bits(),
-                channel
-                    .mark_geometry_response
-                    .rotation_offset_degrees
-                    .to_bits(),
+                match &effective.geometry_response {
+                    toniator_domain::PatternGeometryResponse::Marks(response) => {
+                        response.minimum_fill.to_bits()
+                    }
+                },
+                match &effective.geometry_response {
+                    toniator_domain::PatternGeometryResponse::Marks(response) => {
+                        response.maximum_fill.to_bits()
+                    }
+                },
+                effective.shape_rotation_degrees.to_bits(),
             ),
             sampled_paint: matches!(channel.paint, ChannelPaint::SampledSource),
             max_transformed_curve_segment_instances: remaining_transformed_curve_segment_instances,
@@ -1990,9 +2012,10 @@ fn evaluate_cached_document_impl(
                             document,
                             definition,
                             channel,
+                            effective,
                             &source,
                             &family,
-                            &plan,
+                            plan,
                             remaining_transformed_curve_segment_instances,
                             &|| cancellation.is_cancelled(),
                         )
@@ -2216,6 +2239,7 @@ fn evaluate_document_channel(
     document: &toniator_domain::Document,
     definition: &PatternDefinition,
     channel: &ModeledChannelState,
+    effective: &toniator_domain::EffectiveChannelPatternInstance,
     source: &SourceField,
     family: &TypedFamilyOutput,
     plan: &toniator_patterns::PatternPipelinePlan,
@@ -2223,9 +2247,13 @@ fn evaluate_document_channel(
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<DocumentRealization, EvaluationError> {
     let response = MarkResponse {
-        minimum_fill: channel.mark_geometry_response.minimum_fill,
-        maximum_fill: channel.mark_geometry_response.maximum_fill,
-        rotation_offset_degrees: channel.mark_geometry_response.rotation_offset_degrees,
+        minimum_fill: match &effective.geometry_response {
+            toniator_domain::PatternGeometryResponse::Marks(response) => response.minimum_fill,
+        },
+        maximum_fill: match &effective.geometry_response {
+            toniator_domain::PatternGeometryResponse::Marks(response) => response.maximum_fill,
+        },
+        rotation_offset_degrees: effective.shape_rotation_degrees,
     };
     let realization = if matches!(
         definition.output_layers.as_slice(),
@@ -2404,7 +2432,7 @@ fn document_family_key_supports(
 fn document_family_cache_key(
     canvas: &CanvasSpec,
     definition: &toniator_domain::PatternDefinition,
-    channel: &ModeledChannelState,
+    effective: &toniator_domain::EffectiveChannelPatternInstance,
     limits: EvaluationLimits,
     family: &FamilyCapability,
     source: &SourceField,
@@ -2413,17 +2441,17 @@ fn document_family_cache_key(
         content: DocumentFamilyContentKey {
             canvas: (canvas.width.to_bits(), canvas.height.to_bits()),
             density: (
-                channel.layout.density.across_x.to_bits(),
-                channel.layout.density.across_y.to_bits(),
+                effective.density.across_x.to_bits(),
+                effective.density.across_y.to_bits(),
             ),
-            rotation: channel.layout.rotation_degrees.to_bits(),
+            rotation: effective.pattern_rotation_degrees.to_bits(),
             translation: (
-                channel.layout.translation_x.to_bits(),
-                channel.layout.translation_y.to_bits(),
+                effective.translation_x.to_bits(),
+                effective.translation_y.to_bits(),
             ),
             guard_steps: definition.coverage.guard_steps,
             required_support_radius: required_support_radius_modeled(
-                canvas, channel, definition, family,
+                canvas, effective, definition, family,
             )?
             .to_bits(),
             definition: FamilyDefinitionKey {
@@ -2437,33 +2465,33 @@ fn document_family_cache_key(
     })
 }
 
-/// Derives the conservative circular support required by one legacy channel's normalized fill.
+/// Derives legacy family support from the accepted fill ceiling, independent of current response intent.
 fn required_support_radius_legacy(
     canvas: &CanvasSpec,
-    channel: &ChannelState,
+    effective: &toniator_domain::EffectiveChannelPatternInstance,
     definition: &toniator_domain::PatternDefinition,
     family: &FamilyCapability,
 ) -> Result<f64, EvaluationError> {
     required_support_radius_from_fill(
         canvas,
-        &channel.layout.density,
-        channel.mark_geometry_response.maximum_fill,
+        &effective.density,
+        MAXIMUM_NORMALIZED_MARK_FILL,
         definition.coverage.additional_margin,
         family,
     )
 }
 
-/// Derives the conservative circular support required by one modeled channel's normalized fill.
+/// Derives modeled family support from the accepted fill ceiling, independent of current response intent.
 fn required_support_radius_modeled(
     canvas: &CanvasSpec,
-    channel: &ModeledChannelState,
+    effective: &toniator_domain::EffectiveChannelPatternInstance,
     definition: &toniator_domain::PatternDefinition,
     family: &FamilyCapability,
 ) -> Result<f64, EvaluationError> {
     required_support_radius_from_fill(
         canvas,
-        &channel.layout.density,
-        channel.mark_geometry_response.maximum_fill,
+        &effective.density,
+        MAXIMUM_NORMALIZED_MARK_FILL,
         definition.coverage.additional_margin,
         family,
     )
@@ -2548,11 +2576,12 @@ pub(crate) mod test_support {
 
     use toniator_domain::{
         AuthoredCurveSegment, AuthoredPoint2, AuthoredStructure, AuthoredStructureId,
-        AuthoredStructureKind, CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternLayout,
-        ChannelSourceMapping, ChannelState, ChannelTopologyTemplate, ColorValue, CoveragePolicy,
-        DensityMetric2D, Document, DocumentCommand, DocumentId, DocumentSession,
-        GeneralizedSiteProduct, GuideDimensionId, HalftoneChannelModel, MarkGeometryResponse,
-        MarkOrientation, MarkPrototype, PatternDefinition, PatternDefinitionId, PatternMechanismId,
+        AuthoredStructureKind, CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternInstance,
+        ChannelPatternLayoutDelta, ChannelSourceMapping, ChannelState, ChannelTopologyTemplate,
+        ColorValue, CoveragePolicy, DensityMetric2D, Document, DocumentCommand, DocumentId,
+        DocumentPatternSettings, DocumentSession, GeneralizedSiteProduct, GuideDimensionId,
+        HalftoneChannelModel, MarkGeometryResponse, MarkOrientation, MarkPrototype,
+        PatternDefinition, PatternDefinitionId, PatternGeometryResponse, PatternMechanismId,
         PatternOutputLayer, PatternOutputLayerId, SourceComponent, SourcePlacement,
         SourceReference, SourceReferenceId, StraightGuideDimension, StraightGuideRepetition,
     };
@@ -2572,6 +2601,7 @@ pub(crate) mod test_support {
         ))
     }
 
+    /// Builds one current-authority diagnostic request from caller-supplied immutable source bytes.
     fn request_with_bytes(bytes: Arc<[u8]>) -> ChannelDiagnosticRequest {
         let source_id = SourceReferenceId::new("cancellation-test-source").unwrap();
         let document = Document::with_source(
@@ -2592,18 +2622,32 @@ pub(crate) mod test_support {
                     additional_margin: 4.5,
                 },
             )],
+            DocumentPatternSettings {
+                definition_id: PatternDefinitionId(1),
+                density: DensityMetric2D {
+                    across_x: 90.0,
+                    across_y: 60.0,
+                    aspect_locked: true,
+                },
+                pattern_rotation_degrees: 17.0,
+                shape_rotation_degrees: 0.0,
+                geometry_response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+                    minimum_fill: 0.2,
+                    maximum_fill: 0.9,
+                }),
+            },
             vec![ChannelState {
                 id: CHANNEL_ID,
-                pattern_definition_id: PatternDefinitionId(1),
-                layout: ChannelPatternLayout {
-                    density: DensityMetric2D {
-                        across_x: 90.0,
-                        across_y: 60.0,
-                        aspect_locked: true,
+                pattern_instance: ChannelPatternInstance {
+                    definition_override: None,
+                    layout_delta: ChannelPatternLayoutDelta {
+                        density: None,
+                        rotation_degrees: None,
+                        translation_x: 3.25,
+                        translation_y: -4.5,
                     },
-                    rotation_degrees: 17.0,
-                    translation_x: 3.25,
-                    translation_y: -4.5,
+                    shape_rotation_delta_degrees: None,
+                    geometry_response_delta: None,
                 },
                 appearance: ChannelAppearance {
                     visible: true,
@@ -2614,11 +2658,6 @@ pub(crate) mod test_support {
                         alpha: 1.0,
                     },
                     opacity: 0.72,
-                },
-                mark_geometry_response: MarkGeometryResponse {
-                    minimum_fill: 2.0,
-                    maximum_fill: 9.0,
-                    rotation_offset_degrees: 0.0,
                 },
                 source_mapping: ChannelSourceMapping {
                     component: SourceComponent::Luminance,
@@ -2638,14 +2677,13 @@ pub(crate) mod test_support {
         modeled_document_session_for(HalftoneChannelModel::Rgb)
     }
 
+    /// Converts the retained diagnostic fixture into one modeled topology without copying a base.
     fn modeled_document_session_for(model: HalftoneChannelModel) -> DocumentSession {
         let diagnostic = request();
         let mut session = DocumentSession::new(diagnostic.snapshot.document().clone()).unwrap();
         let channel = session.document().channel(CHANNEL_ID).unwrap();
         let template = ChannelTopologyTemplate {
-            pattern_definition_id: channel.pattern_definition_id,
-            layout: channel.layout.clone(),
-            mark_geometry_response: channel.mark_geometry_response.clone(),
+            pattern_instance: channel.pattern_instance.clone(),
         };
         let topology = session
             .document()
@@ -2732,6 +2770,7 @@ pub(crate) mod test_support {
                 base.canvas().clone(),
                 base.source().clone(),
                 vec![definition],
+                base.pattern_settings().clone(),
                 base.channel_model().unwrap(),
                 base.channel_topology().unwrap().clone(),
                 vec![shape],

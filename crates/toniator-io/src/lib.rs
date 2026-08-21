@@ -19,21 +19,23 @@ use sha2::{Digest, Sha256};
 use toniator_domain::{
     ArtworkWeightResponse, AuthoredCurveSegment, AuthoredPoint2, AuthoredStructure,
     AuthoredStructureDraft, AuthoredStructureId, AuthoredStructureKind, CanvasSpec,
-    ChannelAppearance, ChannelId, ChannelPaint, ChannelPatternLayout, ChannelSourceMapping,
-    ChannelState, ChannelTopology, ColorValue, CoveragePolicy, DensityMetric2D, Document,
-    DocumentId, GeneralizedSiteProductDraft, GuideDimension, GuideDimensionDraft, GuideDimensionId,
-    GuidePrototype, GuideRepetition, HalftoneChannelModel, HalftoneChannelRole,
-    MarkGeometryResponse, MarkOrientation, MarkOrientationDraft, MarkPrototype,
-    ModeledChannelState, PatternDefinition, PatternDefinitionDraft, PatternDefinitionId,
-    PatternDefinitionRecipe, PatternMechanismId, PatternOutputLayerId, PresetMetadata,
-    PresetRecord, RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy, SourceComponent,
-    SourceMapping, SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId,
+    ChannelAppearance, ChannelGeometryResponseDelta, ChannelId, ChannelPaint,
+    ChannelPatternInstance, ChannelPatternLayoutDelta, ChannelSourceMapping, ChannelState,
+    ChannelTopology, ColorValue, CoveragePolicy, DensityMetric2D, DensityMetricDelta2D, Document,
+    DocumentId, DocumentPatternSettings, GeneralizedSiteProductDraft, GuideDimension,
+    GuideDimensionDraft, GuideDimensionId, GuidePrototype, GuideRepetition, HalftoneChannelModel,
+    HalftoneChannelRole, MarkGeometryResponse, MarkGeometryResponseDelta, MarkOrientation,
+    MarkOrientationDraft, MarkPrototype, ModeledChannelState, PatternDefinition,
+    PatternDefinitionDraft, PatternDefinitionId, PatternDefinitionRecipe, PatternGeometryResponse,
+    PatternMechanismId, PatternOutputLayerId, PresetMetadata, PresetRecord, RandomSiteCharacter,
+    SiteDensityModulation, SiteExclusionPolicy, SourceComponent, SourceMapping,
+    SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId,
     StraightGuideDimension, StraightGuideRepetition, ValidationError, VisibleMarkSizingPolicy,
 };
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 pub const CONTAINER_VERSION: u32 = 1;
-pub const DOCUMENT_SCHEMA_VERSION: u32 = 3;
+pub const DOCUMENT_SCHEMA_VERSION: u32 = 4;
 /// Standalone pure-schema preset JSON format version. It is deliberately
 /// independent from the `.toniator` container and document schema versions.
 pub const PRESET_FORMAT_VERSION: u32 = 2;
@@ -239,41 +241,11 @@ impl StoredVersions {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct MigrationReport {
-    migrated_v1: bool,
-    generated_definitions: Vec<MigrationDefinitionReport>,
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MigrationDefinitionReport {
-    pub definition_id: PatternDefinitionId,
-    pub mechanism_ids: Vec<PatternMechanismId>,
-    pub output_layer_ids: Vec<PatternOutputLayerId>,
-}
-impl MigrationReport {
-    pub const fn is_empty(&self) -> bool {
-        !self.migrated_v1
-    }
-    pub fn generated_definition_ids(&self) -> Vec<PatternDefinitionId> {
-        // Kept as a compact convenience projection for lifecycle diagnostics.
-        // Detailed generated addresses are available below.
-        // The report remains lifecycle data and is never serialized.
-        self.generated_definitions
-            .iter()
-            .map(|definition| definition.definition_id)
-            .collect()
-    }
-    pub fn generated_definitions(&self) -> &[MigrationDefinitionReport] {
-        &self.generated_definitions
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct LoadedDocument {
     document: Document,
     sources: SourceBundle,
     versions: StoredVersions,
-    report: MigrationReport,
 }
 impl LoadedDocument {
     pub fn document(&self) -> &Document {
@@ -284,9 +256,6 @@ impl LoadedDocument {
     }
     pub const fn versions(&self) -> StoredVersions {
         self.versions
-    }
-    pub fn migration_report(&self) -> &MigrationReport {
-        &self.report
     }
 }
 
@@ -527,9 +496,9 @@ pub fn load(path: &Path) -> Result<LoadedDocument, LoadError> {
             ),
         });
     }
-    let (current, manifest, report) = match envelope.document_schema_version {
+    let (current, manifest) = match envelope.document_schema_version {
         DOCUMENT_SCHEMA_VERSION => {
-            let stored: StoredDocumentDtoV3 =
+            let stored: StoredDocumentDtoV4 =
                 serde_json::from_slice(&document_bytes).map_err(|error| LoadError::Json {
                     context: error.to_string(),
                 })?;
@@ -538,7 +507,6 @@ pub fn load(path: &Path) -> Result<LoadedDocument, LoadError> {
                     document: stored.document,
                 },
                 stored.source,
-                MigrationReport::default(),
             )
         }
         value => {
@@ -610,7 +578,6 @@ pub fn load(path: &Path) -> Result<LoadedDocument, LoadError> {
         document,
         sources,
         versions: StoredVersions::new(CONTAINER_VERSION, envelope.document_schema_version),
-        report,
     })
 }
 
@@ -631,7 +598,7 @@ fn ensure_supported_file_compression(
     })
 }
 
-/// Saves one fully source-backed current document using deterministic v2 JSON
+/// Saves one fully source-backed current document using deterministic v4 JSON
 /// inside the immutable v1 ZIP container layout.
 pub fn save(path: &Path, document: &Document, sources: &SourceBundle) -> Result<(), SaveError> {
     document.validate().map_err(save_domain_error)?;
@@ -639,13 +606,13 @@ pub fn save(path: &Path, document: &Document, sources: &SourceBundle) -> Result<
         SourceReference::Assigned(id) => id,
         SourceReference::Unassigned => {
             return Err(SaveError::SourceDocumentMismatch {
-                context: "v3 saving requires an assigned document source".into(),
+                context: "v4 saving requires an assigned document source".into(),
             });
         }
     };
     if sources.len() != 1 {
         return Err(SaveError::SourceDocumentMismatch {
-            context: "v3 saving requires exactly one embedded source".into(),
+            context: "v4 saving requires exactly one embedded source".into(),
         });
     }
     let source = sources
@@ -658,7 +625,7 @@ pub fn save(path: &Path, document: &Document, sources: &SourceBundle) -> Result<
             context: error.context().into(),
         }
     })?;
-    let dto = StoredDocumentDtoV3::from_domain(document, source, entry_name.clone())?;
+    let dto = StoredDocumentDtoV4::from_domain(document, source, entry_name.clone())?;
     let mut document_json = serde_json::to_vec(&dto).map_err(|error| SaveError::Archive {
         context: error.to_string(),
     })?;
@@ -860,28 +827,28 @@ struct PresetMetadataDto {
 enum PresetRecipeDto {
     StraightGrid {
         name: String,
-        coverage: CoverageDtoV3,
+        coverage: CoverageDtoV4,
     },
     GeneralizedStraightGuides {
         name: String,
-        coverage: CoverageDtoV3,
+        coverage: CoverageDtoV4,
         dimensions: Vec<GuideDimensionDraftDto>,
         product: GeneralizedSiteProductDraftDto,
         orientation: MarkOrientationDraftDto,
     },
     RandomSites {
         name: String,
-        coverage: CoverageDtoV3,
-        character: RandomSiteCharacterDtoV3,
+        coverage: CoverageDtoV4,
+        character: RandomSiteCharacterDtoV4,
         seed: u32,
-        density_modulation: SiteDensityModulationDtoV3,
-        exclusion: SiteExclusionPolicyDtoV3,
+        density_modulation: SiteDensityModulationDtoV4,
+        exclusion: SiteExclusionPolicyDtoV4,
         maximum_attempts: u32,
         maximum_neighbor_checks: u32,
     },
     AuthoredClosedShapeMarks {
         definition: Box<PresetRecipeDto>,
-        segments: Vec<AuthoredCurveSegmentDtoV3>,
+        segments: Vec<AuthoredCurveSegmentDtoV4>,
     },
 }
 #[derive(Serialize, Deserialize)]
@@ -920,18 +887,23 @@ struct SourceManifestDto {
     display_name: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
-struct StoredDocumentDtoV3 {
+struct StoredDocumentDtoV4 {
     container_version: u32,
     document_schema_version: u32,
-    document: DocumentDtoV3,
+    document: DocumentDtoV4,
     source: SourceManifestDto,
 }
 #[derive(Serialize, Deserialize)]
 struct CurrentDocumentDto {
-    document: DocumentDtoV3,
+    document: DocumentDtoV4,
 }
 
-impl StoredDocumentDtoV3 {
+impl StoredDocumentDtoV4 {
+    /// Projects a validated document and its matching source into the exact v4 archive envelope.
+    ///
+    /// # Errors
+    ///
+    /// Returns a save error when the document cannot be represented by current-v4 persistence.
     fn from_domain(
         document: &Document,
         source: &EmbeddedSource,
@@ -940,7 +912,7 @@ impl StoredDocumentDtoV3 {
         Ok(Self {
             container_version: CONTAINER_VERSION,
             document_schema_version: DOCUMENT_SCHEMA_VERSION,
-            document: DocumentDtoV3::from_domain(document)?,
+            document: DocumentDtoV4::from_domain(document)?,
             source: SourceManifestDto {
                 id: source.id().as_str().into(),
                 entry_name,
@@ -954,51 +926,52 @@ impl StoredDocumentDtoV3 {
 }
 
 #[derive(Serialize, Deserialize)]
-struct DocumentDtoV3 {
+struct DocumentDtoV4 {
     id: u64,
     canvas: CanvasDto,
     source_reference_id: String,
-    pattern_definitions: Vec<PatternDefinitionDtoV3>,
+    pattern_definitions: Vec<PatternDefinitionDtoV4>,
+    pattern_settings: DocumentPatternSettingsDto,
     channel_configuration: ChannelConfigurationDto,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    authored_structures: Vec<AuthoredStructureDtoV3>,
+    authored_structures: Vec<AuthoredStructureDtoV4>,
 }
 
-/// Current-v2 persistence representation of one document-owned authored structure.
+/// Current-v4 persistence representation of one document-owned authored structure.
 #[derive(Serialize, Deserialize)]
-struct AuthoredStructureDtoV3 {
+struct AuthoredStructureDtoV4 {
     id: u64,
-    kind: AuthoredStructureKindDtoV3,
-    segments: Vec<AuthoredCurveSegmentDtoV3>,
+    kind: AuthoredStructureKindDtoV4,
+    segments: Vec<AuthoredCurveSegmentDtoV4>,
 }
 
-/// Current-v2 persistence representation of declared authored-structure topology.
+/// Current-v4 persistence representation of declared authored-structure topology.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum AuthoredStructureKindDtoV3 {
+enum AuthoredStructureKindDtoV4 {
     OpenPath,
     ClosedShape,
 }
 
-/// Current-v2 persistence representation of one explicit authored construction segment.
+/// Current-v4 persistence representation of one explicit authored construction segment.
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum AuthoredCurveSegmentDtoV3 {
+enum AuthoredCurveSegmentDtoV4 {
     Line {
-        start: AuthoredPointDtoV3,
-        end: AuthoredPointDtoV3,
+        start: AuthoredPointDtoV4,
+        end: AuthoredPointDtoV4,
     },
     CubicBezier {
-        start: AuthoredPointDtoV3,
-        control_1: AuthoredPointDtoV3,
-        control_2: AuthoredPointDtoV3,
-        end: AuthoredPointDtoV3,
+        start: AuthoredPointDtoV4,
+        control_1: AuthoredPointDtoV4,
+        control_2: AuthoredPointDtoV4,
+        end: AuthoredPointDtoV4,
     },
 }
 
-/// Current-v2 persistence representation of one authored finite coordinate pair.
+/// Current-v4 persistence representation of one authored finite coordinate pair.
 #[derive(Serialize, Deserialize)]
-struct AuthoredPointDtoV3 {
+struct AuthoredPointDtoV4 {
     x: f64,
     y: f64,
 }
@@ -1008,18 +981,18 @@ struct CanvasDto {
     height: f64,
 }
 #[derive(Serialize, Deserialize)]
-struct PatternDefinitionDtoV3 {
+struct PatternDefinitionDtoV4 {
     id: u64,
     name: String,
-    family: PatternFamilyDtoV3,
-    mechanisms: Vec<PatternMechanismDtoV3>,
-    output_layers: Vec<PatternOutputLayerDtoV3>,
-    modulation: PatternModulationDtoV3,
-    coverage: CoverageDtoV3,
+    family: PatternFamilyDtoV4,
+    mechanisms: Vec<PatternMechanismDtoV4>,
+    output_layers: Vec<PatternOutputLayerDtoV4>,
+    modulation: PatternModulationDtoV4,
+    coverage: CoverageDtoV4,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum PatternFamilyDtoV3 {
+enum PatternFamilyDtoV4 {
     GuideIntersections {
         guide_mechanism_id: u64,
         site_mechanism_id: u64,
@@ -1033,7 +1006,7 @@ enum PatternFamilyDtoV3 {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum PatternMechanismDtoV3 {
+enum PatternMechanismDtoV4 {
     StraightGuides {
         id: u64,
     },
@@ -1043,11 +1016,11 @@ enum PatternMechanismDtoV3 {
     },
     StraightGuideDimensions {
         id: u64,
-        dimensions: Vec<StraightGuideDimensionDtoV3>,
+        dimensions: Vec<StraightGuideDimensionDtoV4>,
     },
     GuideDimensions {
         id: u64,
-        dimensions: Vec<GuideDimensionDtoV3>,
+        dimensions: Vec<GuideDimensionDtoV4>,
     },
     SelectedGuideIntersections {
         id: u64,
@@ -1064,18 +1037,18 @@ enum PatternMechanismDtoV3 {
     },
     RandomSiteProcess {
         id: u64,
-        character: RandomSiteCharacterDtoV3,
+        character: RandomSiteCharacterDtoV4,
         seed: u32,
     },
     SiteDensityModulation {
         id: u64,
         base_site_process_id: u64,
-        modulation: SiteDensityModulationDtoV3,
+        modulation: SiteDensityModulationDtoV4,
     },
     SiteExclusion {
         id: u64,
         density_modulation_id: u64,
-        policy: SiteExclusionPolicyDtoV3,
+        policy: SiteExclusionPolicyDtoV4,
     },
     RandomSiteProduct {
         id: u64,
@@ -1092,7 +1065,7 @@ const fn default_random_site_neighbor_checks() -> u32 {
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum RandomSiteCharacterDtoV3 {
+enum RandomSiteCharacterDtoV4 {
     RawUniform,
     Even {
         minimum_center_distance: f64,
@@ -1105,60 +1078,60 @@ enum RandomSiteCharacterDtoV3 {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum SiteDensityModulationDtoV3 {
+enum SiteDensityModulationDtoV4 {
     Uniform,
     ArtworkWeighted {
         mapping: SourceMappingDto,
         strength: f64,
-        response: ArtworkWeightResponseDtoV3,
+        response: ArtworkWeightResponseDtoV4,
     },
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum ArtworkWeightResponseDtoV3 {
+enum ArtworkWeightResponseDtoV4 {
     Linear,
     Smoothstep,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum SiteExclusionPolicyDtoV3 {
+enum SiteExclusionPolicyDtoV4 {
     None,
     MinimumCenterDistance {
         minimum: f64,
     },
     VisibleMarkMargin {
         margin: f64,
-        sizing: VisibleMarkSizingPolicyDtoV3,
+        sizing: VisibleMarkSizingPolicyDtoV4,
     },
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum VisibleMarkSizingPolicyDtoV3 {
+enum VisibleMarkSizingPolicyDtoV4 {
     MaximumSupportRadius,
 }
 #[derive(Serialize, Deserialize)]
-struct StraightGuideDimensionDtoV3 {
+struct StraightGuideDimensionDtoV4 {
     id: u64,
     baseline_angle_degrees: f64,
     phase: f64,
     spacing_multiplier: f64,
 }
 #[derive(Serialize, Deserialize)]
-struct GuideDimensionDtoV3 {
+struct GuideDimensionDtoV4 {
     id: u64,
     baseline_angle_degrees: f64,
     phase: f64,
-    prototype: GuidePrototypeDtoV3,
-    repetition: GuideRepetitionDtoV3,
+    prototype: GuidePrototypeDtoV4,
+    repetition: GuideRepetitionDtoV4,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum GuidePrototypeDtoV3 {
+enum GuidePrototypeDtoV4 {
     AuthoredOpenPath {
         structure_id: u64,
     },
     CircularArc {
-        center: AuthoredPointDtoV3,
+        center: AuthoredPointDtoV4,
         radius: f64,
         start_angle_degrees: f64,
         sweep_angle_degrees: f64,
@@ -1166,7 +1139,7 @@ enum GuidePrototypeDtoV3 {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum GuideRepetitionDtoV3 {
+enum GuideRepetitionDtoV4 {
     Single,
     TransformStack {
         direction_degrees: f64,
@@ -1174,15 +1147,15 @@ enum GuideRepetitionDtoV3 {
     },
 }
 
-impl GuideDimensionDtoV3 {
+impl GuideDimensionDtoV4 {
     /// Projects one generic guide dimension into persisted intent without resolving resources.
     fn from_domain(value: &GuideDimension) -> Self {
         Self {
             id: value.id.0,
             baseline_angle_degrees: value.baseline_angle_degrees,
             phase: value.phase,
-            prototype: GuidePrototypeDtoV3::from_domain(&value.prototype),
-            repetition: GuideRepetitionDtoV3::from_domain(&value.repetition),
+            prototype: GuidePrototypeDtoV4::from_domain(&value.prototype),
+            repetition: GuideRepetitionDtoV4::from_domain(&value.repetition),
         }
     }
 
@@ -1198,8 +1171,8 @@ impl GuideDimensionDtoV3 {
     }
 }
 
-impl GuidePrototypeDtoV3 {
-    /// Projects a persisted generic-guide prototype into deterministic current-v3 fields.
+impl GuidePrototypeDtoV4 {
+    /// Projects a persisted generic-guide prototype into deterministic current-v4 fields.
     fn from_domain(value: &GuidePrototype) -> Self {
         match value {
             GuidePrototype::AuthoredOpenPath { structure_id } => Self::AuthoredOpenPath {
@@ -1211,7 +1184,7 @@ impl GuidePrototypeDtoV3 {
                 start_angle_degrees,
                 sweep_angle_degrees,
             } => Self::CircularArc {
-                center: AuthoredPointDtoV3::from_domain(*center),
+                center: AuthoredPointDtoV4::from_domain(*center),
                 radius: *radius,
                 start_angle_degrees: *start_angle_degrees,
                 sweep_angle_degrees: *sweep_angle_degrees,
@@ -1240,8 +1213,8 @@ impl GuidePrototypeDtoV3 {
     }
 }
 
-impl GuideRepetitionDtoV3 {
-    /// Projects a bounded generic-guide repetition variant into current-v3 intent fields.
+impl GuideRepetitionDtoV4 {
+    /// Projects a bounded generic-guide repetition variant into current-v4 intent fields.
     fn from_domain(value: &GuideRepetition) -> Self {
         match value {
             GuideRepetition::Single => Self::Single,
@@ -1271,7 +1244,7 @@ impl GuideRepetitionDtoV3 {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum PatternOutputLayerDtoV3 {
+enum PatternOutputLayerDtoV4 {
     CircularMarks {
         id: u64,
         site_mechanism_id: u64,
@@ -1279,27 +1252,27 @@ enum PatternOutputLayerDtoV3 {
     MarkPrototype {
         id: u64,
         site_mechanism_id: u64,
-        prototype: MarkPrototypeDtoV3,
-        orientation: MarkOrientationDtoV3,
+        prototype: MarkPrototypeDtoV4,
+        orientation: MarkOrientationDtoV4,
     },
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum MarkPrototypeDtoV3 {
+enum MarkPrototypeDtoV4 {
     Circle,
     AuthoredClosedShape { structure_id: u64 },
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum MarkOrientationDtoV3 {
+enum MarkOrientationDtoV4 {
     Fixed,
     GuideTangent { dimension_id: u64 },
     GuideNormal { dimension_id: u64 },
 }
 #[derive(Serialize, Deserialize)]
-struct PatternModulationDtoV3 {}
+struct PatternModulationDtoV4 {}
 #[derive(Serialize, Deserialize)]
-struct CoverageDtoV3 {
+struct CoverageDtoV4 {
     guard_steps: u32,
     additional_margin: f64,
 }
@@ -1365,7 +1338,7 @@ impl PresetEnvelopeDto {
 impl PresetRecipeDto {
     /// Converts an ID-free recipe into its stable standalone representation.
     fn from_domain(value: &PatternDefinitionRecipe) -> Self {
-        let coverage = |coverage: &CoveragePolicy| CoverageDtoV3 {
+        let coverage = |coverage: &CoveragePolicy| CoverageDtoV4 {
             guard_steps: coverage.guard_steps,
             additional_margin: coverage.additional_margin,
         };
@@ -1406,10 +1379,10 @@ impl PresetRecipeDto {
             } => Self::RandomSites {
                 name: name.clone(),
                 coverage: coverage(definition_coverage),
-                character: RandomSiteCharacterDtoV3::from_domain(character),
+                character: RandomSiteCharacterDtoV4::from_domain(character),
                 seed: *seed,
-                density_modulation: SiteDensityModulationDtoV3::from_domain(density_modulation),
-                exclusion: SiteExclusionPolicyDtoV3::from_domain(exclusion),
+                density_modulation: SiteDensityModulationDtoV4::from_domain(density_modulation),
+                exclusion: SiteExclusionPolicyDtoV4::from_domain(exclusion),
                 maximum_attempts: *maximum_attempts,
                 maximum_neighbor_checks: *maximum_neighbor_checks,
             },
@@ -1419,7 +1392,7 @@ impl PresetRecipeDto {
                     segments: shape
                         .segments()
                         .iter()
-                        .map(AuthoredCurveSegmentDtoV3::from_domain)
+                        .map(AuthoredCurveSegmentDtoV4::from_domain)
                         .collect(),
                 }
             }
@@ -1432,7 +1405,7 @@ impl PresetRecipeDto {
     ///
     /// Returns stable preset validation context when an embedded authored shape is invalid.
     fn into_domain(self) -> Result<PatternDefinitionRecipe, PresetIoError> {
-        let coverage_from = |value: CoverageDtoV3| CoveragePolicy {
+        let coverage_from = |value: CoverageDtoV4| CoveragePolicy {
             guard_steps: value.guard_steps,
             additional_margin: value.additional_margin,
         };
@@ -1490,7 +1463,7 @@ impl PresetRecipeDto {
                     AuthoredStructureKind::ClosedShape,
                     segments
                         .into_iter()
-                        .map(AuthoredCurveSegmentDtoV3::into_domain)
+                        .map(AuthoredCurveSegmentDtoV4::into_domain)
                         .collect(),
                 )
                 .map_err(|error| PresetIoError {
@@ -1592,30 +1565,68 @@ enum ChannelConfigurationDto {
 #[derive(Serialize, Deserialize)]
 struct LegacyChannelDto {
     id: u64,
-    pattern_definition_id: u64,
-    layout: LayoutDto,
+    pattern_instance: ChannelPatternInstanceDto,
     appearance: AppearanceDto,
-    mark_geometry_response: MarkResponseDto,
     source_mapping: LegacySourceMappingDto,
 }
 #[derive(Serialize, Deserialize)]
 struct ModeledChannelDto {
     role: HalftoneChannelRoleDto,
     id: u64,
-    pattern_definition_id: u64,
-    layout: LayoutDto,
-    mark_geometry_response: MarkResponseDto,
+    pattern_instance: ChannelPatternInstanceDto,
     mapping: SourceMappingDto,
     paint: PaintDto,
     visible: bool,
     opacity: f64,
 }
 #[derive(Serialize, Deserialize)]
-struct LayoutDto {
+struct DocumentPatternSettingsDto {
+    definition_id: u64,
     density: DensityDto,
-    rotation_degrees: f64,
+    pattern_rotation_degrees: f64,
+    shape_rotation_degrees: f64,
+    geometry_response: PatternGeometryResponseDto,
+}
+#[derive(Serialize, Deserialize)]
+struct ChannelPatternInstanceDto {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    definition_override: Option<u64>,
+    layout_delta: LayoutDeltaDto,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shape_rotation_delta_degrees: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    geometry_response_delta: Option<ChannelGeometryResponseDeltaDto>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum PatternGeometryResponseDto {
+    Marks { response: MarkResponseDto },
+}
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ChannelGeometryResponseDeltaDto {
+    Marks { delta: MarkResponseDeltaDto },
+}
+#[derive(Serialize, Deserialize)]
+struct LayoutDeltaDto {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    density: Option<DensityDeltaDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rotation_degrees: Option<f64>,
     translation_x: f64,
     translation_y: f64,
+}
+#[derive(Serialize, Deserialize)]
+struct DensityDeltaDto {
+    across_x_delta: f64,
+    across_y_delta: f64,
+}
+#[derive(Serialize, Deserialize)]
+struct MarkResponseDeltaDto {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    minimum_fill_delta: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    maximum_fill_delta: Option<f64>,
 }
 #[derive(Serialize, Deserialize)]
 struct DensityDto {
@@ -1633,7 +1644,6 @@ struct AppearanceDto {
 struct MarkResponseDto {
     minimum_fill: f64,
     maximum_fill: f64,
-    rotation_offset_degrees: f64,
 }
 #[derive(Serialize, Deserialize)]
 struct LegacySourceMappingDto {
@@ -1727,19 +1737,19 @@ dto_enum!(
     }
 );
 
-impl DocumentDtoV3 {
-    /// Projects an authoritative document into deterministic current-v3 persistence without runtime state.
+impl DocumentDtoV4 {
+    /// Projects an authoritative document into deterministic current-v4 persistence without runtime state.
     ///
     /// # Errors
     ///
     /// Returns a save error for an unassigned source or incoherent channel configuration before an
-    /// archive is written; an empty authored store is omitted to preserve accepted old-v3 bytes.
+    /// archive is written; an empty authored store is omitted to preserve accepted old-v4 bytes.
     fn from_domain(document: &Document) -> Result<Self, SaveError> {
         let source_reference_id = match document.source() {
             SourceReference::Assigned(id) => id.as_str().to_owned(),
             SourceReference::Unassigned => {
                 return Err(SaveError::SourceDocumentMismatch {
-                    context: "v3 saving requires an assigned document source".into(),
+                    context: "v4 saving requires an assigned document source".into(),
                 });
             }
         };
@@ -1775,13 +1785,14 @@ impl DocumentDtoV3 {
             pattern_definitions: document
                 .pattern_definitions()
                 .iter()
-                .map(PatternDefinitionDtoV3::from_domain)
+                .map(PatternDefinitionDtoV4::from_domain)
                 .collect(),
+            pattern_settings: DocumentPatternSettingsDto::from_domain(document.pattern_settings()),
             channel_configuration,
             authored_structures: document
                 .authored_structures()
                 .iter()
-                .map(AuthoredStructureDtoV3::from_domain)
+                .map(AuthoredStructureDtoV4::from_domain)
                 .collect(),
         })
     }
@@ -1796,12 +1807,12 @@ impl DocumentDtoV3 {
         let definitions = self
             .pattern_definitions
             .into_iter()
-            .map(PatternDefinitionDtoV3::into_domain)
+            .map(PatternDefinitionDtoV4::into_domain)
             .collect();
         let authored_structures = self
             .authored_structures
             .into_iter()
-            .map(AuthoredStructureDtoV3::into_domain)
+            .map(AuthoredStructureDtoV4::into_domain)
             .collect::<Result<Vec<_>, _>>()?;
         match self.channel_configuration {
             ChannelConfigurationDto::Legacy { channels } => {
@@ -1813,6 +1824,7 @@ impl DocumentDtoV3 {
                     },
                     source,
                     definitions,
+                    self.pattern_settings.into_domain(),
                     channels
                         .into_iter()
                         .map(LegacyChannelDto::into_domain)
@@ -1829,6 +1841,7 @@ impl DocumentDtoV3 {
                     },
                     source,
                     definitions,
+                    self.pattern_settings.into_domain(),
                     model.into(),
                     ChannelTopology::new(
                         channels
@@ -1843,16 +1856,16 @@ impl DocumentDtoV3 {
     }
 }
 
-impl AuthoredStructureDtoV3 {
-    /// Projects one validated domain-owned structure into deterministic current-v3 persistence fields.
+impl AuthoredStructureDtoV4 {
+    /// Projects one validated domain-owned structure into deterministic current-v4 persistence fields.
     fn from_domain(value: &AuthoredStructure) -> Self {
         Self {
             id: value.id().0,
-            kind: AuthoredStructureKindDtoV3::from_domain(value.kind()),
+            kind: AuthoredStructureKindDtoV4::from_domain(value.kind()),
             segments: value
                 .segments()
                 .iter()
-                .map(AuthoredCurveSegmentDtoV3::from_domain)
+                .map(AuthoredCurveSegmentDtoV4::from_domain)
                 .collect(),
         }
     }
@@ -1868,14 +1881,14 @@ impl AuthoredStructureDtoV3 {
             self.kind.into_domain(),
             self.segments
                 .into_iter()
-                .map(AuthoredCurveSegmentDtoV3::into_domain)
+                .map(AuthoredCurveSegmentDtoV4::into_domain)
                 .collect(),
         )
     }
 }
 
-impl AuthoredStructureKindDtoV3 {
-    /// Converts declared domain topology into its stable current-v3 string representation.
+impl AuthoredStructureKindDtoV4 {
+    /// Converts declared domain topology into its stable current-v4 string representation.
     fn from_domain(value: AuthoredStructureKind) -> Self {
         match value {
             AuthoredStructureKind::OpenPath => Self::OpenPath,
@@ -1883,7 +1896,7 @@ impl AuthoredStructureKindDtoV3 {
         }
     }
 
-    /// Converts stable current-v3 topology into its domain-owned enum.
+    /// Converts stable current-v4 topology into its domain-owned enum.
     fn into_domain(self) -> AuthoredStructureKind {
         match self {
             Self::OpenPath => AuthoredStructureKind::OpenPath,
@@ -1892,13 +1905,13 @@ impl AuthoredStructureKindDtoV3 {
     }
 }
 
-impl AuthoredCurveSegmentDtoV3 {
-    /// Projects one explicit domain segment into the matching tagged current-v3 representation.
+impl AuthoredCurveSegmentDtoV4 {
+    /// Projects one explicit domain segment into the matching tagged current-v4 representation.
     fn from_domain(value: &AuthoredCurveSegment) -> Self {
         match value {
             AuthoredCurveSegment::Line { start, end } => Self::Line {
-                start: AuthoredPointDtoV3::from_domain(*start),
-                end: AuthoredPointDtoV3::from_domain(*end),
+                start: AuthoredPointDtoV4::from_domain(*start),
+                end: AuthoredPointDtoV4::from_domain(*end),
             },
             AuthoredCurveSegment::CubicBezier {
                 start,
@@ -1906,15 +1919,15 @@ impl AuthoredCurveSegmentDtoV3 {
                 control_2,
                 end,
             } => Self::CubicBezier {
-                start: AuthoredPointDtoV3::from_domain(*start),
-                control_1: AuthoredPointDtoV3::from_domain(*control_1),
-                control_2: AuthoredPointDtoV3::from_domain(*control_2),
-                end: AuthoredPointDtoV3::from_domain(*end),
+                start: AuthoredPointDtoV4::from_domain(*start),
+                control_1: AuthoredPointDtoV4::from_domain(*control_1),
+                control_2: AuthoredPointDtoV4::from_domain(*control_2),
+                end: AuthoredPointDtoV4::from_domain(*end),
             },
         }
     }
 
-    /// Converts one tagged current-v3 segment without inferring closure, winding, or render semantics.
+    /// Converts one tagged current-v4 segment without inferring closure, winding, or render semantics.
     fn into_domain(self) -> AuthoredCurveSegment {
         match self {
             Self::Line { start, end } => AuthoredCurveSegment::Line {
@@ -1936,8 +1949,8 @@ impl AuthoredCurveSegmentDtoV3 {
     }
 }
 
-impl AuthoredPointDtoV3 {
-    /// Projects one authored coordinate pair into deterministic current-v3 numeric fields.
+impl AuthoredPointDtoV4 {
+    /// Projects one authored coordinate pair into deterministic current-v4 numeric fields.
     fn from_domain(value: AuthoredPoint2) -> Self {
         Self {
             x: value.x,
@@ -1954,24 +1967,24 @@ impl AuthoredPointDtoV3 {
     }
 }
 
-impl PatternDefinitionDtoV3 {
+impl PatternDefinitionDtoV4 {
     fn from_domain(value: &PatternDefinition) -> Self {
         Self {
             id: value.id.0,
             name: value.name.clone(),
-            family: PatternFamilyDtoV3::from_domain(&value.family),
+            family: PatternFamilyDtoV4::from_domain(&value.family),
             mechanisms: value
                 .mechanisms
                 .iter()
-                .map(PatternMechanismDtoV3::from_domain)
+                .map(PatternMechanismDtoV4::from_domain)
                 .collect(),
             output_layers: value
                 .output_layers
                 .iter()
-                .map(PatternOutputLayerDtoV3::from_domain)
+                .map(PatternOutputLayerDtoV4::from_domain)
                 .collect(),
-            modulation: PatternModulationDtoV3 {},
-            coverage: CoverageDtoV3 {
+            modulation: PatternModulationDtoV4 {},
+            coverage: CoverageDtoV4 {
                 guard_steps: value.coverage.guard_steps,
                 additional_margin: value.coverage.additional_margin,
             },
@@ -1985,12 +1998,12 @@ impl PatternDefinitionDtoV3 {
             mechanisms: self
                 .mechanisms
                 .into_iter()
-                .map(PatternMechanismDtoV3::into_domain)
+                .map(PatternMechanismDtoV4::into_domain)
                 .collect(),
             output_layers: self
                 .output_layers
                 .into_iter()
-                .map(PatternOutputLayerDtoV3::into_domain)
+                .map(PatternOutputLayerDtoV4::into_domain)
                 .collect(),
             modulation: toniator_domain::PatternModulation,
             coverage: CoveragePolicy {
@@ -2000,7 +2013,7 @@ impl PatternDefinitionDtoV3 {
         }
     }
 }
-impl PatternFamilyDtoV3 {
+impl PatternFamilyDtoV4 {
     fn from_domain(value: &toniator_domain::PatternFamily) -> Self {
         match value {
             toniator_domain::PatternFamily::GuideIntersections {
@@ -2046,7 +2059,7 @@ impl PatternFamilyDtoV3 {
         }
     }
 }
-impl PatternMechanismDtoV3 {
+impl PatternMechanismDtoV4 {
     fn from_domain(value: &toniator_domain::PatternMechanism) -> Self {
         match value {
             toniator_domain::PatternMechanism::StraightGuides { id } => {
@@ -2064,7 +2077,7 @@ impl PatternMechanismDtoV3 {
                     id: id.0,
                     dimensions: dimensions
                         .iter()
-                        .map(StraightGuideDimensionDtoV3::from_domain)
+                        .map(StraightGuideDimensionDtoV4::from_domain)
                         .collect(),
                 }
             }
@@ -2073,7 +2086,7 @@ impl PatternMechanismDtoV3 {
                     id: id.0,
                     dimensions: dimensions
                         .iter()
-                        .map(GuideDimensionDtoV3::from_domain)
+                        .map(GuideDimensionDtoV4::from_domain)
                         .collect(),
                 }
             }
@@ -2107,7 +2120,7 @@ impl PatternMechanismDtoV3 {
                 seed,
             } => Self::RandomSiteProcess {
                 id: id.0,
-                character: RandomSiteCharacterDtoV3::from_domain(character),
+                character: RandomSiteCharacterDtoV4::from_domain(character),
                 seed: *seed,
             },
             toniator_domain::PatternMechanism::SiteDensityModulation {
@@ -2117,7 +2130,7 @@ impl PatternMechanismDtoV3 {
             } => Self::SiteDensityModulation {
                 id: id.0,
                 base_site_process_id: base_site_process_id.0,
-                modulation: SiteDensityModulationDtoV3::from_domain(modulation),
+                modulation: SiteDensityModulationDtoV4::from_domain(modulation),
             },
             toniator_domain::PatternMechanism::SiteExclusion {
                 id,
@@ -2126,7 +2139,7 @@ impl PatternMechanismDtoV3 {
             } => Self::SiteExclusion {
                 id: id.0,
                 density_modulation_id: density_modulation_id.0,
-                policy: SiteExclusionPolicyDtoV3::from_domain(policy),
+                policy: SiteExclusionPolicyDtoV4::from_domain(policy),
             },
             toniator_domain::PatternMechanism::RandomSiteProduct {
                 id,
@@ -2158,7 +2171,7 @@ impl PatternMechanismDtoV3 {
                     id: PatternMechanismId(id),
                     dimensions: dimensions
                         .into_iter()
-                        .map(StraightGuideDimensionDtoV3::into_domain)
+                        .map(StraightGuideDimensionDtoV4::into_domain)
                         .collect(),
                 }
             }
@@ -2167,7 +2180,7 @@ impl PatternMechanismDtoV3 {
                     id: PatternMechanismId(id),
                     dimensions: dimensions
                         .into_iter()
-                        .map(GuideDimensionDtoV3::into_domain)
+                        .map(GuideDimensionDtoV4::into_domain)
                         .collect(),
                 }
             }
@@ -2237,7 +2250,7 @@ impl PatternMechanismDtoV3 {
     }
 }
 
-impl RandomSiteCharacterDtoV3 {
+impl RandomSiteCharacterDtoV4 {
     fn from_domain(value: &RandomSiteCharacter) -> Self {
         match value {
             RandomSiteCharacter::RawUniform => Self::RawUniform,
@@ -2278,7 +2291,7 @@ impl RandomSiteCharacterDtoV3 {
     }
 }
 
-impl SiteDensityModulationDtoV3 {
+impl SiteDensityModulationDtoV4 {
     fn from_domain(value: &SiteDensityModulation) -> Self {
         match value {
             SiteDensityModulation::Uniform => Self::Uniform,
@@ -2289,7 +2302,7 @@ impl SiteDensityModulationDtoV3 {
             } => Self::ArtworkWeighted {
                 mapping: SourceMappingDto::from_domain(*mapping),
                 strength: *strength,
-                response: ArtworkWeightResponseDtoV3::from_domain(response),
+                response: ArtworkWeightResponseDtoV4::from_domain(response),
             },
         }
     }
@@ -2309,7 +2322,7 @@ impl SiteDensityModulationDtoV3 {
     }
 }
 
-impl ArtworkWeightResponseDtoV3 {
+impl ArtworkWeightResponseDtoV4 {
     fn from_domain(value: &ArtworkWeightResponse) -> Self {
         match value {
             ArtworkWeightResponse::Linear => Self::Linear,
@@ -2324,7 +2337,7 @@ impl ArtworkWeightResponseDtoV3 {
     }
 }
 
-impl SiteExclusionPolicyDtoV3 {
+impl SiteExclusionPolicyDtoV4 {
     fn from_domain(value: &SiteExclusionPolicy) -> Self {
         match value {
             SiteExclusionPolicy::None => Self::None,
@@ -2333,7 +2346,7 @@ impl SiteExclusionPolicyDtoV3 {
             }
             SiteExclusionPolicy::VisibleMarkMargin { margin, sizing } => Self::VisibleMarkMargin {
                 margin: *margin,
-                sizing: VisibleMarkSizingPolicyDtoV3::from_domain(*sizing),
+                sizing: VisibleMarkSizingPolicyDtoV4::from_domain(*sizing),
             },
         }
     }
@@ -2351,7 +2364,7 @@ impl SiteExclusionPolicyDtoV3 {
     }
 }
 
-impl VisibleMarkSizingPolicyDtoV3 {
+impl VisibleMarkSizingPolicyDtoV4 {
     fn from_domain(value: VisibleMarkSizingPolicy) -> Self {
         match value {
             VisibleMarkSizingPolicy::MaximumSupportRadius => Self::MaximumSupportRadius,
@@ -2363,7 +2376,7 @@ impl VisibleMarkSizingPolicyDtoV3 {
         }
     }
 }
-impl PatternOutputLayerDtoV3 {
+impl PatternOutputLayerDtoV4 {
     fn from_domain(value: &toniator_domain::PatternOutputLayer) -> Self {
         match value {
             toniator_domain::PatternOutputLayer::CircularMarks {
@@ -2381,8 +2394,8 @@ impl PatternOutputLayerDtoV3 {
             } => Self::MarkPrototype {
                 id: id.0,
                 site_mechanism_id: site_mechanism_id.0,
-                prototype: MarkPrototypeDtoV3::from_domain(prototype),
-                orientation: MarkOrientationDtoV3::from_domain(orientation),
+                prototype: MarkPrototypeDtoV4::from_domain(prototype),
+                orientation: MarkOrientationDtoV4::from_domain(orientation),
             },
         }
     }
@@ -2410,7 +2423,7 @@ impl PatternOutputLayerDtoV3 {
     }
 }
 
-impl StraightGuideDimensionDtoV3 {
+impl StraightGuideDimensionDtoV4 {
     fn from_domain(value: &StraightGuideDimension) -> Self {
         Self {
             id: value.id.0,
@@ -2430,7 +2443,7 @@ impl StraightGuideDimensionDtoV3 {
         }
     }
 }
-impl MarkPrototypeDtoV3 {
+impl MarkPrototypeDtoV4 {
     /// Serializes the exact persisted mark variant and its explicit resource reference.
     fn from_domain(value: &MarkPrototype) -> Self {
         match value {
@@ -2451,7 +2464,7 @@ impl MarkPrototypeDtoV3 {
         }
     }
 }
-impl MarkOrientationDtoV3 {
+impl MarkOrientationDtoV4 {
     fn from_domain(value: &MarkOrientation) -> Self {
         match value {
             MarkOrientation::Fixed => Self::Fixed,
@@ -2476,48 +2489,44 @@ impl MarkOrientationDtoV3 {
     }
 }
 impl LegacyChannelDto {
+    /// Projects one retained legacy channel without serializing its derived effective pattern.
     fn from_domain(value: &ChannelState) -> Self {
         Self {
             id: value.id.0,
-            pattern_definition_id: value.pattern_definition_id.0,
-            layout: LayoutDto::from_domain(&value.layout),
+            pattern_instance: ChannelPatternInstanceDto::from_domain(&value.pattern_instance),
             appearance: AppearanceDto::from_domain(&value.appearance),
-            mark_geometry_response: MarkResponseDto::from_domain(&value.mark_geometry_response),
             source_mapping: LegacySourceMappingDto::from_domain(value.source_mapping),
         }
     }
+    /// Rebuilds one retained legacy channel's authored instance and presentation state.
     fn into_domain(self) -> ChannelState {
         ChannelState {
             id: ChannelId(self.id),
-            pattern_definition_id: PatternDefinitionId(self.pattern_definition_id),
-            layout: self.layout.into_domain(),
+            pattern_instance: self.pattern_instance.into_domain(),
             appearance: self.appearance.into_domain(),
-            mark_geometry_response: self.mark_geometry_response.into_domain(),
             source_mapping: self.source_mapping.into_domain(),
         }
     }
 }
 impl ModeledChannelDto {
+    /// Projects one modeled channel without serializing its derived effective pattern.
     fn from_domain(value: &ModeledChannelState) -> Self {
         Self {
             role: value.role.into(),
             id: value.id.0,
-            pattern_definition_id: value.pattern_definition_id.0,
-            layout: LayoutDto::from_domain(&value.layout),
-            mark_geometry_response: MarkResponseDto::from_domain(&value.mark_geometry_response),
+            pattern_instance: ChannelPatternInstanceDto::from_domain(&value.pattern_instance),
             mapping: SourceMappingDto::from_domain(value.mapping),
             paint: PaintDto::from_domain(&value.paint),
             visible: value.visible,
             opacity: value.opacity,
         }
     }
+    /// Rebuilds one modeled channel's authored instance, mapping, paint, and presentation.
     fn into_domain(self) -> ModeledChannelState {
         ModeledChannelState {
             role: self.role.into(),
             id: ChannelId(self.id),
-            pattern_definition_id: PatternDefinitionId(self.pattern_definition_id),
-            layout: self.layout.into_domain(),
-            mark_geometry_response: self.mark_geometry_response.into_domain(),
+            pattern_instance: self.pattern_instance.into_domain(),
             mapping: self.mapping.into_domain(),
             paint: self.paint.into_domain(),
             visible: self.visible,
@@ -2525,33 +2534,8 @@ impl ModeledChannelDto {
         }
     }
 }
-impl LayoutDto {
-    fn from_domain(value: &ChannelPatternLayout) -> Self {
-        Self {
-            density: DensityDto {
-                across_x: value.density.across_x,
-                across_y: value.density.across_y,
-                aspect_locked: value.density.aspect_locked,
-            },
-            rotation_degrees: value.rotation_degrees,
-            translation_x: value.translation_x,
-            translation_y: value.translation_y,
-        }
-    }
-    fn into_domain(self) -> ChannelPatternLayout {
-        ChannelPatternLayout {
-            density: DensityMetric2D {
-                across_x: self.density.across_x,
-                across_y: self.density.across_y,
-                aspect_locked: self.density.aspect_locked,
-            },
-            rotation_degrees: self.rotation_degrees,
-            translation_x: self.translation_x,
-            translation_y: self.translation_y,
-        }
-    }
-}
 impl AppearanceDto {
+    /// Projects retained legacy appearance values without pattern authority.
     fn from_domain(value: &ChannelAppearance) -> Self {
         Self {
             visible: value.visible,
@@ -2559,6 +2543,7 @@ impl AppearanceDto {
             opacity: value.opacity,
         }
     }
+    /// Rebuilds retained legacy appearance values for domain validation.
     fn into_domain(self) -> ChannelAppearance {
         ChannelAppearance {
             visible: self.visible,
@@ -2568,18 +2553,140 @@ impl AppearanceDto {
     }
 }
 impl MarkResponseDto {
+    /// Projects the accepted mark-response branch without shape rotation.
     fn from_domain(value: &MarkGeometryResponse) -> Self {
         Self {
             minimum_fill: value.minimum_fill,
             maximum_fill: value.maximum_fill,
-            rotation_offset_degrees: value.rotation_offset_degrees,
         }
     }
+    /// Rebuilds the accepted mark-response branch for domain validation.
     fn into_domain(self) -> MarkGeometryResponse {
         MarkGeometryResponse {
             minimum_fill: self.minimum_fill,
             maximum_fill: self.maximum_fill,
-            rotation_offset_degrees: self.rotation_offset_degrees,
+        }
+    }
+}
+
+impl DocumentPatternSettingsDto {
+    /// Projects the sole document-base pattern authority into current-v4 fields.
+    fn from_domain(value: &DocumentPatternSettings) -> Self {
+        let PatternGeometryResponse::Marks(response) = &value.geometry_response;
+        Self {
+            definition_id: value.definition_id.0,
+            density: DensityDto {
+                across_x: value.density.across_x,
+                across_y: value.density.across_y,
+                aspect_locked: value.density.aspect_locked,
+            },
+            pattern_rotation_degrees: value.pattern_rotation_degrees,
+            shape_rotation_degrees: value.shape_rotation_degrees,
+            geometry_response: PatternGeometryResponseDto::Marks {
+                response: MarkResponseDto::from_domain(response),
+            },
+        }
+    }
+    /// Rebuilds the sole document-base pattern authority for complete validation.
+    fn into_domain(self) -> DocumentPatternSettings {
+        DocumentPatternSettings {
+            definition_id: PatternDefinitionId(self.definition_id),
+            density: DensityMetric2D {
+                across_x: self.density.across_x,
+                across_y: self.density.across_y,
+                aspect_locked: self.density.aspect_locked,
+            },
+            pattern_rotation_degrees: self.pattern_rotation_degrees,
+            shape_rotation_degrees: self.shape_rotation_degrees,
+            geometry_response: match self.geometry_response {
+                PatternGeometryResponseDto::Marks { response } => {
+                    PatternGeometryResponse::Marks(response.into_domain())
+                }
+            },
+        }
+    }
+}
+impl ChannelPatternInstanceDto {
+    /// Projects optional replacement and additive intent without resolving inherited values.
+    fn from_domain(value: &ChannelPatternInstance) -> Self {
+        Self {
+            definition_override: value.definition_override.map(|id| id.0),
+            layout_delta: LayoutDeltaDto::from_domain(&value.layout_delta),
+            shape_rotation_delta_degrees: value.shape_rotation_delta_degrees,
+            geometry_response_delta: value.geometry_response_delta.as_ref().map(
+                |value| match value {
+                    ChannelGeometryResponseDelta::Marks(delta) => {
+                        ChannelGeometryResponseDeltaDto::Marks {
+                            delta: MarkResponseDeltaDto::from_domain(delta),
+                        }
+                    }
+                },
+            ),
+        }
+    }
+    /// Rebuilds optional replacement and additive intent without materializing inheritance.
+    fn into_domain(self) -> ChannelPatternInstance {
+        ChannelPatternInstance {
+            definition_override: self.definition_override.map(PatternDefinitionId),
+            layout_delta: self.layout_delta.into_domain(),
+            shape_rotation_delta_degrees: self.shape_rotation_delta_degrees,
+            geometry_response_delta: self.geometry_response_delta.map(|delta| match delta {
+                ChannelGeometryResponseDeltaDto::Marks { delta } => {
+                    ChannelGeometryResponseDelta::Marks(delta.into_domain())
+                }
+            }),
+        }
+    }
+}
+impl LayoutDeltaDto {
+    /// Projects typed density and rotation deltas plus retained absolute translation.
+    fn from_domain(value: &ChannelPatternLayoutDelta) -> Self {
+        Self {
+            density: value.density.as_ref().map(DensityDeltaDto::from_domain),
+            rotation_degrees: value.rotation_degrees,
+            translation_x: value.translation_x,
+            translation_y: value.translation_y,
+        }
+    }
+    /// Rebuilds typed density and rotation deltas plus retained absolute translation.
+    fn into_domain(self) -> ChannelPatternLayoutDelta {
+        ChannelPatternLayoutDelta {
+            density: self.density.map(DensityDeltaDto::into_domain),
+            rotation_degrees: self.rotation_degrees,
+            translation_x: self.translation_x,
+            translation_y: self.translation_y,
+        }
+    }
+}
+impl DensityDeltaDto {
+    /// Projects both optional-authority density-axis deltas exactly.
+    fn from_domain(value: &DensityMetricDelta2D) -> Self {
+        Self {
+            across_x_delta: value.across_x_delta,
+            across_y_delta: value.across_y_delta,
+        }
+    }
+    /// Rebuilds both density-axis deltas for later effective validation.
+    fn into_domain(self) -> DensityMetricDelta2D {
+        DensityMetricDelta2D {
+            across_x_delta: self.across_x_delta,
+            across_y_delta: self.across_y_delta,
+        }
+    }
+}
+impl MarkResponseDeltaDto {
+    /// Projects independently optional mark-response field deltas exactly.
+    fn from_domain(value: &MarkGeometryResponseDelta) -> Self {
+        Self {
+            minimum_fill_delta: value.minimum_fill_delta,
+            maximum_fill_delta: value.maximum_fill_delta,
+        }
+    }
+    /// Rebuilds independently optional mark-response field deltas for later effective validation.
+    fn into_domain(self) -> MarkGeometryResponseDelta {
+        MarkGeometryResponseDelta {
+            minimum_fill_delta: self.minimum_fill_delta,
+            maximum_fill_delta: self.maximum_fill_delta,
         }
     }
 }
