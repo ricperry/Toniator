@@ -505,6 +505,85 @@ pub struct EffectiveChannelPatternInstance {
     pub geometry_response: PatternGeometryResponse,
 }
 
+/// Selects the authoritative definition whose active structural capabilities
+/// are projected. Channel scope resolves Stage 20G inheritance exactly once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PatternCapabilityScope {
+    DocumentBase,
+    Channel(ChannelId),
+}
+
+/// Describes the active structural capabilities of one validated definition.
+/// It is derived-only workflow information and is never persisted or cached.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PatternCapabilityProjection {
+    pub definition_id: PatternDefinitionId,
+    pub family: PatternFamilyCapabilityProjection,
+    pub outputs: Vec<PatternOutputCapabilityProjection>,
+}
+
+/// Identifies the active family branch without inferring a named preset or UI page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PatternFamilyCapabilityProjection {
+    Grid(GridCapabilityProjection),
+    Dispersion(DispersionCapabilityProjection),
+}
+
+/// States which current generator inputs participate in the active family.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GeneratorCapabilities {
+    pub density: bool,
+    pub seed: bool,
+}
+
+/// Describes the active guide family structure and its published site product.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GridCapabilityProjection {
+    pub generator: GeneratorCapabilities,
+    pub guides: GuideCapabilities,
+    pub site_product: GuideSiteProductCapability,
+}
+
+/// Describes currently active guide controls without granting edit authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GuideCapabilities {
+    pub count: u8,
+    pub spacing: bool,
+    pub phase: bool,
+    pub editable_curve: bool,
+    pub prototype_kinds: Vec<GuidePrototypeKind>,
+}
+
+/// Identifies the active site product emitted by a guide family.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuideSiteProductCapability {
+    Intersections,
+    AlongGuides,
+}
+
+/// Describes the active dispersion mechanisms without exposing their payload values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DispersionCapabilityProjection {
+    pub generator: GeneratorCapabilities,
+    pub character: RandomCharacterKind,
+    pub density_modulation: DensityModulationKind,
+    pub exclusion: ExclusionKind,
+}
+
+/// Describes one active output layer in stored definition order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PatternOutputCapabilityProjection {
+    Marks(MarkOutputCapabilityProjection),
+}
+
+/// Describes the active current mark output without creating renderer authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MarkOutputCapabilityProjection {
+    pub prototype: MarkPrototypeKind,
+    pub orientation: MarkOrientationKind,
+    pub fill_range: bool,
+}
+
 /// Per-channel placement controls.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChannelPatternLayout {
@@ -1652,6 +1731,32 @@ impl Document {
         validate_effective_pattern(&effective)?;
         validate_effective_response_compatibility(definition, &effective.geometry_response)?;
         Ok(effective)
+    }
+
+    /// Projects active recipe capabilities from the document base or one resolved channel.
+    /// Channel scope delegates inheritance and delta resolution to the sole Stage 20G
+    /// effective-pattern authority; the returned derived value never mutates state,
+    /// participates in commands, or changes cache identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an established validation error when the selected channel or authoritative
+    /// definition is missing or when its stored recipe cannot form an accepted current projection.
+    pub fn pattern_capabilities(
+        &self,
+        scope: PatternCapabilityScope,
+    ) -> Result<PatternCapabilityProjection, ValidationError> {
+        let definition_id = match scope {
+            PatternCapabilityScope::DocumentBase => self.pattern_settings.definition_id,
+            PatternCapabilityScope::Channel(channel_id) => {
+                self.effective_channel_pattern(channel_id)?.definition_id
+            }
+        };
+        let definition = self.definition(definition_id).ok_or(ValidationError::new(
+            "document.pattern_settings.definition_id",
+            "capability scope resolves a missing pattern definition",
+        ))?;
+        validate_and_project_definition(definition)
     }
 
     /// Builds a stale-aware density-delta command from desired effective
@@ -6901,12 +7006,34 @@ fn validate_channel(
     Ok(())
 }
 
-/// Validates one complete typed pattern definition and its ordered family/output capability chain.
+/// Validates and projects one complete typed pattern definition through the shared current vocabulary.
 ///
 /// # Errors
 ///
 /// Returns the first stable family, mechanism, output, coverage, or payload diagnostic.
 fn validate_definition(definition: &PatternDefinition) -> Result<(), ValidationError> {
+    validate_and_project_definition(definition).map(|_| ())
+}
+
+/// Validates one typed recipe then derives its active structural workflow projection.
+///
+/// # Errors
+///
+/// Returns the established validation diagnostic before exposing any partial projection.
+fn validate_and_project_definition(
+    definition: &PatternDefinition,
+) -> Result<PatternCapabilityProjection, ValidationError> {
+    validate_definition_structure(definition)?;
+    project_validated_pattern_definition(definition)
+}
+
+/// Validates one complete typed pattern definition and its ordered family/output capability chain.
+/// The companion projection is derived only after this exhaustive structural validation succeeds.
+///
+/// # Errors
+///
+/// Returns the first stable family, mechanism, output, coverage, or payload diagnostic.
+fn validate_definition_structure(definition: &PatternDefinition) -> Result<(), ValidationError> {
     validate_nonnegative_finite(
         definition.coverage.additional_margin,
         "pattern_definitions.coverage.additional_margin",
@@ -7013,6 +7140,196 @@ fn validate_definition(definition: &PatternDefinition) -> Result<(), ValidationE
         ));
     }
     Ok(())
+}
+
+/// Projects one already validated definition through the current structural capability vocabulary.
+/// It preserves stored output and generic-prototype order and never examines display metadata.
+///
+/// # Errors
+///
+/// Returns a stable internal-capability diagnostic only if a caller bypasses the shared validator.
+fn project_validated_pattern_definition(
+    definition: &PatternDefinition,
+) -> Result<PatternCapabilityProjection, ValidationError> {
+    let outputs = definition
+        .output_layers
+        .iter()
+        .map(project_output_capability)
+        .collect::<Result<Vec<_>, _>>()?;
+    let family = match &definition.family {
+        PatternFamily::GuideIntersections { .. } => {
+            let [guide_mechanism, site_mechanism] = definition.mechanisms.as_slice() else {
+                return Err(ValidationError::new(
+                    "pattern_definitions.family.capability",
+                    "validated guide family is missing its ordered mechanisms",
+                ));
+            };
+            let guides = match guide_mechanism {
+                PatternMechanism::StraightGuides { .. } => GuideCapabilities {
+                    count: 2,
+                    spacing: false,
+                    phase: false,
+                    editable_curve: false,
+                    prototype_kinds: Vec::new(),
+                },
+                PatternMechanism::StraightGuideDimensions { dimensions, .. } => GuideCapabilities {
+                    count: dimensions.len() as u8,
+                    spacing: true,
+                    phase: true,
+                    editable_curve: false,
+                    prototype_kinds: Vec::new(),
+                },
+                PatternMechanism::GuideDimensions { dimensions, .. } => GuideCapabilities {
+                    count: dimensions.len() as u8,
+                    spacing: true,
+                    phase: true,
+                    editable_curve: dimensions.iter().any(|dimension| {
+                        matches!(dimension.prototype, GuidePrototype::AuthoredOpenPath { .. })
+                    }),
+                    prototype_kinds: dimensions
+                        .iter()
+                        .map(|dimension| guide_prototype_kind(&dimension.prototype))
+                        .collect(),
+                },
+                _ => {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.family.capability",
+                        "validated guide family has an unsupported guide mechanism",
+                    ));
+                }
+            };
+            let site_product = match site_mechanism {
+                PatternMechanism::GuideIntersections { .. }
+                | PatternMechanism::SelectedGuideIntersections { .. } => {
+                    GuideSiteProductCapability::Intersections
+                }
+                PatternMechanism::AlongGuideSites { .. } => GuideSiteProductCapability::AlongGuides,
+                _ => {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.family.capability",
+                        "validated guide family has an unsupported site mechanism",
+                    ));
+                }
+            };
+            PatternFamilyCapabilityProjection::Grid(GridCapabilityProjection {
+                generator: GeneratorCapabilities {
+                    density: true,
+                    seed: false,
+                },
+                guides,
+                site_product,
+            })
+        }
+        PatternFamily::RandomSites { .. } => {
+            let [
+                PatternMechanism::RandomSiteProcess { character, .. },
+                PatternMechanism::SiteDensityModulation { modulation, .. },
+                PatternMechanism::SiteExclusion { policy, .. },
+                PatternMechanism::RandomSiteProduct { .. },
+            ] = definition.mechanisms.as_slice()
+            else {
+                return Err(ValidationError::new(
+                    "pattern_definitions.family.capability",
+                    "validated dispersion family is missing its ordered mechanisms",
+                ));
+            };
+            PatternFamilyCapabilityProjection::Dispersion(DispersionCapabilityProjection {
+                generator: GeneratorCapabilities {
+                    density: true,
+                    seed: true,
+                },
+                character: random_character_kind(character),
+                density_modulation: density_modulation_kind(modulation),
+                exclusion: exclusion_kind(policy),
+            })
+        }
+    };
+    Ok(PatternCapabilityProjection {
+        definition_id: definition.id,
+        family,
+        outputs,
+    })
+}
+
+/// Projects one accepted mark output without exposing renderer behavior or payload IDs.
+///
+/// # Errors
+///
+/// Returns a stable diagnostic if an unchecked definition contains a future output branch.
+fn project_output_capability(
+    output: &PatternOutputLayer,
+) -> Result<PatternOutputCapabilityProjection, ValidationError> {
+    let (prototype, orientation) = match output {
+        PatternOutputLayer::CircularMarks { .. } => {
+            (MarkPrototypeKind::Circle, MarkOrientationKind::Fixed)
+        }
+        PatternOutputLayer::MarkPrototype {
+            prototype,
+            orientation,
+            ..
+        } => (
+            mark_prototype_kind(prototype),
+            mark_orientation_kind(orientation),
+        ),
+    };
+    Ok(PatternOutputCapabilityProjection::Marks(
+        MarkOutputCapabilityProjection {
+            prototype,
+            orientation,
+            fill_range: true,
+        },
+    ))
+}
+
+/// Maps the active random-process variant to its payload-free capability discriminant.
+fn random_character_kind(character: &RandomSiteCharacter) -> RandomCharacterKind {
+    match character {
+        RandomSiteCharacter::RawUniform => RandomCharacterKind::RawUniform,
+        RandomSiteCharacter::Even { .. } => RandomCharacterKind::Even,
+        RandomSiteCharacter::Clustered { .. } => RandomCharacterKind::Clustered,
+    }
+}
+
+/// Maps the active density-modulation variant to its payload-free capability discriminant.
+fn density_modulation_kind(modulation: &SiteDensityModulation) -> DensityModulationKind {
+    match modulation {
+        SiteDensityModulation::Uniform => DensityModulationKind::Uniform,
+        SiteDensityModulation::ArtworkWeighted { .. } => DensityModulationKind::ArtworkWeighted,
+    }
+}
+
+/// Maps the active exclusion variant to its payload-free capability discriminant.
+fn exclusion_kind(policy: &SiteExclusionPolicy) -> ExclusionKind {
+    match policy {
+        SiteExclusionPolicy::None => ExclusionKind::None,
+        SiteExclusionPolicy::MinimumCenterDistance { .. } => ExclusionKind::MinimumCenterDistance,
+        SiteExclusionPolicy::VisibleMarkMargin { .. } => ExclusionKind::VisibleMarkMargin,
+    }
+}
+
+/// Maps one active generic guide prototype to its stable descriptor discriminant.
+fn guide_prototype_kind(prototype: &GuidePrototype) -> GuidePrototypeKind {
+    match prototype {
+        GuidePrototype::AuthoredOpenPath { .. } => GuidePrototypeKind::AuthoredOpenPath,
+        GuidePrototype::CircularArc { .. } => GuidePrototypeKind::CircularArc,
+    }
+}
+
+/// Maps one active mark prototype to its stable descriptor discriminant.
+fn mark_prototype_kind(prototype: &MarkPrototype) -> MarkPrototypeKind {
+    match prototype {
+        MarkPrototype::Circle => MarkPrototypeKind::Circle,
+        MarkPrototype::AuthoredClosedShape { .. } => MarkPrototypeKind::AuthoredClosedShape,
+    }
+}
+
+/// Maps one active mark orientation to its stable descriptor discriminant.
+fn mark_orientation_kind(orientation: &MarkOrientation) -> MarkOrientationKind {
+    match orientation {
+        MarkOrientation::Fixed => MarkOrientationKind::Fixed,
+        MarkOrientation::GuideTangent { .. } => MarkOrientationKind::GuideTangent,
+        MarkOrientation::GuideNormal { .. } => MarkOrientationKind::GuideNormal,
+    }
 }
 
 /// Validates one random-site mechanism chain and its compatible typed mark output in stored order.

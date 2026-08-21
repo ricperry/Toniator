@@ -1851,10 +1851,19 @@ moves shared settings to a document base, retains only channel replacements and
 additive deltas, and uses current-only schema-v4 persistence. The user explicitly
 accepted Stage 20G on 2026-08-21; it does not authorize Stage 20H or later work.
 
-**Later Stage 20H+ — Planned.**
+**Stage 20H — Implemented awaiting review.**
+[`STAGE_20H_CAPABILITY_PROJECTION_PLAN.md`](STAGE_20H_CAPABILITY_PROJECTION_PLAN.md)
+defines the bounded headless capability-projection implementation. It derives
+read-only typed structural facts from the document base or a Stage 20G
+effective channel definition, without introducing a second evaluator,
+serialization, invalidation, cache identity, CLI, or GTK authority.
+Focused domain/patterns/engine witnesses and bounded static checks pass;
+parent review remains the next gate.
+
+**Later Stage 20I+ — Planned.**
 [`STAGE_20_PLUS_DECOMPOSITION.md`](STAGE_20_PLUS_DECOMPOSITION.md) provides the
 detailed synchronized sequence from accepted Stage 20G into the planned
-remainder: 20H capability projection; 20I paths/strokes; 20J path offset; 20K parametric
+remainder: 20I paths/strokes; 20J path offset; 20K parametric
 curves; 20L adjacency; 20M connection programs; 20N Voronoi; 20O guide faces;
 20P region realization; 20Q composites; 20R gallery recipes; 20S Pattern
 Wizard; and 20T–20W temporal work. Every row remains separately gated.
