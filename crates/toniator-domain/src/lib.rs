@@ -73,6 +73,59 @@ pub enum AuthoredStructureKind {
     ClosedShape,
 }
 
+/// One deterministic typed consumer of a document-owned authored structure.
+///
+/// This projection names only persisted document identifiers. Presentation labels, ordinals, and
+/// editing prompts remain frontend policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthoredStructureUse {
+    /// One guide-dimension prototype reference owned by a channel's current definition.
+    Guide {
+        channel_id: ChannelId,
+        definition_id: PatternDefinitionId,
+        mechanism_id: PatternMechanismId,
+        dimension_id: GuideDimensionId,
+        structure_id: AuthoredStructureId,
+    },
+    /// One mark-output prototype reference owned by a channel's current definition.
+    Mark {
+        channel_id: ChannelId,
+        definition_id: PatternDefinitionId,
+        output_layer_id: PatternOutputLayerId,
+        structure_id: AuthoredStructureId,
+    },
+}
+
+impl AuthoredStructureUse {
+    /// Returns the selected reusable structure identity without inventing presentation policy.
+    pub const fn structure_id(&self) -> AuthoredStructureId {
+        match self {
+            Self::Guide { structure_id, .. } | Self::Mark { structure_id, .. } => *structure_id,
+        }
+    }
+}
+
+/// One unambiguous selected-channel descriptor target for attaching a newly created structure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthoredStructureAttachment {
+    /// Attaches a new open path by activating one exact generic guide dimension.
+    Guide {
+        mechanism_id: PatternMechanismId,
+        dimension_id: GuideDimensionId,
+    },
+    /// Replaces one ordinary selected-channel straight grid with one fresh generic
+    /// authored-guide/along-guide definition as the new open path is attached.
+    ///
+    /// This intent is deliberately available only through `DocumentHistory`'s
+    /// grouped add-and-attach transition. It preserves the old shared definition
+    /// for linked channels and never exposes an intermediate orphan resource.
+    GuideCustomAlongLayout,
+    /// Attaches a new closed shape by activating one exact mark output layer.
+    Mark {
+        output_layer_id: PatternOutputLayerId,
+    },
+}
+
 /// A validated ID-free authored-structure payload for an authoritative add or replacement command.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AuthoredStructureDraft {
@@ -1433,6 +1486,54 @@ impl Document {
             .find(|structure| structure.id == id)
     }
 
+    /// Projects every persisted guide and mark use in deterministic document, mechanism, and layer order.
+    ///
+    /// The projection is read-only and carries no UI labels, ordinals, prompts, or editor scope state.
+    pub fn authored_structure_uses(&self) -> Vec<AuthoredStructureUse> {
+        let mut uses = Vec::new();
+        for channel_id in self.channel_ids() {
+            let Some(definition_id) = self.pattern_definition_id_for(channel_id) else {
+                continue;
+            };
+            let Some(definition) = self.definition(definition_id) else {
+                continue;
+            };
+            for mechanism in &definition.mechanisms {
+                let PatternMechanism::GuideDimensions { id, dimensions } = mechanism else {
+                    continue;
+                };
+                for dimension in dimensions {
+                    if let GuidePrototype::AuthoredOpenPath { structure_id } = &dimension.prototype
+                    {
+                        uses.push(AuthoredStructureUse::Guide {
+                            channel_id,
+                            definition_id,
+                            mechanism_id: *id,
+                            dimension_id: dimension.id,
+                            structure_id: *structure_id,
+                        });
+                    }
+                }
+            }
+            for layer in &definition.output_layers {
+                if let PatternOutputLayer::MarkPrototype {
+                    id,
+                    prototype: MarkPrototype::AuthoredClosedShape { structure_id },
+                    ..
+                } = layer
+                {
+                    uses.push(AuthoredStructureUse::Mark {
+                        channel_id,
+                        definition_id,
+                        output_layer_id: *id,
+                        structure_id: *structure_id,
+                    });
+                }
+            }
+        }
+        uses
+    }
+
     /// Reports whether any guide or mark output shares this authored structure reference.
     ///
     /// The document owns this referential-integrity boundary; evaluators and
@@ -2471,6 +2572,96 @@ impl Document {
             "pattern_definitions.mechanisms.dimensions.id",
         )
         .map(GuideDimensionId)
+    }
+
+    /// Materializes the one supported selected-channel transition from the ordinary
+    /// straight-grid topology to an authored open path with along-guide sites.
+    ///
+    /// The caller supplies an already-added open-path resource. The returned definition has
+    /// fresh document-wide IDs, preserves the ordinary grid's coverage and mark-output
+    /// semantics, and does not mutate this document. Only the grouped history transition
+    /// may publish it, so linked channels retain the original ordinary definition.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable topology, output, allocation, or validation diagnostic when the
+    /// selected definition is not the ordinary single-output straight grid or an ID space is
+    /// exhausted. No partial definition is returned.
+    fn custom_authored_along_guide_definition(
+        &self,
+        base: &PatternDefinition,
+        structure_id: AuthoredStructureId,
+    ) -> Result<PatternDefinition, ValidationError> {
+        let [
+            PatternMechanism::StraightGuides { .. },
+            PatternMechanism::GuideIntersections { .. },
+        ] = base.mechanisms.as_slice()
+        else {
+            return Err(ValidationError::new(
+                "pattern_definitions.family",
+                "custom authored guides require an ordinary straight grid",
+            ));
+        };
+        let (prototype, orientation) = match base.output_layers.as_slice() {
+            [PatternOutputLayer::CircularMarks { .. }] => {
+                (MarkPrototype::Circle, MarkOrientation::Fixed)
+            }
+            [
+                PatternOutputLayer::MarkPrototype {
+                    prototype,
+                    orientation,
+                    ..
+                },
+            ] => (prototype.clone(), orientation.clone()),
+            _ => {
+                return Err(ValidationError::new(
+                    "pattern_definitions.output_layers",
+                    "custom authored guides require one selected mark output",
+                ));
+            }
+        };
+        let definition_id = self.allocate_definition_id()?;
+        let guide_id = self.allocate_mechanism_id()?;
+        let site_id = PatternMechanismId(guide_id.0.checked_add(1).ok_or_else(|| {
+            ValidationError::new(
+                "pattern_definitions.mechanisms.id",
+                "document mechanism ID space is exhausted",
+            )
+        })?);
+        let output_id = self.allocate_output_layer_id()?;
+        let dimension_id = self.allocate_dimension_id()?;
+        let mut definition = PatternDefinition::generalized_guides(
+            definition_id,
+            format!("{} custom guide layout", base.name),
+            guide_id,
+            site_id,
+            output_id,
+            vec![GuideDimension {
+                id: dimension_id,
+                baseline_angle_degrees: 0.0,
+                phase: 0.0,
+                prototype: GuidePrototype::AuthoredOpenPath { structure_id },
+                repetition: GuideRepetition::Single,
+            }],
+            GeneralizedSiteProduct::AlongGuides {
+                dimensions: vec![dimension_id],
+                interval_multiplier: 1.0,
+                phase: 0.0,
+            },
+            orientation,
+            base.coverage.clone(),
+        );
+        let [
+            PatternOutputLayer::MarkPrototype {
+                prototype: target_prototype,
+                ..
+            },
+        ] = definition.output_layers.as_mut_slice()
+        else {
+            unreachable!("generic guide constructor owns one mark output")
+        };
+        *target_prototype = prototype;
+        Ok(definition)
     }
 
     fn allocate_definition_from_draft(
@@ -4619,14 +4810,27 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
             output_layer_id,
             prototype,
         } => {
-            if let Some(PatternOutputLayer::MarkPrototype {
-                prototype: current, ..
-            }) = definition
+            if let Some(layer) = definition
                 .output_layers
                 .iter_mut()
                 .find(|layer| layer.id() == *output_layer_id)
             {
-                *current = prototype.clone();
+                match layer {
+                    PatternOutputLayer::MarkPrototype {
+                        prototype: current, ..
+                    } => *current = prototype.clone(),
+                    PatternOutputLayer::CircularMarks {
+                        id,
+                        site_mechanism_id,
+                    } => {
+                        *layer = PatternOutputLayer::MarkPrototype {
+                            id: *id,
+                            site_mechanism_id: *site_mechanism_id,
+                            prototype: prototype.clone(),
+                            orientation: MarkOrientation::Fixed,
+                        };
+                    }
+                }
             }
         }
         PatternDefinitionEdit::SetOutputAuthoredClosedShape {
@@ -5108,6 +5312,15 @@ fn remap_mechanism_id(
     duplicate.mechanisms[index].id()
 }
 
+/// Remaps a selected-copy guide dimension to its duplicate definition without changing topology.
+///
+/// This helper accepts both straight and generic guide mechanisms because selected-copy edits
+/// preserve the source mechanism family while allocating fresh dimension identities.
+///
+/// # Panics
+///
+/// Panics only when a caller violates the validated selected-copy invariant by naming a dimension
+/// that is absent from both supported source mechanism families.
 fn remap_dimension_id(
     source: &PatternDefinition,
     duplicate: &PatternDefinition,
@@ -5116,24 +5329,42 @@ fn remap_dimension_id(
     for (source_mechanism, duplicate_mechanism) in
         source.mechanisms.iter().zip(&duplicate.mechanisms)
     {
-        let (
-            PatternMechanism::StraightGuideDimensions {
-                dimensions: source_dimensions,
-                ..
-            },
-            PatternMechanism::StraightGuideDimensions {
-                dimensions: duplicate_dimensions,
-                ..
-            },
-        ) = (source_mechanism, duplicate_mechanism)
-        else {
-            continue;
-        };
-        if let Some(index) = source_dimensions
-            .iter()
-            .position(|dimension| dimension.id == dimension_id)
-        {
-            return duplicate_dimensions[index].id;
+        match (source_mechanism, duplicate_mechanism) {
+            (
+                PatternMechanism::StraightGuideDimensions {
+                    dimensions: source_dimensions,
+                    ..
+                },
+                PatternMechanism::StraightGuideDimensions {
+                    dimensions: duplicate_dimensions,
+                    ..
+                },
+            ) => {
+                if let Some(index) = source_dimensions
+                    .iter()
+                    .position(|dimension| dimension.id == dimension_id)
+                {
+                    return duplicate_dimensions[index].id;
+                }
+            }
+            (
+                PatternMechanism::GuideDimensions {
+                    dimensions: source_dimensions,
+                    ..
+                },
+                PatternMechanism::GuideDimensions {
+                    dimensions: duplicate_dimensions,
+                    ..
+                },
+            ) => {
+                if let Some(index) = source_dimensions
+                    .iter()
+                    .position(|dimension| dimension.id == dimension_id)
+                {
+                    return duplicate_dimensions[index].id;
+                }
+            }
+            _ => {}
         }
     }
     panic!("validated edit references a source guide dimension")
@@ -5587,7 +5818,7 @@ fn validate_definition_edit(
             output_layer_id,
             prototype: _,
         } => {
-            validate_mark_prototype_output_target(definition, *output_layer_id)?;
+            validate_output_layer_target(definition, *output_layer_id)?;
             Ok(())
         }
         PatternDefinitionEdit::SetOutputAuthoredClosedShape {
@@ -11703,6 +11934,7 @@ pub struct DocumentHistory {
     session: DocumentSession,
     undo: Vec<HistoryEntry>,
     redo: Vec<HistoryEntry>,
+    draft_root: Option<DraftRoot>,
 }
 
 #[derive(Clone, Debug)]
@@ -11712,12 +11944,47 @@ struct HistoryEntry {
     result: CommandResult,
 }
 
+/// Immutable main-history identity captured when a private editor draft begins.
+#[derive(Clone, Debug)]
+struct DraftRoot {
+    document: Document,
+    revision: Revision,
+}
+
+/// One successful or unchanged private-draft publication summary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DraftSquashResult {
+    /// Reports whether the draft equals its immutable root and therefore published no main revision.
+    pub unchanged: bool,
+    /// Lists affected channels in deterministic main-document order.
+    pub affected_channels: Vec<ChannelId>,
+    /// Reports the strongest invalidation required by the net published change.
+    pub invalidation: Option<InvalidationLevel>,
+}
+
 impl DocumentHistory {
     pub fn new(session: DocumentSession) -> Self {
         Self {
             session,
             undo: Vec::new(),
             redo: Vec::new(),
+            draft_root: None,
+        }
+    }
+
+    /// Creates an isolated editable history rooted at this exact current document and revision.
+    ///
+    /// The returned history remains a normal command/undo/redo authority locally. Only
+    /// `squash_draft` may publish it into a main history.
+    pub fn new_draft(main: &Self) -> Self {
+        Self {
+            session: main.session.clone(),
+            undo: Vec::new(),
+            redo: Vec::new(),
+            draft_root: Some(DraftRoot {
+                document: main.document().clone(),
+                revision: main.revision(),
+            }),
         }
     }
 
@@ -11757,6 +12024,300 @@ impl DocumentHistory {
         Ok(result)
     }
 
+    /// Duplicates one selected authored resource and retargets exactly that use as one undoable history step.
+    ///
+    /// This reuses typed selected-copy definition semantics for a channel-local guide or mark reference.
+    /// Both candidate transitions validate before either is published, and the allocated resource ID is retained.
+    ///
+    /// # Errors
+    ///
+    /// Returns stale-use, definition, validation, or revision failures without changing this history.
+    pub fn duplicate_and_retarget_authored_structure(
+        &mut self,
+        selected_use: AuthoredStructureUse,
+    ) -> Result<CommandResult, DocumentSessionError> {
+        let before = self.session.snapshot();
+        let selected_use = before
+            .authored_structure_uses()
+            .into_iter()
+            .find(|candidate| *candidate == selected_use)
+            .ok_or_else(|| {
+                DocumentSessionError::Validation(ValidationError::new(
+                    "authored_structures.use",
+                    "selected authored structure use is stale",
+                ))
+            })?;
+        let (candidate, duplicate_result) =
+            before.apply_command(&DocumentCommand::DuplicateAuthoredStructure {
+                structure_id: selected_use.structure_id(),
+            })?;
+        let structure_id = duplicate_result
+            .created_authored_structure_id
+            .expect("validated duplication allocates one resource ID");
+        let (channel_id, definition_id, edit) = match selected_use {
+            AuthoredStructureUse::Guide {
+                channel_id,
+                definition_id,
+                mechanism_id,
+                dimension_id,
+                ..
+            } => (
+                channel_id,
+                definition_id,
+                PatternDefinitionEdit::SetGuideAuthoredStructure {
+                    mechanism_id,
+                    dimension_id,
+                    structure_id,
+                },
+            ),
+            AuthoredStructureUse::Mark {
+                channel_id,
+                definition_id,
+                output_layer_id,
+                ..
+            } => (
+                channel_id,
+                definition_id,
+                PatternDefinitionEdit::SetOutputAuthoredClosedShape {
+                    output_layer_id,
+                    structure_id,
+                },
+            ),
+        };
+        let base_definition = candidate
+            .definition(definition_id)
+            .cloned()
+            .ok_or_else(|| {
+                DocumentSessionError::Validation(ValidationError::new(
+                    "pattern_definitions.reference",
+                    "selected authored structure use references a missing definition",
+                ))
+            })?;
+        let (after, retarget_result) =
+            candidate.apply_command(&DocumentCommand::EditSelectedChannelPatternDefinition {
+                channel_id,
+                base_definition,
+                edit,
+            })?;
+        self.session.restore_history_snapshot(after.clone())?;
+        let result = CommandResult {
+            affected_channels: retarget_result.affected_channels,
+            invalidation: strongest_invalidation(
+                Some(duplicate_result.invalidation),
+                retarget_result.invalidation,
+            )
+            .expect("two transitions have invalidations"),
+            created_authored_structure_id: Some(structure_id),
+        };
+        self.undo.push(HistoryEntry {
+            before,
+            after,
+            result: result.clone(),
+        });
+        self.redo.clear();
+        Ok(result)
+    }
+
+    /// Adds a new authored resource and attaches it to one exact selected-channel descriptor as one undo entry.
+    ///
+    /// The caller supplies the already-disambiguated active target. Candidate add and selected-copy
+    /// attachment both validate before this history advances, so a failure leaves no orphan resource.
+    ///
+    /// # Errors
+    ///
+    /// Returns add, selected-channel definition, attachment, validation, or revision failures without
+    /// changing this history, its undo/redo stacks, or document-visible resource store.
+    pub fn add_and_attach_authored_structure(
+        &mut self,
+        channel_id: ChannelId,
+        attachment: AuthoredStructureAttachment,
+        draft: AuthoredStructureDraft,
+    ) -> Result<CommandResult, DocumentSessionError> {
+        let before = self.session.snapshot();
+        let (added, add_result) =
+            before.apply_command(&DocumentCommand::AddAuthoredStructure { draft })?;
+        let structure_id = add_result
+            .created_authored_structure_id
+            .expect("validated authored addition allocates one resource ID");
+        let definition_id = added.pattern_definition_id_for(channel_id).ok_or_else(|| {
+            DocumentSessionError::Validation(ValidationError::new(
+                "pattern_definitions.reference",
+                "selected channel has no active pattern definition",
+            ))
+        })?;
+        let base_definition = added.definition(definition_id).cloned().ok_or_else(|| {
+            DocumentSessionError::Validation(ValidationError::new(
+                "pattern_definitions.reference",
+                "selected channel definition is missing before authored attachment",
+            ))
+        })?;
+        let (after, attach_result) = match attachment {
+            AuthoredStructureAttachment::Guide {
+                mechanism_id,
+                dimension_id,
+            } => added.apply_command(&DocumentCommand::EditSelectedChannelPatternDefinition {
+                channel_id,
+                base_definition,
+                edit: PatternDefinitionEdit::SetGuidePrototype {
+                    mechanism_id,
+                    dimension_id,
+                    prototype: GuidePrototype::AuthoredOpenPath { structure_id },
+                },
+            })?,
+            AuthoredStructureAttachment::GuideCustomAlongLayout => {
+                let definition =
+                    added.custom_authored_along_guide_definition(&base_definition, structure_id)?;
+                added.apply_command(&DocumentCommand::ReplaceSelectedChannelDefinitionTopology {
+                    channel_id,
+                    base_definition,
+                    definition,
+                })?
+            }
+            AuthoredStructureAttachment::Mark { output_layer_id } => {
+                added.apply_command(&DocumentCommand::EditSelectedChannelPatternDefinition {
+                    channel_id,
+                    base_definition,
+                    edit: PatternDefinitionEdit::SetOutputMarkPrototype {
+                        output_layer_id,
+                        prototype: MarkPrototype::AuthoredClosedShape { structure_id },
+                    },
+                })?
+            }
+        };
+        self.session.restore_history_snapshot(after.clone())?;
+        let result = CommandResult {
+            affected_channels: attach_result.affected_channels,
+            invalidation: strongest_invalidation(
+                Some(add_result.invalidation),
+                attach_result.invalidation,
+            )
+            .expect("add and attachment both invalidate"),
+            created_authored_structure_id: Some(structure_id),
+        };
+        self.undo.push(HistoryEntry {
+            before,
+            after,
+            result: result.clone(),
+        });
+        self.redo.clear();
+        Ok(result)
+    }
+
+    /// Duplicates, retargets one typed use, and replaces the new resource as one undoable history step.
+    ///
+    /// The method keeps all three structural transitions inside one candidate snapshot. It is the
+    /// private-draft shared-resource boundary: the original shared resource remains untouched,
+    /// the exact selected guide or mark use points at the allocated ID, and the replacement owns
+    /// that same allocated ID before the history cursor advances.
+    ///
+    /// # Errors
+    ///
+    /// Returns stale-use, definition, replacement, validation, or revision failures without
+    /// changing the document, undo stack, redo stack, or allocated-resource visibility.
+    pub fn duplicate_retarget_and_replace_authored_structure(
+        &mut self,
+        selected_use: AuthoredStructureUse,
+        replacement: AuthoredStructureDraft,
+    ) -> Result<CommandResult, DocumentSessionError> {
+        let before = self.session.snapshot();
+        let selected_use = before
+            .authored_structure_uses()
+            .into_iter()
+            .find(|candidate| *candidate == selected_use)
+            .ok_or_else(|| {
+                DocumentSessionError::Validation(ValidationError::new(
+                    "authored_structures.use",
+                    "selected authored structure use is stale",
+                ))
+            })?;
+        let (duplicated, duplicate_result) =
+            before.apply_command(&DocumentCommand::DuplicateAuthoredStructure {
+                structure_id: selected_use.structure_id(),
+            })?;
+        let structure_id = duplicate_result
+            .created_authored_structure_id
+            .expect("validated duplication allocates one resource ID");
+        let (channel_id, definition_id, edit) = match selected_use {
+            AuthoredStructureUse::Guide {
+                channel_id,
+                definition_id,
+                mechanism_id,
+                dimension_id,
+                ..
+            } => (
+                channel_id,
+                definition_id,
+                PatternDefinitionEdit::SetGuideAuthoredStructure {
+                    mechanism_id,
+                    dimension_id,
+                    structure_id,
+                },
+            ),
+            AuthoredStructureUse::Mark {
+                channel_id,
+                definition_id,
+                output_layer_id,
+                ..
+            } => (
+                channel_id,
+                definition_id,
+                PatternDefinitionEdit::SetOutputAuthoredClosedShape {
+                    output_layer_id,
+                    structure_id,
+                },
+            ),
+        };
+        let base_definition = duplicated
+            .definition(definition_id)
+            .cloned()
+            .ok_or_else(|| {
+                DocumentSessionError::Validation(ValidationError::new(
+                    "pattern_definitions.reference",
+                    "selected authored structure use references a missing definition",
+                ))
+            })?;
+        let (retargeted, retarget_result) =
+            duplicated.apply_command(&DocumentCommand::EditSelectedChannelPatternDefinition {
+                channel_id,
+                base_definition,
+                edit,
+            })?;
+        let base_structure = retargeted
+            .authored_structure(structure_id)
+            .cloned()
+            .ok_or_else(|| {
+                DocumentSessionError::Validation(ValidationError::new(
+                    "authored_structures.reference",
+                    "duplicated authored structure is missing before replacement",
+                ))
+            })?;
+        let (after, replace_result) =
+            retargeted.apply_command(&DocumentCommand::ReplaceAuthoredStructure {
+                base_structure,
+                replacement,
+            })?;
+        self.session.restore_history_snapshot(after.clone())?;
+        let result = CommandResult {
+            affected_channels: retarget_result.affected_channels,
+            invalidation: strongest_invalidation(
+                strongest_invalidation(
+                    Some(duplicate_result.invalidation),
+                    retarget_result.invalidation,
+                ),
+                replace_result.invalidation,
+            )
+            .expect("three transitions have invalidations"),
+            created_authored_structure_id: Some(structure_id),
+        };
+        self.undo.push(HistoryEntry {
+            before,
+            after,
+            result: result.clone(),
+        });
+        self.redo.clear();
+        Ok(result)
+    }
+
     pub fn undo(&mut self) -> Result<Option<CommandResult>, DocumentSessionError> {
         let Some(entry) = self.undo.last() else {
             return Ok(None);
@@ -11785,6 +12346,189 @@ impl DocumentHistory {
         self.undo.push(entry);
         Ok(Some(result))
     }
+
+    /// Publishes a still-current private draft as one reversible main-history transition.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable draft-kind, stale-root, document-validation, or revision-exhaustion error
+    /// without changing either history. A draft equal to its root is an unchanged no-op.
+    pub fn squash_draft(
+        &mut self,
+        draft: &DocumentHistory,
+    ) -> Result<DraftSquashResult, DocumentSessionError> {
+        let root = draft.draft_root.as_ref().ok_or_else(|| {
+            DocumentSessionError::Validation(ValidationError::new(
+                "document.draft",
+                "only a private draft history can be squashed",
+            ))
+        })?;
+        if self.document() != &root.document || self.revision() != root.revision {
+            return Err(DocumentSessionError::Validation(ValidationError::new(
+                "document.draft",
+                "private draft root is stale against the main history",
+            )));
+        }
+        let final_document = draft.document();
+        if final_document == &root.document {
+            return Ok(DraftSquashResult {
+                unchanged: true,
+                affected_channels: Vec::new(),
+                invalidation: None,
+            });
+        }
+        final_document.validate()?;
+        let result = squash_result(&root.document, final_document);
+        let before = self.session.snapshot();
+        self.session
+            .restore_history_snapshot(final_document.clone())?;
+        self.undo.push(HistoryEntry {
+            before,
+            after: final_document.clone(),
+            result: CommandResult {
+                affected_channels: result.affected_channels.clone(),
+                invalidation: result
+                    .invalidation
+                    .expect("changed drafts invalidate one layer"),
+                created_authored_structure_id: None,
+            },
+        });
+        self.redo.clear();
+        Ok(result)
+    }
+}
+
+/// Summarizes the net draft document difference without replaying draft command history.
+fn squash_result(before: &Document, after: &Document) -> DraftSquashResult {
+    let changed_structures = before
+        .authored_structures
+        .iter()
+        .chain(after.authored_structures.iter())
+        .filter_map(|structure| {
+            let id = structure.id();
+            (before.authored_structure(id) != after.authored_structure(id)).then_some(id)
+        })
+        .collect::<HashSet<_>>();
+    let changed_definitions = before
+        .pattern_definitions
+        .iter()
+        .chain(after.pattern_definitions.iter())
+        .filter_map(|definition| {
+            (before.definition(definition.id) != after.definition(definition.id))
+                .then_some(definition.id)
+        })
+        .collect::<HashSet<_>>();
+    let source_changed = before.source != after.source;
+    let mut level = if source_changed {
+        Some(InvalidationLevel::Source)
+    } else {
+        None
+    };
+    let before_channel_ids = before.channel_ids();
+    let after_channel_ids = after.channel_ids();
+    let topology_changed = before.channel_model() != after.channel_model()
+        || before_channel_ids != after_channel_ids
+        || after_channel_ids.iter().any(|id| {
+            before.modeled_channel(*id).map(|value| value.role)
+                != after.modeled_channel(*id).map(|value| value.role)
+        });
+    let mut changed_channels = HashSet::new();
+    for channel_id in &after_channel_ids {
+        match (
+            before.modeled_channel(*channel_id),
+            after.modeled_channel(*channel_id),
+        ) {
+            (Some(old), Some(new)) if old != new => {
+                changed_channels.insert(*channel_id);
+                if old.pattern_definition_id != new.pattern_definition_id
+                    || old.layout != new.layout
+                {
+                    level = strongest_invalidation(level, InvalidationLevel::Family);
+                } else if old.mark_geometry_response != new.mark_geometry_response {
+                    level = strongest_invalidation(level, InvalidationLevel::Realization);
+                } else if old.mapping != new.mapping {
+                    level = strongest_invalidation(level, InvalidationLevel::Source);
+                } else {
+                    level = strongest_invalidation(level, InvalidationLevel::Presentation);
+                }
+            }
+            (None, None) => {
+                let old = before.channel(*channel_id);
+                let new = after.channel(*channel_id);
+                if old != new {
+                    changed_channels.insert(*channel_id);
+                    level = strongest_invalidation(level, InvalidationLevel::Presentation);
+                }
+            }
+            _ => {}
+        }
+    }
+    if topology_changed {
+        level = strongest_invalidation(level, InvalidationLevel::ChannelTopology);
+    }
+    for id in &changed_structures {
+        let kind = before
+            .authored_structure(*id)
+            .or_else(|| after.authored_structure(*id))
+            .map(AuthoredStructure::kind);
+        level = strongest_invalidation(
+            level,
+            match kind {
+                Some(AuthoredStructureKind::ClosedShape) => InvalidationLevel::Realization,
+                _ => InvalidationLevel::Family,
+            },
+        );
+    }
+    if !changed_definitions.is_empty() {
+        level = strongest_invalidation(level, InvalidationLevel::Family);
+    }
+    let uses = after.authored_structure_uses();
+    let affected_channels = after
+        .channel_ids()
+        .into_iter()
+        .filter(|channel_id| {
+            let definition_id = after.pattern_definition_id_for(*channel_id);
+            topology_changed
+                || source_changed
+                || changed_channels.contains(channel_id)
+                || definition_id.is_some_and(|id| changed_definitions.contains(&id))
+                || uses.iter().any(|usage| match usage {
+                    AuthoredStructureUse::Guide {
+                        channel_id: owner,
+                        structure_id,
+                        ..
+                    }
+                    | AuthoredStructureUse::Mark {
+                        channel_id: owner,
+                        structure_id,
+                        ..
+                    } => owner == channel_id && changed_structures.contains(structure_id),
+                })
+        })
+        .collect();
+    DraftSquashResult {
+        unchanged: false,
+        affected_channels,
+        invalidation: level.or(Some(InvalidationLevel::Family)),
+    }
+}
+
+/// Chooses the strongest pipeline invalidation using the established authority ordering.
+fn strongest_invalidation(
+    current: Option<InvalidationLevel>,
+    next: InvalidationLevel,
+) -> Option<InvalidationLevel> {
+    let rank = |value| match value {
+        InvalidationLevel::Presentation => 0,
+        InvalidationLevel::Realization => 1,
+        InvalidationLevel::Family => 2,
+        InvalidationLevel::Source => 3,
+        InvalidationLevel::ChannelTopology => 4,
+    };
+    Some(match current {
+        Some(value) if rank(value) >= rank(next) => value,
+        _ => next,
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -11902,5 +12646,17 @@ mod history_tests {
         assert_eq!(history.document(), &before_document);
         assert!(history.can_undo());
         assert!(!history.can_redo());
+    }
+
+    /// Proves squash validates an invalid final private snapshot before advancing main history.
+    #[test]
+    fn squash_draft_rejects_an_invalid_final_snapshot_without_main_mutation() {
+        let mut main = history();
+        let mut draft = DocumentHistory::new_draft(&main);
+        draft.session.document.canvas.width = f64::NAN;
+        let before = main.document().clone();
+        assert!(main.squash_draft(&draft).is_err());
+        assert_eq!(main.document(), &before);
+        assert!(!main.can_undo());
     }
 }

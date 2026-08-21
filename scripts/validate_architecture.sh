@@ -45,6 +45,7 @@ while IFS=$'\t' read -r package dependency; do
         toniator-cli:toniator-engine | \
         toniator-cli:toniator-io | \
         toniator-app:toniator-domain | \
+        toniator-app:toniator-geometry | \
         toniator-app:toniator-engine | \
         toniator-app:toniator-io | \
         toniator-app:toniator-patterns)

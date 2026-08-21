@@ -19,6 +19,12 @@ mutations. Dogtail remains useful for ad hoc exploration. WayVNC supplies
 compositor-native input, while grim captures the Sway output through wlroots'
 screencopy protocol.
 
+The VNC helpers expose `click`, `move`, and fixed-step `drag` primitives plus
+`key KEY` for special keys such as `enter`, `escape` (normalized to VNC's
+`esc`), and `left`, `right`, `up`, or `down`. `drag` always sends move, press, eight bounded interpolation
+steps by default, then release; it remains loopback-only through the shared
+helper guard.
+
 Run `scripts/preflight` after installation. It checks Sway, WayVNC, grim,
 AT-SPI, VNCDoTool, the Toniator debug binary, and local runtime requirements
 without installing or changing system packages.

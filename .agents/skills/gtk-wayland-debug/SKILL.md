@@ -32,6 +32,8 @@ unexpectedly.
    - `scripts/screenshot 01-launch.png`
    - `scripts/click 620 410`
    - `scripts/type 'example text'`
+   - `scripts/move 620 410`, `scripts/drag 620 410 700 460`, and
+     `scripts/key enter` for deterministic pointer motion, drags, and special keys.
 6. After a code change, rebuild the bounded target and run
    `scripts/app-restart [PATH]`. Reproduce the same semantic and visual sequence
    rather than inventing a different check.

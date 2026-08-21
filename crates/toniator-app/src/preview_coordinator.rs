@@ -43,16 +43,27 @@ impl PreviewCoordinator {
         self.submission
     }
 
-    /// Accepts only the ticket submitted by this exact workspace generation.
+    /// Records a matching successful terminal completion and clears only its pending identity.
     ///
     /// A rejected ticket leaves `last_accepted_ticket` unchanged so callers can
-    /// keep rendering the prior successful preview. Accepted tickets become the
-    /// new last-success identity without clearing a future pending submission.
+    /// keep rendering the prior successful preview. A matching success clears its own pending
+    /// ticket before recording the new last-success identity; a stale completion leaves both
+    /// fields unchanged.
     pub(crate) fn accept(&mut self, workspace_generation: u64, ticket: u64) -> bool {
         if !accepts_submission(workspace_generation, self.submission, ticket) {
             return false;
         }
+        self.submission = None;
         self.last_accepted_ticket = Some(ticket);
+        true
+    }
+
+    /// Clears a matching failed terminal completion without losing a prior successful ticket.
+    pub(crate) fn fail(&mut self, workspace_generation: u64, ticket: u64) -> bool {
+        if !accepts_submission(workspace_generation, self.submission, ticket) {
+            return false;
+        }
+        self.submission = None;
         true
     }
 
@@ -89,5 +100,23 @@ mod tests {
         assert_eq!(coordinator.last_accepted_ticket(), Some(11));
         assert!(coordinator.accept(5, 12));
         assert_eq!(coordinator.last_accepted_ticket(), Some(12));
+        assert_eq!(coordinator.submission(), None);
+    }
+    /// Proves matching failure clears only its pending identity and preserves the last image ticket.
+    #[test]
+    fn matching_failure_and_explicit_clear_preserve_last_success() {
+        let mut coordinator = PreviewCoordinator::default();
+        coordinator.submit(2, 10);
+        assert!(coordinator.accept(2, 10));
+        coordinator.submit(2, 11);
+        assert!(!coordinator.fail(2, 10));
+        assert_eq!(coordinator.submission().map(|value| value.ticket), Some(11));
+        assert!(coordinator.fail(2, 11));
+        assert_eq!(coordinator.submission(), None);
+        assert_eq!(coordinator.last_accepted_ticket(), Some(10));
+        coordinator.submit(3, 12);
+        coordinator.clear_submission();
+        assert_eq!(coordinator.submission(), None);
+        assert_eq!(coordinator.last_accepted_ticket(), Some(10));
     }
 }

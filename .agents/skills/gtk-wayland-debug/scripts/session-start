@@ -184,7 +184,7 @@ user_systemd_run \
     --output="$output_name" \
     --disable-resizing \
     --render-cursor \
-    --transient-seat \
+    --seat=seat0 \
     --socket="$wayvnc_socket" \
     --log-level=info \
     127.0.0.1 "$port" \

@@ -145,6 +145,8 @@ mod pattern_editor_shell {
         #[template_child]
         pub draft_preview: gtk::TemplateChild<gtk::Picture>,
         #[template_child]
+        pub draft_preview_spinner: gtk::TemplateChild<gtk::Spinner>,
+        #[template_child]
         pub draft_scroll: gtk::TemplateChild<gtk::ScrolledWindow>,
         #[template_child]
         pub draft_actions: gtk::TemplateChild<gtk::Box>,
@@ -186,6 +188,10 @@ impl ToniatorPatternEditorShell {
     /// Returns the template-owned private-preview paintable surface.
     pub fn picture(&self) -> gtk::Picture {
         self.imp().draft_preview.get()
+    }
+    /// Returns the template-owned private-preview pending indicator.
+    pub fn spinner(&self) -> gtk::Spinner {
+        self.imp().draft_preview_spinner.get()
     }
     /// Installs the dynamic draft controls in the template-owned scroll area.
     pub fn set_editor(&self, editor: &gtk::Box) {

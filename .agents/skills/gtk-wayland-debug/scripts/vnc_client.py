@@ -32,8 +32,23 @@ def parser() -> argparse.ArgumentParser:
     click_parser.add_argument("y", type=int)
     click_parser.add_argument("button", type=int, nargs="?", default=1)
 
+    move_parser = subparsers.add_parser("move")
+    move_parser.add_argument("x", type=int)
+    move_parser.add_argument("y", type=int)
+
+    drag_parser = subparsers.add_parser("drag")
+    drag_parser.add_argument("start_x", type=int)
+    drag_parser.add_argument("start_y", type=int)
+    drag_parser.add_argument("end_x", type=int)
+    drag_parser.add_argument("end_y", type=int)
+    drag_parser.add_argument("button", type=int, nargs="?", default=1)
+    drag_parser.add_argument("steps", type=int, nargs="?", default=8)
+
     type_parser = subparsers.add_parser("type")
     type_parser.add_argument("text")
+
+    key_parser = subparsers.add_parser("key")
+    key_parser.add_argument("key")
     return command_parser
 
 
@@ -52,19 +67,60 @@ def main() -> int:
         raise SystemExit(f"refusing non-loopback VNC server: {server}")
     try:
         with api.connect(server, timeout=15) as client:
-            if arguments.command == "click":
+            if arguments.command == "move":
+                if arguments.x < 0 or arguments.y < 0:
+                    raise SystemExit("mouse coordinates must be non-negative")
+                client.mouseMove(arguments.x, arguments.y)
+                client.pause(0.04)
+            elif arguments.command == "click":
                 if arguments.button < 1 or arguments.button > 8:
                     raise SystemExit("mouse button must be between 1 and 8")
                 if arguments.x < 0 or arguments.y < 0:
                     raise SystemExit("mouse coordinates must be non-negative")
                 client.mouseMove(arguments.x, arguments.y)
-                client.mousePress(arguments.button)
+                client.mouseDown(arguments.button)
+                client.pause(0.04)
+                client.mouseUp(arguments.button)
+                client.pause(0.08)
+            elif arguments.command == "drag":
+                if arguments.button < 1 or arguments.button > 8:
+                    raise SystemExit("mouse button must be between 1 and 8")
+                if arguments.steps < 1 or any(
+                    coordinate < 0
+                    for coordinate in (
+                        arguments.start_x,
+                        arguments.start_y,
+                        arguments.end_x,
+                        arguments.end_y,
+                    )
+                ):
+                    raise SystemExit("drag coordinates must be non-negative and steps at least one")
+                client.mouseMove(arguments.start_x, arguments.start_y)
+                client.pause(0.04)
+                client.mouseDown(arguments.button)
+                client.pause(0.04)
+                for step in range(1, arguments.steps + 1):
+                    fraction = step / arguments.steps
+                    client.mouseMove(
+                        round(arguments.start_x + (arguments.end_x - arguments.start_x) * fraction),
+                        round(arguments.start_y + (arguments.end_y - arguments.start_y) * fraction),
+                    )
+                    client.pause(0.02)
+                client.mouseUp(arguments.button)
+                client.pause(0.08)
             elif arguments.command == "type":
                 for character in arguments.text:
                     if character == "\r":
                         continue
                     key = {"-": "minus", "\n": "enter", "\t": "tab"}.get(character, character)
                     client.keyPress(key)
+                    client.pause(0.02)
+            elif arguments.command == "key":
+                key = {"escape": "esc", "return": "enter"}.get(
+                    arguments.key.lower(), arguments.key.lower()
+                )
+                client.keyPress(key)
+                client.pause(0.08)
             else:
                 raise AssertionError(f"unhandled command: {arguments.command}")
     finally:

@@ -1387,6 +1387,7 @@ dependencies = [
  "serde_json",
  "toniator-domain",
  "toniator-engine",
+ "toniator-geometry",
  "toniator-io",
  "toniator-patterns",
 ]

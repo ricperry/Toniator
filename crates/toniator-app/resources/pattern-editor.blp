@@ -16,15 +16,31 @@ template $ToniatorPatternEditorShell : Gtk.Box {
     styles [ "dim-label" ]
   }
 
-  Gtk.Picture draft_preview {
-    content-fit: contain;
-    hexpand: true;
+  Gtk.ScrolledWindow {
+    hscrollbar-policy: never;
+    vscrollbar-policy: never;
     vexpand: false;
     valign: start;
-    can-shrink: true;
-    width-request: 280;
-    height-request: 160;
-    styles [ "toniator-draft-preview" ]
+    min-content-height: 160;
+    max-content-height: 160;
+    propagate-natural-height: false;
+
+    Gtk.Picture draft_preview {
+      content-fit: contain;
+      hexpand: true;
+      vexpand: false;
+      valign: start;
+      can-shrink: true;
+      width-request: 280;
+      height-request: 160;
+      styles [ "toniator-draft-preview" ]
+    }
+  }
+
+  Gtk.Spinner draft_preview_spinner {
+    visible: false;
+    halign: center;
+    tooltip-text: "Preview updating";
   }
 
   Gtk.ScrolledWindow draft_scroll {

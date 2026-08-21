@@ -20,8 +20,10 @@ pub(crate) enum UiIntent {
     SelectChannel(ChannelId),
     /// Applies a named bundled pattern to the selected channel only.
     ApplyPreset(String),
-    /// Opens the isolated private Pattern Editor for the selected channel.
-    OpenPatternEditor,
+    /// Opens the isolated private Grid Pattern Editor for the selected channel.
+    OpenGridPatternEditor,
+    /// Opens the isolated private Mark Editor for the selected channel.
+    OpenMarkEditor,
     /// Discards the private Pattern Editor only through its confirmation route.
     DiscardPatternEditor,
 }

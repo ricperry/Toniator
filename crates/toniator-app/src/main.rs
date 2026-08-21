@@ -10,10 +10,11 @@ mod automation;
 mod components;
 mod controller;
 mod preview_coordinator;
+mod stage20f_editor;
 mod view_models;
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
     env, fs,
     path::{Path, PathBuf},
@@ -31,17 +32,18 @@ use app_events::AppEvent;
 use automation::AutomationSink;
 use controller::{UiIntent, history_redo};
 #[cfg(test)]
-use preview_coordinator::{PreviewSubmission, accepts_submission};
+use preview_coordinator::PreviewSubmission;
+use preview_coordinator::accepts_submission;
 use toniator_domain::{
-    CanvasSpec, ChannelId, ChannelPaint, ChannelTopologyTemplate, ColorComponent,
-    DensityEditedAxis, Document, DocumentCommand, DocumentHistory, DocumentSession,
-    GeneralizedSiteProductDraft, GuideDimensionDraft, HalftoneChannelModel, LegacyMappingFieldEdit,
-    MarkGeometryFieldEdit, MarkOrientationKind, MarkPrototype, ModeledMappingFieldEdit, PaintKind,
-    PatternDefinitionEdit, PatternDefinitionId, PatternMechanismId, PatternOutputLayerId,
-    PropertyCurrentValue, PropertyCurrentValueKind, PropertyDescriptor, PropertyEnumChoice,
-    PropertyFieldId, PropertyReferenceValue, PropertyTarget, PropertyValueKind,
-    RandomCharacterKind, SourceComponent, SourceMappingComponent, SourceReference,
-    SourceReferenceId, TranslationEditedAxis, VariantTransitionFieldUpdate, VariantTransitionValue,
+    AuthoredStructureAttachment, CanvasSpec, ChannelId, ChannelPaint, ChannelTopologyTemplate,
+    ColorComponent, DensityEditedAxis, Document, DocumentCommand, DocumentHistory, DocumentSession,
+    HalftoneChannelModel, LegacyMappingFieldEdit, MarkGeometryFieldEdit, MarkOrientationKind,
+    MarkPrototype, ModeledMappingFieldEdit, PaintKind, PatternDefinitionEdit, PatternDefinitionId,
+    PatternMechanism, PatternMechanismId, PatternOutputLayerId, PropertyCurrentValue,
+    PropertyCurrentValueKind, PropertyDescriptor, PropertyEnumChoice, PropertyFieldId,
+    PropertyReferenceValue, PropertyTarget, PropertyValueKind, RandomCharacterKind,
+    SourceComponent, SourceMappingComponent, SourceReference, SourceReferenceId,
+    TranslationEditedAxis, VariantTransitionFieldUpdate, VariantTransitionValue,
 };
 #[cfg(test)]
 use toniator_domain::{DensityModulationKind, ExclusionKind};
@@ -685,6 +687,16 @@ fn accepts_preview_submission(
     accepts_submission(current_workspace_generation, submission, completion_ticket)
 }
 
+/// Reports whether one private preview completion is the newest terminal result for its draft epoch.
+fn accepts_draft_preview_terminal(
+    current_epoch: u64,
+    pending_ticket: Option<u64>,
+    completion_epoch: u64,
+    completion_ticket: u64,
+) -> bool {
+    current_epoch == completion_epoch && pending_ticket == Some(completion_ticket)
+}
+
 #[derive(Clone)]
 struct Actions {
     new: gio::SimpleAction,
@@ -703,29 +715,99 @@ struct Actions {
 /// it has no route to the main workspace, savepoint, location, or filesystem.
 /// Dropping the surface on close discards that private authority.
 struct PatternEditorSurface {
+    purpose: PatternEditorPurpose,
     window: adw::Window,
     status: gtk::Label,
     picture: gtk::Picture,
+    preview_spinner: gtk::Spinner,
     draft: Rc<RefCell<PatternEditorDraft>>,
     introduction: gtk::Label,
     history: gtk::Label,
     current_pattern: gtk::Label,
-    family: DraftFamilyControls,
     primary: gtk::Box,
     advanced_rows: gtk::Box,
     descriptor_components: BTreeMap<String, DraftDescriptorComponent>,
+    apply: gtk::Button,
+    resource_list: gtk::Box,
+    construction_canvas: gtk::DrawingArea,
+    coordinate_x: gtk::Entry,
+    coordinate_y: gtk::Entry,
+    numeric_commit_active: Rc<Cell<bool>>,
+    make_curve: gtk::Button,
+    make_line: gtk::Button,
+    insert_node: gtk::Button,
+    delete_node: gtk::Button,
 }
 
-/// Holds stable private-editor controls that select a draft pattern family.
+/// Identifies the one authored resource and descriptor purpose exposed by a private editor.
 ///
-/// The controls own only GTK interaction and render state. The private draft
-/// history remains the authority for family, direction count, and site mode.
-struct DraftFamilyControls {
-    root: gtk::Box,
-    directions: gtk::Box,
-    count: gtk::Entry,
-    intersections: gtk::Button,
-    along_guides: gtk::Button,
+/// The purpose is GTK presentation policy only. `DocumentHistory` remains the sole authority
+/// for every draft mutation, resource attachment, and final publication.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PatternEditorPurpose {
+    Grid,
+    Mark,
+}
+
+impl PatternEditorPurpose {
+    /// Returns the only authored topology this modal may construct or edit.
+    const fn structure_kind(self) -> toniator_domain::AuthoredStructureKind {
+        match self {
+            Self::Grid => toniator_domain::AuthoredStructureKind::OpenPath,
+            Self::Mark => toniator_domain::AuthoredStructureKind::ClosedShape,
+        }
+    }
+
+    /// Returns the artist-facing modal title without exposing implementation IDs.
+    const fn title(self) -> &'static str {
+        match self {
+            Self::Grid => "Grid Pattern Editor",
+            Self::Mark => "Mark Editor",
+        }
+    }
+
+    /// Returns the explicit construction action available in this purpose-specific modal.
+    const fn construction_action_label(self) -> &'static str {
+        match self {
+            Self::Grid => "New guide path",
+            Self::Mark => "New mark shape",
+        }
+    }
+}
+
+/// Defines the modal-width breakpoint where construction switches to its vertical fallback.
+///
+/// The exact pixel value is passed to Adwaita's `MaxWidth` condition; it is not inferred from a
+/// child widget's natural allocation.
+const NARROW_EDITOR_MAX_WIDTH_PX: f64 = 700.0;
+
+/// Keeps the wide construction resource list legible without preventing the modal breakpoint.
+const CONSTRUCTION_SIDEBAR_WIDTH_PX: i32 = 320;
+
+/// Requests only the compact minimum canvas width; wide mode receives surplus width through `hexpand`.
+const CONSTRUCTION_CANVAS_MIN_WIDTH_PX: i32 = 220;
+
+/// Names the construction canvas's direct-manipulation gestures without consuming editor height.
+const CONSTRUCTION_CANVAS_GESTURE_HINT: &str = "Click to select or add points after choosing New. Scroll to zoom; middle-button drag pans. Enter completes; Escape cancels.";
+
+/// Reports the same inclusive width policy used by the native modal breakpoint.
+///
+/// This test-only helper keeps the boundary witness aligned with `MaxWidth 700px`; runtime mode
+/// changes are emitted by libadwaita rather than by a child allocation notification.
+#[cfg(test)]
+const fn uses_narrow_editor_layout(width: i32) -> bool {
+    width <= NARROW_EDITOR_MAX_WIDTH_PX as i32
+}
+
+/// Reports whether the construction widgets' explicit horizontal requests leave room for the breakpoint.
+///
+/// The shell contributes 24px of horizontal margins and the layout uses a 12px gap. Child natural
+/// widths remain GTK authority, but this guards the explicit requests that previously locked the
+/// modal above its native `MaxWidth` breakpoint.
+#[cfg(test)]
+const fn requested_construction_width_allows_narrow_breakpoint() -> bool {
+    CONSTRUCTION_SIDEBAR_WIDTH_PX + CONSTRUCTION_CANVAS_MIN_WIDTH_PX + 12 + 24
+        < NARROW_EDITOR_MAX_WIDTH_PX as i32
 }
 
 /// Retains one private-editor descriptor row and its immutable source value.
@@ -753,6 +835,20 @@ struct PatternEditorDraft {
     scheduler: Arc<EvaluationScheduler>,
     preview_submission: Option<u64>,
     epoch: u64,
+    geometry_editor: stage20f_editor::Stage20fEditorState,
+    construction_attachment: Option<AuthoredStructureAttachment>,
+    pending_shared_edit: Option<PendingSharedPathEdit>,
+}
+
+/// Retains a gated private replacement until the artist chooses its shared-resource policy.
+///
+/// The value stays within the private Pattern Editor and contains no main workspace or preview
+/// authority. It is consumed only by an explicit Edit all uses or Make a copy for this use choice.
+#[derive(Clone)]
+struct PendingSharedPathEdit {
+    selected_use: toniator_domain::AuthoredStructureUse,
+    base_structure: toniator_domain::AuthoredStructure,
+    replacement: toniator_domain::AuthoredStructureDraft,
 }
 
 /// Retains one persistent sidebar row and its last immutable descriptor value.
@@ -782,7 +878,8 @@ struct AppState {
     window_title: adw::WindowTitle,
     stack: gtk::Stack,
     picture: gtk::Picture,
-    viewer: gtk::Box,
+    viewer: gtk::Overlay,
+    preview_spinner: gtk::Spinner,
     error: gtk::Label,
     banner: adw::Banner,
     selector: gtk::DropDown,
@@ -926,10 +1023,17 @@ fn build_window(app: &adw::Application, initial_path: Option<PathBuf>) {
     picture.set_content_fit(gtk::ContentFit::Contain);
     picture.set_hexpand(true);
     picture.set_vexpand(true);
-    let viewer = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let viewer = gtk::Overlay::new();
     viewer.add_css_class("toniator-viewer");
     viewer.add_css_class(PreviewModel::Rgb.css_class());
-    viewer.append(&picture);
+    viewer.set_child(Some(&picture));
+    let preview_spinner = gtk::Spinner::new();
+    preview_spinner.set_visible(false);
+    preview_spinner.set_halign(gtk::Align::Center);
+    preview_spinner.set_valign(gtk::Align::Center);
+    preview_spinner.set_tooltip_text(Some("Preview updating"));
+    preview_spinner.update_property(&[gtk::accessible::Property::Label("Preview updating")]);
+    viewer.add_overlay(&preview_spinner);
     stack.add_named(&viewer, Some(Page::Success.name()));
     stack.set_visible_child_name(Page::Empty.name());
     let channel_editor = components::ToniatorChannelEditor::new();
@@ -1023,6 +1127,7 @@ fn build_window(app: &adw::Application, initial_path: Option<PathBuf>) {
         stack,
         picture,
         viewer,
+        preview_spinner,
         error,
         banner,
         selector,
@@ -1176,7 +1281,8 @@ fn dispatch_ui_intent(state: &Rc<RefCell<AppState>>, intent: UiIntent) {
             schedule_inspector_rebuild(state);
         }
         UiIntent::ApplyPreset(id) => apply_selected_preset(state, &id, &id),
-        UiIntent::OpenPatternEditor => open_pattern_editor(state),
+        UiIntent::OpenGridPatternEditor => open_pattern_editor(state, PatternEditorPurpose::Grid),
+        UiIntent::OpenMarkEditor => open_pattern_editor(state, PatternEditorPurpose::Mark),
         UiIntent::DiscardPatternEditor => request_draft_discard(state),
         UiIntent::Undo | UiIntent::Redo => unreachable!("history intents returned above"),
     }
@@ -1401,15 +1507,68 @@ fn channel_inspector_values(values: &[PropertyCurrentValue]) -> Vec<PropertyCurr
         .collect()
 }
 
-/// Returns the selected definition's supported structural values for the
-/// Pattern Editor. The immutable reader remains the source of current values;
-/// this filter neither materializes a definition copy nor exposes future fields.
-fn pattern_editor_values(values: &[PropertyCurrentValue]) -> Vec<PropertyCurrentValue> {
+/// Returns only the selected purpose's descriptor values for one private editor.
+///
+/// The immutable reader remains the source of current values. This filter neither materializes a
+/// definition copy nor exposes a Grid field in Mark Editor (or vice versa).
+fn pattern_editor_values(
+    values: &[PropertyCurrentValue],
+    purpose: PatternEditorPurpose,
+) -> Vec<PropertyCurrentValue> {
     values
         .iter()
-        .filter(|value| is_structural_descriptor(&value.descriptor))
+        .filter(|value| descriptor_belongs_to_editor(&value.descriptor.field, purpose))
         .cloned()
         .collect()
+}
+
+/// Reports whether one structural descriptor belongs to the specified purpose-specific editor.
+///
+/// The filter is presentation policy only: descriptors and their typed commands remain owned by
+/// the domain, and fields omitted here cannot be mutated through this GTK modal.
+fn descriptor_belongs_to_editor(field: &PropertyFieldId, purpose: PatternEditorPurpose) -> bool {
+    matches!(
+        (purpose, field),
+        (
+            PatternEditorPurpose::Grid,
+            PropertyFieldId::DensityAcrossX
+                | PropertyFieldId::DensityAcrossY
+                | PropertyFieldId::DensityAspectLocked
+                | PropertyFieldId::RotationDegrees
+                | PropertyFieldId::TranslationX
+                | PropertyFieldId::TranslationY
+                | PropertyFieldId::GuideBaselineAngle
+                | PropertyFieldId::GuidePhase
+                | PropertyFieldId::GuideSpacingMultiplier
+                | PropertyFieldId::GuidePrototype
+                | PropertyFieldId::GuideAuthoredStructure
+                | PropertyFieldId::GuideArcCenterX
+                | PropertyFieldId::GuideArcCenterY
+                | PropertyFieldId::GuideArcRadius
+                | PropertyFieldId::GuideArcStartAngle
+                | PropertyFieldId::GuideArcSweepAngle
+                | PropertyFieldId::GuideRepetition
+                | PropertyFieldId::GuideStackDirection
+                | PropertyFieldId::GuideStackSpacingMultiplier
+                | PropertyFieldId::IntersectionDimensions
+                | PropertyFieldId::IntersectionMergeEpsilon
+                | PropertyFieldId::AlongGuideDimensions
+                | PropertyFieldId::AlongGuideIntervalMultiplier
+                | PropertyFieldId::AlongGuidePhase
+                | PropertyFieldId::CoverageGuardSteps
+                | PropertyFieldId::CoverageAdditionalMargin
+        ) | (
+            PatternEditorPurpose::Mark,
+            PropertyFieldId::MarkMinimumFill
+                | PropertyFieldId::MarkMaximumFill
+                | PropertyFieldId::MarkRotationOffsetDegrees
+                | PropertyFieldId::OutputSiteProduct
+                | PropertyFieldId::OutputPrototype
+                | PropertyFieldId::OutputAuthoredClosedShape
+                | PropertyFieldId::OutputOrientation
+                | PropertyFieldId::OutputOrientationDimension
+        )
+    )
 }
 
 fn resolve_focus_after_document_change(
@@ -2313,32 +2472,57 @@ fn choose_shared_preset_replacement(
     dialog.present();
 }
 
-/// Adds the selected-channel affordance that opens the separate Pattern Editor.
+/// Adds separate selected-channel affordances for the purpose-specific private editors.
 ///
-/// The sidebar retains channel-instance controls only. The button does not
-/// create a definition, choose shared scope, or mutate document/history state.
+/// The sidebar retains channel-instance controls only. Neither action creates a definition,
+/// chooses shared scope, or mutates document/history state before the artist confirms a draft edit.
 fn append_pattern_editor_launch(state: &Rc<RefCell<AppState>>, inspector: &gtk::Box) {
-    let button = gtk::Button::with_mnemonic("Edit _Pattern…");
-    button.set_tooltip_text(Some(
-        "Explore the selected channel's pattern in a private draft",
-    ));
-    let state = Rc::clone(state);
-    button.connect_clicked(move |_| dispatch_ui_intent(&state, UiIntent::OpenPatternEditor));
-    inspector.append(&button);
+    let grid = gtk::Button::with_mnemonic("Edit _guide paths…");
+    let grid_description =
+        "Edit authored guide-path resources used by the selected channel in a private draft.";
+    grid.set_tooltip_text(Some(grid_description));
+    grid.update_property(&[gtk::accessible::Property::Description(grid_description)]);
+    let state_for_grid = Rc::clone(state);
+    grid.connect_clicked(move |_| {
+        dispatch_ui_intent(&state_for_grid, UiIntent::OpenGridPatternEditor)
+    });
+    let mark = gtk::Button::with_mnemonic("Edit _mark shapes…");
+    let mark_description =
+        "Edit authored mark-shape resources used by the selected channel in a private draft.";
+    mark.set_tooltip_text(Some(mark_description));
+    mark.update_property(&[gtk::accessible::Property::Description(mark_description)]);
+    let state_for_mark = Rc::clone(state);
+    mark.connect_clicked(move |_| dispatch_ui_intent(&state_for_mark, UiIntent::OpenMarkEditor));
+    inspector.append(&grid);
+    inspector.append(&mark);
 }
 
-/// Opens or raises the transient Pattern Editor for the current stable channel.
+/// Opens or raises one purpose-specific transient editor for the current stable channel.
 ///
-/// The editor owns a cloned private document/history. It can inspect and edit
-/// its draft, but it has no route back to the main workspace, savepoint, or
-/// filesystem; closing always discards the private session.
-fn open_pattern_editor(state: &Rc<RefCell<AppState>>) {
-    if let Some(window) = state
-        .borrow()
-        .pattern_editor
-        .as_ref()
-        .map(|surface| surface.window.clone())
-    {
+/// The editor owns a cloned private document/history. It can inspect and edit its matching
+/// resource purpose, but it has no route back to the main workspace, savepoint, or filesystem;
+/// closing always discards the private session.
+fn open_pattern_editor(state: &Rc<RefCell<AppState>>, purpose: PatternEditorPurpose) {
+    let existing_editor = {
+        let app_state = state.borrow();
+        app_state.pattern_editor.as_ref().map(|surface| {
+            (
+                surface.window.clone(),
+                surface.purpose,
+                surface.status.clone(),
+            )
+        })
+    };
+    if let Some((window, existing_purpose, status)) = existing_editor {
+        if existing_purpose != purpose {
+            status.set_label(&format!(
+                "Finish or cancel the open {} before opening {}.",
+                existing_purpose.title(),
+                purpose.title()
+            ));
+            window.present();
+            return;
+        }
         rebuild_pattern_editor(state);
         window.present();
         return;
@@ -2348,7 +2532,7 @@ fn open_pattern_editor(state: &Rc<RefCell<AppState>>) {
         let Some(selected_channel) = app_state.inspector_runtime.selected_channel else {
             return;
         };
-        let (document, presentation, sources) = {
+        let (document, presentation, sources, history) = {
             let Some(workspace) = app_state.workspace.as_ref() else {
                 return;
             };
@@ -2359,18 +2543,11 @@ fn open_pattern_editor(state: &Rc<RefCell<AppState>>) {
                 workspace.document().clone(),
                 presentation,
                 workspace.sources.clone(),
+                DocumentHistory::new_draft(&workspace.history),
             )
         };
         app_state.draft_epoch = app_state.draft_epoch.saturating_add(1);
         let epoch = app_state.draft_epoch;
-        let history = match fresh_history(document.clone()) {
-            Ok(history) => history,
-            Err(error) => {
-                drop(app_state);
-                set_inspector_status(&mut state.borrow_mut(), error);
-                return;
-            }
-        };
         (
             app_state.window.clone(),
             Rc::new(RefCell::new(PatternEditorDraft {
@@ -2385,13 +2562,16 @@ fn open_pattern_editor(state: &Rc<RefCell<AppState>>) {
                 ),
                 preview_submission: None,
                 epoch,
+                geometry_editor: stage20f_editor::Stage20fEditorState::default(),
+                construction_attachment: None,
+                pending_shared_edit: None,
             })),
         )
     };
     let window = adw::Window::builder()
-        .title("Pattern Editor")
-        .default_width(460)
-        .default_height(640)
+        .title(purpose.title())
+        .default_width(980)
+        .default_height(760)
         .transient_for(&parent)
         .modal(true)
         .build();
@@ -2399,6 +2579,8 @@ fn open_pattern_editor(state: &Rc<RefCell<AppState>>) {
     let shell = components::ToniatorPatternEditorShell::new();
     let status = shell.status();
     let picture = shell.picture();
+    let preview_spinner = shell.spinner();
+    preview_spinner.update_property(&[gtk::accessible::Property::Label("Preview updating")]);
     picture.set_can_shrink(true);
     picture.set_size_request(-1, 160);
     shell.set_editor(&editor);
@@ -2414,7 +2596,452 @@ fn open_pattern_editor(state: &Rc<RefCell<AppState>>) {
     let current_pattern = gtk::Label::new(None);
     current_pattern.set_xalign(0.0);
     current_pattern.add_css_class("heading");
-    let family = create_draft_family_controls(state);
+    let resource_list = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let construction_actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let new_structure = gtk::Button::with_label(purpose.construction_action_label());
+    construction_actions.append(&new_structure);
+    let construction_canvas = gtk::DrawingArea::new();
+    construction_canvas.set_content_width(CONSTRUCTION_CANVAS_MIN_WIDTH_PX);
+    construction_canvas.set_content_height(220);
+    construction_canvas.set_hexpand(true);
+    construction_canvas.set_tooltip_text(Some(CONSTRUCTION_CANVAS_GESTURE_HINT));
+    construction_canvas.update_property(&[gtk::accessible::Property::Description(
+        CONSTRUCTION_CANVAS_GESTURE_HINT,
+    )]);
+    construction_canvas.add_css_class("toniator-draft-preview");
+    let coordinate_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let coordinate_x = gtk::Entry::new();
+    coordinate_x.set_sensitive(false);
+    let coordinate_y = gtk::Entry::new();
+    coordinate_y.set_sensitive(false);
+    coordinate_row.append(&gtk::Label::new(Some("X")));
+    coordinate_row.append(&coordinate_x);
+    coordinate_row.append(&gtk::Label::new(Some("Y")));
+    coordinate_row.append(&coordinate_y);
+    let segment_actions = gtk::Grid::new();
+    segment_actions.set_column_spacing(6);
+    segment_actions.set_row_spacing(6);
+    let make_curve = gtk::Button::with_label("Make curve");
+    make_curve.set_tooltip_text(Some("Convert the selected line segment to a cubic curve."));
+    let make_line = gtk::Button::with_label("Make line");
+    make_line.set_tooltip_text(Some(
+        "Convert the selected cubic segment to a straight line.",
+    ));
+    let insert_node = gtk::Button::with_label("Insert node");
+    insert_node.set_tooltip_text(Some(
+        "Split the selected segment at its selected hit position.",
+    ));
+    let delete_node = gtk::Button::with_label("Delete node");
+    delete_node.set_tooltip_text(Some(
+        "Delete the selected node when the path retains two nodes.",
+    ));
+    for (index, action) in [&make_curve, &make_line, &insert_node, &delete_node]
+        .into_iter()
+        .enumerate()
+    {
+        action.set_sensitive(false);
+        segment_actions.attach(action, (index % 2) as i32, (index / 2) as i32, 1, 1);
+    }
+    let state_for_canvas = Rc::clone(state);
+    construction_canvas.set_draw_func(move |_, context, width, height| {
+        context.set_source_rgb(0.16, 0.16, 0.18);
+        context.rectangle(0.0, 0.0, f64::from(width), f64::from(height));
+        let _ = context.fill();
+        context.set_source_rgb(0.55, 0.68, 0.95);
+        context.rectangle(0.5, 0.5, f64::from(width - 1), f64::from(height - 1));
+        let _ = context.stroke();
+        let app_state = state_for_canvas.borrow();
+        let Some(surface) = app_state.pattern_editor.as_ref() else {
+            return;
+        };
+        let draft = surface.draft.borrow();
+        if let Some(points) = draft.geometry_editor.construction_points() {
+            let point = |point: toniator_geometry::Point2| draft.geometry_editor.to_screen(point);
+            if let Some(first) = points.first().copied() {
+                let first = point(first);
+                context.set_source_rgb(0.9, 0.78, 0.32);
+                context.move_to(first.x, first.y);
+                for next in points.iter().skip(1).copied() {
+                    let next = point(next);
+                    context.line_to(next.x, next.y);
+                }
+                context.set_line_width(1.5);
+                let _ = context.stroke();
+            }
+            for construction_point in points {
+                let construction_point = point(*construction_point);
+                context.set_source_rgb(1.0, 0.85, 0.35);
+                context.arc(
+                    construction_point.x,
+                    construction_point.y,
+                    4.0,
+                    0.0,
+                    std::f64::consts::TAU,
+                );
+                let _ = context.fill();
+            }
+            return;
+        }
+        let Some(structure) = draft
+            .geometry_editor
+            .selected_structure
+            .and_then(|id| draft.history.document().authored_structure(id))
+        else {
+            return;
+        };
+        let Ok(source_path) = toniator_geometry::CurvePath::from_authored_structure(structure)
+        else {
+            return;
+        };
+        let path = draft
+            .geometry_editor
+            .local_preview_path()
+            .unwrap_or(&source_path);
+        let point = |point: toniator_geometry::Point2| draft.geometry_editor.to_screen(point);
+        for (index, segment) in path.segments().iter().enumerate() {
+            let start = point(segment.start());
+            context.move_to(start.x, start.y);
+            match segment {
+                toniator_geometry::CurveSegment::Line(line) => {
+                    let end = point(line.end());
+                    context.line_to(end.x, end.y);
+                }
+                toniator_geometry::CurveSegment::CubicBezier(cubic) => {
+                    let c1 = point(cubic.control_1());
+                    let c2 = point(cubic.control_2());
+                    let end = point(cubic.end());
+                    context.curve_to(c1.x, c1.y, c2.x, c2.y, end.x, end.y);
+                    context.set_source_rgb(0.55, 0.55, 0.6);
+                    context.move_to(start.x, start.y);
+                    context.line_to(c1.x, c1.y);
+                    context.move_to(end.x, end.y);
+                    context.line_to(c2.x, c2.y);
+                    let _ = context.stroke();
+                }
+            }
+            if draft.geometry_editor.selected_segment == Some(index) {
+                context.set_source_rgb(1.0, 0.65, 0.2);
+                context.set_line_width(3.0);
+            } else {
+                context.set_source_rgb(0.8, 0.9, 1.0);
+                context.set_line_width(1.5);
+            }
+            let _ = context.stroke();
+        }
+        for segment in path.segments() {
+            let anchor = point(segment.start());
+            context.set_source_rgb(1.0, 1.0, 1.0);
+            context.arc(anchor.x, anchor.y, 4.0, 0.0, std::f64::consts::TAU);
+            let _ = context.fill();
+            if let toniator_geometry::CurveSegment::CubicBezier(cubic) = segment {
+                for control in [cubic.control_1(), cubic.control_2()] {
+                    let control = point(control);
+                    context.set_source_rgb(0.65, 0.78, 1.0);
+                    context.arc(control.x, control.y, 3.0, 0.0, std::f64::consts::TAU);
+                    let _ = context.fill();
+                }
+            }
+        }
+    });
+    let construction_gesture = gtk::GestureClick::new();
+    construction_gesture.set_button(1);
+    construction_gesture.set_exclusive(false);
+    let state_for_construction = Rc::clone(state);
+    let canvas_for_construction = construction_canvas.clone();
+    construction_gesture.connect_pressed(move |_, _, x, y| {
+        canvas_for_construction.grab_focus();
+        let (created, selected) = {
+            let app_state = state_for_construction.borrow();
+            let Some(surface) = app_state.pattern_editor.as_ref() else {
+                return;
+            };
+            let mut draft = surface.draft.borrow_mut();
+            let screen = toniator_geometry::Point2::new(x, y);
+            if draft.geometry_editor.incomplete() {
+                (draft.geometry_editor.add_node_screen(screen, 8.0), false)
+            } else {
+                let existing = draft
+                    .geometry_editor
+                    .selected_structure
+                    .and_then(|id| draft.history.document().authored_structure(id))
+                    .and_then(|structure| {
+                        toniator_geometry::CurvePath::from_authored_structure(structure).ok()
+                    });
+                if let Some(path) = existing {
+                    draft.geometry_editor.select_at(&path, screen, 8.0);
+                    if draft.geometry_editor.selected_node.is_some()
+                        || draft.geometry_editor.selected_segment.is_some()
+                    {
+                        (None, true)
+                    } else {
+                        surface.status.set_label(&format!(
+                            "Choose {} before adding construction nodes.",
+                            surface.purpose.construction_action_label()
+                        ));
+                        (None, false)
+                    }
+                } else {
+                    surface.status.set_label(&format!(
+                        "Choose {} before adding construction nodes.",
+                        surface.purpose.construction_action_label()
+                    ));
+                    (None, false)
+                }
+            }
+        };
+        if selected {
+            rebuild_pattern_editor(&state_for_construction);
+            return;
+        }
+        if created.is_none() {
+            if let Some(surface) = state_for_construction.borrow().pattern_editor.as_ref() {
+                surface.construction_canvas.queue_draw();
+            }
+            return;
+        }
+        if let Some(draft) = created
+            && attach_completed_authored_structure(&state_for_construction, draft)
+        {
+            rebuild_pattern_editor(&state_for_construction);
+            submit_draft_preview(&state_for_construction);
+        }
+    });
+    construction_canvas.add_controller(construction_gesture);
+    let drag_gesture = gtk::GestureDrag::new();
+    drag_gesture.set_button(1);
+    drag_gesture.set_exclusive(false);
+    let state_for_drag = Rc::clone(state);
+    drag_gesture.connect_drag_begin(move |gesture, x, y| {
+        let claim = {
+            let app_state = state_for_drag.borrow();
+            if let Some(surface) = app_state.pattern_editor.as_ref() {
+                let mut draft = surface.draft.borrow_mut();
+                if draft.geometry_editor.incomplete() {
+                    false
+                } else if let Some(structure) = draft
+                    .geometry_editor
+                    .selected_structure
+                    .and_then(|id| draft.history.document().authored_structure(id))
+                    && let Ok(path) =
+                        toniator_geometry::CurvePath::from_authored_structure(structure)
+                {
+                    draft.geometry_editor.select_at(
+                        &path,
+                        toniator_geometry::Point2::new(x, y),
+                        8.0,
+                    );
+                    let target = draft.geometry_editor.selected_target;
+                    if draft.geometry_editor.may_claim_target_drag(target) {
+                        draft.geometry_editor.begin_target_drag_at(
+                            path,
+                            target.expect("claimed drag has a selected target"),
+                            toniator_geometry::Point2::new(x, y),
+                        );
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+        if !claim {
+            gesture.set_state(gtk::EventSequenceState::Denied);
+        }
+    });
+    let state_for_drag_update = Rc::clone(state);
+    drag_gesture.connect_drag_update(move |_, offset_x, offset_y| {
+        let canvas = {
+            let app = state_for_drag_update.borrow();
+            let Some(surface) = app.pattern_editor.as_ref() else {
+                return;
+            };
+            let changed = surface
+                .draft
+                .borrow_mut()
+                .geometry_editor
+                .update_drag_offset(offset_x, offset_y);
+            changed.then(|| surface.construction_canvas.clone())
+        };
+        if let Some(canvas) = canvas {
+            canvas.queue_draw();
+        }
+    });
+    let state_for_drag_end = Rc::clone(state);
+    drag_gesture.connect_drag_end(move |_, x, y| {
+        let mutation = {
+            let app_state = state_for_drag_end.borrow();
+            let Some(surface) = app_state.pattern_editor.as_ref() else {
+                return;
+            };
+            let mut draft = surface.draft.borrow_mut();
+            let id = draft.geometry_editor.selected_structure;
+            let Some(id) = id else {
+                return;
+            };
+            let Some(payload) = draft.geometry_editor.end_drag_offset(x, y) else {
+                return;
+            };
+            let Some(base_structure) = draft.history.document().authored_structure(id).cloned()
+            else {
+                return;
+            };
+            (base_structure, payload)
+        };
+        if request_path_replacement(&state_for_drag_end, mutation.0, mutation.1) {
+            rebuild_pattern_editor(&state_for_drag_end);
+            submit_draft_preview(&state_for_drag_end);
+        }
+    });
+    construction_canvas.add_controller(drag_gesture);
+    let zoom_scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+    let state_for_zoom = Rc::clone(state);
+    zoom_scroll.connect_scroll(move |_, _, dy| {
+        let canvas = {
+            let app = state_for_zoom.borrow();
+            let Some(surface) = app.pattern_editor.as_ref() else {
+                return glib::Propagation::Stop;
+            };
+            let mut draft = surface.draft.borrow_mut();
+            let next =
+                (draft.geometry_editor.zoom * if dy < 0.0 { 1.1 } else { 0.9 }).clamp(0.1, 16.0);
+            let pan = draft.geometry_editor.pan;
+            draft.geometry_editor.set_viewport(pan, next);
+            surface.construction_canvas.clone()
+        };
+        canvas.queue_draw();
+        glib::Propagation::Stop
+    });
+    construction_canvas.add_controller(zoom_scroll);
+    let pan_gesture = gtk::GestureDrag::new();
+    pan_gesture.set_button(2);
+    let state_for_pan_begin = Rc::clone(state);
+    pan_gesture.connect_drag_begin(move |_, x, y| {
+        if let Some(surface) = state_for_pan_begin.borrow().pattern_editor.as_ref() {
+            surface
+                .draft
+                .borrow_mut()
+                .geometry_editor
+                .begin_pan(toniator_geometry::Point2::new(x, y));
+        }
+    });
+    let state_for_pan_update = Rc::clone(state);
+    pan_gesture.connect_drag_update(move |_, offset_x, offset_y| {
+        let canvas = {
+            let app = state_for_pan_update.borrow();
+            let Some(surface) = app.pattern_editor.as_ref() else {
+                return;
+            };
+            let changed = surface
+                .draft
+                .borrow_mut()
+                .geometry_editor
+                .update_pan_offset(offset_x, offset_y);
+            changed.then(|| surface.construction_canvas.clone())
+        };
+        if let Some(canvas) = canvas {
+            canvas.queue_draw();
+        }
+    });
+    let state_for_pan_end = Rc::clone(state);
+    pan_gesture.connect_drag_end(move |_, _, _| {
+        if let Some(surface) = state_for_pan_end.borrow().pattern_editor.as_ref() {
+            surface.draft.borrow_mut().geometry_editor.end_pan();
+        }
+    });
+    construction_canvas.add_controller(pan_gesture);
+    construction_canvas.set_focusable(true);
+    let keys = gtk::EventControllerKey::new();
+    let state_for_keys = Rc::clone(state);
+    keys.connect_key_pressed(move |_, key, _, modifiers| {
+        if key == gtk::gdk::Key::Escape {
+            if let Some(surface) = state_for_keys.borrow().pattern_editor.as_ref() {
+                let mut draft = surface.draft.borrow_mut();
+                draft.geometry_editor.cancel();
+                draft.construction_attachment = None;
+                surface.status.set_label("Construction cancelled.");
+                surface.construction_canvas.queue_draw();
+            }
+            return glib::Propagation::Stop;
+        }
+        if key == gtk::gdk::Key::Return {
+            let payload = {
+                let app = state_for_keys.borrow();
+                let Some(surface) = app.pattern_editor.as_ref() else {
+                    return glib::Propagation::Stop;
+                };
+                let mut draft = surface.draft.borrow_mut();
+                draft.geometry_editor.complete()
+            };
+            if let Some(payload) = payload
+                && attach_completed_authored_structure(&state_for_keys, payload)
+            {
+                rebuild_pattern_editor(&state_for_keys);
+                submit_draft_preview(&state_for_keys);
+            }
+            return glib::Propagation::Stop;
+        }
+        if key == gtk::gdk::Key::Insert {
+            apply_edited_path(
+                &state_for_keys,
+                stage20f_editor::PathEdit::InsertNode { parameter: 0.5 },
+            );
+            return glib::Propagation::Stop;
+        }
+        let (dx, dy) = match key {
+            gtk::gdk::Key::Left => (-1.0, 0.0),
+            gtk::gdk::Key::Right => (1.0, 0.0),
+            gtk::gdk::Key::Up => (0.0, -1.0),
+            gtk::gdk::Key::Down => (0.0, 1.0),
+            _ => return glib::Propagation::Proceed,
+        };
+        let step = stage20f_editor::Stage20fEditorState::nudge_step(
+            modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK),
+            modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK),
+        );
+        let mutation = {
+            let app = state_for_keys.borrow();
+            let Some(surface) = app.pattern_editor.as_ref() else {
+                return glib::Propagation::Stop;
+            };
+            let draft = surface.draft.borrow_mut();
+            let Some(structure) = draft
+                .geometry_editor
+                .selected_structure
+                .and_then(|id| draft.history.document().authored_structure(id))
+                .cloned()
+            else {
+                return glib::Propagation::Stop;
+            };
+            let Ok(path) = toniator_geometry::CurvePath::from_authored_structure(&structure) else {
+                return glib::Propagation::Stop;
+            };
+            let Some(target) = draft.geometry_editor.selected_target else {
+                return glib::Propagation::Stop;
+            };
+            let Some(payload) =
+                draft
+                    .geometry_editor
+                    .nudge_selected(&path, target, dx * step, dy * step)
+            else {
+                return glib::Propagation::Stop;
+            };
+            (structure, payload)
+        };
+        if request_path_replacement(&state_for_keys, mutation.0, mutation.1) {
+            rebuild_pattern_editor(&state_for_keys);
+            submit_draft_preview(&state_for_keys);
+        }
+        glib::Propagation::Stop
+    });
+    construction_canvas.add_controller(keys);
+    let state_for_new_structure = Rc::clone(state);
+    new_structure.connect_clicked(move |_| {
+        begin_authored_construction(&state_for_new_structure, purpose.structure_kind())
+    });
     let primary = gtk::Box::new(gtk::Orientation::Vertical, 12);
     let advanced = gtk::Expander::new(Some("Advanced"));
     advanced.set_tooltip_text(Some(
@@ -2422,10 +3049,54 @@ fn open_pattern_editor(state: &Rc<RefCell<AppState>>) {
     ));
     let advanced_rows = gtk::Box::new(gtk::Orientation::Vertical, 12);
     advanced.set_child(Some(&advanced_rows));
+    let construction_sidebar = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    construction_sidebar.set_size_request(CONSTRUCTION_SIDEBAR_WIDTH_PX, -1);
+    construction_sidebar.append(&resource_list);
+    construction_sidebar.append(&construction_actions);
+    let construction_surface = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    construction_surface.set_hexpand(true);
+    let canvas_heading = gtk::Label::new(Some("Construction canvas"));
+    canvas_heading.set_xalign(0.0);
+    canvas_heading.add_css_class("heading");
+    construction_surface.append(&canvas_heading);
+    construction_surface.append(&construction_canvas);
+    construction_surface.append(&coordinate_row);
+    construction_surface.append(&segment_actions);
+    // A regular box keeps both construction regions in the draft scroll area's natural flow.
+    // `GtkPaned` could collapse both children after the native narrow breakpoint changed its
+    // orientation, leaving the editor inaccessible at a modal width of 620px.
+    let construction_layout = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    construction_layout.set_hexpand(true);
+    construction_layout.append(&construction_sidebar);
+    construction_layout.append(&construction_surface);
+    let narrow_breakpoint = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
+        adw::BreakpointConditionLengthType::MaxWidth,
+        NARROW_EDITOR_MAX_WIDTH_PX,
+        adw::LengthUnit::Px,
+    ));
+    let layout_for_narrow = construction_layout.clone();
+    let sidebar_for_narrow = construction_sidebar.clone();
+    let canvas_for_narrow = construction_canvas.clone();
+    narrow_breakpoint.connect_apply(move |_| {
+        layout_for_narrow.set_orientation(gtk::Orientation::Vertical);
+        sidebar_for_narrow.set_size_request(-1, -1);
+        sidebar_for_narrow.set_hexpand(true);
+        canvas_for_narrow.set_content_height(260);
+    });
+    let layout_for_wide = construction_layout.clone();
+    let sidebar_for_wide = construction_sidebar.clone();
+    let canvas_for_wide = construction_canvas.clone();
+    narrow_breakpoint.connect_unapply(move |_| {
+        layout_for_wide.set_orientation(gtk::Orientation::Horizontal);
+        sidebar_for_wide.set_size_request(CONSTRUCTION_SIDEBAR_WIDTH_PX, -1);
+        sidebar_for_wide.set_hexpand(false);
+        canvas_for_wide.set_content_height(220);
+    });
+    window.add_breakpoint(narrow_breakpoint);
     editor.append(&introduction);
     editor.append(&history);
     editor.append(&current_pattern);
-    editor.append(&family.root);
+    editor.append(&construction_layout);
     editor.append(&primary);
     editor.append(&advanced);
     let undo = gtk::Button::with_mnemonic("_Undo");
@@ -2442,10 +3113,17 @@ fn open_pattern_editor(state: &Rc<RefCell<AppState>>) {
     cancel.connect_clicked(move |_| {
         dispatch_ui_intent(&state_for_cancel, UiIntent::DiscardPatternEditor)
     });
+    let apply = gtk::Button::with_mnemonic("_Apply");
+    apply.set_tooltip_text(Some(
+        "Publish this valid private draft as one main undo step.",
+    ));
+    let state_for_apply = Rc::clone(state);
+    apply.connect_clicked(move |_| apply_pattern_editor_draft(&state_for_apply));
     shell.append_action(&undo);
     shell.append_action(&redo);
     shell.append_action(&preset);
     shell.append_action(&cancel);
+    shell.append_action(&apply);
     let header = adw::HeaderBar::new();
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
@@ -2470,22 +3148,493 @@ fn open_pattern_editor(state: &Rc<RefCell<AppState>>) {
         }
     });
     state.borrow_mut().pattern_editor = Some(PatternEditorSurface {
+        purpose,
         window: window.clone(),
         status,
         picture,
+        preview_spinner,
         draft,
         introduction,
         history,
         current_pattern,
-        family,
         primary,
         advanced_rows,
         descriptor_components: BTreeMap::new(),
+        apply,
+        resource_list,
+        construction_canvas,
+        coordinate_x,
+        coordinate_y,
+        numeric_commit_active: Rc::new(Cell::new(false)),
+        make_curve,
+        make_line,
+        insert_node,
+        delete_node,
+    });
+    let state_for_x = Rc::clone(state);
+    let x = state
+        .borrow()
+        .pattern_editor
+        .as_ref()
+        .unwrap()
+        .coordinate_x
+        .clone();
+    x.connect_activate(move |_| commit_selected_numeric_once(&state_for_x));
+    let focus_x = gtk::EventControllerFocus::new();
+    let state_for_x_leave = Rc::clone(state);
+    focus_x.connect_leave(move |_| commit_selected_numeric_once(&state_for_x_leave));
+    x.add_controller(focus_x);
+    let state_for_y = Rc::clone(state);
+    let y = state
+        .borrow()
+        .pattern_editor
+        .as_ref()
+        .unwrap()
+        .coordinate_y
+        .clone();
+    y.connect_activate(move |_| commit_selected_numeric_once(&state_for_y));
+    let focus_y = gtk::EventControllerFocus::new();
+    let state_for_y_leave = Rc::clone(state);
+    focus_y.connect_leave(move |_| commit_selected_numeric_once(&state_for_y_leave));
+    y.add_controller(focus_y);
+    let make_curve = state
+        .borrow()
+        .pattern_editor
+        .as_ref()
+        .expect("live pattern editor owns its action controls")
+        .make_curve
+        .clone();
+    let state_for_make_curve = Rc::clone(state);
+    make_curve.connect_clicked(move |_| {
+        apply_edited_path(&state_for_make_curve, stage20f_editor::PathEdit::MakeCurve);
+    });
+    let make_line = state
+        .borrow()
+        .pattern_editor
+        .as_ref()
+        .expect("live pattern editor owns its action controls")
+        .make_line
+        .clone();
+    let state_for_make_line = Rc::clone(state);
+    make_line.connect_clicked(move |_| {
+        apply_edited_path(&state_for_make_line, stage20f_editor::PathEdit::MakeLine);
+    });
+    let insert_node = state
+        .borrow()
+        .pattern_editor
+        .as_ref()
+        .expect("live pattern editor owns its action controls")
+        .insert_node
+        .clone();
+    let state_for_insert = Rc::clone(state);
+    insert_node.connect_clicked(move |_| {
+        let parameter = state_for_insert
+            .borrow()
+            .pattern_editor
+            .as_ref()
+            .and_then(|surface| {
+                surface
+                    .draft
+                    .borrow()
+                    .geometry_editor
+                    .selected_segment_parameter
+            })
+            .unwrap_or(0.5)
+            .clamp(0.05, 0.95);
+        apply_edited_path(
+            &state_for_insert,
+            stage20f_editor::PathEdit::InsertNode { parameter },
+        );
+    });
+    let delete_node = state
+        .borrow()
+        .pattern_editor
+        .as_ref()
+        .expect("live pattern editor owns its action controls")
+        .delete_node
+        .clone();
+    let state_for_delete = Rc::clone(state);
+    delete_node.connect_clicked(move |_| {
+        let node = state_for_delete
+            .borrow()
+            .pattern_editor
+            .as_ref()
+            .and_then(|surface| surface.draft.borrow().geometry_editor.selected_node);
+        if let Some(node) = node {
+            apply_edited_path(
+                &state_for_delete,
+                stage20f_editor::PathEdit::DeleteNode { node },
+            );
+        }
     });
     emit_draft_automation_state(&mut state.borrow_mut(), "draft_opened", None);
-    rebuild_pattern_editor(state);
     window.present();
-    submit_draft_preview(state);
+    schedule_pattern_editor_initial_rebuild(state);
+}
+
+/// Defers initial private-editor synchronization until the launching GTK callback releases AppState.
+///
+/// Opening the modal creates its surface under `AppState` authority. GTK may synchronously emit
+/// widget notifications while that callback unwinds, so this idle boundary reacquires the state
+/// only after those borrows end. It rebuilds and schedules only the private draft preview; it never
+/// publishes the draft or mutates the main workspace.
+fn schedule_pattern_editor_initial_rebuild(state: &Rc<RefCell<AppState>>) {
+    let state = Rc::clone(state);
+    glib::idle_add_local_once(move || {
+        if state.borrow().pattern_editor.is_none() {
+            return;
+        }
+        rebuild_pattern_editor(&state);
+        submit_draft_preview(&state);
+    });
+}
+
+/// Commits one settled coordinate-entry change synchronously while rejecting reentrant duplicates.
+///
+/// GTK may emit activation and focus-leave for one Enter or AT-SPI commit. The surface-owned cell
+/// protects that one callback cycle without delaying the typed history command past the current
+/// input action, so a following Undo always targets the numeric replacement before older history.
+fn commit_selected_numeric_once(state: &Rc<RefCell<AppState>>) {
+    let active = {
+        let app = state.borrow();
+        let Some(surface) = app.pattern_editor.as_ref() else {
+            return;
+        };
+        Rc::clone(&surface.numeric_commit_active)
+    };
+    if !accepts_numeric_commit_callback(&active) {
+        return;
+    }
+    commit_selected_numeric(state);
+    active.set(false);
+}
+
+/// Claims the one synchronous coordinate callback allowed until its caller releases the cell.
+///
+/// The cell is surface-local GTK presentation state, never document or history authority. A
+/// `false` result means an activation/focus-leave callback is already committing the same entry.
+fn accepts_numeric_commit_callback(active: &Cell<bool>) -> bool {
+    !active.replace(true)
+}
+
+/// Commits the current selected anchor or cubic-control X/Y entries through one private typed replacement.
+fn commit_selected_numeric(state: &Rc<RefCell<AppState>>) {
+    let mutation = {
+        let app = state.borrow();
+        let Some(surface) = app.pattern_editor.as_ref() else {
+            return;
+        };
+        let mut draft = surface.draft.borrow_mut();
+        let Some(structure) = draft
+            .geometry_editor
+            .selected_structure
+            .and_then(|id| draft.history.document().authored_structure(id))
+            .cloned()
+        else {
+            return;
+        };
+        let Ok(path) = toniator_geometry::CurvePath::from_authored_structure(&structure) else {
+            return;
+        };
+        let Some(target) = draft.geometry_editor.selected_target else {
+            return;
+        };
+        let x = surface.coordinate_x.text();
+        let y = surface.coordinate_y.text();
+        if !matches!(
+            (x.parse::<f64>(), y.parse::<f64>()),
+            (Ok(x), Ok(y)) if x.is_finite() && y.is_finite()
+        ) {
+            draft.geometry_editor.set_local_invalid(true);
+            surface
+                .status
+                .set_label("Enter finite numeric X and Y coordinates before applying.");
+            surface.apply.set_sensitive(false);
+            return;
+        }
+        draft.geometry_editor.set_local_invalid(false);
+        let Some(payload) =
+            draft
+                .geometry_editor
+                .commit_numeric(&path, target, x.as_str(), y.as_str())
+        else {
+            surface
+                .apply
+                .set_sensitive(draft.geometry_editor.apply_ready(draft.is_dirty()));
+            return;
+        };
+        (structure, payload)
+    };
+    if request_path_replacement(state, mutation.0, mutation.1) {
+        rebuild_pattern_editor(state);
+        submit_draft_preview(state);
+    }
+}
+
+/// Returns the channel that owns one deterministic authored-resource use projection.
+fn authored_use_channel(use_value: &toniator_domain::AuthoredStructureUse) -> ChannelId {
+    match use_value {
+        toniator_domain::AuthoredStructureUse::Guide { channel_id, .. }
+        | toniator_domain::AuthoredStructureUse::Mark { channel_id, .. } => *channel_id,
+    }
+}
+
+/// Produces one stable artist-facing summary without exposing an authored resource's raw ID.
+fn authored_use_summary(
+    document: &Document,
+    use_value: &toniator_domain::AuthoredStructureUse,
+) -> String {
+    let structure_id = use_value.structure_id();
+    let Some(structure) = document.authored_structure(structure_id) else {
+        return "Unavailable authored-resource use".to_owned();
+    };
+    let ordinal = document
+        .authored_structures()
+        .iter()
+        .filter(|candidate| candidate.kind() == structure.kind())
+        .position(|candidate| candidate.id() == structure_id)
+        .map_or(0, |value| value + 1);
+    let name = channel_display_name(document, authored_use_channel(use_value));
+    match use_value {
+        toniator_domain::AuthoredStructureUse::Guide { .. } => {
+            format!("Guide path {ordinal} used by {name}")
+        }
+        toniator_domain::AuthoredStructureUse::Mark { .. } => {
+            format!("Mark shape {ordinal} used by {name}")
+        }
+    }
+}
+
+/// Requests a private typed replacement, gating its first shared-resource mutation for an artist choice.
+///
+/// A single-use or already-armed resource applies immediately. A newly encountered shared resource
+/// retains its exact base and replacement in the private draft and opens a choice dialog; it does
+/// not create history, alter preview state, or silently select a sharing policy.
+fn request_path_replacement(
+    state: &Rc<RefCell<AppState>>,
+    base_structure: toniator_domain::AuthoredStructure,
+    replacement: toniator_domain::AuthoredStructureDraft,
+) -> bool {
+    let disclosure = {
+        let app = state.borrow();
+        let Some(surface) = app.pattern_editor.as_ref() else {
+            return false;
+        };
+        let mut draft = surface.draft.borrow_mut();
+        if draft.pending_shared_edit.is_some() {
+            surface
+                .status
+                .set_label("Choose how to edit this shared resource before making another change.");
+            return false;
+        }
+        let uses: Vec<_> = draft
+            .history
+            .document()
+            .authored_structure_uses()
+            .into_iter()
+            .filter(|use_value| use_value.structure_id() == base_structure.id())
+            .collect();
+        if uses.len() > 1 && !draft.geometry_editor.is_shared_armed(base_structure.id()) {
+            let active_use = uses
+                .iter()
+                .find(|use_value| authored_use_channel(use_value) == draft.selected_channel)
+                .copied()
+                .unwrap_or(uses[0]);
+            let summaries: Vec<String> = uses
+                .iter()
+                .map(|use_value| authored_use_summary(draft.history.document(), use_value))
+                .collect();
+            let active_summary = authored_use_summary(draft.history.document(), &active_use);
+            draft.pending_shared_edit = Some(PendingSharedPathEdit {
+                selected_use: active_use,
+                base_structure,
+                replacement,
+            });
+            Some((active_summary, summaries))
+        } else {
+            match draft
+                .history
+                .apply(&DocumentCommand::ReplaceAuthoredStructure {
+                    base_structure,
+                    replacement,
+                }) {
+                Ok(_) => return true,
+                Err(error) => {
+                    surface
+                        .status
+                        .set_label(&format!("Path edit was not applied: {error}"));
+                    return false;
+                }
+            }
+        }
+    };
+    if let Some((active_summary, summaries)) = disclosure {
+        show_shared_resource_choice(state, &active_summary, &summaries);
+    }
+    false
+}
+
+/// Presents the first-mutation shared-resource choice with every deterministic typed-use summary.
+fn show_shared_resource_choice(
+    state: &Rc<RefCell<AppState>>,
+    active_summary: &str,
+    summaries: &[String],
+) {
+    let parent = state
+        .borrow()
+        .pattern_editor
+        .as_ref()
+        .map(|surface| surface.window.clone())
+        .expect("shared resource choice belongs to a live Pattern Editor");
+    let dialog = adw::Window::builder()
+        .title("Shared resource")
+        .transient_for(&parent)
+        .modal(true)
+        .build();
+    let content = components::ToniatorConfirmationContent::new();
+    content.set_detail(&format!(
+        "This authored resource has multiple uses:\n{}\n\nThis editor is changing: {active_summary}",
+        summaries.join("\n")
+    ));
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    actions.set_halign(gtk::Align::End);
+    let edit_all = gtk::Button::with_label("Edit all uses");
+    edit_all.set_tooltip_text(Some(
+        "Keep the shared resource and change every listed use.",
+    ));
+    let copy = gtk::Button::with_label("Make a copy for this use");
+    copy.set_tooltip_text(Some(
+        "Retarget only the listed current use to a newly copied resource.",
+    ));
+    actions.append(&edit_all);
+    actions.append(&copy);
+    content.append(&actions);
+    dialog.set_content(Some(&content));
+    let edit_all_dialog = dialog.clone();
+    let edit_all_state = Rc::clone(state);
+    edit_all.connect_clicked(move |_| {
+        if resolve_shared_path_choice(&edit_all_state, false) {
+            edit_all_dialog.close();
+        }
+    });
+    let copy_dialog = dialog.clone();
+    let copy_state = Rc::clone(state);
+    copy.connect_clicked(move |_| {
+        if resolve_shared_path_choice(&copy_state, true) {
+            copy_dialog.close();
+        }
+    });
+    dialog.present();
+}
+
+/// Resolves one disclosed shared-resource policy atomically and keeps the pending replacement on failure.
+fn resolve_shared_path_choice(state: &Rc<RefCell<AppState>>, make_copy: bool) -> bool {
+    let changed = {
+        let app = state.borrow();
+        let Some(surface) = app.pattern_editor.as_ref() else {
+            return false;
+        };
+        let mut draft = surface.draft.borrow_mut();
+        let Some(pending) = draft.pending_shared_edit.take() else {
+            return false;
+        };
+        let original_id = pending.base_structure.id();
+        let result = if make_copy {
+            draft
+                .history
+                .duplicate_retarget_and_replace_authored_structure(
+                    pending.selected_use,
+                    pending.replacement.clone(),
+                )
+        } else {
+            draft.geometry_editor.arm_shared_resource(original_id);
+            draft
+                .history
+                .apply(&DocumentCommand::ReplaceAuthoredStructure {
+                    base_structure: pending.base_structure.clone(),
+                    replacement: pending.replacement.clone(),
+                })
+        };
+        match result {
+            Ok(result) => {
+                if make_copy {
+                    let structure_id = result
+                        .created_authored_structure_id
+                        .expect("grouped copy reports its exact allocated structure ID");
+                    draft.geometry_editor.selected_structure = Some(structure_id);
+                }
+                draft.geometry_editor.arm_shared_resource(original_id);
+                true
+            }
+            Err(error) => {
+                draft.pending_shared_edit = Some(pending);
+                surface
+                    .status
+                    .set_label(&format!("Shared path edit was not applied: {error}"));
+                false
+            }
+        }
+    };
+    if changed {
+        rebuild_pattern_editor(state);
+        submit_draft_preview(state);
+    }
+    changed
+}
+
+/// Applies one selected-path edit through the private typed history and refreshes preview only on change.
+///
+/// Selection and geometry remain local to the private Pattern Editor. This helper is the sole GTK
+/// action route to `ReplaceAuthoredStructure`, so no-op segment conversions and failed deletions
+/// never create history entries or resubmit a preview.
+fn apply_edited_path(state: &Rc<RefCell<AppState>>, edit: stage20f_editor::PathEdit) {
+    let mutation = {
+        let app = state.borrow();
+        let Some(surface) = app.pattern_editor.as_ref() else {
+            return;
+        };
+        let draft = surface.draft.borrow_mut();
+        let Some(structure) = draft
+            .geometry_editor
+            .selected_structure
+            .and_then(|id| draft.history.document().authored_structure(id))
+            .cloned()
+        else {
+            surface.status.set_label("Select a path before editing it.");
+            return;
+        };
+        let Ok(path) = toniator_geometry::CurvePath::from_authored_structure(&structure) else {
+            surface
+                .status
+                .set_label("The selected authored structure cannot be edited as a path.");
+            return;
+        };
+        let payload = match draft.geometry_editor.edit_path(&path, edit) {
+            Ok(Some(payload)) => payload,
+            Ok(None) => {
+                surface
+                    .status
+                    .set_label("That segment already has the requested kind.");
+                return;
+            }
+            Err(stage20f_editor::PathEditError::NoSegmentSelection) => {
+                surface
+                    .status
+                    .set_label("Select a segment before using that action.");
+                return;
+            }
+            Err(stage20f_editor::PathEditError::Geometry(error)) => {
+                surface.status.set_label(error.message());
+                return;
+            }
+        };
+        (structure, payload)
+    };
+    let changed = request_path_replacement(state, mutation.0, mutation.1);
+    if changed {
+        rebuild_pattern_editor(state);
+        submit_draft_preview(state);
+    }
 }
 
 /// Detaches and closes the private Pattern Editor only after discard is chosen.
@@ -2495,7 +3644,12 @@ fn open_pattern_editor(state: &Rc<RefCell<AppState>>) {
 fn close_pattern_editor(state: &Rc<RefCell<AppState>>) {
     let window = {
         let mut state = state.borrow_mut();
-        state.pattern_editor.take().map(|surface| surface.window)
+        state.pattern_editor.take().map(|surface| {
+            surface.draft.borrow_mut().preview_submission = None;
+            surface.preview_spinner.stop();
+            surface.preview_spinner.set_visible(false);
+            surface.window
+        })
     };
     if let Some(window) = window {
         window.close();
@@ -2508,13 +3662,14 @@ fn close_pattern_editor(state: &Rc<RefCell<AppState>>) {
 /// private history. Main workspace state is intentionally not read or mutated
 /// after the editor opens, which makes Cancel and titlebar close true discard.
 fn rebuild_pattern_editor(state: &Rc<RefCell<AppState>>) {
-    let Some((window, status, draft)) = (|| {
+    let Some((window, status, draft, purpose)) = (|| {
         let state = state.borrow();
         let surface = state.pattern_editor.as_ref()?;
         Some((
             surface.window.clone(),
             surface.status.clone(),
             Rc::clone(&surface.draft),
+            surface.purpose,
         ))
     })() else {
         // Take the surface while borrowed, then close it after the RefCell
@@ -2531,6 +3686,14 @@ fn rebuild_pattern_editor(state: &Rc<RefCell<AppState>>) {
     let (selected, name, values, dirty, can_undo, can_redo) = {
         let mut draft = draft.borrow_mut();
         let document = draft.history.document().clone();
+        if draft
+            .geometry_editor
+            .selected_structure
+            .and_then(|id| document.authored_structure(id))
+            .is_some_and(|structure| structure.kind() != purpose.structure_kind())
+        {
+            draft.geometry_editor.clear_structure_selection();
+        }
         let ids = authoritative_channel_ids(&document);
         let Some(selected) = selected_channel_after_transition(Some(draft.selected_channel), &ids)
         else {
@@ -2540,13 +3703,13 @@ fn rebuild_pattern_editor(state: &Rc<RefCell<AppState>>) {
         (
             selected,
             channel_display_name(&document, selected),
-            pattern_editor_values(&selected_property_values(&document, selected)),
+            pattern_editor_values(&selected_property_values(&document, selected), purpose),
             draft.is_dirty(),
             draft.history.can_undo(),
             draft.history.can_redo(),
         )
     };
-    window.set_title(Some(&format!("Pattern Editor — {name}")));
+    window.set_title(Some(&format!("{} — {name}", purpose.title())));
     status.set_label(if dirty {
         "Unsaved changes. Previewing draft…"
     } else {
@@ -2566,9 +3729,114 @@ fn rebuild_pattern_editor(state: &Rc<RefCell<AppState>>) {
         ));
         surface.current_pattern.set_label(&format!(
             "Current pattern: {}",
-            draft_pattern_summary(&values)
+            draft_pattern_summary(&values, purpose)
         ));
-        update_draft_family_controls(&surface.family, &values);
+        surface
+            .apply
+            .set_sensitive(draft.borrow().geometry_editor.apply_ready(dirty));
+        let coordinate = {
+            let draft = draft.borrow();
+            let structure = draft
+                .geometry_editor
+                .selected_structure
+                .and_then(|id| draft.history.document().authored_structure(id));
+            structure
+                .and_then(|structure| {
+                    toniator_geometry::CurvePath::from_authored_structure(structure).ok()
+                })
+                .and_then(|path| {
+                    draft.geometry_editor.selected_target.and_then(|target| {
+                        draft
+                            .geometry_editor
+                            .coordinate(&path, target)
+                            .map(|point| (target, point))
+                    })
+                })
+        };
+        let (can_make_curve, can_make_line, can_insert_node, can_delete_node) = {
+            let draft = draft.borrow();
+            let structure = draft
+                .geometry_editor
+                .selected_structure
+                .and_then(|id| draft.history.document().authored_structure(id));
+            let path = structure.and_then(|structure| {
+                toniator_geometry::CurvePath::from_authored_structure(structure).ok()
+            });
+            let segment = draft
+                .geometry_editor
+                .selected_segment
+                .and_then(|index| path.as_ref().and_then(|path| path.segments().get(index)));
+            (
+                matches!(segment, Some(toniator_geometry::CurveSegment::Line(_))),
+                matches!(
+                    segment,
+                    Some(toniator_geometry::CurveSegment::CubicBezier(_))
+                ),
+                segment.is_some(),
+                draft.geometry_editor.selected_node.is_some(),
+            )
+        };
+        surface.make_curve.set_sensitive(can_make_curve);
+        surface.make_line.set_sensitive(can_make_line);
+        surface.insert_node.set_sensitive(can_insert_node);
+        surface.delete_node.set_sensitive(can_delete_node);
+        if let Some((target, point)) = coordinate {
+            let target_name = match target {
+                stage20f_editor::NumericTarget::Anchor(index) => format!("Anchor {}", index + 1),
+                stage20f_editor::NumericTarget::Control1(index) => {
+                    format!("Segment {} Control 1", index + 1)
+                }
+                stage20f_editor::NumericTarget::Control2(index) => {
+                    format!("Segment {} Control 2", index + 1)
+                }
+            };
+            surface
+                .coordinate_x
+                .update_property(&[gtk::accessible::Property::Label(&format!(
+                    "{target_name} X coordinate"
+                ))]);
+            surface
+                .coordinate_y
+                .update_property(&[gtk::accessible::Property::Label(&format!(
+                    "{target_name} Y coordinate"
+                ))]);
+            surface.coordinate_x.set_sensitive(true);
+            surface.coordinate_y.set_sensitive(true);
+            if !surface.coordinate_x.has_focus() {
+                surface.coordinate_x.set_text(&point.x.to_string());
+            }
+            if !surface.coordinate_y.has_focus() {
+                surface.coordinate_y.set_text(&point.y.to_string());
+            }
+        } else {
+            surface
+                .coordinate_x
+                .update_property(&[gtk::accessible::Property::Label(
+                    "No selected point X coordinate",
+                )]);
+            surface
+                .coordinate_y
+                .update_property(&[gtk::accessible::Property::Label(
+                    "No selected point Y coordinate",
+                )]);
+            surface.coordinate_x.set_sensitive(false);
+            surface.coordinate_y.set_sensitive(false);
+            if !surface.coordinate_x.has_focus() {
+                surface.coordinate_x.set_text("");
+            }
+            if !surface.coordinate_y.has_focus() {
+                surface.coordinate_y.set_text("");
+            }
+        }
+        rebuild_authored_resource_list(
+            state,
+            &surface.resource_list,
+            draft.borrow().history.document(),
+            draft.borrow().geometry_editor.selected_structure,
+            purpose,
+        );
+        surface.construction_canvas.queue_draw();
+        sync_draft_preview_pending(surface);
     }
     let (primary_values, advanced_values): (Vec<_>, Vec<_>) = values
         .into_iter()
@@ -2576,152 +3844,353 @@ fn rebuild_pattern_editor(state: &Rc<RefCell<AppState>>) {
     reconcile_draft_descriptor_components(state, selected, primary_values, advanced_values);
 }
 
-/// Creates persistent private-draft family controls that reuse bundled recipes.
+/// Projects one purpose's authored resources into a stable artist-facing group without raw IDs.
 ///
-/// Choosing a family changes only the cloned `DocumentHistory`, then submits
-/// only the draft scheduler. The main workspace, its history/savepoint and
-/// preview are not read or changed by this control.
-fn create_draft_family_controls(state: &Rc<RefCell<AppState>>) -> DraftFamilyControls {
-    let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    let heading = gtk::Label::new(Some("Pattern family"));
+/// The domain remains authoritative for structure order and typed uses; this helper assigns only
+/// presentation ordinals and concise summaries inside the private editor.
+fn rebuild_authored_resource_list(
+    state: &Rc<RefCell<AppState>>,
+    list: &gtk::Box,
+    document: &Document,
+    selected_structure: Option<toniator_domain::AuthoredStructureId>,
+    purpose: PatternEditorPurpose,
+) {
+    while let Some(child) = list.first_child() {
+        list.remove(&child);
+    }
+    let uses = document.authored_structure_uses();
+    let kind = purpose.structure_kind();
+    let heading = gtk::Label::new(Some(match purpose {
+        PatternEditorPurpose::Grid => "Guide paths",
+        PatternEditorPurpose::Mark => "Mark shapes",
+    }));
     heading.set_xalign(0.0);
     heading.add_css_class("heading");
-    root.append(&heading);
-    let choices = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let grid = gtk::Button::with_label("Grid");
-    grid.set_tooltip_text(Some("Choose guide-based circles for this private draft."));
-    let state_for_grid = Rc::clone(state);
-    grid.connect_clicked(move |_| choose_draft_grid(&state_for_grid));
-    let random = gtk::Button::with_label("Random");
-    random.set_tooltip_text(Some("Choose random circles for this private draft."));
-    let state_for_random = Rc::clone(state);
-    random.connect_clicked(move |_| apply_draft_preset(&state_for_random, "even-random-circles"));
-    choices.append(&grid);
-    choices.append(&random);
-    root.append(&choices);
-    let topology = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let count_label = gtk::Label::new(Some("Directions"));
-    count_label.set_xalign(0.0);
-    let count = gtk::Entry::new();
-    count.set_input_purpose(gtk::InputPurpose::Digits);
-    count.set_tooltip_text(Some(
-        "Choose one to four numbered directions for the private grid draft.",
-    ));
-    count_label.set_mnemonic_widget(Some(&count));
-    let state_for_count = Rc::clone(state);
-    count.connect_activate(move |control| {
-        commit_draft_direction_count(&state_for_count, control);
-    });
-    let count_focus = gtk::EventControllerFocus::new();
-    let state_for_count_leave = Rc::clone(state);
-    let count_for_leave = count.clone();
-    count_focus.connect_leave(move |_| {
-        commit_draft_direction_count(&state_for_count_leave, &count_for_leave);
-    });
-    count.add_controller(count_focus);
-    let intersections = gtk::Button::with_label("At intersections");
-    intersections.set_tooltip_text(Some("Place marks where selected directions meet."));
-    let state_for_intersections = Rc::clone(state);
-    intersections
-        .connect_clicked(move |_| apply_current_draft_grid_recipe(&state_for_intersections, true));
-    let along_guides = gtk::Button::with_label("Along guides");
-    along_guides.set_tooltip_text(Some(
-        "Place marks at regular spacing along selected directions.",
-    ));
-    let state_for_along = Rc::clone(state);
-    along_guides.connect_clicked(move |_| apply_current_draft_grid_recipe(&state_for_along, false));
-    topology.append(&count_label);
-    topology.append(&count);
-    topology.append(&intersections);
-    topology.append(&along_guides);
-    root.append(&topology);
-    DraftFamilyControls {
-        root,
-        directions: topology,
-        count,
-        intersections,
-        along_guides,
+    list.append(&heading);
+    for (ordinal, structure) in document
+        .authored_structures()
+        .iter()
+        .filter(|value| value.kind() == kind)
+        .enumerate()
+    {
+        let count = uses
+            .iter()
+            .filter(|usage| usage.structure_id() == structure.id())
+            .count();
+        let label = match purpose {
+            PatternEditorPurpose::Grid => format!(
+                "Guide path {} — {} node segments; {} use{}",
+                ordinal + 1,
+                structure.segments().len(),
+                count,
+                if count == 1 { "" } else { "s" }
+            ),
+            PatternEditorPurpose::Mark => format!(
+                "Mark shape {} — {} node segments; {} use{}",
+                ordinal + 1,
+                structure.segments().len(),
+                count,
+                if count == 1 { "" } else { "s" }
+            ),
+        };
+        let row = gtk::Button::with_label(&label);
+        row.set_halign(gtk::Align::Fill);
+        row.set_hexpand(true);
+        row.set_has_frame(true);
+        let selected = selected_structure == Some(structure.id());
+        if selected {
+            row.add_css_class("suggested-action");
+        }
+        let state_for_row = Rc::clone(state);
+        let structure_id = structure.id();
+        row.connect_clicked(move |_| select_authored_resource(&state_for_row, structure_id));
+        list.append(&row);
     }
 }
 
-/// Commits a completed one-to-four direction count for the private grid draft.
+/// Selects one explicit authored resource row without mutating its private history or preview.
+fn select_authored_resource(
+    state: &Rc<RefCell<AppState>>,
+    structure_id: toniator_domain::AuthoredStructureId,
+) {
+    if let Some(surface) = state.borrow().pattern_editor.as_ref() {
+        let mut draft = surface.draft.borrow_mut();
+        draft.geometry_editor.select_structure(structure_id);
+    }
+    rebuild_pattern_editor(state);
+}
+
+/// Describes the preflight result for one explicit authored construction request.
 ///
-/// Text remains local until Enter or focus leave, avoiding a history transition
-/// for every keystroke. Invalid values leave both documents and previews intact.
-fn commit_draft_direction_count(state: &Rc<RefCell<AppState>>, control: &gtk::Entry) {
-    match control.text().trim().parse::<usize>() {
-        Ok(count @ 1..=4) => {
-            let intersections = current_draft_grid_topology(state)
-                .map(|(_, intersections)| intersections)
-                .unwrap_or(false);
-            apply_draft_grid_recipe(state, count, intersections);
+/// This remains app-local presentation state. The typed attachment itself remains in the private
+/// draft and does not mutate `DocumentHistory` until successful completion.
+enum ConstructionPreflight {
+    Ready(AuthoredStructureAttachment),
+    ConfirmCustomAlongGuideLayout,
+}
+
+/// Begins local open-guide or closed-mark construction without mutating draft history.
+fn begin_authored_construction(
+    state: &Rc<RefCell<AppState>>,
+    kind: toniator_domain::AuthoredStructureKind,
+) {
+    let preflight = {
+        let app = state.borrow();
+        let Some(surface) = app.pattern_editor.as_ref() else {
+            return;
+        };
+        if surface.purpose.structure_kind() != kind {
+            surface
+                .status
+                .set_label("This editor only creates its own resource kind.");
+            return;
         }
-        _ => {
+        let mut draft = surface.draft.borrow_mut();
+        match authored_attachment_target(draft.history.document(), draft.selected_channel, kind) {
+            Ok(preflight) => preflight,
+            Err(message) => {
+                draft.construction_attachment = None;
+                surface.status.set_label(&message);
+                return;
+            }
+        }
+    };
+    match preflight {
+        ConstructionPreflight::Ready(attachment) => {
+            activate_authored_construction(state, kind, attachment)
+        }
+        ConstructionPreflight::ConfirmCustomAlongGuideLayout => {
+            show_custom_along_guide_confirmation(state)
+        }
+    }
+}
+
+/// Stores one already-confirmed attachment intent and starts canvas-only construction.
+///
+/// This operation deliberately changes no private history or preview. Escape clears the local
+/// intent, while successful completion alone consumes it through the atomic domain transition.
+fn activate_authored_construction(
+    state: &Rc<RefCell<AppState>>,
+    kind: toniator_domain::AuthoredStructureKind,
+    attachment: AuthoredStructureAttachment,
+) {
+    if let Some(surface) = state.borrow().pattern_editor.as_ref() {
+        let mut draft = surface.draft.borrow_mut();
+        draft.geometry_editor.begin(kind);
+        draft.construction_attachment = Some(attachment);
+        draft.geometry_editor.selected_node = None;
+        surface
+            .status
+            .set_label("Click the canvas to add nodes; Enter completes and Escape cancels.");
+        surface.construction_canvas.queue_draw();
+    }
+}
+
+/// Presents the explicit selected-channel transition needed before an ordinary Grid can gain a guide path.
+///
+/// Confirming stores only a private construction intent. It does not convert, retarget, allocate,
+/// or advance history until the artist finishes a valid open path.
+fn show_custom_along_guide_confirmation(state: &Rc<RefCell<AppState>>) {
+    let parent = state
+        .borrow()
+        .pattern_editor
+        .as_ref()
+        .map(|surface| surface.window.clone())
+        .expect("guide confirmation belongs to a live Grid Pattern Editor");
+    let dialog = adw::Window::builder()
+        .title("Create a custom guide layout?")
+        .transient_for(&parent)
+        .modal(true)
+        .build();
+    let content = components::ToniatorConfirmationContent::new();
+    content.set_detail(
+        "This channel will switch to a private custom along-guide layout when the new guide is completed. Linked channels remain unchanged.",
+    );
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    actions.set_halign(gtk::Align::End);
+    let cancel = gtk::Button::with_mnemonic("_Cancel");
+    let confirm = gtk::Button::with_mnemonic("Create custom _guide");
+    actions.append(&cancel);
+    actions.append(&confirm);
+    content.append(&actions);
+    dialog.set_content(Some(&content));
+    let cancel_dialog = dialog.clone();
+    cancel.connect_clicked(move |_| cancel_dialog.close());
+    let confirm_dialog = dialog.clone();
+    let state_for_confirm = Rc::clone(state);
+    confirm.connect_clicked(move |_| {
+        activate_authored_construction(
+            &state_for_confirm,
+            toniator_domain::AuthoredStructureKind::OpenPath,
+            AuthoredStructureAttachment::GuideCustomAlongLayout,
+        );
+        confirm_dialog.close();
+    });
+    dialog.present();
+}
+
+/// Resolves the one active selected-channel typed target or explicit confirmation required before drawing.
+///
+/// It never chooses among multiple guide dimensions or mark outputs. An ordinary straight Grid
+/// returns the explicit custom-along-guide confirmation rather than silently changing topology.
+fn authored_attachment_target(
+    document: &Document,
+    channel_id: ChannelId,
+    kind: toniator_domain::AuthoredStructureKind,
+) -> Result<ConstructionPreflight, String> {
+    let Some(definition) = document.pattern_definition_for(channel_id) else {
+        return Err("The selected channel has no active pattern target.".to_owned());
+    };
+    let targets = match kind {
+        toniator_domain::AuthoredStructureKind::OpenPath => definition
+            .mechanisms
+            .iter()
+            .filter_map(|mechanism| match mechanism {
+                PatternMechanism::GuideDimensions { id, dimensions } => Some(
+                    dimensions
+                        .iter()
+                        .map(|dimension| AuthoredStructureAttachment::Guide {
+                            mechanism_id: *id,
+                            dimension_id: dimension.id,
+                        }),
+                ),
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>(),
+        toniator_domain::AuthoredStructureKind::ClosedShape => definition
+            .output_layers
+            .iter()
+            .map(|layer| AuthoredStructureAttachment::Mark {
+                output_layer_id: layer.id(),
+            })
+            .collect::<Vec<_>>(),
+    };
+    match targets.as_slice() {
+        [target] => Ok(ConstructionPreflight::Ready(*target)),
+        [] if kind == toniator_domain::AuthoredStructureKind::OpenPath
+            && matches!(
+                definition.mechanisms.as_slice(),
+                [PatternMechanism::StraightGuides { .. }, PatternMechanism::GuideIntersections { .. }]
+            )
+            && definition.output_layers.len() == 1 => {
+                Ok(ConstructionPreflight::ConfirmCustomAlongGuideLayout)
+            }
+        [] => Err("This selected pattern has no compatible active target for the new path.".to_owned()),
+        _ => Err("This selected pattern has multiple compatible guide targets; choose one before creating a path.".to_owned()),
+    }
+}
+
+/// Attaches a completed local construction through one atomic private-history resource transition.
+///
+/// The new resource is never published unattached. A missing or ambiguous descriptor keeps the
+/// completed local draft out of history and reports the authority boundary in the editor status.
+fn attach_completed_authored_structure(
+    state: &Rc<RefCell<AppState>>,
+    authored_draft: toniator_domain::AuthoredStructureDraft,
+) -> bool {
+    let result = {
+        let app_state = state.borrow();
+        let Some(surface) = app_state.pattern_editor.as_ref() else {
+            return false;
+        };
+        let mut draft = surface.draft.borrow_mut();
+        let selected_channel = draft.selected_channel;
+        let Some(attachment) = draft.construction_attachment else {
+            surface
+                .status
+                .set_label("Choose a valid construction target before completing this path.");
+            return false;
+        };
+        draft.history.add_and_attach_authored_structure(
+            selected_channel,
+            attachment,
+            authored_draft,
+        )
+    };
+    match result {
+        Ok(result) => {
+            if let Some(surface) = state.borrow().pattern_editor.as_ref() {
+                let mut draft = surface.draft.borrow_mut();
+                draft.geometry_editor.selected_structure = result.created_authored_structure_id;
+                draft.geometry_editor.cancel();
+                draft.construction_attachment = None;
+                surface
+                    .status
+                    .set_label("New path attached to the selected pattern.");
+            }
+            true
+        }
+        Err(error) => {
             if let Some(surface) = state.borrow().pattern_editor.as_ref() {
                 surface
                     .status
-                    .set_label("Fix the highlighted setting… Choose one to four directions.");
+                    .set_label(&format!("New path was not attached: {error}"));
+            }
+            false
+        }
+    }
+}
+
+/// Squashes the current private editor draft into the main history as one authoritative undo step.
+///
+/// A stale or invalid draft remains open and leaves both histories untouched. Successful publication
+/// closes the private surface, refreshes the main UI, and schedules the existing main preview path.
+fn apply_pattern_editor_draft(state: &Rc<RefCell<AppState>>) {
+    let result = {
+        let mut app_state = state.borrow_mut();
+        let Some(draft) = app_state
+            .pattern_editor
+            .as_ref()
+            .map(|surface| Rc::clone(&surface.draft))
+        else {
+            return;
+        };
+        let Some(workspace) = app_state.workspace.as_mut() else {
+            return;
+        };
+        workspace.history.squash_draft(&draft.borrow().history)
+    };
+    match result {
+        Ok(summary) if summary.unchanged => {
+            if let Some(surface) = state.borrow().pattern_editor.as_ref() {
+                surface.status.set_label("No draft changes to apply.");
+            }
+        }
+        Ok(_) => {
+            close_pattern_editor(state);
+            let mut app_state = state.borrow_mut();
+            set_preview_pending(&mut app_state);
+            set_inspector_status(&mut app_state, "Pattern draft applied.");
+            emit_automation_state(&mut app_state, "draft_applied", None);
+            sync_ui(&mut app_state);
+            drop(app_state);
+            rebuild_inspector(state);
+            schedule_main_preview_submission(state);
+        }
+        Err(error) => {
+            if let Some(surface) = state.borrow().pattern_editor.as_ref() {
+                surface
+                    .status
+                    .set_label(&format!("Couldn’t apply this draft: {error}"));
             }
         }
     }
 }
 
-/// Reuses the current private grid count while changing its artist-facing site mode.
+/// Projects a concise purpose-specific readout without exposing recipe internals.
 ///
-/// The count/mode projection reads the private draft only; rebuilding the
-/// recipe remains the sole typed-history mutation path.
-fn apply_current_draft_grid_recipe(state: &Rc<RefCell<AppState>>, intersections: bool) {
-    if let Some((count, _)) = current_draft_grid_topology(state) {
-        apply_draft_grid_recipe(state, count, intersections);
-    }
-}
-
-/// Reads current grid topology from the private editor's immutable values.
-///
-/// A random draft has no guide topology, so callers leave its family untouched.
-fn current_draft_grid_topology(state: &Rc<RefCell<AppState>>) -> Option<(usize, bool)> {
-    let binding = state.borrow();
-    let surface = binding.pattern_editor.as_ref()?;
-    let draft = surface.draft.borrow();
-    let values = pattern_editor_values(&selected_property_values(
-        draft.history.document(),
-        draft.selected_channel,
-    ));
-    draft_grid_topology(&values)
-}
-
-/// Updates persistent family controls from immutable private-draft values.
-///
-/// Programmatic state changes do not build commands; callbacks read the draft
-/// only when an artist activates an action. Random drafts hide grid-only
-/// controls without destroying their focus/callback instances.
-fn update_draft_family_controls(family: &DraftFamilyControls, values: &[PropertyCurrentValue]) {
-    if let Some((count, intersections)) = draft_grid_topology(values) {
-        if !family.count.has_focus() {
-            family.count.set_text(&count.to_string());
+/// The values are immutable domain projections; the result is presentation text only.
+fn draft_pattern_summary(
+    values: &[PropertyCurrentValue],
+    purpose: PatternEditorPurpose,
+) -> &'static str {
+    match purpose {
+        PatternEditorPurpose::Grid if draft_grid_topology(values).is_some() => {
+            "Custom guide layout"
         }
-        family.directions.set_visible(true);
-        family.intersections.set_sensitive(!intersections);
-        family.along_guides.set_sensitive(intersections);
-    } else {
-        family.directions.set_visible(false);
-    }
-}
-
-/// Projects a concise active-family readout without exposing recipe internals.
-///
-/// The values are immutable domain projections; the result is presentation
-/// text only and defaults to the artist-facing Simple XY Grid name.
-fn draft_pattern_summary(values: &[PropertyCurrentValue]) -> &'static str {
-    if draft_grid_topology(values).is_some() {
-        "Grid"
-    } else if values
-        .iter()
-        .any(|value| value.descriptor.field == PropertyFieldId::RandomCharacter)
-    {
-        "Random"
-    } else {
-        "Simple XY Grid"
+        PatternEditorPurpose::Grid => "Simple XY Grid",
+        PatternEditorPurpose::Mark => "Mark appearance",
     }
 }
 
@@ -2742,145 +4211,6 @@ fn draft_grid_topology(values: &[PropertyCurrentValue]) -> Option<(usize, bool)>
         .iter()
         .any(|value| value.descriptor.field == PropertyFieldId::IntersectionDimensions);
     Some((count, intersections))
-}
-
-/// Applies one bundled recipe to the private Pattern Editor history only.
-///
-/// Registry failures preserve the private and main documents plus both preview
-/// textures. On success this creates one private undo step and schedules the
-/// private canonical preview path.
-fn apply_draft_preset(state: &Rc<RefCell<AppState>>, id: &str) {
-    let result = {
-        let state = state.borrow();
-        let Some(surface) = state.pattern_editor.as_ref() else {
-            return;
-        };
-        let mut draft = surface.draft.borrow_mut();
-        let selected = draft.selected_channel;
-        PresetRegistry::bundled()
-            .apply_to_selected(&mut draft.history, selected, id)
-            .map_err(|error| error.to_string())
-    };
-    match result {
-        Ok(_) => {
-            emit_draft_automation_state(&mut state.borrow_mut(), "draft_changed", None);
-            rebuild_pattern_editor(state);
-            submit_draft_preview(state);
-        }
-        Err(error) => {
-            if let Some(surface) = state.borrow().pattern_editor.as_ref() {
-                surface
-                    .status
-                    .set_label(&format!("Fix the highlighted setting… {error}"));
-            }
-        }
-    }
-}
-
-/// Chooses the editable guide-based family for the private draft.
-///
-/// This reconstructs a typed two-direction recipe even when the source
-/// document starts with the simpler default grid, so the one-to-four direction
-/// controls are immediately available. The main document and preview remain
-/// outside this private-history transition.
-fn choose_draft_grid(state: &Rc<RefCell<AppState>>) {
-    apply_draft_grid_recipe(state, 2, true);
-}
-
-/// Rebuilds the private grid recipe with one-to-four artist-visible directions.
-///
-/// This uses the existing typed recipe replacement command, never GTK-owned
-/// geometry. Intersection placement requires two directions; a one-direction
-/// choice therefore uses along-guide placement. The resulting command affects
-/// only the private draft history and schedules only its preview on success.
-fn apply_draft_grid_recipe(
-    state: &Rc<RefCell<AppState>>,
-    requested_count: usize,
-    intersections: bool,
-) {
-    let result = {
-        let app_state = state.borrow();
-        let Some(surface) = app_state.pattern_editor.as_ref() else {
-            return;
-        };
-        let Some(recipe) = draft_grid_recipe(requested_count, intersections) else {
-            return;
-        };
-        let mut draft = surface.draft.borrow_mut();
-        let selected = draft.selected_channel;
-        let Some(base_definition) = draft
-            .history
-            .document()
-            .pattern_definition_for(selected)
-            .cloned()
-        else {
-            return;
-        };
-        draft
-            .history
-            .apply(&DocumentCommand::ReplaceSelectedChannelDefinitionRecipe {
-                channel_id: selected,
-                base_definition,
-                recipe,
-            })
-            .map_err(|error| error.to_string())
-    };
-    match result {
-        Ok(_) => {
-            emit_draft_automation_state(&mut state.borrow_mut(), "draft_changed", None);
-            rebuild_pattern_editor(state);
-            submit_draft_preview(state);
-        }
-        Err(error) => {
-            if let Some(surface) = state.borrow().pattern_editor.as_ref() {
-                surface
-                    .status
-                    .set_label(&format!("Fix the highlighted setting… {error}"));
-            }
-        }
-    }
-}
-
-/// Builds an ID-free one-to-four-direction grid recipe for the private editor.
-///
-/// This pure helper preserves pattern-recipe authority: it has no GTK, history,
-/// preview, or filesystem side effects. A one-direction request uses along-
-/// guide sites because intersections require at least two directions.
-fn draft_grid_recipe(
-    requested_count: usize,
-    intersections: bool,
-) -> Option<toniator_domain::PatternDefinitionRecipe> {
-    let count = requested_count.clamp(1, 4);
-    let mut recipe = PresetRegistry::bundled().reconstruct("straight-grid-circles")?;
-    let toniator_domain::PatternDefinitionRecipe::GeneralizedStraightGuides {
-        dimensions,
-        product,
-        ..
-    } = &mut recipe
-    else {
-        return None;
-    };
-    let defaults = [0.0, 90.0, 45.0, 135.0];
-    *dimensions = (0..count)
-        .map(|index| GuideDimensionDraft {
-            baseline_angle_degrees: defaults[index],
-            phase: 0.0,
-            spacing_multiplier: 1.0,
-        })
-        .collect();
-    *product = if intersections && count >= 2 {
-        GeneralizedSiteProductDraft::Intersections {
-            dimension_indices: (0..count).collect(),
-            merge_epsilon: 1e-9,
-        }
-    } else {
-        GeneralizedSiteProductDraft::AlongGuides {
-            dimension_indices: (0..count).collect(),
-            interval_multiplier: 1.0,
-            phase: 0.0,
-        }
-    };
-    Some(recipe)
 }
 
 /// Projects a unique artist-facing label for one private draft control.
@@ -2904,10 +4234,10 @@ fn draft_descriptor_label(
         .pattern_editor
         .as_ref()
         .and_then(|surface| {
-            pattern_editor_values(&selected_property_values(
-                surface.draft.borrow().history.document(),
-                selected,
-            ))
+            pattern_editor_values(
+                &selected_property_values(surface.draft.borrow().history.document(), selected),
+                surface.purpose,
+            )
             .iter()
             .filter(|value| {
                 value.descriptor.field == current.descriptor.field
@@ -3600,6 +4930,8 @@ fn submit_draft_preview(state: &Rc<RefCell<AppState>>) {
         };
         draft.preview_submission = Some(ticket.value());
         surface.status.set_label("Previewing draft…");
+        surface.preview_spinner.set_visible(true);
+        surface.preview_spinner.start();
         (
             scheduler,
             request,
@@ -3635,7 +4967,7 @@ fn request_draft_discard(state: &Rc<RefCell<AppState>>) {
         let Some(surface) = app_state.pattern_editor.as_ref() else {
             return;
         };
-        (surface.draft.borrow().is_dirty(), app_state.window.clone())
+        (surface.draft.borrow().is_dirty(), surface.window.clone())
     };
     if !dirty {
         close_pattern_editor(state);
@@ -4200,7 +5532,30 @@ fn remember_inspector_draft(
 fn set_preview_pending(state: &mut AppState) {
     state.preview_target = None;
     state.preview_coordinator.clear_submission();
+    sync_main_preview_pending(state);
     set_page(state, page_while_preview_pending(state.preview.is_some()));
+}
+
+/// Synchronizes the visible main-preview spinner with the coordinator's newest pending ticket only.
+fn sync_main_preview_pending(state: &AppState) {
+    let pending = state.preview_coordinator.submission().is_some();
+    state.preview_spinner.set_visible(pending);
+    if pending {
+        state.preview_spinner.start();
+    } else {
+        state.preview_spinner.stop();
+    }
+}
+
+/// Synchronizes the private editor spinner with its independent newest pending ticket only.
+fn sync_draft_preview_pending(surface: &PatternEditorSurface) {
+    let pending = surface.draft.borrow().preview_submission.is_some();
+    surface.preview_spinner.set_visible(pending);
+    if pending {
+        surface.preview_spinner.start();
+    } else {
+        surface.preview_spinner.stop();
+    }
 }
 
 /// Schedules one main preview submission after the current GTK callback unwinds.
@@ -5546,40 +6901,65 @@ fn handle_preview_completion(
 ) {
     let mut app_state = state.borrow_mut();
     let workspace_generation = app_state.workspace_generation;
+    let ticket = completion.ticket().value();
+    if !accepts_submission(
+        workspace_generation,
+        app_state.preview_coordinator.submission(),
+        ticket,
+    ) {
+        return;
+    }
     let accepted = app_state.workspace.as_ref().map_or(Ok(false), |workspace| {
         app_state
             .scheduler
             .accept_completion(&completion, workspace.history.session())
     });
     match accepted {
-        Ok(true)
-            if app_state
-                .preview_coordinator
-                .accept(workspace_generation, completion.ticket().value()) =>
-        {
-            match completion.result() {
-                Some(result) => match texture_from_surface(result.raster()) {
-                    Ok(texture) => {
-                        app_state.picture.set_paintable(Some(&texture));
-                        app_state.preview = Some(texture);
-                        set_page(&mut app_state, Page::Success);
-                        emit_automation_state(
-                            &mut app_state,
-                            "preview_accepted",
-                            Some(completion.ticket().value()),
-                        );
-                    }
-                    Err(error) => show_error(&mut app_state, error),
-                },
-                None => show_error(
+        Ok(true) => match completion.result() {
+            Some(result) => match texture_from_surface(result.raster()) {
+                Ok(texture) => {
+                    app_state
+                        .preview_coordinator
+                        .accept(workspace_generation, ticket);
+                    sync_main_preview_pending(&app_state);
+                    app_state.picture.set_paintable(Some(&texture));
+                    app_state.preview = Some(texture);
+                    set_page(&mut app_state, Page::Success);
+                    set_inspector_status(&mut app_state, "Preview updated.");
+                    emit_automation_state(&mut app_state, "preview_accepted", Some(ticket));
+                }
+                Err(error) => {
+                    app_state
+                        .preview_coordinator
+                        .fail(workspace_generation, ticket);
+                    sync_main_preview_pending(&app_state);
+                    show_error(&mut app_state, error);
+                }
+            },
+            None => {
+                app_state
+                    .preview_coordinator
+                    .fail(workspace_generation, ticket);
+                sync_main_preview_pending(&app_state);
+                show_error(
                     &mut app_state,
                     "Couldn’t render this pattern. Your last preview is still shown.".to_owned(),
-                ),
+                );
             }
+        },
+        Ok(false) => {
+            app_state
+                .preview_coordinator
+                .fail(workspace_generation, ticket);
+            sync_main_preview_pending(&app_state);
         }
-        Ok(true) => {}
-        Ok(false) => {}
-        Err(error) => show_error(&mut app_state, error.to_string()),
+        Err(error) => {
+            app_state
+                .preview_coordinator
+                .fail(workspace_generation, ticket);
+            sync_main_preview_pending(&app_state);
+            show_error(&mut app_state, error.to_string());
+        }
     }
 }
 
@@ -5593,10 +6973,18 @@ fn handle_draft_preview_completion(
     let Some(surface) = app_state.pattern_editor.as_ref() else {
         return;
     };
-    let draft = surface.draft.borrow_mut();
-    if draft.epoch != epoch || draft.preview_submission != Some(completion.ticket().value()) {
+    let mut draft = surface.draft.borrow_mut();
+    if !accepts_draft_preview_terminal(
+        draft.epoch,
+        draft.preview_submission,
+        epoch,
+        completion.ticket().value(),
+    ) {
         return;
     }
+    draft.preview_submission = None;
+    surface.preview_spinner.stop();
+    surface.preview_spinner.set_visible(false);
     match draft
         .scheduler
         .accept_completion(&completion, draft.history.session())
@@ -5637,8 +7025,14 @@ fn install_workspace(state: &Rc<RefCell<AppState>>, workspace: Workspace) {
         let mut state = state.borrow_mut();
         state.workspace_generation = state.workspace_generation.saturating_add(1);
         state.preview_coordinator.clear_submission();
+        sync_main_preview_pending(&state);
         state.inspector_runtime.reset_for_workspace();
-        let pattern_editor_window = state.pattern_editor.take().map(|surface| surface.window);
+        let pattern_editor_window = state.pattern_editor.take().map(|surface| {
+            surface.draft.borrow_mut().preview_submission = None;
+            surface.preview_spinner.stop();
+            surface.preview_spinner.set_visible(false);
+            surface.window
+        });
         state.workspace = Some(workspace);
         state.model = state
             .workspace
@@ -5710,8 +7104,14 @@ fn clear_workspace(state: &Rc<RefCell<AppState>>) {
         state.generation = state.generation.saturating_add(1);
         state.workspace_generation = state.workspace_generation.saturating_add(1);
         state.preview_coordinator.clear_submission();
+        sync_main_preview_pending(&state);
         state.inspector_runtime.reset_for_workspace();
-        let pattern_editor_window = state.pattern_editor.take().map(|surface| surface.window);
+        let pattern_editor_window = state.pattern_editor.take().map(|surface| {
+            surface.draft.borrow_mut().preview_submission = None;
+            surface.preview_spinner.stop();
+            surface.preview_spinner.set_visible(false);
+            surface.window
+        });
         state.workspace = None;
         state.pending_load = false;
         state.pending_save = false;
@@ -5857,6 +7257,8 @@ fn submit_current_source(
     state
         .preview_coordinator
         .submit(workspace_generation, ticket.value());
+    sync_main_preview_pending(state);
+    set_inspector_status(state, "Preview updating…");
     emit_automation_state(state, "preview_submitted", Some(ticket.value()));
     Ok(())
 }
@@ -6129,6 +7531,127 @@ mod tests {
     use super::*;
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+    /// Builds an app-owned main history whose private drafts use the Pattern Editor publication boundary.
+    fn private_draft_main_history() -> DocumentHistory {
+        let document = Document::new_default_document(
+            CanvasSpec {
+                width: 100.0,
+                height: 80.0,
+            },
+            SourceReference::Unassigned,
+        )
+        .expect("default app document");
+        DocumentHistory::new(DocumentSession::new(document).expect("valid app session"))
+    }
+
+    /// Proves purpose filtering and construction preflight keep ordinary Grid and Mark workflows separate.
+    ///
+    /// This witness uses only immutable domain projections and a private history. It creates no GTK
+    /// widgets, preview submissions, or external files.
+    #[test]
+    fn purpose_filters_and_preflights_keep_default_mark_and_guide_workflows_explicit() {
+        let mut history = private_draft_main_history();
+        let channel = ChannelId(1);
+        assert!(matches!(
+            authored_attachment_target(
+                history.document(),
+                channel,
+                toniator_domain::AuthoredStructureKind::ClosedShape,
+            ),
+            Ok(ConstructionPreflight::Ready(
+                AuthoredStructureAttachment::Mark { .. }
+            ))
+        ));
+        assert!(matches!(
+            authored_attachment_target(
+                history.document(),
+                channel,
+                toniator_domain::AuthoredStructureKind::OpenPath,
+            ),
+            Ok(ConstructionPreflight::ConfirmCustomAlongGuideLayout)
+        ));
+        let base_definition = history
+            .document()
+            .pattern_definition_for(channel)
+            .expect("default definition")
+            .clone();
+        let generic = toniator_domain::PatternDefinition::generalized_guides(
+            PatternDefinitionId(2),
+            "private generic guide",
+            PatternMechanismId(3),
+            PatternMechanismId(4),
+            PatternOutputLayerId(2),
+            vec![toniator_domain::GuideDimension {
+                id: toniator_domain::GuideDimensionId(1),
+                baseline_angle_degrees: 0.0,
+                phase: 0.0,
+                prototype: toniator_domain::GuidePrototype::CircularArc {
+                    center: toniator_domain::AuthoredPoint2 { x: 0.0, y: 0.0 },
+                    radius: 10.0,
+                    start_angle_degrees: 0.0,
+                    sweep_angle_degrees: 90.0,
+                },
+                repetition: toniator_domain::GuideRepetition::Single,
+            }],
+            toniator_domain::GeneralizedSiteProduct::AlongGuides {
+                dimensions: vec![toniator_domain::GuideDimensionId(1)],
+                interval_multiplier: 1.0,
+                phase: 0.0,
+            },
+            toniator_domain::MarkOrientation::Fixed,
+            base_definition.coverage.clone(),
+        );
+        history
+            .apply(&DocumentCommand::ReplaceSelectedChannelDefinitionTopology {
+                channel_id: channel,
+                base_definition,
+                definition: generic,
+            })
+            .expect("private generic guide setup");
+        assert!(matches!(
+            authored_attachment_target(
+                history.document(),
+                channel,
+                toniator_domain::AuthoredStructureKind::OpenPath,
+            ),
+            Ok(ConstructionPreflight::Ready(
+                AuthoredStructureAttachment::Guide { .. }
+            ))
+        ));
+        assert!(descriptor_belongs_to_editor(
+            &PropertyFieldId::GuidePrototype,
+            PatternEditorPurpose::Grid
+        ));
+        assert!(!descriptor_belongs_to_editor(
+            &PropertyFieldId::GuidePrototype,
+            PatternEditorPurpose::Mark
+        ));
+        assert!(descriptor_belongs_to_editor(
+            &PropertyFieldId::OutputPrototype,
+            PatternEditorPurpose::Mark
+        ));
+        assert!(!descriptor_belongs_to_editor(
+            &PropertyFieldId::OutputPrototype,
+            PatternEditorPurpose::Grid
+        ));
+    }
+
+    /// Proves the editor uses a vertical construction layout before a narrow modal can collapse its canvas.
+    ///
+    /// This pure policy witness creates no GTK allocation, history, preview, or external state.
+    #[test]
+    fn narrow_editor_layout_stacks_before_the_canvas_becomes_a_sliver() {
+        assert!(uses_narrow_editor_layout(620));
+        assert!(uses_narrow_editor_layout(700));
+        assert!(!uses_narrow_editor_layout(701));
+        assert!(!uses_narrow_editor_layout(980));
+        assert!(requested_construction_width_allows_narrow_breakpoint());
+        assert!(CONSTRUCTION_CANVAS_GESTURE_HINT.contains("Scroll to zoom"));
+        assert!(CONSTRUCTION_CANVAS_GESTURE_HINT.contains("middle-button drag pans"));
+        assert!(CONSTRUCTION_CANVAS_GESTURE_HINT.contains("Enter completes"));
+        assert!(CONSTRUCTION_CANVAS_GESTURE_HINT.contains("Escape cancels"));
+    }
+
     fn asset(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../assets")
@@ -6270,82 +7793,6 @@ mod tests {
             .expect("private test scheduler shuts down");
     }
 
-    /// Builds private grid recipes with the requested one-to-four directions.
-    ///
-    /// This test proves the editor's count control stays recipe/command based
-    /// and never requires GTK geometry or renderer authority.
-    #[test]
-    fn private_grid_recipe_supports_one_to_four_directions_and_site_modes() {
-        for count in 1..=4 {
-            let recipe = draft_grid_recipe(count, true).expect("bundled grid exists");
-            let toniator_domain::PatternDefinitionRecipe::GeneralizedStraightGuides {
-                dimensions,
-                product,
-                ..
-            } = recipe
-            else {
-                panic!("bundled grid remains generalized straight guides");
-            };
-            assert_eq!(dimensions.len(), count);
-            match product {
-                GeneralizedSiteProductDraft::AlongGuides { .. } => assert_eq!(count, 1),
-                GeneralizedSiteProductDraft::Intersections { .. } => assert!(count >= 2),
-            }
-        }
-        let recipe = draft_grid_recipe(4, false).expect("bundled grid exists");
-        let toniator_domain::PatternDefinitionRecipe::GeneralizedStraightGuides { product, .. } =
-            recipe
-        else {
-            panic!("bundled grid remains generalized straight guides");
-        };
-        assert!(matches!(
-            product,
-            GeneralizedSiteProductDraft::AlongGuides { .. }
-        ));
-        let mut workspace = load_workspace(&asset("raster-sample-v1.toniator"))
-            .expect("frozen raster fixture opens for descriptor projection");
-        let selected = authoritative_channel_ids(workspace.document())[0];
-        PresetRegistry::bundled()
-            .apply_to_selected(&mut workspace.history, selected, "straight-grid-circles")
-            .expect("bundled grid projects through selected-copy history");
-        let values =
-            pattern_editor_values(&selected_property_values(workspace.document(), selected));
-        assert_eq!(draft_grid_topology(&values), Some((2, true)));
-    }
-
-    /// Applies a rebuilt three-direction recipe through private-history command authority.
-    ///
-    /// This regression test proves the visible count control has a valid
-    /// command target rather than merely constructing an unused recipe. It
-    /// mutates only its local test history and has no GTK, scheduler, or file
-    /// side effects.
-    #[test]
-    fn private_grid_recipe_replaces_the_selected_draft_with_three_directions() {
-        let mut workspace = load_workspace(&asset("raster-sample-v1.toniator"))
-            .expect("frozen raster fixture opens for private draft authority");
-        let selected = authoritative_channel_ids(workspace.document())[0];
-        PresetRegistry::bundled()
-            .apply_to_selected(&mut workspace.history, selected, "straight-grid-circles")
-            .expect("bundled grid prepares the selected local draft");
-        let base_definition = workspace
-            .document()
-            .pattern_definition_for(selected)
-            .cloned()
-            .expect("selected local draft exposes its base definition");
-        workspace
-            .history
-            .apply(&DocumentCommand::ReplaceSelectedChannelDefinitionRecipe {
-                channel_id: selected,
-                base_definition,
-                recipe: draft_grid_recipe(3, true).expect("bundled grid recipe exists"),
-            })
-            .expect("three directions are valid through private command authority");
-        assert!(workspace.history.can_undo());
-        let values =
-            pattern_editor_values(&selected_property_values(workspace.document(), selected));
-        assert_eq!(draft_grid_topology(&values), Some((3, true)));
-    }
-
     /// Applies Grid, Random, then Grid through one isolated draft history.
     ///
     /// The test proves family switches advance only the cloned history and
@@ -6371,6 +7818,231 @@ mod tests {
         assert_eq!(workspace.history.revision(), main_revision);
         assert_eq!(draft.revision().0, main_revision.0 + 3);
         assert!(draft.document().pattern_definition_for(selected).is_some());
+    }
+
+    /// Proves applying a private draft squashes once, clears main redo, and undoes exactly to its base.
+    #[test]
+    fn pattern_editor_apply_boundary_squashes_as_one_main_undo_step() {
+        let mut main = private_draft_main_history();
+        main.apply(&DocumentCommand::SetVisibility {
+            channel_id: ChannelId(1),
+            visible: false,
+        })
+        .expect("main edit creates redo witness");
+        main.undo().expect("main undo creates redo branch");
+        let base = main.document().clone();
+        let mut draft = DocumentHistory::new_draft(&main);
+        draft
+            .apply(&DocumentCommand::SetVisibility {
+                channel_id: ChannelId(1),
+                visible: false,
+            })
+            .expect("private mutation");
+        let final_document = draft.document().clone();
+        assert!(!main.squash_draft(&draft).expect("apply squash").unchanged);
+        assert_eq!(main.document(), &final_document);
+        assert!(main.can_undo());
+        assert!(!main.can_redo());
+        main.undo().expect("one main undo");
+        assert_eq!(main.document(), &base);
+        assert!(!main.can_undo());
+    }
+
+    /// Proves stale Apply rejects without changing either the app-owned main history or private draft.
+    #[test]
+    fn pattern_editor_apply_boundary_preserves_stale_main_and_draft_histories() {
+        let mut main = private_draft_main_history();
+        let mut draft = DocumentHistory::new_draft(&main);
+        draft
+            .apply(&DocumentCommand::SetVisibility {
+                channel_id: ChannelId(1),
+                visible: false,
+            })
+            .expect("private mutation");
+        let draft_document = draft.document().clone();
+        let draft_revision = draft.revision();
+        main.apply(&DocumentCommand::SetOpacity {
+            channel_id: ChannelId(1),
+            opacity: 0.5,
+        })
+        .expect("main change stales draft root");
+        let main_document = main.document().clone();
+        let main_revision = main.revision();
+        assert!(main.squash_draft(&draft).is_err());
+        assert_eq!(main.document(), &main_document);
+        assert_eq!(main.revision(), main_revision);
+        assert_eq!(draft.document(), &draft_document);
+        assert_eq!(draft.revision(), draft_revision);
+    }
+
+    /// Proves Cancel/drop discards a dirty private draft without touching app-owned main authority.
+    #[test]
+    fn pattern_editor_cancel_boundary_discards_dirty_draft_without_main_mutation() {
+        let main = private_draft_main_history();
+        let main_document = main.document().clone();
+        let main_revision = main.revision();
+        let main_can_undo = main.can_undo();
+        {
+            let mut draft = DocumentHistory::new_draft(&main);
+            draft
+                .apply(&DocumentCommand::SetVisibility {
+                    channel_id: ChannelId(1),
+                    visible: false,
+                })
+                .expect("private mutation");
+            assert_ne!(draft.document(), &main_document);
+        }
+        assert_eq!(main.document(), &main_document);
+        assert_eq!(main.revision(), main_revision);
+        assert_eq!(main.can_undo(), main_can_undo);
+    }
+
+    /// Proves a changed numeric anchor reaches the private replacement command as one history entry.
+    ///
+    /// This app boundary witnesses the same `commit_selected_numeric` payload and
+    /// `ReplaceAuthoredStructure` authority used by GTK without creating widgets, previews, or
+    /// external files. Equal values remain excluded by the widget-independent numeric helper.
+    #[test]
+    fn pattern_editor_numeric_anchor_commit_replaces_the_private_authored_resource_once() {
+        let path = toniator_geometry::CurvePath::new(
+            vec![
+                toniator_geometry::CurveSegment::CubicBezier(
+                    toniator_geometry::CubicBezierSegment::new(
+                        toniator_geometry::Point2::new(120.0, 110.0),
+                        toniator_geometry::Point2::new(180.0, 100.0),
+                        toniator_geometry::Point2::new(250.0, 140.0),
+                        toniator_geometry::Point2::new(306.0, 154.0),
+                    )
+                    .expect("finite first cubic"),
+                ),
+                toniator_geometry::CurveSegment::Line(
+                    toniator_geometry::LineSegment::new(
+                        toniator_geometry::Point2::new(306.0, 154.0),
+                        toniator_geometry::Point2::new(486.0, 150.0),
+                    )
+                    .expect("finite second line"),
+                ),
+            ],
+            toniator_geometry::PathClosure::Open,
+        )
+        .expect("connected numeric test path");
+        let mut draft = private_draft_main_history();
+        let created = draft
+            .apply(&DocumentCommand::AddAuthoredStructure {
+                draft: path
+                    .to_authored_structure_draft()
+                    .expect("path converts to an authored resource"),
+            })
+            .expect("private resource add")
+            .created_authored_structure_id
+            .expect("private add allocates the exact resource");
+        let base = draft
+            .document()
+            .authored_structure(created)
+            .expect("added private resource")
+            .clone();
+        let current = toniator_geometry::CurvePath::from_authored_structure(&base)
+            .expect("private resource remains editable");
+        let editor = stage20f_editor::Stage20fEditorState::default();
+        assert!(
+            editor
+                .commit_numeric(
+                    &current,
+                    stage20f_editor::NumericTarget::Anchor(1),
+                    "306",
+                    "154",
+                )
+                .is_none()
+        );
+        let replacement = editor
+            .commit_numeric(
+                &current,
+                stage20f_editor::NumericTarget::Anchor(1),
+                "320",
+                "154",
+            )
+            .expect("changed anchor produces a replacement payload");
+        draft
+            .apply(&DocumentCommand::ReplaceAuthoredStructure {
+                base_structure: base,
+                replacement,
+            })
+            .expect("changed numeric payload replaces the authored resource");
+        assert!(draft.can_undo());
+        assert_eq!(
+            toniator_geometry::CurvePath::from_authored_structure(
+                draft
+                    .document()
+                    .authored_structure(created)
+                    .expect("replacement retains the exact resource ID"),
+            )
+            .expect("replacement remains editable")
+            .segments()[0]
+                .end(),
+            toniator_geometry::Point2::new(320.0, 154.0)
+        );
+    }
+
+    /// Proves duplicate activation/focus callbacks cannot defer or repeat one numeric history command.
+    #[test]
+    fn pattern_editor_numeric_callback_gate_is_synchronous_and_reentrancy_safe() {
+        let active = Cell::new(false);
+        assert!(accepts_numeric_commit_callback(&active));
+        assert!(!accepts_numeric_commit_callback(&active));
+        active.set(false);
+        assert!(accepts_numeric_commit_callback(&active));
+    }
+
+    /// Proves a zero-motion target drag cannot reach private replacement history while a moved drag does.
+    ///
+    /// This app boundary mirrors the canvas release route without GTK input: the first press/release
+    /// is a pure selection click, then the moved release applies one `ReplaceAuthoredStructure` and
+    /// one undo restores the exact pre-drag resource document.
+    #[test]
+    fn pattern_editor_drag_release_skips_zero_motion_and_commits_one_moved_replacement() {
+        let path = toniator_geometry::CurvePath::line(
+            toniator_geometry::Point2::new(10.0, 20.0),
+            toniator_geometry::Point2::new(40.0, 20.0),
+        )
+        .expect("finite drag test path");
+        let mut draft = private_draft_main_history();
+        let created = draft
+            .apply(&DocumentCommand::AddAuthoredStructure {
+                draft: path
+                    .to_authored_structure_draft()
+                    .expect("path converts to an authored resource"),
+            })
+            .expect("private resource add")
+            .created_authored_structure_id
+            .expect("private add allocates the exact resource");
+        let base_document = draft.document().clone();
+        let base = draft
+            .document()
+            .authored_structure(created)
+            .expect("added private resource")
+            .clone();
+        let current = toniator_geometry::CurvePath::from_authored_structure(&base)
+            .expect("private resource remains editable");
+        let mut editor = stage20f_editor::Stage20fEditorState::default();
+        editor.begin_target_drag(current.clone(), stage20f_editor::NumericTarget::Anchor(0));
+        assert!(
+            editor
+                .end_drag(toniator_geometry::Point2::new(10.0, 20.0))
+                .is_none()
+        );
+        assert_eq!(draft.document(), &base_document);
+        editor.begin_target_drag(current, stage20f_editor::NumericTarget::Anchor(0));
+        let replacement = editor
+            .end_drag(toniator_geometry::Point2::new(12.0, 24.0))
+            .expect("moved target yields one replacement payload");
+        draft
+            .apply(&DocumentCommand::ReplaceAuthoredStructure {
+                base_structure: base,
+                replacement,
+            })
+            .expect("moved target replaces the private resource");
+        draft.undo().expect("one moved-drag undo");
+        assert_eq!(draft.document(), &base_document);
     }
 
     /// Finalizes every private compound selector through draft history and previews.
@@ -6841,6 +8513,15 @@ mod tests {
         assert!(!accepts_preview_submission(42, Some(old), 7));
         assert!(!accepts_preview_submission(42, None, 7));
         assert!(!accepts_preview_submission(41, Some(old), 8));
+    }
+
+    /// Proves private pending state clears only for the current epoch and newest ticket.
+    #[test]
+    fn draft_preview_terminal_gate_rejects_stale_epoch_and_ticket() {
+        assert!(accepts_draft_preview_terminal(9, Some(14), 9, 14));
+        assert!(!accepts_draft_preview_terminal(9, Some(14), 8, 14));
+        assert!(!accepts_draft_preview_terminal(9, Some(14), 9, 13));
+        assert!(!accepts_draft_preview_terminal(9, None, 9, 14));
     }
 
     #[test]
