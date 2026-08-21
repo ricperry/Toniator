@@ -427,14 +427,16 @@ accepted implementation are documented in
 `docs/STAGE_20G_EFFECTIVE_PATTERN_AUTHORITY_PLAN.md`. The user explicitly
 accepted Stage 20G on 2026-08-21; publication remains separate.
 
-**Stage 20H — Implemented awaiting review.** The approved bounded capability-projection
+**Stage 20H — Complete at commit
+`4b1cc08819eee36c2009e2abf5543dcaefe29929`.** The approved bounded capability-projection
 contract is recorded in
 [`STAGE_20H_CAPABILITY_PROJECTION_PLAN.md`](docs/STAGE_20H_CAPABILITY_PROJECTION_PLAN.md).
 It adds only a domain-owned, typed, read-only projection of the document base
 or effective channel recipe. It preserves Stage 20G effective authority and
 does not alter persistence, commands, invalidation, cache identity, CLI, GTK,
-or canonical evaluation. Focused domain, patterns, and engine witnesses pass;
-parent review remains required before acceptance or any checkpoint.
+or canonical evaluation. Focused domain, patterns, and engine witnesses pass,
+and the independent implementation review passed. The user explicitly
+accepted Stage 20H on 2026-08-21; publication remains separate.
 
 **Remaining Stage 20I+ — Planned.** The approved remaining order is 20I
 canonical paths/strokes; 20J path

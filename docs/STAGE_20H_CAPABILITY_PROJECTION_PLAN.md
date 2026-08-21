@@ -1,6 +1,7 @@
 # Stage 20H — Capability Projection Foundation
 
-Status: **Implemented awaiting review** (2026-08-21). This execution contract is subordinate to
+Status: **Complete at commit `4b1cc08819eee36c2009e2abf5543dcaefe29929`** (user accepted
+2026-08-21; publication remains separate). This execution contract is subordinate to
 the protected normative specification, the greenfield roadmap, and the Stage
 20G effective-pattern authority contract.
 
@@ -70,6 +71,8 @@ channel definitions resolve independently.
 
 Run focused current tests, affected-package format/check/strict Clippy,
 architecture validation, `git diff --check`, protected-path and immutable
-asset checks, and semantic-map's read-only worktree review. Record evidence
-and stop at **Implemented awaiting review**. No acceptance, checkpoint,
-publication, GTK work, schema/fixture port, or Stage 20I+ work is authorized.
+asset checks, and semantic-map's read-only worktree review. The reviewed
+implementation checkpoint is `4b1cc08819eee36c2009e2abf5543dcaefe29929` and
+the user accepted Stage 20H on 2026-08-21. Publication remains separate;
+Stage 20I+ remains separately gated. No GTK work, schema/fixture port, or
+Stage 20I+ implementation is authorized by this contract.

@@ -1851,14 +1851,16 @@ moves shared settings to a document base, retains only channel replacements and
 additive deltas, and uses current-only schema-v4 persistence. The user explicitly
 accepted Stage 20G on 2026-08-21; it does not authorize Stage 20H or later work.
 
-**Stage 20H — Implemented awaiting review.**
+**Stage 20H — Complete at commit
+`4b1cc08819eee36c2009e2abf5543dcaefe29929`.**
 [`STAGE_20H_CAPABILITY_PROJECTION_PLAN.md`](STAGE_20H_CAPABILITY_PROJECTION_PLAN.md)
 defines the bounded headless capability-projection implementation. It derives
 read-only typed structural facts from the document base or a Stage 20G
 effective channel definition, without introducing a second evaluator,
 serialization, invalidation, cache identity, CLI, or GTK authority.
-Focused domain/patterns/engine witnesses and bounded static checks pass;
-parent review remains the next gate.
+Focused domain/patterns/engine witnesses and bounded static checks pass, and
+the independent implementation review passed. The user explicitly accepted
+Stage 20H on 2026-08-21; publication remains separate.
 
 **Later Stage 20I+ — Planned.**
 [`STAGE_20_PLUS_DECOMPOSITION.md`](STAGE_20_PLUS_DECOMPOSITION.md) provides the
