@@ -133,7 +133,9 @@ fn effective_pattern_composes_typed_channel_deltas() {
     assert_eq!(effective.density.across_y, 16.0);
     assert_eq!(effective.pattern_rotation_degrees, 33.0);
     assert_eq!(effective.shape_rotation_degrees, -12.0);
-    let PatternGeometryResponse::Marks(response) = effective.geometry_response;
+    let PatternGeometryResponse::Marks(response) = effective.geometry_response else {
+        panic!("mark fixture resolves the marks branch");
+    };
     assert_eq!(response.minimum_fill, 0.25);
     assert_eq!(response.maximum_fill, 1.5);
 }
@@ -193,7 +195,10 @@ fn reset_response_removes_intent_and_later_base_change_flows_through() {
     let PatternGeometryResponse::Marks(response) = document
         .effective_channel_pattern(ChannelId(1))
         .expect("effective response")
-        .geometry_response;
+        .geometry_response
+    else {
+        panic!("mark fixture resolves the marks branch");
+    };
     assert_eq!(response.minimum_fill, 0.2);
 }
 
@@ -599,7 +604,10 @@ fn direct_partial_mark_delta_composes_and_resets_atomically() {
     let PatternGeometryResponse::Marks(response) = document
         .effective_channel_pattern(ChannelId(3))
         .expect("partial response resolves")
-        .geometry_response;
+        .geometry_response
+    else {
+        panic!("mark fixture resolves the marks branch");
+    };
     assert_eq!(response.minimum_fill, 0.25);
     assert_eq!(response.maximum_fill, 1.0);
     let reset = DocumentCommand::ResetChannelGeometryResponseDelta {

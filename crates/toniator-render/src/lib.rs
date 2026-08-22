@@ -11,7 +11,7 @@ use std::{collections::HashSet, error::Error, fmt};
 use image::{ColorType, ImageEncoder, codecs::png::PngEncoder};
 use toniator_domain::{CanvasSpec, ChannelId, ColorValue, HalftoneChannelModel};
 use toniator_geometry::{
-    CanonicalCircleMark, CanonicalFillRule, CanonicalMark, CurveSegment, Point2,
+    CanonicalCircleMark, CanonicalFillRule, CanonicalMark, CanonicalStroke, CurveSegment, Point2,
 };
 
 const SUBPIXEL_GRID: u32 = 8;
@@ -94,6 +94,7 @@ pub struct RenderLayer {
 pub enum GeometryOutput {
     CircularMarks(Vec<CanonicalCircleMark>),
     CanonicalMarks(Vec<CanonicalMark>),
+    CanonicalStrokes(Vec<CanonicalStroke>),
 }
 
 /// Renderer-owned immutable source-colored circle. Stage 9D may adapt the
@@ -264,6 +265,7 @@ impl RenderScene {
             .map(|layer| match &layer.geometry {
                 GeometryOutput::CircularMarks(marks) => marks.len(),
                 GeometryOutput::CanonicalMarks(marks) => marks.len(),
+                GeometryOutput::CanonicalStrokes(strokes) => strokes.len(),
             })
             .sum()
     }
@@ -468,11 +470,47 @@ fn validate_layer(layer: &RenderLayer) -> Result<(), RenderError> {
                 ));
             }
         }
+        GeometryOutput::CanonicalStrokes(strokes) => {
+            if strokes.iter().any(|stroke| {
+                !stroke.nominal_basis.is_finite()
+                    || stroke.nominal_basis <= 0.0
+                    || stroke.path.bounds().is_err()
+                    || stroke
+                        .outline
+                        .bounds
+                        .is_some_and(|bounds| !bounds.min.is_finite() || !bounds.max.is_finite())
+                    || stroke.profile.iter().any(|sample| {
+                        !sample.center.is_finite()
+                            || !sample.width.is_finite()
+                            || sample.width < 0.0
+                            || !sample.normalized_thickness.is_finite()
+                            || !(0.0..=2.0).contains(&sample.normalized_thickness)
+                    })
+                    || stroke.outline.fill_rule != CanonicalFillRule::NonZero
+                    || stroke
+                        .outline
+                        .contours
+                        .iter()
+                        .any(|contour| contour.segments.is_empty())
+            }) {
+                return Err(RenderError::new(
+                    "scene.layer.geometry",
+                    "canonical stroke geometry must be finite",
+                ));
+            }
+        }
     }
     if let Some(paints) = &layer.mark_paints {
+        if matches!(layer.geometry, GeometryOutput::CanonicalStrokes(_)) {
+            return Err(RenderError::new(
+                "scene.layer.source_color",
+                "guide-path strokes require solid channel paint",
+            ));
+        }
         let marks = match &layer.geometry {
             GeometryOutput::CircularMarks(marks) => marks.len(),
             GeometryOutput::CanonicalMarks(marks) => marks.len(),
+            GeometryOutput::CanonicalStrokes(strokes) => strokes.len(),
         };
         if paints.len() != marks {
             return Err(RenderError::new(
@@ -654,6 +692,92 @@ fn scene_fingerprint(
                     }
                 }
             }
+            GeometryOutput::CanonicalStrokes(strokes) => {
+                add_scene_bytes(&mut hash, [3]);
+                add_scene_bytes(&mut hash, (strokes.len() as u64).to_le_bytes());
+                for stroke in strokes {
+                    add_scene_bytes(&mut hash, stroke.source_guide_id.dimension_id.to_le_bytes());
+                    add_scene_bytes(&mut hash, stroke.source_guide_id.index.to_le_bytes());
+                    add_scene_bytes(
+                        &mut hash,
+                        stroke
+                            .source_structure_id
+                            .map_or(0, |id| id.0)
+                            .to_le_bytes(),
+                    );
+                    add_scene_bytes(&mut hash, stroke.nominal_basis.to_bits().to_le_bytes());
+                    add_scene_bytes(
+                        &mut hash,
+                        [
+                            match stroke.style.join {
+                                toniator_domain::StrokeJoin::Round => 1,
+                            },
+                            match stroke.style.cap {
+                                toniator_domain::StrokeCap::Round => 1,
+                            },
+                        ],
+                    );
+                    add_scene_bytes(
+                        &mut hash,
+                        [match stroke.path.closure() {
+                            toniator_geometry::PathClosure::Open => 1,
+                            toniator_geometry::PathClosure::Closed => 2,
+                        }],
+                    );
+                    add_scene_bytes(
+                        &mut hash,
+                        (stroke.path.segments().len() as u64).to_le_bytes(),
+                    );
+                    for segment in stroke.path.segments() {
+                        match segment {
+                            CurveSegment::Line(line) => {
+                                add_scene_bytes(&mut hash, [1]);
+                                for point in [line.start(), line.end()] {
+                                    add_scene_bytes(&mut hash, point.x.to_bits().to_le_bytes());
+                                    add_scene_bytes(&mut hash, point.y.to_bits().to_le_bytes());
+                                }
+                            }
+                            CurveSegment::CubicBezier(cubic) => {
+                                add_scene_bytes(&mut hash, [2]);
+                                for point in [
+                                    cubic.start(),
+                                    cubic.control_1(),
+                                    cubic.control_2(),
+                                    cubic.end(),
+                                ] {
+                                    add_scene_bytes(&mut hash, point.x.to_bits().to_le_bytes());
+                                    add_scene_bytes(&mut hash, point.y.to_bits().to_le_bytes());
+                                }
+                            }
+                        }
+                    }
+                    for sample in &stroke.profile {
+                        add_scene_bytes(&mut hash, sample.center.x.to_bits().to_le_bytes());
+                        add_scene_bytes(&mut hash, sample.center.y.to_bits().to_le_bytes());
+                        add_scene_bytes(&mut hash, sample.location.segment_index().to_le_bytes());
+                        add_scene_bytes(
+                            &mut hash,
+                            sample.location.parameter().to_bits().to_le_bytes(),
+                        );
+                        add_scene_bytes(
+                            &mut hash,
+                            sample.normalized_thickness.to_bits().to_le_bytes(),
+                        );
+                        add_scene_bytes(&mut hash, sample.width.to_bits().to_le_bytes());
+                    }
+                    append_scene_fill_rule(&mut hash, stroke.outline.fill_rule);
+                    add_scene_bytes(
+                        &mut hash,
+                        (stroke.outline.contours.len() as u64).to_le_bytes(),
+                    );
+                    for contour in &stroke.outline.contours {
+                        add_scene_bytes(&mut hash, (contour.segments.len() as u64).to_le_bytes());
+                        for segment in &contour.segments {
+                            append_scene_outline_segment(&mut hash, segment);
+                        }
+                    }
+                }
+            }
         }
         if model.is_some() {
             if let Some(paints) = &layer.mark_paints {
@@ -828,8 +952,34 @@ fn append_scene_fill_rule(hash: &mut u64, fill_rule: CanonicalFillRule) {
         hash,
         [match fill_rule {
             CanonicalFillRule::EvenOdd => 1,
+            CanonicalFillRule::NonZero => 2,
         }],
     );
+}
+
+/// Appends one derived outline segment in a stable scene-identity representation.
+fn append_scene_outline_segment(hash: &mut u64, segment: &CurveSegment) {
+    match segment {
+        CurveSegment::Line(line) => {
+            add_scene_bytes(hash, [1]);
+            for point in [line.start(), line.end()] {
+                add_scene_bytes(hash, point.x.to_bits().to_le_bytes());
+                add_scene_bytes(hash, point.y.to_bits().to_le_bytes());
+            }
+        }
+        CurveSegment::CubicBezier(cubic) => {
+            add_scene_bytes(hash, [2]);
+            for point in [
+                cubic.start(),
+                cubic.control_1(),
+                cubic.control_2(),
+                cubic.end(),
+            ] {
+                add_scene_bytes(hash, point.x.to_bits().to_le_bytes());
+                add_scene_bytes(hash, point.y.to_bits().to_le_bytes());
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1266,6 +1416,20 @@ fn rasterize_stage5(
                     )?;
                 }
             }
+            GeometryOutput::CanonicalStrokes(strokes) => {
+                for stroke in strokes {
+                    composite_canonical_stroke(
+                        &mut linear_pixels,
+                        width,
+                        height,
+                        stroke,
+                        &layer.color,
+                        layer.opacity,
+                        CanonicalRasterTransform::native(),
+                        work,
+                    )?;
+                }
+            }
         }
     }
     pixels_from_linear(width, height, linear_pixels)
@@ -1346,6 +1510,20 @@ fn rasterize_layer(
                 )?;
             }
         }
+        GeometryOutput::CanonicalStrokes(strokes) => {
+            for stroke in strokes {
+                composite_canonical_stroke(
+                    &mut pixels,
+                    width,
+                    height,
+                    stroke,
+                    &layer.color,
+                    layer.opacity,
+                    CanonicalRasterTransform::native(),
+                    work,
+                )?;
+            }
+        }
     }
     Ok(pixels)
 }
@@ -1390,6 +1568,20 @@ fn rasterize_layer_with_transform(
                     height,
                     mark,
                     layer.mark_paint(index),
+                    layer.opacity,
+                    CanonicalRasterTransform::preview(transform),
+                    work,
+                )?;
+            }
+        }
+        GeometryOutput::CanonicalStrokes(strokes) => {
+            for stroke in strokes {
+                composite_canonical_stroke(
+                    &mut pixels,
+                    width,
+                    height,
+                    stroke,
+                    &layer.color,
                     layer.opacity,
                     CanonicalRasterTransform::preview(transform),
                     work,
@@ -1510,6 +1702,20 @@ fn rasterize_layer_for_output(
                     target.height,
                     mark,
                     layer.mark_paint(index),
+                    layer.opacity,
+                    CanonicalRasterTransform::output(transform),
+                    work,
+                )?;
+            }
+        }
+        GeometryOutput::CanonicalStrokes(strokes) => {
+            for stroke in strokes {
+                composite_canonical_stroke(
+                    &mut pixels,
+                    target.width,
+                    target.height,
+                    stroke,
+                    &layer.color,
                     layer.opacity,
                     CanonicalRasterTransform::output(transform),
                     work,
@@ -1759,6 +1965,74 @@ fn composite_canonical_mark(
     }
 }
 
+/// Composites one canonical stroke once per pixel from its nonzero filled outline.
+///
+/// # Errors
+///
+/// Returns cancellation or finite raster bounds errors without changing the
+/// canonical centerline or splitting it at the canvas boundary.
+#[allow(clippy::too_many_arguments)]
+fn composite_canonical_stroke(
+    pixels: &mut [PremultipliedLinearPixel],
+    width: u32,
+    height: u32,
+    stroke: &CanonicalStroke,
+    color: &ColorValue,
+    opacity: f64,
+    transform: CanonicalRasterTransform,
+    work: &mut RasterWork<'_>,
+) -> Result<(), RenderError> {
+    let Some(bounds) = stroke.outline.bounds else {
+        return Ok(());
+    };
+    let min = transform.point(bounds.min);
+    let max = transform.point(bounds.max);
+    let min_x = (min.x - 1.0).floor().max(0.0) as u32;
+    let min_y = (min.y - 1.0).floor().max(0.0) as u32;
+    let max_x = (max.x + 1.0).ceil().min(f64::from(width)) as u32;
+    let max_y = (max.y + 1.0).ceil().min(f64::from(height)) as u32;
+    let edges = flattened_outline_edges(&stroke.outline, transform, work)?;
+    if edges.is_empty() {
+        return Ok(());
+    }
+    for y in min_y..max_y {
+        work.check()?;
+        for x in min_x..max_x {
+            let mut covered = 0_u32;
+            let samples = if matches!(work.antialiasing, RasterAntialiasing::On) {
+                SUBPIXEL_GRID
+            } else {
+                1
+            };
+            for sy in 0..samples {
+                for sx in 0..samples {
+                    let point = Point2::new(
+                        f64::from(x) + (f64::from(sx) + 0.5) / f64::from(samples),
+                        f64::from(y) + (f64::from(sy) + 0.5) / f64::from(samples),
+                    );
+                    if point_in_nonzero_outline(&edges, point) {
+                        covered += 1;
+                    }
+                }
+            }
+            let coverage = f64::from(covered) / f64::from(samples * samples);
+            if coverage > 0.0 {
+                let source = PremultipliedLinearPixel {
+                    red: color.red * color.alpha * opacity * coverage,
+                    green: color.green * color.alpha * opacity * coverage,
+                    blue: color.blue * color.alpha * opacity * coverage,
+                    alpha: color.alpha * opacity * coverage,
+                };
+                source_over(
+                    &mut pixels[y as usize * width as usize + x as usize],
+                    source,
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Flattens stored line and cubic geometry in authored order under the caller's checked edge bound.
 ///
 /// # Errors
@@ -1795,6 +2069,71 @@ fn flattened_path_edges(
         }
     }
     Ok(points.windows(2).map(|pair| (pair[0], pair[1])).collect())
+}
+
+/// Flattens every independent canonical outline contour under the shared raster edge budget.
+///
+/// # Errors
+///
+/// Returns cancellation, numeric subdivision, or edge-limit diagnostics without changing
+/// canonical outline topology or applying consumer clipping before raster sampling.
+fn flattened_outline_edges(
+    outline: &toniator_geometry::CanonicalFilledOutline,
+    transform: CanonicalRasterTransform,
+    work: &mut RasterWork<'_>,
+) -> Result<Vec<(Point2, Point2)>, RenderError> {
+    let mut edges = Vec::new();
+    for contour in &outline.contours {
+        work.check()?;
+        let mut points = Vec::new();
+        for segment in &contour.segments {
+            match segment {
+                CurveSegment::Line(line) => {
+                    if points.is_empty() {
+                        points.push(transform.point(line.start()));
+                    }
+                    push_flattened_point(&mut points, transform.point(line.end()), work)?;
+                }
+                CurveSegment::CubicBezier(cubic) => {
+                    if points.is_empty() {
+                        points.push(transform.point(cubic.start()));
+                    }
+                    flatten_cubic(
+                        transform.point(cubic.start()),
+                        transform.point(cubic.control_1()),
+                        transform.point(cubic.control_2()),
+                        transform.point(cubic.end()),
+                        0,
+                        &mut points,
+                        work,
+                    )?;
+                }
+            }
+        }
+        edges.extend(points.windows(2).map(|pair| (pair[0], pair[1])));
+    }
+    Ok(edges)
+}
+
+/// Tests nonzero winding coverage across every ordered outline contour.
+fn point_in_nonzero_outline(edges: &[(Point2, Point2)], point: Point2) -> bool {
+    let mut winding = 0_i32;
+    for (start, end) in edges {
+        if start.y <= point.y && end.y > point.y {
+            let cross =
+                (end.x - start.x) * (point.y - start.y) - (point.x - start.x) * (end.y - start.y);
+            if cross > 0.0 {
+                winding += 1;
+            }
+        } else if start.y > point.y && end.y <= point.y {
+            let cross =
+                (end.x - start.x) * (point.y - start.y) - (point.x - start.x) * (end.y - start.y);
+            if cross < 0.0 {
+                winding -= 1;
+            }
+        }
+    }
+    winding != 0
 }
 
 /// Recursively appends a deterministic cubic polyline whose control polygon is within 1/64 pixel flatness.
@@ -2194,7 +2533,13 @@ fn write_stage5_svg(scene: &RenderScene) -> String {
         let color = color_hex(&layer.color);
         let opacity = compact_number(layer.color.alpha * layer.opacity);
         document.push_str(&format!("<g id=\"channel-{}\" clip-path=\"url(#canvas-clip)\" fill=\"{color}\" fill-opacity=\"{opacity}\">\n", layer.channel_id.0));
-        write_svg_geometry(&mut document, &layer.geometry, layer.channel_id.0, None);
+        write_svg_geometry(
+            &mut document,
+            &layer.geometry,
+            layer.channel_id.0,
+            None,
+            &scene.canvas,
+        );
         document.push_str("</g>\n");
     }
     document.push_str("</svg>\n");
@@ -2224,7 +2569,7 @@ fn write_modeled_svg(scene: &RenderScene, model: HalftoneChannelModel) -> String
         HalftoneChannelModel::SourceColorAlpha => None,
     };
     for layer in &scene.layers {
-        write_svg_channel_group(&mut document, layer, blend_mode);
+        write_svg_channel_group(&mut document, layer, blend_mode, &scene.canvas);
     }
     document.push_str("</g>\n");
     document.push_str("</svg>\n");
@@ -2232,7 +2577,12 @@ fn write_modeled_svg(scene: &RenderScene, model: HalftoneChannelModel) -> String
 }
 
 /// Appends one modeled channel group with immutable presentation and per-mark paint semantics.
-fn write_svg_channel_group(document: &mut String, layer: &RenderLayer, blend_mode: Option<&str>) {
+fn write_svg_channel_group(
+    document: &mut String,
+    layer: &RenderLayer,
+    blend_mode: Option<&str>,
+    canvas: &CanvasSpec,
+) {
     let mut styles = Vec::new();
     if let Some(mode) = blend_mode {
         styles.push(format!("mix-blend-mode:{mode}"));
@@ -2246,7 +2596,13 @@ fn write_svg_channel_group(document: &mut String, layer: &RenderLayer, blend_mod
         layer.channel_id.0,
         style.unwrap_or_default(),
     ));
-    write_svg_geometry(document, &layer.geometry, layer.channel_id.0, Some(layer));
+    write_svg_geometry(
+        document,
+        &layer.geometry,
+        layer.channel_id.0,
+        Some(layer),
+        canvas,
+    );
     document.push_str("</g>\n");
 }
 
@@ -2256,6 +2612,7 @@ fn write_svg_geometry(
     geometry: &GeometryOutput,
     channel_id: u64,
     layer: Option<&RenderLayer>,
+    canvas: &CanvasSpec,
 ) {
     match geometry {
         GeometryOutput::CircularMarks(marks) => {
@@ -2353,7 +2710,87 @@ fn write_svg_geometry(
                 }
             }
         }
+        GeometryOutput::CanonicalStrokes(strokes) => {
+            for (index, stroke) in strokes.iter().enumerate() {
+                let id = format!("channel-{channel_id}-stroke-{index}");
+                if stroke.outline.contours.is_empty() {
+                    continue;
+                }
+                if !outline_intersects_canvas(&stroke.outline, canvas) {
+                    continue;
+                }
+                let data = svg_outline_path_data(&stroke.outline);
+                let paint = layer.map_or_else(String::new, |value| {
+                    format!(
+                        " fill=\"{}\" fill-opacity=\"{}\"",
+                        color_hex(&value.color),
+                        compact_number(value.color.alpha * value.opacity)
+                    )
+                });
+                document.push_str(&format!(
+                    "<path id=\"{id}\" d=\"{data}\" fill-rule=\"nonzero\"{paint}/>\n"
+                ));
+            }
+        }
     }
+}
+
+/// Reports whether derived outline bounds reach the final SVG canvas without clipping geometry.
+fn outline_intersects_canvas(
+    outline: &toniator_geometry::CanonicalFilledOutline,
+    canvas: &CanvasSpec,
+) -> bool {
+    outline.bounds.is_some_and(|bounds| {
+        bounds.max.x >= 0.0
+            && bounds.max.y >= 0.0
+            && bounds.min.x <= canvas.width
+            && bounds.min.y <= canvas.height
+    })
+}
+
+/// Serializes independent canonical outline contours as one direct SVG path payload.
+fn svg_outline_path_data(outline: &toniator_geometry::CanonicalFilledOutline) -> String {
+    let mut data = String::new();
+    for contour in &outline.contours {
+        for (index, segment) in contour.segments.iter().enumerate() {
+            match segment {
+                CurveSegment::Line(line) => {
+                    if index == 0 {
+                        data.push_str(&format!(
+                            "M {} {} ",
+                            compact_number(line.start().x),
+                            compact_number(line.start().y)
+                        ));
+                    }
+                    data.push_str(&format!(
+                        "L {} {} ",
+                        compact_number(line.end().x),
+                        compact_number(line.end().y)
+                    ));
+                }
+                CurveSegment::CubicBezier(cubic) => {
+                    if index == 0 {
+                        data.push_str(&format!(
+                            "M {} {} ",
+                            compact_number(cubic.start().x),
+                            compact_number(cubic.start().y)
+                        ));
+                    }
+                    data.push_str(&format!(
+                        "C {} {},{} {},{} {} ",
+                        compact_number(cubic.control_1().x),
+                        compact_number(cubic.control_1().y),
+                        compact_number(cubic.control_2().x),
+                        compact_number(cubic.control_2().y),
+                        compact_number(cubic.end().x),
+                        compact_number(cubic.end().y)
+                    ));
+                }
+            }
+        }
+        data.push('Z');
+    }
+    data
 }
 
 fn color_hex(color: &ColorValue) -> String {

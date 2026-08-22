@@ -32,15 +32,16 @@ use toniator_domain::{
     HalftoneChannelModel, HalftoneChannelRole, ModeledChannelState,
 };
 pub use toniator_patterns::{
-    CanonicalCircleMark, CanonicalMark, CanonicalMarkRealization, CircularMarkRealization,
-    MarkResponse, Point2, RealizationError, SiteId, SiteScope,
+    CanonicalCircleMark, CanonicalMark, CanonicalMarkRealization, CanonicalStrokeRealization,
+    CircularMarkRealization, MarkResponse, Point2, RealizationError, SiteId, SiteScope,
 };
 use toniator_patterns::{
     CurvePath, CurveSegment, FamilyCapability, GenericGuideCapability, GridFamilyOutput,
     MappedCircularMarkRealization, PatternPipelineError, SourceColorCircularMarkRealization,
-    TypedFamilyOutput, TypedRealization, evaluate_straight_grid,
+    StrokeResponse, TypedFamilyOutput, TypedRealization, evaluate_straight_grid,
     evaluate_typed_family_product_with_source_cancellable, family_requires_decoded_source,
-    maximum_nominal_cell_diameter, realize_circular_marks, realize_typed_mapped_outputs,
+    maximum_emitted_guide_spacing, maximum_nominal_cell_diameter, realize_circular_marks,
+    realize_typed_canonical_strokes_cancellable, realize_typed_mapped_outputs,
     realize_typed_source_color_outputs,
 };
 pub use toniator_render::{
@@ -170,6 +171,8 @@ pub struct EvaluationLimits {
     max_family_candidates: usize,
     max_flattened_raster_edges: usize,
     max_transformed_curve_segment_instances: usize,
+    max_stroke_profile_samples: usize,
+    max_stroke_outline_segments: usize,
 }
 
 impl EvaluationLimits {
@@ -192,6 +195,8 @@ impl EvaluationLimits {
             max_flattened_raster_edges: toniator_render::DEFAULT_MAX_FLATTENED_RASTER_EDGES,
             max_transformed_curve_segment_instances:
                 toniator_patterns::MAX_TRANSFORMED_CURVE_SEGMENT_INSTANCES,
+            max_stroke_profile_samples: toniator_patterns::MAX_STROKE_PROFILE_SAMPLES,
+            max_stroke_outline_segments: toniator_patterns::MAX_STROKE_OUTLINE_SEGMENTS,
         })
     }
 
@@ -246,6 +251,54 @@ impl EvaluationLimits {
     pub const fn max_transformed_curve_segment_instances(self) -> usize {
         self.max_transformed_curve_segment_instances
     }
+
+    /// Returns the request-wide canonical connected-stroke profile sample limit.
+    pub const fn max_stroke_profile_samples(self) -> usize {
+        self.max_stroke_profile_samples
+    }
+
+    /// Replaces the nonzero request-wide connected-stroke profile bound.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a disabled profile budget before an evaluation can allocate partial geometry.
+    pub fn with_max_stroke_profile_samples(
+        mut self,
+        value: usize,
+    ) -> Result<Self, EvaluationError> {
+        if value == 0 {
+            return Err(EvaluationError::new(
+                "realization.stroke.profile_limit",
+                "configured stroke profile limit must be nonzero",
+            ));
+        }
+        self.max_stroke_profile_samples = value;
+        Ok(self)
+    }
+
+    /// Returns the request-wide canonical connected-stroke outline segment limit.
+    pub const fn max_stroke_outline_segments(self) -> usize {
+        self.max_stroke_outline_segments
+    }
+
+    /// Replaces the nonzero request-wide connected-stroke outline bound.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a disabled outline-segment budget before an evaluation can allocate partial geometry.
+    pub fn with_max_stroke_outline_segments(
+        mut self,
+        value: usize,
+    ) -> Result<Self, EvaluationError> {
+        if value == 0 {
+            return Err(EvaluationError::new(
+                "realization.stroke.outline_limit",
+                "configured stroke outline limit must be nonzero",
+            ));
+        }
+        self.max_stroke_outline_segments = value;
+        Ok(self)
+    }
 }
 
 impl Default for EvaluationLimits {
@@ -256,6 +309,8 @@ impl Default for EvaluationLimits {
             max_flattened_raster_edges: toniator_render::DEFAULT_MAX_FLATTENED_RASTER_EDGES,
             max_transformed_curve_segment_instances:
                 toniator_patterns::MAX_TRANSFORMED_CURVE_SEGMENT_INSTANCES,
+            max_stroke_profile_samples: toniator_patterns::MAX_STROKE_PROFILE_SAMPLES,
+            max_stroke_outline_segments: toniator_patterns::MAX_STROKE_OUTLINE_SEGMENTS,
         }
     }
 }
@@ -289,6 +344,32 @@ mod stage20e2_limit_tests {
                 .unwrap_err()
                 .path(),
             "raster.limits.flattened_edges"
+        );
+    }
+
+    /// Proves connected-stroke request limits are explicit nonzero cache-contract inputs.
+    #[test]
+    fn connected_stroke_limits_are_configurable_and_reject_disabled_values() {
+        let limits = EvaluationLimits::default()
+            .with_max_stroke_profile_samples(17)
+            .expect("profile limit accepts nonzero")
+            .with_max_stroke_outline_segments(23)
+            .expect("outline limit accepts nonzero");
+        assert_eq!(limits.max_stroke_profile_samples(), 17);
+        assert_eq!(limits.max_stroke_outline_segments(), 23);
+        assert_eq!(
+            EvaluationLimits::default()
+                .with_max_stroke_profile_samples(0)
+                .expect_err("disabled profile limit rejects")
+                .path(),
+            "realization.stroke.profile_limit"
+        );
+        assert_eq!(
+            EvaluationLimits::default()
+                .with_max_stroke_outline_segments(0)
+                .expect_err("disabled outline limit rejects")
+                .path(),
+            "realization.stroke.outline_limit"
         );
     }
 }
@@ -807,13 +888,18 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
     // artifact into a last-successful cache.
     let plan = toniator_patterns::resolve_document_pattern_pipeline(document, definition)
         .map_err(EvaluationError::from_pipeline)?;
+    let toniator_domain::PatternGeometryResponse::Marks(mark_response) =
+        &effective.geometry_response
+    else {
+        return Err(EvaluationError::new(
+            "evaluation.stroke.single_channel",
+            "guide-path output is available through complete document evaluation only",
+        )
+        .into());
+    };
     let response = MarkResponse {
-        minimum_fill: match &effective.geometry_response {
-            toniator_domain::PatternGeometryResponse::Marks(response) => response.minimum_fill,
-        },
-        maximum_fill: match &effective.geometry_response {
-            toniator_domain::PatternGeometryResponse::Marks(response) => response.maximum_fill,
-        },
+        minimum_fill: mark_response.minimum_fill,
+        maximum_fill: mark_response.maximum_fill,
         rotation_offset_degrees: effective.shape_rotation_degrees,
     };
     let source_key = SourceCacheKey {
@@ -1983,19 +2069,25 @@ fn evaluate_cached_document_impl(
                 channel.mapping.gain.to_bits(),
                 channel.mapping.bias.to_bits()
             ),
-            response: (
-                match &effective.geometry_response {
-                    toniator_domain::PatternGeometryResponse::Marks(response) => {
-                        response.minimum_fill.to_bits()
+            response: match &effective.geometry_response {
+                toniator_domain::PatternGeometryResponse::Marks(response) => {
+                    DocumentResponseIdentity::Marks {
+                        minimum: response.minimum_fill.to_bits(),
+                        maximum: response.maximum_fill.to_bits(),
+                        shape_rotation: effective.shape_rotation_degrees.to_bits(),
                     }
-                },
-                match &effective.geometry_response {
-                    toniator_domain::PatternGeometryResponse::Marks(response) => {
-                        response.maximum_fill.to_bits()
+                }
+                toniator_domain::PatternGeometryResponse::Connected(response) => {
+                    DocumentResponseIdentity::Connected {
+                        minimum: response.minimum_thickness.to_bits(),
+                        maximum: response.maximum_thickness.to_bits(),
+                        shape_rotation: effective.shape_rotation_degrees.to_bits(),
+                        outline_contract: toniator_patterns::CANONICAL_STROKE_OUTLINE_CONTRACT_ID,
+                        profile_limit: limits.max_stroke_profile_samples(),
+                        outline_segment_limit: limits.max_stroke_outline_segments(),
                     }
-                },
-                effective.shape_rotation_degrees.to_bits(),
-            ),
+                }
+            },
             sampled_paint: matches!(channel.paint, ChannelPaint::SampledSource),
             max_transformed_curve_segment_instances: remaining_transformed_curve_segment_instances,
         };
@@ -2017,6 +2109,8 @@ fn evaluate_cached_document_impl(
                             &family,
                             plan,
                             remaining_transformed_curve_segment_instances,
+                            limits.max_stroke_profile_samples(),
+                            limits.max_stroke_outline_segments(),
                             &|| cancellation.is_cancelled(),
                         )
                     }) {
@@ -2191,6 +2285,7 @@ enum DocumentRealization {
     Mapped(TypedRealization<MappedCircularMarkRealization>),
     SourceColor(TypedRealization<SourceColorCircularMarkRealization>),
     Canonical(TypedRealization<CanonicalMarkRealization>),
+    Strokes(TypedRealization<CanonicalStrokeRealization>),
 }
 /// Returns the complete immutable realization fingerprint for any retained or canonical variant.
 fn document_realization_identity(value: &DocumentRealization) -> &str {
@@ -2198,6 +2293,7 @@ fn document_realization_identity(value: &DocumentRealization) -> &str {
         DocumentRealization::Mapped(value) => &value.output.realization_fingerprint,
         DocumentRealization::SourceColor(value) => &value.output.realization_fingerprint,
         DocumentRealization::Canonical(value) => &value.output.realization_fingerprint,
+        DocumentRealization::Strokes(value) => &value.output.realization_fingerprint,
     }
 }
 
@@ -2210,6 +2306,20 @@ fn document_realization_identity(value: &DocumentRealization) -> &str {
 fn transformed_curve_segment_instances(
     value: &DocumentRealization,
 ) -> Result<usize, EvaluationError> {
+    if let DocumentRealization::Strokes(value) = value {
+        return value
+            .output
+            .strokes
+            .iter()
+            .try_fold(0_usize, |total, stroke| {
+                total
+                    .checked_add(stroke.path.segments().len())
+                    .ok_or(EvaluationError::new(
+                        "realization.stroke.segment_limit",
+                        "stroke segment instance count overflows",
+                    ))
+            });
+    }
     let DocumentRealization::Canonical(value) = value else {
         return Ok(0);
     };
@@ -2244,15 +2354,58 @@ fn evaluate_document_channel(
     family: &TypedFamilyOutput,
     plan: &toniator_patterns::PatternPipelinePlan,
     max_transformed_curve_segment_instances: usize,
+    max_stroke_profile_samples: usize,
+    max_stroke_outline_segments: usize,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<DocumentRealization, EvaluationError> {
+    if matches!(
+        definition.output_layers.as_slice(),
+        [PatternOutputLayer::GuidePaths { .. }]
+    ) {
+        let toniator_domain::PatternGeometryResponse::Connected(response) =
+            &effective.geometry_response
+        else {
+            return Err(EvaluationError::new(
+                "evaluation.stroke.response",
+                "guide-path output requires the connected response branch",
+            ));
+        };
+        let ChannelPaint::Solid(_) = channel.paint else {
+            return Err(EvaluationError::new(
+                "evaluation.stroke.paint",
+                "guide-path output requires solid channel paint",
+            ));
+        };
+        return Ok(DocumentRealization::Strokes(
+            realize_typed_canonical_strokes_cancellable(
+                family,
+                plan,
+                source,
+                document.canvas(),
+                channel.mapping,
+                StrokeResponse {
+                    minimum_thickness: response.minimum_thickness,
+                    maximum_thickness: response.maximum_thickness,
+                },
+                1.0,
+                max_stroke_profile_samples,
+                max_stroke_outline_segments,
+                is_cancelled,
+            )
+            .map_err(EvaluationError::from_pipeline)?,
+        ));
+    }
+    let toniator_domain::PatternGeometryResponse::Marks(mark_response) =
+        &effective.geometry_response
+    else {
+        return Err(EvaluationError::new(
+            "evaluation.mark.response",
+            "mark output requires the marks response branch",
+        ));
+    };
     let response = MarkResponse {
-        minimum_fill: match &effective.geometry_response {
-            toniator_domain::PatternGeometryResponse::Marks(response) => response.minimum_fill,
-        },
-        maximum_fill: match &effective.geometry_response {
-            toniator_domain::PatternGeometryResponse::Marks(response) => response.maximum_fill,
-        },
+        minimum_fill: mark_response.minimum_fill,
+        maximum_fill: mark_response.maximum_fill,
         rotation_offset_degrees: effective.shape_rotation_degrees,
     };
     let realization = if matches!(
@@ -2374,6 +2527,17 @@ fn document_render_layer(
             )
             .map_err(EvaluationError::from_render),
         },
+        DocumentRealization::Strokes(value) => match channel.paint {
+            ChannelPaint::Solid(ref color) => RenderLayer::new(
+                channel.id,
+                channel.visible,
+                color.clone(),
+                channel.opacity,
+                GeometryOutput::CanonicalStrokes(value.output.strokes),
+            )
+            .map_err(EvaluationError::from_render),
+            ChannelPaint::SampledSource => unreachable!("stroke realization rejects sampled paint"),
+        },
     }
 }
 fn aggregate_document_identity<'a>(
@@ -2488,6 +2652,16 @@ fn required_support_radius_modeled(
     definition: &toniator_domain::PatternDefinition,
     family: &FamilyCapability,
 ) -> Result<f64, EvaluationError> {
+    if matches!(
+        definition.output_layers.as_slice(),
+        [PatternOutputLayer::GuidePaths { .. }]
+    ) {
+        return Ok(
+            maximum_emitted_guide_spacing(family, canvas, &effective.density)
+                .map_err(EvaluationError::from_pipeline)?
+                + definition.coverage.additional_margin,
+        );
+    }
     required_support_radius_from_fill(
         canvas,
         &effective.density,
@@ -2517,9 +2691,27 @@ struct DocumentRealizationCacheKey {
     resolved_shape_content: String,
     source_identity: RealizationSourceIdentity,
     mapping: String,
-    response: (u64, u64, u64),
+    response: DocumentResponseIdentity,
     sampled_paint: bool,
     max_transformed_curve_segment_instances: usize,
+}
+
+/// Tagged response identity prevents mark and connected-stroke realizations from colliding.
+#[derive(Clone, Debug, PartialEq)]
+enum DocumentResponseIdentity {
+    Marks {
+        minimum: u64,
+        maximum: u64,
+        shape_rotation: u64,
+    },
+    Connected {
+        minimum: u64,
+        maximum: u64,
+        shape_rotation: u64,
+        outline_contract: &'static str,
+        profile_limit: usize,
+        outline_segment_limit: usize,
+    },
 }
 
 #[derive(Clone, Default)]
@@ -2578,12 +2770,13 @@ pub(crate) mod test_support {
         AuthoredCurveSegment, AuthoredPoint2, AuthoredStructure, AuthoredStructureId,
         AuthoredStructureKind, CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternInstance,
         ChannelPatternLayoutDelta, ChannelSourceMapping, ChannelState, ChannelTopologyTemplate,
-        ColorValue, CoveragePolicy, DensityMetric2D, Document, DocumentCommand, DocumentId,
-        DocumentPatternSettings, DocumentSession, GeneralizedSiteProduct, GuideDimensionId,
-        HalftoneChannelModel, MarkGeometryResponse, MarkOrientation, MarkPrototype,
-        PatternDefinition, PatternDefinitionId, PatternGeometryResponse, PatternMechanismId,
-        PatternOutputLayer, PatternOutputLayerId, SourceComponent, SourcePlacement,
-        SourceReference, SourceReferenceId, StraightGuideDimension, StraightGuideRepetition,
+        ColorValue, ConnectedGeometryResponse, CoveragePolicy, DensityMetric2D, Document,
+        DocumentCommand, DocumentId, DocumentPatternSettings, DocumentSession,
+        GeneralizedSiteProduct, GuideDimensionId, HalftoneChannelModel, MarkGeometryResponse,
+        MarkOrientation, MarkPrototype, PatternDefinition, PatternDefinitionId,
+        PatternGeometryResponse, PatternMechanismId, PatternOutputLayer, PatternOutputLayerId,
+        SourceComponent, SourcePlacement, SourceReference, SourceReferenceId,
+        StraightGuideDimension, StraightGuideRepetition,
     };
 
     use super::*;
@@ -2774,6 +2967,73 @@ pub(crate) mod test_support {
                 base.channel_model().unwrap(),
                 base.channel_topology().unwrap().clone(),
                 vec![shape],
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// Builds a modeled Connected/GuidePaths session for cache and stale-publication witnesses.
+    fn modeled_path_session() -> DocumentSession {
+        let source_id = SourceReferenceId::new("cancellation-test-source").unwrap();
+        let base = Document::new_default_document(
+            CanvasSpec {
+                width: 64.0,
+                height: 48.0,
+            },
+            SourceReference::Assigned(source_id),
+        )
+        .unwrap();
+        let guide = PatternMechanismId(71);
+        let mut definition = PatternDefinition::generalized_straight_guides(
+            PatternDefinitionId(70),
+            "path cache",
+            guide,
+            PatternMechanismId(72),
+            PatternOutputLayerId(73),
+            vec![StraightGuideDimension {
+                id: GuideDimensionId(74),
+                baseline_angle_degrees: 0.0,
+                phase: 0.0,
+                repetition: StraightGuideRepetition {
+                    spacing_multiplier: 1.0,
+                },
+            }],
+            GeneralizedSiteProduct::AlongGuides {
+                dimensions: vec![GuideDimensionId(74)],
+                interval_multiplier: 1.0,
+                phase: 0.0,
+            },
+            MarkOrientation::Fixed,
+            CoveragePolicy {
+                guard_steps: 1,
+                additional_margin: 0.0,
+            },
+        );
+        definition.output_layers = vec![PatternOutputLayer::GuidePaths {
+            id: PatternOutputLayerId(73),
+            guide_mechanism_id: guide,
+            style: toniator_domain::PathStrokeStyle::default(),
+        }];
+        let mut settings = base.pattern_settings().clone();
+        settings.definition_id = definition.id;
+        settings.density.across_x = 2.0;
+        settings.density.across_y = 2.0;
+        settings.geometry_response =
+            PatternGeometryResponse::Connected(ConnectedGeometryResponse {
+                minimum_thickness: 0.01,
+                maximum_thickness: 0.02,
+            });
+        DocumentSession::new(
+            Document::with_source_topology_and_authored_structures(
+                base.id(),
+                base.canvas().clone(),
+                base.source().clone(),
+                vec![definition],
+                settings,
+                base.channel_model().unwrap(),
+                base.channel_topology().unwrap().clone(),
+                Vec::new(),
             )
             .unwrap(),
         )
@@ -3053,6 +3313,43 @@ pub(crate) mod test_support {
             }
         );
         assert!(scheduler.accept_completion(&repeated, &session).unwrap());
+        scheduler.shutdown().unwrap();
+    }
+
+    /// Proves a Connected-only path edit reuses family work while rebuilding downstream cache products.
+    #[test]
+    fn connected_path_cache_reuses_family_and_rebuilds_downstream_products() {
+        let scheduler = EvaluationScheduler::new_with_limits(EvaluationLimits::default()).unwrap();
+        let mut session = modeled_path_session();
+        let bytes = valid_document_bytes();
+        let first_ticket = scheduler
+            .submit(document_request(&session, Arc::clone(&bytes)))
+            .unwrap();
+        let first = wait_for_document_completion(&scheduler);
+        assert_eq!(first.ticket(), first_ticket);
+        assert!(scheduler.accept_completion(&first, &session).unwrap());
+        let command = session
+            .document()
+            .set_channel_geometry_response_for_effective(
+                ChannelId(1),
+                PatternGeometryResponse::Connected(ConnectedGeometryResponse {
+                    minimum_thickness: 0.015,
+                    maximum_thickness: 0.025,
+                }),
+            )
+            .unwrap();
+        session.apply(&command).unwrap();
+        let edited = scheduler
+            .submit(document_request(&session, Arc::clone(&bytes)))
+            .unwrap();
+        let completion = wait_for_document_completion(&scheduler);
+        assert_eq!(completion.ticket(), edited);
+        let diagnostics = completion.cache_diagnostics().unwrap();
+        assert_eq!(diagnostics.aggregate.family, CacheDisposition::Hit);
+        assert_eq!(diagnostics.aggregate.realization, CacheDisposition::Miss);
+        assert_eq!(diagnostics.aggregate.scene, CacheDisposition::Miss);
+        assert_eq!(diagnostics.aggregate.raster, CacheDisposition::Miss);
+        assert!(scheduler.accept_completion(&completion, &session).unwrap());
         scheduler.shutdown().unwrap();
     }
 

@@ -9,6 +9,7 @@ use toniator_domain::{GuideDimensionId, PatternMechanismId};
 
 mod curves;
 mod guides;
+mod outlines;
 
 pub use curves::{
     CubicBezierSegment, CurveError, CurvePath, CurveSegment, IntersectionKind, LineSegment,
@@ -17,6 +18,10 @@ pub use curves::{
 pub use guides::{
     GuideCoveragePlan, GuideDimensionCoverage, GuidePathInstance, GuidePathLocationProvenance,
     GuidePathSet, construct_circular_arc, resolve_guide_prototype,
+};
+pub use outlines::{
+    CanonicalFilledOutline, CanonicalOutlineContour, VariableWidthOutlineLimits,
+    VariableWidthPathSample, build_variable_width_outline_cancellable,
 };
 
 /// A finite document- or pattern-local point.
@@ -604,6 +609,8 @@ pub struct CanonicalCircleMark {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum CanonicalFillRule {
     EvenOdd,
+    /// The contour direction determines coverage, preserving overlapping outline windings.
+    NonZero,
 }
 
 /// A renderer-independent closed curve mark realized from one existing family site.
@@ -619,6 +626,155 @@ pub struct CanonicalPathMark {
     pub scope: SiteScope,
     pub provenance: FamilySiteProvenance,
     pub fill_rule: CanonicalFillRule,
+}
+
+/// One sampled response knot retained by a canonical variable-width stroke.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StrokeProfileSample {
+    /// Exact centerline location; no consumer infers this from sampled coordinates.
+    pub location: PathLocation,
+    pub center: Point2,
+    /// Authored normalized thickness in the connected response range `[0, 2]`.
+    pub normalized_thickness: f64,
+    /// Resolved document-space outline width.
+    pub width: f64,
+}
+
+/// Ordered canonical stroke geometry derived from exactly one existing guide path.
+///
+/// The original centerline remains immutable and is never clipped by this value.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CanonicalStroke {
+    pub source_guide_id: GuideInstanceId,
+    pub source_structure_id: Option<toniator_domain::AuthoredStructureId>,
+    pub path: CurvePath,
+    pub nominal_basis: f64,
+    pub style: toniator_domain::PathStrokeStyle,
+    pub profile: Vec<StrokeProfileSample>,
+    pub outline: CanonicalFilledOutline,
+}
+
+impl CanonicalStroke {
+    /// Builds one finite ordered stroke with a reusable derived filled outline.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty/non-finite profiles, a mismatched outline, or invalid nominal bases before a
+    /// renderer can consume it. The outline is derived geometry and is never clipped here.
+    pub fn new(
+        source_guide_id: GuideInstanceId,
+        source_structure_id: Option<toniator_domain::AuthoredStructureId>,
+        path: CurvePath,
+        nominal_basis: f64,
+        style: toniator_domain::PathStrokeStyle,
+        profile: Vec<StrokeProfileSample>,
+        outline: CanonicalFilledOutline,
+    ) -> Result<Self, CurveError> {
+        if !nominal_basis.is_finite() || nominal_basis <= 0.0 {
+            return Err(CurveError::new(
+                "canonical.stroke.basis",
+                "stroke nominal basis must be positive and finite",
+            ));
+        }
+        if profile.is_empty() {
+            return Err(CurveError::new(
+                "canonical.stroke.profile.empty",
+                "canonical strokes require at least one profile sample",
+            ));
+        }
+        if path.bounds().is_err()
+            || profile.iter().any(|sample| {
+                !sample.center.is_finite()
+                    || !sample.normalized_thickness.is_finite()
+                    || !(0.0..=2.0).contains(&sample.normalized_thickness)
+                    || !sample.width.is_finite()
+                    || sample.width < 0.0
+                    || (sample.normalized_thickness * nominal_basis - sample.width).abs()
+                        > 1.0 / 4096.0
+            })
+        {
+            return Err(CurveError::new(
+                "canonical.stroke.profile",
+                "stroke profile samples must be finite and nonnegative",
+            ));
+        }
+        for (index, sample) in profile.iter().enumerate() {
+            let point = path.point_at(sample.location).map_err(|_| {
+                CurveError::new(
+                    "canonical.stroke.location",
+                    "stroke profile locations must address the centerline",
+                )
+            })?;
+            if ((point.x - sample.center.x).powi(2) + (point.y - sample.center.y).powi(2)).sqrt()
+                > 1.0 / 4096.0
+            {
+                return Err(CurveError::new(
+                    "canonical.stroke.center",
+                    "stroke profile center must match its exact path location",
+                ));
+            }
+            if index > 0 {
+                let previous = profile[index - 1].location;
+                let wrap = path.closure() == PathClosure::Closed
+                    && index + 1 == profile.len()
+                    && sample.location == profile[0].location;
+                if !wrap
+                    && (sample.location.segment_index() < previous.segment_index()
+                        || (sample.location.segment_index() == previous.segment_index()
+                            && sample.location.parameter() < previous.parameter()))
+                {
+                    return Err(CurveError::new(
+                        "canonical.stroke.profile.order",
+                        "stroke profile locations must follow authored path order",
+                    ));
+                }
+            }
+        }
+        if outline.fill_rule != CanonicalFillRule::NonZero {
+            return Err(CurveError::new(
+                "canonical.stroke.outline.fill_rule",
+                "canonical stroke outlines require nonzero winding",
+            ));
+        }
+        if outline.contours.iter().any(|contour| {
+            contour.segments.is_empty()
+                || contour
+                    .segments
+                    .windows(2)
+                    .any(|pair| pair[0].end() != pair[1].start())
+                || contour
+                    .segments
+                    .last()
+                    .is_some_and(|last| last.end() != contour.segments[0].start())
+                || contour
+                    .segments
+                    .iter()
+                    .any(|segment| segment.bounds().is_err())
+        }) {
+            return Err(CurveError::new(
+                "canonical.stroke.outline",
+                "canonical stroke outline contours must be finite connected closed geometry",
+            ));
+        }
+        if outline
+            .bounds
+            .is_some_and(|bounds| !bounds.min.is_finite() || !bounds.max.is_finite())
+        {
+            return Err(CurveError::new(
+                "canonical.stroke.outline.bounds",
+                "canonical stroke outline bounds must remain finite",
+            ));
+        }
+        Ok(Self {
+            source_guide_id,
+            source_structure_id,
+            path,
+            nominal_basis,
+            style,
+            profile,
+            outline,
+        })
+    }
 }
 
 impl CanonicalPathMark {

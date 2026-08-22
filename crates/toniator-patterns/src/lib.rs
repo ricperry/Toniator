@@ -16,11 +16,12 @@ use toniator_domain::{
 };
 pub use toniator_geometry::{
     AffineTransform2D, Bounds, CanonicalCircleMark, CanonicalFillRule, CanonicalMark,
-    CanonicalPathMark, CurveError, CurvePath, CurveSegment, FamilySite, FamilySiteError,
-    FamilySiteId, FamilySiteProvenance, FamilySiteSet, GuideInstanceId,
+    CanonicalPathMark, CanonicalStroke, CurveError, CurvePath, CurveSegment, FamilySite,
+    FamilySiteError, FamilySiteId, FamilySiteProvenance, FamilySiteSet, GuideInstanceId,
     GuideIntersectionProvenance, GuidePathInstance, GuidePathLocationProvenance, GuidePathSet,
     IntersectionSite, NominalCellBasis, PathClosure, PathLocation, Point2, SiteId, SiteScope,
-    StraightGuide, Vector2, projection_range, resolve_guide_prototype,
+    StraightGuide, StrokeProfileSample, VariableWidthOutlineLimits, VariableWidthPathSample,
+    Vector2, build_variable_width_outline_cancellable, projection_range, resolve_guide_prototype,
 };
 use toniator_sampling::{
     SampledSourcePaint, SamplingError, SourceComponent, SourceField, SourceMappingComponent,
@@ -506,8 +507,45 @@ pub fn family_requires_decoded_source(family: &FamilyCapability) -> bool {
 pub struct OutputCapability {
     pub layer_id: PatternOutputLayerId,
     pub consumes: StructuralProductCapability,
-    pub prototype: MarkPrototype,
-    pub orientation: MarkOrientation,
+    /// The mutually exclusive output authority; guide paths never masquerade as marks.
+    pub payload: OutputCapabilityPayload,
+}
+
+/// Typed realization payload retained in cache/provenance identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OutputCapabilityPayload {
+    Marks {
+        prototype: MarkPrototype,
+        orientation: MarkOrientation,
+    },
+    GuidePaths {
+        guide_mechanism_id: PatternMechanismId,
+        style: toniator_domain::PathStrokeStyle,
+    },
+}
+
+impl OutputCapability {
+    /// Returns mark authority only when this output is a mark layer.
+    pub fn marks(&self) -> Option<(&MarkPrototype, &MarkOrientation)> {
+        match &self.payload {
+            OutputCapabilityPayload::Marks {
+                prototype,
+                orientation,
+            } => Some((prototype, orientation)),
+            OutputCapabilityPayload::GuidePaths { .. } => None,
+        }
+    }
+
+    /// Returns guide-path authority only when this output is a connected path layer.
+    pub fn guide_paths(&self) -> Option<(PatternMechanismId, toniator_domain::PathStrokeStyle)> {
+        match self.payload {
+            OutputCapabilityPayload::Marks { .. } => None,
+            OutputCapabilityPayload::GuidePaths {
+                guide_mechanism_id,
+                style,
+            } => Some((guide_mechanism_id, style)),
+        }
+    }
 }
 
 /// Typed family/modulation/output plan. Modulation has no variants in the
@@ -540,6 +578,8 @@ struct TypedFamilyStructure {
     antialias_margin: f64,
     generation_domain: Bounds,
     guide_path_set: Option<GuidePathSet>,
+    /// Per-guide nominal spacing retained with family output so realization never uses a global axis proxy.
+    guide_nominal_bases: BTreeMap<GuideInstanceId, f64>,
 }
 
 impl TypedFamilyOutput {
@@ -568,6 +608,11 @@ impl TypedFamilyOutput {
         self.structure.guide_path_set.as_ref()
     }
 
+    /// Returns the family-resolved nominal basis for one emitted guide path.
+    pub fn guide_nominal_basis(&self, guide_id: GuideInstanceId) -> Option<f64> {
+        self.structure.guide_nominal_bases.get(&guide_id).copied()
+    }
+
     /// Returns retained straight-guide authority for per-site mark orientation.
     ///
     /// This exposes derived family data read-only; realization may consume it
@@ -591,9 +636,20 @@ pub struct TypedRealizationProvenance {
     pub ordered_output_layer_ids: Vec<PatternOutputLayerId>,
     pub ordered_output_prototypes: Vec<MarkPrototype>,
     pub ordered_output_orientations: Vec<MarkOrientation>,
-    /// Truthful evaluator-derived sites remain adjacent to canonical marks;
-    /// realizers consume only their private current-circle compatibility view.
-    pub site_set: FamilySiteSet,
+    /// The exclusive truthful structural authority consumed by this realization.
+    pub structural_input: RealizationStructuralInput,
+}
+
+/// Tagged realization input proving whether an output consumed sites or raw ordered guide paths.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RealizationStructuralInput {
+    /// Mark outputs consume only evaluator-published sites.
+    Sites(FamilySiteSet),
+    /// Connected path outputs consume ordered raw guides and their family-resolved bases.
+    GuidePaths {
+        guides: GuidePathSet,
+        nominal_bases: BTreeMap<GuideInstanceId, f64>,
+    },
 }
 
 /// A realization plus its typed provenance. Renderers consume `output` only.
@@ -785,8 +841,10 @@ pub fn resolve_pattern_pipeline(
             } if *source_id == site_mechanism_id => ordered_outputs.push(OutputCapability {
                 layer_id: *id,
                 consumes: product,
-                prototype: MarkPrototype::Circle,
-                orientation: MarkOrientation::Fixed,
+                payload: OutputCapabilityPayload::Marks {
+                    prototype: MarkPrototype::Circle,
+                    orientation: MarkOrientation::Fixed,
+                },
             }),
             PatternOutputLayer::MarkPrototype {
                 id,
@@ -796,8 +854,22 @@ pub fn resolve_pattern_pipeline(
             } if *source_id == site_mechanism_id => ordered_outputs.push(OutputCapability {
                 layer_id: *id,
                 consumes: product,
-                prototype: prototype.clone(),
-                orientation: orientation.clone(),
+                payload: OutputCapabilityPayload::Marks {
+                    prototype: prototype.clone(),
+                    orientation: orientation.clone(),
+                },
+            }),
+            PatternOutputLayer::GuidePaths {
+                id,
+                guide_mechanism_id: source_id,
+                style,
+            } if *source_id == guide_mechanism_id => ordered_outputs.push(OutputCapability {
+                layer_id: *id,
+                consumes: product,
+                payload: OutputCapabilityPayload::GuidePaths {
+                    guide_mechanism_id: *source_id,
+                    style: *style,
+                },
             }),
             _ => {
                 return Err(PatternPipelineError::new(
@@ -1016,8 +1088,10 @@ fn resolve_random_site_pipeline(
         ordered_outputs: vec![OutputCapability {
             layer_id: *id,
             consumes: product,
-            prototype: prototype.clone(),
-            orientation: MarkOrientation::Fixed,
+            payload: OutputCapabilityPayload::Marks {
+                prototype: prototype.clone(),
+                orientation: MarkOrientation::Fixed,
+            },
         }],
     })
 }
@@ -1105,6 +1179,7 @@ pub fn evaluate_typed_family_product_with_source_cancellable(
                 antialias_margin: ANTIALIAS_MARGIN,
                 generation_domain: output.generation_domain,
                 guide_path_set: None,
+                guide_nominal_bases: BTreeMap::new(),
             },
         });
     }
@@ -1157,6 +1232,35 @@ pub fn evaluate_typed_family_product_with_source_cancellable(
                 .flat_map(|guide| [guide.start, guide.end]),
         )
         .expect("generalized finite guides produce bounds");
+        let guide_paths = output
+            .guides
+            .iter()
+            .map(|guide| GuidePathInstance {
+                id: guide.id,
+                source_structure_id: None,
+                path: CurvePath::line(guide.start, guide.end)
+                    .expect("validated generalized guide endpoints build a path"),
+            })
+            .collect::<Vec<_>>();
+        let guide_nominal_bases = output
+            .guides
+            .iter()
+            .filter_map(|guide| {
+                output
+                    .coverage
+                    .iter()
+                    .find(|coverage| coverage.dimension_id == guide.id.dimension_id)
+                    .map(|coverage| (guide.id, coverage.spacing))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let guide_path_set = (!guide_paths.is_empty()).then(|| {
+            GuidePathSet::new(
+                output.family_fingerprint.clone(),
+                family.provenance.mechanism_ids[0],
+                guide_paths,
+            )
+            .expect("validated generalized guide output builds a path set")
+        });
         return Ok(TypedFamilyOutput {
             family: family.clone(),
             sites: site_set,
@@ -1168,7 +1272,8 @@ pub fn evaluate_typed_family_product_with_source_cancellable(
                 guard_steps: request.guard_steps,
                 antialias_margin: ANTIALIAS_MARGIN,
                 generation_domain,
-                guide_path_set: None,
+                guide_path_set,
+                guide_nominal_bases,
             },
         });
     }
@@ -1179,7 +1284,7 @@ pub fn evaluate_typed_family_product_with_source_cancellable(
         family: family.clone(),
         sites: site_set,
         diagnostics: None,
-        structure: TypedFamilyStructure::from_grid(&output),
+        structure: TypedFamilyStructure::from_grid(&output, family.provenance.mechanism_ids[0]),
     })
 }
 
@@ -1256,6 +1361,7 @@ fn evaluate_generic_curve_guides_cancellable(
                 "curved-guide coverage could not prove a complete generation envelope",
             ))?;
     let mut guides = Vec::new();
+    let mut guide_nominal_bases = BTreeMap::new();
     let mut grouped = Vec::<Vec<GuidePathInstance>>::new();
     for (dimension, (source_structure_id, prototype)) in
         generic.dimensions.iter().zip(&generic.resolved_paths)
@@ -1368,6 +1474,13 @@ fn evaluate_generic_curve_guides_cancellable(
                 source_structure_id: *source_structure_id,
                 path,
             };
+            let basis = if spacing > 0.0 {
+                spacing
+            } else {
+                (request.canvas.width / request.density.across_x)
+                    .max(request.canvas.height / request.density.across_y)
+            };
+            guide_nominal_bases.insert(instance.id, basis);
             this_dimension.push(instance.clone());
             guides.push(instance);
             if guides.len() > request.max_family_candidates {
@@ -1466,6 +1579,7 @@ fn evaluate_generic_curve_guides_cancellable(
             antialias_margin: ANTIALIAS_MARGIN,
             generation_domain: document_domain,
             guide_path_set: Some(guide_set),
+            guide_nominal_bases,
         },
     })
 }
@@ -2008,6 +2122,55 @@ pub fn maximum_nominal_cell_diameter(
         })
 }
 
+/// Returns the largest nominal spacing among every emitted guide dimension, independent of site selection.
+///
+/// # Errors
+///
+/// Rejects nonfinite density or repetition values before a connected-path family envelope is allocated.
+pub fn maximum_emitted_guide_spacing(
+    family: &FamilyCapability,
+    canvas: &CanvasSpec,
+    density: &DensityMetric2D,
+) -> Result<f64, PatternPipelineError> {
+    let dimensions = family
+        .generic_guides
+        .as_ref()
+        .map(|guide| &guide.dimensions);
+    let mut maximum = 0.0_f64;
+    if let Some(dimensions) = dimensions {
+        for dimension in dimensions {
+            let spacing = match dimension.repetition {
+                GuideRepetition::Single => {
+                    (canvas.width / density.across_x).max(canvas.height / density.across_y)
+                }
+                GuideRepetition::TransformStack {
+                    direction_degrees,
+                    spacing_multiplier,
+                } => {
+                    let angle = (dimension.baseline_angle_degrees + direction_degrees).to_radians();
+                    directional_spacing(canvas, density, Vector2::new(angle.cos(), angle.sin()))?
+                        * spacing_multiplier
+                }
+            };
+            maximum = maximum.max(spacing);
+        }
+    } else {
+        for dimension in &family.dimensions {
+            let radians = dimension.baseline_angle_degrees.to_radians();
+            maximum = maximum.max(
+                directional_spacing(canvas, density, Vector2::new(radians.cos(), radians.sin()))?
+                    * dimension.repetition.spacing_multiplier,
+            );
+        }
+    }
+    (maximum.is_finite() && maximum > 0.0)
+        .then_some(maximum)
+        .ok_or(PatternPipelineError::new(
+            "pattern.family.guide_spacing",
+            "emitted guides require a finite positive nominal spacing",
+        ))
+}
+
 /// Extends a family fingerprint with every published site's exact nominal basis and diameter.
 fn family_site_fingerprint(base: &str, sites: &[FamilySite]) -> String {
     let mut bytes = base.as_bytes().to_vec();
@@ -2283,8 +2446,37 @@ fn family_sites_from_generalized(
 }
 
 impl TypedFamilyStructure {
-    /// Captures straight-grid metadata without exposing it as generic site output.
-    fn from_grid(output: &GridFamilyOutput) -> Self {
+    /// Captures straight-grid metadata as ordered raw line paths for connected realization.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if a previously validated grid guide cannot rebuild its own finite line path.
+    fn from_grid(output: &GridFamilyOutput, guide_mechanism_id: PatternMechanismId) -> Self {
+        let paths = output
+            .guides
+            .iter()
+            .map(|guide| GuidePathInstance {
+                id: guide.id,
+                source_structure_id: None,
+                path: CurvePath::line(guide.start, guide.end)
+                    .expect("validated straight guide endpoints build a path"),
+            })
+            .collect::<Vec<_>>();
+        let guide_path_set = (!paths.is_empty()).then(|| {
+            GuidePathSet::new(output.family_fingerprint.clone(), guide_mechanism_id, paths)
+                .expect("validated ordered straight guides build a path set")
+        });
+        let guide_nominal_bases = output
+            .guides
+            .iter()
+            .filter_map(|guide| {
+                output
+                    .coverage
+                    .iter()
+                    .find(|coverage| coverage.dimension_id == guide.id.dimension_id)
+                    .map(|coverage| (guide.id, coverage.spacing))
+            })
+            .collect();
         Self {
             coverage: output.coverage.clone(),
             guides: output.guides.clone(),
@@ -2292,7 +2484,8 @@ impl TypedFamilyStructure {
             guard_steps: output.guard_steps,
             antialias_margin: output.antialias_margin,
             generation_domain: output.generation_domain,
-            guide_path_set: None,
+            guide_path_set,
+            guide_nominal_bases,
         }
     }
 }
@@ -3029,7 +3222,11 @@ pub fn realize_typed_canonical_marks_cancellable(
             "canonical mark realization requires exactly one ordered output layer",
         ));
     };
-    let prototype_path = match &output.prototype {
+    let (prototype, orientation) = output.marks().ok_or(PatternPipelineError::new(
+        "pattern.output_layers.capability",
+        "canonical mark realization requires a mark output",
+    ))?;
+    let prototype_path = match prototype {
         MarkPrototype::Circle => None,
         MarkPrototype::AuthoredClosedShape { structure_id } => {
             let structure =
@@ -3085,7 +3282,7 @@ pub fn realize_typed_canonical_marks_cancellable(
             site_orientation_degrees(
                 family,
                 site,
-                &output.orientation,
+                orientation,
                 request.response.rotation_offset_degrees,
             )
         })
@@ -3553,7 +3750,24 @@ fn realization_provenance(
         ));
     }
     match plan.ordered_outputs.as_slice() {
-        [OutputCapability { consumes, .. }] if *consumes == family.family().product => {
+        [output @ OutputCapability { consumes, .. }] if *consumes == family.family().product => {
+            let structural_input = if output.marks().is_some() {
+                RealizationStructuralInput::Sites(family.site_set().clone())
+            } else if output.guide_paths().is_some() {
+                let guides = family.guide_path_set().ok_or(PatternPipelineError::new(
+                    "pattern.output_layers.guide_paths",
+                    "guide-path output requires ordered raw guide paths",
+                ))?;
+                RealizationStructuralInput::GuidePaths {
+                    guides: guides.clone(),
+                    nominal_bases: family.structure.guide_nominal_bases.clone(),
+                }
+            } else {
+                return Err(PatternPipelineError::new(
+                    "pattern.output_layers.capability",
+                    "ordered output has no typed structural input",
+                ));
+            };
             Ok(TypedRealizationProvenance {
                 structural: family.family().provenance.clone(),
                 modulation: plan.modulation.clone(),
@@ -3565,19 +3779,19 @@ fn realization_provenance(
                 ordered_output_prototypes: plan
                     .ordered_outputs
                     .iter()
-                    .map(|output| output.prototype.clone())
+                    .filter_map(|output| output.marks().map(|(prototype, _)| prototype.clone()))
                     .collect(),
                 ordered_output_orientations: plan
                     .ordered_outputs
                     .iter()
-                    .map(|output| output.orientation.clone())
+                    .filter_map(|output| output.marks().map(|(_, orientation)| orientation.clone()))
                     .collect(),
-                site_set: family.site_set().clone(),
+                structural_input,
             })
         }
         _ => Err(PatternPipelineError::new(
             "pattern.output_layers.capability",
-            "ordered output realization has no compatible circular-mark layer",
+            "ordered output realization has no compatible structural product",
         )),
     }
 }
@@ -4381,6 +4595,436 @@ pub struct CanonicalMarkRealization {
     pub paints: Option<Vec<SampledSourcePaint>>,
 }
 
+/// Effective normalized width response consumed only by guide-path realization.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StrokeResponse {
+    pub minimum_thickness: f64,
+    pub maximum_thickness: f64,
+}
+
+/// Immutable ordered canonical strokes produced from one guide-path output layer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CanonicalStrokeRealization {
+    pub family_fingerprint: String,
+    pub realization_fingerprint: String,
+    pub source_identity: toniator_sampling::SourceIdentity,
+    pub response: StrokeResponse,
+    pub strokes: Vec<CanonicalStroke>,
+}
+
+/// Stable canonical sweep contract included in all stroke realization identity.
+pub const CANONICAL_STROKE_OUTLINE_CONTRACT_ID: &str = "toniator-stage-20i-filled-outline-v3";
+/// Bounds adaptive samples per evaluation request before profile allocation.
+pub const MAX_STROKE_PROFILE_SAMPLES: usize = 262_144;
+/// Bounds derived filled-outline segments per evaluation request.
+pub const MAX_STROKE_OUTLINE_SEGMENTS: usize = 524_288;
+/// Caps adaptive centerline/width subdivision deterministically.
+pub const MAX_STROKE_SUBDIVISION_DEPTH: u8 = 48;
+const STROKE_CENTERLINE_TOLERANCE: f64 = 1.0 / 64.0;
+const STROKE_WIDTH_TOLERANCE: f64 = 1.0 / 64.0;
+
+/// Realizes ordered guide paths into reusable finite filled outlines.
+///
+/// # Errors
+///
+/// Returns a stable capability, sampling, cancellation, or canonical-geometry
+/// error without exposing a partial stroke collection.
+#[allow(clippy::too_many_arguments)]
+pub fn realize_typed_canonical_strokes_cancellable(
+    family: &TypedFamilyOutput,
+    plan: &PatternPipelinePlan,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: StrokeResponse,
+    _nominal_basis: f64,
+    max_profile_samples: usize,
+    max_outline_segments: usize,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<TypedRealization<CanonicalStrokeRealization>, PatternPipelineError> {
+    let provenance = realization_provenance(family, plan)?;
+    let [output] = plan.ordered_outputs.as_slice() else {
+        return Err(PatternPipelineError::new(
+            "pattern.output_layers.capability",
+            "canonical stroke realization requires one output layer",
+        ));
+    };
+    if output.guide_paths().is_none() {
+        return Err(PatternPipelineError::new(
+            "pattern.output_layers.capability",
+            "canonical stroke realization requires a guide-path output",
+        ));
+    }
+    let guides = family.guide_path_set().ok_or(PatternPipelineError::new(
+        "pattern.output_layers.guide_paths",
+        "guide-path output requires derived guide paths",
+    ))?;
+    let mut strokes = Vec::with_capacity(guides.guides().len());
+    let mut profile_samples = 0_usize;
+    let mut outline_segments = 0_usize;
+    for guide in guides.guides() {
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        let nominal_basis =
+            family
+                .guide_nominal_basis(guide.id)
+                .ok_or(PatternPipelineError::new(
+                    "realization.stroke.basis",
+                    "guide path has no resolved nominal spacing basis",
+                ))?;
+        let pixel_footprint = (canvas.width / f64::from(source.identity().width))
+            .min(canvas.height / f64::from(source.identity().height));
+        let mut profile: Vec<StrokeProfileSample> =
+            Vec::with_capacity(guide.path.segments().len() * 2);
+        for (segment_index, segment) in guide.path.segments().iter().enumerate() {
+            let start = stroke_sample(
+                segment,
+                segment_index,
+                0.0,
+                source,
+                canvas,
+                mapping,
+                response,
+                nominal_basis,
+            )?;
+            let end = stroke_sample(
+                segment,
+                segment_index,
+                1.0,
+                source,
+                canvas,
+                mapping,
+                response,
+                nominal_basis,
+            )?;
+            if profile
+                .last()
+                .is_some_and(|previous| previous.location != start.location)
+            {
+                if profile_samples >= max_profile_samples {
+                    return Err(PatternPipelineError::new(
+                        "realization.stroke.profile_limit",
+                        "canonical stroke profile exceeds the sample limit",
+                    ));
+                }
+                profile.push(start);
+                profile_samples += 1;
+            }
+            append_adaptive_stroke_interval(
+                segment,
+                segment_index,
+                0.0,
+                start,
+                1.0,
+                end,
+                0,
+                pixel_footprint,
+                source,
+                canvas,
+                mapping,
+                response,
+                nominal_basis,
+                &mut profile,
+                &mut profile_samples,
+                max_profile_samples,
+                is_cancelled,
+            )?;
+        }
+        let outline = build_variable_width_outline_cancellable(
+            &guide.path,
+            &profile
+                .iter()
+                .map(|sample| VariableWidthPathSample {
+                    location: sample.location,
+                    width: sample.width,
+                })
+                .collect::<Vec<_>>(),
+            output.guide_paths().expect("validated guide output").1,
+            1.0 / 8.0,
+            VariableWidthOutlineLimits::new(
+                max_outline_segments.saturating_sub(outline_segments).max(1),
+            )
+            .map_err(|_| {
+                PatternPipelineError::new(
+                    "realization.stroke.outline_limit",
+                    "configured stroke outline limit must be nonzero",
+                )
+            })?,
+            is_cancelled,
+        )
+        .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
+        outline_segments = outline_segments
+            .checked_add(
+                outline
+                    .contours
+                    .iter()
+                    .map(|contour| contour.segments.len())
+                    .sum::<usize>(),
+            )
+            .ok_or(PatternPipelineError::new(
+                "realization.stroke.outline_limit",
+                "canonical stroke outline exceeds the segment limit",
+            ))?;
+        if outline_segments > max_outline_segments {
+            return Err(PatternPipelineError::new(
+                "realization.stroke.outline_limit",
+                "canonical stroke outline exceeds the segment limit",
+            ));
+        }
+        strokes.push(
+            CanonicalStroke::new(
+                guide.id,
+                guide.source_structure_id,
+                guide.path.clone(),
+                nominal_basis,
+                output.guide_paths().expect("validated guide output").1,
+                profile,
+                outline,
+            )
+            .map_err(|_| {
+                PatternPipelineError::new(
+                    "realization.stroke.geometry",
+                    "canonical stroke geometry must remain finite",
+                )
+            })?,
+        );
+    }
+    let mut bytes = family.family_fingerprint().as_bytes().to_vec();
+    bytes.extend(CANONICAL_STROKE_OUTLINE_CONTRACT_ID.as_bytes());
+    bytes.extend(response.minimum_thickness.to_bits().to_le_bytes());
+    bytes.extend(response.maximum_thickness.to_bits().to_le_bytes());
+    for stroke in &strokes {
+        bytes.extend(stroke.source_guide_id.dimension_id.to_le_bytes());
+        bytes.extend(stroke.source_guide_id.index.to_le_bytes());
+        for sample in &stroke.profile {
+            bytes.extend(sample.center.x.to_bits().to_le_bytes());
+            bytes.extend(sample.center.y.to_bits().to_le_bytes());
+            bytes.extend(sample.location.segment_index().to_le_bytes());
+            bytes.extend(sample.location.parameter().to_bits().to_le_bytes());
+            bytes.extend(sample.normalized_thickness.to_bits().to_le_bytes());
+        }
+        for contour in &stroke.outline.contours {
+            bytes.extend((contour.segments.len() as u64).to_le_bytes());
+        }
+    }
+    Ok(TypedRealization {
+        provenance,
+        output: CanonicalStrokeRealization {
+            family_fingerprint: family.family_fingerprint().to_owned(),
+            realization_fingerprint: fnv1a64(bytes),
+            source_identity: source.identity().clone(),
+            response,
+            strokes,
+        },
+    })
+}
+
+/// Samples one exact segment-local centerline position and its normalized round-brush width.
+///
+/// # Errors
+///
+/// Propagates bounded source sampling failures without substituting a synthetic width.
+#[allow(clippy::too_many_arguments)]
+fn stroke_sample(
+    segment: &CurveSegment,
+    segment_index: usize,
+    parameter: f64,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: StrokeResponse,
+    basis: f64,
+) -> Result<StrokeProfileSample, PatternPipelineError> {
+    let center = segment.point_at(parameter).map_err(|_| {
+        PatternPipelineError::new(
+            "realization.stroke.centerline",
+            "stroke centerline must remain finite",
+        )
+    })?;
+    let ink = source
+        .sample_mapping_response(center, canvas, mapping)
+        .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
+    let thickness = response.minimum_thickness
+        + ink * (response.maximum_thickness - response.minimum_thickness);
+    let width = thickness * basis;
+    Ok(StrokeProfileSample {
+        location: PathLocation::new(segment_index, parameter).map_err(|_| {
+            PatternPipelineError::new(
+                "realization.stroke.location",
+                "stroke location must remain normalized",
+            )
+        })?,
+        center,
+        normalized_thickness: thickness,
+        width,
+    })
+}
+
+/// Adaptively appends the right endpoint of one interval once its centerline and width meet Stage 20I bounds.
+///
+/// # Errors
+///
+/// Stops atomically at cancellation, depth, numeric, or profile-allocation limits.
+#[allow(clippy::too_many_arguments)]
+fn append_adaptive_stroke_interval(
+    segment: &CurveSegment,
+    segment_index: usize,
+    left_t: f64,
+    left: StrokeProfileSample,
+    right_t: f64,
+    right: StrokeProfileSample,
+    depth: u8,
+    pixel_footprint: f64,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: StrokeResponse,
+    basis: f64,
+    profile: &mut Vec<StrokeProfileSample>,
+    profile_samples: &mut usize,
+    max_profile_samples: usize,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<(), PatternPipelineError> {
+    if is_cancelled() {
+        return Err(PatternPipelineError::new(
+            "evaluation.cancelled",
+            "evaluation was cancelled",
+        ));
+    }
+    let middle_t = (left_t + right_t) * 0.5;
+    let middle = stroke_sample(
+        segment,
+        segment_index,
+        middle_t,
+        source,
+        canvas,
+        mapping,
+        response,
+        basis,
+    )?;
+    let chord_middle = Point2::new(
+        (left.center.x + right.center.x) * 0.5,
+        (left.center.y + right.center.y) * 0.5,
+    );
+    let midpoint_error = ((middle.center.x - chord_middle.x).powi(2)
+        + (middle.center.y - chord_middle.y).powi(2))
+    .sqrt();
+    let centerline_error = midpoint_error.max(cubic_subcurve_flatness(segment, left_t, right_t));
+    let interval = ((right.center.x - left.center.x).powi(2)
+        + (right.center.y - left.center.y).powi(2))
+    .sqrt();
+    let width_error = (middle.width - (left.width + right.width) * 0.5).abs();
+    let refine = centerline_error > STROKE_CENTERLINE_TOLERANCE
+        || interval > pixel_footprint * 0.5
+        || width_error > STROKE_WIDTH_TOLERANCE;
+    if refine {
+        if depth >= MAX_STROKE_SUBDIVISION_DEPTH {
+            return Err(PatternPipelineError::new(
+                "realization.stroke.subdivision_depth",
+                "stroke response exceeds the adaptive subdivision depth",
+            ));
+        }
+        append_adaptive_stroke_interval(
+            segment,
+            segment_index,
+            left_t,
+            left,
+            middle_t,
+            middle,
+            depth + 1,
+            pixel_footprint,
+            source,
+            canvas,
+            mapping,
+            response,
+            basis,
+            profile,
+            profile_samples,
+            max_profile_samples,
+            is_cancelled,
+        )?;
+        append_adaptive_stroke_interval(
+            segment,
+            segment_index,
+            middle_t,
+            middle,
+            right_t,
+            right,
+            depth + 1,
+            pixel_footprint,
+            source,
+            canvas,
+            mapping,
+            response,
+            basis,
+            profile,
+            profile_samples,
+            max_profile_samples,
+            is_cancelled,
+        )?;
+    } else {
+        if profile.is_empty() {
+            profile.push(left);
+            *profile_samples += 1;
+        }
+        if *profile_samples >= max_profile_samples {
+            return Err(PatternPipelineError::new(
+                "realization.stroke.profile_limit",
+                "canonical stroke profile exceeds the sample limit",
+            ));
+        }
+        profile.push(right);
+        *profile_samples += 1;
+    }
+    Ok(())
+}
+
+/// Returns a conservative De Casteljau control-polygon flatness bound for one original cubic subinterval.
+fn cubic_subcurve_flatness(segment: &CurveSegment, left: f64, right: f64) -> f64 {
+    let CurveSegment::CubicBezier(cubic) = segment else {
+        return 0.0;
+    };
+    let lerp =
+        |a: Point2, b: Point2, t: f64| Point2::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
+    let split = |points: [Point2; 4], t: f64| {
+        let a = lerp(points[0], points[1], t);
+        let b = lerp(points[1], points[2], t);
+        let c = lerp(points[2], points[3], t);
+        let d = lerp(a, b, t);
+        let e = lerp(b, c, t);
+        let f = lerp(d, e, t);
+        ([points[0], a, d, f], [f, e, c, points[3]])
+    };
+    let points = [
+        cubic.start(),
+        cubic.control_1(),
+        cubic.control_2(),
+        cubic.end(),
+    ];
+    let (at_right, _) = split(points, right);
+    let fraction = if right > 0.0 { left / right } else { 0.0 };
+    let (_, interval) = split(at_right, fraction);
+    let start = interval[0];
+    let end = interval[3];
+    let dx = end.x - start.x;
+    let dy = end.y - start.y;
+    let length = (dx * dx + dy * dy).sqrt();
+    if length == 0.0 {
+        return interval[1..3]
+            .iter()
+            .map(|point| ((point.x - start.x).powi(2) + (point.y - start.y).powi(2)).sqrt())
+            .fold(0.0, f64::max);
+    }
+    interval[1..3]
+        .iter()
+        .map(|point| ((dy * (point.x - start.x) - dx * (point.y - start.y)).abs()) / length)
+        .fold(0.0, f64::max)
+}
+
 /// The exact nonzero upper bound for transformed authored curve-segment instances.
 pub const MAX_TRANSFORMED_CURVE_SEGMENT_INSTANCES: usize = 1_048_576;
 
@@ -4919,22 +5563,43 @@ fn append_output_capability_identity(bytes: &mut Vec<u8>, output: &OutputCapabil
         StructuralProductCapability::AlongGuideSites => 2,
         StructuralProductCapability::RandomSites => 3,
     });
-    match &output.prototype {
-        MarkPrototype::Circle => bytes.push(1),
-        MarkPrototype::AuthoredClosedShape { structure_id } => {
-            bytes.push(2);
-            bytes.extend(structure_id.0.to_le_bytes());
+    match &output.payload {
+        OutputCapabilityPayload::Marks {
+            prototype,
+            orientation,
+        } => {
+            bytes.push(1);
+            match prototype {
+                MarkPrototype::Circle => bytes.push(1),
+                MarkPrototype::AuthoredClosedShape { structure_id } => {
+                    bytes.push(2);
+                    bytes.extend(structure_id.0.to_le_bytes());
+                }
+            }
+            match orientation {
+                MarkOrientation::Fixed => bytes.push(1),
+                MarkOrientation::GuideTangent { dimension_id } => {
+                    bytes.push(2);
+                    bytes.extend(dimension_id.0.to_le_bytes());
+                }
+                MarkOrientation::GuideNormal { dimension_id } => {
+                    bytes.push(3);
+                    bytes.extend(dimension_id.0.to_le_bytes());
+                }
+            }
         }
-    }
-    match output.orientation {
-        MarkOrientation::Fixed => bytes.push(1),
-        MarkOrientation::GuideTangent { dimension_id } => {
+        OutputCapabilityPayload::GuidePaths {
+            guide_mechanism_id,
+            style,
+        } => {
             bytes.push(2);
-            bytes.extend(dimension_id.0.to_le_bytes());
-        }
-        MarkOrientation::GuideNormal { dimension_id } => {
-            bytes.push(3);
-            bytes.extend(dimension_id.0.to_le_bytes());
+            bytes.extend(guide_mechanism_id.0.to_le_bytes());
+            bytes.push(match style.join {
+                toniator_domain::StrokeJoin::Round => 1,
+            });
+            bytes.push(match style.cap {
+                toniator_domain::StrokeCap::Round => 1,
+            });
         }
     }
 }
@@ -5098,6 +5763,7 @@ fn append_guide_path_location_identity(
 fn append_fill_rule_identity(bytes: &mut Vec<u8>, fill_rule: CanonicalFillRule) {
     bytes.push(match fill_rule {
         CanonicalFillRule::EvenOdd => 1,
+        CanonicalFillRule::NonZero => 2,
     });
 }
 

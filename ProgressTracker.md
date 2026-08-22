@@ -438,8 +438,20 @@ or canonical evaluation. Focused domain, patterns, and engine witnesses pass,
 and the independent implementation review passed. The user explicitly
 accepted Stage 20H on 2026-08-21; publication remains separate.
 
-**Remaining Stage 20I+ — Planned.** The approved remaining order is 20I
-canonical paths/strokes; 20J path
+**Stage 20I — Implemented awaiting review.** The approved canonical-path/stroke outline correction
+is bounded by `docs/STAGE_20I_CANONICAL_PATHS_STROKES_PLAN.md`. It introduces
+ordered guide-path output, effective connected thickness response, canonical
+compact filled outlines, and final-consumer clipping only; offsets, adjacency,
+regions, composites, presets, GTK, and later stages remain excluded.
+
+**Terminology follow-up — Tracked.** Revisit the public and internal use of
+`density`, especially `across_x` and `across_y`: those values currently express
+guide resolution/count along the document axes, while density conventionally
+means guides per unit distance. Do not rename the fields or change their
+behavior as part of Stage 20I; scope the schema, persistence, CLI, and UI impact
+in a separately authorized follow-up.
+
+**Remaining Stage 20J+ — Planned.** The approved remaining order is 20J path
 offset; 20K parametric curves; 20L adjacency; 20M connection programs; 20N
 Voronoi; 20O guide faces; 20P region realization; 20Q composites; 20R gallery
 recipes; 20S Pattern Wizard; and 20T–20W temporal work. Each requires its own

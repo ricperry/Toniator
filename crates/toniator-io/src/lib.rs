@@ -21,16 +21,17 @@ use toniator_domain::{
     AuthoredStructureDraft, AuthoredStructureId, AuthoredStructureKind, CanvasSpec,
     ChannelAppearance, ChannelGeometryResponseDelta, ChannelId, ChannelPaint,
     ChannelPatternInstance, ChannelPatternLayoutDelta, ChannelSourceMapping, ChannelState,
-    ChannelTopology, ColorValue, CoveragePolicy, DensityMetric2D, DensityMetricDelta2D, Document,
-    DocumentId, DocumentPatternSettings, GeneralizedSiteProductDraft, GuideDimension,
-    GuideDimensionDraft, GuideDimensionId, GuidePrototype, GuideRepetition, HalftoneChannelModel,
-    HalftoneChannelRole, MarkGeometryResponse, MarkGeometryResponseDelta, MarkOrientation,
-    MarkOrientationDraft, MarkPrototype, ModeledChannelState, PatternDefinition,
-    PatternDefinitionDraft, PatternDefinitionId, PatternDefinitionRecipe, PatternGeometryResponse,
-    PatternMechanismId, PatternOutputLayerId, PresetMetadata, PresetRecord, RandomSiteCharacter,
-    SiteDensityModulation, SiteExclusionPolicy, SourceComponent, SourceMapping,
-    SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId,
-    StraightGuideDimension, StraightGuideRepetition, ValidationError, VisibleMarkSizingPolicy,
+    ChannelTopology, ColorValue, ConnectedGeometryResponse, ConnectedGeometryResponseDelta,
+    CoveragePolicy, DensityMetric2D, DensityMetricDelta2D, Document, DocumentId,
+    DocumentPatternSettings, GeneralizedSiteProductDraft, GuideDimension, GuideDimensionDraft,
+    GuideDimensionId, GuidePrototype, GuideRepetition, HalftoneChannelModel, HalftoneChannelRole,
+    MarkGeometryResponse, MarkGeometryResponseDelta, MarkOrientation, MarkOrientationDraft,
+    MarkPrototype, ModeledChannelState, PathStrokeStyle, PatternDefinition, PatternDefinitionDraft,
+    PatternDefinitionId, PatternDefinitionRecipe, PatternGeometryResponse, PatternMechanismId,
+    PatternOutputLayerId, PresetMetadata, PresetRecord, RandomSiteCharacter, SiteDensityModulation,
+    SiteExclusionPolicy, SourceComponent, SourceMapping, SourceMappingComponent, SourcePlacement,
+    SourceReference, SourceReferenceId, StraightGuideDimension, StraightGuideRepetition,
+    ValidationError, VisibleMarkSizingPolicy,
 };
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
@@ -1255,6 +1256,11 @@ enum PatternOutputLayerDtoV4 {
         prototype: MarkPrototypeDtoV4,
         orientation: MarkOrientationDtoV4,
     },
+    GuidePaths {
+        id: u64,
+        guide_mechanism_id: u64,
+        style: PathStrokeStyle,
+    },
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1601,11 +1607,13 @@ struct ChannelPatternInstanceDto {
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum PatternGeometryResponseDto {
     Marks { response: MarkResponseDto },
+    Connected { response: ConnectedResponseDto },
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ChannelGeometryResponseDeltaDto {
     Marks { delta: MarkResponseDeltaDto },
+    Connected { delta: ConnectedResponseDeltaDto },
 }
 #[derive(Serialize, Deserialize)]
 struct LayoutDeltaDto {
@@ -1627,6 +1635,18 @@ struct MarkResponseDeltaDto {
     minimum_fill_delta: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     maximum_fill_delta: Option<f64>,
+}
+#[derive(Serialize, Deserialize)]
+struct ConnectedResponseDto {
+    minimum_thickness: f64,
+    maximum_thickness: f64,
+}
+#[derive(Serialize, Deserialize)]
+struct ConnectedResponseDeltaDto {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    minimum_thickness_delta: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    maximum_thickness_delta: Option<f64>,
 }
 #[derive(Serialize, Deserialize)]
 struct DensityDto {
@@ -2397,6 +2417,15 @@ impl PatternOutputLayerDtoV4 {
                 prototype: MarkPrototypeDtoV4::from_domain(prototype),
                 orientation: MarkOrientationDtoV4::from_domain(orientation),
             },
+            toniator_domain::PatternOutputLayer::GuidePaths {
+                id,
+                guide_mechanism_id,
+                style,
+            } => Self::GuidePaths {
+                id: id.0,
+                guide_mechanism_id: guide_mechanism_id.0,
+                style: *style,
+            },
         }
     }
     fn into_domain(self) -> toniator_domain::PatternOutputLayer {
@@ -2418,6 +2447,15 @@ impl PatternOutputLayerDtoV4 {
                 site_mechanism_id: PatternMechanismId(site_mechanism_id),
                 prototype: prototype.into_domain(),
                 orientation: orientation.into_domain(),
+            },
+            Self::GuidePaths {
+                id,
+                guide_mechanism_id,
+                style,
+            } => toniator_domain::PatternOutputLayer::GuidePaths {
+                id: PatternOutputLayerId(id),
+                guide_mechanism_id: PatternMechanismId(guide_mechanism_id),
+                style,
             },
         }
     }
@@ -2569,10 +2607,51 @@ impl MarkResponseDto {
     }
 }
 
+impl ConnectedResponseDto {
+    /// Projects the persisted normalized stroke response without resolving channel inheritance.
+    fn from_domain(value: &ConnectedGeometryResponse) -> Self {
+        Self {
+            minimum_thickness: value.minimum_thickness,
+            maximum_thickness: value.maximum_thickness,
+        }
+    }
+    /// Rebuilds the connected response for domain-owned validation.
+    fn into_domain(self) -> ConnectedGeometryResponse {
+        ConnectedGeometryResponse {
+            minimum_thickness: self.minimum_thickness,
+            maximum_thickness: self.maximum_thickness,
+        }
+    }
+}
+
+impl ConnectedResponseDeltaDto {
+    /// Projects optional additive stroke response intent without materializing effective values.
+    fn from_domain(value: &ConnectedGeometryResponseDelta) -> Self {
+        Self {
+            minimum_thickness_delta: value.minimum_thickness_delta,
+            maximum_thickness_delta: value.maximum_thickness_delta,
+        }
+    }
+    /// Rebuilds optional additive stroke response intent.
+    fn into_domain(self) -> ConnectedGeometryResponseDelta {
+        ConnectedGeometryResponseDelta {
+            minimum_thickness_delta: self.minimum_thickness_delta,
+            maximum_thickness_delta: self.maximum_thickness_delta,
+        }
+    }
+}
+
 impl DocumentPatternSettingsDto {
     /// Projects the sole document-base pattern authority into current-v4 fields.
     fn from_domain(value: &DocumentPatternSettings) -> Self {
-        let PatternGeometryResponse::Marks(response) = &value.geometry_response;
+        let geometry_response = match &value.geometry_response {
+            PatternGeometryResponse::Marks(response) => PatternGeometryResponseDto::Marks {
+                response: MarkResponseDto::from_domain(response),
+            },
+            PatternGeometryResponse::Connected(response) => PatternGeometryResponseDto::Connected {
+                response: ConnectedResponseDto::from_domain(response),
+            },
+        };
         Self {
             definition_id: value.definition_id.0,
             density: DensityDto {
@@ -2582,9 +2661,7 @@ impl DocumentPatternSettingsDto {
             },
             pattern_rotation_degrees: value.pattern_rotation_degrees,
             shape_rotation_degrees: value.shape_rotation_degrees,
-            geometry_response: PatternGeometryResponseDto::Marks {
-                response: MarkResponseDto::from_domain(response),
-            },
+            geometry_response,
         }
     }
     /// Rebuilds the sole document-base pattern authority for complete validation.
@@ -2601,6 +2678,9 @@ impl DocumentPatternSettingsDto {
             geometry_response: match self.geometry_response {
                 PatternGeometryResponseDto::Marks { response } => {
                     PatternGeometryResponse::Marks(response.into_domain())
+                }
+                PatternGeometryResponseDto::Connected { response } => {
+                    PatternGeometryResponse::Connected(response.into_domain())
                 }
             },
         }
@@ -2620,6 +2700,11 @@ impl ChannelPatternInstanceDto {
                             delta: MarkResponseDeltaDto::from_domain(delta),
                         }
                     }
+                    ChannelGeometryResponseDelta::Connected(delta) => {
+                        ChannelGeometryResponseDeltaDto::Connected {
+                            delta: ConnectedResponseDeltaDto::from_domain(delta),
+                        }
+                    }
                 },
             ),
         }
@@ -2633,6 +2718,9 @@ impl ChannelPatternInstanceDto {
             geometry_response_delta: self.geometry_response_delta.map(|delta| match delta {
                 ChannelGeometryResponseDeltaDto::Marks { delta } => {
                     ChannelGeometryResponseDelta::Marks(delta.into_domain())
+                }
+                ChannelGeometryResponseDeltaDto::Connected { delta } => {
+                    ChannelGeometryResponseDelta::Connected(delta.into_domain())
                 }
             }),
         }

@@ -227,7 +227,10 @@ fn v4_save_is_deterministic_and_serializes_only_base_plus_authored_deltas() {
     let ChannelGeometryResponseDelta::Marks(delta) = instance
         .geometry_response_delta
         .as_ref()
-        .expect("response delta");
+        .expect("response delta")
+    else {
+        panic!("mark fixture reloads mark response delta");
+    };
     assert_eq!(delta.minimum_fill_delta, Some(0.0));
     assert_eq!(delta.maximum_fill_delta, None);
     fs::remove_file(first).expect("first temporary removes");

@@ -4,7 +4,7 @@
 
 use std::{collections::HashSet, error::Error, fmt};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// A stable identifier for an authoritative document.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -447,6 +447,8 @@ pub struct DocumentPatternSettings {
 #[derive(Clone, Debug, PartialEq)]
 pub enum PatternGeometryResponse {
     Marks(MarkGeometryResponse),
+    /// Defines normalized round-brush widths for a guide-path output.
+    Connected(ConnectedGeometryResponse),
 }
 
 /// An optional additive density adjustment for one channel.
@@ -475,10 +477,25 @@ pub struct MarkGeometryResponseDelta {
     pub maximum_fill_delta: Option<f64>,
 }
 
+/// The normalized width response for one guide-path output.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConnectedGeometryResponse {
+    pub minimum_thickness: f64,
+    pub maximum_thickness: f64,
+}
+
+/// Optional additive channel intent for the document-owned stroke response.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConnectedGeometryResponseDelta {
+    pub minimum_thickness_delta: Option<f64>,
+    pub maximum_thickness_delta: Option<f64>,
+}
+
 /// The optional response-delta branch stored by a channel.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChannelGeometryResponseDelta {
     Marks(MarkGeometryResponseDelta),
+    Connected(ConnectedGeometryResponseDelta),
 }
 
 /// The persisted pattern intent owned by one channel.  It never contains a
@@ -574,6 +591,8 @@ pub struct DispersionCapabilityProjection {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PatternOutputCapabilityProjection {
     Marks(MarkOutputCapabilityProjection),
+    /// Reports the structural guide-path output without evaluator or renderer authority.
+    GuidePaths(GuidePathOutputCapabilityProjection),
 }
 
 /// Describes the active current mark output without creating renderer authority.
@@ -582,6 +601,42 @@ pub struct MarkOutputCapabilityProjection {
     pub prototype: MarkPrototypeKind,
     pub orientation: MarkOrientationKind,
     pub fill_range: bool,
+}
+
+/// Describes the only accepted Stage 20I stroke style.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GuidePathOutputCapabilityProjection {
+    pub round_join: bool,
+    pub round_cap: bool,
+    pub thickness_range: bool,
+}
+
+/// The only supported guide-path join policy in Stage 20I.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StrokeJoin {
+    Round,
+}
+
+/// The only supported guide-path cap policy in Stage 20I.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StrokeCap {
+    Round,
+}
+
+/// Persisted authored stroke style; response width remains document/channel authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathStrokeStyle {
+    pub join: StrokeJoin,
+    pub cap: StrokeCap,
+}
+
+impl Default for PathStrokeStyle {
+    fn default() -> Self {
+        Self {
+            join: StrokeJoin::Round,
+            cap: StrokeCap::Round,
+        }
+    }
 }
 
 /// Per-channel placement controls.
@@ -1105,12 +1160,20 @@ pub enum PatternOutputLayer {
         prototype: MarkPrototype,
         orientation: MarkOrientation,
     },
+    /// Consumes one ordered guide-path mechanism as round-brush strokes.
+    GuidePaths {
+        id: PatternOutputLayerId,
+        guide_mechanism_id: PatternMechanismId,
+        style: PathStrokeStyle,
+    },
 }
 
 impl PatternOutputLayer {
     pub const fn id(&self) -> PatternOutputLayerId {
         match self {
-            Self::CircularMarks { id, .. } | Self::MarkPrototype { id, .. } => *id,
+            Self::CircularMarks { id, .. }
+            | Self::MarkPrototype { id, .. }
+            | Self::GuidePaths { id, .. } => *id,
         }
     }
 }
@@ -1707,17 +1770,38 @@ impl Document {
             + instance.layout_delta.rotation_degrees.unwrap_or(0.0);
         let shape_rotation_degrees = self.pattern_settings.shape_rotation_degrees
             + instance.shape_rotation_delta_degrees.unwrap_or(0.0);
-        let PatternGeometryResponse::Marks(base) = &self.pattern_settings.geometry_response;
-        let delta = match &instance.geometry_response_delta {
-            None => MarkGeometryResponseDelta {
-                minimum_fill_delta: None,
-                maximum_fill_delta: None,
-            },
-            Some(ChannelGeometryResponseDelta::Marks(delta)) => delta.clone(),
-        };
-        let response = MarkGeometryResponse {
-            minimum_fill: base.minimum_fill + delta.minimum_fill_delta.unwrap_or(0.0),
-            maximum_fill: base.maximum_fill + delta.maximum_fill_delta.unwrap_or(0.0),
+        let geometry_response = match (
+            &self.pattern_settings.geometry_response,
+            &instance.geometry_response_delta,
+        ) {
+            (PatternGeometryResponse::Marks(base), None) => {
+                PatternGeometryResponse::Marks(base.clone())
+            }
+            (
+                PatternGeometryResponse::Marks(base),
+                Some(ChannelGeometryResponseDelta::Marks(delta)),
+            ) => PatternGeometryResponse::Marks(MarkGeometryResponse {
+                minimum_fill: base.minimum_fill + delta.minimum_fill_delta.unwrap_or(0.0),
+                maximum_fill: base.maximum_fill + delta.maximum_fill_delta.unwrap_or(0.0),
+            }),
+            (PatternGeometryResponse::Connected(base), None) => {
+                PatternGeometryResponse::Connected(base.clone())
+            }
+            (
+                PatternGeometryResponse::Connected(base),
+                Some(ChannelGeometryResponseDelta::Connected(delta)),
+            ) => PatternGeometryResponse::Connected(ConnectedGeometryResponse {
+                minimum_thickness: base.minimum_thickness
+                    + delta.minimum_thickness_delta.unwrap_or(0.0),
+                maximum_thickness: base.maximum_thickness
+                    + delta.maximum_thickness_delta.unwrap_or(0.0),
+            }),
+            _ => {
+                return Err(ValidationError::new(
+                    "channel.pattern.geometry_response_delta",
+                    "channel response delta must match the document response branch",
+                ));
+            }
         };
         let effective = EffectiveChannelPatternInstance {
             definition_id,
@@ -1726,10 +1810,20 @@ impl Document {
             translation_x: instance.layout_delta.translation_x,
             translation_y: instance.layout_delta.translation_y,
             shape_rotation_degrees,
-            geometry_response: PatternGeometryResponse::Marks(response),
+            geometry_response,
         };
         validate_effective_pattern(&effective)?;
         validate_effective_response_compatibility(definition, &effective.geometry_response)?;
+        if matches!(
+            definition.output_layers.as_slice(),
+            [PatternOutputLayer::GuidePaths { .. }]
+        ) && effective.shape_rotation_degrees != 0.0
+        {
+            return Err(ValidationError::new(
+                "effective_pattern.shape_rotation_degrees",
+                "shape rotation is inapplicable to guide-path output",
+            ));
+        }
         Ok(effective)
     }
 
@@ -1883,16 +1977,60 @@ impl Document {
         channel_id: ChannelId,
         desired: PatternGeometryResponse,
     ) -> Result<DocumentCommand, ValidationError> {
-        let (PatternGeometryResponse::Marks(base), PatternGeometryResponse::Marks(desired)) =
-            (&self.pattern_settings.geometry_response, desired);
-        validate_mark_response(&desired)?;
+        let geometry_response = match (&self.pattern_settings.geometry_response, desired) {
+            (PatternGeometryResponse::Marks(base), PatternGeometryResponse::Marks(desired)) => {
+                validate_mark_response(&desired)?;
+                ChannelGeometryResponseDelta::Marks(MarkGeometryResponseDelta {
+                    minimum_fill_delta: Some(desired.minimum_fill - base.minimum_fill),
+                    maximum_fill_delta: Some(desired.maximum_fill - base.maximum_fill),
+                })
+            }
+            (
+                PatternGeometryResponse::Connected(base),
+                PatternGeometryResponse::Connected(desired),
+            ) => {
+                validate_connected_response(&desired)?;
+                ChannelGeometryResponseDelta::Connected(ConnectedGeometryResponseDelta {
+                    minimum_thickness_delta: Some(
+                        desired.minimum_thickness - base.minimum_thickness,
+                    ),
+                    maximum_thickness_delta: Some(
+                        desired.maximum_thickness - base.maximum_thickness,
+                    ),
+                })
+            }
+            _ => {
+                return Err(ValidationError::new(
+                    "channel.pattern.geometry_response",
+                    "desired response must match the document response branch",
+                ));
+            }
+        };
         Ok(DocumentCommand::SetChannelGeometryResponseDelta {
             base: self.pattern_settings.clone(),
             channel_id,
-            geometry_response: ChannelGeometryResponseDelta::Marks(MarkGeometryResponseDelta {
-                minimum_fill_delta: Some(desired.minimum_fill - base.minimum_fill),
-                maximum_fill_delta: Some(desired.maximum_fill - base.maximum_fill),
-            }),
+            geometry_response,
+        })
+    }
+
+    /// Builds the stale-aware geometry-response reset without materializing an inherited value.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error when the requested channel does not exist; command execution
+    /// still validates that remaining overrides are compatible atomically.
+    pub fn reset_channel_geometry_response_delta(
+        &self,
+        channel_id: ChannelId,
+    ) -> Result<DocumentCommand, ValidationError> {
+        self.channel_pattern_instance(channel_id)
+            .ok_or(ValidationError::new(
+                "channel.pattern.channel",
+                "channel pattern instance is missing",
+            ))?;
+        Ok(DocumentCommand::ResetChannelGeometryResponseDelta {
+            base: self.pattern_settings.clone(),
+            channel_id,
         })
     }
 
@@ -1911,8 +2049,18 @@ impl Document {
         edit: MarkGeometryFieldEdit,
     ) -> Result<DocumentCommand, ValidationError> {
         let effective = self.effective_channel_pattern(channel_id)?;
-        let PatternGeometryResponse::Marks(mut desired) = effective.geometry_response;
-        let PatternGeometryResponse::Marks(base) = &self.pattern_settings.geometry_response;
+        let PatternGeometryResponse::Marks(mut desired) = effective.geometry_response else {
+            return Err(ValidationError::new(
+                "channel.pattern.geometry_response",
+                "mark response editing requires the marks branch",
+            ));
+        };
+        let PatternGeometryResponse::Marks(base) = &self.pattern_settings.geometry_response else {
+            return Err(ValidationError::new(
+                "channel.pattern.geometry_response",
+                "mark response editing requires the marks base",
+            ));
+        };
         let instance = self
             .channel_pattern_instance(channel_id)
             .ok_or(ValidationError::new(
@@ -1921,6 +2069,12 @@ impl Document {
             ))?;
         let mut delta = match &instance.geometry_response_delta {
             Some(ChannelGeometryResponseDelta::Marks(delta)) => delta.clone(),
+            Some(ChannelGeometryResponseDelta::Connected(_)) => {
+                return Err(ValidationError::new(
+                    "channel.pattern.geometry_response_delta",
+                    "mark response editing requires a matching mark delta",
+                ));
+            }
             None => MarkGeometryResponseDelta {
                 minimum_fill_delta: None,
                 maximum_fill_delta: None,
@@ -2132,9 +2286,20 @@ impl Document {
             PropertyFieldId::DensityAspectLocked,
             PropertyFieldId::RotationDegrees,
             PropertyFieldId::ShapeRotationDegrees,
-            PropertyFieldId::MarkMinimumFill,
-            PropertyFieldId::MarkMaximumFill,
         ] {
+            descriptors.push(descriptor_from_contract(field, PropertyTarget::Document));
+        }
+        let response_fields = match &self.pattern_settings.geometry_response {
+            PatternGeometryResponse::Marks(_) => [
+                PropertyFieldId::MarkMinimumFill,
+                PropertyFieldId::MarkMaximumFill,
+            ],
+            PatternGeometryResponse::Connected(_) => [
+                PropertyFieldId::ConnectedMinimumThickness,
+                PropertyFieldId::ConnectedMaximumThickness,
+            ],
+        };
+        for field in response_fields {
             descriptors.push(descriptor_from_contract(field, PropertyTarget::Document));
         }
         for channel_id in self.channel_ids() {
@@ -2145,13 +2310,14 @@ impl Document {
                 PropertyFieldId::RotationDegrees,
                 PropertyFieldId::TranslationX,
                 PropertyFieldId::TranslationY,
-                PropertyFieldId::MarkMinimumFill,
-                PropertyFieldId::MarkMaximumFill,
                 PropertyFieldId::ShapeRotationDegrees,
                 PropertyFieldId::Opacity,
                 PropertyFieldId::Visibility,
                 PropertyFieldId::DefinitionSelection,
             ] {
+                descriptors.push(descriptor_from_contract(field, target));
+            }
+            for field in response_fields {
                 descriptors.push(descriptor_from_contract(field, target));
             }
             if let Some(model) = self.channel_model() {
@@ -2384,10 +2550,16 @@ impl Document {
             }
             for layer in &definition.output_layers {
                 let target = PropertyTarget::OutputLayer(definition.id, layer.id());
-                descriptors.push(descriptor_from_contract(
-                    PropertyFieldId::OutputSiteProduct,
-                    target,
-                ));
+                if matches!(
+                    layer,
+                    PatternOutputLayer::CircularMarks { .. }
+                        | PatternOutputLayer::MarkPrototype { .. }
+                ) {
+                    descriptors.push(descriptor_from_contract(
+                        PropertyFieldId::OutputSiteProduct,
+                        target,
+                    ));
+                }
                 if let PatternOutputLayer::MarkPrototype { orientation, .. } = layer {
                     for field in [
                         PropertyFieldId::OutputPrototype,
@@ -2525,14 +2697,44 @@ impl Document {
                     self.pattern_settings.shape_rotation_degrees,
                 ),
                 PropertyFieldId::MarkMinimumFill => {
-                    let PatternGeometryResponse::Marks(response) =
-                        &self.pattern_settings.geometry_response;
-                    PropertyCurrentValueKind::FiniteF64(response.minimum_fill)
+                    match &self.pattern_settings.geometry_response {
+                        PatternGeometryResponse::Marks(response) => {
+                            PropertyCurrentValueKind::FiniteF64(response.minimum_fill)
+                        }
+                        PatternGeometryResponse::Connected(_) => {
+                            unreachable!("inactive mark descriptor")
+                        }
+                    }
                 }
                 PropertyFieldId::MarkMaximumFill => {
-                    let PatternGeometryResponse::Marks(response) =
-                        &self.pattern_settings.geometry_response;
-                    PropertyCurrentValueKind::FiniteF64(response.maximum_fill)
+                    match &self.pattern_settings.geometry_response {
+                        PatternGeometryResponse::Marks(response) => {
+                            PropertyCurrentValueKind::FiniteF64(response.maximum_fill)
+                        }
+                        PatternGeometryResponse::Connected(_) => {
+                            unreachable!("inactive mark descriptor")
+                        }
+                    }
+                }
+                PropertyFieldId::ConnectedMinimumThickness => {
+                    match &self.pattern_settings.geometry_response {
+                        PatternGeometryResponse::Connected(response) => {
+                            PropertyCurrentValueKind::FiniteF64(response.minimum_thickness)
+                        }
+                        PatternGeometryResponse::Marks(_) => {
+                            unreachable!("inactive connected descriptor")
+                        }
+                    }
+                }
+                PropertyFieldId::ConnectedMaximumThickness => {
+                    match &self.pattern_settings.geometry_response {
+                        PatternGeometryResponse::Connected(response) => {
+                            PropertyCurrentValueKind::FiniteF64(response.maximum_thickness)
+                        }
+                        PatternGeometryResponse::Marks(_) => {
+                            unreachable!("inactive connected descriptor")
+                        }
+                    }
                 }
                 _ => unreachable!("document descriptor is not a document-base field"),
             },
@@ -2560,14 +2762,40 @@ impl Document {
                     PropertyFieldId::TranslationY => {
                         PropertyCurrentValueKind::FiniteF64(effective.translation_y)
                     }
-                    PropertyFieldId::MarkMinimumFill => {
-                        let PatternGeometryResponse::Marks(response) = effective.geometry_response;
-                        PropertyCurrentValueKind::FiniteF64(response.minimum_fill)
-                    }
-                    PropertyFieldId::MarkMaximumFill => {
-                        let PatternGeometryResponse::Marks(response) = effective.geometry_response;
-                        PropertyCurrentValueKind::FiniteF64(response.maximum_fill)
-                    }
+                    PropertyFieldId::MarkMinimumFill => match effective.geometry_response {
+                        PatternGeometryResponse::Marks(response) => {
+                            PropertyCurrentValueKind::FiniteF64(response.minimum_fill)
+                        }
+                        PatternGeometryResponse::Connected(_) => {
+                            unreachable!("inactive mark descriptor")
+                        }
+                    },
+                    PropertyFieldId::MarkMaximumFill => match effective.geometry_response {
+                        PatternGeometryResponse::Marks(response) => {
+                            PropertyCurrentValueKind::FiniteF64(response.maximum_fill)
+                        }
+                        PatternGeometryResponse::Connected(_) => {
+                            unreachable!("inactive mark descriptor")
+                        }
+                    },
+                    PropertyFieldId::ConnectedMinimumThickness => match effective.geometry_response
+                    {
+                        PatternGeometryResponse::Connected(response) => {
+                            PropertyCurrentValueKind::FiniteF64(response.minimum_thickness)
+                        }
+                        PatternGeometryResponse::Marks(_) => {
+                            unreachable!("inactive connected descriptor")
+                        }
+                    },
+                    PropertyFieldId::ConnectedMaximumThickness => match effective.geometry_response
+                    {
+                        PatternGeometryResponse::Connected(response) => {
+                            PropertyCurrentValueKind::FiniteF64(response.maximum_thickness)
+                        }
+                        PatternGeometryResponse::Marks(_) => {
+                            unreachable!("inactive connected descriptor")
+                        }
+                    },
                     PropertyFieldId::ShapeRotationDegrees => {
                         PropertyCurrentValueKind::FiniteF64(effective.shape_rotation_degrees)
                     }
@@ -2940,6 +3168,22 @@ impl Document {
                 }
                 _ => PropertyInheritance::Inherited,
             },
+            PropertyFieldId::ConnectedMinimumThickness => match &instance.geometry_response_delta {
+                Some(ChannelGeometryResponseDelta::Connected(delta))
+                    if delta.minimum_thickness_delta.is_some() =>
+                {
+                    PropertyInheritance::Explicit
+                }
+                _ => PropertyInheritance::Inherited,
+            },
+            PropertyFieldId::ConnectedMaximumThickness => match &instance.geometry_response_delta {
+                Some(ChannelGeometryResponseDelta::Connected(delta))
+                    if delta.maximum_thickness_delta.is_some() =>
+                {
+                    PropertyInheritance::Explicit
+                }
+                _ => PropertyInheritance::Inherited,
+            },
             PropertyFieldId::DefinitionSelection => {
                 if instance.definition_override.is_some() {
                     PropertyInheritance::Explicit
@@ -2979,14 +3223,36 @@ impl Document {
                     self.pattern_settings.shape_rotation_degrees,
                 )),
                 PropertyFieldId::MarkMinimumFill => {
-                    let PatternGeometryResponse::Marks(response) =
-                        &self.pattern_settings.geometry_response;
-                    Some(PropertyCurrentValueKind::FiniteF64(response.minimum_fill))
+                    match &self.pattern_settings.geometry_response {
+                        PatternGeometryResponse::Marks(response) => {
+                            Some(PropertyCurrentValueKind::FiniteF64(response.minimum_fill))
+                        }
+                        PatternGeometryResponse::Connected(_) => None,
+                    }
                 }
                 PropertyFieldId::MarkMaximumFill => {
-                    let PatternGeometryResponse::Marks(response) =
-                        &self.pattern_settings.geometry_response;
-                    Some(PropertyCurrentValueKind::FiniteF64(response.maximum_fill))
+                    match &self.pattern_settings.geometry_response {
+                        PatternGeometryResponse::Marks(response) => {
+                            Some(PropertyCurrentValueKind::FiniteF64(response.maximum_fill))
+                        }
+                        PatternGeometryResponse::Connected(_) => None,
+                    }
+                }
+                PropertyFieldId::ConnectedMinimumThickness => {
+                    match &self.pattern_settings.geometry_response {
+                        PatternGeometryResponse::Connected(response) => Some(
+                            PropertyCurrentValueKind::FiniteF64(response.minimum_thickness),
+                        ),
+                        PatternGeometryResponse::Marks(_) => None,
+                    }
+                }
+                PropertyFieldId::ConnectedMaximumThickness => {
+                    match &self.pattern_settings.geometry_response {
+                        PatternGeometryResponse::Connected(response) => Some(
+                            PropertyCurrentValueKind::FiniteF64(response.maximum_thickness),
+                        ),
+                        PatternGeometryResponse::Marks(_) => None,
+                    }
                 }
                 _ => None,
             },
@@ -3021,14 +3287,32 @@ impl Document {
                         Some(ChannelGeometryResponseDelta::Marks(delta)) => delta
                             .minimum_fill_delta
                             .map(PropertyCurrentValueKind::FiniteF64),
+                        Some(ChannelGeometryResponseDelta::Connected(_)) => None,
                         None => None,
                     },
                     PropertyFieldId::MarkMaximumFill => match &instance.geometry_response_delta {
                         Some(ChannelGeometryResponseDelta::Marks(delta)) => delta
                             .maximum_fill_delta
                             .map(PropertyCurrentValueKind::FiniteF64),
+                        Some(ChannelGeometryResponseDelta::Connected(_)) => None,
                         None => None,
                     },
+                    PropertyFieldId::ConnectedMinimumThickness => {
+                        match &instance.geometry_response_delta {
+                            Some(ChannelGeometryResponseDelta::Connected(delta)) => delta
+                                .minimum_thickness_delta
+                                .map(PropertyCurrentValueKind::FiniteF64),
+                            _ => None,
+                        }
+                    }
+                    PropertyFieldId::ConnectedMaximumThickness => {
+                        match &instance.geometry_response_delta {
+                            Some(ChannelGeometryResponseDelta::Connected(delta)) => delta
+                                .maximum_thickness_delta
+                                .map(PropertyCurrentValueKind::FiniteF64),
+                            _ => None,
+                        }
+                    }
                     _ => None,
                 }
             }
@@ -4344,6 +4628,7 @@ impl Document {
         )?;
         match &self.pattern_settings.geometry_response {
             PatternGeometryResponse::Marks(response) => validate_mark_response(response)?,
+            PatternGeometryResponse::Connected(response) => validate_connected_response(response)?,
         }
         if self
             .definition(self.pattern_settings.definition_id)
@@ -4379,7 +4664,27 @@ impl Document {
             }
         }
         for channel_id in self.channel_ids() {
-            self.effective_channel_pattern(channel_id)?;
+            let effective = self.effective_channel_pattern(channel_id)?;
+            if matches!(
+                &self.channel_configuration,
+                ChannelConfiguration::Topology {
+                    model: HalftoneChannelModel::SourceColorAlpha,
+                    ..
+                }
+            ) && self
+                .definition(effective.definition_id)
+                .is_some_and(|definition| {
+                    matches!(
+                        definition.output_layers.as_slice(),
+                        [PatternOutputLayer::GuidePaths { .. }]
+                    )
+                })
+            {
+                return Err(ValidationError::new(
+                    "channel.paint",
+                    "guide-path output requires solid channel paint",
+                ));
+            }
         }
         Ok(())
     }
@@ -5522,6 +5827,7 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
                             orientation: MarkOrientation::Fixed,
                         };
                     }
+                    PatternOutputLayer::GuidePaths { .. } => {}
                 }
             }
         }
@@ -6932,6 +7238,10 @@ fn validate_mark_prototype_output_target(
             "pattern_definitions.output_layers",
             "command targets an output without a mark-prototype configuration",
         )),
+        PatternOutputLayer::GuidePaths { .. } => Err(ValidationError::new(
+            "pattern_definitions.output_layers",
+            "command targets a guide-path output without a mark-prototype configuration",
+        )),
     }
 }
 
@@ -7091,7 +7401,12 @@ fn validate_definition_structure(definition: &PatternDefinition) -> Result<(), V
         }
         validate_straight_dimensions(dimensions)?;
         validate_site_mechanism(site, *id, root_site_id, dimensions)?;
-        validate_generalized_output_layers(&definition.output_layers, root_site_id, dimensions)?;
+        validate_generalized_output_layers(
+            &definition.output_layers,
+            *id,
+            root_site_id,
+            dimensions,
+        )?;
         return Ok(());
     }
     if let [PatternMechanism::GuideDimensions { id, dimensions }, site] =
@@ -7106,7 +7421,7 @@ fn validate_definition_structure(definition: &PatternDefinition) -> Result<(), V
         validate_guide_dimensions(dimensions)?;
         let ids: Vec<_> = dimensions.iter().map(|dimension| dimension.id).collect();
         validate_site_mechanism_ids(site, *id, root_site_id, &ids)?;
-        validate_generalized_output_layers_ids(&definition.output_layers, root_site_id, &ids)?;
+        validate_generalized_output_layers_ids(&definition.output_layers, *id, root_site_id, &ids)?;
         return Ok(());
     }
     if !matches!(definition.mechanisms.first(), Some(PatternMechanism::StraightGuides { id }) if *id == guide_mechanism_id)
@@ -7131,6 +7446,12 @@ fn validate_definition_structure(definition: &PatternDefinition) -> Result<(), V
                 ..
             },
         ] => *site_mechanism_id == root_site_id,
+        [
+            PatternOutputLayer::GuidePaths {
+                guide_mechanism_id: output_guide_id,
+                ..
+            },
+        ] => *output_guide_id == guide_mechanism_id,
         _ => false,
     };
     if !has_compatible_output {
@@ -7259,6 +7580,15 @@ fn project_validated_pattern_definition(
 fn project_output_capability(
     output: &PatternOutputLayer,
 ) -> Result<PatternOutputCapabilityProjection, ValidationError> {
+    if matches!(output, PatternOutputLayer::GuidePaths { .. }) {
+        return Ok(PatternOutputCapabilityProjection::GuidePaths(
+            GuidePathOutputCapabilityProjection {
+                round_join: true,
+                round_cap: true,
+                thickness_range: true,
+            },
+        ));
+    }
     let (prototype, orientation) = match output {
         PatternOutputLayer::CircularMarks { .. } => {
             (MarkPrototypeKind::Circle, MarkOrientationKind::Fixed)
@@ -7271,6 +7601,7 @@ fn project_output_capability(
             mark_prototype_kind(prototype),
             mark_orientation_kind(orientation),
         ),
+        PatternOutputLayer::GuidePaths { .. } => unreachable!("handled above"),
     };
     Ok(PatternOutputCapabilityProjection::Marks(
         MarkOutputCapabilityProjection {
@@ -7762,9 +8093,23 @@ fn validate_site_mechanism_ids(
 /// Returns a stable output-layer or orientation-reference diagnostic.
 fn validate_generalized_output_layers_ids(
     layers: &[PatternOutputLayer],
+    guide_id: PatternMechanismId,
     site_id: PatternMechanismId,
     dimensions: &[GuideDimensionId],
 ) -> Result<(), ValidationError> {
+    if let [
+        PatternOutputLayer::GuidePaths {
+            guide_mechanism_id, ..
+        },
+    ] = layers
+    {
+        return (*guide_mechanism_id == guide_id)
+            .then_some(())
+            .ok_or(ValidationError::new(
+                "pattern_definitions.output_layers.guide_mechanism_id",
+                "guide-path output must consume its declared guide mechanism",
+            ));
+    }
     let [
         PatternOutputLayer::MarkPrototype {
             site_mechanism_id,
@@ -7856,9 +8201,23 @@ fn validate_site_mechanism(
 /// Returns a stable output-layer, site-product, or orientation-reference diagnostic.
 fn validate_generalized_output_layers(
     layers: &[PatternOutputLayer],
+    guide_id: PatternMechanismId,
     site_id: PatternMechanismId,
     dimensions: &[StraightGuideDimension],
 ) -> Result<(), ValidationError> {
+    if let [
+        PatternOutputLayer::GuidePaths {
+            guide_mechanism_id, ..
+        },
+    ] = layers
+    {
+        return (*guide_mechanism_id == guide_id)
+            .then_some(())
+            .ok_or(ValidationError::new(
+                "pattern_definitions.output_layers.guide_mechanism_id",
+                "guide-path output must consume its declared guide mechanism",
+            ));
+    }
     let [
         PatternOutputLayer::MarkPrototype {
             site_mechanism_id,
@@ -7958,17 +8317,25 @@ fn validate_channel_pattern_instance(
     if let Some(rotation) = instance.shape_rotation_delta_degrees {
         validate_finite(rotation, "channel.pattern.shape_rotation_delta_degrees")?;
     }
-    if let Some(ChannelGeometryResponseDelta::Marks(delta)) = &instance.geometry_response_delta {
-        if let Some(value) = delta.minimum_fill_delta {
+    if let Some(delta) = &instance.geometry_response_delta {
+        let (minimum, maximum) = match delta {
+            ChannelGeometryResponseDelta::Marks(value) => {
+                (value.minimum_fill_delta, value.maximum_fill_delta)
+            }
+            ChannelGeometryResponseDelta::Connected(value) => {
+                (value.minimum_thickness_delta, value.maximum_thickness_delta)
+            }
+        };
+        if let Some(value) = minimum {
             validate_finite(
                 value,
-                "channel.pattern.geometry_response_delta.minimum_fill_delta",
+                "channel.pattern.geometry_response_delta.minimum_delta",
             )?;
         }
-        if let Some(value) = delta.maximum_fill_delta {
+        if let Some(value) = maximum {
             validate_finite(
                 value,
-                "channel.pattern.geometry_response_delta.maximum_fill_delta",
+                "channel.pattern.geometry_response_delta.maximum_delta",
             )?;
         }
     }
@@ -8001,29 +8368,41 @@ fn validate_effective_pattern(
     )?;
     match &effective.geometry_response {
         PatternGeometryResponse::Marks(response) => validate_mark_response(response),
+        PatternGeometryResponse::Connected(response) => validate_connected_response(response),
     }
 }
 
-/// Confirms that the resolved definition can realize the persisted response
-/// branch. Stage 20G accepts marks only, so this rejects an empty or future
-/// non-mark output arrangement before an engine can evaluate it.
+/// Confirms that the resolved definition can realize the persisted response branch.
 ///
 /// # Errors
 ///
-/// Returns a validation error without mutation when a marks response does not
-/// have at least one mark-producing output layer.
+/// Returns a validation error without mutation when the response branch and
+/// the one homogeneous output kind do not agree.
 fn validate_effective_response_compatibility(
     definition: &PatternDefinition,
     response: &PatternGeometryResponse,
 ) -> Result<(), ValidationError> {
-    match response {
-        PatternGeometryResponse::Marks(_) if definition.output_layers.is_empty() => {
-            Err(ValidationError::new(
-                "channel.pattern.geometry_response",
-                "marks response requires a mark-producing definition output",
-            ))
+    let marks = definition.output_layers.iter().all(|layer| {
+        matches!(
+            layer,
+            PatternOutputLayer::CircularMarks { .. } | PatternOutputLayer::MarkPrototype { .. }
+        )
+    });
+    let paths = matches!(
+        definition.output_layers.as_slice(),
+        [PatternOutputLayer::GuidePaths { .. }]
+    );
+    match (response, marks, paths) {
+        (PatternGeometryResponse::Marks(_), true, false)
+            if !definition.output_layers.is_empty() =>
+        {
+            Ok(())
         }
-        PatternGeometryResponse::Marks(_) => Ok(()),
+        (PatternGeometryResponse::Connected(_), false, true) => Ok(()),
+        _ => Err(ValidationError::new(
+            "channel.pattern.geometry_response",
+            "geometry response must match the definition's homogeneous output kind",
+        )),
     }
 }
 
@@ -8044,6 +8423,27 @@ fn validate_mark_response(response: &MarkGeometryResponse) -> Result<(), Validat
         return Err(ValidationError::new(
             "channel.pattern.mark_geometry_response",
             "minimum_fill must not exceed maximum_fill",
+        ));
+    }
+    Ok(())
+}
+
+/// Validates the normalized stroke-width response after document authority has composed deltas.
+fn validate_connected_response(
+    response: &ConnectedGeometryResponse,
+) -> Result<(), ValidationError> {
+    for value in [response.minimum_thickness, response.maximum_thickness] {
+        if !value.is_finite() || !(0.0..=2.0).contains(&value) {
+            return Err(ValidationError::new(
+                "channel.pattern.geometry_response",
+                "stroke thickness must be finite and within 0.0..=2.0",
+            ));
+        }
+    }
+    if response.minimum_thickness > response.maximum_thickness {
+        return Err(ValidationError::new(
+            "channel.pattern.geometry_response",
+            "minimum stroke thickness must not exceed maximum stroke thickness",
         ));
     }
     Ok(())
@@ -8266,6 +8666,8 @@ pub enum PropertyFieldId {
     TranslationY,
     MarkMinimumFill,
     MarkMaximumFill,
+    ConnectedMinimumThickness,
+    ConnectedMaximumThickness,
     ShapeRotationDegrees,
     LegacyMappingComponent,
     LegacyMappingPlacement,
@@ -8342,6 +8744,8 @@ pub const PROPERTY_FIELD_IDS: &[PropertyFieldId] = &[
     PropertyFieldId::TranslationY,
     PropertyFieldId::MarkMinimumFill,
     PropertyFieldId::MarkMaximumFill,
+    PropertyFieldId::ConnectedMinimumThickness,
+    PropertyFieldId::ConnectedMaximumThickness,
     PropertyFieldId::ShapeRotationDegrees,
     PropertyFieldId::LegacyMappingComponent,
     PropertyFieldId::LegacyMappingPlacement,
@@ -9964,7 +10368,10 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::TranslationX | PropertyFieldId::TranslationY => {
                 PropertyCommandKind::SetTranslationAxis
             }
-            PropertyFieldId::MarkMinimumFill | PropertyFieldId::MarkMaximumFill => {
+            PropertyFieldId::MarkMinimumFill
+            | PropertyFieldId::MarkMaximumFill
+            | PropertyFieldId::ConnectedMinimumThickness
+            | PropertyFieldId::ConnectedMaximumThickness => {
                 PropertyCommandKind::SetChannelGeometryResponseDelta
             }
             PropertyFieldId::ShapeRotationDegrees => {
@@ -10138,7 +10545,10 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::ExclusionMinimumCenterDistance
             | PropertyFieldId::RandomMaximumAttempts
             | PropertyFieldId::RandomMaximumNeighborChecks => positive_bounds(),
-            PropertyFieldId::MarkMinimumFill | PropertyFieldId::MarkMaximumFill => fill_bounds(),
+            PropertyFieldId::MarkMinimumFill
+            | PropertyFieldId::MarkMaximumFill
+            | PropertyFieldId::ConnectedMinimumThickness
+            | PropertyFieldId::ConnectedMaximumThickness => fill_bounds(),
             PropertyFieldId::CoverageAdditionalMargin
             | PropertyFieldId::ModeledMappingGain
             | PropertyFieldId::ArtworkWeightMappingGain
@@ -11989,6 +12399,9 @@ impl DocumentCommand {
                 )?;
                 match &settings.geometry_response {
                     PatternGeometryResponse::Marks(response) => validate_mark_response(response),
+                    PatternGeometryResponse::Connected(response) => {
+                        validate_connected_response(response)
+                    }
                 }
             }
             Self::ReplaceDocumentPatternDefinitionRecipe {
@@ -12109,6 +12522,21 @@ impl DocumentCommand {
                         }
                         if let Some(value) = delta.maximum_fill_delta {
                             validate_finite(value, "channel.pattern.mark_delta.maximum_fill")?;
+                        }
+                        Ok(())
+                    }
+                    ChannelGeometryResponseDelta::Connected(delta) => {
+                        if let Some(value) = delta.minimum_thickness_delta {
+                            validate_finite(
+                                value,
+                                "channel.pattern.stroke_delta.minimum_thickness",
+                            )?;
+                        }
+                        if let Some(value) = delta.maximum_thickness_delta {
+                            validate_finite(
+                                value,
+                                "channel.pattern.stroke_delta.maximum_thickness",
+                            )?;
                         }
                         Ok(())
                     }

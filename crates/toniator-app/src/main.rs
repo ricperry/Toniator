@@ -1668,6 +1668,9 @@ fn inspector_group(field: PropertyFieldId) -> &'static str {
         PropertyFieldId::MarkMinimumFill
         | PropertyFieldId::MarkMaximumFill
         | PropertyFieldId::ShapeRotationDegrees => "Marks",
+        PropertyFieldId::ConnectedMinimumThickness | PropertyFieldId::ConnectedMaximumThickness => {
+            "Paths"
+        }
         PropertyFieldId::DefinitionSelection => "Pattern",
         PropertyFieldId::CoverageGuardSteps
         | PropertyFieldId::CoverageAdditionalMargin
@@ -1698,6 +1701,9 @@ fn inspector_field_label(field: PropertyFieldId) -> String {
         PropertyFieldId::TranslationY => "Y offset".into(),
         PropertyFieldId::MarkMinimumFill => "Minimum fill".into(),
         PropertyFieldId::MarkMaximumFill => "Maximum fill".into(),
+        // Connected values use the same domain-built inspector command boundary as mark fills.
+        PropertyFieldId::ConnectedMinimumThickness => "Minimum thickness".into(),
+        PropertyFieldId::ConnectedMaximumThickness => "Maximum thickness".into(),
         PropertyFieldId::ShapeRotationDegrees => "Shape rotation".into(),
         PropertyFieldId::LegacyMappingComponent | PropertyFieldId::ModeledMappingComponent => {
             "Source component".into()
@@ -5851,7 +5857,13 @@ fn command_for_inspector_input(
             match descriptor.target {
                 PropertyTarget::Document => {
                     let mut settings = document.pattern_settings().clone();
-                    let PatternGeometryResponse::Marks(response) = &mut settings.geometry_response;
+                    let PatternGeometryResponse::Marks(response) = &mut settings.geometry_response
+                    else {
+                        return Err(
+                            "Mark controls are inapplicable to the connected response branch."
+                                .to_owned(),
+                        );
+                    };
                     match edit {
                         MarkGeometryFieldEdit::MinimumFill(value) => response.minimum_fill = value,
                         MarkGeometryFieldEdit::MaximumFill(value) => response.maximum_fill = value,
@@ -5865,6 +5877,64 @@ fn command_for_inspector_input(
                     .set_channel_mark_response_field_for_effective(channel_id, edit)
                     .map_err(|error| error.to_string()),
                 _ => Err("Mark response requires document or channel authority.".to_owned()),
+            }
+        }
+        PropertyFieldId::ConnectedMinimumThickness | PropertyFieldId::ConnectedMaximumThickness => {
+            let value = f64_value(input)?;
+            match descriptor.target {
+                PropertyTarget::Document => {
+                    let mut settings = document.pattern_settings().clone();
+                    let PatternGeometryResponse::Connected(response) =
+                        &mut settings.geometry_response
+                    else {
+                        return Err(
+                            "Path controls are inapplicable to the mark response branch."
+                                .to_owned(),
+                        );
+                    };
+                    match descriptor.field {
+                        PropertyFieldId::ConnectedMinimumThickness => {
+                            response.minimum_thickness = value;
+                        }
+                        PropertyFieldId::ConnectedMaximumThickness => {
+                            response.maximum_thickness = value;
+                        }
+                        _ => unreachable!("connected response arm owns only connected fields"),
+                    }
+                    Ok(DocumentCommand::SetDocumentPatternSettings {
+                        base: document.pattern_settings().clone(),
+                        settings,
+                    })
+                }
+                PropertyTarget::Channel(channel_id) => {
+                    let effective = document
+                        .effective_channel_pattern(channel_id)
+                        .map_err(|error| error.to_string())?;
+                    let PatternGeometryResponse::Connected(mut response) =
+                        effective.geometry_response
+                    else {
+                        return Err(
+                            "Path controls are inapplicable to the mark response branch."
+                                .to_owned(),
+                        );
+                    };
+                    match descriptor.field {
+                        PropertyFieldId::ConnectedMinimumThickness => {
+                            response.minimum_thickness = value;
+                        }
+                        PropertyFieldId::ConnectedMaximumThickness => {
+                            response.maximum_thickness = value;
+                        }
+                        _ => unreachable!("connected response arm owns only connected fields"),
+                    }
+                    document
+                        .set_channel_geometry_response_for_effective(
+                            channel_id,
+                            PatternGeometryResponse::Connected(response),
+                        )
+                        .map_err(|error| error.to_string())
+                }
+                _ => Err("Connected response requires document or channel authority.".to_owned()),
             }
         }
         PropertyFieldId::ShapeRotationDegrees => {
@@ -7628,6 +7698,128 @@ mod tests {
         )
         .expect("default app document");
         DocumentHistory::new(DocumentSession::new(document).expect("valid app session"))
+    }
+
+    /// Builds one valid modeled GuidePaths document for inspector-command authority tests.
+    fn connected_path_document() -> Document {
+        let base = Document::new_default_document(
+            CanvasSpec {
+                width: 120.0,
+                height: 80.0,
+            },
+            SourceReference::Unassigned,
+        )
+        .expect("default connected-path document");
+        let guide_id = PatternMechanismId(31);
+        let mut definition = toniator_domain::PatternDefinition::generalized_straight_guides(
+            PatternDefinitionId(30),
+            "app inspector guide paths",
+            guide_id,
+            PatternMechanismId(32),
+            PatternOutputLayerId(33),
+            vec![toniator_domain::StraightGuideDimension {
+                id: toniator_domain::GuideDimensionId(34),
+                baseline_angle_degrees: 0.0,
+                phase: 0.0,
+                repetition: toniator_domain::StraightGuideRepetition {
+                    spacing_multiplier: 1.0,
+                },
+            }],
+            toniator_domain::GeneralizedSiteProduct::AlongGuides {
+                dimensions: vec![toniator_domain::GuideDimensionId(34)],
+                interval_multiplier: 1.0,
+                phase: 0.0,
+            },
+            toniator_domain::MarkOrientation::Fixed,
+            toniator_domain::CoveragePolicy {
+                guard_steps: 2,
+                additional_margin: 0.0,
+            },
+        );
+        definition.output_layers = vec![toniator_domain::PatternOutputLayer::GuidePaths {
+            id: PatternOutputLayerId(33),
+            guide_mechanism_id: guide_id,
+            style: toniator_domain::PathStrokeStyle::default(),
+        }];
+        let mut settings = base.pattern_settings().clone();
+        settings.definition_id = definition.id;
+        settings.geometry_response =
+            PatternGeometryResponse::Connected(toniator_domain::ConnectedGeometryResponse {
+                minimum_thickness: 0.25,
+                maximum_thickness: 1.0,
+            });
+        Document::with_source_topology_and_authored_structures(
+            toniator_domain::DocumentId(201),
+            base.canvas().clone(),
+            SourceReference::Unassigned,
+            vec![definition],
+            settings,
+            base.channel_model().expect("modeled topology").to_owned(),
+            base.channel_topology().expect("modeled topology").clone(),
+            Vec::new(),
+        )
+        .expect("connected guide-path document validates")
+    }
+
+    /// Builds stale-aware document and selected-channel Connected commands through the inspector boundary.
+    #[test]
+    fn inspector_dispatches_connected_document_and_channel_edits() {
+        let document = connected_path_document();
+        let document_descriptor = document
+            .property_values()
+            .into_iter()
+            .find(|value| {
+                value.descriptor.target == PropertyTarget::Document
+                    && value.descriptor.field == PropertyFieldId::ConnectedMinimumThickness
+            })
+            .expect("connected document thickness descriptor")
+            .descriptor;
+        let document_command = command_for_inspector_input(
+            &document,
+            Some(ChannelId(1)),
+            DefinitionEditScope::SelectedCopy,
+            &document_descriptor,
+            InspectorInput::FiniteF64(0.4),
+        )
+        .expect("document connected command");
+        let (document_after, _) = document
+            .apply_command(&document_command)
+            .expect("document connected command applies");
+        let PatternGeometryResponse::Connected(response) =
+            &document_after.pattern_settings().geometry_response
+        else {
+            panic!("document remains connected");
+        };
+        assert_eq!(response.minimum_thickness, 0.4);
+
+        let channel_descriptor = document
+            .property_values()
+            .into_iter()
+            .find(|value| {
+                value.descriptor.target == PropertyTarget::Channel(ChannelId(1))
+                    && value.descriptor.field == PropertyFieldId::ConnectedMaximumThickness
+            })
+            .expect("connected channel thickness descriptor")
+            .descriptor;
+        let channel_command = command_for_inspector_input(
+            &document,
+            Some(ChannelId(1)),
+            DefinitionEditScope::SelectedCopy,
+            &channel_descriptor,
+            InspectorInput::FiniteF64(1.4),
+        )
+        .expect("channel connected command");
+        let (channel_after, _) = document
+            .apply_command(&channel_command)
+            .expect("channel connected command applies");
+        let PatternGeometryResponse::Connected(response) = channel_after
+            .effective_channel_pattern(ChannelId(1))
+            .expect("effective channel")
+            .geometry_response
+        else {
+            panic!("channel remains connected");
+        };
+        assert_eq!(response.maximum_thickness, 1.4);
     }
 
     /// Proves purpose filtering and construction preflight keep ordinary Grid and Mark workflows separate.

@@ -134,18 +134,22 @@ fn definition_only_pipeline_products_match_domain_projection() {
             .pattern_capabilities(PatternCapabilityScope::DocumentBase)
             .expect("domain projection resolves");
         assert_eq!(projection.outputs.len(), plan.ordered_outputs.len());
-        let PatternOutputCapabilityProjection::Marks(projected_output) = projection.outputs[0];
+        let PatternOutputCapabilityProjection::Marks(projected_output) = projection.outputs[0]
+        else {
+            panic!("mark-only fixture must project a mark output");
+        };
         let plan_output = &plan.ordered_outputs[0];
+        let (prototype, orientation) = plan_output.marks().expect("mark output authority");
         assert_eq!(
             projected_output.prototype,
-            match &plan_output.prototype {
+            match prototype {
                 MarkPrototype::Circle => MarkPrototypeKind::Circle,
                 MarkPrototype::AuthoredClosedShape { .. } => MarkPrototypeKind::AuthoredClosedShape,
             }
         );
         assert_eq!(
             projected_output.orientation,
-            match &plan_output.orientation {
+            match orientation {
                 MarkOrientation::Fixed => MarkOrientationKind::Fixed,
                 MarkOrientation::GuideTangent { .. } => MarkOrientationKind::GuideTangent,
                 MarkOrientation::GuideNormal { .. } => MarkOrientationKind::GuideNormal,
