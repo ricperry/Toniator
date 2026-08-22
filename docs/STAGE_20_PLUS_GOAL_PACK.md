@@ -89,7 +89,18 @@ variable-width filled outlines with final-consumer clipping and native PNG/SVG
 parity. It preserves current document schema v4, preset format v2, Stage 20G
 effective authority, and the divergent-channel Holiday regression witness.
 The private Sway/AT-SPI evidence is automated wlroots evidence, not manual
-GNOME/Mutter acceptance. Stage 20J+ remains separately gated.
+GNOME/Mutter acceptance. Stage 20J was separately gated from Stage 20I and is
+recorded below.
+
+Stage 20J is complete at implementation checkpoint
+`2edbb8659a82106ce8de904ef1ce9155e3b4d777` and was explicitly accepted by the
+user on 2026-08-22. Its bounded implementation adds persisted absolute-gap
+normal-offset repetition, reusable compact line/cubic centerline offsets,
+deterministic crossing cleanup, complete component identity, Stage 20I outline
+reuse, and additive current-v4 persistence. Intrinsic raster/vector, compact
+cubic, Holiday, Inkscape, and private Sway/AT-SPI witnesses passed. Automated
+wlroots evidence is not manual GNOME/Mutter review. Stage 20K+ remains
+separately gated.
 
 ## Later Goal candidates
 
@@ -107,7 +118,7 @@ fresh planning validates its contract against actual implementation evidence.
 | 20G | Effective Pattern Authority: document base recipe/settings, optional channel replacement, typed deltas, reset/inherit, and current-only persistence. | Inheritance/delta/reset/stale/history/invalidation/save-reopen tests plus intrinsic raster/vector/Holiday render witnesses. | domain/io; protected specification direction. | [`STAGE_20G_EFFECTIVE_PATTERN_AUTHORITY_PLAN.md`](STAGE_20G_EFFECTIVE_PATTERN_AUTHORITY_PLAN.md). | **Complete at `de1320ba359beee42223ef994baebfd9ecd94c9c`**; user accepted on 2026-08-21. |
 | 20H | Capability Projection Foundation: validated recipe/primitives to typed read-only capabilities. | Resolver and unsupported-page omission tests. | 20G. | Capability vocabulary extensions. | **Complete at `4b1cc08819eee36c2009e2abf5543dcaefe29929`; user accepted on 2026-08-21; publication remains separate.** |
 | 20I | Canonical Paths and Strokes: **complete at implementation checkpoint `de166f533379dc5b75d5a36e38baf145d0fac6c2`** with ordered guide/path output, effective connected thickness response, reusable compact variable-width filled outlines, final-consumer clipping, identity, and native PNG/SVG parity. | Path/stroke/clip/identity/canonical-output tests, natural and low-resolution artifacts, Holiday regression, and private Sway/AT-SPI evidence. | 20B, 20D, 20G. | None within the accepted contract. | **Complete at `de166f533379dc5b75d5a36e38baf145d0fac6c2`; user accepted on 2026-08-21; publication remains separate.** |
-| 20J | Path Offset and Constant Gap: deterministic line/cubic offsets, joins, endpoint/collapse policy. | Offset/collapse/finite/determinism tests. | 20I. | Exact joins and limits. | Planned; separate contract and gate. |
+| 20J | Path Offset and Constant Gap: **complete at implementation checkpoint `2edbb8659a82106ce8de904ef1ce9155e3b4d777`** with persisted absolute-gap normal-offset repetition, reusable compact line/cubic offsets, deterministic joins/crossing cleanup, component identity, Stage 20I outline reuse, and current-v4 persistence. | Authority, offset/collapse/finite/coverage/identity/cache/persistence tests, natural PNG/SVG artifacts, cubic/Holiday diagnostics, Inkscape, and private Sway/AT-SPI evidence. | 20B, 20D, 20G, 20I. | None within the accepted bounded contract. | **Complete at `2edbb8659a82106ce8de904ef1ce9155e3b4d777`; user accepted on 2026-08-22; publication remains separate.** |
 | 20K | Parametric Curves: common contract, initially round/square spirals, raw paths and sites along curves. | Sampling/phase/winding/bounds/cancellation tests. | 20G, 20H, 20I. | Additional parametric forms. | Planned; separate contract and gate. |
 | 20L | Site Adjacency: deterministic mechanism-neutral graph over `FamilySiteSet`. | Ordering/degeneracy/degree/distance/cache tests. | 20A. | Neighbor policy. | Planned; separate contract and gate. |
 | 20M | Connection Programs: bounded nearest/random links and grid maze/tree paths. | Replay/seed/legality/open-path/canonical-output tests. | 20I, 20L. | TSP and motifs deferred. | Planned; separate contract and gate. |

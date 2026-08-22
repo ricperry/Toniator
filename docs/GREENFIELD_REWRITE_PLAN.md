@@ -1872,13 +1872,23 @@ effective authority, current schema v4/preset v2, final-consumer clipping,
 native RGBA PNG/SVG parity, and the Holiday mark regression witness. The user
 accepted Stage 20I on 2026-08-21; publication remains separate.
 
-**Later Stage 20J+ — Planned.**
+**Stage 20J — Complete at implementation checkpoint
+`2edbb8659a82106ce8de904ef1ce9155e3b4d777`.**
+[`STAGE_20J_PATH_OFFSET_CONSTANT_GAP_PLAN.md`](STAGE_20J_PATH_OFFSET_CONSTANT_GAP_PLAN.md)
+records the accepted persisted absolute-gap `NormalOffset` repetition and the
+reusable geometry-owned compact line/cubic centerline offset service. Coverage,
+crossing cleanup, component identity, current-v4 persistence, Stage 20I outline
+reuse, native RGBA PNG/SVG output, and the Holiday regression remain within the
+accepted authority split. The user accepted Stage 20J on 2026-08-22;
+publication remains separate.
+
+**Later Stage 20K+ — Planned.**
 [`STAGE_20_PLUS_DECOMPOSITION.md`](STAGE_20_PLUS_DECOMPOSITION.md) provides the
-detailed synchronized sequence from accepted Stage 20I into the planned
-remainder: 20J path offset; 20K parametric curves; 20L adjacency; 20M
-connection programs; 20N Voronoi; 20O guide faces; 20P region realization;
-20Q composites; 20R gallery recipes; 20S Pattern Wizard; and 20T–20W temporal
-work. Every row remains separately gated.
+detailed synchronized sequence from accepted Stage 20J into the planned
+remainder: 20K parametric curves; 20L adjacency; 20M connection programs; 20N
+Voronoi; 20O guide faces; 20P region realization; 20Q composites; 20R gallery
+recipes; 20S Pattern Wizard; and 20T–20W temporal work. Every row remains
+separately gated.
 
 Every mechanism must enter through the Stage 14 typed schema, Stage 15 generic
 pipeline, Stage 17 command/descriptor contract, canonical geometry, and

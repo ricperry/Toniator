@@ -310,6 +310,23 @@ witnesses, private Sway app consumption, independent repair re-review, and the
 final zero-alpha engine-to-render review pass. Shape authoring and later Stage
 20F+ mechanisms remain separately gated.
 
+Stages 20F–20I are accepted foundations: provisional private-draft guide/shape
+resource editing, document-base effective pattern authority with channel
+deltas, read-only capability projection, and canonical guide paths with
+compact variable-width filled strokes. Those stages retain headless domain and
+geometry authority; their mechanical GTK exposure is not the final Pattern
+Wizard.
+
+Stage 20J is complete at implementation checkpoint
+`2edbb8659a82106ce8de904ef1ce9155e3b4d777`. It adds persisted absolute-gap
+`NormalOffset` guide repetition backed by one reusable geometry-owned compact
+line/cubic centerline offset service, deterministic crossing cleanup and
+component identity, Stage 20I outline reuse, and additive current-v4
+persistence. Intrinsic raster/vector, compact cubic, divergent Holiday,
+Inkscape, and private Sway/AT-SPI witnesses passed. Automated wlroots evidence
+is not manual GNOME/Mutter review. Stage 20K+ and the Pattern Wizard remain
+separately gated.
+
 Low-resolution fixtures and outputs are supplementary only. Every future stage
 that exercises source loading, sampling, rendering, preview, or export must
 also test the immutable PNG at its natural 1024×1024 dimensions and the SVG at

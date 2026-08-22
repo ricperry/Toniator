@@ -1,20 +1,19 @@
 # Toniator Pattern Wizard Plan
 
-Status: **approved future-work plan; implementation remains gated** (2026-08-21).
+Status: **approved future-work plan; implementation remains gated** (2026-08-22).
 
 This document records the intended replacement direction for the artist-facing
 Pattern Editor workflow. It does not authorize implementation, change the
-completed Stage 20F ledger state, or begin Stage 20G+. The user-authorized normative
-effective-pattern direction is recorded in the protected specifications; its
-code and current-only format transition remain Stage 20G work.
-Stage 20F can close as bounded authoring and private-draft infrastructure; the
-complete Pattern Wizard is a later, separately gated UI milestone after the
-headless capabilities it exposes exist.
+accepted Stage 20F–20J ledger state, or begin Stage 20K+ or Stage 20S. The
+user-authorized normative effective-pattern direction is recorded in the
+protected specifications and implemented by accepted Stage 20G authority.
+The complete Pattern Wizard remains a separately gated UI milestone after the
+remaining headless capabilities it exposes exist.
 
 The plan is informed by the notes, visual studies, and representative pattern
-assets under `assets/Stage20FCorrectionHints/`, the accepted Stage 20A–20E2
-architecture, the accepted Stage 20F infrastructure, and the planned Stage 20G+ engine
-sequence.
+assets under `assets/Stage20FCorrectionHints/`, the accepted Stage 20A–20J
+architecture, the accepted Stage 20F infrastructure, and the planned Stage
+20K+ engine sequence.
 
 ## Product direction
 
@@ -164,7 +163,7 @@ normal gallery rather than leading to a dead wizard page.
 | `guides.fixed_straight` | Topology requires fixed directions | Read-only guide-direction summary and explanation | Required for Triagrid/Tetragrid |
 | `guides.spacing` | Repeated guide distance is configurable | Guide Spacing | Current |
 | `guides.phase` | Guide stack origin is configurable | Guide Phase | Current |
-| `guides.raw_paths` | Generated guides may become paths | Raw Guides choice | Stage 20I |
+| `guides.raw_paths` | Generated guides may become paths | Raw Guides choice | Current headless Stage 20I; wizard exposure remains planned |
 | `sites.intersections` | Eligible guide crossings produce sites | Guide Intersections choice; selected guide dimensions; merge tolerance under Advanced | Current |
 | `sites.along_guides` | Arc-length intervals on guides produce sites | Sites Along Guides choice; Site Interval and Site Phase | Current |
 | `sites.along_curve` | Intervals on a parametric curve produce sites | Sites Along Curve choice; Site Interval, jitter, seed | Future parametric contract |
@@ -179,13 +178,13 @@ normal gallery rather than leading to a dead wizard page.
 | `marks.shape` | Mark prototype is selectable | Circle / built-in / custom shape; **Edit shape…** | Current circle/authored shape; Stage 20F infrastructure |
 | `marks.orientation` | Marks can follow a guide tangent/normal | Fixed / Tangent / Normal | Current guided products |
 | `marks.rotation_jitter` | Each mark can receive deterministic variation | Rotation Jitter and seed | Future modulation contract |
-| `paths.raw` | A structural path can be made visible | Configure Paths page | Stage 20I |
-| `paths.spacing.stacked` | Generated path positions are preserved | Stacked path-spacing choice | Stage 20I |
-| `paths.spacing.constant_gap` | Related paths are offset to a uniform gap | Constant Gap choice; Path Gap | Future reusable path-offset contract |
-| `paths.endpoint_policy` | Constant-gap endpoints need topology policy | Extend Beyond Canvas / Wrap Around Endpoint | Future reusable path-offset contract |
+| `paths.raw` | A structural path can be made visible | Configure Paths page | Current headless Stage 20I; wizard exposure remains planned |
+| `paths.spacing.stacked` | Generated path positions are preserved | Stacked path-spacing choice | Current headless Stage 20I; wizard exposure remains planned |
+| `paths.spacing.constant_gap` | Related paths are offset to a uniform gap | Constant Gap choice; Path Gap | Current headless Stage 20J; wizard exposure remains planned |
+| `paths.endpoint_policy` | Constant-gap open paths extend tangentially beyond the padded generation bounds | Extend Beyond Canvas; Wrap Around Endpoint stays unavailable | Current headless Stage 20J policy; capability/wizard exposure planned and wrap-around deferred |
 | `regions.realize.scale` | Regions scale about their reference | Scale choice and amount | Stage 20P |
 | `regions.realize.constant_gap` | Region boundaries offset by distance | Constant Gap choice and signed Grow/Neutral/Shrink amount | Stage 20P |
-| `response.fill_range` | Output supports document/channel response range | Minimum Fill / Maximum Fill in Review and main inspector | Current marks; planned paths/regions |
+| `response.fill_range` | Output supports document/channel response range | Minimum Fill / Maximum Fill in Review and main inspector | Current marks and paths; planned regions |
 | `output.composite` | More than one ordered realized output exists | Ordered Outputs page | Stage 20Q |
 
 The dotted “stacked” and “even gaps” guide studies appear to describe two site
@@ -202,9 +201,9 @@ realization flags.
 
 Availability terms:
 
-- **Current engine**: accepted Stage 20A–20F authority exists; Stage 20F owns
-  only the bounded authoring exposure, not the final wizard.
-- **Planned 20G+**: the roadmap names the required headless primitive.
+- **Current engine**: accepted Stage 20A–20J authority exists; Stage 20F owns
+  only bounded authoring exposure, not the final wizard.
+- **Planned 20K+**: the roadmap names the required headless primitive.
 - **Future contract**: the supplied asset expresses intent, but no existing
   stage contract yet owns all required behavior.
 - **Advanced/deferred**: excluded from the primary workflow until justified.
@@ -213,17 +212,17 @@ Availability terms:
 
 | Baseline card | Structural recipe | Required capability flags | Artist controls revealed | Availability | Representative asset |
 |---|---|---|---|---|---|
-| One Guide — Lines | One straight guide family -> paths | `family.grid`, `guides.count.1`, `guides.spacing`, `guides.phase`, `guides.raw_paths`, `paths.raw` | Guide spacing/phase; path thickness/fill response | Planned 20I | `lingrid.svg` |
-| One Guide — Curved Lines | One authored guide family -> paths | Prior row plus `guides.editable_curve` | Edit curve; guide repetition; path controls | Planned 20I | `lingrid-curve-stacked.svg` |
-| One Guide — Constant Gap Curves | One authored guide -> offset path family | Prior row plus `paths.spacing.constant_gap`, `paths.endpoint_policy` | Path Gap; endpoint behavior | Future path-offset contract | `lingrid-curve-even-gaps.svg` |
+| One Guide — Lines | One straight guide family -> paths | `family.grid`, `guides.count.1`, `guides.spacing`, `guides.phase`, `guides.raw_paths`, `paths.raw` | Guide spacing/phase; path thickness/fill response | Current headless Stage 20I; wizard card planned | `lingrid.svg` |
+| One Guide — Curved Lines | One authored guide family -> paths | Prior row plus `guides.editable_curve` | Edit curve; guide repetition; path controls | Current headless Stage 20I; wizard card planned | `lingrid-curve-stacked.svg` |
+| One Guide — Constant Gap Curves | One authored guide -> offset path family | Prior row plus `paths.spacing.constant_gap`, `paths.endpoint_policy` | Path Gap; Extend Beyond Canvas endpoint summary | Current headless Stage 20J; wizard card planned | `lingrid-curve-even-gaps.svg` |
 | One Guide — Marks | One guide -> sites along guide -> marks | `family.grid`, `guides.count.1`, `sites.along_guides`, `marks.at_sites`, `marks.shape`, `response.fill_range` | Site interval/phase; mark shape; fill | Current engine | `lingrid-dots.svg`, `MarksAlongGuide.svg` |
 | Curved Guide — Even-Interval Marks | Authored guide stack -> equal-arc sites -> marks | Prior row plus `guides.editable_curve` | Edit curve; equal-arc Site Interval | Current engine | `lingrid-dots-even-gaps.svg` |
 | Curved Guide — Aligned Marks | Authored guide stack -> aligned sites -> marks | Prior row plus a not-yet-defined aligned-sampling flag | Alignment origin/spacing after semantics exist | Future contract | `lingrid-dots-stacked.svg` |
-| Two Guides — Lines | Two guide families -> paths | `family.grid`, `guides.count.2`, `guides.raw_paths`, `paths.raw`, `paths.spacing.stacked` | Guide A/B; spacing/phase; path controls | Planned 20I | `squagrid.svg` |
-| Two Curved Guides — Lines | Two authored guide families -> paths | Prior row plus `guides.editable_curve` | Edit Guide A/B; path controls | Planned 20I | `squagrid-curve.svg` |
+| Two Guides — Lines | Two guide families -> paths | `family.grid`, `guides.count.2`, `guides.raw_paths`, `paths.raw`, `paths.spacing.stacked` | Guide A/B; spacing/phase; path controls | Current headless Stage 20I; wizard card planned | `squagrid.svg` |
+| Two Curved Guides — Lines | Two authored guide families -> paths | Prior row plus `guides.editable_curve` | Edit Guide A/B; path controls | Current headless Stage 20I; wizard card planned | `squagrid-curve.svg` |
 | Two Guides — Intersection Marks | Two guides -> intersection sites -> marks | `family.grid`, `guides.count.2`, `sites.intersections`, `marks.at_sites`, `marks.shape`, `marks.orientation`, `response.fill_range` | Guide A/B; intersection source; mark controls | Current engine | `squagrid-dots.svg`, `MarksAtIntersections.svg` |
 | Two Curved Guides — Intersection Marks | Two authored guides -> intersection sites -> marks | Prior row plus `guides.editable_curve` | Edit Guide A/B; mark controls | Current engine | `squagrid-curve-dots.svg` |
-| Triagrid — Lines | Three fixed straight directions -> paths | `family.grid`, `guides.count.3`, `guides.fixed_straight`, `guides.raw_paths`, `paths.raw` | Spacing/phase only; guide-editor explanation | Planned 20I | `triangrid.svg` |
+| Triagrid — Lines | Three fixed straight directions -> paths | `family.grid`, `guides.count.3`, `guides.fixed_straight`, `guides.raw_paths`, `paths.raw` | Spacing/phase only; guide-editor explanation | Current headless Stage 20I; wizard card planned | `triangrid.svg` |
 | Triagrid — Marks | Three fixed directions -> intersection sites -> marks | Prior row plus `sites.intersections`, `marks.at_sites`, `marks.shape` | Intersection set; mark controls | Current engine | `triangrid-dots.svg` |
 | Tetragrid | Four fixed straight directions -> selected product | `family.grid`, `guides.count.4`, `guides.fixed_straight` plus chosen use flags | Advanced spacing/phase and supported use only | Advanced/deferred | `tetragrid.svg` |
 | Guide Cells | Closed faces from eligible guides -> regions | `family.grid`, `regions.guide_faces`, then a region-realization flag | Guide topology; Scale or Constant Gap region controls | Planned 20O–20P | `CellsGrid.svg` |
@@ -495,9 +494,10 @@ geometry or inventing frontend-only document state. The approved order is:
 | 20S | Pattern Wizard gallery, adaptive pages, Review, and nested subeditors. |
 | 20T–20W | Frame source, frame sequence, transitions, then transition exposure. |
 
-Every row remains separately gated. TSP, aligned curved-guide sampling,
-user-defined motifs, additional parametric forms, and the Tetragrid decision
-remain deferred rather than silently entering a listed stage.
+Stages 20G–20J are accepted headless authority; every later row remains
+separately gated. TSP, aligned curved-guide sampling, wrap-around constant-gap
+endpoints, user-defined motifs, additional parametric forms, and the Tetragrid
+decision remain deferred rather than silently entering a listed stage.
 
 The final wizard must remain a projection of ordinary typed recipes. No preset
 name, thumbnail, family label, or wizard page is permitted to select hidden
@@ -532,14 +532,16 @@ contracts before UI work:
 - the initial connection programs and their legal degree/distance rules;
 - whether the traveling-salesperson route is open, closed, or both, and its
   deterministic work limits;
-- path Constant Gap offset/collapse semantics and endpoint behavior;
+- whether wrap-around Constant Gap endpoints belong with Stage 20M connection
+  programs or a later separate contract; Stage 20J accepts tangential extension
+  beyond the padded generation bounds only;
 - region fill/outline and Scale versus Constant Gap defaults;
 - the initial parametric generator set and its coverage model;
 - whether Tetragrid has enough artistic value to retain; and
 
-The document-level pattern plus channel-delta schema direction is now
-normative; its exact current-only serialization, validation, and command shape
-is deliberately owned by the separately gated Stage 20G implementation.
+The document-level pattern plus channel-delta schema direction is normative;
+its exact current-only serialization, validation, and command shape are owned
+by the accepted Stage 20G implementation.
 
 These decisions should be settled in the owning headless stages. The wizard
 should expose accepted capability, not serve as the place where engine

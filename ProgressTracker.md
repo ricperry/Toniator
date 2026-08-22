@@ -448,9 +448,9 @@ offsets, adjacency, regions, composites, presets, GTK feature work, and later
 stages remain excluded. The user explicitly accepted Stage 20I on 2026-08-21;
 publication remains separate.
 
-**Stage 20J — Implemented awaiting review.** The bounded Path Offset and
-Constant Gap implementation and stage-scoped verification completed on
-2026-08-22. The work is governed by
+**Stage 20J — Complete at commit
+`2edbb8659a82106ce8de904ef1ce9155e3b4d777`.** The accepted Path Offset and
+Constant Gap implementation is governed by
 [`STAGE_20J_PATH_OFFSET_CONSTANT_GAP_PLAN.md`](docs/STAGE_20J_PATH_OFFSET_CONSTANT_GAP_PLAN.md):
 persisted absolute-gap `NormalOffset` guide repetition, reusable compact
 line/cubic centerline offsets, tangential padded-domain endpoint extension,
@@ -458,8 +458,8 @@ deterministic crossing dissolution, Stage 20I outline reuse, and current-v4
 persistence. Focused domain, geometry, patterns, engine, IO, render, CLI/SVG,
 Holiday, and private Sway/AT-SPI evidence is green; independent re-review has
 no remaining finding. Automated wlroots evidence is not manual GNOME/Mutter
-acceptance. Acceptance, checkpointing, publication, Stage 20K+, protected
-specification changes, and Legacy work remain separate.
+review. The user explicitly accepted Stage 20J on 2026-08-22; publication,
+Stage 20K+, protected specification changes, and Legacy work remain separate.
 
 **Terminology follow-up — Tracked.** Revisit the public and internal use of
 `density`, especially `across_x` and `across_y`: those values currently express

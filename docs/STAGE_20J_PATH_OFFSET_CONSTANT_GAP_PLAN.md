@@ -1,8 +1,8 @@
 # Stage 20J — Path Offset and Constant Gap
 
-Status: **Implemented awaiting review**. The bounded implementation and
-stage-scoped verification completed on 2026-08-22. Acceptance, checkpointing,
-publication, and Stage 20K+ remain separate.
+Status: **Complete at implementation checkpoint
+`2edbb8659a82106ce8de904ef1ce9155e3b4d777`**. The user accepted Stage 20J on
+2026-08-22. Publication and Stage 20K+ remain separate.
 
 Stage 20J adds persisted `NormalOffset` guide repetition and one reusable
 geometry-owned line/cubic offset service. An authored positive spacing is the
@@ -123,6 +123,33 @@ package formatting/check/strict Clippy, architecture validation,
 `git diff --check`, protected-path and immutable-asset hashes, semantic-map
 read-only worktree review, and independent review. If `toniator-app` changes,
 run the private Wayland/AT-SPI harness and distinguish automated wlroots
-evidence from GNOME/Mutter acceptance. Stop at **Implemented awaiting review**;
-acceptance, checkpoint, commit, push, publication, and Stage 20K+ are not
-implicit.
+evidence from GNOME/Mutter acceptance.
+
+## Verified implementation and acceptance record
+
+The accepted implementation is recorded at checkpoint
+`2edbb8659a82106ce8de904ef1ce9155e3b4d777`, whose parent is the accepted Stage
+20I documentation closeout. The user accepted Stage 20J on 2026-08-22 after
+the final independent re-review reported no remaining finding.
+
+Focused domain, geometry, patterns, engine, IO, and render witnesses passed,
+along with affected-package check and strict production-target Clippy,
+formatting, architecture validation, and diff/protected-path checks. The
+intrinsic raster and vector witnesses, the compact cubic diagnostic, and the
+divergent-channel Holiday regression are under
+`target/validation/stage-20j/`. Their SVGs use direct filled paths under one
+final clip, parse as XML, and pass headless Inkscape export; disposable cubic
+clip release also completed without a crash. Native RGBA and hidden-RGB rules
+remain preserved, and the two immutable source artworks remain byte-stable.
+
+The existing generic resource editor exposes the persisted gap, sides, and
+cleanup fields without adding a dedicated workflow. A fresh private Sway run
+covered effective display, preview update, editor-local undo, keyboard focus,
+and cancel with empty Toniator logs. That is automated wlroots evidence, not
+manual GNOME Shell/Mutter review. Container version 1, document schema v4, and
+preset format v2 remain current; derived offsets, components, outlines, scenes,
+and caches remain omitted from persistence.
+
+This acceptance does not authorize publication, Stage 20K implementation,
+adjacency, connection programs, regions, composites, Pattern Wizard work,
+temporal work, Legacy changes, or protected-specification revision.
