@@ -1558,6 +1558,9 @@ fn descriptor_belongs_to_editor(field: &PropertyFieldId, purpose: PatternEditorP
                 | PropertyFieldId::GuideArcStartAngle
                 | PropertyFieldId::GuideArcSweepAngle
                 | PropertyFieldId::GuideRepetition
+                | PropertyFieldId::GuideOffsetSpacing
+                | PropertyFieldId::GuideOffsetSides
+                | PropertyFieldId::GuideOffsetCleanup
                 | PropertyFieldId::GuideStackDirection
                 | PropertyFieldId::GuideStackSpacingMultiplier
                 | PropertyFieldId::IntersectionDimensions
@@ -1677,6 +1680,7 @@ fn inspector_group(field: PropertyFieldId) -> &'static str {
         | PropertyFieldId::GuideBaselineAngle
         | PropertyFieldId::GuidePhase
         | PropertyFieldId::GuideSpacingMultiplier
+        | PropertyFieldId::GuideOffsetSpacing
         | PropertyFieldId::IntersectionDimensions
         | PropertyFieldId::IntersectionMergeEpsilon
         | PropertyFieldId::AlongGuideDimensions
@@ -1735,6 +1739,9 @@ fn inspector_field_label(field: PropertyFieldId) -> String {
         PropertyFieldId::GuideArcStartAngle => "Arc start angle".into(),
         PropertyFieldId::GuideArcSweepAngle => "Arc sweep angle".into(),
         PropertyFieldId::GuideRepetition => "Guide repetition".into(),
+        PropertyFieldId::GuideOffsetSpacing => "Offset gap".into(),
+        PropertyFieldId::GuideOffsetSides => "Offset sides".into(),
+        PropertyFieldId::GuideOffsetCleanup => "Offset cleanup".into(),
         PropertyFieldId::GuideStackDirection => "Stack direction".into(),
         PropertyFieldId::GuideStackSpacingMultiplier => "Stack spacing multiplier".into(),
         PropertyFieldId::IntersectionDimensions => "Directions at intersections".into(),
@@ -1838,6 +1845,15 @@ fn enum_choice_label(choice: PropertyEnumChoice) -> &'static str {
         PropertyEnumChoice::GuideRepetition(
             toniator_domain::GuideRepetitionKind::TransformStack,
         ) => "Transform stack",
+        PropertyEnumChoice::GuideRepetition(toniator_domain::GuideRepetitionKind::NormalOffset) => {
+            "Normal offset"
+        }
+        PropertyEnumChoice::OffsetSides(toniator_domain::OffsetSides::Left) => "Left",
+        PropertyEnumChoice::OffsetSides(toniator_domain::OffsetSides::Right) => "Right",
+        PropertyEnumChoice::OffsetSides(toniator_domain::OffsetSides::Both) => "Both",
+        PropertyEnumChoice::OffsetCleanup(toniator_domain::OffsetCleanup::DissolveCrossings) => {
+            "Dissolve crossings"
+        }
     }
 }
 
@@ -6171,6 +6187,38 @@ fn structural_command_for_input(
                 spacing_multiplier: number(input)?,
             }
         }
+        PropertyFieldId::GuideOffsetSpacing => PatternDefinitionEdit::SetGuideOffsetSpacing {
+            mechanism_id: mechanism_id()?,
+            dimension_id: match descriptor.target {
+                PropertyTarget::GuideDimension(_, _, id) => id,
+                _ => return Err("Guide dimension target is required.".to_owned()),
+            },
+            spacing: number(input)?,
+        },
+        PropertyFieldId::GuideOffsetSides => match choice(input)? {
+            PropertyEnumChoice::OffsetSides(sides) => PatternDefinitionEdit::SetGuideOffsetSides {
+                mechanism_id: mechanism_id()?,
+                dimension_id: match descriptor.target {
+                    PropertyTarget::GuideDimension(_, _, id) => id,
+                    _ => return Err("Guide dimension target is required.".to_owned()),
+                },
+                sides,
+            },
+            _ => return Err("Expected an offset-side choice.".to_owned()),
+        },
+        PropertyFieldId::GuideOffsetCleanup => match choice(input)? {
+            PropertyEnumChoice::OffsetCleanup(cleanup) => {
+                PatternDefinitionEdit::SetGuideOffsetCleanup {
+                    mechanism_id: mechanism_id()?,
+                    dimension_id: match descriptor.target {
+                        PropertyTarget::GuideDimension(_, _, id) => id,
+                        _ => return Err("Guide dimension target is required.".to_owned()),
+                    },
+                    cleanup,
+                }
+            }
+            _ => return Err("Expected an offset-cleanup choice.".to_owned()),
+        },
         PropertyFieldId::IntersectionMergeEpsilon => {
             PatternDefinitionEdit::SetIntersectionMergeEpsilon {
                 mechanism_id: mechanism_id()?,
@@ -8003,6 +8051,12 @@ mod tests {
                     toniator_domain::GuideRepetitionKind::TransformStack,
                 ),
                 "Transform stack",
+            ),
+            (
+                PropertyEnumChoice::GuideRepetition(
+                    toniator_domain::GuideRepetitionKind::NormalOffset,
+                ),
+                "Normal offset",
             ),
         ];
         for (choice, expected) in choices {

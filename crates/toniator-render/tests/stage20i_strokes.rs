@@ -46,6 +46,7 @@ fn stroke(y: f64) -> CanonicalStroke {
         GuideInstanceId {
             dimension_id: 1,
             index: y as i64,
+            component_ordinal: 0,
         },
         None,
         path,

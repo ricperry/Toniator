@@ -3,8 +3,9 @@ use toniator_domain::{
     AuthoredStructureId, AuthoredStructureKind, CanvasSpec, CoveragePolicy, Document,
     DocumentCommand, DocumentHistory, DocumentId, DocumentSession, GeneralizedSiteProduct,
     GuideDimension, GuideDimensionId, GuidePrototype, GuideRepetition, InvalidationLevel,
-    MarkOrientation, PatternDefinition, PatternDefinitionEdit, PatternDefinitionId,
-    PatternMechanismId, PatternOutputLayerId, SourceReference,
+    MarkOrientation, OffsetCleanup, OffsetSides, PatternDefinition, PatternDefinitionEdit,
+    PatternDefinitionId, PatternMechanism, PatternMechanismId, PatternOutputLayerId,
+    PropertyCurrentValueKind, PropertyEnumChoice, PropertyFieldId, SourceReference,
 };
 
 /// Builds one valid document-owned open path used by generic guide validation tests.
@@ -74,6 +75,7 @@ fn document_with_generic_guides(prototype: GuidePrototype) -> Document {
         base.canvas().clone(),
         base.source().clone(),
         vec![definition(prototype)],
+        base.pattern_settings().clone(),
         base.channel_model().expect("modeled document").to_owned(),
         base.channel_topology().expect("modeled document").clone(),
         vec![open_path()],
@@ -87,6 +89,14 @@ fn generic_guide_definitions_validate_prototypes_repetition_references_and_produ
     let guide_definition = definition(GuidePrototype::AuthoredOpenPath {
         structure_id: AuthoredStructureId(7),
     });
+    let settings_document = Document::new_default_document(
+        CanvasSpec {
+            width: 100.0,
+            height: 100.0,
+        },
+        SourceReference::Unassigned,
+    )
+    .expect("settings source document is valid");
     let result = Document::with_source_topology_and_authored_structures(
         DocumentId(1),
         CanvasSpec {
@@ -95,6 +105,7 @@ fn generic_guide_definitions_validate_prototypes_repetition_references_and_produ
         },
         SourceReference::Unassigned,
         vec![guide_definition],
+        settings_document.pattern_settings().clone(),
         toniator_domain::HalftoneChannelModel::Rgb,
         Document::new_default_document(
             CanvasSpec {
@@ -120,6 +131,64 @@ fn generic_guide_definitions_validate_prototypes_repetition_references_and_produ
         sweep_angle_degrees: 90.0,
     };
     toniator_domain::validate_pattern_definition(&definition(arc)).unwrap();
+}
+
+/// Proves normal-offset repetition rejects a nonzero phase before document authority changes.
+#[test]
+fn normal_offset_repetition_requires_zero_phase() {
+    let definition = PatternDefinition::generalized_guides(
+        PatternDefinitionId(1),
+        "offset",
+        PatternMechanismId(1),
+        PatternMechanismId(2),
+        PatternOutputLayerId(1),
+        vec![GuideDimension {
+            id: GuideDimensionId(1),
+            baseline_angle_degrees: 0.0,
+            phase: 1.0,
+            prototype: GuidePrototype::AuthoredOpenPath {
+                structure_id: AuthoredStructureId(7),
+            },
+            repetition: GuideRepetition::NormalOffset {
+                spacing: 24.0,
+                sides: OffsetSides::Both,
+                cleanup: OffsetCleanup::DissolveCrossings,
+            },
+        }],
+        GeneralizedSiteProduct::AlongGuides {
+            dimensions: vec![GuideDimensionId(1)],
+            interval_multiplier: 1.0,
+            phase: 0.0,
+        },
+        MarkOrientation::Fixed,
+        CoveragePolicy {
+            guard_steps: 1,
+            additional_margin: 0.0,
+        },
+    );
+    let base = Document::new_default_document(
+        CanvasSpec {
+            width: 100.0,
+            height: 100.0,
+        },
+        SourceReference::Unassigned,
+    )
+    .expect("base document validates");
+    let error = Document::with_source_topology_and_authored_structures(
+        base.id(),
+        base.canvas().clone(),
+        base.source().clone(),
+        vec![definition],
+        base.pattern_settings().clone(),
+        base.channel_model().expect("modeled document").to_owned(),
+        base.channel_topology().expect("modeled document").clone(),
+        vec![open_path()],
+    )
+    .expect_err("nonzero normal-offset phase is invalid");
+    assert_eq!(
+        error.path(),
+        "pattern_definitions.mechanisms.guide_repetition.phase"
+    );
 }
 
 /// Proves generic definitions reject malformed arc payloads before any command/history transition.
@@ -167,7 +236,7 @@ fn generic_guide_edits_descriptors_history_and_affected_channels_are_atomic() {
     let result = history
         .apply(&edit)
         .expect("shared generic edit validates atomically");
-    assert_eq!(result.invalidation, InvalidationLevel::Family);
+    assert_eq!(result.invalidation, Some(InvalidationLevel::Family));
     let linked = history
         .document()
         .channel_topology()
@@ -202,7 +271,7 @@ fn generic_guide_edits_descriptors_history_and_affected_channels_are_atomic() {
             replacement,
         })
         .expect("shared open resource replacement is valid");
-    assert_eq!(affected.invalidation, InvalidationLevel::Family);
+    assert_eq!(affected.invalidation, Some(InvalidationLevel::Family));
     let linked = history
         .document()
         .channel_topology()
@@ -380,8 +449,138 @@ fn duplicated_definitions_share_authored_guides_and_live_references_block_remova
             definition_id: PatternDefinitionId(1),
         })
         .expect("definition duplication preserves raw structure sharing");
-    assert_eq!(duplicate.invalidation, InvalidationLevel::Family);
+    assert_eq!(duplicate.invalidation, Some(InvalidationLevel::Family));
     assert!(
         matches!(history.apply(&DocumentCommand::RemoveUnreferencedAuthoredStructure { structure_id: AuthoredStructureId(7) }), Err(error) if error.to_string().contains("authored_structures.remove.referenced"))
     );
+}
+
+/// Proves normal-offset payload leaves are descriptor-backed Family edits with stale, no-op, and history authority.
+#[test]
+fn normal_offset_payload_descriptors_and_typed_edits_are_history_safe() {
+    let document = document_with_generic_guides(GuidePrototype::AuthoredOpenPath {
+        structure_id: AuthoredStructureId(7),
+    });
+    let mut history = DocumentHistory::new(DocumentSession::new(document).expect("valid session"));
+    let apply = |history: &mut DocumentHistory, edit: PatternDefinitionEdit| {
+        let base_definition = history.document().pattern_definitions()[0].clone();
+        history
+            .apply(&DocumentCommand::EditSharedPatternDefinition {
+                definition_id: PatternDefinitionId(1),
+                base_definition,
+                edit,
+            })
+            .expect("active normal-offset edit applies")
+    };
+    apply(
+        &mut history,
+        PatternDefinitionEdit::SetGuideRepetition {
+            mechanism_id: PatternMechanismId(1),
+            dimension_id: GuideDimensionId(1),
+            repetition: GuideRepetition::NormalOffset {
+                spacing: 24.0,
+                sides: OffsetSides::Both,
+                cleanup: OffsetCleanup::DissolveCrossings,
+            },
+        },
+    );
+
+    let values = history.document().property_values();
+    let value = |field| {
+        &values
+            .iter()
+            .find(|value| {
+                value.descriptor.field == field
+                    && value.descriptor.target
+                        == toniator_domain::PropertyTarget::GuideDimension(
+                            PatternDefinitionId(1),
+                            PatternMechanismId(1),
+                            GuideDimensionId(1),
+                        )
+            })
+            .expect("active offset descriptor exists")
+            .value
+    };
+    assert_eq!(
+        value(PropertyFieldId::GuideOffsetSpacing),
+        &PropertyCurrentValueKind::FiniteF64(24.0)
+    );
+    assert_eq!(
+        value(PropertyFieldId::GuideOffsetSides),
+        &PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::OffsetSides(OffsetSides::Both))
+    );
+    assert_eq!(
+        value(PropertyFieldId::GuideOffsetCleanup),
+        &PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::OffsetCleanup(
+            OffsetCleanup::DissolveCrossings
+        ))
+    );
+
+    let stale_base = history.document().pattern_definitions()[0].clone();
+    let result = apply(
+        &mut history,
+        PatternDefinitionEdit::SetGuideOffsetSpacing {
+            mechanism_id: PatternMechanismId(1),
+            dimension_id: GuideDimensionId(1),
+            spacing: 36.0,
+        },
+    );
+    assert_eq!(result.invalidation, Some(InvalidationLevel::Family));
+    apply(
+        &mut history,
+        PatternDefinitionEdit::SetGuideOffsetSides {
+            mechanism_id: PatternMechanismId(1),
+            dimension_id: GuideDimensionId(1),
+            sides: OffsetSides::Left,
+        },
+    );
+    let revision = history.revision();
+    let before = history.document().clone();
+    assert!(
+        history
+            .apply(&DocumentCommand::EditSharedPatternDefinition {
+                definition_id: PatternDefinitionId(1),
+                base_definition: stale_base,
+                edit: PatternDefinitionEdit::SetGuideOffsetCleanup {
+                    mechanism_id: PatternMechanismId(1),
+                    dimension_id: GuideDimensionId(1),
+                    cleanup: OffsetCleanup::DissolveCrossings,
+                },
+            })
+            .is_err(),
+        "stale offset payload bases fail atomically"
+    );
+    assert_eq!(history.document(), &before);
+    assert_eq!(history.revision(), revision);
+
+    let current_base = history.document().pattern_definitions()[0].clone();
+    assert!(
+        history
+            .apply(&DocumentCommand::EditSharedPatternDefinition {
+                definition_id: PatternDefinitionId(1),
+                base_definition: current_base,
+                edit: PatternDefinitionEdit::SetGuideOffsetSides {
+                    mechanism_id: PatternMechanismId(1),
+                    dimension_id: GuideDimensionId(1),
+                    sides: OffsetSides::Left,
+                },
+            })
+            .is_err(),
+        "equal authored payload is a semantic no-op"
+    );
+    history.undo().expect("offset side edit is undoable");
+    history.redo().expect("offset side edit is redoable");
+    let PatternMechanism::GuideDimensions { dimensions, .. } =
+        &history.document().pattern_definitions()[0].mechanisms[0]
+    else {
+        panic!("generic guide root remains active")
+    };
+    assert!(matches!(
+        dimensions[0].repetition,
+        GuideRepetition::NormalOffset {
+            spacing: 36.0,
+            sides: OffsetSides::Left,
+            cleanup: OffsetCleanup::DissolveCrossings
+        }
+    ));
 }

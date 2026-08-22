@@ -1,6 +1,6 @@
 # Toniator Progress Tracker
 
-Last updated: **2026-08-21**. The durable execution contract is
+Last updated: **2026-08-22**. The durable execution contract is
 [GREENFIELD_REWRITE_PLAN.md](docs/GREENFIELD_REWRITE_PLAN.md). Normative
 architecture remains in the five protected [Project Specification files](Project%20Specification/Addendum.md).
 
@@ -448,6 +448,19 @@ offsets, adjacency, regions, composites, presets, GTK feature work, and later
 stages remain excluded. The user explicitly accepted Stage 20I on 2026-08-21;
 publication remains separate.
 
+**Stage 20J — Implemented awaiting review.** The bounded Path Offset and
+Constant Gap implementation and stage-scoped verification completed on
+2026-08-22. The work is governed by
+[`STAGE_20J_PATH_OFFSET_CONSTANT_GAP_PLAN.md`](docs/STAGE_20J_PATH_OFFSET_CONSTANT_GAP_PLAN.md):
+persisted absolute-gap `NormalOffset` guide repetition, reusable compact
+line/cubic centerline offsets, tangential padded-domain endpoint extension,
+deterministic crossing dissolution, Stage 20I outline reuse, and current-v4
+persistence. Focused domain, geometry, patterns, engine, IO, render, CLI/SVG,
+Holiday, and private Sway/AT-SPI evidence is green; independent re-review has
+no remaining finding. Automated wlroots evidence is not manual GNOME/Mutter
+acceptance. Acceptance, checkpointing, publication, Stage 20K+, protected
+specification changes, and Legacy work remain separate.
+
 **Terminology follow-up — Tracked.** Revisit the public and internal use of
 `density`, especially `across_x` and `across_y`: those values currently express
 guide resolution/count along the document axes, while density conventionally
@@ -455,8 +468,8 @@ means guides per unit distance. Do not rename the fields or change their
 behavior as part of Stage 20I; scope the schema, persistence, CLI, and UI impact
 in a separately authorized follow-up.
 
-**Remaining Stage 20J+ — Planned.** The approved remaining order is 20J path
-offset; 20K parametric curves; 20L adjacency; 20M connection programs; 20N
+**Remaining Stage 20K+ — Planned.** The approved remaining order is 20K
+parametric curves; 20L adjacency; 20M connection programs; 20N
 Voronoi; 20O guide faces; 20P region realization; 20Q composites; 20R gallery
 recipes; 20S Pattern Wizard; and 20T–20W temporal work. Each requires its own
 contract, implementation, review, and acceptance gate.

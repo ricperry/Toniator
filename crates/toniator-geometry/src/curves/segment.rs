@@ -83,6 +83,15 @@ impl CubicBezierSegment {
     pub const fn end(&self) -> Point2 {
         self.end
     }
+
+    /// Splits this finite cubic exactly with De Casteljau construction at one normalized parameter.
+    ///
+    /// # Errors
+    ///
+    /// Returns the canonical parameter or finite-coordinate diagnostic without approximating either child.
+    pub fn split(self, parameter: f64) -> Result<(Self, Self), CurveError> {
+        split_cubic(self, parameter)
+    }
 }
 
 /// One finite curve segment, retaining its authored line or cubic kind.
@@ -339,8 +348,12 @@ impl CurveSegment {
         Ok(ArcLengthProfile { leaves, work_items })
     }
 
-    /// Returns the analytic non-normalized derivative for bounded intersection refinement.
-    pub(crate) fn derivative_at(&self, parameter_value: f64) -> Result<Vector2, CurveError> {
+    /// Returns the finite analytic derivative before normalization for geometry-owned construction and refinement.
+    ///
+    /// # Errors
+    ///
+    /// Returns parameter or numeric-overflow diagnostics without inventing a stationary derivative.
+    pub fn derivative_at(&self, parameter_value: f64) -> Result<Vector2, CurveError> {
         let t = parameter(parameter_value)?;
         match self {
             Self::Line(line) => vector(line.start, line.end),

@@ -337,6 +337,30 @@ pub enum GuideRepetition {
         direction_degrees: f64,
         spacing_multiplier: f64,
     },
+    /// Repeats one guide along its local normals at an authored absolute document-space gap.
+    NormalOffset {
+        spacing: f64,
+        sides: OffsetSides,
+        cleanup: OffsetCleanup,
+    },
+}
+
+/// Selects the signed normal-offset directions derived from one source guide.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OffsetSides {
+    /// Emits the source followed by positive left-normal offsets.
+    Left,
+    /// Emits negative right-normal offsets followed by the source.
+    Right,
+    /// Emits negative offsets, the source, and positive offsets in signed order.
+    Both,
+}
+
+/// Selects the accepted deterministic cleanup policy for derived offset paths.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OffsetCleanup {
+    /// Splits and removes reversal loops without manufacturing region topology.
+    DissolveCrossings,
 }
 
 /// One finite, stable generic guide dimension authored in definition-local
@@ -2430,6 +2454,14 @@ impl Document {
                                     PropertyFieldId::GuideStackSpacingMultiplier,
                                 ]);
                             }
+                            if matches!(dimension.repetition, GuideRepetition::NormalOffset { .. })
+                            {
+                                fields.extend([
+                                    PropertyFieldId::GuideOffsetSpacing,
+                                    PropertyFieldId::GuideOffsetSides,
+                                    PropertyFieldId::GuideOffsetCleanup,
+                                ]);
+                            }
                             for field in fields {
                                 descriptors.push(descriptor_from_contract(field, target));
                             }
@@ -3014,6 +3046,15 @@ impl Document {
                                 ),
                             ),
                             (
+                                PropertyFieldId::GuideRepetition,
+                                _,
+                                GuideRepetition::NormalOffset { .. },
+                            ) => PropertyCurrentValueKind::EnumChoice(
+                                PropertyEnumChoice::GuideRepetition(
+                                    GuideRepetitionKind::NormalOffset,
+                                ),
+                            ),
+                            (
                                 PropertyFieldId::GuideStackDirection,
                                 _,
                                 GuideRepetition::TransformStack {
@@ -3027,6 +3068,25 @@ impl Document {
                                     spacing_multiplier, ..
                                 },
                             ) => PropertyCurrentValueKind::FiniteF64(*spacing_multiplier),
+                            (
+                                PropertyFieldId::GuideOffsetSpacing,
+                                _,
+                                GuideRepetition::NormalOffset { spacing, .. },
+                            ) => PropertyCurrentValueKind::FiniteF64(*spacing),
+                            (
+                                PropertyFieldId::GuideOffsetSides,
+                                _,
+                                GuideRepetition::NormalOffset { sides, .. },
+                            ) => PropertyCurrentValueKind::EnumChoice(
+                                PropertyEnumChoice::OffsetSides(*sides),
+                            ),
+                            (
+                                PropertyFieldId::GuideOffsetCleanup,
+                                _,
+                                GuideRepetition::NormalOffset { cleanup, .. },
+                            ) => PropertyCurrentValueKind::EnumChoice(
+                                PropertyEnumChoice::OffsetCleanup(*cleanup),
+                            ),
                             _ => unreachable!("inactive generic guide descriptor field"),
                         }
                     }
@@ -5356,6 +5416,36 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
                 dimension.repetition = repetition.clone();
             }
         }
+        PatternDefinitionEdit::SetGuideOffsetSpacing {
+            mechanism_id,
+            dimension_id,
+            spacing,
+        } => apply_guide_offset_payload(
+            definition,
+            *mechanism_id,
+            *dimension_id,
+            |current_spacing, _sides, _cleanup| *current_spacing = *spacing,
+        ),
+        PatternDefinitionEdit::SetGuideOffsetSides {
+            mechanism_id,
+            dimension_id,
+            sides,
+        } => apply_guide_offset_payload(
+            definition,
+            *mechanism_id,
+            *dimension_id,
+            |_spacing, current_sides, _cleanup| *current_sides = *sides,
+        ),
+        PatternDefinitionEdit::SetGuideOffsetCleanup {
+            mechanism_id,
+            dimension_id,
+            cleanup,
+        } => apply_guide_offset_payload(
+            definition,
+            *mechanism_id,
+            *dimension_id,
+            |_spacing, _sides, current_cleanup| *current_cleanup = *cleanup,
+        ),
         PatternDefinitionEdit::SetGuideStackDirection {
             mechanism_id,
             dimension_id,
@@ -5951,6 +6041,36 @@ fn apply_guide_stack_scalar(
     }
 }
 
+/// Applies one active normal-offset payload leaf without creating dormant repetition data.
+///
+/// The caller validates that the target is a generic normal-offset repetition before this local
+/// mutation; inactive or missing targets remain unchanged for the candidate validation boundary.
+fn apply_guide_offset_payload(
+    definition: &mut PatternDefinition,
+    mechanism_id: PatternMechanismId,
+    dimension_id: GuideDimensionId,
+    mutate: impl FnOnce(&mut f64, &mut OffsetSides, &mut OffsetCleanup),
+) {
+    if let Some(PatternMechanism::GuideDimensions { dimensions, .. }) = definition
+        .mechanisms
+        .iter_mut()
+        .find(|mechanism| mechanism.id() == mechanism_id)
+        && let Some(GuideDimension {
+            repetition:
+                GuideRepetition::NormalOffset {
+                    spacing,
+                    sides,
+                    cleanup,
+                },
+            ..
+        }) = dimensions
+            .iter_mut()
+            .find(|dimension| dimension.id == dimension_id)
+    {
+        mutate(spacing, sides, cleanup);
+    }
+}
+
 /// Remaps definition-owned IDs in one validated edit while retaining external resource references.
 fn remap_definition_edit_for_duplicate(
     source: &PatternDefinition,
@@ -6068,6 +6188,33 @@ fn remap_definition_edit_for_duplicate(
             mechanism_id: mechanism(*mechanism_id),
             dimension_id: dimension(*dimension_id),
             repetition: repetition.clone(),
+        },
+        PatternDefinitionEdit::SetGuideOffsetSpacing {
+            mechanism_id,
+            dimension_id,
+            spacing,
+        } => PatternDefinitionEdit::SetGuideOffsetSpacing {
+            mechanism_id: mechanism(*mechanism_id),
+            dimension_id: dimension(*dimension_id),
+            spacing: *spacing,
+        },
+        PatternDefinitionEdit::SetGuideOffsetSides {
+            mechanism_id,
+            dimension_id,
+            sides,
+        } => PatternDefinitionEdit::SetGuideOffsetSides {
+            mechanism_id: mechanism(*mechanism_id),
+            dimension_id: dimension(*dimension_id),
+            sides: *sides,
+        },
+        PatternDefinitionEdit::SetGuideOffsetCleanup {
+            mechanism_id,
+            dimension_id,
+            cleanup,
+        } => PatternDefinitionEdit::SetGuideOffsetCleanup {
+            mechanism_id: mechanism(*mechanism_id),
+            dimension_id: dimension(*dimension_id),
+            cleanup: *cleanup,
         },
         PatternDefinitionEdit::SetGuideStackDirection {
             mechanism_id,
@@ -6504,6 +6651,27 @@ fn validate_definition_edit(
             validate_generic_guide_dimension_target(definition, *mechanism_id, *dimension_id)?;
             validate_guide_repetition(repetition)
         }
+        PatternDefinitionEdit::SetGuideOffsetSpacing {
+            mechanism_id,
+            dimension_id,
+            spacing,
+        } => {
+            validate_active_offset_target(definition, *mechanism_id, *dimension_id)?;
+            validate_positive_finite(
+                *spacing,
+                "pattern_definitions.mechanisms.guide_repetition.offset.spacing",
+            )
+        }
+        PatternDefinitionEdit::SetGuideOffsetSides {
+            mechanism_id,
+            dimension_id,
+            ..
+        }
+        | PatternDefinitionEdit::SetGuideOffsetCleanup {
+            mechanism_id,
+            dimension_id,
+            ..
+        } => validate_active_offset_target(definition, *mechanism_id, *dimension_id).map(|_| ()),
         PatternDefinitionEdit::SetGuideStackDirection {
             mechanism_id,
             dimension_id,
@@ -7052,6 +7220,27 @@ fn validate_active_stack_target(
         .repetition
     {
         GuideRepetition::TransformStack { .. } => Ok(()),
+        _ => Err(ValidationError::new(
+            "pattern_definitions.mechanisms.guide_repetition",
+            "field is inactive for the current guide repetition",
+        )),
+    }
+}
+
+/// Validates that one payload edit addresses an active normal-offset repetition.
+///
+/// # Errors
+///
+/// Returns the generic-guide target diagnostic or a stable inactive-field error without mutation.
+fn validate_active_offset_target(
+    definition: &PatternDefinition,
+    mechanism_id: PatternMechanismId,
+    dimension_id: GuideDimensionId,
+) -> Result<(), ValidationError> {
+    match validate_generic_guide_dimension_target(definition, mechanism_id, dimension_id)?
+        .repetition
+    {
+        GuideRepetition::NormalOffset { .. } => Ok(()),
         _ => Err(ValidationError::new(
             "pattern_definitions.mechanisms.guide_repetition",
             "field is inactive for the current guide repetition",
@@ -7986,20 +8175,36 @@ fn validate_guide_dimensions(dimensions: &[GuideDimension]) -> Result<(), Valida
                 }
             }
         }
-        if let GuideRepetition::TransformStack {
-            direction_degrees,
-            spacing_multiplier,
-        } = dimension.repetition
-        {
-            validate_finite(
+        match dimension.repetition {
+            GuideRepetition::Single => {}
+            GuideRepetition::TransformStack {
                 direction_degrees,
-                "pattern_definitions.mechanisms.guide_repetition.direction",
-            )?;
-            if !spacing_multiplier.is_finite() || spacing_multiplier <= 0.0 {
-                return Err(ValidationError::new(
-                    "pattern_definitions.mechanisms.guide_repetition.spacing_multiplier",
-                    "guide stack spacing multiplier must be positive and finite",
-                ));
+                spacing_multiplier,
+            } => {
+                validate_finite(
+                    direction_degrees,
+                    "pattern_definitions.mechanisms.guide_repetition.direction",
+                )?;
+                if !spacing_multiplier.is_finite() || spacing_multiplier <= 0.0 {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.mechanisms.guide_repetition.spacing_multiplier",
+                        "guide stack spacing multiplier must be positive and finite",
+                    ));
+                }
+            }
+            GuideRepetition::NormalOffset { spacing, .. } => {
+                if dimension.phase != 0.0 {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.mechanisms.guide_repetition.phase",
+                        "normal-offset guide dimensions require zero phase",
+                    ));
+                }
+                if !spacing.is_finite() || spacing <= 0.0 {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.mechanisms.guide_repetition.spacing",
+                        "normal-offset spacing must be positive and finite",
+                    ));
+                }
             }
         }
     }
@@ -8697,6 +8902,9 @@ pub enum PropertyFieldId {
     GuideArcStartAngle,
     GuideArcSweepAngle,
     GuideRepetition,
+    GuideOffsetSpacing,
+    GuideOffsetSides,
+    GuideOffsetCleanup,
     GuideStackDirection,
     GuideStackSpacingMultiplier,
     IntersectionDimensions,
@@ -8775,6 +8983,9 @@ pub const PROPERTY_FIELD_IDS: &[PropertyFieldId] = &[
     PropertyFieldId::GuideArcStartAngle,
     PropertyFieldId::GuideArcSweepAngle,
     PropertyFieldId::GuideRepetition,
+    PropertyFieldId::GuideOffsetSpacing,
+    PropertyFieldId::GuideOffsetSides,
+    PropertyFieldId::GuideOffsetCleanup,
     PropertyFieldId::GuideStackDirection,
     PropertyFieldId::GuideStackSpacingMultiplier,
     PropertyFieldId::IntersectionDimensions,
@@ -8844,6 +9055,8 @@ pub enum PropertyEnumChoice {
     MarkOrientation(MarkOrientationKind),
     GuidePrototype(GuidePrototypeKind),
     GuideRepetition(GuideRepetitionKind),
+    OffsetSides(OffsetSides),
+    OffsetCleanup(OffsetCleanup),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -8890,6 +9103,7 @@ pub enum GuidePrototypeKind {
 pub enum GuideRepetitionKind {
     Single,
     TransformStack,
+    NormalOffset,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -8922,6 +9136,7 @@ pub enum PropertyDependency {
     AuthoredPathPrototype,
     CircularArc,
     TransformStack,
+    NormalOffset,
     IntersectionProduct,
     AlongGuideProduct,
     RandomProcess,
@@ -8947,6 +9162,7 @@ pub enum PropertyApplicability {
     AuthoredPathPrototype,
     CircularArc,
     TransformStack,
+    NormalOffset,
     IntersectionProduct,
     AlongGuideProduct,
     RandomProcess,
@@ -9022,6 +9238,9 @@ pub enum PropertyCommandKind {
     SetGuideArcStartAngle,
     SetGuideArcSweepAngle,
     SetGuideRepetition,
+    SetGuideOffsetSpacing,
+    SetGuideOffsetSides,
+    SetGuideOffsetCleanup,
     SetGuideStackDirection,
     SetGuideStackSpacingMultiplier,
     SetIntersectionDimensions,
@@ -10410,6 +10629,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::GuideArcStartAngle => PropertyCommandKind::SetGuideArcStartAngle,
             PropertyFieldId::GuideArcSweepAngle => PropertyCommandKind::SetGuideArcSweepAngle,
             PropertyFieldId::GuideRepetition => PropertyCommandKind::SetGuideRepetition,
+            PropertyFieldId::GuideOffsetSpacing => PropertyCommandKind::SetGuideOffsetSpacing,
+            PropertyFieldId::GuideOffsetSides => PropertyCommandKind::SetGuideOffsetSides,
+            PropertyFieldId::GuideOffsetCleanup => PropertyCommandKind::SetGuideOffsetCleanup,
             PropertyFieldId::GuideStackDirection => PropertyCommandKind::SetGuideStackDirection,
             PropertyFieldId::GuideStackSpacingMultiplier => {
                 PropertyCommandKind::SetGuideStackSpacingMultiplier
@@ -10511,7 +10733,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::OutputPrototype
             | PropertyFieldId::OutputOrientation
             | PropertyFieldId::GuidePrototype
-            | PropertyFieldId::GuideRepetition => PropertyValueKind::EnumChoice,
+            | PropertyFieldId::GuideRepetition
+            | PropertyFieldId::GuideOffsetSides
+            | PropertyFieldId::GuideOffsetCleanup => PropertyValueKind::EnumChoice,
             _ => PropertyValueKind::FiniteF64,
         },
         choices: match field {
@@ -10530,6 +10754,8 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::OutputOrientation => MARK_ORIENTATION_CHOICES,
             PropertyFieldId::GuidePrototype => GUIDE_PROTOTYPE_CHOICES,
             PropertyFieldId::GuideRepetition => GUIDE_REPETITION_CHOICES,
+            PropertyFieldId::GuideOffsetSides => OFFSET_SIDES_CHOICES,
+            PropertyFieldId::GuideOffsetCleanup => OFFSET_CLEANUP_CHOICES,
             _ => &[],
         },
         bounds: match field {
@@ -10537,6 +10763,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::DensityAcrossY
             | PropertyFieldId::GuideSpacingMultiplier
             | PropertyFieldId::GuideArcRadius
+            | PropertyFieldId::GuideOffsetSpacing
             | PropertyFieldId::GuideStackSpacingMultiplier
             | PropertyFieldId::AlongGuideIntervalMultiplier
             | PropertyFieldId::RandomEvenMinimumCenterDistance
@@ -10586,7 +10813,8 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::VisibleMarkMargin => PropertyUnit::DocumentDistance,
             PropertyFieldId::GuideArcCenterX
             | PropertyFieldId::GuideArcCenterY
-            | PropertyFieldId::GuideArcRadius => PropertyUnit::DocumentDistance,
+            | PropertyFieldId::GuideArcRadius
+            | PropertyFieldId::GuideOffsetSpacing => PropertyUnit::DocumentDistance,
             PropertyFieldId::ColorRed
             | PropertyFieldId::ColorGreen
             | PropertyFieldId::ColorBlue
@@ -10632,6 +10860,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::GuideStackDirection | PropertyFieldId::GuideStackSpacingMultiplier => {
                 PropertyApplicability::TransformStack
             }
+            PropertyFieldId::GuideOffsetSpacing
+            | PropertyFieldId::GuideOffsetSides
+            | PropertyFieldId::GuideOffsetCleanup => PropertyApplicability::NormalOffset,
             PropertyFieldId::IntersectionDimensions | PropertyFieldId::IntersectionMergeEpsilon => {
                 PropertyApplicability::IntersectionProduct
             }
@@ -10722,6 +10953,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
                 | PropertyFieldId::GuideArcStartAngle
                 | PropertyFieldId::GuideArcSweepAngle
                 | PropertyFieldId::GuideRepetition
+                | PropertyFieldId::GuideOffsetSpacing
+                | PropertyFieldId::GuideOffsetSides
+                | PropertyFieldId::GuideOffsetCleanup
                 | PropertyFieldId::GuideStackDirection
                 | PropertyFieldId::GuideStackSpacingMultiplier
                 | PropertyFieldId::IntersectionDimensions
@@ -10866,7 +11100,16 @@ const GUIDE_PROTOTYPE_CHOICES: &[PropertyEnumChoice] = &[
 const GUIDE_REPETITION_CHOICES: &[PropertyEnumChoice] = &[
     PropertyEnumChoice::GuideRepetition(GuideRepetitionKind::Single),
     PropertyEnumChoice::GuideRepetition(GuideRepetitionKind::TransformStack),
+    PropertyEnumChoice::GuideRepetition(GuideRepetitionKind::NormalOffset),
 ];
+const OFFSET_SIDES_CHOICES: &[PropertyEnumChoice] = &[
+    PropertyEnumChoice::OffsetSides(OffsetSides::Left),
+    PropertyEnumChoice::OffsetSides(OffsetSides::Right),
+    PropertyEnumChoice::OffsetSides(OffsetSides::Both),
+];
+const OFFSET_CLEANUP_CHOICES: &[PropertyEnumChoice] = &[PropertyEnumChoice::OffsetCleanup(
+    OffsetCleanup::DissolveCrossings,
+)];
 
 const fn dependency_for_contract(
     applicability: PropertyApplicability,
@@ -10881,6 +11124,7 @@ const fn dependency_for_contract(
         PropertyApplicability::AuthoredPathPrototype => PropertyDependency::AuthoredPathPrototype,
         PropertyApplicability::CircularArc => PropertyDependency::CircularArc,
         PropertyApplicability::TransformStack => PropertyDependency::TransformStack,
+        PropertyApplicability::NormalOffset => PropertyDependency::NormalOffset,
         PropertyApplicability::IntersectionProduct => PropertyDependency::IntersectionProduct,
         PropertyApplicability::AlongGuideProduct => PropertyDependency::AlongGuideProduct,
         PropertyApplicability::RandomProcess => PropertyDependency::RandomProcess,
@@ -11457,6 +11701,21 @@ pub enum PatternDefinitionEdit {
         dimension_id: GuideDimensionId,
         repetition: GuideRepetition,
     },
+    SetGuideOffsetSpacing {
+        mechanism_id: PatternMechanismId,
+        dimension_id: GuideDimensionId,
+        spacing: f64,
+    },
+    SetGuideOffsetSides {
+        mechanism_id: PatternMechanismId,
+        dimension_id: GuideDimensionId,
+        sides: OffsetSides,
+    },
+    SetGuideOffsetCleanup {
+        mechanism_id: PatternMechanismId,
+        dimension_id: GuideDimensionId,
+        cleanup: OffsetCleanup,
+    },
     SetGuideStackDirection {
         mechanism_id: PatternMechanismId,
         dimension_id: GuideDimensionId,
@@ -11905,8 +12164,21 @@ impl PatternDefinitionEdit {
                         GuideRepetition::TransformStack { .. } => {
                             GuideRepetitionKind::TransformStack
                         }
+                        GuideRepetition::NormalOffset { .. } => GuideRepetitionKind::NormalOffset,
                     },
                 )),
+            ),
+            Edit::SetGuideOffsetSpacing { spacing, .. } => (
+                PropertyFieldId::GuideOffsetSpacing,
+                PropertyFieldValue::FiniteF64(*spacing),
+            ),
+            Edit::SetGuideOffsetSides { sides, .. } => (
+                PropertyFieldId::GuideOffsetSides,
+                PropertyFieldValue::EnumChoice(PropertyEnumChoice::OffsetSides(*sides)),
+            ),
+            Edit::SetGuideOffsetCleanup { cleanup, .. } => (
+                PropertyFieldId::GuideOffsetCleanup,
+                PropertyFieldValue::EnumChoice(PropertyEnumChoice::OffsetCleanup(*cleanup)),
             ),
             Edit::SetGuideStackDirection { value, .. } => (
                 PropertyFieldId::GuideStackDirection,

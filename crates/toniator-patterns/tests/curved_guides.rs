@@ -2,8 +2,8 @@ use toniator_domain::{
     AuthoredCurveSegment, AuthoredPoint2, AuthoredStructure, AuthoredStructureId,
     AuthoredStructureKind, CanvasSpec, CoveragePolicy, DensityMetric2D, Document, DocumentId,
     GeneralizedSiteProduct, GuideDimension, GuideDimensionId, GuidePrototype, GuideRepetition,
-    MarkOrientation, PatternDefinition, PatternDefinitionId, PatternMechanismId,
-    PatternOutputLayerId, SourceReference,
+    MarkOrientation, OffsetCleanup, OffsetSides, PatternDefinition, PatternDefinitionId,
+    PatternMechanismId, PatternOutputLayerId, SourceReference,
 };
 use toniator_geometry::{AffineTransform2D, FamilySiteProvenance, Point2, SiteScope, Vector2};
 use toniator_patterns::{
@@ -47,6 +47,7 @@ fn document(definition: PatternDefinition, structures: Vec<AuthoredStructure>) -
         base.canvas().clone(),
         SourceReference::Unassigned,
         vec![definition],
+        base.pattern_settings().clone(),
         base.channel_model().unwrap().to_owned(),
         base.channel_topology().unwrap().clone(),
         structures,
@@ -381,4 +382,193 @@ fn curved_transform_stacks_and_along_guides_preserve_scope_phase_and_variable_in
             .any(|interval| *interval < horizontal_normal),
         "sampled local tangents select the smaller anisotropic interval where appropriate"
     );
+}
+
+/// Proves normal offsets use independent signed document-space gaps and retain source index zero.
+#[test]
+fn normal_offsets_publish_signed_constant_gap_centerlines() {
+    let definition = definition(
+        vec![GuideDimension {
+            id: GuideDimensionId(31),
+            baseline_angle_degrees: 0.0,
+            phase: 0.0,
+            prototype: GuidePrototype::AuthoredOpenPath {
+                structure_id: AuthoredStructureId(31),
+            },
+            repetition: GuideRepetition::NormalOffset {
+                spacing: 12.0,
+                sides: OffsetSides::Both,
+                cleanup: OffsetCleanup::DissolveCrossings,
+            },
+        }],
+        GeneralizedSiteProduct::AlongGuides {
+            dimensions: vec![GuideDimensionId(31)],
+            interval_multiplier: 1.0,
+            phase: 0.0,
+        },
+    );
+    let document = document(
+        definition.clone(),
+        vec![line(
+            31,
+            AuthoredPoint2 { x: 20.0, y: 50.0 },
+            AuthoredPoint2 { x: 80.0, y: 50.0 },
+        )],
+    );
+    let output = evaluate_document_typed_family_cancellable(
+        &document,
+        &definition,
+        &request(5_000),
+        &|| false,
+    )
+    .expect("normal-offset family evaluates");
+    let guides = output
+        .guide_path_set()
+        .expect("guide paths publish")
+        .guides();
+    let indices = guides
+        .iter()
+        .map(|guide| guide.id.index)
+        .collect::<Vec<_>>();
+    assert!(indices.windows(2).all(|pair| pair[0] < pair[1]));
+    let prior = guides
+        .iter()
+        .find(|guide| guide.id.index == -1)
+        .expect("right offset publishes");
+    let source = guides
+        .iter()
+        .find(|guide| guide.id.index == 0)
+        .expect("source index zero publishes");
+    let next = guides
+        .iter()
+        .find(|guide| guide.id.index == 1)
+        .expect("left offset publishes");
+    let distance = |first: Point2, second: Point2| (first.x - second.x).hypot(first.y - second.y);
+    assert!((distance(prior.path.start(), source.path.start()) - 12.0).abs() < 1.0e-9);
+    assert!((distance(source.path.start(), next.path.start()) - 12.0).abs() < 1.0e-9);
+    assert_eq!(output.guide_nominal_basis(source.id), Some(12.0));
+    let authored_points = [Point2::new(20.0, 50.0), Point2::new(80.0, 50.0)].map(|point| {
+        AffineTransform2D::rotate_about_then_translate(
+            Point2::new(50.0, 50.0),
+            17.0,
+            Vector2::new(4.0, -3.0),
+        )
+        .unwrap()
+        .apply_point(point)
+    });
+    assert!(authored_points.into_iter().all(|authored| {
+        source.path.segments().iter().any(|segment| {
+            [segment.start(), segment.end()].into_iter().any(|point| {
+                (point.x - authored.x).abs() < 1.0e-9 && (point.y - authored.y).abs() < 1.0e-9
+            })
+        })
+    }));
+}
+
+/// Proves crossing cleanup components publish through the family boundary with distinct full identities.
+#[test]
+fn normal_offset_cleanup_components_publish_without_identity_collision() {
+    let structure = AuthoredStructure::new(
+        AuthoredStructureId(41),
+        AuthoredStructureKind::OpenPath,
+        vec![
+            AuthoredCurveSegment::Line {
+                start: AuthoredPoint2 { x: 10.0, y: 10.0 },
+                end: AuthoredPoint2 { x: 90.0, y: 90.0 },
+            },
+            AuthoredCurveSegment::Line {
+                start: AuthoredPoint2 { x: 90.0, y: 90.0 },
+                end: AuthoredPoint2 { x: 10.0, y: 90.0 },
+            },
+            AuthoredCurveSegment::Line {
+                start: AuthoredPoint2 { x: 10.0, y: 90.0 },
+                end: AuthoredPoint2 { x: 90.0, y: 10.0 },
+            },
+        ],
+    )
+    .expect("finite crossing structure");
+    let definition = definition(
+        vec![GuideDimension {
+            id: GuideDimensionId(41),
+            baseline_angle_degrees: 0.0,
+            phase: 0.0,
+            prototype: GuidePrototype::AuthoredOpenPath {
+                structure_id: AuthoredStructureId(41),
+            },
+            repetition: GuideRepetition::NormalOffset {
+                spacing: 12.0,
+                sides: OffsetSides::Left,
+                cleanup: OffsetCleanup::DissolveCrossings,
+            },
+        }],
+        GeneralizedSiteProduct::AlongGuides {
+            dimensions: vec![GuideDimensionId(41)],
+            interval_multiplier: 1.0,
+            phase: 0.0,
+        },
+    );
+    let document = document(definition.clone(), vec![structure]);
+    let output = evaluate_document_typed_family_cancellable(
+        &document,
+        &definition,
+        &request(10_000),
+        &|| false,
+    )
+    .expect("split normal-offset family publishes atomically");
+    let guides = output
+        .guide_path_set()
+        .expect("guide paths publish")
+        .guides();
+    let split_index = guides
+        .iter()
+        .find(|guide| guide.id.component_ordinal > 0)
+        .expect("at least one offset crossing becomes multiple components")
+        .id
+        .index;
+    let components = guides
+        .iter()
+        .filter(|guide| guide.id.index == split_index)
+        .collect::<Vec<_>>();
+    assert!(components.len() >= 2);
+    assert!(components.windows(2).all(|pair| {
+        pair[0].id.component_ordinal < pair[1].id.component_ordinal && pair[0].id != pair[1].id
+    }));
+}
+
+/// Proves a one-sided family reports a stable coverage failure when even its source cannot survive.
+#[test]
+fn normal_offset_one_sided_collapse_fails_coverage_atomically() {
+    let definition = definition(
+        vec![GuideDimension {
+            id: GuideDimensionId(51),
+            baseline_angle_degrees: 0.0,
+            phase: 0.0,
+            prototype: GuidePrototype::AuthoredOpenPath {
+                structure_id: AuthoredStructureId(51),
+            },
+            repetition: GuideRepetition::NormalOffset {
+                spacing: 12.0,
+                sides: OffsetSides::Left,
+                cleanup: OffsetCleanup::DissolveCrossings,
+            },
+        }],
+        GeneralizedSiteProduct::AlongGuides {
+            dimensions: vec![GuideDimensionId(51)],
+            interval_multiplier: 1.0,
+            phase: 0.0,
+        },
+    );
+    let stationary = line(
+        51,
+        AuthoredPoint2 { x: 50.0, y: 50.0 },
+        AuthoredPoint2 { x: 50.0, y: 50.0 },
+    );
+    let error = evaluate_document_typed_family_cancellable(
+        &document(definition.clone(), vec![stationary]),
+        &definition,
+        &request(128),
+        &|| false,
+    )
+    .expect_err("stationary one-sided guide cannot prove coverage");
+    assert_eq!(error.path(), "coverage.curved_guides.normal_offset");
 }

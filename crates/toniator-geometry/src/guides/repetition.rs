@@ -46,13 +46,14 @@ impl GuidePathSet {
         let mut ids = std::collections::BTreeSet::new();
         let mut completed_dimensions = std::collections::BTreeSet::new();
         let mut previous_dimension = None;
-        let mut previous_index = None;
+        let mut previous_identity = None;
         for guide in &guides {
             if !ids.insert(guide.id)
                 || (previous_dimension != Some(guide.id.dimension_id)
                     && !completed_dimensions.insert(guide.id.dimension_id))
                 || (previous_dimension == Some(guide.id.dimension_id)
-                    && previous_index.is_some_and(|index| index >= guide.id.index))
+                    && previous_identity
+                        .is_some_and(|identity: GuideInstanceId| identity >= guide.id))
             {
                 return Err(CurveError::new(
                     "curve.guide.path_set",
@@ -60,7 +61,7 @@ impl GuidePathSet {
                 ));
             }
             previous_dimension = Some(guide.id.dimension_id);
-            previous_index = Some(guide.id.index);
+            previous_identity = Some(guide.id);
         }
         for guide in &guides {
             guide.path.bounds()?;
@@ -83,5 +84,43 @@ impl GuidePathSet {
     /// Returns the guide root mechanism that owns emitted guide identities.
     pub const fn guide_mechanism_id(&self) -> PatternMechanismId {
         self.guide_mechanism_id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{CurveSegment, LineSegment, PathClosure, Point2};
+    use toniator_domain::GuideDimensionId;
+
+    /// Proves cleanup components at one signed repetition index retain distinct ordered guide identities.
+    #[test]
+    fn split_components_share_an_index_without_identity_collision() {
+        let path = CurvePath::new(
+            vec![CurveSegment::Line(
+                LineSegment::new(Point2::new(0.0, 0.0), Point2::new(1.0, 0.0))
+                    .expect("finite line"),
+            )],
+            PathClosure::Open,
+        )
+        .expect("finite path");
+        let guides = GuidePathSet::new(
+            "split-components".into(),
+            PatternMechanismId(1),
+            vec![
+                GuidePathInstance {
+                    id: GuideInstanceId::with_component(GuideDimensionId(1), 2, 0),
+                    source_structure_id: None,
+                    path: path.clone(),
+                },
+                GuidePathInstance {
+                    id: GuideInstanceId::with_component(GuideDimensionId(1), 2, 1),
+                    source_structure_id: None,
+                    path,
+                },
+            ],
+        )
+        .expect("ordered split components remain unique");
+        assert_eq!(guides.guides()[1].id.component_ordinal, 1);
     }
 }

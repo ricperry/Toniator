@@ -1146,6 +1146,27 @@ enum GuideRepetitionDtoV4 {
         direction_degrees: f64,
         spacing_multiplier: f64,
     },
+    NormalOffset {
+        spacing: f64,
+        sides: OffsetSidesDtoV4,
+        cleanup: OffsetCleanupDtoV4,
+    },
+}
+
+/// Persisted current-v4 signed-side intent for normal-offset guide repetition.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum OffsetSidesDtoV4 {
+    Left,
+    Right,
+    Both,
+}
+
+/// Persisted current-v4 cleanup discriminant for normal-offset guide repetition.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum OffsetCleanupDtoV4 {
+    DissolveCrossings,
 }
 
 impl GuideDimensionDtoV4 {
@@ -1226,6 +1247,23 @@ impl GuideRepetitionDtoV4 {
                 direction_degrees: *direction_degrees,
                 spacing_multiplier: *spacing_multiplier,
             },
+            GuideRepetition::NormalOffset {
+                spacing,
+                sides,
+                cleanup,
+            } => Self::NormalOffset {
+                spacing: *spacing,
+                sides: match sides {
+                    toniator_domain::OffsetSides::Left => OffsetSidesDtoV4::Left,
+                    toniator_domain::OffsetSides::Right => OffsetSidesDtoV4::Right,
+                    toniator_domain::OffsetSides::Both => OffsetSidesDtoV4::Both,
+                },
+                cleanup: match cleanup {
+                    toniator_domain::OffsetCleanup::DissolveCrossings => {
+                        OffsetCleanupDtoV4::DissolveCrossings
+                    }
+                },
+            },
         }
     }
 
@@ -1239,6 +1277,23 @@ impl GuideRepetitionDtoV4 {
             } => GuideRepetition::TransformStack {
                 direction_degrees,
                 spacing_multiplier,
+            },
+            Self::NormalOffset {
+                spacing,
+                sides,
+                cleanup,
+            } => GuideRepetition::NormalOffset {
+                spacing,
+                sides: match sides {
+                    OffsetSidesDtoV4::Left => toniator_domain::OffsetSides::Left,
+                    OffsetSidesDtoV4::Right => toniator_domain::OffsetSides::Right,
+                    OffsetSidesDtoV4::Both => toniator_domain::OffsetSides::Both,
+                },
+                cleanup: match cleanup {
+                    OffsetCleanupDtoV4::DissolveCrossings => {
+                        toniator_domain::OffsetCleanup::DissolveCrossings
+                    }
+                },
             },
         }
     }

@@ -66,10 +66,12 @@ fn family_site_set_contract_rejects_invalid_ids_order_positions_and_provenance()
                 GuideInstanceId {
                     dimension_id: 1,
                     index: 7,
+                    component_ordinal: 0,
                 },
                 GuideInstanceId {
                     dimension_id: 2,
                     index: -3,
+                    component_ordinal: 0,
                 },
             ],
         },
@@ -95,6 +97,7 @@ fn family_site_set_contract_rejects_invalid_ids_order_positions_and_provenance()
                     guide_id: GuideInstanceId {
                         dimension_id: 9,
                         index: -4,
+                        component_ordinal: 0,
                     },
                     guide_order: 2,
                     sequence: 8,
@@ -169,10 +172,12 @@ fn family_site_set_contract_rejects_invalid_ids_order_positions_and_provenance()
             GuideInstanceId {
                 dimension_id: 1,
                 index: 0,
+                component_ordinal: 0,
             },
             GuideInstanceId {
                 dimension_id: 1,
                 index: 0,
+                component_ordinal: 0,
             },
         ],
     };
@@ -193,6 +198,7 @@ fn family_site_set_contract_rejects_invalid_ids_order_positions_and_provenance()
             guide_id: GuideInstanceId {
                 dimension_id,
                 index: 0,
+                component_ordinal: 0,
             },
             guide_order: 0,
             sequence: 0,

@@ -50,6 +50,7 @@ fn canonical_stroke_retains_ordered_profile_without_canvas_clipping() {
         GuideInstanceId {
             dimension_id: 3,
             index: -1,
+            component_ordinal: 0,
         },
         None,
         path.clone(),

@@ -2771,9 +2771,10 @@ pub(crate) mod test_support {
         AuthoredStructureKind, CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternInstance,
         ChannelPatternLayoutDelta, ChannelSourceMapping, ChannelState, ChannelTopologyTemplate,
         ColorValue, ConnectedGeometryResponse, CoveragePolicy, DensityMetric2D, Document,
-        DocumentCommand, DocumentId, DocumentPatternSettings, DocumentSession,
-        GeneralizedSiteProduct, GuideDimensionId, HalftoneChannelModel, MarkGeometryResponse,
-        MarkOrientation, MarkPrototype, PatternDefinition, PatternDefinitionId,
+        DocumentCommand, DocumentHistory, DocumentId, DocumentPatternSettings, DocumentSession,
+        GeneralizedSiteProduct, GuideDimension, GuideDimensionId, GuidePrototype, GuideRepetition,
+        HalftoneChannelModel, MarkGeometryResponse, MarkOrientation, MarkPrototype, OffsetCleanup,
+        OffsetSides, PatternDefinition, PatternDefinitionEdit, PatternDefinitionId,
         PatternGeometryResponse, PatternMechanismId, PatternOutputLayer, PatternOutputLayerId,
         SourceComponent, SourcePlacement, SourceReference, SourceReferenceId,
         StraightGuideDimension, StraightGuideRepetition,
@@ -3034,6 +3035,88 @@ pub(crate) mod test_support {
                 base.channel_model().unwrap(),
                 base.channel_topology().unwrap().clone(),
                 Vec::new(),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// Builds a current generic-guide session whose persisted repetition exercises Stage 20J and Stage 20I together.
+    fn modeled_normal_offset_session() -> DocumentSession {
+        let source_id = SourceReferenceId::new("cancellation-test-source").unwrap();
+        let base = Document::new_default_document(
+            CanvasSpec {
+                width: 64.0,
+                height: 48.0,
+            },
+            SourceReference::Assigned(source_id),
+        )
+        .unwrap();
+        let guide_mechanism_id = PatternMechanismId(92);
+        let dimension_id = GuideDimensionId(95);
+        let mut definition = PatternDefinition::generalized_guides(
+            PatternDefinitionId(90),
+            "normal-offset cache",
+            guide_mechanism_id,
+            PatternMechanismId(93),
+            PatternOutputLayerId(94),
+            vec![GuideDimension {
+                id: dimension_id,
+                baseline_angle_degrees: 0.0,
+                phase: 0.0,
+                prototype: GuidePrototype::AuthoredOpenPath {
+                    structure_id: AuthoredStructureId(96),
+                },
+                repetition: GuideRepetition::NormalOffset {
+                    spacing: 12.0,
+                    sides: OffsetSides::Both,
+                    cleanup: OffsetCleanup::DissolveCrossings,
+                },
+            }],
+            GeneralizedSiteProduct::AlongGuides {
+                dimensions: vec![dimension_id],
+                interval_multiplier: 1.0,
+                phase: 0.0,
+            },
+            MarkOrientation::Fixed,
+            CoveragePolicy {
+                guard_steps: 1,
+                additional_margin: 0.0,
+            },
+        );
+        definition.output_layers = vec![PatternOutputLayer::GuidePaths {
+            id: PatternOutputLayerId(94),
+            guide_mechanism_id,
+            style: toniator_domain::PathStrokeStyle::default(),
+        }];
+        let guide = AuthoredStructure::new(
+            AuthoredStructureId(96),
+            AuthoredStructureKind::OpenPath,
+            vec![AuthoredCurveSegment::Line {
+                start: AuthoredPoint2 { x: 8.0, y: 24.0 },
+                end: AuthoredPoint2 { x: 56.0, y: 24.0 },
+            }],
+        )
+        .unwrap();
+        let mut settings = base.pattern_settings().clone();
+        settings.definition_id = definition.id;
+        settings.density.across_x = 2.0;
+        settings.density.across_y = 2.0;
+        settings.geometry_response =
+            PatternGeometryResponse::Connected(ConnectedGeometryResponse {
+                minimum_thickness: 0.01,
+                maximum_thickness: 0.02,
+            });
+        DocumentSession::new(
+            Document::with_source_topology_and_authored_structures(
+                base.id(),
+                base.canvas().clone(),
+                base.source().clone(),
+                vec![definition],
+                settings,
+                base.channel_model().unwrap(),
+                base.channel_topology().unwrap().clone(),
+                vec![guide],
             )
             .unwrap(),
         )
@@ -3350,6 +3433,150 @@ pub(crate) mod test_support {
         assert_eq!(diagnostics.aggregate.scene, CacheDisposition::Miss);
         assert_eq!(diagnostics.aggregate.raster, CacheDisposition::Miss);
         assert!(scheduler.accept_completion(&completion, &session).unwrap());
+        scheduler.shutdown().unwrap();
+    }
+
+    /// Proves Stage 20J structural edits miss family cache while Stage 20I thickness remains realization-only.
+    #[test]
+    fn normal_offset_cache_identity_reuses_and_invalidates_at_the_authoritative_levels() {
+        let scheduler = EvaluationScheduler::new_with_limits(EvaluationLimits::default()).unwrap();
+        let mut history = DocumentHistory::new(modeled_normal_offset_session());
+        let bytes = valid_document_bytes();
+        let submit =
+            |scheduler: &EvaluationScheduler, session: &DocumentSession, bytes: Arc<[u8]>| {
+                let ticket = scheduler.submit(document_request(session, bytes)).unwrap();
+                let completion = wait_for_document_completion(scheduler);
+                assert_eq!(completion.ticket(), ticket);
+                assert!(
+                    completion.result().is_some(),
+                    "normal-offset evaluation failed: {:?}",
+                    completion.error()
+                );
+                assert!(scheduler.accept_completion(&completion, session).unwrap());
+                completion
+            };
+        let first = submit(&scheduler, history.session(), Arc::clone(&bytes));
+        assert_eq!(
+            first.cache_diagnostics().unwrap().aggregate,
+            CacheDiagnostics {
+                decoded_source: CacheDisposition::Miss,
+                family: CacheDisposition::Miss,
+                realization: CacheDisposition::Miss,
+                scene: CacheDisposition::Miss,
+                raster: CacheDisposition::Miss,
+            }
+        );
+        let repeated = submit(&scheduler, history.session(), Arc::clone(&bytes));
+        assert_eq!(
+            repeated.cache_diagnostics().unwrap().aggregate,
+            CacheDiagnostics {
+                decoded_source: CacheDisposition::Hit,
+                family: CacheDisposition::Hit,
+                realization: CacheDisposition::Hit,
+                scene: CacheDisposition::Hit,
+                raster: CacheDisposition::Hit,
+            }
+        );
+
+        let thickness = history
+            .document()
+            .set_channel_geometry_response_for_effective(
+                CHANNEL_ID,
+                PatternGeometryResponse::Connected(ConnectedGeometryResponse {
+                    minimum_thickness: 0.012,
+                    maximum_thickness: 0.024,
+                }),
+            )
+            .unwrap();
+        history.apply(&thickness).unwrap();
+        let thickness_completion = submit(&scheduler, history.session(), Arc::clone(&bytes));
+        let thickness_cache = thickness_completion.cache_diagnostics().unwrap().aggregate;
+        assert_eq!(thickness_cache.decoded_source, CacheDisposition::Hit);
+        assert_eq!(thickness_cache.family, CacheDisposition::Hit);
+        assert_eq!(thickness_cache.realization, CacheDisposition::Miss);
+        assert_eq!(thickness_cache.scene, CacheDisposition::Miss);
+        assert_eq!(thickness_cache.raster, CacheDisposition::Miss);
+
+        let base_definition = history.document().pattern_definitions()[0].clone();
+        history
+            .apply(&DocumentCommand::EditSharedPatternDefinition {
+                definition_id: PatternDefinitionId(90),
+                base_definition,
+                edit: PatternDefinitionEdit::SetGuideOffsetSpacing {
+                    mechanism_id: PatternMechanismId(92),
+                    dimension_id: GuideDimensionId(95),
+                    spacing: 16.0,
+                },
+            })
+            .unwrap();
+        let structural = submit(&scheduler, history.session(), bytes);
+        let structural_cache = structural.cache_diagnostics().unwrap().aggregate;
+        assert_eq!(structural_cache.decoded_source, CacheDisposition::Hit);
+        assert_eq!(structural_cache.family, CacheDisposition::Miss);
+        assert_eq!(structural_cache.realization, CacheDisposition::Miss);
+        assert_eq!(structural_cache.scene, CacheDisposition::Miss);
+        assert_eq!(structural_cache.raster, CacheDisposition::Miss);
+        scheduler.shutdown().unwrap();
+    }
+
+    /// Proves superseded Stage 20J family work cannot publish a partial cache transaction.
+    #[test]
+    fn normal_offset_stale_family_publication_is_cancelled_atomically() {
+        let (gate, entered) =
+            EvaluationStageGate::new(EvaluationStage::Family, EvaluationCheckpoint::After);
+        let scheduler =
+            EvaluationScheduler::new_with_test_gate(EvaluationLimits::default(), Arc::clone(&gate))
+                .unwrap();
+        let mut history = DocumentHistory::new(modeled_normal_offset_session());
+        let stale_ticket = scheduler
+            .submit(document_request(history.session(), valid_document_bytes()))
+            .unwrap();
+        entered.recv_timeout(GUARD).unwrap();
+        let base_definition = history.document().pattern_definitions()[0].clone();
+        history
+            .apply(&DocumentCommand::EditSharedPatternDefinition {
+                definition_id: PatternDefinitionId(90),
+                base_definition,
+                edit: PatternDefinitionEdit::SetGuideOffsetSides {
+                    mechanism_id: PatternMechanismId(92),
+                    dimension_id: GuideDimensionId(95),
+                    sides: OffsetSides::Left,
+                },
+            })
+            .unwrap();
+        let newest_ticket = scheduler
+            .submit(document_request(history.session(), valid_document_bytes()))
+            .unwrap();
+        gate.release();
+        let completion = wait_for_document_completion(&scheduler);
+        assert_ne!(stale_ticket, newest_ticket);
+        assert_eq!(completion.ticket(), newest_ticket);
+        assert!(completion.result().is_some());
+        assert!(
+            scheduler
+                .accept_completion(&completion, history.session())
+                .unwrap()
+        );
+        let repeated_ticket = scheduler
+            .submit(document_request(history.session(), valid_document_bytes()))
+            .unwrap();
+        let repeated = wait_for_document_completion(&scheduler);
+        assert_eq!(repeated.ticket(), repeated_ticket);
+        assert_eq!(
+            repeated.cache_diagnostics().unwrap().aggregate,
+            CacheDiagnostics {
+                decoded_source: CacheDisposition::Hit,
+                family: CacheDisposition::Hit,
+                realization: CacheDisposition::Hit,
+                scene: CacheDisposition::Hit,
+                raster: CacheDisposition::Hit,
+            }
+        );
+        assert!(
+            scheduler
+                .accept_completion(&repeated, history.session())
+                .unwrap()
+        );
         scheduler.shutdown().unwrap();
     }
 

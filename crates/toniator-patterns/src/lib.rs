@@ -9,19 +9,21 @@ use toniator_domain::{
     ArtworkWeightResponse, AuthoredStructureId, CanvasSpec, ChannelId, DensityMetric2D, Document,
     DocumentCommand, DocumentHistory, DocumentSessionError, GuideDimension, GuideDimensionDraft,
     GuideDimensionId, GuidePrototype, GuideRepetition, MarkOrientation, MarkOrientationDraft,
-    MarkPrototype, PatternDefinition, PatternDefinitionRecipe, PatternFamily, PatternMechanism,
-    PatternMechanismId, PatternModulation, PatternOutputLayer, PatternOutputLayerId,
-    PresetMetadata, PresetRecord, RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy,
-    SourceMapping, StraightGuideDimension, VisibleMarkSizingPolicy,
+    MarkPrototype, OffsetCleanup, OffsetSides, PatternDefinition, PatternDefinitionRecipe,
+    PatternFamily, PatternMechanism, PatternMechanismId, PatternModulation, PatternOutputLayer,
+    PatternOutputLayerId, PresetMetadata, PresetRecord, RandomSiteCharacter, SiteDensityModulation,
+    SiteExclusionPolicy, SourceMapping, StraightGuideDimension, VisibleMarkSizingPolicy,
 };
 pub use toniator_geometry::{
     AffineTransform2D, Bounds, CanonicalCircleMark, CanonicalFillRule, CanonicalMark,
     CanonicalPathMark, CanonicalStroke, CurveError, CurvePath, CurveSegment, FamilySite,
     FamilySiteError, FamilySiteId, FamilySiteProvenance, FamilySiteSet, GuideInstanceId,
     GuideIntersectionProvenance, GuidePathInstance, GuidePathLocationProvenance, GuidePathSet,
-    IntersectionSite, NominalCellBasis, PathClosure, PathLocation, Point2, SiteId, SiteScope,
-    StraightGuide, StrokeProfileSample, VariableWidthOutlineLimits, VariableWidthPathSample,
-    Vector2, build_variable_width_outline_cancellable, projection_range, resolve_guide_prototype,
+    IntersectionSite, NominalCellBasis, PathClosure, PathLocation, PathOffsetCleanup,
+    PathOffsetEndpointPolicy, PathOffsetLimits, PathOffsetRequest, PathOffsetResult, Point2,
+    SiteId, SiteScope, StraightGuide, StrokeProfileSample, VariableWidthOutlineLimits,
+    VariableWidthPathSample, Vector2, build_variable_width_outline_cancellable,
+    offset_path_cancellable, projection_range, resolve_guide_prototype,
 };
 use toniator_sampling::{
     SampledSourcePaint, SamplingError, SourceComponent, SourceField, SourceMappingComponent,
@@ -1288,12 +1290,92 @@ pub fn evaluate_typed_family_product_with_source_cancellable(
     })
 }
 
+/// Proves that surviving outer offset components span authored endpoints and the requested normal side.
+///
+/// # Errors
+///
+/// Returns canonical path, normal, bounds, or finite-location diagnostics without accepting partial coverage.
+fn normal_offset_components_bracket_domain(
+    paths: &[toniator_geometry::OffsetPathComponent],
+    source: &CurvePath,
+    domain: Bounds,
+    signed_side: f64,
+) -> Result<bool, PatternPipelineError> {
+    if paths.is_empty() {
+        return Ok(false);
+    }
+    let authored_start = PathLocation::new(0, 0.0)?;
+    let authored_end = PathLocation::new(source.segments().len() - 1, 1.0)?;
+    let tolerance = PathOffsetLimits::default().tolerance;
+    let mut ordered = paths.iter().collect::<Vec<_>>();
+    ordered.sort_by(|left, right| {
+        left.source_start
+            .segment_index()
+            .cmp(&right.source_start.segment_index())
+            .then_with(|| {
+                left.source_start
+                    .parameter()
+                    .total_cmp(&right.source_start.parameter())
+            })
+    });
+    if ordered.first().map(|component| component.source_start) != Some(authored_start)
+        || ordered.last().map(|component| component.source_end) != Some(authored_end)
+        || ordered.windows(2).any(|pair| {
+            let first_end = pair[0].path.end();
+            let second_start = pair[1].path.start();
+            (first_end.x - second_start.x).hypot(first_end.y - second_start.y) > tolerance
+        })
+    {
+        return Ok(false);
+    }
+    for segment_index in 0..source.segments().len() {
+        for parameter in [0.0, 0.5, 1.0] {
+            let normal = source.unit_normal_at(PathLocation::new(segment_index, parameter)?)?;
+            let (domain_minimum, domain_maximum) = domain
+                .corners()
+                .into_iter()
+                .map(|point| point.dot(normal))
+                .fold(
+                    (f64::INFINITY, f64::NEG_INFINITY),
+                    |(minimum, maximum), projection| {
+                        (minimum.min(projection), maximum.max(projection))
+                    },
+                );
+            let mut path_minimum = f64::INFINITY;
+            let mut path_maximum = f64::NEG_INFINITY;
+            for component in paths {
+                for point in component.path.bounds()?.corners() {
+                    let projection = point.dot(normal);
+                    path_minimum = path_minimum.min(projection);
+                    path_maximum = path_maximum.max(projection);
+                }
+            }
+            let bracketed = if signed_side > 0.0 {
+                path_maximum + tolerance >= domain_maximum
+            } else {
+                path_minimum - tolerance <= domain_minimum
+            };
+            if !bracketed {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
 /// Evaluates resolved Stage 20D finite guide paths before any current-circle compatibility realization.
 fn evaluate_generic_curve_guides_cancellable(
     family: &FamilyCapability,
     request: &GridInspectRequest,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<TypedFamilyOutput, PatternPipelineError> {
+    #[derive(Clone, Copy)]
+    struct NormalOffsetCoveragePlan {
+        first_required: i64,
+        last_required: i64,
+        sides: OffsetSides,
+    }
+
     let generic = family
         .generic_guides
         .as_ref()
@@ -1335,6 +1417,9 @@ fn evaluate_generic_curve_guides_cancellable(
             let unit = Vector2::new(angle.cos(), angle.sin());
             let spacing =
                 directional_spacing(&request.canvas, &request.density, unit)? * spacing_multiplier;
+            maximum_spacing = maximum_spacing.max(spacing);
+        }
+        if let GuideRepetition::NormalOffset { spacing, .. } = dimension.repetition {
             maximum_spacing = maximum_spacing.max(spacing);
         }
     }
@@ -1382,10 +1467,10 @@ fn evaluate_generic_curve_guides_cancellable(
             "curved-guide coverage could not prove a complete generation envelope",
         ))?;
         let base = prototype.transformed(baseline)?;
-        let (unit, spacing, indices) = match dimension.repetition {
+        let (unit, spacing, indices, normal_offset_coverage) = match dimension.repetition {
             GuideRepetition::Single => {
                 let angle = dimension.baseline_angle_degrees.to_radians();
-                (Vector2::new(angle.cos(), angle.sin()), 0.0, vec![0])
+                (Vector2::new(angle.cos(), angle.sin()), 0.0, vec![0], None)
             }
             GuideRepetition::TransformStack {
                 direction_degrees,
@@ -1447,47 +1532,239 @@ fn evaluate_generic_curve_guides_cancellable(
                         "curved-guide instance count exceeds the configured family limit",
                     ));
                 }
-                (unit, spacing, (first..=last).collect())
+                (unit, spacing, (first..=last).collect(), None)
+            }
+            GuideRepetition::NormalOffset { spacing, sides, .. } => {
+                let path_bounds = base.bounds()?;
+                if path_bounds.min == path_bounds.max {
+                    return Err(PatternPipelineError::new(
+                        "coverage.curved_guides.normal_offset",
+                        "normal-offset source guide collapsed before coverage could be proved",
+                    ));
+                }
+                let mut first_raw = f64::INFINITY;
+                let mut last_raw = f64::NEG_INFINITY;
+                for segment_index in 0..base.segments().len() {
+                    for parameter in [0.0, 0.5, 1.0] {
+                        let normal =
+                            base.unit_normal_at(PathLocation::new(segment_index, parameter)?)?;
+                        let domain_projections = local_domain
+                            .corners()
+                            .into_iter()
+                            .map(|point| point.dot(normal));
+                        let (domain_minimum, domain_maximum) = domain_projections.fold(
+                            (f64::INFINITY, f64::NEG_INFINITY),
+                            |(minimum, maximum), projection| {
+                                (minimum.min(projection), maximum.max(projection))
+                            },
+                        );
+                        let path_projections = path_bounds
+                            .corners()
+                            .into_iter()
+                            .map(|point| point.dot(normal));
+                        let (path_minimum, path_maximum) = path_projections.fold(
+                            (f64::INFINITY, f64::NEG_INFINITY),
+                            |(minimum, maximum), projection| {
+                                (minimum.min(projection), maximum.max(projection))
+                            },
+                        );
+                        first_raw =
+                            first_raw.min(((domain_minimum - path_maximum) / spacing).floor());
+                        last_raw = last_raw.max(((domain_maximum - path_minimum) / spacing).ceil());
+                    }
+                }
+                if !first_raw.is_finite()
+                    || !last_raw.is_finite()
+                    || first_raw < i64::MIN as f64
+                    || last_raw > i64::MAX as f64
+                {
+                    return Err(PatternPipelineError::new(
+                        "coverage.curved_guides.numeric_overflow",
+                        "normal-offset coverage arithmetic overflowed",
+                    ));
+                }
+                let guard = i64::from(request.guard_steps);
+                let first =
+                    (first_raw as i64)
+                        .checked_sub(guard)
+                        .ok_or(PatternPipelineError::new(
+                            "coverage.curved_guides.numeric_overflow",
+                            "normal-offset coverage arithmetic overflowed",
+                        ))?;
+                let last =
+                    (last_raw as i64)
+                        .checked_add(guard)
+                        .ok_or(PatternPipelineError::new(
+                            "coverage.curved_guides.numeric_overflow",
+                            "normal-offset coverage arithmetic overflowed",
+                        ))?;
+                let (first, last) = match sides {
+                    OffsetSides::Left => (0, last.max(0)),
+                    OffsetSides::Right => (first.min(0), 0),
+                    OffsetSides::Both => (first.min(0), last.max(0)),
+                };
+                let count = last
+                    .checked_sub(first)
+                    .and_then(|value| value.checked_add(1));
+                if count.is_none() || count.unwrap() as u64 > request.max_family_candidates as u64 {
+                    return Err(PatternPipelineError::new(
+                        "coverage.curved_guides.instance_limit",
+                        "normal-offset instance count exceeds the configured family limit",
+                    ));
+                }
+                (
+                    Vector2::new(0.0, 0.0),
+                    spacing,
+                    (first..=last).collect(),
+                    Some(NormalOffsetCoveragePlan {
+                        first_required: first,
+                        last_required: last,
+                        sides,
+                    }),
+                )
             }
         };
-        let mut this_dimension = Vec::new();
-        for index in indices {
+        let evaluate_index = |index: i64| -> Result<
+            Vec<toniator_geometry::OffsetPathComponent>,
+            PatternPipelineError,
+        > {
             if is_cancelled() {
                 return Err(PatternPipelineError::new(
                     "evaluation.cancelled",
                     "evaluation was cancelled",
                 ));
             }
-            let offset = dimension.phase + index as f64 * spacing;
-            let local = AffineTransform2D::rotate_about_then_translate(
-                Point2::new(0.0, 0.0),
-                0.0,
-                unit.scale(offset),
-            )
-            .ok_or(PatternPipelineError::new(
-                "coverage.curved_guides.proof",
-                "curved-guide coverage could not prove a complete generation envelope",
-            ))?;
-            let path = base.transformed(local)?.transformed(channel_transform)?;
-            let instance = GuidePathInstance {
-                id: GuideInstanceId::new(dimension.id, index),
-                source_structure_id: *source_structure_id,
-                path,
-            };
+            match dimension.repetition {
+                GuideRepetition::NormalOffset { cleanup, .. } => {
+                    let cleanup = match cleanup {
+                        OffsetCleanup::DissolveCrossings => PathOffsetCleanup::DissolveCrossings,
+                    };
+                    match offset_path_cancellable(
+                        PathOffsetRequest {
+                            path: &base,
+                            signed_distance: index as f64 * spacing,
+                            endpoint_policy: PathOffsetEndpointPolicy::TangentialExtension {
+                                bounds: local_domain,
+                            },
+                            cleanup,
+                            limits: PathOffsetLimits::default(),
+                        },
+                        is_cancelled,
+                    )? {
+                        PathOffsetResult::Paths(paths) => Ok(paths),
+                        PathOffsetResult::Collapsed => Ok(Vec::new()),
+                    }
+                }
+                _ => {
+                    let offset = dimension.phase + index as f64 * spacing;
+                    let local = AffineTransform2D::rotate_about_then_translate(
+                        Point2::new(0.0, 0.0),
+                        0.0,
+                        unit.scale(offset),
+                    )
+                    .ok_or(PatternPipelineError::new(
+                        "coverage.curved_guides.proof",
+                        "curved-guide coverage could not prove a complete generation envelope",
+                    ))?;
+                    Ok(vec![toniator_geometry::OffsetPathComponent {
+                        component_ordinal: 0,
+                        source_start: PathLocation::new(0, 0.0)?,
+                        source_end: PathLocation::new(base.segments().len() - 1, 1.0)?,
+                        path: base.transformed(local)?,
+                    }])
+                }
+            }
+        };
+        let mut attempts = 0_usize;
+        let mut paths_by_index = BTreeMap::new();
+        for index in indices {
+            attempts += 1;
+            let paths = evaluate_index(index)?;
+            paths_by_index.insert(index, paths);
+        }
+        if let Some(coverage) = normal_offset_coverage {
+            if paths_by_index.get(&0).is_none_or(Vec::is_empty) {
+                return Err(PatternPipelineError::new(
+                    "coverage.curved_guides.normal_offset",
+                    "normal-offset source guide collapsed before coverage could be proved",
+                ));
+            }
+            if matches!(coverage.sides, OffsetSides::Left | OffsetSides::Both)
+                && coverage.last_required > 0
+            {
+                let mut probe = coverage.last_required;
+                while !normal_offset_components_bracket_domain(
+                    paths_by_index.get(&probe).map_or(&[], Vec::as_slice),
+                    &base,
+                    local_domain,
+                    1.0,
+                )? {
+                    if attempts >= request.max_family_candidates {
+                        return Err(PatternPipelineError::new(
+                            "coverage.curved_guides.normal_offset",
+                            "normal-offset left coverage could not find a surviving outer component within the configured family limit",
+                        ));
+                    }
+                    probe = probe.checked_add(1).ok_or(PatternPipelineError::new(
+                        "coverage.curved_guides.numeric_overflow",
+                        "normal-offset coverage arithmetic overflowed",
+                    ))?;
+                    attempts += 1;
+                    paths_by_index.insert(probe, evaluate_index(probe)?);
+                }
+            }
+            if matches!(coverage.sides, OffsetSides::Right | OffsetSides::Both)
+                && coverage.first_required < 0
+            {
+                let mut probe = coverage.first_required;
+                while !normal_offset_components_bracket_domain(
+                    paths_by_index.get(&probe).map_or(&[], Vec::as_slice),
+                    &base,
+                    local_domain,
+                    -1.0,
+                )? {
+                    if attempts >= request.max_family_candidates {
+                        return Err(PatternPipelineError::new(
+                            "coverage.curved_guides.normal_offset",
+                            "normal-offset right coverage could not find a surviving outer component within the configured family limit",
+                        ));
+                    }
+                    probe = probe.checked_sub(1).ok_or(PatternPipelineError::new(
+                        "coverage.curved_guides.numeric_overflow",
+                        "normal-offset coverage arithmetic overflowed",
+                    ))?;
+                    attempts += 1;
+                    paths_by_index.insert(probe, evaluate_index(probe)?);
+                }
+            }
+        }
+        let mut this_dimension = Vec::new();
+        for (index, paths) in paths_by_index {
             let basis = if spacing > 0.0 {
                 spacing
             } else {
                 (request.canvas.width / request.density.across_x)
                     .max(request.canvas.height / request.density.across_y)
             };
-            guide_nominal_bases.insert(instance.id, basis);
-            this_dimension.push(instance.clone());
-            guides.push(instance);
-            if guides.len() > request.max_family_candidates {
-                return Err(PatternPipelineError::new(
-                    "coverage.curved_guides.instance_limit",
-                    "curved-guide instance count exceeds the configured family limit",
-                ));
+            for component in paths {
+                let instance = GuidePathInstance {
+                    id: GuideInstanceId::with_component(
+                        dimension.id,
+                        index,
+                        component.component_ordinal,
+                    ),
+                    source_structure_id: *source_structure_id,
+                    path: component.path.transformed(channel_transform)?,
+                };
+                guide_nominal_bases.insert(instance.id, basis);
+                this_dimension.push(instance.clone());
+                guides.push(instance);
+                if guides.len() > request.max_family_candidates {
+                    return Err(PatternPipelineError::new(
+                        "coverage.curved_guides.instance_limit",
+                        "curved-guide instance count exceeds the configured family limit",
+                    ));
+                }
             }
         }
         grouped.push(this_dimension);
@@ -2091,6 +2368,7 @@ pub fn maximum_nominal_cell_diameter(
                     directional_spacing(canvas, density, Vector2::new(angle.cos(), angle.sin()))
                         .map(|spacing| maximum.max(spacing * spacing_multiplier))
                 }
+                GuideRepetition::NormalOffset { spacing, .. } => Ok(maximum.max(spacing)),
             })
     };
     let maximum = match family.product {
@@ -2151,6 +2429,7 @@ pub fn maximum_emitted_guide_spacing(
                     directional_spacing(canvas, density, Vector2::new(angle.cos(), angle.sin()))?
                         * spacing_multiplier
                 }
+                GuideRepetition::NormalOffset { spacing, .. } => spacing,
             };
             maximum = maximum.max(spacing);
         }
@@ -2258,6 +2537,22 @@ fn generic_curve_fingerprint(
                 bytes.push(2);
                 bytes.extend(direction_degrees.to_bits().to_le_bytes());
                 bytes.extend(spacing_multiplier.to_bits().to_le_bytes());
+            }
+            GuideRepetition::NormalOffset {
+                spacing,
+                sides,
+                cleanup,
+            } => {
+                bytes.push(3);
+                bytes.extend(spacing.to_bits().to_le_bytes());
+                bytes.push(match sides {
+                    OffsetSides::Left => 1,
+                    OffsetSides::Right => 2,
+                    OffsetSides::Both => 3,
+                });
+                bytes.push(match cleanup {
+                    OffsetCleanup::DissolveCrossings => 1,
+                });
             }
         }
     }
@@ -3882,10 +4177,12 @@ fn adapt_family_sites_for_current_circular_marks(family: &TypedFamilyOutput) -> 
                             GuideInstanceId {
                                 dimension_id: process.0,
                                 index: seed,
+                                component_ordinal: 0,
                             },
                             GuideInstanceId {
                                 dimension_id: product.0,
                                 index: accepted,
+                                component_ordinal: 0,
                             },
                         ],
                     )
@@ -4800,6 +5097,7 @@ pub fn realize_typed_canonical_strokes_cancellable(
     for stroke in &strokes {
         bytes.extend(stroke.source_guide_id.dimension_id.to_le_bytes());
         bytes.extend(stroke.source_guide_id.index.to_le_bytes());
+        bytes.extend(stroke.source_guide_id.component_ordinal.to_le_bytes());
         for sample in &stroke.profile {
             bytes.extend(sample.center.x.to_bits().to_le_bytes());
             bytes.extend(sample.center.y.to_bits().to_le_bytes());
@@ -5739,10 +6037,11 @@ fn append_guide_instances_identity(bytes: &mut Vec<u8>, contributors: &[GuideIns
     }
 }
 
-/// Appends one exact dimension/index guide contributor.
+/// Appends one exact dimension/index/component guide contributor.
 fn append_guide_instance_identity(bytes: &mut Vec<u8>, guide_id: GuideInstanceId) {
     bytes.extend(guide_id.dimension_id.to_le_bytes());
     bytes.extend(guide_id.index.to_le_bytes());
+    bytes.extend(guide_id.component_ordinal.to_le_bytes());
 }
 
 /// Appends one exact curve-guide contributor location.
@@ -7021,6 +7320,79 @@ fn fingerprint(request: &GridInspectRequest, spacing_x: f64, spacing_y: f64) -> 
 #[cfg(test)]
 mod coverage_tests {
     use super::*;
+
+    /// Proves outer normal-offset coverage requires authored endpoint span and geometric side bracketing.
+    #[test]
+    fn normal_offset_outer_components_must_bracket_the_generation_domain() {
+        let source = CurvePath::line(Point2::new(2.0, 5.0), Point2::new(8.0, 5.0)).unwrap();
+        let domain = Bounds::new(Point2::new(0.0, 0.0), Point2::new(10.0, 10.0)).unwrap();
+        let component = |start, end, first_x, last_x, y| toniator_geometry::OffsetPathComponent {
+            component_ordinal: 0,
+            source_start: PathLocation::new(0, start).unwrap(),
+            source_end: PathLocation::new(0, end).unwrap(),
+            path: CurvePath::line(Point2::new(first_x, y), Point2::new(last_x, y)).unwrap(),
+        };
+        assert!(
+            !normal_offset_components_bracket_domain(
+                &[component(0.4, 0.6, 0.0, 10.0, 11.0)],
+                &source,
+                domain,
+                1.0,
+            )
+            .unwrap()
+        );
+        assert!(
+            !normal_offset_components_bracket_domain(
+                &[component(0.0, 1.0, 0.0, 10.0, 9.0)],
+                &source,
+                domain,
+                1.0,
+            )
+            .unwrap()
+        );
+        assert!(
+            normal_offset_components_bracket_domain(
+                &[component(0.0, 1.0, 0.0, 10.0, 11.0)],
+                &source,
+                domain,
+                1.0,
+            )
+            .unwrap()
+        );
+        assert!(
+            normal_offset_components_bracket_domain(
+                &[component(0.0, 1.0, 0.0, 10.0, -1.0)],
+                &source,
+                domain,
+                -1.0,
+            )
+            .unwrap()
+        );
+        assert!(
+            !normal_offset_components_bracket_domain(
+                &[
+                    component(0.0, 0.4, 0.0, 4.0, 11.0),
+                    component(0.6, 1.0, 6.0, 10.0, 11.0),
+                ],
+                &source,
+                domain,
+                1.0,
+            )
+            .unwrap()
+        );
+        assert!(
+            normal_offset_components_bracket_domain(
+                &[
+                    component(0.0, 0.4, 0.0, 5.0, 11.0),
+                    component(0.6, 1.0, 5.0, 10.0, 11.0),
+                ],
+                &source,
+                domain,
+                1.0,
+            )
+            .unwrap()
+        );
+    }
 
     #[test]
     fn candidate_range_multiplication_reports_overflow_at_the_stable_limit_path() {

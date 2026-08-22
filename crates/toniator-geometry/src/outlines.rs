@@ -2,7 +2,7 @@
 
 use crate::{
     Bounds, CanonicalFillRule, CubicBezierSegment, CurveError, CurvePath, CurveSegment,
-    PathClosure, PathLocation, Point2, Vector2,
+    LineSegment, PathClosure, PathLocation, Point2, Vector2,
 };
 
 /// One exact centerline location and document-space width consumed by the outline service.
@@ -504,6 +504,9 @@ fn push_join_or_rail(
     if start == end {
         return Ok(());
     }
+    if (start.x - end.x).hypot(start.y - end.y) <= 1.0e-12 {
+        return push_line(segments, start, end, remaining_segments);
+    }
     let same_center = first.center == second.center;
     let turn = first.tangent.x * second.tangent.y - first.tangent.y * second.tangent.x;
     let outer = turn > 0.0;
@@ -540,6 +543,28 @@ fn push_rail(
         end,
         remaining_segments,
     )
+}
+
+/// Appends one finite direct rail for a numerically tiny but topologically required join.
+///
+/// # Errors
+///
+/// Returns the segment-limit or finite-coordinate diagnostic before mutating the contour.
+fn push_line(
+    segments: &mut Vec<CurveSegment>,
+    start: Point2,
+    end: Point2,
+    remaining_segments: &mut usize,
+) -> Result<(), CurveError> {
+    if *remaining_segments == 0 {
+        return Err(CurveError::new(
+            "curve.outline.segment_limit",
+            "variable-width outline exceeds the configured segment limit",
+        ));
+    }
+    segments.push(CurveSegment::Line(LineSegment::new(start, end)?));
+    *remaining_segments -= 1;
+    Ok(())
 }
 
 /// Appends a true two-cubic semicircular endpoint cap.

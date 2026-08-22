@@ -10,6 +10,7 @@ use toniator_domain::{GuideDimensionId, PatternMechanismId};
 mod curves;
 mod guides;
 mod outlines;
+mod path_offsets;
 
 pub use curves::{
     CubicBezierSegment, CurveError, CurvePath, CurveSegment, IntersectionKind, LineSegment,
@@ -22,6 +23,12 @@ pub use guides::{
 pub use outlines::{
     CanonicalFilledOutline, CanonicalOutlineContour, VariableWidthOutlineLimits,
     VariableWidthPathSample, build_variable_width_outline_cancellable,
+};
+pub use path_offsets::{
+    MAX_PATH_OFFSET_CLEANUP_PAIRS, MAX_PATH_OFFSET_COMPONENTS, MAX_PATH_OFFSET_SEGMENTS,
+    MAX_PATH_OFFSET_SUBDIVISION_DEPTH, OffsetPathComponent, PathOffsetCleanup,
+    PathOffsetEndpointPolicy, PathOffsetLimits, PathOffsetRequest, PathOffsetResult,
+    offset_path_cancellable,
 };
 
 /// A finite document- or pattern-local point.
@@ -199,6 +206,8 @@ impl AffineTransform2D {
 pub struct GuideInstanceId {
     pub dimension_id: u64,
     pub index: i64,
+    /// Distinguishes ordered cleanup fragments emitted for one signed repetition index.
+    pub component_ordinal: u32,
 }
 
 impl GuideInstanceId {
@@ -206,6 +215,20 @@ impl GuideInstanceId {
         Self {
             dimension_id: dimension_id.0,
             index,
+            component_ordinal: 0,
+        }
+    }
+
+    /// Builds the complete identity for one ordered normal-offset cleanup component.
+    pub const fn with_component(
+        dimension_id: GuideDimensionId,
+        index: i64,
+        component_ordinal: u32,
+    ) -> Self {
+        Self {
+            dimension_id: dimension_id.0,
+            index,
+            component_ordinal,
         }
     }
 }

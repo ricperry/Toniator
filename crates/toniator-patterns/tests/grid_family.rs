@@ -730,14 +730,16 @@ fn current_circle_compatibility_adapter_preserves_accepted_site_id_and_contribut
             mark.provenance.contributors[0],
             toniator_geometry::GuideInstanceId {
                 dimension_id: 82,
-                index: 0x1234_5678
+                index: 0x1234_5678,
+                component_ordinal: 0,
             }
         );
         assert_eq!(
             mark.provenance.contributors[1],
             toniator_geometry::GuideInstanceId {
                 dimension_id: 85,
-                index: accepted_ordinal as i64
+                index: accepted_ordinal as i64,
+                component_ordinal: 0,
             }
         );
     }

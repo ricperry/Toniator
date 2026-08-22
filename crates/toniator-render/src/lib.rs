@@ -604,8 +604,7 @@ fn scene_fingerprint(
                         }],
                     );
                     for contributor in &mark.provenance.contributors {
-                        add_scene_bytes(&mut hash, contributor.dimension_id.to_le_bytes());
-                        add_scene_bytes(&mut hash, contributor.index.to_le_bytes());
+                        append_scene_guide_instance(&mut hash, *contributor);
                     }
                 }
             }
@@ -698,6 +697,10 @@ fn scene_fingerprint(
                 for stroke in strokes {
                     add_scene_bytes(&mut hash, stroke.source_guide_id.dimension_id.to_le_bytes());
                     add_scene_bytes(&mut hash, stroke.source_guide_id.index.to_le_bytes());
+                    add_scene_bytes(
+                        &mut hash,
+                        stroke.source_guide_id.component_ordinal.to_le_bytes(),
+                    );
                     add_scene_bytes(
                         &mut hash,
                         stroke
@@ -925,10 +928,11 @@ fn append_scene_guide_instances(
     }
 }
 
-/// Appends one dimension/index guide identity.
+/// Appends one complete dimension/index/component guide identity.
 fn append_scene_guide_instance(hash: &mut u64, guide: toniator_geometry::GuideInstanceId) {
     add_scene_bytes(hash, guide.dimension_id.to_le_bytes());
     add_scene_bytes(hash, guide.index.to_le_bytes());
+    add_scene_bytes(hash, guide.component_ordinal.to_le_bytes());
 }
 
 /// Appends one exact curve contributor location.

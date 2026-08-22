@@ -31,10 +31,12 @@ fn mark(x: f64, y: f64, radius: f64, scope: SiteScope) -> CanonicalCircleMark {
                 GuideInstanceId {
                     dimension_id: 1,
                     index: 0,
+                    component_ordinal: 0,
                 },
                 GuideInstanceId {
                     dimension_id: 2,
                     index: 0,
+                    component_ordinal: 0,
                 },
             ],
         },
@@ -451,7 +453,7 @@ fn scene_identity_covers_canonical_provenance() {
     let GeometryOutput::CircularMarks(mut marks) = first.layers()[0].geometry().clone() else {
         panic!("fixture scene retains circular geometry");
     };
-    marks[0].provenance.contributors[1].index = 99;
+    marks[0].provenance.contributors[1].component_ordinal = 1;
     let second = RenderScene::new(
         first.canvas().clone(),
         first.identity().family_fingerprint().to_owned(),

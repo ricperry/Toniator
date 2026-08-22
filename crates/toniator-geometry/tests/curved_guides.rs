@@ -36,6 +36,7 @@ fn single_and_transform_stack_coverage_emit_complete_deterministic_instances() {
                 id: GuideInstanceId {
                     dimension_id: 41,
                     index: 0,
+                    component_ordinal: 0,
                 },
                 source_structure_id: None,
                 path: path.clone(),
@@ -44,6 +45,7 @@ fn single_and_transform_stack_coverage_emit_complete_deterministic_instances() {
                 id: GuideInstanceId {
                     dimension_id: 3,
                     index: -1,
+                    component_ordinal: 0,
                 },
                 source_structure_id: None,
                 path: path.clone(),
@@ -52,6 +54,7 @@ fn single_and_transform_stack_coverage_emit_complete_deterministic_instances() {
                 id: GuideInstanceId {
                     dimension_id: 3,
                     index: 0,
+                    component_ordinal: 0,
                 },
                 source_structure_id: None,
                 path: path.clone(),
@@ -60,6 +63,7 @@ fn single_and_transform_stack_coverage_emit_complete_deterministic_instances() {
                 id: GuideInstanceId {
                     dimension_id: 3,
                     index: 1,
+                    component_ordinal: 0,
                 },
                 source_structure_id: None,
                 path,
@@ -75,19 +79,23 @@ fn single_and_transform_stack_coverage_emit_complete_deterministic_instances() {
         vec![
             GuideInstanceId {
                 dimension_id: 41,
-                index: 0
+                index: 0,
+                component_ordinal: 0,
             },
             GuideInstanceId {
                 dimension_id: 3,
-                index: -1
+                index: -1,
+                component_ordinal: 0,
             },
             GuideInstanceId {
                 dimension_id: 3,
-                index: 0
+                index: 0,
+                component_ordinal: 0,
             },
             GuideInstanceId {
                 dimension_id: 3,
-                index: 1
+                index: 1,
+                component_ordinal: 0,
             },
         ]
     );
@@ -100,6 +108,7 @@ fn single_and_transform_stack_coverage_emit_complete_deterministic_instances() {
                 id: GuideInstanceId {
                     dimension_id: 3,
                     index: 1,
+                    component_ordinal: 0,
                 },
                 source_structure_id: None,
                 path: set.guides()[1].path.clone(),
@@ -108,6 +117,7 @@ fn single_and_transform_stack_coverage_emit_complete_deterministic_instances() {
                 id: GuideInstanceId {
                     dimension_id: 3,
                     index: 0,
+                    component_ordinal: 0,
                 },
                 source_structure_id: None,
                 path: set.guides()[1].path.clone(),
