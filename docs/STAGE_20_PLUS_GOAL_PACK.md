@@ -81,6 +81,16 @@ final Pattern Wizard workflow. The user accepted Stage 20F on 2026-08-21; that
 acceptance did not itself authorize Stage 20G. Stage 20G was separately
 authorized and accepted as recorded below.
 
+Stage 20I is complete at implementation checkpoint
+`de166f533379dc5b75d5a36e38baf145d0fac6c2` and was explicitly accepted by the
+user on 2026-08-21. Its bounded implementation adds ordered guide-path output,
+effective connected thickness response, and reusable geometry-owned compact
+variable-width filled outlines with final-consumer clipping and native PNG/SVG
+parity. It preserves current document schema v4, preset format v2, Stage 20G
+effective authority, and the divergent-channel Holiday regression witness.
+The private Sway/AT-SPI evidence is automated wlroots evidence, not manual
+GNOME/Mutter acceptance. Stage 20J+ remains separately gated.
+
 ## Later Goal candidates
 
 Do not execute a later Goal until the prerequisite checkpoint is accepted and
@@ -96,7 +106,7 @@ fresh planning validates its contract against actual implementation evidence.
 | 20F | Provisional private-draft guide/shape resource editors and pending-preview feedback. | Focused editor/domain/geometry checks and private Sway evidence. | Accepted 20C–20E2 checkpoints. | Final wizard workflow; automated Sway is not a claim of separate GNOME/Mutter inspection. | **Complete at `7117e24b8c9e2e723c3c23e7e9050dc71277d15c`**; Stage 20G was separately authorized. |
 | 20G | Effective Pattern Authority: document base recipe/settings, optional channel replacement, typed deltas, reset/inherit, and current-only persistence. | Inheritance/delta/reset/stale/history/invalidation/save-reopen tests plus intrinsic raster/vector/Holiday render witnesses. | domain/io; protected specification direction. | [`STAGE_20G_EFFECTIVE_PATTERN_AUTHORITY_PLAN.md`](STAGE_20G_EFFECTIVE_PATTERN_AUTHORITY_PLAN.md). | **Complete at `de1320ba359beee42223ef994baebfd9ecd94c9c`**; user accepted on 2026-08-21. |
 | 20H | Capability Projection Foundation: validated recipe/primitives to typed read-only capabilities. | Resolver and unsupported-page omission tests. | 20G. | Capability vocabulary extensions. | **Complete at `4b1cc08819eee36c2009e2abf5543dcaefe29929`; user accepted on 2026-08-21; publication remains separate.** |
-| 20I | Canonical Paths and Strokes: raw guide/path output, stacked realization, typed strokes, clipping, identity, PNG/SVG parity. | Path/stroke/clip/identity/canonical-output tests. | 20B, 20D, 20G. | Exact stroke defaults. | Planned; separate contract and gate. |
+| 20I | Canonical Paths and Strokes: **complete at implementation checkpoint `de166f533379dc5b75d5a36e38baf145d0fac6c2`** with ordered guide/path output, effective connected thickness response, reusable compact variable-width filled outlines, final-consumer clipping, identity, and native PNG/SVG parity. | Path/stroke/clip/identity/canonical-output tests, natural and low-resolution artifacts, Holiday regression, and private Sway/AT-SPI evidence. | 20B, 20D, 20G. | None within the accepted contract. | **Complete at `de166f533379dc5b75d5a36e38baf145d0fac6c2`; user accepted on 2026-08-21; publication remains separate.** |
 | 20J | Path Offset and Constant Gap: deterministic line/cubic offsets, joins, endpoint/collapse policy. | Offset/collapse/finite/determinism tests. | 20I. | Exact joins and limits. | Planned; separate contract and gate. |
 | 20K | Parametric Curves: common contract, initially round/square spirals, raw paths and sites along curves. | Sampling/phase/winding/bounds/cancellation tests. | 20G, 20H, 20I. | Additional parametric forms. | Planned; separate contract and gate. |
 | 20L | Site Adjacency: deterministic mechanism-neutral graph over `FamilySiteSet`. | Ordering/degeneracy/degree/distance/cache tests. | 20A. | Neighbor policy. | Planned; separate contract and gate. |

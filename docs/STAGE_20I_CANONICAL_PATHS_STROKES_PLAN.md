@@ -1,6 +1,6 @@
 # Stage 20I — Canonical Paths and Strokes
 
-Status: **Implemented awaiting review** (outline-correction implementation is not accepted or checkpointed).
+Status: **Complete at implementation checkpoint `de166f533379dc5b75d5a36e38baf145d0fac6c2`**; the user accepted Stage 20I on 2026-08-21. Publication remains separate.
 
 Stage 20I adds one ordered guide-path output kind beside existing marks. A
 definition remains homogeneous: it produces marks or guide paths, never a
@@ -33,10 +33,9 @@ Verification covers authority, inheritance/deltas/reset, path ordering,
 variable-width outline bounds and cancellation, raster/SVG parity and final
 clipping, cache reuse/invalidation, deterministic v4 save/reopen, and both
 immutable source artworks at intrinsic dimensions. The divergent-channel
-Holiday document remains a mark-regression witness. Work stops at
-**Implemented awaiting review**; acceptance, checkpointing, push, and Stage
-20J+ are not authorized by this contract. The approved mechanical app adapter
-and private harness evidence add no path UI, GTK feature, or inspector work.
+Holiday document remains a mark-regression witness. The approved mechanical app
+adapter and private harness evidence add no dedicated path workflow, GTK feature,
+or inspector reorganization. Stage 20J+ remains separately gated.
 
 ## Detailed implementation decisions
 
@@ -83,5 +82,28 @@ EvaluationLimits exposes setters for those request-wide values and passes them t
 Connected family support takes the maximum spacing of every emitted guide dimension,
 not merely dimensions selected for site products. Definition/layout changes remain Family work;
 connected response changes remain Realization work. No effective projection is saved;
-schema remains v4 and preset v2 remains mark-only. Stage completion is limited to
-Implemented awaiting review: no acceptance, commit, push, or Stage 20J work follows.
+schema remains v4 and preset v2 remains mark-only.
+
+## Verified implementation and acceptance record
+
+The implementation is recorded at checkpoint
+`de166f533379dc5b75d5a36e38baf145d0fac6c2`, whose parent is the Stage 20H
+documentation checkpoint. The user accepted Stage 20I on 2026-08-21. The
+checkpoint retains the reusable geometry-owned compact variable-width outline
+authority, direct filled SVG paths under the final canvas clip, one raster fill
+per stroke in guide order, and current Stage 20G effective-value authority.
+
+Focused domain, geometry, patterns, render, engine, and IO witnesses passed,
+along with affected-package check/Clippy, formatting, architecture validation,
+and `git diff --check`. Natural and low-resolution raster/vector artifacts are
+under `target/validation/stage-20i/`; the natural path outputs are
+`path-raster.*` and `path-vector.*`, and `holiday-fresh.*` preserves the
+divergent-channel regression witness. SVG parsing and headless Inkscape clip
+release/export passed. The private Sway/AT-SPI run exercised the Connected
+minimum-thickness edit and preview refresh without diagnostics; it is automated
+wlroots evidence, not manual GNOME/Mutter acceptance.
+
+The current document schema remains v4 and preset format remains v2. Derived
+profiles, outlines, scenes, capabilities, and caches remain omitted from
+persistence. The separate density-versus-resolution terminology follow-up
+remains tracked and is not changed by Stage 20I.

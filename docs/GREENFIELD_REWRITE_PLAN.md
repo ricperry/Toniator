@@ -1849,7 +1849,8 @@ separately gated below.
 records the accepted bounded implementation of effective pattern authority. It
 moves shared settings to a document base, retains only channel replacements and
 additive deltas, and uses current-only schema-v4 persistence. The user explicitly
-accepted Stage 20G on 2026-08-21; it does not authorize Stage 20H or later work.
+accepted Stage 20G on 2026-08-21; that acceptance did not itself authorize
+Stage 20H or later work.
 
 **Stage 20H — Complete at commit
 `4b1cc08819eee36c2009e2abf5543dcaefe29929`.**
@@ -1862,13 +1863,22 @@ Focused domain/patterns/engine witnesses and bounded static checks pass, and
 the independent implementation review passed. The user explicitly accepted
 Stage 20H on 2026-08-21; publication remains separate.
 
-**Later Stage 20I+ — Planned.**
+**Stage 20I — Complete at implementation checkpoint
+`de166f533379dc5b75d5a36e38baf145d0fac6c2`.**
+[`STAGE_20I_CANONICAL_PATHS_STROKES_PLAN.md`](STAGE_20I_CANONICAL_PATHS_STROKES_PLAN.md)
+records the accepted canonical guide-path output and reusable geometry-owned
+compact variable-width filled-outline implementation. It preserves Stage 20G
+effective authority, current schema v4/preset v2, final-consumer clipping,
+native RGBA PNG/SVG parity, and the Holiday mark regression witness. The user
+accepted Stage 20I on 2026-08-21; publication remains separate.
+
+**Later Stage 20J+ — Planned.**
 [`STAGE_20_PLUS_DECOMPOSITION.md`](STAGE_20_PLUS_DECOMPOSITION.md) provides the
-detailed synchronized sequence from accepted Stage 20G into the planned
-remainder: 20I paths/strokes; 20J path offset; 20K parametric
-curves; 20L adjacency; 20M connection programs; 20N Voronoi; 20O guide faces;
-20P region realization; 20Q composites; 20R gallery recipes; 20S Pattern
-Wizard; and 20T–20W temporal work. Every row remains separately gated.
+detailed synchronized sequence from accepted Stage 20I into the planned
+remainder: 20J path offset; 20K parametric curves; 20L adjacency; 20M
+connection programs; 20N Voronoi; 20O guide faces; 20P region realization;
+20Q composites; 20R gallery recipes; 20S Pattern Wizard; and 20T–20W temporal
+work. Every row remains separately gated.
 
 Every mechanism must enter through the Stage 14 typed schema, Stage 15 generic
 pipeline, Stage 17 command/descriptor contract, canonical geometry, and

@@ -438,11 +438,15 @@ or canonical evaluation. Focused domain, patterns, and engine witnesses pass,
 and the independent implementation review passed. The user explicitly
 accepted Stage 20H on 2026-08-21; publication remains separate.
 
-**Stage 20I — Implemented awaiting review.** The approved canonical-path/stroke outline correction
-is bounded by `docs/STAGE_20I_CANONICAL_PATHS_STROKES_PLAN.md`. It introduces
-ordered guide-path output, effective connected thickness response, canonical
-compact filled outlines, and final-consumer clipping only; offsets, adjacency,
-regions, composites, presets, GTK, and later stages remain excluded.
+**Stage 20I — Complete at commit
+`de166f533379dc5b75d5a36e38baf145d0fac6c2`.** The accepted canonical-path/stroke
+outline correction is bounded by
+`docs/STAGE_20I_CANONICAL_PATHS_STROKES_PLAN.md`. It introduces ordered
+guide-path output, effective connected thickness response, reusable
+geometry-owned compact filled outlines, and final-consumer clipping only;
+offsets, adjacency, regions, composites, presets, GTK feature work, and later
+stages remain excluded. The user explicitly accepted Stage 20I on 2026-08-21;
+publication remains separate.
 
 **Terminology follow-up — Tracked.** Revisit the public and internal use of
 `density`, especially `across_x` and `across_y`: those values currently express

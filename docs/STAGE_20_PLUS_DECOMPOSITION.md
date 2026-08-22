@@ -15,8 +15,11 @@ the final wizard workflow. **Stage 20G is Complete at commit
 `de1320ba359beee42223ef994baebfd9ecd94c9c`** under its accepted bounded
 contract. **Stage 20H is Complete at commit
 `4b1cc08819eee36c2009e2abf5543dcaefe29929`** under its accepted bounded
-contract; the user accepted it on 2026-08-21. Stages 20I–20W remain Planned
-and separately gated by their own contracts; publication remains separate.
+contract; the user accepted it on 2026-08-21. **Stage 20I is Complete at
+implementation checkpoint `de166f533379dc5b75d5a36e38baf145d0fac6c2`** under
+its accepted bounded contract; the user accepted it on 2026-08-21. Stages
+20J–20W remain Planned and separately gated by their own contracts;
+publication remains separate.
 Stage 19B is complete at
 implementation checkpoint `b0b84e4`. Stage 20A is complete at implementation
 checkpoint `b7fbd81`.
@@ -58,7 +61,10 @@ guide prototypes, bounded repetition, deterministic coverage, existing
 guide-site product consumption, and document-aware identity/invalidation. Stage
 20E2 adds ordinary canonical authored-shape marks, exact normalized line/cubic
 realization, even-odd preview/PNG/SVG consumption, bounded cancellation, and
-complete identity. No connected-path/stroke, graph, region, Voronoi, or
+complete identity. Stage 20I adds ordered guide-path output, effective
+connected thickness response, and reusable compact variable-width filled
+outlines with final-consumer clipping and PNG/SVG parity. No path offsets,
+adjacency, connection programs, graph, region, Voronoi, or
 multiframe/transition authority exists yet.
 
 ## Ten-concern separation audit
@@ -124,7 +130,7 @@ faces, cells, offsets, caches and scheduler results.
 | 20F Guide/shape editor exposure | **Complete at `7117e24b8c9e2e723c3c23e7e9050dc71277d15c`:** provisional private-draft editing of authored open guides and closed mark shapes. Direct inspector routes are resource-scoped technical exposure, not the final workflow. `GuideCustomAlongLayout` migrates in 20S. | Final gallery/wizard, document/channel inheritance, frontend evaluator. | app; accepted commands/descriptors. | Focused editor/domain/geometry checks plus private Sway evidence; automated Sway is not a claim of separate GNOME/Mutter inspection. | Yes. | User accepted on 2026-08-21; Stage 20G was separately authorized under its own contract. |
 | 20G Effective Pattern Authority | Document base recipe/settings, optional channel recipe replacement, typed additive deltas, explicit reset/inherit, domain effective-value validation, history/invalidation, and current-only persistence transition. | GTK-calculated effective values, obsolete schema/preset compatibility. | domain/io; protected schema revision. | Inheritance/delta/reset/stale/history/invalidation/save-reopen tests and intrinsic raster/vector/Holiday render witnesses. | Existing controls only. | **Complete at `de1320ba359beee42223ef994baebfd9ecd94c9c`**; [`STAGE_20G_EFFECTIVE_PATTERN_AUTHORITY_PLAN.md`](STAGE_20G_EFFECTIVE_PATTERN_AUTHORITY_PLAN.md) records the accepted contract. |
 | 20H Capability Projection Foundation | **Complete at `4b1cc08819eee36c2009e2abf5543dcaefe29929`:** read-only typed capability resolver from validated recipes and accepted engine primitives. | Preset-name dispatch or GTK authority. | domain/patterns; 20G. | Resolver and unsupported-page omission witnesses; independent implementation review passed. | None. | User accepted on 2026-08-21; publication remains separate. |
-| 20I Canonical Paths and Strokes | Raw guide/path output, stacked realization, canonical strokes, typed thickness response, clipping, cache identity, PNG/SVG parity. | Networks, offsets, regions. | geometry/patterns/render; 20B/20D/20G. | Path/stroke/clip/identity/canonical-output tests. | None. | Planned; separate contract and gate. |
+| 20I Canonical Paths and Strokes | **Complete at implementation checkpoint `de166f533379dc5b75d5a36e38baf145d0fac6c2`:** ordered raw guide/path output, effective connected thickness response, reusable compact variable-width filled outlines, final-consumer clipping, cache identity, and native PNG/SVG parity. | Networks, offsets, regions, composites, dedicated path workflow. | geometry/patterns/render/engine/io plus mechanical app adapter; 20B/20D/20G. | Focused authority, outline, realization, render, cache, persistence, natural/low-resolution PNG/SVG, Holiday regression, architecture, and private Sway/AT-SPI witnesses; automated wlroots is not manual GNOME/Mutter acceptance. | Existing mechanical controls only; no dedicated path workflow or inspector reorganization. | User accepted on 2026-08-21; publication remains separate. |
 | 20J Path Offset and Constant Gap | Deterministic line/cubic offset, joins, endpoint policy, collapse limits, and constant-gap realization. | Region offset and UI exposure. | geometry/patterns; 20I. | Offset/collapse/finite/determinism tests. | None. | Planned; separate contract and gate. |
 | 20K Parametric Curves | Common parametric-curve contract, initially round and square spirals, with raw-path and sites-along-curve outputs. | Additional parametric forms. | domain/geometry/patterns; 20G/20H/20I. | Sampling/phase/winding/bounds/cancellation tests. | None. | Planned; separate contract and gate. |
 | 20L Site Adjacency | Deterministic mechanism-neutral adjacency over `FamilySiteSet`. | Connection rendering/program policy. | geometry/patterns; 20A. | Ordering/degeneracy/degree/distance/cache tests. | None. | Planned; separate contract and gate. |
