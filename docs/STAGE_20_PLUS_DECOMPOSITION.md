@@ -21,10 +21,12 @@ its accepted bounded contract; the user accepted it on 2026-08-21. **Stage 20J
 is Complete at implementation checkpoint
 `2edbb8659a82106ce8de904ef1ce9155e3b4d777`** under its accepted bounded
 contract; the user accepted it on 2026-08-22. **Stage 20K is Complete at
-implementation checkpoint `f848ff995c9e30f89a85fbc01b5b8d97cc8de3d5`** under its separate parametric-curve contract, with the verified
-round/square five-turn intrinsic raster/vector evidence; Stages 20L–20W remain
-Planned and separately gated by their own contracts; publication remains
-separate.
+implementation checkpoint `f848ff995c9e30f89a85fbc01b5b8d97cc8de3d5`** under
+its separate parametric-curve contract, with the verified round/square
+five-turn intrinsic raster/vector evidence. **Stage 20L is Complete at
+implementation checkpoint `b41fa3fcf2e1089ea422ba18524c2c4a26f568e8`;** the user accepted its deterministic
+derived site-adjacency contract on 2026-08-23. Stages 20M–20W remain Planned
+and separately gated by their own contracts; publication remains separate.
 Stage 19B is complete at
 implementation checkpoint `b0b84e4`. Stage 20A is complete at implementation
 checkpoint `b7fbd81`.
@@ -144,7 +146,7 @@ faces, cells, offsets, caches and scheduler results.
 | 20I Canonical Paths and Strokes | **Complete at implementation checkpoint `de166f533379dc5b75d5a36e38baf145d0fac6c2`:** ordered raw guide/path output, effective connected thickness response, reusable compact variable-width filled outlines, final-consumer clipping, cache identity, and native PNG/SVG parity. | Networks, offsets, regions, composites, dedicated path workflow. | geometry/patterns/render/engine/io plus mechanical app adapter; 20B/20D/20G. | Focused authority, outline, realization, render, cache, persistence, natural/low-resolution PNG/SVG, Holiday regression, architecture, and private Sway/AT-SPI witnesses; automated wlroots is not manual GNOME/Mutter acceptance. | Existing mechanical controls only; no dedicated path workflow or inspector reorganization. | User accepted on 2026-08-21; publication remains separate. |
 | 20J Path Offset and Constant Gap | **Complete at implementation checkpoint `2edbb8659a82106ce8de904ef1ce9155e3b4d777`:** persisted absolute-gap normal-offset repetition, reusable compact line/cubic offsets, deterministic joins/crossing cleanup, tangential generation-bound extension, component identity, Stage 20I outline reuse, and current-v4 persistence. | Region offsets, parametric curves, adjacency, connection programs, composites, dedicated UI. | domain/geometry/patterns/engine/io/render plus mechanical app adapter; 20B/20D/20G/20I. | Focused authority, geometry, coverage, identity, cache, persistence, natural PNG/SVG, cubic/Holiday, Inkscape, architecture, and private Sway/AT-SPI witnesses; automated wlroots is not manual GNOME/Mutter review. | Existing mechanical controls only; no dedicated workflow. | User accepted on 2026-08-22; publication remains separate. |
 | 20K Parametric Curves | **Complete at implementation checkpoint `f848ff995c9e30f89a85fbc01b5b8d97cc8de3d5`:** common parametric-curve contract, initially round and square spirals, with raw-path and sites-along-curve outputs, reusable repetition, and current-v4 intent-only persistence. | Additional parametric forms. | domain/geometry/patterns; 20G/20H/20I. | Sampling/phase/winding/bounds/cancellation tests plus five-turn intrinsic raster/vector and Inkscape evidence. | None. | User accepted on 2026-08-22; publication remains separate. |
-| 20L Site Adjacency | Deterministic mechanism-neutral adjacency over `FamilySiteSet`. | Connection rendering/program policy. | geometry/patterns; 20A. | Ordering/degeneracy/degree/distance/cache tests. | None. | Planned; separate contract and gate. |
+| 20L Site Adjacency | **Complete at implementation checkpoint `b41fa3fcf2e1089ea422ba18524c2c4a26f568e8`:** deterministic mechanism-neutral adjacency over `FamilySiteSet`, with guard-inclusive family evaluation and bounded cancellable construction. | Connection rendering/program policy. | geometry/patterns/engine; 20A/20G/20H. | Ordering/degeneracy/degree/distance/component/fingerprint/cancellation/limit tests; eligible-family, guard, cache, stale-publication, and cross-family witnesses. | None. | User accepted on 2026-08-23; publication remains separate. |
 | 20M Connection Programs | Bounded nearest/random links and grid maze/tree programs producing canonical paths. | TSP and motifs. | domain/geometry/patterns/render; 20I/20L. | Replay/seed/legality/open-path/canonical-output tests. | None. | Planned; separate contract and gate. |
 | 20N Canonical Regions and Voronoi | Guard-inclusive ordinary Voronoi regions from grid or dispersion sites. | Guide cells, power diagrams, UI. | geometry/patterns/render; 20A/20G. | Guard/degeneracy/canonical-region/PNG-SVG tests. | None. | Planned; separate contract and gate. |
 | 20O Guide Arrangement Faces | Complete off-canvas faces from eligible closed guide arrangements. | Curved Triagrid/Tetragrid editing. | geometry/patterns; 20B/20D/20N. | Arrangement/coverage/degeneracy tests. | None. | Planned; separate contract and gate. |

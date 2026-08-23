@@ -1896,15 +1896,19 @@ filtering keep the complete eight-artifact matrix within the existing limits
 without changing geometry ownership or final-consumer clipping. The user
 accepted Stage 20K on 2026-08-22; publication remains separate.
 
-**Stage 20L — Implemented awaiting review.**
+**Stage 20L — Complete at implementation checkpoint
+`b41fa3fcf2e1089ea422ba18524c2c4a26f568e8`.**
 [`STAGE_20_PLUS_DECOMPOSITION.md`](STAGE_20_PLUS_DECOMPOSITION.md) provides the
-detailed synchronized Stage 20L contract. The implementation provides
+detailed synchronized Stage 20L contract. The user accepted the
+implementation on 2026-08-23. It provides
 deterministic, mechanism-neutral derived site topology across geometry,
 patterns, and engine, with guard-inclusive evaluation, bounded cancellable
 construction, and no persisted connection intent or renderable paths. Focused
 and broad affected-package verification is green, and the final independent
-read-only implementation review found no material issue. User acceptance,
-checkpointing, publication, and Stage 20M remain separate gates.
+read-only implementation review found no material issue. The checkpoint also
+contains the user-edited `.agents/skills/toniator-orchestrator/SKILL.md`, which
+remains user-owned guidance and is not product authority. Publication and Stage
+20M remain separate gates.
 
 **Remaining Stage 20M+ — Planned.** The approved remainder is 20M connection
 programs; 20N Voronoi; 20O guide faces; 20P region realization; 20Q composites;

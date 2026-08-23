@@ -459,7 +459,7 @@ persistence. Focused domain, geometry, patterns, engine, IO, render, CLI/SVG,
 Holiday, and private Sway/AT-SPI evidence is green; independent re-review has
 no remaining finding. Automated wlroots evidence is not manual GNOME/Mutter
 review. The user explicitly accepted Stage 20J on 2026-08-22; publication,
-later Stage 20L+ work, protected specification changes, and Legacy work remain
+later Stage 20M+ work, protected specification changes, and Legacy work remain
 separate.
 
 **Terminology follow-up — Tracked.** Revisit the public and internal use of
@@ -499,15 +499,19 @@ geometry. The user accepted Stage 20K on 2026-08-22. The accepted
 implementation checkpoint is `f848ff995c9e30f89a85fbc01b5b8d97cc8de3d5`;
 publication remains separate.
 
-**Stage 20L — Implemented awaiting review.** The deterministic,
-mechanism-neutral derived site-adjacency contract is implemented across
-geometry, patterns, and engine with bounded cancellable construction,
-guard-inclusive family evaluation, ordinary-output identity preservation, and
-no document intent, schema, preset, history, renderer, CLI, GTK, or later
-connection-program work. Focused and broad affected-package verification is
-green, the bounded current-suite maintenance pass is complete, and the final
-independent read-only review found no material issue. User acceptance,
-checkpointing, publication, and Stage 20M remain separate gates.
+**Stage 20L — Complete at implementation checkpoint
+`b41fa3fcf2e1089ea422ba18524c2c4a26f568e8`.** The user
+accepted the deterministic, mechanism-neutral derived site-adjacency contract
+on 2026-08-23. It is implemented across geometry, patterns, and engine with
+bounded cancellable construction, guard-inclusive family evaluation,
+ordinary-output identity preservation, and no document intent, schema, preset,
+history, renderer, CLI, GTK, or later connection-program work. Focused and
+broad affected-package verification is green, the bounded current-suite
+maintenance pass is complete, and the final independent read-only review found
+no material issue. The checkpoint includes the user-edited
+`.agents/skills/toniator-orchestrator/SKILL.md`; that guidance change is
+preserved as user-owned and is not Stage 20L product authority. Publication and
+Stage 20M remain separate gates.
 
 **Remaining Stage 20M+ — Planned.** The approved remaining order is 20M
 connection programs; 20N

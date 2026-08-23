@@ -341,7 +341,15 @@ filtering keep the complete eight-artifact matrix within the existing limits
 without changing geometry ownership or final-consumer clipping. The user
 accepted Stage 20K on 2026-08-22; publication remains separate.
 
-Stage 20L+ and the Pattern Wizard remain separately gated and planned.
+Stage 20L is complete at implementation checkpoint
+`b41fa3fcf2e1089ea422ba18524c2c4a26f568e8`. It adds the headless
+deterministic, mechanism-neutral derived site-adjacency boundary over eligible
+`FamilySiteSet` outputs, including guard-inclusive evaluation, bounded
+cancellation, ordered graph identity, and failure-atomic engine derivation. It
+adds no persisted connection intent, schema or preset field, renderer path,
+CLI/GTK behavior, or connection-program selection. The user accepted Stage
+20L on 2026-08-23; publication remains separate. Stage 20M+ and the Pattern
+Wizard remain separately gated and planned.
 
 Low-resolution fixtures and outputs are supplementary only. Every future stage
 that exercises source loading, sampling, rendering, preview, or export must
