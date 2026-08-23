@@ -20,8 +20,11 @@ implementation checkpoint `de166f533379dc5b75d5a36e38baf145d0fac6c2`** under
 its accepted bounded contract; the user accepted it on 2026-08-21. **Stage 20J
 is Complete at implementation checkpoint
 `2edbb8659a82106ce8de904ef1ce9155e3b4d777`** under its accepted bounded
-contract; the user accepted it on 2026-08-22. Stages 20K–20W remain Planned and
-separately gated by their own contracts; publication remains separate.
+contract; the user accepted it on 2026-08-22. **Stage 20K is Complete at
+implementation checkpoint `f848ff995c9e30f89a85fbc01b5b8d97cc8de3d5`** under its separate parametric-curve contract, with the verified
+round/square five-turn intrinsic raster/vector evidence; Stages 20L–20W remain
+Planned and separately gated by their own contracts; publication remains
+separate.
 Stage 19B is complete at
 implementation checkpoint `b0b84e4`. Stage 20A is complete at implementation
 checkpoint `b7fbd81`.
@@ -68,15 +71,18 @@ connected thickness response, and reusable compact variable-width filled
 outlines with final-consumer clipping and PNG/SVG parity. Stage 20J adds
 persisted absolute-gap normal-offset repetition backed by reusable compact
 line/cubic centerline offsets, deterministic crossing cleanup, and complete
-component identity. No parametric-curve, adjacency, connection-program, graph,
-region, Voronoi, or multiframe/transition authority exists yet.
+component identity. Stage 20K now provides the accepted and checkpointed
+parametric-curve authority for finite round/square spirals, raw canonical paths,
+equal-arc sites, reusable repetition, and current-v4 intent-only persistence.
+No adjacency, connection-program, graph, region, Voronoi, or
+multiframe/transition authority exists yet.
 
 ## Ten-concern separation audit
 
 | Concern | Current authority | Missing or coupled issue | Intended boundary | Invalidation / cache class |
 |---|---|---|---|---|
 | Source/sample | `SourceReference`, sampling fields, decoder identity and conditional artwork-weighted random input | Frame selection does not exist; source values must not become a renderer setting. | 20T source/frame contract; existing sampling stays reusable. | **Source/modulation:** decode always keys logical+content identity; only declared structural weighting reaches family. |
-| Guide/procedural structure | Authored/circular guide prototypes, bounded single/transform-stack/normal-offset repetition, guide paths, sites, and coverage planners | Parametric curve prototypes do not exist yet. | 20K parametric curves. | **Structural:** guide prototype, repetition, dimensions, coverage and phase miss family/downstream. |
+| Guide/procedural structure | Authored/circular guide prototypes, bounded single/transform-stack/normal-offset repetition, guide paths, sites, coverage planners, and the accepted finite round/square parametric curves | Additional parametric forms do not exist yet. | 20K parametric curves; 20L adjacency. | **Structural:** guide prototype, repetition, dimensions, coverage and phase miss family/downstream. |
 | Sites/distribution | `TypedFamilyOutput` and `FamilySiteSet`; `GridFamilyOutput` remains a dedicated diagnostic/compatibility type | Site interchange is now truthful and mechanism-neutral; future consumers must not depend on the private circle adapter. | 20B and later consumers. | **Structural:** site process/selection/seed/weighting changes miss family. |
 | Adjacency/topology | None; only guide/site provenance exists | No reusable graph; no topology can consume random and grid sites alike. | 20L adjacency, 20M programs. | **Structural:** graph rule/program/seed miss family-derived topology and downstream. |
 | Regions/cells/faces | None | No canonical region, Voronoi or guide-face output; canvas must not create cells. | 20N–20P. | **Structural:** region source/treatment changes miss realization/downstream; final clip stays consumer-only. |
@@ -101,10 +107,10 @@ and authored-shape marks. Stage 20F adds only provisional private-draft
 resource-editing exposure. It is not the final Pattern Wizard.
 
 Effective document/channel authority, read-only capability projection,
-canonical paths/strokes, and normal offsets are accepted. The roadmap may now
-add parametric curves, graphs, regions, composites, and finally the
-capability-driven Pattern Wizard. A wizard page never creates its own engine
-semantics.
+canonical paths/strokes, and normal offsets are accepted. Stage 20K is complete
+at implementation checkpoint `f848ff995c9e30f89a85fbc01b5b8d97cc8de3d5`; the roadmap may continue only through
+graphs, regions, composites, and finally the capability-driven Pattern Wizard.
+A wizard page never creates its own engine semantics.
 
 ```text
 20A–20E2 accepted headless authority ─ 20F provisional resource editors
@@ -137,7 +143,7 @@ faces, cells, offsets, caches and scheduler results.
 | 20H Capability Projection Foundation | **Complete at `4b1cc08819eee36c2009e2abf5543dcaefe29929`:** read-only typed capability resolver from validated recipes and accepted engine primitives. | Preset-name dispatch or GTK authority. | domain/patterns; 20G. | Resolver and unsupported-page omission witnesses; independent implementation review passed. | None. | User accepted on 2026-08-21; publication remains separate. |
 | 20I Canonical Paths and Strokes | **Complete at implementation checkpoint `de166f533379dc5b75d5a36e38baf145d0fac6c2`:** ordered raw guide/path output, effective connected thickness response, reusable compact variable-width filled outlines, final-consumer clipping, cache identity, and native PNG/SVG parity. | Networks, offsets, regions, composites, dedicated path workflow. | geometry/patterns/render/engine/io plus mechanical app adapter; 20B/20D/20G. | Focused authority, outline, realization, render, cache, persistence, natural/low-resolution PNG/SVG, Holiday regression, architecture, and private Sway/AT-SPI witnesses; automated wlroots is not manual GNOME/Mutter acceptance. | Existing mechanical controls only; no dedicated path workflow or inspector reorganization. | User accepted on 2026-08-21; publication remains separate. |
 | 20J Path Offset and Constant Gap | **Complete at implementation checkpoint `2edbb8659a82106ce8de904ef1ce9155e3b4d777`:** persisted absolute-gap normal-offset repetition, reusable compact line/cubic offsets, deterministic joins/crossing cleanup, tangential generation-bound extension, component identity, Stage 20I outline reuse, and current-v4 persistence. | Region offsets, parametric curves, adjacency, connection programs, composites, dedicated UI. | domain/geometry/patterns/engine/io/render plus mechanical app adapter; 20B/20D/20G/20I. | Focused authority, geometry, coverage, identity, cache, persistence, natural PNG/SVG, cubic/Holiday, Inkscape, architecture, and private Sway/AT-SPI witnesses; automated wlroots is not manual GNOME/Mutter review. | Existing mechanical controls only; no dedicated workflow. | User accepted on 2026-08-22; publication remains separate. |
-| 20K Parametric Curves | Common parametric-curve contract, initially round and square spirals, with raw-path and sites-along-curve outputs. | Additional parametric forms. | domain/geometry/patterns; 20G/20H/20I. | Sampling/phase/winding/bounds/cancellation tests. | None. | Planned; separate contract and gate. |
+| 20K Parametric Curves | **Complete at implementation checkpoint `f848ff995c9e30f89a85fbc01b5b8d97cc8de3d5`:** common parametric-curve contract, initially round and square spirals, with raw-path and sites-along-curve outputs, reusable repetition, and current-v4 intent-only persistence. | Additional parametric forms. | domain/geometry/patterns; 20G/20H/20I. | Sampling/phase/winding/bounds/cancellation tests plus five-turn intrinsic raster/vector and Inkscape evidence. | None. | User accepted on 2026-08-22; publication remains separate. |
 | 20L Site Adjacency | Deterministic mechanism-neutral adjacency over `FamilySiteSet`. | Connection rendering/program policy. | geometry/patterns; 20A. | Ordering/degeneracy/degree/distance/cache tests. | None. | Planned; separate contract and gate. |
 | 20M Connection Programs | Bounded nearest/random links and grid maze/tree programs producing canonical paths. | TSP and motifs. | domain/geometry/patterns/render; 20I/20L. | Replay/seed/legality/open-path/canonical-output tests. | None. | Planned; separate contract and gate. |
 | 20N Canonical Regions and Voronoi | Guard-inclusive ordinary Voronoi regions from grid or dispersion sites. | Guide cells, power diagrams, UI. | geometry/patterns/render; 20A/20G. | Guard/degeneracy/canonical-region/PNG-SVG tests. | None. | Planned; separate contract and gate. |

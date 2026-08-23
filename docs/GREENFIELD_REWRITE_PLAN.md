@@ -1882,10 +1882,24 @@ reuse, native RGBA PNG/SVG output, and the Holiday regression remain within the
 accepted authority split. The user accepted Stage 20J on 2026-08-22;
 publication remains separate.
 
-**Later Stage 20K+ — Planned.**
+**Stage 20K — Complete at implementation checkpoint
+`f848ff995c9e30f89a85fbc01b5b8d97cc8de3d5`.**
+[`STAGE_20K_PARAMETRIC_CURVES_PLAN.md`](STAGE_20K_PARAMETRIC_CURVES_PLAN.md)
+records the accepted headless parametric-curve family: finite round and square
+spirals, raw canonical curve paths or equal-arc curve sites, reusable
+repetition, current schema-v4 intent-only persistence, and canonical PNG/SVG
+output. Verified intrinsic evidence uses five full turns with artboard-derived
+pitch for both immutable inputs; all eight native PNG outputs and all eight
+Inkscape-rendered SVG outputs were inspected directly. Bounded adaptive
+five-point Gauss-Legendre arc-length measurement and row-active outline
+filtering keep the complete eight-artifact matrix within the existing limits
+without changing geometry ownership or final-consumer clipping. The user
+accepted Stage 20K on 2026-08-22; publication remains separate.
+
+**Remaining Stage 20L+ — Planned.**
 [`STAGE_20_PLUS_DECOMPOSITION.md`](STAGE_20_PLUS_DECOMPOSITION.md) provides the
-detailed synchronized sequence from accepted Stage 20J into the planned
-remainder: 20K parametric curves; 20L adjacency; 20M connection programs; 20N
+the detailed synchronized sequence from accepted Stage 20K into the planned
+remainder: 20L adjacency; 20M connection programs; 20N
 Voronoi; 20O guide faces; 20P region realization; 20Q composites; 20R gallery
 recipes; 20S Pattern Wizard; and 20T–20W temporal work. Every row remains
 separately gated.

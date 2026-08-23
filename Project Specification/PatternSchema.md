@@ -40,7 +40,7 @@ mapping, color, opacity, and visibility remain channel-specific.
 
 ## 2. Architectural invariants
 
-1. A pattern begins with exactly one `PatternFamily`: `Grid` or `Random`.
+1. A pattern begins with exactly one `PatternFamily`: `Grid`, `Random`, or `Parametric`.
 2. The family is responsible for generating the structural source: guides, sites, or both.
 3. Site placement belongs entirely to the family.
 4. Voronoi never chooses, weights, perturbs, or regenerates sites.
@@ -86,6 +86,7 @@ Named patterns such as “Rectangular Dots,” “Triangular Dots,” “Random 
 pub enum PatternFamily {
     Grid(GridFamily),
     Random(RandomFamily),
+    Parametric(ParametricCurveFamily),
 }
 ```
 
@@ -106,6 +107,44 @@ A family may produce:
 - Both guides and sites.
 
 The downstream output schema declares which parts it requires.
+
+### 4.1 Parametric curve family
+
+A parametric family owns one finite analytic curve source and may publish either
+that source as an open path or equal-arc sites along it.  It is not a Grid guide
+prototype: its identity, finite extent, and output use remain explicit.
+
+```rust
+pub struct ParametricCurveFamily {
+    pub curve: ParametricCurve,
+    pub repetition: CurveRepetition,
+    pub site_generation: Option<AlongCurveSites>,
+}
+
+pub enum ParametricCurve {
+    Spiral(SpiralCurve),
+}
+
+pub struct SpiralCurve {
+    pub shape: SpiralShape,
+    pub turns: f64,
+    pub radial_spacing: f64,
+    pub phase_degrees: f64,
+    pub winding: CurveWinding,
+}
+
+pub enum SpiralShape { Round, Square }
+pub enum CurveWinding { Clockwise, CounterClockwise }
+```
+
+The local origin is `(0, 0)`; the evaluator places that origin at the canvas center
+before the effective channel transform. `turns` and `radial_spacing` establish
+the finite source extent without consulting canvas edges. `phase_degrees` and
+`winding` are structural; document/channel pattern rotation and translation
+remain the effective channel layout transform. Round spirals canonically
+convert to bounded cubic `CurvePath` geometry; square spirals preserve exact
+line corners. `CurveRepetition` is reusable by Grid guides and parametric
+sources, including `NormalOffset`.
 
 ---
 
@@ -172,7 +211,6 @@ pub enum GuidePrototype {
     Bezier(BezierGuide),
     Polyline(PolylineGuide),
     Arc(ArcGuide),
-    Spiral(SpiralGuide),
     Procedural(ProceduralGuide),
     UserPath(UserPathReference),
 }

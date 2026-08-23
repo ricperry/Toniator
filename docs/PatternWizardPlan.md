@@ -4,7 +4,7 @@ Status: **approved future-work plan; implementation remains gated** (2026-08-22)
 
 This document records the intended replacement direction for the artist-facing
 Pattern Editor workflow. It does not authorize implementation, change the
-accepted Stage 20F–20J ledger state, or begin Stage 20K+ or Stage 20S. The
+accepted Stage 20F–20K ledger state, or begin Stage 20L+ or Stage 20S. The
 user-authorized normative effective-pattern direction is recorded in the
 protected specifications and implemented by accepted Stage 20G authority.
 The complete Pattern Wizard remains a separately gated UI milestone after the
@@ -12,8 +12,8 @@ remaining headless capabilities it exposes exist.
 
 The plan is informed by the notes, visual studies, and representative pattern
 assets under `assets/Stage20FCorrectionHints/`, the accepted Stage 20A–20J
-architecture, the accepted Stage 20F infrastructure, and the planned Stage
-20K+ engine sequence.
+architecture, the accepted Stage 20K implementation, the
+accepted Stage 20F infrastructure, and the planned Stage 20L+ engine sequence.
 
 ## Product direction
 
@@ -151,7 +151,7 @@ normal gallery rather than leading to a dead wizard page.
 |---|---|---|---|
 | `family.grid` | Generator starts with guide dimensions | Grid Arrangement | Current family concepts |
 | `family.dispersion` | Generator creates sites directly | Distribution | Current random-site family |
-| `family.parametric` | Generator creates a mathematical curve | Parametric Form | Future generator contract |
+| `family.parametric` | Generator creates a mathematical curve | Parametric Form | Accepted headless Stage 20K; wizard exposure remains planned |
 | `family.hybrid` | Generator owns specialized topology rules | Hybrid Structure | Future program contract |
 | `generator.density` | Generator accepts document detail/density | Density / Detail control and channel delta | Current for grid/random; future elsewhere |
 | `generator.seed` | Reproducible stochastic choice exists | Seed control and per-channel seed delta where defined | Current random; planned networks |
@@ -166,7 +166,7 @@ normal gallery rather than leading to a dead wizard page.
 | `guides.raw_paths` | Generated guides may become paths | Raw Guides choice | Current headless Stage 20I; wizard exposure remains planned |
 | `sites.intersections` | Eligible guide crossings produce sites | Guide Intersections choice; selected guide dimensions; merge tolerance under Advanced | Current |
 | `sites.along_guides` | Arc-length intervals on guides produce sites | Sites Along Guides choice; Site Interval and Site Phase | Current |
-| `sites.along_curve` | Intervals on a parametric curve produce sites | Sites Along Curve choice; Site Interval, jitter, seed | Future parametric contract |
+| `sites.along_curve` | Intervals on a parametric curve produce sites | Sites Along Curve choice; Site Interval, jitter, seed | Accepted headless Stage 20K; wizard exposure remains planned |
 | `sites.dispersed` | A distribution produces sites directly | Distribution character and density controls | Current raw/even/clustered |
 | `sites.weighted` | Source data influences site density | Uniform / Source Weighted; source component, response, strength | Current |
 | `sites.exclusion` | Candidate acceptance has a spacing policy | Overlap allowed / Minimum spacing / Visible-mark margin and amount | Current |
@@ -201,9 +201,10 @@ realization flags.
 
 Availability terms:
 
-- **Current engine**: accepted Stage 20A–20J authority exists; Stage 20F owns
-  only bounded authoring exposure, not the final wizard.
-- **Planned 20K+**: the roadmap names the required headless primitive.
+- **Current engine**: accepted Stage 20A–20K authority exists; Stage 20F owns only bounded
+  authoring exposure, not the final wizard.
+- **Accepted 20K / Planned 20L+**: Stage 20K names the accepted headless
+  primitive; later rows name planned headless capabilities.
 - **Future contract**: the supplied asset expresses intent, but no existing
   stage contract yet owns all required behavior.
 - **Advanced/deferred**: excluded from the primary workflow until justified.
@@ -247,14 +248,14 @@ Tetragrid must not enable `guides.editable_curve`.
 
 | Baseline card | Structural recipe | Required capability flags | Artist controls revealed | Availability | Representative asset |
 |---|---|---|---|---|---|
-| Spiral — Line | Spiral(shape: round) -> path | `family.parametric`, `paths.raw` | Turns; radial spacing; phase; winding; path controls | Planned 20K after 20I path output | `spiral.svg` |
-| Spiral — Marks | Spiral(shape: round) -> sites along curve -> marks | `family.parametric`, `sites.along_curve`, `marks.at_sites`, `marks.shape` | Spiral controls; Site Interval/jitter/seed; mark controls | Future parametric contract | `spiral-dots.svg` |
-| Square Spiral — Line | Spiral(shape: square) -> path | Same as Spiral — Line; shape is data | Shape; turns; spacing; phase; path controls | Planned 20K after 20I | `squiral.svg` |
-| Square Spiral — Marks | Spiral(shape: square) -> sites -> marks | Same as Spiral — Marks; shape is data | Shape; site interval; mark controls | Future parametric contract | `squiral-dots.svg` |
+| Spiral — Line | Spiral(shape: round) -> path | `family.parametric`, `paths.raw` | Turns; radial spacing; phase; winding; path controls | Accepted 20K; wizard card remains planned | `spiral.svg` |
+| Spiral — Marks | Spiral(shape: round) -> sites along curve -> marks | `family.parametric`, `sites.along_curve`, `marks.at_sites`, `marks.shape` | Spiral controls; Site Interval/jitter/seed; mark controls | Accepted 20K; wizard card remains planned | `spiral-dots.svg` |
+| Square Spiral — Line | Spiral(shape: square) -> path | Same as Spiral — Line; shape is data | Shape; turns; spacing; phase; path controls | Accepted 20K; wizard card remains planned | `squiral.svg` |
+| Square Spiral — Marks | Spiral(shape: square) -> sites -> marks | Same as Spiral — Marks; shape is data | Shape; site interval; mark controls | Accepted 20K; wizard card remains planned | `squiral-dots.svg` |
 
-Rosette, Lissajous, Trochoid, and Radial Wave should be additional generator
-configurations only after a common parametric-curve contract exists. They do
-not justify preset-specific render paths.
+Rosette, Lissajous, Trochoid, and Radial Wave remain separately gated
+additional generator configurations now that the common parametric-curve
+contract exists. They do not justify preset-specific render paths.
 
 ### Hybrid and connection-program baselines
 
@@ -483,7 +484,7 @@ geometry or inventing frontend-only document state. The approved order is:
 | 20H | Read-only typed capability projection from validated recipes and accepted primitives. |
 | 20I | Canonical raw paths and strokes. |
 | 20J | Path offset and Constant Gap realization. |
-| 20K | Common parametric curves, initially round and square spirals. |
+| 20K | **Complete at `f848ff995c9e30f89a85fbc01b5b8d97cc8de3d5`:** common parametric curves, initially round and square spirals, with verified five-turn intrinsic raw-path/equal-arc evidence. |
 | 20L | Mechanism-neutral site adjacency. |
 | 20M | Bounded connection programs, initially nearest/random links and grid maze/tree. |
 | 20N | Canonical guard-inclusive Voronoi regions. |
@@ -494,8 +495,9 @@ geometry or inventing frontend-only document state. The approved order is:
 | 20S | Pattern Wizard gallery, adaptive pages, Review, and nested subeditors. |
 | 20T–20W | Frame source, frame sequence, transitions, then transition exposure. |
 
-Stages 20G–20J are accepted headless authority; every later row remains
-separately gated. TSP, aligned curved-guide sampling, wrap-around constant-gap
+Stages 20G–20K are accepted headless authority; every Stage 20L+ row remains
+separately gated. TSP,
+aligned curved-guide sampling, wrap-around constant-gap
 endpoints, user-defined motifs, additional parametric forms, and the Tetragrid
 decision remain deferred rather than silently entering a listed stage.
 
@@ -536,7 +538,8 @@ contracts before UI work:
   programs or a later separate contract; Stage 20J accepts tangential extension
   beyond the padded generation bounds only;
 - region fill/outline and Scale versus Constant Gap defaults;
-- the initial parametric generator set and its coverage model;
+- additional parametric generator forms beyond the accepted Stage 20K set and
+  their coverage model;
 - whether Tetragrid has enough artistic value to retain; and
 
 The document-level pattern plus channel-delta schema direction is normative;

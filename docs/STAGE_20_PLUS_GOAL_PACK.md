@@ -99,8 +99,19 @@ normal-offset repetition, reusable compact line/cubic centerline offsets,
 deterministic crossing cleanup, complete component identity, Stage 20I outline
 reuse, and additive current-v4 persistence. Intrinsic raster/vector, compact
 cubic, Holiday, Inkscape, and private Sway/AT-SPI witnesses passed. Automated
-wlroots evidence is not manual GNOME/Mutter review. Stage 20K+ remains
-separately gated.
+wlroots evidence is not manual GNOME/Mutter review. Stage 20K is complete at
+implementation checkpoint `f848ff995c9e30f89a85fbc01b5b8d97cc8de3d5`;
+later Stage 20L+ remains separately gated.
+
+Stage 20K adds the headless finite round/square parametric-curve family, raw
+canonical paths or equal-arc curve sites, reusable repetition, and current-v4
+intent-only persistence. Verified intrinsic evidence uses five full turns with
+artboard-derived pitch for both immutable inputs; all eight native PNG outputs
+and all eight Inkscape-rendered SVG outputs were inspected directly. Bounded
+adaptive five-point Gauss-Legendre arc-length measurement and row-active
+outline filtering keep the complete matrix within the existing limits without
+changing geometry ownership or final-consumer clipping. The user accepted
+Stage 20K on 2026-08-22; publication remains separate.
 
 ## Later Goal candidates
 
@@ -119,7 +130,7 @@ fresh planning validates its contract against actual implementation evidence.
 | 20H | Capability Projection Foundation: validated recipe/primitives to typed read-only capabilities. | Resolver and unsupported-page omission tests. | 20G. | Capability vocabulary extensions. | **Complete at `4b1cc08819eee36c2009e2abf5543dcaefe29929`; user accepted on 2026-08-21; publication remains separate.** |
 | 20I | Canonical Paths and Strokes: **complete at implementation checkpoint `de166f533379dc5b75d5a36e38baf145d0fac6c2`** with ordered guide/path output, effective connected thickness response, reusable compact variable-width filled outlines, final-consumer clipping, identity, and native PNG/SVG parity. | Path/stroke/clip/identity/canonical-output tests, natural and low-resolution artifacts, Holiday regression, and private Sway/AT-SPI evidence. | 20B, 20D, 20G. | None within the accepted contract. | **Complete at `de166f533379dc5b75d5a36e38baf145d0fac6c2`; user accepted on 2026-08-21; publication remains separate.** |
 | 20J | Path Offset and Constant Gap: **complete at implementation checkpoint `2edbb8659a82106ce8de904ef1ce9155e3b4d777`** with persisted absolute-gap normal-offset repetition, reusable compact line/cubic offsets, deterministic joins/crossing cleanup, component identity, Stage 20I outline reuse, and current-v4 persistence. | Authority, offset/collapse/finite/coverage/identity/cache/persistence tests, natural PNG/SVG artifacts, cubic/Holiday diagnostics, Inkscape, and private Sway/AT-SPI evidence. | 20B, 20D, 20G, 20I. | None within the accepted bounded contract. | **Complete at `2edbb8659a82106ce8de904ef1ce9155e3b4d777`; user accepted on 2026-08-22; publication remains separate.** |
-| 20K | Parametric Curves: common contract, initially round/square spirals, raw paths and sites along curves. | Sampling/phase/winding/bounds/cancellation tests. | 20G, 20H, 20I. | Additional parametric forms. | Planned; separate contract and gate. |
+| 20K | Parametric Curves: common contract, initially round/square spirals, raw paths and sites along curves. | Sampling/phase/winding/bounds/cancellation tests plus five-turn intrinsic raster/vector and Inkscape evidence. | 20G, 20H, 20I. | Additional parametric forms. | **Complete at `f848ff995c9e30f89a85fbc01b5b8d97cc8de3d5`; user accepted on 2026-08-22; publication remains separate.** |
 | 20L | Site Adjacency: deterministic mechanism-neutral graph over `FamilySiteSet`. | Ordering/degeneracy/degree/distance/cache tests. | 20A. | Neighbor policy. | Planned; separate contract and gate. |
 | 20M | Connection Programs: bounded nearest/random links and grid maze/tree paths. | Replay/seed/legality/open-path/canonical-output tests. | 20I, 20L. | TSP and motifs deferred. | Planned; separate contract and gate. |
 | 20N | Canonical Regions and Voronoi: guard-inclusive ordinary regions from grid/dispersion sites. | Guard/degeneracy/canonical-region/PNG-SVG tests. | 20A, 20G. | Power diagrams and UI deferred. | Planned; separate contract and gate. |

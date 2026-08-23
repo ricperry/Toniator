@@ -1,16 +1,17 @@
 # Stage 20J — Cusp/Reversal Correction
 
-Status: **Accepted awaiting checkpoint** (2026-08-22). Direct inspection of the
+Status: **Complete at correction checkpoint
+`f848ff995c9e30f89a85fbc01b5b8d97cc8de3d5`** (2026-08-22). Direct inspection of the
 unclipped Inkscape output disproved the prior review claim: after the tangential
 endpoint extensions crossed, cleanup removed the extensions but still published
 their isolated authored cusp fragments, producing a floating chevron/diamond.
 The extended offset envelope now collapses at that crossing without weakening
 standalone cusp-fragment isolation. The regenerated clipped and clip-released
 outputs were inspected directly and contain one clean terminal cusp with no
-floating or re-entering descendants. Stage 20J's accepted checkpoint and all
-current Stage 20K work remain preserved. The user explicitly accepted this
-correction on 2026-08-22; no checkpoint, commit, or Stage 20K acceptance is
-implied.
+floating or re-entering descendants. Stage 20J's original accepted checkpoint
+remains preserved; this correction is checkpointed with the accepted Stage 20K
+implementation. The user explicitly accepted the correction and Stage 20K
+separately on 2026-08-22; publication remains separate.
 
 ## Objective and authority
 
@@ -118,6 +119,6 @@ review.
 
 ## Gate
 
-Stop with Stage 20K at **Implemented awaiting review** after the correction is
-implemented and verified. Do not accept, checkpoint, commit, push, publish, or
-begin Stage 20L.
+This correction and Stage 20K are accepted and checkpointed at
+`f848ff995c9e30f89a85fbc01b5b8d97cc8de3d5`. Do not push, publish, or begin
+Stage 20L without separate authorization.

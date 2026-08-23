@@ -1,10 +1,11 @@
 # Stage 20K — Parametric Curve Family
 
-Status: **Accepted awaiting checkpoint** (2026-08-22).
+Status: **Complete at commit
+`f848ff995c9e30f89a85fbc01b5b8d97cc8de3d5`** (2026-08-22).
 
 The user accepted the verified implementation and artboard-detail correction on
-2026-08-22. The implementation checkpoint is pending; no checkpoint hash is
-claimed here.
+2026-08-22. The accepted implementation checkpoint is
+`f848ff995c9e30f89a85fbc01b5b8d97cc8de3d5`; publication remains separate.
 
 Stage 20K adds the headless `ParametricCurve` family. It starts with finite
 round and square spirals, carrying structural shape, turns, radial spacing,

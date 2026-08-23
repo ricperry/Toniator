@@ -48,6 +48,22 @@ Examples include:
 
 ---
 
+## 1A. Parametric curve authority
+
+The original Pattern Schema listed spiral as a `GuidePrototype`. That wording
+is superseded: a finite spiral is an explicit `ParametricCurve` family source,
+not a Grid guide dimension. The first accepted forms are round and square
+spirals. A parametric source may publish exactly one homogeneous structural
+product: an ordinary open `CurvePath` for connected realization, or equal-arc
+sites for mark realization. It may use the shared finite `CurveRepetition`,
+including `NormalOffset`; final canvas clipping remains a consumer concern.
+
+Analytic intent is persisted. Derived curve paths, sites, stroke outlines,
+capabilities, and caches are not serialized. Additional parametric forms,
+composites, adjacency, and preset-name behavior require later authorization.
+
+---
+
 ## 2. Connected-output programs
 
 Connected output must support user-authored connection behavior as well as generative topology.

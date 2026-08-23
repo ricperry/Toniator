@@ -469,7 +469,8 @@ means guides per unit distance. Do not rename the fields or change their
 behavior as part of Stage 20I; scope the schema, persistence, CLI, and UI impact
 in a separately authorized follow-up.
 
-**Stage 20K — Accepted awaiting checkpoint.** Parametric Curves implementation remains governed by
+**Stage 20K — Complete at commit
+`f848ff995c9e30f89a85fbc01b5b8d97cc8de3d5`.** Parametric Curves implementation remains governed by
 [`STAGE_20K_PARAMETRIC_CURVES_PLAN.md`](docs/STAGE_20K_PARAMETRIC_CURVES_PLAN.md).
 It adds only the common round/square finite spiral family, raw curve paths or
 equal-arc curve sites, and reusable accepted repetition. User review correctly
@@ -494,8 +495,9 @@ nanounit polygon/chord arc-length refinement with bounded adaptive quadrature
 and limits raster winding work to row-active outline edges. All eight native
 PNG outputs and all eight Inkscape SVG renderings were inspected directly and
 cover their artboards with coherent round/square path and equal-arc-site
-geometry. The user accepted Stage 20K on 2026-08-22. The implementation
-checkpoint is pending; no checkpoint hash is implied.
+geometry. The user accepted Stage 20K on 2026-08-22. The accepted
+implementation checkpoint is `f848ff995c9e30f89a85fbc01b5b8d97cc8de3d5`;
+publication remains separate.
 
 **Remaining Stage 20L+ — Planned.** The approved remaining order is 20L
 adjacency; 20M connection programs; 20N

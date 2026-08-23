@@ -324,8 +324,24 @@ line/cubic centerline offset service, deterministic crossing cleanup and
 component identity, Stage 20I outline reuse, and additive current-v4
 persistence. Intrinsic raster/vector, compact cubic, divergent Holiday,
 Inkscape, and private Sway/AT-SPI witnesses passed. Automated wlroots evidence
-is not manual GNOME/Mutter review. Stage 20K+ and the Pattern Wizard remain
-separately gated.
+is not manual GNOME/Mutter review. The Pattern Wizard remains separately
+gated.
+
+Stage 20K is **Complete at implementation checkpoint
+`f848ff995c9e30f89a85fbc01b5b8d97cc8de3d5`** under
+[`STAGE_20K_PARAMETRIC_CURVES_PLAN.md`](docs/STAGE_20K_PARAMETRIC_CURVES_PLAN.md).
+It adds the accepted headless finite round/square parametric-curve family,
+raw canonical curve paths or equal-arc curve sites, reusable repetition,
+current schema-v4 intent-only persistence, and canonical PNG/SVG output. The
+verified intrinsic evidence uses five full turns with artboard-derived pitch
+for both immutable inputs; all eight native PNG outputs and all eight
+Inkscape-rendered SVG outputs were inspected directly. Bounded adaptive
+five-point Gauss-Legendre arc-length measurement and row-active outline
+filtering keep the complete eight-artifact matrix within the existing limits
+without changing geometry ownership or final-consumer clipping. The user
+accepted Stage 20K on 2026-08-22; publication remains separate.
+
+Stage 20L+ and the Pattern Wizard remain separately gated and planned.
 
 Low-resolution fixtures and outputs are supplementary only. Every future stage
 that exercises source loading, sampling, rendering, preview, or export must

@@ -2,7 +2,7 @@
 
 Status: **Complete at implementation checkpoint
 `2edbb8659a82106ce8de904ef1ce9155e3b4d777`**. The user accepted Stage 20J on
-2026-08-22. Publication and Stage 20K+ remain separate.
+2026-08-22. Publication and later Stage 20L+ remain separate.
 
 Stage 20J adds persisted `NormalOffset` guide repetition and one reusable
 geometry-owned line/cubic offset service. An authored positive spacing is the
