@@ -562,7 +562,11 @@ fn typed_family_outputs_publish_truthful_family_site_sets() {
     }
 }
 
-/// Proves the private circle seam alone preserves accepted legacy ID and contributor bytes.
+/// Proves the private circle seam preserves current site IDs and contributor bytes.
+///
+/// # Panics
+///
+/// Panics when current provenance projection or normalized realization changes.
 #[test]
 fn current_circle_compatibility_adapter_preserves_accepted_site_id_and_contributor_bytes() {
     let source = decode_source(
@@ -571,8 +575,8 @@ fn current_circle_compatibility_adapter_preserves_accepted_site_id_and_contribut
     )
     .unwrap();
     let response = MarkResponse {
-        minimum_fill: 2.0,
-        maximum_fill: 9.0,
+        minimum_fill: 0.2,
+        maximum_fill: 0.9,
         rotation_offset_degrees: 0.0,
     };
     let mapping =
@@ -583,17 +587,16 @@ fn current_circle_compatibility_adapter_preserves_accepted_site_id_and_contribut
         phase: 0.5,
     });
     let along_plan = resolve_pattern_pipeline(&along_definition).unwrap();
-    let along = evaluate_typed_family_product_cancellable(
-        &along_plan.family,
-        &request(17.0, 3.25, -4.5),
-        &|| false,
-    )
-    .unwrap();
+    let mut along_request = request(17.0, 3.25, -4.5);
+    along_request.support_radius = 10.0;
+    let along =
+        evaluate_typed_family_product_cancellable(&along_plan.family, &along_request, &|| false)
+            .unwrap();
     let along_realization = realize_typed_mapped_outputs(
         &along,
         &along_plan,
         &source,
-        &request(17.0, 3.25, -4.5).canvas,
+        &along_request.canvas,
         mapping,
         response,
     )
@@ -623,9 +626,11 @@ fn current_circle_compatibility_adapter_preserves_accepted_site_id_and_contribut
         assert_eq!(mark.provenance.contributors, vec![guide_id]);
     }
     let intersection_plan = resolve_pattern_pipeline(&concurrent_multiway_definition()).unwrap();
+    let mut intersection_request = request(0.0, 0.0, 0.0);
+    intersection_request.support_radius = 10.0;
     let intersections = evaluate_typed_family_product_cancellable(
         &intersection_plan.family,
-        &request(0.0, 0.0, 0.0),
+        &intersection_request,
         &|| false,
     )
     .unwrap();
@@ -633,7 +638,7 @@ fn current_circle_compatibility_adapter_preserves_accepted_site_id_and_contribut
         &intersections,
         &intersection_plan,
         &source,
-        &request(0.0, 0.0, 0.0).canvas,
+        &intersection_request.canvas,
         mapping,
         response,
     )
@@ -695,17 +700,16 @@ fn current_circle_compatibility_adapter_preserves_accepted_site_id_and_contribut
         SiteDensityModulation::Uniform,
     );
     let random_plan = resolve_pattern_pipeline(&random_definition).unwrap();
-    let random = evaluate_typed_family_product_cancellable(
-        &random_plan.family,
-        &request(17.0, 3.25, -4.5),
-        &|| false,
-    )
-    .unwrap();
+    let mut random_request = request(17.0, 3.25, -4.5);
+    random_request.support_radius = 10.0;
+    let random =
+        evaluate_typed_family_product_cancellable(&random_plan.family, &random_request, &|| false)
+            .unwrap();
     let random_realization = realize_typed_mapped_outputs(
         &random,
         &random_plan,
         &source,
-        &request(17.0, 3.25, -4.5).canvas,
+        &random_request.canvas,
         mapping,
         response,
     )

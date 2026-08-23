@@ -1896,13 +1896,20 @@ filtering keep the complete eight-artifact matrix within the existing limits
 without changing geometry ownership or final-consumer clipping. The user
 accepted Stage 20K on 2026-08-22; publication remains separate.
 
-**Remaining Stage 20L+ — Planned.**
+**Stage 20L — Implemented awaiting review.**
 [`STAGE_20_PLUS_DECOMPOSITION.md`](STAGE_20_PLUS_DECOMPOSITION.md) provides the
-the detailed synchronized sequence from accepted Stage 20K into the planned
-remainder: 20L adjacency; 20M connection programs; 20N
-Voronoi; 20O guide faces; 20P region realization; 20Q composites; 20R gallery
-recipes; 20S Pattern Wizard; and 20T–20W temporal work. Every row remains
-separately gated.
+detailed synchronized Stage 20L contract. The implementation provides
+deterministic, mechanism-neutral derived site topology across geometry,
+patterns, and engine, with guard-inclusive evaluation, bounded cancellable
+construction, and no persisted connection intent or renderable paths. Focused
+and broad affected-package verification is green, and the final independent
+read-only implementation review found no material issue. User acceptance,
+checkpointing, publication, and Stage 20M remain separate gates.
+
+**Remaining Stage 20M+ — Planned.** The approved remainder is 20M connection
+programs; 20N Voronoi; 20O guide faces; 20P region realization; 20Q composites;
+20R gallery recipes; 20S Pattern Wizard; and 20T–20W temporal work. Every row
+remains separately gated.
 
 Every mechanism must enter through the Stage 14 typed schema, Stage 15 generic
 pipeline, Stage 17 command/descriptor contract, canonical geometry, and

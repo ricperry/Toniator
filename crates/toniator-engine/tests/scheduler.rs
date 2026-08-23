@@ -5,11 +5,12 @@ use std::{
 };
 
 use toniator_domain::{
-    CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternLayout, ChannelSourceMapping,
-    ChannelState, ColorValue, CoveragePolicy, DensityMetric2D, Document, DocumentCommand,
-    DocumentId, DocumentSession, MarkGeometryResponse, PatternDefinition, PatternDefinitionId,
-    PatternMechanismId, PatternOutputLayerId, SourceComponent, SourcePlacement, SourceReference,
-    SourceReferenceId,
+    CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternInstance, ChannelPatternLayoutDelta,
+    ChannelSourceMapping, ChannelState, ColorValue, CoveragePolicy, DensityEditedAxis,
+    DensityMetric2D, Document, DocumentCommand, DocumentHistory, DocumentId,
+    DocumentPatternSettings, DocumentSession, MarkGeometryFieldEdit, MarkGeometryResponse,
+    PatternDefinition, PatternDefinitionId, PatternGeometryResponse, PatternMechanismId,
+    PatternOutputLayerId, SourceComponent, SourcePlacement, SourceReference, SourceReferenceId,
 };
 use toniator_engine::{
     CacheDiagnostics, CacheDisposition, ChannelDiagnosticCompletion, ChannelDiagnosticRequest,
@@ -20,6 +21,8 @@ use toniator_engine::{
 const CHANNEL_ID: ChannelId = ChannelId(1);
 const COMPLETION_GUARD: Duration = Duration::from_secs(15);
 
+/// Builds a scheduler fixture with document-owned pattern settings and one
+/// channel that stores only explicit inheritable deltas and presentation data.
 fn session() -> DocumentSession {
     let source_id = SourceReferenceId::new("scheduler-source").unwrap();
     DocumentSession::new(
@@ -41,18 +44,32 @@ fn session() -> DocumentSession {
                     additional_margin: 4.5,
                 },
             )],
+            DocumentPatternSettings {
+                definition_id: PatternDefinitionId(1),
+                density: DensityMetric2D {
+                    across_x: 90.0,
+                    across_y: 60.0,
+                    aspect_locked: true,
+                },
+                pattern_rotation_degrees: 17.0,
+                shape_rotation_degrees: 0.0,
+                geometry_response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+                    minimum_fill: 0.2,
+                    maximum_fill: 0.9,
+                }),
+            },
             vec![ChannelState {
                 id: CHANNEL_ID,
-                pattern_definition_id: PatternDefinitionId(1),
-                layout: ChannelPatternLayout {
-                    density: DensityMetric2D {
-                        across_x: 90.0,
-                        across_y: 60.0,
-                        aspect_locked: true,
+                pattern_instance: ChannelPatternInstance {
+                    definition_override: None,
+                    layout_delta: ChannelPatternLayoutDelta {
+                        density: None,
+                        rotation_degrees: None,
+                        translation_x: 3.25,
+                        translation_y: -4.5,
                     },
-                    rotation_degrees: 17.0,
-                    translation_x: 3.25,
-                    translation_y: -4.5,
+                    shape_rotation_delta_degrees: None,
+                    geometry_response_delta: None,
                 },
                 appearance: ChannelAppearance {
                     visible: true,
@@ -63,11 +80,6 @@ fn session() -> DocumentSession {
                         alpha: 1.0,
                     },
                     opacity: 0.72,
-                },
-                mark_geometry_response: MarkGeometryResponse {
-                    minimum_fill: 2.0,
-                    maximum_fill: 9.0,
-                    rotation_offset_degrees: 0.0,
                 },
                 source_mapping: ChannelSourceMapping {
                     component: SourceComponent::Luminance,
@@ -124,6 +136,8 @@ fn submit_and_accept(
     completion
 }
 
+/// Confirms scheduled diagnostics match synchronous results for both immutable
+/// source formats without granting test code a second evaluation authority.
 #[test]
 fn scheduled_raster_and_svg_baselines_match_synchronous_results_exactly() {
     for (path, format, source_hash) in [
@@ -217,6 +231,8 @@ fn stage20a_site_interchange_keeps_diagnostic_scheduler_cache_and_latest_ticket_
     scheduler.shutdown().unwrap();
 }
 
+/// Confirms the accepted diagnostic cache invalidates at each current domain
+/// boundary while preserving exact hits when no authoritative input changes.
 #[test]
 fn accepted_cache_obeys_the_complete_reuse_matrix_and_keeps_outputs_exact() {
     let bytes: Arc<[u8]> = std::fs::read("../../assets/raster-sample.png")
@@ -280,12 +296,14 @@ fn accepted_cache_obeys_the_complete_reuse_matrix_and_keeps_outputs_exact() {
         },
     );
 
-    session
-        .apply(&DocumentCommand::SetMarkGeometryField {
-            channel_id: CHANNEL_ID,
-            edit: toniator_domain::MarkGeometryFieldEdit::MaximumFill(8.0),
-        })
-        .unwrap();
+    let response_edit = session
+        .document()
+        .set_channel_mark_response_field_for_effective(
+            CHANNEL_ID,
+            MarkGeometryFieldEdit::MaximumFill(0.8),
+        )
+        .expect("response edit builds");
+    session.apply(&response_edit).unwrap();
     let response = submit_and_accept(
         &scheduler,
         &session,
@@ -302,13 +320,19 @@ fn accepted_cache_obeys_the_complete_reuse_matrix_and_keeps_outputs_exact() {
         },
     );
 
-    session
-        .apply(&DocumentCommand::SetDensityAxis {
-            channel_id: CHANNEL_ID,
-            edited_axis: toniator_domain::DensityEditedAxis::AcrossX,
-            value: 80.0,
-        })
-        .unwrap();
+    let density_edit = session
+        .document()
+        .set_channel_density_for_effective(
+            CHANNEL_ID,
+            DensityEditedAxis::AcrossX,
+            DensityMetric2D {
+                across_x: 80.0,
+                across_y: 60.0,
+                aspect_locked: true,
+            },
+        )
+        .expect("density edit builds");
+    session.apply(&density_edit).unwrap();
     let family = submit_and_accept(
         &scheduler,
         &session,
@@ -325,19 +349,19 @@ fn accepted_cache_obeys_the_complete_reuse_matrix_and_keeps_outputs_exact() {
         },
     );
 
-    session
-        .apply(&DocumentCommand::SetDensityAspectLock {
-            channel_id: CHANNEL_ID,
-            aspect_locked: false,
-        })
-        .unwrap();
-    let aspect_only = submit_and_accept(
+    let mut history = DocumentHistory::new(session);
+    let aspect_unlock = history
+        .document()
+        .set_document_density_aspect_lock(false)
+        .expect("document aspect-lock command builds");
+    history.apply(&aspect_unlock).unwrap();
+    let unlocked = submit_and_accept(
         &scheduler,
-        &session,
-        request(&session, Arc::clone(&bytes), SourceFormatHint::Png),
+        history.session(),
+        request(history.session(), Arc::clone(&bytes), SourceFormatHint::Png),
     );
     assert_diagnostics(
-        &aspect_only,
+        &unlocked,
         CacheDiagnostics {
             decoded_source: CacheDisposition::Hit,
             family: CacheDisposition::Miss,
@@ -348,16 +372,16 @@ fn accepted_cache_obeys_the_complete_reuse_matrix_and_keeps_outputs_exact() {
     );
 
     let replacement_id = SourceReferenceId::new("scheduler-source-replacement").unwrap();
-    session
+    history
         .apply(&DocumentCommand::SetSourceReference {
             source: SourceReference::Assigned(replacement_id.clone()),
         })
         .unwrap();
     let source_change = submit_and_accept(
         &scheduler,
-        &session,
+        history.session(),
         ChannelDiagnosticRequest::new(
-            session.evaluation_snapshot(CHANNEL_ID).unwrap(),
+            history.session().evaluation_snapshot(CHANNEL_ID).unwrap(),
             ResolvedSource::new(replacement_id, Arc::clone(&bytes), SourceFormatHint::Png).unwrap(),
         ),
     );
@@ -374,6 +398,8 @@ fn accepted_cache_obeys_the_complete_reuse_matrix_and_keeps_outputs_exact() {
     scheduler.shutdown().unwrap();
 }
 
+/// Confirms cancelled, failed, superseded, and stale completions cannot
+/// replace the last accepted cache transaction.
 #[test]
 fn unaccepted_stale_cancelled_and_failed_work_never_replaces_accepted_cache() {
     let bytes: Arc<[u8]> = std::fs::read("../../assets/raster-sample.png")
@@ -444,23 +470,21 @@ fn unaccepted_stale_cancelled_and_failed_work_never_replaces_accepted_cache() {
         .unwrap();
     let stale_document = wait_for_latest(&scheduler);
     assert_eq!(stale_document.ticket(), ticket);
-    session
-        .apply(&DocumentCommand::SetRotation {
-            channel_id: CHANNEL_ID,
-            rotation_degrees: 18.0,
-        })
-        .unwrap();
+    let rotation_edit = session
+        .document()
+        .set_channel_pattern_rotation_for_effective(CHANNEL_ID, 18.0)
+        .expect("rotation edit builds");
+    session.apply(&rotation_edit).unwrap();
     assert!(
         !scheduler
             .accept_completion(&stale_document, &session)
             .unwrap()
     );
-    session
-        .apply(&DocumentCommand::SetRotation {
-            channel_id: CHANNEL_ID,
-            rotation_degrees: 17.0,
-        })
-        .unwrap();
+    let reset_rotation = session
+        .document()
+        .set_channel_pattern_rotation_for_effective(CHANNEL_ID, 17.0)
+        .expect("rotation reset builds");
+    session.apply(&reset_rotation).unwrap();
 
     // Submitting a new ticket makes a retained completion ticket-stale and
     // discards its unaccepted transaction.
@@ -594,6 +618,8 @@ fn superseded_failures_are_silent_but_the_newest_failure_keeps_its_ticket_and_to
     scheduler.shutdown().unwrap();
 }
 
+/// Confirms a completion requires both latest-ticket and current-document
+/// revision gates before it can be presented.
 #[test]
 fn presentation_requires_both_scheduler_and_document_revision_gates() {
     let bytes: Arc<[u8]> = std::fs::read("../../assets/raster-sample.png")
@@ -609,12 +635,11 @@ fn presentation_requires_both_scheduler_and_document_revision_gates() {
     assert!(scheduler.is_latest(ticket));
     assert!(session.accepts_evaluation(completion.token()));
 
-    session
-        .apply(&DocumentCommand::SetRotation {
-            channel_id: CHANNEL_ID,
-            rotation_degrees: 15.0,
-        })
-        .unwrap();
+    let rotation_edit = session
+        .document()
+        .set_channel_pattern_rotation_for_effective(CHANNEL_ID, 15.0)
+        .expect("rotation edit builds");
+    session.apply(&rotation_edit).unwrap();
     assert!(scheduler.is_latest(ticket));
     assert!(!session.accepts_evaluation(completion.token()));
     scheduler.shutdown().unwrap();

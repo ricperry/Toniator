@@ -1,13 +1,16 @@
 use toniator_domain::{
-    CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternLayout, ChannelSourceMapping,
-    ChannelState, ColorValue, CoveragePolicy, DensityMetric2D, Document, DocumentCommand,
-    DocumentId, DocumentSession, InvalidationLevel, MarkGeometryResponse, PatternDefinition,
-    PatternDefinitionId, PatternMechanismId, PatternOutputLayerId, Revision, SourceComponent,
+    CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternInstance, ChannelPatternLayoutDelta,
+    ChannelSourceMapping, ChannelState, ColorValue, CoveragePolicy, DensityEditedAxis,
+    DensityMetric2D, Document, DocumentCommand, DocumentId, DocumentSession, InvalidationLevel,
+    MarkGeometryFieldEdit, MarkGeometryResponse, PatternDefinition, PatternDefinitionId,
+    PatternGeometryResponse, PatternMechanismId, PatternOutputLayerId, Revision, SourceComponent,
     SourcePlacement,
 };
 
 const CHANNEL_ID: ChannelId = ChannelId(1);
 
+/// Builds one legacy-channel session whose family and realization inputs
+/// inherit from document-owned pattern settings for command-contract tests.
 fn session() -> DocumentSession {
     let document = Document::new(
         DocumentId(1),
@@ -26,18 +29,32 @@ fn session() -> DocumentSession {
                 additional_margin: 4.5,
             },
         )],
+        toniator_domain::DocumentPatternSettings {
+            definition_id: PatternDefinitionId(1),
+            density: DensityMetric2D {
+                across_x: 90.0,
+                across_y: 60.0,
+                aspect_locked: true,
+            },
+            pattern_rotation_degrees: 0.0,
+            shape_rotation_degrees: 0.0,
+            geometry_response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+                minimum_fill: 0.2,
+                maximum_fill: 0.9,
+            }),
+        },
         vec![ChannelState {
             id: CHANNEL_ID,
-            pattern_definition_id: PatternDefinitionId(1),
-            layout: ChannelPatternLayout {
-                density: DensityMetric2D {
-                    across_x: 90.0,
-                    across_y: 60.0,
-                    aspect_locked: true,
+            pattern_instance: ChannelPatternInstance {
+                definition_override: None,
+                layout_delta: ChannelPatternLayoutDelta {
+                    density: None,
+                    rotation_degrees: None,
+                    translation_x: 0.0,
+                    translation_y: 0.0,
                 },
-                rotation_degrees: 0.0,
-                translation_x: 0.0,
-                translation_y: 0.0,
+                shape_rotation_delta_degrees: None,
+                geometry_response_delta: None,
             },
             appearance: ChannelAppearance {
                 visible: true,
@@ -49,11 +66,6 @@ fn session() -> DocumentSession {
                 },
                 opacity: 0.75,
             },
-            mark_geometry_response: MarkGeometryResponse {
-                minimum_fill: 2.0,
-                maximum_fill: 9.0,
-                rotation_offset_degrees: 0.0,
-            },
             source_mapping: ChannelSourceMapping {
                 component: SourceComponent::Luminance,
                 placement: SourcePlacement::StretchToCanvas,
@@ -64,23 +76,32 @@ fn session() -> DocumentSession {
     DocumentSession::new(document).expect("valid session")
 }
 
+/// Proves successful domain-built mutations advance legacy-session revision
+/// exactly once while exposing the correct current effective pattern values.
 #[test]
 fn successful_commands_mutate_once_and_advance_revision_once() {
     let mut session = session();
     let commands = [
         (
-            DocumentCommand::SetDensityAxis {
-                channel_id: CHANNEL_ID,
-                edited_axis: toniator_domain::DensityEditedAxis::AcrossX,
-                value: 70.0,
-            },
+            session
+                .document()
+                .set_channel_density_for_effective(
+                    CHANNEL_ID,
+                    DensityEditedAxis::AcrossX,
+                    DensityMetric2D {
+                        across_x: 70.0,
+                        across_y: 60.0,
+                        aspect_locked: true,
+                    },
+                )
+                .expect("density command builds"),
             InvalidationLevel::Family,
         ),
         (
-            DocumentCommand::SetRotation {
-                channel_id: CHANNEL_ID,
-                rotation_degrees: 20.0,
-            },
+            session
+                .document()
+                .set_channel_pattern_rotation_for_effective(CHANNEL_ID, 20.0)
+                .expect("rotation command builds"),
             InvalidationLevel::Family,
         ),
         (
@@ -92,10 +113,13 @@ fn successful_commands_mutate_once_and_advance_revision_once() {
             InvalidationLevel::Family,
         ),
         (
-            DocumentCommand::SetMarkGeometryField {
-                channel_id: CHANNEL_ID,
-                edit: toniator_domain::MarkGeometryFieldEdit::MaximumFill(8.5),
-            },
+            session
+                .document()
+                .set_channel_mark_response_field_for_effective(
+                    CHANNEL_ID,
+                    MarkGeometryFieldEdit::MaximumFill(0.85),
+                )
+                .expect("mark response command builds"),
             InvalidationLevel::Realization,
         ),
         (
@@ -124,49 +148,70 @@ fn successful_commands_mutate_once_and_advance_revision_once() {
 
     for (index, (command, invalidation)) in commands.iter().enumerate() {
         let result = session.apply(command).expect("valid command");
-        assert_eq!(result.invalidation, *invalidation);
+        assert_eq!(result.invalidation, Some(*invalidation));
         assert_eq!(result.affected_channels, vec![CHANNEL_ID]);
         assert_eq!(session.revision(), Revision((index + 1) as u64));
     }
 
     let channel = session
         .document()
+        .effective_channel_pattern(CHANNEL_ID)
+        .expect("channel resolves");
+    assert_eq!(channel.density.across_x, 70.0);
+    assert_eq!(channel.pattern_rotation_degrees, 20.0);
+    assert_eq!(channel.translation_x, 2.0);
+    assert_eq!(channel.translation_y, 0.0);
+    let PatternGeometryResponse::Marks(response) = channel.geometry_response else {
+        panic!("fixture remains marks")
+    };
+    assert_eq!(response.maximum_fill, 0.85);
+    let channel = session
+        .document()
         .channel(CHANNEL_ID)
         .expect("channel exists");
-    assert_eq!(channel.layout.density.across_x, 70.0);
-    assert_eq!(channel.layout.rotation_degrees, 20.0);
-    assert_eq!(channel.layout.translation_x, 2.0);
-    assert_eq!(channel.layout.translation_y, 0.0);
-    assert_eq!(channel.mark_geometry_response.maximum_fill, 8.5);
     assert_eq!(channel.appearance.color.blue, 0.6);
     assert_eq!(channel.appearance.opacity, 0.4);
     assert!(!channel.appearance.visible);
 }
 
+/// Proves invalid domain-built command attempts preserve exact legacy
+/// authority and revision without manufacturing obsolete raw commands.
 #[test]
 fn failed_commands_preserve_exact_document_and_revision() {
     let mut session = session();
     let original_document = session.snapshot();
     let original_revision = session.revision();
 
+    let invalid_commands = [
+        session.document().set_channel_density_for_effective(
+            CHANNEL_ID,
+            DensityEditedAxis::AcrossX,
+            DensityMetric2D {
+                across_x: 0.0,
+                across_y: 60.0,
+                aspect_locked: true,
+            },
+        ),
+        session
+            .document()
+            .set_channel_pattern_rotation_for_effective(CHANNEL_ID, f64::NAN),
+        session
+            .document()
+            .set_channel_mark_response_field_for_effective(
+                CHANNEL_ID,
+                MarkGeometryFieldEdit::MinimumFill(-1.0),
+            ),
+    ];
+    for command in invalid_commands {
+        assert!(command.is_err(), "invalid effective edit must not build");
+        assert_eq!(session.snapshot(), original_document);
+        assert_eq!(session.revision(), original_revision);
+    }
     for command in [
-        DocumentCommand::SetDensityAxis {
-            channel_id: CHANNEL_ID,
-            edited_axis: toniator_domain::DensityEditedAxis::AcrossX,
-            value: 0.0,
-        },
-        DocumentCommand::SetRotation {
-            channel_id: CHANNEL_ID,
-            rotation_degrees: f64::NAN,
-        },
         DocumentCommand::SetTranslationAxis {
             channel_id: CHANNEL_ID,
             edited_axis: toniator_domain::TranslationEditedAxis::X,
             value: f64::INFINITY,
-        },
-        DocumentCommand::SetMarkGeometryField {
-            channel_id: CHANNEL_ID,
-            edit: toniator_domain::MarkGeometryFieldEdit::MinimumFill(-1.0),
         },
         DocumentCommand::SetColorComponent {
             channel_id: CHANNEL_ID,
@@ -191,6 +236,8 @@ fn failed_commands_preserve_exact_document_and_revision() {
     }
 }
 
+/// Proves evaluation tokens remain current only until a stale-aware effective
+/// pattern command advances the authoritative document revision.
 #[test]
 fn current_results_are_accepted_and_stale_results_are_rejected() {
     let mut session = session();
@@ -200,10 +247,12 @@ fn current_results_are_accepted_and_stale_results_are_rejected() {
     assert!(session.accepts_evaluation(current));
 
     session
-        .apply(&DocumentCommand::SetRotation {
-            channel_id: CHANNEL_ID,
-            rotation_degrees: 15.0,
-        })
+        .apply(
+            &session
+                .document()
+                .set_channel_pattern_rotation_for_effective(CHANNEL_ID, 15.0)
+                .expect("rotation command builds"),
+        )
         .expect("valid edit");
     assert!(!session.accepts_evaluation(current));
 

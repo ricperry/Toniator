@@ -1,6 +1,5 @@
 use std::{fs, path::PathBuf};
 
-use sha2::{Digest, Sha256};
 use toniator_domain::{
     CanvasSpec, ChannelId, Document, DocumentCommand, DocumentHistory, DocumentSession,
     PatternDefinitionEdit, PatternMechanism, SourceReference, SourceReferenceId,
@@ -32,16 +31,6 @@ struct ChannelCanonicalIdentity {
     realization: String,
 }
 
-/// Test-only grouped proof for RGB isolation. It keeps the three isolated
-/// canonical outputs and green/blue visible-layer comparisons together so the
-/// manifest writer cannot accidentally report an unrelated channel boundary.
-struct RgbIsolationEvidence<'a> {
-    isolated_before: [&'a CanonicalOutput; 3],
-    isolated_after: [&'a CanonicalOutput; 3],
-    green_geometry_equal: bool,
-    blue_geometry_equal: bool,
-}
-
 /// Builds a document history for one natural source, retaining the established
 /// document-owned channel topology and canonical engine boundary.
 fn history(source_id: SourceReferenceId, width: f64, height: f64) -> DocumentHistory {
@@ -57,23 +46,13 @@ fn history(source_id: SourceReferenceId, width: f64, height: f64) -> DocumentHis
     history
 }
 
-/// Writes exact canonical output artifacts for review below this stage's
-/// derived validation directory without changing the immutable source inputs.
-fn write_artifacts(name: &str, png: &[u8], svg: &str) {
-    let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/validation/stage-19a/canonical-output");
-    fs::create_dir_all(&directory).unwrap();
-    fs::write(directory.join(format!("{name}.png")), png).unwrap();
-    fs::write(directory.join(format!("{name}.svg")), svg).unwrap();
-}
-
-/// Returns the isolated standalone-preset directory used by canonical reload
-/// parity evidence; it never changes the immutable project input assets.
-fn preset_directory() -> PathBuf {
-    let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/validation/stage-19a/reloaded-presets");
-    fs::create_dir_all(&directory).unwrap();
-    directory
+/// Returns one bounded process-local temporary preset path for an actual
+/// persistence assertion; callers remove it before completing the test.
+fn preset_path(id: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "toniator-preset-parity-{}-{id}.json",
+        std::process::id()
+    ))
 }
 
 /// Evaluates one complete modeled document through the ordinary canonical
@@ -164,88 +143,6 @@ fn evaluated_document(
         source,
     ))
     .unwrap()
-}
-
-/// Computes a compact stable digest for review manifests from exact canonical
-/// output bytes; it is evidence-only and does not feed evaluator/cache state.
-fn sha256(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
-}
-
-/// Writes a compact inspectable channel/definition/identity manifest beside
-/// the natural-resolution artifacts. It records only derived test evidence.
-fn write_rgb_manifest(
-    name: &str,
-    source_name: &str,
-    history: &DocumentHistory,
-    before: &CanonicalOutput,
-    after: &CanonicalOutput,
-    isolation: RgbIsolationEvidence<'_>,
-) {
-    let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/validation/stage-19a/canonical-output");
-    fs::create_dir_all(&directory).unwrap();
-    let body = history
-        .document()
-        .channel_topology()
-        .unwrap()
-        .channels()
-        .iter()
-        .map(|channel| {
-            let before_identity = channel_identity(before, channel.id);
-            let after_identity = channel_identity(after, channel.id);
-            let (recipe_ownership, isolated_index, geometry_equal) = match channel.id {
-                ChannelId(1) => ("even-random-circles", 0, "not-applicable-red-edited"),
-                ChannelId(2) => (
-                    "straight-grid-circles",
-                    1,
-                    if isolation.green_geometry_equal {
-                        "true"
-                    } else {
-                        "false"
-                    },
-                ),
-                ChannelId(3) => (
-                    "original-default",
-                    2,
-                    if isolation.blue_geometry_equal {
-                        "true"
-                    } else {
-                        "false"
-                    },
-                ),
-                _ => ("unrecognized", 0, "false"),
-            };
-            format!(
-                "channel_role={:?}\nchannel_id={}\nrecipe_ownership={}\ndefinition_id={}\nfamily_before={}\nfamily_after={}\nrealization_before={}\nrealization_after={}\nisolated_png_before_sha256={}\nisolated_png_after_sha256={}\nisolated_png_changed={}\nvisible_render_layer_geometry_equal={}\n",
-                channel.role,
-                channel.id.0,
-                recipe_ownership,
-                channel.pattern_definition_id.0,
-                before_identity.family,
-                after_identity.family,
-                before_identity.realization,
-                after_identity.realization,
-                sha256(&isolation.isolated_before[isolated_index].png),
-                sha256(&isolation.isolated_after[isolated_index].png),
-                isolation.isolated_before[isolated_index].png
-                    != isolation.isolated_after[isolated_index].png,
-                geometry_equal,
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    fs::write(
-        directory.join(format!("{name}.manifest.txt")),
-        format!(
-            "source_baseline={source_name}\ncomposite_png_before_sha256={}\ncomposite_png_after_sha256={}\ncomposite_svg_before_sha256={}\ncomposite_svg_after_sha256={}\nred_typed_seed_edit_changes_only_red=true\nisolated_svg_byte_equality_asserted=false\nisolated_svg_note=Modeled SVG serializes hidden document-wide channel identity metadata, so isolated SVG bytes are inspectable artifacts but not the byte-isolation assertion.\n\n{body}",
-            sha256(&before.png),
-            sha256(&after.png),
-            sha256(before.svg.as_bytes()),
-            sha256(after.svg.as_bytes()),
-        ),
-    )
-    .unwrap();
 }
 
 /// Builds RGB document state in which red owns even-random, green owns the
@@ -353,11 +250,12 @@ fn bundled_presets_reload_and_preserve_canonical_output_parity() {
             620.0,
         ),
     ];
-    for (preset_id, artifact_name, source_path, format, width, height) in cases {
+    for (preset_id, _artifact_name, source_path, format, width, height) in cases {
         let record = registry.find(preset_id).unwrap();
-        let preset_path = preset_directory().join(format!("{preset_id}.preset.json"));
+        let preset_path = preset_path(preset_id);
         save_preset(&preset_path, record).unwrap();
         let reloaded = load_preset(&preset_path).unwrap();
+        fs::remove_file(&preset_path).expect("temporary preset file is removed");
         assert_eq!(reloaded, *record);
         let source_id = SourceReferenceId::new(format!("preset-{preset_id}")).unwrap();
         let source =
@@ -388,15 +286,15 @@ fn bundled_presets_reload_and_preserve_canonical_output_parity() {
         let original_svg = write_svg(original.scene());
         assert_eq!(original_png, reloaded_png);
         assert_eq!(original_svg, write_svg(reloaded_output.scene()));
-        write_artifacts(artifact_name, &original_png, &original_svg);
     }
 }
 
 /// Proves that RGB preset applications allocate three independent document
 /// definitions and that a later typed red seed edit changes only red's
-/// canonical output/identity. The test writes inspectable natural-resolution
-/// composite artifacts for both immutable project baselines and compares
-/// isolated green/blue PNG and SVG bytes before and after the red edit.
+/// canonical output/identity. It compares isolated green/blue PNG bytes plus
+/// complete-document geometry and per-channel identity; isolated SVG bytes are
+/// intentionally excluded because hidden document-wide identity metadata still
+/// changes when red changes.
 #[test]
 fn independent_rgb_presets_preserve_unaffected_channel_canonical_outputs() {
     let cases = [
@@ -417,7 +315,7 @@ fn independent_rgb_presets_preserve_unaffected_channel_canonical_outputs() {
             620.0,
         ),
     ];
-    for (artifact_name, source_name, source_path, format, width, height) in cases {
+    for (artifact_name, _source_name, source_path, format, width, height) in cases {
         let source_id = SourceReferenceId::new(format!("independent-{artifact_name}")).unwrap();
         let source =
             ResolvedSource::new(source_id.clone(), fs::read(source_path).unwrap(), format).unwrap();
@@ -451,26 +349,6 @@ fn independent_rgb_presets_preserve_unaffected_channel_canonical_outputs() {
             canonical_output(&isolated_channel_history(&history, green), source.clone());
         let blue_before =
             canonical_output(&isolated_channel_history(&history, blue), source.clone());
-        write_artifacts(
-            &format!("{artifact_name}-before-composite"),
-            &before.png,
-            &before.svg,
-        );
-        write_artifacts(
-            &format!("{artifact_name}-before-red-isolated"),
-            &red_before.png,
-            &red_before.svg,
-        );
-        write_artifacts(
-            &format!("{artifact_name}-before-green-isolated"),
-            &green_before.png,
-            &green_before.svg,
-        );
-        write_artifacts(
-            &format!("{artifact_name}-before-blue-isolated"),
-            &blue_before.png,
-            &blue_before.svg,
-        );
 
         edit_red_seed(&mut history, red);
 
@@ -529,44 +407,11 @@ fn independent_rgb_presets_preserve_unaffected_channel_canonical_outputs() {
             channel_identity(&before, blue),
             channel_identity(&after, blue)
         );
-        write_artifacts(
-            &format!("{artifact_name}-after-composite"),
-            &after.png,
-            &after.svg,
-        );
-        write_artifacts(
-            &format!("{artifact_name}-after-red-isolated"),
-            &red_after.png,
-            &red_after.svg,
-        );
-        write_artifacts(
-            &format!("{artifact_name}-after-green-isolated"),
-            &green_after.png,
-            &green_after.svg,
-        );
-        write_artifacts(
-            &format!("{artifact_name}-after-blue-isolated"),
-            &blue_after.png,
-            &blue_after.svg,
-        );
         let green_geometry_equal =
             channel_geometry(&before_result, green) == channel_geometry(&after_result, green);
         let blue_geometry_equal =
             channel_geometry(&before_result, blue) == channel_geometry(&after_result, blue);
         assert!(green_geometry_equal);
         assert!(blue_geometry_equal);
-        write_rgb_manifest(
-            artifact_name,
-            source_name,
-            &history,
-            &before,
-            &after,
-            RgbIsolationEvidence {
-                isolated_before: [&red_before, &green_before, &blue_before],
-                isolated_after: [&red_after, &green_after, &blue_after],
-                green_geometry_equal,
-                blue_geometry_equal,
-            },
-        );
     }
 }

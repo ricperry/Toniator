@@ -247,8 +247,12 @@ fn center_and_visible_mark_exclusion_preserve_spacing_and_report_unsatisfiable_d
     assert!(diagnostics.rejected_by_exclusion > 0);
 }
 
-#[test]
 /// Proves natural random sites remain the authority before both circle realizers.
+///
+/// # Panics
+///
+/// Panics when either realizer no longer projects the evaluated random site set.
+#[test]
 fn natural_random_product_publishes_sites_before_mapped_and_source_color_realization() {
     let constrained_definition = definition(
         RandomSiteCharacter::RawUniform,
@@ -257,8 +261,10 @@ fn natural_random_product_publishes_sites_before_mapped_and_source_color_realiza
         32,
     );
     let plan = resolve_pattern_pipeline(&constrained_definition).unwrap();
+    let mut family_request = natural_request();
+    family_request.support_radius = 10.0;
     let family =
-        evaluate_typed_family_product_cancellable(&plan.family, &natural_request(), &|| false)
+        evaluate_typed_family_product_cancellable(&plan.family, &family_request, &|| false)
             .unwrap();
     let diagnostics = family.random_diagnostics().expect("random diagnostics");
     assert!(diagnostics.requested_sites >= 10_404);
@@ -285,15 +291,15 @@ fn natural_random_product_publishes_sites_before_mapped_and_source_color_realiza
         bias: 0.0,
     };
     let response = MarkResponse {
-        minimum_fill: 2.0,
-        maximum_fill: 9.0,
+        minimum_fill: 0.2,
+        maximum_fill: 0.9,
         rotation_offset_degrees: 0.0,
     };
     let mapped = realize_typed_mapped_outputs(
         &family,
         &plan,
         &source,
-        &natural_request().canvas,
+        &family_request.canvas,
         mapping,
         response,
     )
@@ -304,7 +310,7 @@ fn natural_random_product_publishes_sites_before_mapped_and_source_color_realiza
         &family,
         &plan,
         &source,
-        &natural_request().canvas,
+        &family_request.canvas,
         mapping,
         response,
     )
@@ -320,8 +326,12 @@ fn natural_random_product_publishes_sites_before_mapped_and_source_color_realiza
     );
 }
 
-#[test]
 /// Measures bounded natural distributions from truthful site sets without adapters.
+///
+/// # Panics
+///
+/// Panics when deterministic random distribution bounds no longer hold.
+#[test]
 fn natural_random_distribution_metrics_are_bounded_and_structurally_distinct() {
     let source_path = format!(
         "{}/../../assets/raster-sample.png",
@@ -423,35 +433,6 @@ fn natural_random_distribution_metrics_are_bounded_and_structurally_distinct() {
     let (raw_bins, _raw_peak) = occupancy(&raw);
     let (even_bins, _even_peak) = occupancy(&even);
     let (clustered_bins, _clustered_peak) = occupancy(&clustered);
-    let mut metrics = String::from(
-        "process requested achieved canvas guard candidates density_reject exclusion_reject outside_reject occupancy32 peak32 mean_response\n",
-    );
-    for (name, value) in [
-        ("raw", &raw),
-        ("even", &even),
-        ("clustered", &clustered),
-        ("artwork-weighted", &weighted),
-    ] {
-        let diagnostics = random(value);
-        let (bins, peak) = occupancy(value);
-        metrics.push_str(&format!(
-            "{name} {} {} {} {} {} {} {} {} {bins} {peak} {:.9}\n",
-            diagnostics.requested_sites,
-            diagnostics.achieved_sites,
-            diagnostics.canvas_sites,
-            diagnostics.guard_sites,
-            diagnostics.candidates_considered,
-            diagnostics.rejected_by_density,
-            diagnostics.rejected_by_exclusion,
-            diagnostics.rejected_outside_envelope,
-            response_mean(value),
-        ));
-    }
-    let target = format!(
-        "{}/../../target/validation/stage-16b/natural-random-metrics.txt",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    fs::write(target, metrics).unwrap();
     assert!(even_bins >= raw_bins.saturating_sub(8));
     assert!(clustered_bins * 2 < raw_bins);
     assert!(response_mean(&weighted) > response_mean(&raw));

@@ -1,5 +1,3 @@
-use std::{fs, path::PathBuf};
-
 use toniator_domain::{
     CanvasSpec, ChannelId, Document, DocumentHistory, DocumentSession, SourceReference,
 };
@@ -21,34 +19,23 @@ fn history() -> DocumentHistory {
     DocumentHistory::new(DocumentSession::new(document).unwrap())
 }
 
-/// Uses the current document's selected-channel layout without introducing a
-/// preset-specific evaluator or renderer path.
+/// Resolves the current selected channel through document-owned inheritance
+/// before constructing the shared family request; this test never recreates
+/// effective layout arithmetic or adds a preset-specific evaluation path.
 fn request(document: &Document) -> GridInspectRequest {
     let channel = document
-        .channel_topology()
-        .unwrap()
-        .channels()
-        .first()
-        .unwrap();
+        .effective_channel_pattern(ChannelId(1))
+        .expect("the default selected channel resolves through document authority");
     GridInspectRequest {
         canvas: document.canvas().clone(),
-        density: channel.layout.density.clone(),
-        rotation_degrees: channel.layout.rotation_degrees,
-        translation_x: channel.layout.translation_x,
-        translation_y: channel.layout.translation_y,
+        density: channel.density,
+        rotation_degrees: channel.pattern_rotation_degrees,
+        translation_x: channel.translation_x,
+        translation_y: channel.translation_y,
         guard_steps: 2,
         support_radius: 4.5,
         max_family_candidates: 1_000_000,
     }
-}
-
-/// Persists compact canonical-family evidence below the active stage's
-/// validation directory, never altering source fixtures or output code.
-fn write_artifact(name: &str, body: &str) {
-    let directory =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/validation/stage-19a/parity");
-    fs::create_dir_all(&directory).unwrap();
-    fs::write(directory.join(name), body).unwrap();
 }
 
 /// Proves representative grid and random recipes enter exactly the existing
@@ -75,14 +62,6 @@ fn bundled_grid_and_random_recipes_have_deterministic_canonical_family_parity() 
                 .provenance
                 .definition_id,
             definition.id.0
-        );
-        write_artifact(
-            &format!("{id}.txt"),
-            &format!(
-                "preset_id={id}\ndefinition_id={}\nfamily_fingerprint={}\n",
-                definition.id.0,
-                first.family_fingerprint()
-            ),
         );
     }
 }

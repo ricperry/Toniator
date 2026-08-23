@@ -11,6 +11,7 @@ mod curves;
 mod guides;
 mod outlines;
 mod path_offsets;
+mod site_adjacency;
 
 pub use curves::{
     CubicBezierSegment, CurveError, CurvePath, CurveSegment, IntersectionKind, LineSegment,
@@ -30,6 +31,11 @@ pub use path_offsets::{
     MAX_PATH_OFFSET_SEGMENTS, MAX_PATH_OFFSET_SUBDIVISION_DEPTH, OffsetPathComponent,
     PATH_OFFSET_ALGORITHM_CONTRACT_ID, PathOffsetCleanup, PathOffsetEndpointPolicy,
     PathOffsetLimits, PathOffsetRequest, PathOffsetResult, offset_path_cancellable,
+};
+pub use site_adjacency::{
+    SITE_ADJACENCY_CONTRACT_ID, SiteAdjacencyComponent, SiteAdjacencyEdge, SiteAdjacencyError,
+    SiteAdjacencyGraph, SiteAdjacencyLimits, SiteAdjacencyNode, SiteAdjacencyPolicy,
+    build_site_adjacency_cancellable,
 };
 
 /// A finite document- or pattern-local point.

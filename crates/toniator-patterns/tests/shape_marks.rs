@@ -105,6 +105,7 @@ fn shape_document(
         base.canvas().clone(),
         base.source().clone(),
         vec![definition.clone()],
+        base.pattern_settings().clone(),
         base.channel_model().unwrap(),
         base.channel_topology().unwrap().clone(),
         vec![horizontal, vertical, shape],

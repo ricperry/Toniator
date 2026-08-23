@@ -1,9 +1,9 @@
 use toniator_domain::{
-    CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternLayout, ChannelSourceMapping,
-    ChannelState, ColorValue, CoveragePolicy, DensityMetric2D, Document, DocumentId,
-    DocumentSession, MarkGeometryResponse, PatternDefinition, PatternDefinitionId,
-    PatternMechanismId, PatternOutputLayerId, SourceComponent, SourcePlacement, SourceReference,
-    SourceReferenceId,
+    CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternInstance, ChannelPatternLayoutDelta,
+    ChannelSourceMapping, ChannelState, ColorValue, CoveragePolicy, DensityMetric2D, Document,
+    DocumentId, DocumentPatternSettings, DocumentSession, MarkGeometryResponse, PatternDefinition,
+    PatternDefinitionId, PatternGeometryResponse, PatternMechanismId, PatternOutputLayerId,
+    SourceComponent, SourcePlacement, SourceReference, SourceReferenceId,
 };
 use toniator_engine::{
     ChannelDiagnosticRequest, EvaluationLimits, GeometryOutput, ResolvedSource, SourceFormatHint,
@@ -11,6 +11,54 @@ use toniator_engine::{
 };
 
 const CHANNEL_ID: ChannelId = ChannelId(1);
+
+/// Builds current document-owned pattern settings whose resolved values match
+/// the diagnostic fixture without storing an obsolete per-channel layout.
+fn pattern_settings(rotation_degrees: f64) -> DocumentPatternSettings {
+    DocumentPatternSettings {
+        definition_id: PatternDefinitionId(1),
+        density: DensityMetric2D {
+            across_x: 90.0,
+            across_y: 60.0,
+            aspect_locked: true,
+        },
+        pattern_rotation_degrees: rotation_degrees,
+        shape_rotation_degrees: 0.0,
+        geometry_response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+            minimum_fill: 0.2,
+            maximum_fill: 0.9,
+        }),
+    }
+}
+
+/// Builds a channel that inherits every family and realization setting while
+/// retaining only channel-owned appearance and source mapping intent.
+fn channel(
+    component: SourceComponent,
+    translation_x: f64,
+    translation_y: f64,
+    appearance: ChannelAppearance,
+) -> ChannelState {
+    ChannelState {
+        id: CHANNEL_ID,
+        pattern_instance: ChannelPatternInstance {
+            definition_override: None,
+            layout_delta: ChannelPatternLayoutDelta {
+                density: None,
+                rotation_degrees: None,
+                translation_x,
+                translation_y,
+            },
+            shape_rotation_delta_degrees: None,
+            geometry_response_delta: None,
+        },
+        appearance,
+        source_mapping: ChannelSourceMapping {
+            component,
+            placement: SourcePlacement::StretchToCanvas,
+        },
+    }
+}
 
 /// Builds the retained legacy diagnostic request used by render identity regression witnesses.
 fn request(bytes: Vec<u8>, format: SourceFormatHint) -> ChannelDiagnosticRequest {
@@ -33,20 +81,12 @@ fn request(bytes: Vec<u8>, format: SourceFormatHint) -> ChannelDiagnosticRequest
                 additional_margin: 4.5,
             },
         )],
-        vec![ChannelState {
-            id: CHANNEL_ID,
-            pattern_definition_id: PatternDefinitionId(1),
-            layout: ChannelPatternLayout {
-                density: DensityMetric2D {
-                    across_x: 90.0,
-                    across_y: 60.0,
-                    aspect_locked: true,
-                },
-                rotation_degrees: 17.0,
-                translation_x: 3.25,
-                translation_y: -4.5,
-            },
-            appearance: ChannelAppearance {
+        pattern_settings(17.0),
+        vec![channel(
+            SourceComponent::Luminance,
+            3.25,
+            -4.5,
+            ChannelAppearance {
                 visible: true,
                 color: ColorValue {
                     red: 0.0,
@@ -56,16 +96,7 @@ fn request(bytes: Vec<u8>, format: SourceFormatHint) -> ChannelDiagnosticRequest
                 },
                 opacity: 0.72,
             },
-            mark_geometry_response: MarkGeometryResponse {
-                minimum_fill: 2.0,
-                maximum_fill: 9.0,
-                rotation_offset_degrees: 0.0,
-            },
-            source_mapping: ChannelSourceMapping {
-                component: SourceComponent::Luminance,
-                placement: SourcePlacement::StretchToCanvas,
-            },
-        }],
+        )],
     )
     .unwrap();
     let session = DocumentSession::new(document).unwrap();
@@ -75,31 +106,31 @@ fn request(bytes: Vec<u8>, format: SourceFormatHint) -> ChannelDiagnosticRequest
     )
 }
 
-/// Preserves accepted legacy-circle diagnostic identities after generalized marks were introduced.
+/// Verifies current document authority yields exact deterministic circle diagnostics for both
+/// immutable source inputs, including source-sensitive realization and scene identities.
 #[test]
-fn document_derived_evaluation_matches_accepted_stage_five_identities_and_geometry() {
-    for (path, format, realization, scene, decoded) in [
+fn document_derived_evaluation_has_current_deterministic_circle_geometry() {
+    for (path, format, decoded, family, realization, scene) in [
         (
             "../../assets/raster-sample.png",
             SourceFormatHint::Png,
-            "fnv1a64:9db8b05a88a2c727",
-            "fnv1a64:79d8d6ed11625502",
             "sha256:2840ac64a71451469ed2b90b797b284f57ceace284cd986a46e66b6ef82b6ee8",
+            "fnv1a64:2f09ab261ea6caf3:nominal-cell-basis:fnv1a64:3c3cd02759ee6efe",
+            "fnv1a64:293071f7ca8674b9",
+            "fnv1a64:72bea009ca013ccb",
         ),
         (
             "../../assets/vector-sample.svg",
             SourceFormatHint::Svg,
-            "fnv1a64:d59cc5d53352afd5",
-            "fnv1a64:c78b9c3d56c8d8cd",
             "sha256:cf28b0ab640991969d9a5936be85dfd552867125950362495c69b1ab99f94fb7",
+            "fnv1a64:2f09ab261ea6caf3:nominal-cell-basis:fnv1a64:3c3cd02759ee6efe",
+            "fnv1a64:90e6ef8f666af93f",
+            "fnv1a64:b413f4ce295e4b84",
         ),
     ] {
         let result =
             evaluate_channel_diagnostic(request(std::fs::read(path).unwrap(), format)).unwrap();
-        assert_eq!(
-            result.scene().identity().family_fingerprint(),
-            "fnv1a64:87a8b213740ed5b9"
-        );
+        assert_eq!(result.scene().identity().family_fingerprint(), family);
         assert_eq!(
             result.scene().identity().realization_fingerprint(),
             realization
@@ -107,16 +138,14 @@ fn document_derived_evaluation_matches_accepted_stage_five_identities_and_geomet
         assert_eq!(result.scene().identity().scene_fingerprint(), scene);
         assert_eq!(result.source_identity().decoded_pixel_hash, decoded);
         let GeometryOutput::CircularMarks(marks) = result.scene().layers()[0].geometry() else {
-            panic!("accepted Stage 5 diagnostic definition must retain the legacy circle adapter");
+            panic!("fixture must retain the circle diagnostic adapter");
         };
-        assert_eq!(marks.len(), 6_185);
-        assert_eq!(
-            marks
-                .iter()
-                .filter(|mark| mark.scope == toniator_engine::SiteScope::Guard)
-                .count(),
-            783
-        );
+        assert_eq!(marks.len(), 6_830);
+        let guard_count = marks
+            .iter()
+            .filter(|mark| mark.scope == toniator_engine::SiteScope::Guard)
+            .count();
+        assert_eq!(guard_count, 1_428);
         assert!(
             marks
                 .windows(2)
@@ -130,6 +159,7 @@ fn document_derived_evaluation_matches_accepted_stage_five_identities_and_geomet
     }
 }
 
+/// Confirms source identity mismatch fails before decoding or geometry work.
 #[test]
 fn source_mismatch_is_rejected_before_decode_or_geometry() {
     let source_id = SourceReferenceId::new("snapshot-source").unwrap();
@@ -152,20 +182,12 @@ fn source_mismatch_is_rejected_before_decode_or_geometry() {
                 additional_margin: 4.5,
             },
         )],
-        vec![ChannelState {
-            id: CHANNEL_ID,
-            pattern_definition_id: PatternDefinitionId(1),
-            layout: ChannelPatternLayout {
-                density: DensityMetric2D {
-                    across_x: 90.0,
-                    across_y: 60.0,
-                    aspect_locked: true,
-                },
-                rotation_degrees: 0.0,
-                translation_x: 0.0,
-                translation_y: 0.0,
-            },
-            appearance: ChannelAppearance {
+        pattern_settings(0.0),
+        vec![channel(
+            SourceComponent::Luminance,
+            0.0,
+            0.0,
+            ChannelAppearance {
                 visible: true,
                 color: ColorValue {
                     red: 0.0,
@@ -175,16 +197,7 @@ fn source_mismatch_is_rejected_before_decode_or_geometry() {
                 },
                 opacity: 1.0,
             },
-            mark_geometry_response: MarkGeometryResponse {
-                minimum_fill: 2.0,
-                maximum_fill: 9.0,
-                rotation_offset_degrees: 0.0,
-            },
-            source_mapping: ChannelSourceMapping {
-                component: SourceComponent::Luminance,
-                placement: SourcePlacement::StretchToCanvas,
-            },
-        }],
+        )],
     )
     .unwrap();
     let session = DocumentSession::new(document).unwrap();
@@ -196,6 +209,7 @@ fn source_mismatch_is_rejected_before_decode_or_geometry() {
     assert_eq!(error.path(), "evaluation.source_reference");
 }
 
+/// Confirms an unassigned authoritative source rejects a resolved payload.
 #[test]
 fn unassigned_source_reference_fails_at_the_authoritative_boundary() {
     let document = Document::new(
@@ -215,20 +229,12 @@ fn unassigned_source_reference_fails_at_the_authoritative_boundary() {
                 additional_margin: 4.5,
             },
         )],
-        vec![ChannelState {
-            id: CHANNEL_ID,
-            pattern_definition_id: PatternDefinitionId(1),
-            layout: ChannelPatternLayout {
-                density: DensityMetric2D {
-                    across_x: 90.0,
-                    across_y: 60.0,
-                    aspect_locked: true,
-                },
-                rotation_degrees: 0.0,
-                translation_x: 0.0,
-                translation_y: 0.0,
-            },
-            appearance: ChannelAppearance {
+        pattern_settings(0.0),
+        vec![channel(
+            SourceComponent::Alpha,
+            0.0,
+            0.0,
+            ChannelAppearance {
                 visible: true,
                 color: ColorValue {
                     red: 0.0,
@@ -238,16 +244,7 @@ fn unassigned_source_reference_fails_at_the_authoritative_boundary() {
                 },
                 opacity: 1.0,
             },
-            mark_geometry_response: MarkGeometryResponse {
-                minimum_fill: 2.0,
-                maximum_fill: 9.0,
-                rotation_offset_degrees: 0.0,
-            },
-            source_mapping: ChannelSourceMapping {
-                component: SourceComponent::Alpha,
-                placement: SourcePlacement::StretchToCanvas,
-            },
-        }],
+        )],
     )
     .unwrap();
     let session = DocumentSession::new(document).unwrap();
@@ -264,6 +261,7 @@ fn unassigned_source_reference_fails_at_the_authoritative_boundary() {
     assert_eq!(error.path(), "evaluation.source_reference");
 }
 
+/// Confirms candidate limits reject before oversized family allocation.
 #[test]
 fn default_and_custom_candidate_limits_fail_before_oversized_family_allocation() {
     assert_eq!(

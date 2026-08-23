@@ -499,8 +499,18 @@ geometry. The user accepted Stage 20K on 2026-08-22. The accepted
 implementation checkpoint is `f848ff995c9e30f89a85fbc01b5b8d97cc8de3d5`;
 publication remains separate.
 
-**Remaining Stage 20L+ — Planned.** The approved remaining order is 20L
-adjacency; 20M connection programs; 20N
+**Stage 20L — Implemented awaiting review.** The deterministic,
+mechanism-neutral derived site-adjacency contract is implemented across
+geometry, patterns, and engine with bounded cancellable construction,
+guard-inclusive family evaluation, ordinary-output identity preservation, and
+no document intent, schema, preset, history, renderer, CLI, GTK, or later
+connection-program work. Focused and broad affected-package verification is
+green, the bounded current-suite maintenance pass is complete, and the final
+independent read-only review found no material issue. User acceptance,
+checkpointing, publication, and Stage 20M remain separate gates.
+
+**Remaining Stage 20M+ — Planned.** The approved remaining order is 20M
+connection programs; 20N
 Voronoi; 20O guide faces; 20P region realization; 20Q composites; 20R gallery
 recipes; 20S Pattern Wizard; and 20T–20W temporal work. Each requires its own
 contract, implementation, review, and acceptance gate.

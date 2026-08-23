@@ -22,11 +22,12 @@ pub use toniator_geometry::{
     GuideInstanceId, GuideIntersectionProvenance, IntersectionSite, NominalCellBasis,
     PATH_OFFSET_ALGORITHM_CONTRACT_ID, PathClosure, PathLocation, PathOffsetCleanup,
     PathOffsetEndpointPolicy, PathOffsetLimits, PathOffsetRequest, PathOffsetResult, Point2,
-    SiteId, SiteScope, StraightGuide, StrokeProfileSample, StructuralPathInstance,
+    SiteAdjacencyError, SiteAdjacencyGraph, SiteAdjacencyLimits, SiteAdjacencyPolicy, SiteId,
+    SiteScope, StraightGuide, StrokeProfileSample, StructuralPathInstance,
     StructuralPathInstanceId, StructuralPathLocationProvenance, StructuralPathSet,
     StructuralPathSourceId, VariableWidthOutlineLimits, VariableWidthPathSample, Vector2,
-    build_variable_width_outline_cancellable, offset_path_cancellable, projection_range,
-    resolve_guide_prototype,
+    build_site_adjacency_cancellable, build_variable_width_outline_cancellable,
+    offset_path_cancellable, projection_range, resolve_guide_prototype,
 };
 use toniator_sampling::{
     SampledSourcePaint, SamplingError, SourceComponent, SourceField, SourceMappingComponent,
@@ -593,6 +594,15 @@ pub struct TypedFamilyOutput {
     structure: TypedFamilyStructure,
 }
 
+/// One caller-requested topology result paired with the complete family envelope that produced it.
+///
+/// The family stays a normal cacheable product while adjacency remains caller-supplied derived data.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SiteAdjacencyEvaluation {
+    pub family: TypedFamilyOutput,
+    pub graph: SiteAdjacencyGraph,
+}
+
 /// Truthful non-site metadata retained for the current circle compatibility adapter.
 #[derive(Clone, Debug, PartialEq)]
 struct TypedFamilyStructure {
@@ -649,6 +659,11 @@ impl TypedFamilyOutput {
     /// Returns the conservative support radius used to allocate this immutable family envelope.
     pub fn planned_support_radius(&self) -> f64 {
         self.structure.support_radius
+    }
+
+    /// Returns the complete guard-step count retained by the immutable family envelope.
+    pub const fn guard_steps(&self) -> u32 {
+        self.structure.guard_steps
     }
 }
 
@@ -1488,6 +1503,137 @@ pub fn evaluate_typed_family_product_with_source_cancellable(
         diagnostics: None,
         structure: TypedFamilyStructure::from_grid(&output, family.provenance.mechanism_ids[0]),
     })
+}
+
+/// Evaluates a complete topology-supporting family envelope, then derives caller-supplied site adjacency.
+///
+/// This boundary dispatches only on the resolved structural-product capability.  It never uses a
+/// mechanism name or provenance variant, never treats canvas bounds as graph input, and never
+/// stores adjacency as document intent or a family-cache product.
+///
+/// # Errors
+///
+/// Returns stable raw-path, guard, family, source, geometry, limit, or cancellation diagnostics
+/// before a partial family/graph pair can escape.
+pub fn evaluate_typed_site_adjacency_with_source_cancellable(
+    family: &FamilyCapability,
+    request: &GridInspectRequest,
+    source: Option<&SourceField>,
+    policy: SiteAdjacencyPolicy,
+    limits: SiteAdjacencyLimits,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<SiteAdjacencyEvaluation, PatternPipelineError> {
+    if family.product == StructuralProductCapability::ParametricPaths {
+        return Err(PatternPipelineError::new(
+            "adjacency.family.product",
+            "raw parametric-path products do not publish sites for adjacency",
+        ));
+    }
+    if !matches!(
+        family.product,
+        StructuralProductCapability::GuideIntersections
+            | StructuralProductCapability::AlongGuideSites
+            | StructuralProductCapability::RandomSites
+    ) {
+        return Err(PatternPipelineError::new(
+            "adjacency.family.product",
+            "resolved family product does not publish eligible adjacency sites",
+        ));
+    }
+    if request.guard_steps == 0 {
+        return Err(PatternPipelineError::new(
+            "adjacency.coverage.guard_steps",
+            "active adjacency requires at least one guard step",
+        ));
+    }
+    policy.validate().map_err(site_adjacency_error)?;
+    let topology_support = f64::from(request.guard_steps) * policy.maximum_distance();
+    let support_radius = request.support_radius + topology_support;
+    if !support_radius.is_finite() {
+        return Err(PatternPipelineError::new(
+            "adjacency.coverage.support",
+            "topology support must remain finite",
+        ));
+    }
+    let mut complete_request = request.clone();
+    complete_request.support_radius = support_radius;
+    let complete_family = evaluate_typed_family_product_with_source_cancellable(
+        family,
+        &complete_request,
+        source,
+        is_cancelled,
+    )?;
+    let graph = build_typed_site_adjacency_cancellable(
+        &complete_family,
+        request.support_radius,
+        policy,
+        limits,
+        is_cancelled,
+    )?;
+    Ok(SiteAdjacencyEvaluation {
+        family: complete_family,
+        graph,
+    })
+}
+
+/// Derives topology from one already evaluated typed site product without reinterpreting its mechanism.
+///
+/// # Errors
+///
+/// Returns a stable product, guard, geometry, resource, or cancellation diagnostic without
+/// publishing a partial graph. Raw parametric paths are rejected before graph allocation.
+pub fn build_typed_site_adjacency_cancellable(
+    family: &TypedFamilyOutput,
+    base_support_radius: f64,
+    policy: SiteAdjacencyPolicy,
+    limits: SiteAdjacencyLimits,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<SiteAdjacencyGraph, PatternPipelineError> {
+    if family.family.product == StructuralProductCapability::ParametricPaths {
+        return Err(PatternPipelineError::new(
+            "adjacency.family.product",
+            "raw parametric-path products do not publish sites for adjacency",
+        ));
+    }
+    if !matches!(
+        family.family.product,
+        StructuralProductCapability::GuideIntersections
+            | StructuralProductCapability::AlongGuideSites
+            | StructuralProductCapability::RandomSites
+    ) {
+        return Err(PatternPipelineError::new(
+            "adjacency.family.product",
+            "resolved family product does not publish eligible adjacency sites",
+        ));
+    }
+    if family.guard_steps() == 0 {
+        return Err(PatternPipelineError::new(
+            "adjacency.coverage.guard_steps",
+            "active adjacency requires at least one guard step",
+        ));
+    }
+    policy.validate().map_err(site_adjacency_error)?;
+    if !base_support_radius.is_finite() || base_support_radius < 0.0 {
+        return Err(PatternPipelineError::new(
+            "adjacency.coverage.support",
+            "base topology support must be finite and nonnegative",
+        ));
+    }
+    let required_support =
+        base_support_radius + f64::from(family.guard_steps()) * policy.maximum_distance();
+    if !required_support.is_finite() || family.planned_support_radius() < required_support {
+        return Err(PatternPipelineError::new(
+            "adjacency.coverage.support",
+            "family envelope does not cover required topology support",
+        ));
+    }
+    build_site_adjacency_cancellable(family.site_set(), policy, limits, is_cancelled)
+        .map_err(site_adjacency_error)
+}
+
+/// Preserves geometry-owned topology diagnostics at the typed family boundary.
+fn site_adjacency_error(error: SiteAdjacencyError) -> PatternPipelineError {
+    PatternPipelineError::new(error.path(), error.message())
 }
 
 /// Converts one validated analytic parametric source then reuses the accepted finite-path evaluator.
@@ -6878,6 +7024,11 @@ mod realization_tests {
     use super::*;
     use toniator_sampling::{SourceFormatHint, decode_source};
 
+    /// Builds a current-valid guarded grid fixture whose declared support covers normalized marks.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the guarded fixture violates current grid preconditions.
     fn family() -> GridFamilyOutput {
         evaluate_straight_grid(&GridInspectRequest {
             canvas: CanvasSpec {
@@ -6893,7 +7044,7 @@ mod realization_tests {
             translation_x: 3.25,
             translation_y: -4.5,
             guard_steps: 2,
-            support_radius: 4.5,
+            support_radius: 10.0,
             max_family_candidates: 1_048_576,
         })
         .unwrap()
@@ -6917,6 +7068,11 @@ mod realization_tests {
         decode_source(&bytes, hint).unwrap()
     }
 
+    /// Verifies alpha association controls canonical radii without exposing hidden RGB.
+    ///
+    /// # Panics
+    ///
+    /// Panics when canonical alpha association or nominal-cell normalization changes.
     #[test]
     fn png_alpha_associated_ink_reaches_canonical_radii_without_hidden_rgb_fringes() {
         let image = image::RgbaImage::from_raw(
@@ -6956,9 +7112,13 @@ mod realization_tests {
             height: 1.0,
         };
         let response = MarkResponse {
-            minimum_fill: 2.0,
-            maximum_fill: 9.0,
+            minimum_fill: 0.2,
+            maximum_fill: 0.9,
             rotation_offset_degrees: 0.0,
+        };
+        let radius = |ink| {
+            radius_from_ink_with_diameter(ink, response, grid.sites[0].nominal_cell_diameter)
+                .expect("fixture nominal cell basis is valid")
         };
         let luminance = realize_circular_marks(
             &grid,
@@ -6979,7 +7139,8 @@ mod realization_tests {
         )
         .unwrap();
         assert_eq!(
-            luminance.marks[0].radius, 1.0,
+            luminance.marks[0].radius,
+            radius(0.0),
             "transparent black is the minimum mark radius"
         );
         assert!(
@@ -6988,23 +7149,28 @@ mod realization_tests {
                 .all(|index| luminance.marks[index].radius == luminance.marks[0].radius),
             "all zero-alpha hidden RGB variants map to minimum radius"
         );
-        assert_eq!(luminance.marks[3].radius, 4.5);
-        assert_eq!(luminance.marks[4].radius, 1.0);
-        let half_alpha_radius = (2.0 + (128.0 / 255.0) * 7.0) / 2.0;
+        assert_eq!(luminance.marks[3].radius, radius(1.0));
+        assert_eq!(luminance.marks[4].radius, radius(0.0));
+        let half_alpha_radius = radius(128.0 / 255.0);
         assert!((luminance.marks[6].radius - half_alpha_radius).abs() < 1e-12);
-        assert_eq!(luminance.marks[7].radius, 4.5);
+        assert_eq!(luminance.marks[7].radius, radius(1.0));
         assert!(
             alpha.marks[5].radius > alpha.marks[6].radius
                 && alpha.marks[6].radius > alpha.marks[7].radius,
             "Alpha response has one decreasing alpha polarity, without squaring"
         );
-        assert!((alpha.marks[6].radius - (2.0 + (127.0 / 255.0) * 7.0) / 2.0).abs() < 1e-12);
+        assert!((alpha.marks[6].radius - radius(127.0 / 255.0)).abs() < 1e-12);
         assert_ne!(
             luminance.realization_fingerprint,
             alpha.realization_fingerprint
         );
     }
 
+    /// Verifies normalized responses require an explicit nominal cell diameter.
+    ///
+    /// # Panics
+    ///
+    /// Panics when response validation or nominal-cell normalization changes.
     #[test]
     fn normalized_diameter_response_requires_an_explicit_nominal_cell() {
         let response = MarkResponse {
@@ -7051,6 +7217,11 @@ mod realization_tests {
         );
     }
 
+    /// Verifies size-only responses retain every planned canvas and guard site.
+    ///
+    /// # Panics
+    ///
+    /// Panics when current realization changes the evaluated family envelope.
     #[test]
     fn size_changes_reuse_every_site_and_keep_guards_without_clipping() {
         let family = family();
@@ -7065,8 +7236,8 @@ mod realization_tests {
             SourcePlacement::StretchToCanvas,
             SourceComponent::Luminance,
             MarkResponse {
-                minimum_fill: 2.0,
-                maximum_fill: 9.0,
+                minimum_fill: 0.2,
+                maximum_fill: 0.9,
                 rotation_offset_degrees: 0.0,
             },
         )
@@ -7078,8 +7249,8 @@ mod realization_tests {
             SourcePlacement::StretchToCanvas,
             SourceComponent::Luminance,
             MarkResponse {
-                minimum_fill: 3.0,
-                maximum_fill: 8.0,
+                minimum_fill: 0.3,
+                maximum_fill: 0.8,
                 rotation_offset_degrees: 0.0,
             },
         )
@@ -7113,9 +7284,15 @@ mod realization_tests {
         );
     }
 
+    /// Proves a current-valid normalized response cannot exceed declared family support.
+    ///
+    /// # Panics
+    ///
+    /// Panics when declared support no longer governs direct realization.
     #[test]
     fn direct_realization_rejects_a_response_beyond_declared_family_support() {
-        let family = family();
+        let mut family = family();
+        family.support_radius = 4.5;
         let canvas = CanvasSpec {
             width: 90.0,
             height: 60.0,
@@ -7127,16 +7304,16 @@ mod realization_tests {
             SourcePlacement::StretchToCanvas,
             SourceComponent::Luminance,
             MarkResponse {
-                minimum_fill: 2.0,
-                maximum_fill: 9.1,
+                minimum_fill: 0.2,
+                maximum_fill: 2.0,
                 rotation_offset_degrees: 0.0,
             },
         )
         .expect_err("family support is authoritative at direct realization");
-        assert_eq!(error.path(), "realization.response.maximum_fill");
+        assert_eq!(error.path(), "realization.family.support_radius");
 
         let mut wider_family = family;
-        wider_family.support_radius = 6.0;
+        wider_family.support_radius = 20.0;
         let wider = realize_circular_marks(
             &wider_family,
             &field(),
@@ -7145,19 +7322,29 @@ mod realization_tests {
             SourceComponent::Luminance,
             MarkResponse {
                 minimum_fill: 0.5,
-                maximum_fill: 12.0,
+                maximum_fill: 2.0,
                 rotation_offset_degrees: 0.0,
             },
         )
-        .expect("declared support permits diameters below 2 and above 9");
+        .expect("declared support permits current normalized fills through 2.0");
         assert!(
             wider
                 .marks
                 .iter()
-                .all(|mark| mark.radius >= 0.25 && mark.radius <= 6.0)
+                .zip(&wider_family.sites)
+                .all(|(mark, site)| {
+                    let minimum_radius = 0.5 * site.nominal_cell_diameter / 2.0;
+                    let maximum_radius = site.nominal_cell_diameter;
+                    mark.radius >= minimum_radius && mark.radius <= maximum_radius
+                })
         );
     }
 
+    /// Verifies canonical mark output excludes presentation-only inputs from identity.
+    ///
+    /// # Panics
+    ///
+    /// Panics when presentation-independent mark content or identity changes.
     #[test]
     fn canonical_marks_and_fingerprint_are_presentation_independent() {
         let family = family();
@@ -7172,8 +7359,8 @@ mod realization_tests {
             SourcePlacement::StretchToCanvas,
             SourceComponent::Luminance,
             MarkResponse {
-                minimum_fill: 2.0,
-                maximum_fill: 9.0,
+                minimum_fill: 0.2,
+                maximum_fill: 0.9,
                 rotation_offset_degrees: 0.0,
             },
         )
@@ -7186,8 +7373,8 @@ mod realization_tests {
             SourcePlacement::StretchToCanvas,
             SourceComponent::Luminance,
             MarkResponse {
-                minimum_fill: 2.0,
-                maximum_fill: 9.0,
+                minimum_fill: 0.2,
+                maximum_fill: 0.9,
                 rotation_offset_degrees: 0.0,
             },
         )
@@ -7226,6 +7413,11 @@ mod realization_tests {
         output
     }
 
+    /// Verifies mapped realization retains family identity while validating current response input.
+    ///
+    /// # Panics
+    ///
+    /// Panics when mapped realization accepts invalid current response input.
     #[test]
     fn mapped_realization_keeps_family_structural_and_validates_direct_inputs() {
         let family = sites_at_positions(&[0.0, 1.0]);
@@ -7235,8 +7427,8 @@ mod realization_tests {
             height: 1.0,
         };
         let response = MarkResponse {
-            minimum_fill: 2.0,
-            maximum_fill: 9.0,
+            minimum_fill: 0.2,
+            maximum_fill: 0.9,
             rotation_offset_degrees: 0.0,
         };
         let mapping = SourceMapping::canonical(SourceMappingComponent::Red);
@@ -7273,17 +7465,22 @@ mod realization_tests {
                 &canvas,
                 mapping,
                 MarkResponse {
-                    minimum_fill: 2.0,
-                    maximum_fill: 9.1,
+                    minimum_fill: 0.2,
+                    maximum_fill: 2.1,
                     rotation_offset_degrees: 0.0,
                 },
             )
             .unwrap_err()
             .path(),
-            "realization.response.maximum_fill"
+            "realization.response"
         );
     }
 
+    /// Verifies source-colored realization omits transparent samples and keeps paint opaque.
+    ///
+    /// # Panics
+    ///
+    /// Panics when transparent suppression, opaque paint, or nominal sizing changes.
     #[test]
     fn source_color_realization_suppresses_zero_alpha_and_keeps_positive_paint_opaque() {
         let family = sites_at_positions(&[0.0, 1.0, 2.0, 3.0]);
@@ -7301,8 +7498,8 @@ mod realization_tests {
             height: 1.0,
         };
         let response = MarkResponse {
-            minimum_fill: 2.0,
-            maximum_fill: 9.0,
+            minimum_fill: 0.2,
+            maximum_fill: 0.9,
             rotation_offset_degrees: 0.0,
         };
         let mapping = SourceMapping::canonical(SourceMappingComponent::Alpha);
@@ -7334,8 +7531,18 @@ mod realization_tests {
                 alpha: 1.0
             }
         );
-        assert_eq!(opaque.mark.radius, 4.5);
-        assert!((partial.mark.radius - (2.0 + (128.0 / 255.0) * 7.0) / 2.0).abs() < 1e-12);
+        let nominal_cell_diameter = family.sites[0].nominal_cell_diameter;
+        assert_eq!(
+            opaque.mark.radius,
+            radius_from_ink_with_diameter(1.0, response, nominal_cell_diameter).unwrap()
+        );
+        assert!(
+            (partial.mark.radius
+                - radius_from_ink_with_diameter(128.0 / 255.0, response, nominal_cell_diameter)
+                    .unwrap())
+            .abs()
+                < 1e-12
+        );
         assert!(realization.has_only_finite_marks());
 
         let repeated =
@@ -7364,6 +7571,11 @@ mod realization_tests {
         assert_ne!(realization.marks[1].paint, changed.marks[1].paint);
     }
 
+    /// Verifies paint payload independently contributes to source-colored realization identity.
+    ///
+    /// # Panics
+    ///
+    /// Panics when sampled paint is omitted from source-color identity.
     #[test]
     fn sampled_paint_alone_changes_the_source_color_realization_identity() {
         let family = sites_at_positions(&[0.0]);
@@ -7374,8 +7586,8 @@ mod realization_tests {
         };
         let mapping = SourceMapping::canonical(SourceMappingComponent::Alpha);
         let response = MarkResponse {
-            minimum_fill: 2.0,
-            maximum_fill: 9.0,
+            minimum_fill: 0.2,
+            maximum_fill: 0.9,
             rotation_offset_degrees: 0.0,
         };
         let realization =
@@ -7404,6 +7616,11 @@ mod realization_tests {
         );
     }
 
+    /// Verifies interpolation unassociates sampled color before opaque mark construction.
+    ///
+    /// # Panics
+    ///
+    /// Panics when interpolation leaks hidden RGB or changes normalized radius.
     #[test]
     fn source_color_unassociates_after_interpolation_without_a_hidden_rgb_fringe() {
         let family = sites_at_positions(&[0.5]);
@@ -7418,8 +7635,8 @@ mod realization_tests {
             &canvas,
             SourceMapping::canonical(SourceMappingComponent::Alpha),
             MarkResponse {
-                minimum_fill: 2.0,
-                maximum_fill: 9.0,
+                minimum_fill: 0.2,
+                maximum_fill: 0.9,
                 rotation_offset_degrees: 0.0,
             },
         )
@@ -7434,11 +7651,28 @@ mod realization_tests {
                 alpha: 1.0
             }
         );
-        assert_eq!(realization.marks[0].mark.radius, 2.75);
+        assert_eq!(
+            realization.marks[0].mark.radius,
+            radius_from_ink_with_diameter(
+                0.5,
+                MarkResponse {
+                    minimum_fill: 0.2,
+                    maximum_fill: 0.9,
+                    rotation_offset_degrees: 0.0,
+                },
+                family.sites[0].nominal_cell_diameter,
+            )
+            .unwrap()
+        );
     }
 
+    /// Verifies inverted mapped luminance and alpha preserve current canonical mark geometry.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the mapped and component realization paths diverge.
     #[test]
-    fn inverted_stage9_luminance_and_alpha_mappings_retain_legacy_mark_geometry() {
+    fn inverted_luminance_and_alpha_mappings_retain_canonical_mark_geometry() {
         let family = sites_at_positions(&[0.0, 1.0]);
         let source = source_from_rgba(2, vec![255, 0, 0, 128, 255, 255, 255, 64]);
         let canvas = CanvasSpec {
@@ -7446,8 +7680,8 @@ mod realization_tests {
             height: 1.0,
         };
         let response = MarkResponse {
-            minimum_fill: 2.0,
-            maximum_fill: 9.0,
+            minimum_fill: 0.2,
+            maximum_fill: 0.9,
             rotation_offset_degrees: 0.0,
         };
         for (legacy_component, mapping_component) in [
@@ -7501,6 +7735,11 @@ mod realization_tests {
         }
     }
 
+    /// Exercises both immutable baseline sources through current mapped realization APIs.
+    ///
+    /// # Panics
+    ///
+    /// Panics when either immutable source or current mapped realization contract changes.
     #[test]
     fn stage9_realizations_exercise_both_immutable_baseline_sources() {
         let family = family();
@@ -7509,8 +7748,8 @@ mod realization_tests {
             height: 60.0,
         };
         let response = MarkResponse {
-            minimum_fill: 2.0,
-            maximum_fill: 9.0,
+            minimum_fill: 0.2,
+            maximum_fill: 0.9,
             rotation_offset_degrees: 0.0,
         };
         for (name, hint, expected_hash) in [
@@ -8219,6 +8458,7 @@ mod typed_pipeline_tests {
         )
     }
 
+    /// Builds the typed-grid fixture with support valid for its normalized response bounds.
     fn request() -> GridInspectRequest {
         GridInspectRequest {
             canvas: CanvasSpec {
@@ -8234,7 +8474,7 @@ mod typed_pipeline_tests {
             translation_x: 3.25,
             translation_y: -4.5,
             guard_steps: 2,
-            support_radius: 4.5,
+            support_radius: 10.0,
             max_family_candidates: 100_000,
         }
     }
@@ -8251,6 +8491,11 @@ mod typed_pipeline_tests {
         decode_source(&bytes, SourceFormatHint::Png).unwrap()
     }
 
+    /// Verifies typed capabilities retain ordered provenance and exact current family identity.
+    ///
+    /// # Panics
+    ///
+    /// Panics when typed capability identity or provenance changes.
     #[test]
     fn typed_capability_plan_preserves_order_provenance_and_accepted_geometry() {
         let definition = definition();
@@ -8264,7 +8509,10 @@ mod typed_pipeline_tests {
 
         let expected = evaluate_straight_grid(&request()).unwrap();
         let generic = evaluate_typed_family(&definition, &request()).unwrap();
-        assert_eq!(generic.family_fingerprint(), expected.family_fingerprint);
+        assert_eq!(
+            generic.family_fingerprint(),
+            "fnv1a64:392c46103de1f1ab:nominal-cell-basis:fnv1a64:ed9b878e62f6850b"
+        );
         assert_eq!(generic.site_set().len(), expected.sites.len());
         assert_eq!(
             generic.site_set().sites()[0].position,
@@ -8278,8 +8526,8 @@ mod typed_pipeline_tests {
             &request().canvas,
             SourceMapping::canonical(SourceMappingComponent::Red),
             MarkResponse {
-                minimum_fill: 2.0,
-                maximum_fill: 9.0,
+                minimum_fill: 0.2,
+                maximum_fill: 0.9,
                 rotation_offset_degrees: 0.0,
             },
         )
@@ -8340,6 +8588,7 @@ mod generalized_straight_guide_tests {
             },
         }
     }
+    /// Builds the generalized-guide fixture with support valid for its normalized response bounds.
     fn request() -> StraightGuideInspectRequest {
         StraightGuideInspectRequest {
             canvas: CanvasSpec {
@@ -8355,7 +8604,7 @@ mod generalized_straight_guide_tests {
             translation_x: 3.25,
             translation_y: -4.5,
             guard_steps: 2,
-            support_radius: 4.5,
+            support_radius: 10.0,
             max_family_candidates: 100_000,
         }
     }
@@ -8662,6 +8911,11 @@ mod generalized_straight_guide_tests {
         toniator_domain::validate_pattern_definition(&along).unwrap();
     }
 
+    /// Verifies generalized family and realization inputs contribute to their contract identities.
+    ///
+    /// # Panics
+    ///
+    /// Panics when generalized identity omits an asserted structural or realization input.
     #[test]
     fn generalized_identity_covers_family_and_realization_contract_inputs() {
         let definition = intersections(
@@ -8784,8 +9038,8 @@ mod generalized_straight_guide_tests {
             &grid_request.canvas,
             SourceMapping::canonical(SourceMappingComponent::Red),
             MarkResponse {
-                minimum_fill: 2.0,
-                maximum_fill: 9.0,
+                minimum_fill: 0.2,
+                maximum_fill: 0.9,
                 rotation_offset_degrees: 0.0,
             },
         )
@@ -8803,8 +9057,8 @@ mod generalized_straight_guide_tests {
             &grid_request.canvas,
             SourceMapping::canonical(SourceMappingComponent::Red),
             MarkResponse {
-                minimum_fill: 2.0,
-                maximum_fill: 9.0,
+                minimum_fill: 0.2,
+                maximum_fill: 0.9,
                 rotation_offset_degrees: 0.0,
             },
         )
@@ -8816,8 +9070,8 @@ mod generalized_straight_guide_tests {
             &grid_request.canvas,
             SourceMapping::canonical(SourceMappingComponent::Red),
             MarkResponse {
-                minimum_fill: 2.0,
-                maximum_fill: 9.0,
+                minimum_fill: 0.2,
+                maximum_fill: 0.9,
                 rotation_offset_degrees: 0.0,
             },
         )

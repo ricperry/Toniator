@@ -33,16 +33,17 @@ use toniator_domain::{
 };
 pub use toniator_patterns::{
     CanonicalCircleMark, CanonicalMark, CanonicalMarkRealization, CanonicalStrokeRealization,
-    CircularMarkRealization, MarkResponse, Point2, RealizationError, SiteId, SiteScope,
+    CircularMarkRealization, MarkResponse, Point2, RealizationError, SiteAdjacencyGraph,
+    SiteAdjacencyLimits, SiteAdjacencyPolicy, SiteId, SiteScope,
 };
 use toniator_patterns::{
     CurvePath, CurveSegment, FamilyCapability, GenericGuideCapability, GridFamilyOutput,
     MappedCircularMarkRealization, PatternPipelineError, SourceColorCircularMarkRealization,
-    StrokeResponse, TypedFamilyOutput, TypedRealization, evaluate_straight_grid,
-    evaluate_typed_family_product_with_source_cancellable, family_requires_decoded_source,
-    maximum_emitted_guide_spacing, maximum_nominal_cell_diameter, realize_circular_marks,
-    realize_typed_canonical_strokes_cancellable, realize_typed_mapped_outputs,
-    realize_typed_source_color_outputs,
+    StrokeResponse, TypedFamilyOutput, TypedRealization, build_typed_site_adjacency_cancellable,
+    evaluate_straight_grid, evaluate_typed_family_product_with_source_cancellable,
+    family_requires_decoded_source, maximum_emitted_guide_spacing, maximum_nominal_cell_diameter,
+    realize_circular_marks, realize_typed_canonical_strokes_cancellable,
+    realize_typed_mapped_outputs, realize_typed_source_color_outputs,
 };
 pub use toniator_render::{
     GeometryOutput, OutputRasterTarget, PreviewRasterTarget, RasterAntialiasing, RasterBackground,
@@ -79,6 +80,33 @@ pub fn resolve_source_identity(
 /// Runs the bounded Stage 3 family evaluation through the shared headless boundary.
 pub fn inspect_straight_grid(request: &GridInspectRequest) -> Result<GridFamilyOutput, GridError> {
     evaluate_straight_grid(request)
+}
+
+/// Derives a caller-supplied topology graph from an accepted family output without changing caches.
+///
+/// The engine forwards the immutable family result and caller resource policy to the patterns and
+/// geometry authorities. It neither persists policy nor publishes adjacency into ordinary family,
+/// realization, scene, raster, or scheduler cache slots.
+///
+/// # Errors
+///
+/// Returns stable family-product, topology, resource, or cancellation diagnostics and never
+/// modifies accepted evaluation caches.
+pub fn derive_site_adjacency_cancellable(
+    family: &TypedFamilyOutput,
+    base_support_radius: f64,
+    policy: SiteAdjacencyPolicy,
+    limits: EvaluationLimits,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<SiteAdjacencyGraph, EvaluationError> {
+    build_typed_site_adjacency_cancellable(
+        family,
+        base_support_radius,
+        policy,
+        limits.site_adjacency_limits(),
+        is_cancelled,
+    )
+    .map_err(EvaluationError::from_pipeline)
 }
 
 /// One immutable Stage 4 request: the engine creates family output once, then
@@ -173,6 +201,7 @@ pub struct EvaluationLimits {
     max_transformed_curve_segment_instances: usize,
     max_stroke_profile_samples: usize,
     max_stroke_outline_segments: usize,
+    site_adjacency: SiteAdjacencyLimits,
 }
 
 impl EvaluationLimits {
@@ -197,6 +226,7 @@ impl EvaluationLimits {
                 toniator_patterns::MAX_TRANSFORMED_CURVE_SEGMENT_INSTANCES,
             max_stroke_profile_samples: toniator_patterns::MAX_STROKE_PROFILE_SAMPLES,
             max_stroke_outline_segments: toniator_patterns::MAX_STROKE_OUTLINE_SEGMENTS,
+            site_adjacency: SiteAdjacencyLimits::default(),
         })
     }
 
@@ -299,6 +329,31 @@ impl EvaluationLimits {
         self.max_stroke_outline_segments = value;
         Ok(self)
     }
+
+    /// Returns the caller-applied bounded work policy for derived site adjacency.
+    pub const fn site_adjacency_limits(self) -> SiteAdjacencyLimits {
+        self.site_adjacency
+    }
+
+    /// Replaces the complete nonzero adjacency resource policy without changing document authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns the stable geometry-owned limit diagnostic when a topology budget is disabled.
+    pub fn with_site_adjacency_limits(
+        mut self,
+        limits: SiteAdjacencyLimits,
+    ) -> Result<Self, EvaluationError> {
+        SiteAdjacencyLimits::new(
+            limits.maximum_nodes,
+            limits.maximum_neighbor_memberships,
+            limits.maximum_edges,
+            limits.maximum_distance_checks,
+        )
+        .map_err(|error| EvaluationError::new(error.path(), error.message()))?;
+        self.site_adjacency = limits;
+        Ok(self)
+    }
 }
 
 impl Default for EvaluationLimits {
@@ -311,6 +366,7 @@ impl Default for EvaluationLimits {
                 toniator_patterns::MAX_TRANSFORMED_CURVE_SEGMENT_INSTANCES,
             max_stroke_profile_samples: toniator_patterns::MAX_STROKE_PROFILE_SAMPLES,
             max_stroke_outline_segments: toniator_patterns::MAX_STROKE_OUTLINE_SEGMENTS,
+            site_adjacency: SiteAdjacencyLimits::default(),
         }
     }
 }
@@ -3714,6 +3770,71 @@ pub(crate) mod test_support {
             assert_eq!(done_receiver.recv_timeout(GUARD).unwrap(), Ok(()));
         }
     }
+
+    /// Proves a cached immutable family may be reused for caller-derived topology without caching graphs.
+    #[test]
+    fn accepted_family_cache_reuses_for_derived_adjacency_and_cancellation_is_atomic() {
+        let session = modeled_document_session();
+        let request = document_request(&session, valid_document_bytes());
+        let different_adjacency_limits = EvaluationLimits::default()
+            .with_site_adjacency_limits(
+                SiteAdjacencyLimits::new(10_000, 10_000, 10_000, 100_000)
+                    .expect("sufficient nonzero topology limits"),
+            )
+            .expect("engine accepts sufficient topology limits");
+        let ordinary_default = evaluate_with_limits(request.clone(), EvaluationLimits::default())
+            .expect("ordinary document evaluation succeeds");
+        let ordinary_different = evaluate_with_limits(request.clone(), different_adjacency_limits)
+            .expect("adjacency-only limit change preserves ordinary evaluation");
+        assert_eq!(ordinary_default.scene(), ordinary_different.scene());
+        assert_eq!(ordinary_default.raster(), ordinary_different.raster());
+        assert_eq!(ordinary_default.channels(), ordinary_different.channels());
+        let mut cache = DocumentDerivedCache::default();
+        let first = evaluate_cached_document(
+            request.clone(),
+            EvaluationLimits::default(),
+            &cache,
+            &NeverCancelled,
+        )
+        .expect("first document family succeeds");
+        cache.commit(first.transaction);
+        let accepted_family_count = cache.families.len();
+        let family = Arc::clone(&cache.families[0].1);
+        let policy = SiteAdjacencyPolicy::MutualNearest {
+            maximum_degree: 2,
+            maximum_distance: 10.0,
+        };
+        let graph = derive_site_adjacency_cancellable(
+            &family,
+            0.0,
+            policy,
+            EvaluationLimits::default(),
+            &|| false,
+        )
+        .expect("accepted family derives topology");
+        let second = evaluate_cached_document(
+            request,
+            EvaluationLimits::default(),
+            &cache,
+            &NeverCancelled,
+        )
+        .expect("identical document reuses family");
+        assert_eq!(second.diagnostics.channels[0].family, CacheDisposition::Hit);
+        assert_eq!(
+            derive_site_adjacency_cancellable(
+                &family,
+                0.0,
+                policy,
+                EvaluationLimits::default(),
+                &|| true,
+            )
+            .expect_err("cancelled graph cannot publish")
+            .path(),
+            "evaluation.cancelled",
+        );
+        assert_eq!(cache.families.len(), accepted_family_count);
+        assert_eq!(graph.nodes().len(), family.site_set().len());
+    }
 }
 
 #[cfg(test)]
@@ -3754,6 +3875,22 @@ mod cache_key_tests {
 
         assert!(family_key_supports(&broad, &narrow));
         assert!(!family_key_supports(&narrow, &broad));
+    }
+
+    /// Proves topology-supporting family envelopes reuse only when the accepted support is broader.
+    #[test]
+    fn family_cache_key_reuses_broader_topology_envelope_and_rejects_insufficient_one() {
+        let base_support = 4.0_f64;
+        let guard_steps = 2.0_f64;
+        let mut broad = family(true);
+        broad.required_support_radius = (base_support + guard_steps * 8.0).to_bits();
+        let mut requested = broad.clone();
+        requested.required_support_radius = (base_support + guard_steps * 5.0).to_bits();
+        let mut insufficient = broad.clone();
+        insufficient.required_support_radius = (base_support + guard_steps * 3.0).to_bits();
+
+        assert!(family_key_supports(&broad, &requested));
+        assert!(!family_key_supports(&insufficient, &requested));
     }
 
     fn contract(layer_id: u64) -> RealizationContractKey {

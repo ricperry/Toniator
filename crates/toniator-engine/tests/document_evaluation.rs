@@ -2,24 +2,25 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
     fs,
-    path::Path,
-    time::{Duration, Instant},
+    path::PathBuf,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use toniator_domain::{
     ArtworkWeightResponse, AuthoredCurveSegment, AuthoredPoint2, AuthoredStructure,
     AuthoredStructureDraft, AuthoredStructureId, AuthoredStructureKind, CanvasSpec,
-    ChannelAppearance, ChannelId, ChannelPatternLayout, ChannelSourceMapping, ChannelState,
-    ChannelTopology, ChannelTopologyTemplate, ColorValue, CoveragePolicy, DensityMetric2D,
-    Document, DocumentCommand, DocumentHistory, DocumentId, DocumentSession,
-    GeneralizedSiteProduct, GuideDimension, GuideDimensionId, GuidePrototype, GuideRepetition,
-    HalftoneChannelModel, HalftoneChannelRole, InvalidationLevel, MarkGeometryFieldEdit,
-    MarkGeometryResponse, MarkOrientation, PROPERTY_FIELD_IDS, PatternDefinition,
-    PatternDefinitionEdit, PatternDefinitionId, PatternMechanism, PatternMechanismId,
-    PatternOutputLayer, PatternOutputLayerId, PropertyFieldId, RandomSiteCharacter,
-    SiteDensityModulation, SiteExclusionPolicy, SourceComponent, SourceMapping,
-    SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId,
-    StraightGuideDimension, StraightGuideRepetition, TranslationEditedAxis,
-    VisibleMarkSizingPolicy, property_field_contract, property_field_contracts,
+    ChannelAppearance, ChannelId, ChannelPatternInstance, ChannelPatternLayoutDelta,
+    ChannelSourceMapping, ChannelState, ChannelTopology, ChannelTopologyTemplate, ColorValue,
+    CoveragePolicy, DensityMetric2D, Document, DocumentCommand, DocumentHistory, DocumentId,
+    DocumentPatternSettings, DocumentSession, GeneralizedSiteProduct, GuideDimension,
+    GuideDimensionId, GuidePrototype, GuideRepetition, HalftoneChannelModel, HalftoneChannelRole,
+    InvalidationLevel, MarkGeometryFieldEdit, MarkGeometryResponse, MarkOrientation,
+    PROPERTY_FIELD_IDS, PatternDefinition, PatternDefinitionEdit, PatternDefinitionId,
+    PatternGeometryResponse, PatternMechanism, PatternMechanismId, PatternOutputLayer,
+    PatternOutputLayerId, PropertyFieldId, RandomSiteCharacter, SiteDensityModulation,
+    SiteExclusionPolicy, SourceComponent, SourceMapping, SourceMappingComponent, SourcePlacement,
+    SourceReference, SourceReferenceId, StraightGuideDimension, StraightGuideRepetition,
+    TranslationEditedAxis, VisibleMarkSizingPolicy, property_field_contract,
+    property_field_contracts,
 };
 use toniator_engine::{
     CacheDisposition, ChannelDiagnosticRequest, EvaluationCompletion, EvaluationLimits,
@@ -39,6 +40,21 @@ fn wait_for_latest(scheduler: &EvaluationScheduler) -> EvaluationCompletion {
         assert!(Instant::now() < deadline);
         std::thread::yield_now();
     }
+}
+
+/// Allocates a process- and time-unique temporary path for one current-schema save/reopen witness.
+///
+/// The returned path is not created; callers own removing the file after loading it so this test
+/// suite never materializes historical validation artifacts.
+fn temporary_document_path(label: &str) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("the system clock is after the Unix epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "toniator-document-evaluation-{label}-{}-{nonce}.toniator",
+        std::process::id()
+    ))
 }
 
 /// Builds a complete source-assigned modeled session with a shared authored guide resource.
@@ -106,6 +122,7 @@ fn stage20d_session() -> DocumentSession {
             base.canvas().clone(),
             base.source().clone(),
             vec![definition],
+            base.pattern_settings().clone(),
             base.channel_model().unwrap(),
             base.channel_topology().unwrap().clone(),
             vec![structure],
@@ -202,6 +219,7 @@ fn stage20e2_session(shape_segments: Vec<AuthoredCurveSegment>) -> DocumentSessi
             base.canvas().clone(),
             base.source().clone(),
             vec![definition],
+            base.pattern_settings().clone(),
             base.channel_model().unwrap(),
             base.channel_topology().unwrap().clone(),
             vec![horizontal_guide, vertical_guide, shape],
@@ -450,9 +468,7 @@ fn stage20e2_sampled_source_paint_keeps_canonical_shape_topology() {
         .canonical_channel_topology(
             HalftoneChannelModel::SourceColorAlpha,
             ChannelTopologyTemplate {
-                pattern_definition_id: seed.pattern_definition_id,
-                layout: seed.layout.clone(),
-                mark_geometry_response: seed.mark_geometry_response.clone(),
+                pattern_instance: seed.pattern_instance.clone(),
             },
         )
         .unwrap();
@@ -462,6 +478,7 @@ fn stage20e2_sampled_source_paint_keeps_canonical_shape_topology() {
             document.canvas().clone(),
             document.source().clone(),
             definitions,
+            document.pattern_settings().clone(),
             HalftoneChannelModel::SourceColorAlpha,
             topology,
             document.authored_structures().to_vec(),
@@ -560,18 +577,32 @@ fn stage20d_legacy_diagnostic_session() -> DocumentSession {
         document.canvas().clone(),
         document.source().clone(),
         vec![document.pattern_definitions()[0].clone()],
+        DocumentPatternSettings {
+            definition_id: PatternDefinitionId(1),
+            density: DensityMetric2D {
+                across_x: 10.0,
+                across_y: 10.0,
+                aspect_locked: false,
+            },
+            pattern_rotation_degrees: 0.0,
+            shape_rotation_degrees: 0.0,
+            geometry_response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+                minimum_fill: 1.0,
+                maximum_fill: 2.0,
+            }),
+        },
         vec![ChannelState {
             id: ChannelId(71),
-            pattern_definition_id: PatternDefinitionId(1),
-            layout: ChannelPatternLayout {
-                density: DensityMetric2D {
-                    across_x: 10.0,
-                    across_y: 10.0,
-                    aspect_locked: false,
+            pattern_instance: ChannelPatternInstance {
+                definition_override: None,
+                layout_delta: ChannelPatternLayoutDelta {
+                    density: None,
+                    rotation_degrees: None,
+                    translation_x: 0.0,
+                    translation_y: 0.0,
                 },
-                rotation_degrees: 0.0,
-                translation_x: 0.0,
-                translation_y: 0.0,
+                shape_rotation_delta_degrees: None,
+                geometry_response_delta: None,
             },
             appearance: ChannelAppearance {
                 visible: true,
@@ -582,11 +613,6 @@ fn stage20d_legacy_diagnostic_session() -> DocumentSession {
                     alpha: 1.0,
                 },
                 opacity: 1.0,
-            },
-            mark_geometry_response: MarkGeometryResponse {
-                minimum_fill: 1.0,
-                maximum_fill: 4.5,
-                rotation_offset_degrees: 0.0,
             },
             source_mapping: ChannelSourceMapping {
                 component: SourceComponent::Luminance,
@@ -770,18 +796,26 @@ fn stage17_history_command_cache_matrix_preserves_earliest_layers_and_restoratio
         })
         .unwrap();
     assert_eq!(presentation.affected_channels, vec![ChannelId(1)]);
-    assert_eq!(presentation.invalidation, InvalidationLevel::Presentation);
+    assert_eq!(
+        presentation.invalidation,
+        Some(InvalidationLevel::Presentation)
+    );
     let presentation_completion =
         submit_and_accept(&scheduler, history.session(), request(&history));
     assert_presentation_reuse(&presentation_completion);
 
-    let realization = history
-        .apply(&DocumentCommand::SetMarkGeometryField {
-            channel_id: ChannelId(1),
-            edit: MarkGeometryFieldEdit::MinimumFill(1.0),
-        })
+    let mark_edit = history
+        .document()
+        .set_channel_mark_response_field_for_effective(
+            ChannelId(1),
+            MarkGeometryFieldEdit::MinimumFill(0.1),
+        )
         .unwrap();
-    assert_eq!(realization.invalidation, InvalidationLevel::Realization);
+    let realization = history.apply(&mark_edit).unwrap();
+    assert_eq!(
+        realization.invalidation,
+        Some(InvalidationLevel::Realization)
+    );
     let realization_completion =
         submit_and_accept(&scheduler, history.session(), request(&history));
     let realization_diagnostics = realization_completion.cache_diagnostics().unwrap();
@@ -801,7 +835,7 @@ fn stage17_history_command_cache_matrix_preserves_earliest_layers_and_restoratio
             value: 1.0,
         })
         .unwrap();
-    assert_eq!(family.invalidation, InvalidationLevel::Family);
+    assert_eq!(family.invalidation, Some(InvalidationLevel::Family));
     let family_completion = submit_and_accept(&scheduler, history.session(), request(&history));
     assert_eq!(
         family_completion
@@ -841,12 +875,13 @@ fn stage17_history_command_cache_matrix_preserves_earliest_layers_and_restoratio
 }
 
 #[test]
+/// Verifies selected-channel definition copies keep current cache and history authority.
 fn stage17_shared_output_edits_disclose_copy_escalation_and_restore_cache_authority() {
     let source_id = SourceReferenceId::new("fixture-source").unwrap();
     let bytes = fs::read("../../assets/raster-sample.png").unwrap();
     let mut history = DocumentHistory::new(generalized_session_named(
         HalftoneChannelModel::Rgb,
-        GeneralizedConfiguration::ThreeDirection,
+        GeneralizedConfiguration::Nonorthogonal,
     ));
     let scheduler = EvaluationScheduler::new().unwrap();
     let request = |history: &DocumentHistory| {
@@ -869,18 +904,18 @@ fn stage17_shared_output_edits_disclose_copy_escalation_and_restore_cache_author
         })
         .unwrap();
     assert_eq!(selected.affected_channels, vec![ChannelId(1)]);
-    assert_eq!(selected.invalidation, InvalidationLevel::Family);
+    assert_eq!(selected.invalidation, Some(InvalidationLevel::Family));
     assert_ne!(history.document(), &original);
     assert_ne!(
         history
             .document()
-            .modeled_channel(ChannelId(1))
+            .effective_channel_pattern(ChannelId(1))
             .unwrap()
-            .pattern_definition_id,
+            .definition_id,
         original
-            .modeled_channel(ChannelId(1))
+            .effective_channel_pattern(ChannelId(1))
             .unwrap()
-            .pattern_definition_id
+            .definition_id
     );
     let copied = submit_and_accept(&scheduler, history.session(), request(&history));
     let copied_diagnostics = copied.cache_diagnostics().unwrap();
@@ -914,7 +949,7 @@ fn stage17_shared_output_edits_disclose_copy_escalation_and_restore_cache_author
         shared.affected_channels,
         vec![ChannelId(1), ChannelId(2), ChannelId(3)]
     );
-    assert_eq!(shared.invalidation, InvalidationLevel::Realization);
+    assert_eq!(shared.invalidation, Some(InvalidationLevel::Realization));
     let shared_completion = submit_and_accept(&scheduler, history.session(), request(&history));
     assert_eq!(
         shared_completion
@@ -963,7 +998,7 @@ fn stage17_source_and_topology_commands_disclose_complete_order_and_restore_hist
         source.affected_channels,
         vec![ChannelId(1), ChannelId(2), ChannelId(3)]
     );
-    assert_eq!(source.invalidation, InvalidationLevel::Source);
+    assert_eq!(source.invalidation, Some(InvalidationLevel::Source));
     let source_completion = submit_and_accept(
         &scheduler,
         history.session(),
@@ -1023,7 +1058,7 @@ fn stage17_source_and_topology_commands_disclose_complete_order_and_restore_hist
     );
     assert_eq!(
         topology_result.invalidation,
-        InvalidationLevel::ChannelTopology
+        Some(InvalidationLevel::ChannelTopology)
     );
     let topology_completion = submit_and_accept(
         &scheduler,
@@ -1125,6 +1160,7 @@ fn stage17_contract_invalidation_matrix_and_descriptor_reads_are_cache_inert() {
 #[derive(Clone, Copy)]
 enum Stage17StructuralFixture {
     Intersections,
+    OrientableIntersections,
     AlongGuides,
     RawRandom,
     EvenRandom,
@@ -1139,6 +1175,10 @@ fn stage17_structural_session(fixture: Stage17StructuralFixture) -> DocumentSess
         Stage17StructuralFixture::Intersections => generalized_session_named(
             HalftoneChannelModel::Rgb,
             GeneralizedConfiguration::ThreeDirection,
+        ),
+        Stage17StructuralFixture::OrientableIntersections => generalized_session_named(
+            HalftoneChannelModel::Rgb,
+            GeneralizedConfiguration::Nonorthogonal,
         ),
         Stage17StructuralFixture::AlongGuides => generalized_session_named(
             HalftoneChannelModel::Rgb,
@@ -1226,25 +1266,14 @@ fn stage17_structural_session(fixture: Stage17StructuralFixture) -> DocumentSess
     }
 }
 
-/// Classifies property descriptors whose edits invalidate the active pattern-definition authority.
+/// Classifies the current property descriptors covered by the Stage 17 cache-matrix fixtures.
 fn is_pattern_definition_leaf(field: PropertyFieldId) -> bool {
     match field {
-        PropertyFieldId::MarkRotationOffsetDegrees => false,
         PropertyFieldId::CoverageGuardSteps
         | PropertyFieldId::CoverageAdditionalMargin
         | PropertyFieldId::GuideBaselineAngle
         | PropertyFieldId::GuidePhase
         | PropertyFieldId::GuideSpacingMultiplier
-        | PropertyFieldId::GuidePrototype
-        | PropertyFieldId::GuideAuthoredStructure
-        | PropertyFieldId::GuideArcCenterX
-        | PropertyFieldId::GuideArcCenterY
-        | PropertyFieldId::GuideArcRadius
-        | PropertyFieldId::GuideArcStartAngle
-        | PropertyFieldId::GuideArcSweepAngle
-        | PropertyFieldId::GuideRepetition
-        | PropertyFieldId::GuideStackDirection
-        | PropertyFieldId::GuideStackSpacingMultiplier
         | PropertyFieldId::IntersectionDimensions
         | PropertyFieldId::IntersectionMergeEpsilon
         | PropertyFieldId::AlongGuideDimensions
@@ -1272,10 +1301,22 @@ fn is_pattern_definition_leaf(field: PropertyFieldId) -> bool {
         | PropertyFieldId::RandomMaximumNeighborChecks
         | PropertyFieldId::OutputSiteProduct
         | PropertyFieldId::OutputPrototype
-        | PropertyFieldId::OutputAuthoredClosedShape
         | PropertyFieldId::OutputOrientation
         | PropertyFieldId::OutputOrientationDimension => true,
         PropertyFieldId::SourceReference
+        | PropertyFieldId::GuidePrototype
+        | PropertyFieldId::GuideAuthoredStructure
+        | PropertyFieldId::GuideArcCenterX
+        | PropertyFieldId::GuideArcCenterY
+        | PropertyFieldId::GuideArcRadius
+        | PropertyFieldId::GuideArcStartAngle
+        | PropertyFieldId::GuideArcSweepAngle
+        | PropertyFieldId::GuideRepetition
+        | PropertyFieldId::GuideOffsetSpacing
+        | PropertyFieldId::GuideOffsetSides
+        | PropertyFieldId::GuideOffsetCleanup
+        | PropertyFieldId::GuideStackDirection
+        | PropertyFieldId::GuideStackSpacingMultiplier
         | PropertyFieldId::DensityAcrossX
         | PropertyFieldId::DensityAcrossY
         | PropertyFieldId::DensityAspectLocked
@@ -1284,6 +1325,23 @@ fn is_pattern_definition_leaf(field: PropertyFieldId) -> bool {
         | PropertyFieldId::TranslationY
         | PropertyFieldId::MarkMinimumFill
         | PropertyFieldId::MarkMaximumFill
+        | PropertyFieldId::ConnectedMinimumThickness
+        | PropertyFieldId::ConnectedMaximumThickness
+        | PropertyFieldId::ShapeRotationDegrees
+        | PropertyFieldId::OutputAuthoredClosedShape
+        | PropertyFieldId::ParametricShape
+        | PropertyFieldId::ParametricTurns
+        | PropertyFieldId::ParametricRadialSpacing
+        | PropertyFieldId::ParametricPhase
+        | PropertyFieldId::ParametricWinding
+        | PropertyFieldId::ParametricRepetition
+        | PropertyFieldId::ParametricOffsetSpacing
+        | PropertyFieldId::ParametricOffsetSides
+        | PropertyFieldId::ParametricOffsetCleanup
+        | PropertyFieldId::ParametricStackDirection
+        | PropertyFieldId::ParametricStackSpacingMultiplier
+        | PropertyFieldId::AlongParametricInterval
+        | PropertyFieldId::AlongParametricPhase
         | PropertyFieldId::LegacyMappingComponent
         | PropertyFieldId::LegacyMappingPlacement
         | PropertyFieldId::ModeledMappingComponent
@@ -1641,7 +1699,7 @@ fn stage17_every_pattern_definition_leaf_obeys_its_cache_contract() {
         Case {
             name: "output orientation",
             field: PropertyFieldId::OutputOrientation,
-            fixture: Stage17StructuralFixture::Intersections,
+            fixture: Stage17StructuralFixture::OrientableIntersections,
             edit: PatternDefinitionEdit::SetOutputOrientation {
                 output_layer_id: PatternOutputLayerId(1),
                 orientation: MarkOrientation::GuideNormal {
@@ -1653,10 +1711,10 @@ fn stage17_every_pattern_definition_leaf_obeys_its_cache_contract() {
         Case {
             name: "output orientation dimension",
             field: PropertyFieldId::OutputOrientationDimension,
-            fixture: Stage17StructuralFixture::Intersections,
+            fixture: Stage17StructuralFixture::OrientableIntersections,
             edit: PatternDefinitionEdit::SetOutputOrientationDimension {
                 output_layer_id: PatternOutputLayerId(1),
-                dimension_id: GuideDimensionId(12),
+                dimension_id: GuideDimensionId(11),
             },
             accepts_transition: true,
         },
@@ -1670,7 +1728,7 @@ fn stage17_every_pattern_definition_leaf_obeys_its_cache_contract() {
     let listed: BTreeSet<_> = cases.iter().map(|case| case.field).collect();
     assert_eq!(
         listed, expected,
-        "every structural field has one cache case"
+        "every Stage 17-covered structural field has one cache case"
     );
 
     let bytes = fs::read("../../assets/raster-sample.png").unwrap();
@@ -1710,9 +1768,20 @@ fn stage17_every_pattern_definition_leaf_obeys_its_cache_contract() {
                 "{}",
                 case.name
             );
-            assert_eq!(result.invalidation, contract.invalidation, "{}", case.name);
+            assert_eq!(
+                result.invalidation,
+                Some(contract.invalidation),
+                "{}",
+                case.name
+            );
             let completion = submit_and_accept(&scheduler, history.session(), request(&history));
-            let diagnostics = completion.cache_diagnostics().unwrap();
+            let diagnostics = completion.cache_diagnostics().unwrap_or_else(|| {
+                panic!(
+                    "{}: current evaluation did not publish diagnostics: {:?}",
+                    case.name,
+                    completion.error()
+                )
+            });
             assert_eq!(
                 diagnostics.aggregate.decoded_source,
                 CacheDisposition::Hit,
@@ -1823,16 +1892,16 @@ fn session_with_canvas(model: HalftoneChannelModel, width: f64, height: f64) -> 
     );
     let channel = ChannelState {
         id: ChannelId(1),
-        pattern_definition_id: definition.id,
-        layout: ChannelPatternLayout {
-            density: DensityMetric2D {
-                across_x: width / 10.0,
-                across_y: height / 10.0,
-                aspect_locked: true,
+        pattern_instance: ChannelPatternInstance {
+            definition_override: None,
+            layout_delta: ChannelPatternLayoutDelta {
+                density: None,
+                rotation_degrees: None,
+                translation_x: 0.0,
+                translation_y: 0.0,
             },
-            rotation_degrees: 0.0,
-            translation_x: 0.0,
-            translation_y: 0.0,
+            shape_rotation_delta_degrees: None,
+            geometry_response_delta: None,
         },
         appearance: ChannelAppearance {
             visible: true,
@@ -1843,11 +1912,6 @@ fn session_with_canvas(model: HalftoneChannelModel, width: f64, height: f64) -> 
                 alpha: 1.0,
             },
             opacity: 1.0,
-        },
-        mark_geometry_response: MarkGeometryResponse {
-            minimum_fill: 2.0,
-            maximum_fill: 9.0,
-            rotation_offset_degrees: 0.0,
         },
         source_mapping: ChannelSourceMapping {
             component: SourceComponent::Luminance,
@@ -1860,23 +1924,30 @@ fn session_with_canvas(model: HalftoneChannelModel, width: f64, height: f64) -> 
         CanvasSpec { width, height },
         SourceReference::Assigned(source),
         vec![definition],
+        DocumentPatternSettings {
+            definition_id: PatternDefinitionId(1),
+            density: DensityMetric2D {
+                across_x: width / 10.0,
+                across_y: height / 10.0,
+                aspect_locked: true,
+            },
+            pattern_rotation_degrees: 0.0,
+            shape_rotation_degrees: 0.0,
+            geometry_response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+                minimum_fill: 0.2,
+                maximum_fill: 0.9,
+            }),
+        },
         vec![channel],
     )
     .unwrap();
     let mut session = DocumentSession::new(document).unwrap();
     let template = ChannelTopologyTemplate {
-        pattern_definition_id: PatternDefinitionId(1),
-        layout: session
+        pattern_instance: session
             .document()
             .channel(ChannelId(1))
             .unwrap()
-            .layout
-            .clone(),
-        mark_geometry_response: session
-            .document()
-            .channel(ChannelId(1))
-            .unwrap()
-            .mark_geometry_response
+            .pattern_instance
             .clone(),
     };
     let topology = session
@@ -1923,6 +1994,7 @@ impl GeneralizedConfiguration {
     }
 }
 
+/// Builds a valid current generalized-family session for one topology/cache configuration.
 fn generalized_session_named(
     model: HalftoneChannelModel,
     configuration: GeneralizedConfiguration,
@@ -1991,9 +2063,7 @@ fn generalized_session_named(
                 ],
                 merge_epsilon: 1e-9,
             },
-            MarkOrientation::GuideTangent {
-                dimension_id: GuideDimensionId(11),
-            },
+            MarkOrientation::Fixed,
         ),
         GeneralizedConfiguration::FourDirection => {
             let mut dimensions = dimensions;
@@ -2016,9 +2086,7 @@ fn generalized_session_named(
                     ],
                     merge_epsilon: 1e-9,
                 },
-                MarkOrientation::GuideTangent {
-                    dimension_id: GuideDimensionId(14),
-                },
+                MarkOrientation::Fixed,
             )
         }
         GeneralizedConfiguration::ParallelAlong => (
@@ -2046,9 +2114,7 @@ fn generalized_session_named(
                 interval_multiplier: 0.75,
                 phase: 0.5,
             },
-            MarkOrientation::GuideTangent {
-                dimension_id: GuideDimensionId(11),
-            },
+            MarkOrientation::Fixed,
         ),
     };
     let definition = PatternDefinition::generalized_straight_guides(
@@ -2068,16 +2134,16 @@ fn generalized_session_named(
     let source = SourceReferenceId::new("fixture-source").unwrap();
     let channel = ChannelState {
         id: ChannelId(1),
-        pattern_definition_id: definition.id,
-        layout: ChannelPatternLayout {
-            density: DensityMetric2D {
-                across_x: 9.0,
-                across_y: 6.0,
-                aspect_locked: false,
+        pattern_instance: ChannelPatternInstance {
+            definition_override: None,
+            layout_delta: ChannelPatternLayoutDelta {
+                density: None,
+                rotation_degrees: None,
+                translation_x: 3.25,
+                translation_y: -4.5,
             },
-            rotation_degrees: 17.0,
-            translation_x: 3.25,
-            translation_y: -4.5,
+            shape_rotation_delta_degrees: None,
+            geometry_response_delta: None,
         },
         appearance: ChannelAppearance {
             visible: true,
@@ -2088,11 +2154,6 @@ fn generalized_session_named(
                 alpha: 1.0,
             },
             opacity: 1.0,
-        },
-        mark_geometry_response: MarkGeometryResponse {
-            minimum_fill: 2.0,
-            maximum_fill: 9.0,
-            rotation_offset_degrees: 0.0,
         },
         source_mapping: ChannelSourceMapping {
             component: SourceComponent::Luminance,
@@ -2107,23 +2168,30 @@ fn generalized_session_named(
         },
         SourceReference::Assigned(source),
         vec![definition],
+        DocumentPatternSettings {
+            definition_id: PatternDefinitionId(1),
+            density: DensityMetric2D {
+                across_x: 9.0,
+                across_y: 6.0,
+                aspect_locked: false,
+            },
+            pattern_rotation_degrees: 17.0,
+            shape_rotation_degrees: 0.0,
+            geometry_response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+                minimum_fill: 0.2,
+                maximum_fill: 0.9,
+            }),
+        },
         vec![channel],
     )
     .unwrap();
     let mut session = DocumentSession::new(document).unwrap();
     let template = ChannelTopologyTemplate {
-        pattern_definition_id: PatternDefinitionId(1),
-        layout: session
+        pattern_instance: session
             .document()
             .channel(ChannelId(1))
             .unwrap()
-            .layout
-            .clone(),
-        mark_geometry_response: session
-            .document()
-            .channel(ChannelId(1))
-            .unwrap()
-            .mark_geometry_response
+            .pattern_instance
             .clone(),
     };
     let topology = session
@@ -2149,6 +2217,7 @@ fn generalized_session_with_definition(
         canvas,
         source,
         vec![definition],
+        base.document().pattern_settings().clone(),
         model,
         base.document().channel_topology().unwrap().clone(),
     )
@@ -2534,163 +2603,7 @@ fn scheduler_rebuilds_families_and_realizations_when_canvas_changes() {
     scheduler.shutdown().unwrap();
 }
 
-#[test]
-fn frozen_v1_migration_and_saved_v2_preserve_accepted_outputs_for_every_model() {
-    let validation = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/validation/stage-15");
-    fs::create_dir_all(&validation).unwrap();
-    for (fixture, source_format) in [
-        ("raster-sample-v1.toniator", SourceFormatHint::Png),
-        ("vector-sample-v1.toniator", SourceFormatHint::Svg),
-    ] {
-        let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../assets")
-            .join(fixture);
-        let migrated = load(&fixture_path).unwrap();
-        let source = migrated.sources().entries().next().unwrap();
-        let original_session = DocumentSession::new(migrated.document().clone()).unwrap();
-        let original = evaluate_with_limits(
-            EvaluationRequest::new(
-                original_session.document_evaluation_snapshot(),
-                ResolvedSource::new(source.id().clone(), source.bytes().to_vec(), source_format)
-                    .unwrap(),
-            ),
-            EvaluationLimits::default(),
-        )
-        .unwrap();
-        let seed = migrated.document().channel_topology().unwrap().channels()[0].clone();
-        for model in [
-            HalftoneChannelModel::Rgb,
-            HalftoneChannelModel::Cmyk,
-            HalftoneChannelModel::SourceColorAlpha,
-        ] {
-            let topology = migrated
-                .document()
-                .canonical_channel_topology(
-                    model,
-                    ChannelTopologyTemplate {
-                        pattern_definition_id: seed.pattern_definition_id,
-                        layout: seed.layout.clone(),
-                        mark_geometry_response: seed.mark_geometry_response.clone(),
-                    },
-                )
-                .unwrap();
-            let document = Document::with_source_and_topology(
-                migrated.document().id(),
-                migrated.document().canvas().clone(),
-                migrated.document().source().clone(),
-                migrated.document().pattern_definitions().to_vec(),
-                model,
-                topology,
-            )
-            .unwrap();
-            let current_session = DocumentSession::new(document.clone()).unwrap();
-            let current = evaluate_with_limits(
-                EvaluationRequest::new(
-                    current_session.document_evaluation_snapshot(),
-                    ResolvedSource::new(
-                        source.id().clone(),
-                        source.bytes().to_vec(),
-                        source_format,
-                    )
-                    .unwrap(),
-                ),
-                EvaluationLimits::default(),
-            )
-            .unwrap();
-            if model == HalftoneChannelModel::Rgb {
-                assert_eq!(current.channels(), original.channels());
-                assert_eq!(current.scene().identity(), original.scene().identity());
-                assert_eq!(current.raster().pixels(), original.raster().pixels());
-                assert_eq!(write_svg(current.scene()), write_svg(original.scene()));
-            }
-            let label = fixture.trim_end_matches(".toniator");
-            let v1_png = encode_png(current.raster()).unwrap();
-            let v1_svg = write_svg(current.scene());
-            fs::write(
-                validation.join(format!("{label}-{model:?}-frozen-v1.png")),
-                &v1_png,
-            )
-            .unwrap();
-            fs::write(
-                validation.join(format!("{label}-{model:?}-frozen-v1.svg")),
-                &v1_svg,
-            )
-            .unwrap();
-            let saved = validation.join(format!(
-                "{}-{model:?}-saved-v2.toniator",
-                fixture.trim_end_matches(".toniator")
-            ));
-            save(&saved, &document, migrated.sources()).unwrap();
-            let expected_archive_hash = match (fixture, model) {
-                ("raster-sample-v1.toniator", HalftoneChannelModel::Rgb) => {
-                    "7135531041b8a4f9136731267b356ce4b3acbdb74c6e12c6670817e0613436cf"
-                }
-                ("raster-sample-v1.toniator", HalftoneChannelModel::Cmyk) => {
-                    "9aa1ec4c5fe5fca6b023278719ebe56160ec526617ec46eb2f4864277c3ea588"
-                }
-                ("raster-sample-v1.toniator", HalftoneChannelModel::SourceColorAlpha) => {
-                    "1137a5bd4ccc0905087081ff62aa70feb0bf195a7c10272b12bfc323760db6d2"
-                }
-                ("vector-sample-v1.toniator", HalftoneChannelModel::Rgb) => {
-                    "b2d6f3116d9b5aa4bef37d89268be5aa6092a9eb195b33049d53ecad7e910d97"
-                }
-                ("vector-sample-v1.toniator", HalftoneChannelModel::Cmyk) => {
-                    "9424c9d9278fe0e4780a1b4c2ba7688a8b46292c1be7e24144fb3ce1ae81041a"
-                }
-                ("vector-sample-v1.toniator", HalftoneChannelModel::SourceColorAlpha) => {
-                    "419e16a7e8b6de45799dd3780e8c2a781e5050ede74dfd2a33cb114097e0b515"
-                }
-                _ => unreachable!("fixed frozen-v1/model matrix"),
-            };
-            assert_eq!(
-                format!("{:x}", Sha256::digest(fs::read(&saved).unwrap())),
-                expected_archive_hash,
-                "additive current-v2 DTO variants must not alter saved Stage 15 bytes"
-            );
-            let reopened = load(&saved).unwrap();
-            assert_eq!(reopened.versions().document(), 2);
-            let reopened_session = DocumentSession::new(reopened.document().clone()).unwrap();
-            let reopened_result = evaluate_with_limits(
-                EvaluationRequest::new(
-                    reopened_session.document_evaluation_snapshot(),
-                    ResolvedSource::new(
-                        source.id().clone(),
-                        source.bytes().to_vec(),
-                        source_format,
-                    )
-                    .unwrap(),
-                ),
-                EvaluationLimits::default(),
-            )
-            .unwrap();
-            assert_eq!(reopened_result.channels(), current.channels());
-            assert_eq!(
-                reopened_result.scene().identity(),
-                current.scene().identity()
-            );
-            assert_eq!(reopened_result.raster().pixels(), current.raster().pixels());
-            assert_eq!(
-                write_svg(reopened_result.scene()),
-                write_svg(current.scene())
-            );
-            let v2_png = encode_png(reopened_result.raster()).unwrap();
-            let v2_svg = write_svg(reopened_result.scene());
-            assert_eq!(v2_png, v1_png);
-            assert_eq!(v2_svg, v1_svg);
-            fs::write(
-                validation.join(format!("{label}-{model:?}-saved-reopened-v2.png")),
-                v2_png,
-            )
-            .unwrap();
-            fs::write(
-                validation.join(format!("{label}-{model:?}-saved-reopened-v2.svg")),
-                v2_svg,
-            )
-            .unwrap();
-        }
-    }
-}
-
+/// Verifies preview-size changes retain canonical scene reuse while invalidating only raster output.
 #[test]
 fn preview_target_changes_reuse_scene_and_miss_only_raster_then_repeat_hits() {
     let session = session(HalftoneChannelModel::Rgb);
@@ -2752,6 +2665,7 @@ fn preview_target_changes_reuse_scene_and_miss_only_raster_then_repeat_hits() {
 }
 
 #[test]
+/// Verifies native source dimensions drive current complete-document previews for each model.
 fn reddit_inputs_evaluate_intrinsically_to_large_preview_targets_for_every_model() {
     for (path, format, width, height) in [
         (
@@ -2769,9 +2683,13 @@ fn reddit_inputs_evaluate_intrinsically_to_large_preview_targets_for_every_model
             HalftoneChannelModel::SourceColorAlpha,
         ] {
             let session = session_with_canvas(model, width, height);
-            let channel = &session.document().channel_topology().unwrap().channels()[0];
-            assert_eq!(channel.layout.density.across_x, width / 10.0);
-            assert_eq!(channel.layout.density.across_y, height / 10.0);
+            let channel_id = session.document().channel_topology().unwrap().channels()[0].id;
+            let channel = session
+                .document()
+                .effective_channel_pattern(channel_id)
+                .unwrap();
+            assert_eq!(channel.density.across_x, width / 10.0);
+            assert_eq!(channel.density.across_y, height / 10.0);
             let request = EvaluationRequest::with_preview_target(
                 session.document_evaluation_snapshot(),
                 ResolvedSource::new(
@@ -2910,11 +2828,11 @@ fn complete_document_rejects_unassigned_modeled_source() {
         DocumentId(9),
         document.canvas().clone(),
         document.pattern_definitions().to_vec(),
+        document.pattern_settings().clone(),
         vec![ChannelState {
             id: ChannelId(1),
-            pattern_definition_id: PatternDefinitionId(1),
-            layout: document.channel_topology().unwrap().channels()[0]
-                .layout
+            pattern_instance: document.channel_topology().unwrap().channels()[0]
+                .pattern_instance
                 .clone(),
             appearance: ChannelAppearance {
                 visible: true,
@@ -2926,9 +2844,6 @@ fn complete_document_rejects_unassigned_modeled_source() {
                 },
                 opacity: 1.0,
             },
-            mark_geometry_response: document.channel_topology().unwrap().channels()[0]
-                .mark_geometry_response
-                .clone(),
             source_mapping: ChannelSourceMapping {
                 component: SourceComponent::Luminance,
                 placement: SourcePlacement::StretchToCanvas,
@@ -3116,18 +3031,32 @@ fn engine_preflights_multiplier_ten_along_guides_before_realization() {
         },
         SourceReference::Assigned(source_id.clone()),
         vec![definition],
+        DocumentPatternSettings {
+            definition_id: PatternDefinitionId(601),
+            density: DensityMetric2D {
+                across_x: 10.0,
+                across_y: 10.0,
+                aspect_locked: true,
+            },
+            pattern_rotation_degrees: 0.0,
+            shape_rotation_degrees: 0.0,
+            geometry_response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+                minimum_fill: 0.0,
+                maximum_fill: 1.0,
+            }),
+        },
         vec![ChannelState {
             id: ChannelId(601),
-            pattern_definition_id: PatternDefinitionId(601),
-            layout: ChannelPatternLayout {
-                density: DensityMetric2D {
-                    across_x: 10.0,
-                    across_y: 10.0,
-                    aspect_locked: true,
+            pattern_instance: ChannelPatternInstance {
+                definition_override: None,
+                layout_delta: ChannelPatternLayoutDelta {
+                    density: None,
+                    rotation_degrees: None,
+                    translation_x: 0.0,
+                    translation_y: 0.0,
                 },
-                rotation_degrees: 0.0,
-                translation_x: 0.0,
-                translation_y: 0.0,
+                shape_rotation_delta_degrees: None,
+                geometry_response_delta: None,
             },
             appearance: ChannelAppearance {
                 visible: true,
@@ -3138,11 +3067,6 @@ fn engine_preflights_multiplier_ten_along_guides_before_realization() {
                     alpha: 1.0,
                 },
                 opacity: 1.0,
-            },
-            mark_geometry_response: MarkGeometryResponse {
-                minimum_fill: 0.0,
-                maximum_fill: 1.0,
-                rotation_offset_degrees: 0.0,
             },
             source_mapping: ChannelSourceMapping {
                 component: SourceComponent::Luminance,
@@ -3307,7 +3231,7 @@ fn generalized_cache_identity_matrix_misses_at_the_first_authoritative_layer() {
     let source_id = SourceReferenceId::new("fixture-source").unwrap();
     let raster = fs::read("../../assets/raster-sample.png").unwrap();
     let vector = fs::read("../../assets/vector-sample.svg").unwrap();
-    let configuration = GeneralizedConfiguration::ThreeDirection;
+    let configuration = GeneralizedConfiguration::Nonorthogonal;
     let session = generalized_session_named(HalftoneChannelModel::Rgb, configuration);
     let scheduler = EvaluationScheduler::new().unwrap();
     let baseline = submit_and_accept(
@@ -3502,10 +3426,8 @@ fn generalized_cache_identity_matrix_misses_at_the_first_authoritative_layer() {
 }
 
 #[test]
-fn generalized_saved_v2_documents_reopen_with_identical_complete_outputs() {
-    let validation =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/validation/stage-16a");
-    fs::create_dir_all(&validation).unwrap();
+/// Verifies current schema-v4 generalized documents reopen without changing canonical outputs.
+fn generalized_saved_v4_documents_reopen_with_identical_complete_outputs() {
     for configuration in [
         GeneralizedConfiguration::Orthogonal,
         GeneralizedConfiguration::Nonorthogonal,
@@ -3550,10 +3472,14 @@ fn generalized_saved_v2_documents_reopen_with_identical_complete_outputs() {
                     ResolvedSource::new(source_id.clone(), bytes.clone(), source_format).unwrap(),
                 ))
                 .unwrap();
-                let path =
-                    validation.join(format!("{product_label}-{source_label}-{model:?}.toniator"));
+                let path = temporary_document_path(&format!(
+                    "generalized-{product_label}-{source_label}-{model:?}"
+                ));
                 save(&path, base.document(), &bundle).unwrap();
-                let reopened = load(&path).unwrap();
+                let reopened = load(&path);
+                fs::remove_file(&path).expect("temporary document file is removed");
+                let reopened = reopened.unwrap();
+                assert_eq!(reopened.versions().document(), 4);
                 let reopened_session = DocumentSession::new(reopened.document().clone()).unwrap();
                 let current = evaluate(EvaluationRequest::new(
                     reopened_session.document_evaluation_snapshot(),
@@ -3564,21 +3490,12 @@ fn generalized_saved_v2_documents_reopen_with_identical_complete_outputs() {
                 assert_eq!(current.scene().identity(), original.scene().identity());
                 assert_eq!(current.raster().pixels(), original.raster().pixels());
                 assert_eq!(write_svg(current.scene()), write_svg(original.scene()));
-                fs::write(
-                    validation.join(format!("{product_label}-{source_label}-{model:?}.png")),
-                    encode_png(current.raster()).unwrap(),
-                )
-                .unwrap();
-                fs::write(
-                    validation.join(format!("{product_label}-{source_label}-{model:?}.svg")),
-                    write_svg(current.scene()),
-                )
-                .unwrap();
             }
         }
     }
 }
 
+/// Builds one deterministic random-site definition for current evaluation fixtures.
 fn random_definition(
     character: RandomSiteCharacter,
     modulation: SiteDensityModulation,
@@ -3606,6 +3523,7 @@ fn random_definition(
     )
 }
 
+/// Builds a source-assigned current-pattern session whose density follows its requested canvas.
 fn random_session(
     model: HalftoneChannelModel,
     width: f64,
@@ -3613,24 +3531,24 @@ fn random_session(
     definition: PatternDefinition,
 ) -> DocumentSession {
     let base = session(model);
-    let mut channels = base
+    let channels = base
         .document()
         .channel_topology()
         .unwrap()
         .channels()
         .to_vec();
-    for channel in &mut channels {
-        channel.layout.density = DensityMetric2D {
-            across_x: (width / 10.0).round(),
-            across_y: (height / 10.0).round(),
-            aspect_locked: true,
-        };
-    }
+    let mut settings = base.document().pattern_settings().clone();
+    settings.density = DensityMetric2D {
+        across_x: (width / 10.0).round(),
+        across_y: (height / 10.0).round(),
+        aspect_locked: true,
+    };
     let document = Document::with_source_and_topology(
         base.document().id(),
         CanvasSpec { width, height },
         base.document().source().clone(),
         vec![definition],
+        settings,
         model,
         ChannelTopology::new(channels),
     )
@@ -3673,6 +3591,12 @@ fn assert_nonempty_random_native_output(result: &toniator_engine::EvaluationResu
                 );
                 positive_marks += circles.iter().filter(|radius| **radius > 0.0).count();
             }
+            toniator_engine::GeometryOutput::CanonicalStrokes(strokes) => {
+                assert!(
+                    !strokes.is_empty(),
+                    "{label}: enabled channel had no canonical strokes"
+                );
+            }
         }
     }
     assert!(
@@ -3705,10 +3629,8 @@ fn assert_nonempty_random_native_output(result: &toniator_engine::EvaluationResu
 }
 
 #[test]
-fn random_site_saved_v2_documents_reopen_with_native_png_svg_and_both_sources() {
-    let validation =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/validation/stage-16b");
-    fs::create_dir_all(&validation).unwrap();
+/// Verifies current schema-v4 random-site documents reopen with identical native outputs.
+fn random_site_saved_v4_documents_reopen_with_native_png_svg_and_both_sources() {
     let configurations = [
         (
             "raw",
@@ -3789,9 +3711,12 @@ fn random_site_saved_v2_documents_reopen_with_native_png_svg_and_both_sources() 
         )
         .unwrap()])
         .unwrap();
-        let document_path = validation.join(format!("{label}-raster-Rgb.toniator"));
+        let document_path = temporary_document_path(&format!("random-{label}-raster-rgb"));
         save(&document_path, session.document(), &bundle).unwrap();
-        let reopened = load(&document_path).unwrap();
+        let reopened = load(&document_path);
+        fs::remove_file(&document_path).expect("temporary document file is removed");
+        let reopened = reopened.unwrap();
+        assert_eq!(reopened.versions().document(), 4);
         let reopened_session = DocumentSession::new(reopened.document().clone()).unwrap();
         let reopened_result = evaluate(EvaluationRequest::new(
             reopened_session.document_evaluation_snapshot(),
@@ -3815,16 +3740,6 @@ fn random_site_saved_v2_documents_reopen_with_native_png_svg_and_both_sources() 
             write_svg(result.scene()),
             write_svg(reopened_result.scene())
         );
-        fs::write(
-            validation.join(format!("{label}-raster-Rgb.png")),
-            encode_png(result.raster()).unwrap(),
-        )
-        .unwrap();
-        fs::write(
-            validation.join(format!("{label}-raster-Rgb.svg")),
-            write_svg(result.scene()),
-        )
-        .unwrap();
     }
     for (source_label, source_format, source_path, embedded_format, width, height) in [
         (
@@ -3884,13 +3799,12 @@ fn random_site_saved_v2_documents_reopen_with_native_png_svg_and_both_sources() 
             ))
             .unwrap();
             assert_nonempty_random_native_output(&result, &label);
-            save(
-                &validation.join(format!("{label}.toniator")),
-                session.document(),
-                &bundle,
-            )
-            .unwrap();
-            let reopened = load(&validation.join(format!("{label}.toniator"))).unwrap();
+            let document_path = temporary_document_path(&format!("random-{label}"));
+            save(&document_path, session.document(), &bundle).unwrap();
+            let reopened = load(&document_path);
+            fs::remove_file(&document_path).expect("temporary document file is removed");
+            let reopened = reopened.unwrap();
+            assert_eq!(reopened.versions().document(), 4);
             let reopened_session = DocumentSession::new(reopened.document().clone()).unwrap();
             let reopened_result = evaluate(EvaluationRequest::new(
                 reopened_session.document_evaluation_snapshot(),
@@ -3918,16 +3832,6 @@ fn random_site_saved_v2_documents_reopen_with_native_png_svg_and_both_sources() 
                 write_svg(result.scene()),
                 write_svg(reopened_result.scene())
             );
-            fs::write(
-                validation.join(format!("{label}.png")),
-                encode_png(result.raster()).unwrap(),
-            )
-            .unwrap();
-            fs::write(
-                validation.join(format!("{label}.svg")),
-                write_svg(result.scene()),
-            )
-            .unwrap();
         }
         for (kind, character) in [
             ("raw", RandomSiteCharacter::RawUniform),
@@ -3972,13 +3876,12 @@ fn random_site_saved_v2_documents_reopen_with_native_png_svg_and_both_sources() 
             .unwrap()])
             .unwrap();
             let label = format!("{kind}-{source_label}-Rgb-natural");
-            save(
-                &validation.join(format!("{label}.toniator")),
-                session.document(),
-                &bundle,
-            )
-            .unwrap();
-            let reopened = load(&validation.join(format!("{label}.toniator"))).unwrap();
+            let document_path = temporary_document_path(&format!("random-{label}"));
+            save(&document_path, session.document(), &bundle).unwrap();
+            let reopened = load(&document_path);
+            fs::remove_file(&document_path).expect("temporary document file is removed");
+            let reopened = reopened.unwrap();
+            assert_eq!(reopened.versions().document(), 4);
             let reopened_session = DocumentSession::new(reopened.document().clone()).unwrap();
             let reopened_result = evaluate(EvaluationRequest::new(
                 reopened_session.document_evaluation_snapshot(),
@@ -4008,16 +3911,6 @@ fn random_site_saved_v2_documents_reopen_with_native_png_svg_and_both_sources() 
                 "{label}"
             );
             assert_nonempty_random_native_output(&result, &label);
-            fs::write(
-                validation.join(format!("{label}.png")),
-                encode_png(result.raster()).unwrap(),
-            )
-            .unwrap();
-            fs::write(
-                validation.join(format!("{label}.svg")),
-                write_svg(result.scene()),
-            )
-            .unwrap();
         }
     }
 }
@@ -4288,15 +4181,15 @@ fn stage20a_natural_png_and_svg_inputs_preserve_current_circle_outputs() {
             raster_identity.realization_fingerprint(),
             raster_identity.scene_fingerprint()
         ),
-        "family:Rgb:Red:1:fnv1a64:362aedb40f0f839f:Green:2:fnv1a64:362aedb40f0f839f:Blue:3:fnv1a64:362aedb40f0f839f|realization:Rgb:Red:1:fnv1a64:1e0c7281d8b76bf0:Green:2:fnv1a64:bd90d174a377ce3b:Blue:3:fnv1a64:0c4f8869317e9c01|fnv1a64:88c5e8210e66dd16"
+        "family:Rgb:Red:1:fnv1a64:5050838a0ff3f39e:nominal-cell-basis:fnv1a64:21872e36b5f0186f:Green:2:fnv1a64:5050838a0ff3f39e:nominal-cell-basis:fnv1a64:21872e36b5f0186f:Blue:3:fnv1a64:5050838a0ff3f39e:nominal-cell-basis:fnv1a64:21872e36b5f0186f|realization:Rgb:Red:1:fnv1a64:1e0c0d268dad8093:Green:2:fnv1a64:de67a00e5a742f2b:Blue:3:fnv1a64:91d5c73d953e6338|fnv1a64:19b475bf9eca62b9"
     );
     assert_eq!(
         format!("{:x}", Sha256::digest(raster_result.raster().pixels())),
-        "37c334f2f1faefb23c1625411710e709741d310d0beb1f36183ff95b0eb1393e"
+        "890659b7ea13a781bce1cb1d76f3e35cd76133fcecc8c8b536c939cf8d8df768"
     );
     assert_eq!(
         format!("{:x}", Sha256::digest(raster_svg.as_bytes())),
-        "6f28bf7d84d24cf7a9cbc43bf1f0c4a38982b736b4b9aae408f357921a97dd94"
+        "97d78199c126938e52e33e35809462276b562a2b14e766a33ec484b9045b9a02"
     );
 
     let vector_bytes = fs::read("../../assets/vector-sample.svg").unwrap();
@@ -4895,13 +4788,19 @@ fn scheduler_never_commits_partially_staged_channels_from_a_failed_document() {
             value: 1.0,
         })
         .unwrap();
-    session
-        .apply(&DocumentCommand::SetDensityAxis {
-            channel_id: ChannelId(2),
-            edited_axis: toniator_domain::DensityEditedAxis::AcrossX,
-            value: 10_000.0,
-        })
+    let oversized_density = session
+        .document()
+        .set_channel_density_for_effective(
+            ChannelId(2),
+            toniator_domain::DensityEditedAxis::AcrossX,
+            DensityMetric2D {
+                across_x: 10_000.0,
+                across_y: 6.0,
+                aspect_locked: true,
+            },
+        )
         .unwrap();
+    session.apply(&oversized_density).unwrap();
     let failed_ticket = scheduler
         .submit(EvaluationRequest::new(
             session.document_evaluation_snapshot(),
@@ -4918,13 +4817,19 @@ fn scheduler_never_commits_partially_staged_channels_from_a_failed_document() {
     assert_eq!(failed.error().unwrap().path(), "coverage.candidate_limit");
     assert!(scheduler.accept_completion(&failed, &session).unwrap());
 
-    session
-        .apply(&DocumentCommand::SetDensityAxis {
-            channel_id: ChannelId(2),
-            edited_axis: toniator_domain::DensityEditedAxis::AcrossX,
-            value: 9.0,
-        })
+    let restored_density = session
+        .document()
+        .set_channel_density_for_effective(
+            ChannelId(2),
+            toniator_domain::DensityEditedAxis::AcrossX,
+            DensityMetric2D {
+                across_x: 9.0,
+                across_y: 6.0,
+                aspect_locked: true,
+            },
+        )
         .unwrap();
+    session.apply(&restored_density).unwrap();
     let completion = submit_and_accept(
         &scheduler,
         &session,
