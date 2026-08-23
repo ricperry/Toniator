@@ -1,7 +1,7 @@
-use toniator_domain::PathStrokeStyle;
+use toniator_domain::{GuideDimensionId, PathStrokeStyle};
 use toniator_geometry::{
-    CanonicalStroke, CurvePath, GuideInstanceId, PathClosure, PathLocation, Point2,
-    StrokeProfileSample, VariableWidthOutlineLimits, VariableWidthPathSample,
+    CanonicalStroke, CurvePath, PathClosure, PathLocation, Point2, StrokeProfileSample,
+    StructuralPathInstanceId, VariableWidthOutlineLimits, VariableWidthPathSample,
     build_variable_width_outline_cancellable,
 };
 
@@ -47,11 +47,7 @@ fn canonical_stroke_retains_ordered_profile_without_canvas_clipping() {
         },
     ];
     let stroke = CanonicalStroke::new(
-        GuideInstanceId {
-            dimension_id: 3,
-            index: -1,
-            component_ordinal: 0,
-        },
+        StructuralPathInstanceId::guide_dimension(GuideDimensionId(3), -1, 0),
         None,
         path.clone(),
         10.0,

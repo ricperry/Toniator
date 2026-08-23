@@ -1,7 +1,8 @@
-use toniator_domain::{CanvasSpec, ChannelId, ColorValue, PathStrokeStyle};
+use toniator_domain::{CanvasSpec, ChannelId, ColorValue, GuideDimensionId, PathStrokeStyle};
 use toniator_geometry::{
-    CanonicalStroke, CurvePath, GuideInstanceId, PathLocation, Point2, StrokeProfileSample,
-    VariableWidthOutlineLimits, VariableWidthPathSample, build_variable_width_outline_cancellable,
+    CanonicalStroke, CurvePath, PathLocation, Point2, StrokeProfileSample,
+    StructuralPathInstanceId, VariableWidthOutlineLimits, VariableWidthPathSample,
+    build_variable_width_outline_cancellable,
 };
 use toniator_render::{
     GeometryOutput, RasterBackground, RenderLayer, RenderScene, rasterize, write_svg,
@@ -43,11 +44,7 @@ fn stroke(y: f64) -> CanonicalStroke {
     )
     .expect("outline");
     CanonicalStroke::new(
-        GuideInstanceId {
-            dimension_id: 1,
-            index: y as i64,
-            component_ordinal: 0,
-        },
+        StructuralPathInstanceId::guide_dimension(GuideDimensionId(1), y as i64, 0),
         None,
         path,
         4.0,

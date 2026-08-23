@@ -209,7 +209,7 @@ fn writes_native_offset_documents_for_both_immutable_sources() {
     }
 }
 
-/// Writes a compact single-sided cubic offset diagnostic whose zero-distance centerline anchors the ladder.
+/// Writes and byte-round-trips the intent-only cubic diagnostic whose source anchors the ladder.
 #[test]
 fn writes_cubic_offset_diagnostic_document() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../");
@@ -222,7 +222,7 @@ fn writes_cubic_offset_diagnostic_document() {
         320.0,
         12.0,
         true,
-        OffsetSides::Left,
+        OffsetSides::Both,
     );
     let sources = SourceBundle::new([EmbeddedSource::new(
         source_id,
@@ -234,5 +234,23 @@ fn writes_cubic_offset_diagnostic_document() {
     .expect("source bundle validates");
     let path = output.join("normal-offset-cubic.toniator");
     save(&path, &document, &sources).expect("cubic diagnostic saves");
-    assert!(load(&path).is_ok(), "cubic diagnostic reopens");
+    let original = fs::read(&path).expect("cubic diagnostic bytes");
+    let reopened = load(&path).expect("cubic diagnostic reopens");
+    assert!(matches!(
+        reopened.document().pattern_definitions()[0].mechanisms[0],
+        toniator_domain::PatternMechanism::GuideDimensions { ref dimensions, .. }
+            if matches!(dimensions[0].repetition,
+                GuideRepetition::NormalOffset {
+                    spacing,
+                    sides: OffsetSides::Both,
+                    cleanup: OffsetCleanup::DissolveCrossings,
+        } if spacing.to_bits() == 12.0_f64.to_bits())
+    ));
+    save(&path, reopened.document(), reopened.sources())
+        .expect("reopened cubic diagnostic saves deterministically");
+    assert_eq!(
+        fs::read(&path).expect("reopened cubic diagnostic bytes"),
+        original,
+        "derived cusp cleanup never enters intent-only persistence"
+    );
 }

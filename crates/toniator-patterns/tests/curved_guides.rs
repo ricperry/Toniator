@@ -156,7 +156,7 @@ fn curved_guides_reuse_existing_site_products_with_truthful_guide_and_site_sets(
     let output =
         evaluate_document_typed_family_cancellable(&document, &definition, &request(64), &|| false)
             .expect("document-aware authored curve product evaluates");
-    assert_eq!(output.guide_path_set().unwrap().guides().len(), 3);
+    assert_eq!(output.structural_path_set().unwrap().paths().len(), 3);
     assert_eq!(
         output.site_set().sites().len(),
         1,
@@ -168,7 +168,10 @@ fn curved_guides_reuse_existing_site_products_with_truthful_guide_and_site_sets(
         FamilySiteProvenance::CurveGuideIntersection { contributors } => assert_eq!(
             contributors
                 .iter()
-                .map(|value| value.guide_id.dimension_id)
+                .map(|value| match value.path.source {
+                    toniator_patterns::StructuralPathSourceId::GuideDimension(id) => id.0,
+                    toniator_patterns::StructuralPathSourceId::ParametricCurve(id) => id.0,
+                })
                 .collect::<Vec<_>>(),
             vec![9, 2, 7],
             "selected dimension order, not numeric ID order, owns merged provenance"
@@ -306,16 +309,19 @@ fn curved_transform_stacks_and_along_guides_preserve_scope_phase_and_variable_in
         &|| false,
     )
     .expect("stacked finite arcs publish bounded along-guide sites");
-    let guides = output.guide_path_set().unwrap().guides();
+    let guides = output.structural_path_set().unwrap().paths();
     assert!(guides.len() > 1);
     assert!(
         guides
             .windows(2)
-            .all(|pair| pair[0].id.index < pair[1].id.index)
+            .all(|pair| pair[0].id.repetition_index < pair[1].id.repetition_index)
     );
-    let raw_phase = guides.iter().find(|guide| guide.id.index == 0).expect(
-        "index zero must retain the raw authored phase rather than a normalized lattice label",
-    );
+    let raw_phase = guides
+        .iter()
+        .find(|guide| guide.id.repetition_index == 0)
+        .expect(
+            "index zero must retain the raw authored phase rather than a normalized lattice label",
+        );
     let expected = AffineTransform2D::rotate_about_then_translate(
         Point2::new(50.0, 50.0),
         17.0,
@@ -327,7 +333,7 @@ fn curved_transform_stacks_and_along_guides_preserve_scope_phase_and_variable_in
     assert!((raw_phase.path.start().y - expected.y).abs() < 1.0e-10);
     let next = guides
         .iter()
-        .find(|guide| guide.id.index == 1)
+        .find(|guide| guide.id.repetition_index == 1)
         .expect("the raw phase lattice also retains index one");
     let expected_next = AffineTransform2D::rotate_about_then_translate(
         Point2::new(50.0, 50.0),
@@ -355,7 +361,7 @@ fn curved_transform_stacks_and_along_guides_preserve_scope_phase_and_variable_in
                     absolute_arc_position_bits: second,
                     ..
                 },
-            ) if first_location.guide_id == second_location.guide_id => {
+            ) if first_location.path == second_location.path => {
                 Some(f64::from_bits(*second) - f64::from_bits(*first))
             }
             _ => None,
@@ -423,25 +429,25 @@ fn normal_offsets_publish_signed_constant_gap_centerlines() {
     )
     .expect("normal-offset family evaluates");
     let guides = output
-        .guide_path_set()
+        .structural_path_set()
         .expect("guide paths publish")
-        .guides();
+        .paths();
     let indices = guides
         .iter()
-        .map(|guide| guide.id.index)
+        .map(|guide| guide.id.repetition_index)
         .collect::<Vec<_>>();
     assert!(indices.windows(2).all(|pair| pair[0] < pair[1]));
     let prior = guides
         .iter()
-        .find(|guide| guide.id.index == -1)
+        .find(|guide| guide.id.repetition_index == -1)
         .expect("right offset publishes");
     let source = guides
         .iter()
-        .find(|guide| guide.id.index == 0)
+        .find(|guide| guide.id.repetition_index == 0)
         .expect("source index zero publishes");
     let next = guides
         .iter()
-        .find(|guide| guide.id.index == 1)
+        .find(|guide| guide.id.repetition_index == 1)
         .expect("left offset publishes");
     let distance = |first: Point2, second: Point2| (first.x - second.x).hypot(first.y - second.y);
     assert!((distance(prior.path.start(), source.path.start()) - 12.0).abs() < 1.0e-9);
@@ -516,23 +522,214 @@ fn normal_offset_cleanup_components_publish_without_identity_collision() {
     )
     .expect("split normal-offset family publishes atomically");
     let guides = output
-        .guide_path_set()
+        .structural_path_set()
         .expect("guide paths publish")
-        .guides();
+        .paths();
     let split_index = guides
         .iter()
         .find(|guide| guide.id.component_ordinal > 0)
         .expect("at least one offset crossing becomes multiple components")
         .id
-        .index;
+        .repetition_index;
     let components = guides
         .iter()
-        .filter(|guide| guide.id.index == split_index)
+        .filter(|guide| guide.id.repetition_index == split_index)
         .collect::<Vec<_>>();
     assert!(components.len() >= 2);
     assert!(components.windows(2).all(|pair| {
         pair[0].id.component_ordinal < pair[1].id.component_ordinal && pair[0].id != pair[1].id
     }));
+    let samples = output
+        .site_set()
+        .iter()
+        .filter_map(|site| match &site.provenance {
+            FamilySiteProvenance::CurveAlongGuide {
+                location,
+                sequence,
+                absolute_arc_position_bits,
+                ..
+            } if location.path.repetition_index == split_index => Some((
+                location.path.component_ordinal,
+                *sequence,
+                f64::from_bits(*absolute_arc_position_bits),
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(samples.iter().any(|sample| sample.0 == 0));
+    assert!(samples.iter().any(|sample| sample.0 > 0));
+    assert!(
+        samples
+            .windows(2)
+            .all(|pair| { pair[0].1 < pair[1].1 && pair[0].2 < pair[1].2 })
+    );
+}
+
+/// Proves the 320x320 diagnostic propagates both ways and stops at terminal-extension collapse.
+#[test]
+fn diagnostic_cubic_stops_when_terminal_extensions_cross() {
+    let dimension_id = GuideDimensionId(61);
+    let definition = definition(
+        vec![GuideDimension {
+            id: dimension_id,
+            baseline_angle_degrees: 0.0,
+            phase: 0.0,
+            prototype: GuidePrototype::AuthoredOpenPath {
+                structure_id: AuthoredStructureId(61),
+            },
+            repetition: GuideRepetition::NormalOffset {
+                spacing: 12.0,
+                sides: OffsetSides::Both,
+                cleanup: OffsetCleanup::DissolveCrossings,
+            },
+        }],
+        GeneralizedSiteProduct::AlongGuides {
+            dimensions: vec![dimension_id],
+            interval_multiplier: 1.0,
+            phase: 0.0,
+        },
+    );
+    let base = Document::new_default_document(
+        CanvasSpec {
+            width: 320.0,
+            height: 320.0,
+        },
+        SourceReference::Unassigned,
+    )
+    .expect("diagnostic base document validates");
+    let structure = AuthoredStructure::new(
+        AuthoredStructureId(61),
+        AuthoredStructureKind::OpenPath,
+        vec![AuthoredCurveSegment::CubicBezier {
+            start: AuthoredPoint2 { x: 20.0, y: 160.0 },
+            control_1: AuthoredPoint2 { x: 96.0, y: 64.0 },
+            control_2: AuthoredPoint2 { x: 224.0, y: 64.0 },
+            end: AuthoredPoint2 { x: 300.0, y: 160.0 },
+        }],
+    )
+    .expect("diagnostic cubic validates");
+    let document = Document::with_source_topology_and_authored_structures(
+        DocumentId(61),
+        base.canvas().clone(),
+        SourceReference::Unassigned,
+        vec![definition.clone()],
+        base.pattern_settings().clone(),
+        base.channel_model()
+            .expect("default channel model")
+            .to_owned(),
+        base.channel_topology()
+            .expect("default channel topology")
+            .clone(),
+        vec![structure],
+    )
+    .expect("diagnostic document validates");
+    let output = evaluate_document_typed_family_cancellable(
+        &document,
+        &definition,
+        &GridInspectRequest {
+            canvas: CanvasSpec {
+                width: 320.0,
+                height: 320.0,
+            },
+            density: DensityMetric2D {
+                across_x: 32.0,
+                across_y: 32.0,
+                aspect_locked: false,
+            },
+            rotation_degrees: 0.0,
+            translation_x: 0.0,
+            translation_y: 0.0,
+            guard_steps: 1,
+            support_radius: 4.5,
+            max_family_candidates: 50_000,
+        },
+        &|| false,
+    )
+    .expect("diagnostic normal-offset family evaluates");
+    let paths = output
+        .structural_path_set()
+        .expect("diagnostic paths publish")
+        .paths();
+    assert!(
+        paths.iter().any(|path| path.id.repetition_index < 0),
+        "diagnostic publishes the right-side offset ladder"
+    );
+    assert!(
+        paths.iter().any(|path| path.id.repetition_index > 0),
+        "diagnostic publishes the left-side offset ladder"
+    );
+    let mut positive_indices = paths
+        .iter()
+        .filter_map(|path| (path.id.repetition_index > 0).then_some(path.id.repetition_index))
+        .collect::<Vec<_>>();
+    positive_indices.sort_unstable();
+    positive_indices.dedup();
+    let mut left_canvas = false;
+    for repetition_index in positive_indices {
+        let intersects_canvas = paths
+            .iter()
+            .filter(|path| path.id.repetition_index == repetition_index)
+            .any(|path| {
+                let bounds = path.path.bounds().expect("diagnostic path bounds");
+                bounds.max.x >= 0.0
+                    && bounds.min.x <= 320.0
+                    && bounds.max.y >= 0.0
+                    && bounds.min.y <= 320.0
+            });
+        if intersects_canvas {
+            assert!(
+                !left_canvas,
+                "repetition {repetition_index} must not re-enter the canvas after the cusp family leaves it"
+            );
+        } else {
+            left_canvas = true;
+        }
+    }
+    for (first_index, first) in paths.iter().enumerate() {
+        for second in paths.iter().skip(first_index + 1) {
+            let intersections = first
+                .path
+                .intersections(&second.path)
+                .expect("diagnostic component intersections remain bounded");
+            assert!(
+                intersections.iter().all(|intersection| {
+                    intersection.kind() != toniator_geometry::IntersectionKind::Crossing
+                }),
+                "diagnostic paths {:?} and {:?} must not form a cross-hatched offset family: {intersections:?}",
+                first.id,
+                second.id
+            );
+        }
+    }
+    let last_visible = paths
+        .iter()
+        .filter(|path| path.id.repetition_index == 14)
+        .collect::<Vec<_>>();
+    assert_eq!(last_visible.len(), 2);
+    assert_eq!(last_visible[0].id.component_ordinal, 0);
+    assert_eq!(last_visible[1].id.component_ordinal, 1);
+    assert!(last_visible.iter().all(|component| {
+        let bounds = component.path.bounds().expect("last visible cusp bounds");
+        bounds.max.x - bounds.min.x > 40.0
+            && bounds.max.y - bounds.min.y > 50.0
+            && component
+                .path
+                .unit_tangent_at(
+                    toniator_geometry::PathLocation::new(0, 0.0).expect("component start location"),
+                )
+                .is_ok()
+            && component
+                .path
+                .unit_tangent_at(
+                    toniator_geometry::PathLocation::new(component.path.segments().len() - 1, 1.0)
+                        .expect("component end location"),
+                )
+                .is_ok()
+    }));
+    assert!(
+        paths.iter().all(|path| path.id.repetition_index < 15),
+        "the family stops when both tangential endpoint extensions cross instead of publishing floating cusp fragments"
+    );
 }
 
 /// Proves a one-sided family reports a stable coverage failure when even its source cannot survive.

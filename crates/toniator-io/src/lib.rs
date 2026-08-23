@@ -22,16 +22,17 @@ use toniator_domain::{
     ChannelAppearance, ChannelGeometryResponseDelta, ChannelId, ChannelPaint,
     ChannelPatternInstance, ChannelPatternLayoutDelta, ChannelSourceMapping, ChannelState,
     ChannelTopology, ColorValue, ConnectedGeometryResponse, ConnectedGeometryResponseDelta,
-    CoveragePolicy, DensityMetric2D, DensityMetricDelta2D, Document, DocumentId,
+    CoveragePolicy, CurveWinding, DensityMetric2D, DensityMetricDelta2D, Document, DocumentId,
     DocumentPatternSettings, GeneralizedSiteProductDraft, GuideDimension, GuideDimensionDraft,
     GuideDimensionId, GuidePrototype, GuideRepetition, HalftoneChannelModel, HalftoneChannelRole,
     MarkGeometryResponse, MarkGeometryResponseDelta, MarkOrientation, MarkOrientationDraft,
-    MarkPrototype, ModeledChannelState, PathStrokeStyle, PatternDefinition, PatternDefinitionDraft,
-    PatternDefinitionId, PatternDefinitionRecipe, PatternGeometryResponse, PatternMechanismId,
-    PatternOutputLayerId, PresetMetadata, PresetRecord, RandomSiteCharacter, SiteDensityModulation,
-    SiteExclusionPolicy, SourceComponent, SourceMapping, SourceMappingComponent, SourcePlacement,
-    SourceReference, SourceReferenceId, StraightGuideDimension, StraightGuideRepetition,
-    ValidationError, VisibleMarkSizingPolicy,
+    MarkPrototype, ModeledChannelState, ParametricCurve, PathStrokeStyle, PatternDefinition,
+    PatternDefinitionDraft, PatternDefinitionId, PatternDefinitionRecipe, PatternGeometryResponse,
+    PatternMechanismId, PatternOutputLayerId, PresetMetadata, PresetRecord, RandomSiteCharacter,
+    SiteDensityModulation, SiteExclusionPolicy, SourceComponent, SourceMapping,
+    SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId, SpiralCurve,
+    SpiralShape, StraightGuideDimension, StraightGuideRepetition, ValidationError,
+    VisibleMarkSizingPolicy,
 };
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
@@ -1004,6 +1005,10 @@ enum PatternFamilyDtoV4 {
         exclusion_id: u64,
         site_product_id: u64,
     },
+    ParametricCurve {
+        curve_mechanism_id: u64,
+        site_mechanism_id: Option<u64>,
+    },
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -1034,6 +1039,17 @@ enum PatternMechanismDtoV4 {
         guide_mechanism_id: u64,
         dimensions: Vec<u64>,
         interval_multiplier: f64,
+        phase: f64,
+    },
+    ParametricCurveSource {
+        id: u64,
+        curve: ParametricCurveDtoV4,
+        repetition: GuideRepetitionDtoV4,
+    },
+    AlongParametricCurveSites {
+        id: u64,
+        curve_mechanism_id: u64,
+        interval: f64,
         phase: f64,
     },
     RandomSiteProcess {
@@ -1151,6 +1167,35 @@ enum GuideRepetitionDtoV4 {
         sides: OffsetSidesDtoV4,
         cleanup: OffsetCleanupDtoV4,
     },
+}
+
+/// Current-v4 analytic intent for the bounded parametric source vocabulary.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ParametricCurveDtoV4 {
+    Spiral {
+        shape: SpiralShapeDtoV4,
+        turns: f64,
+        radial_spacing: f64,
+        phase_degrees: f64,
+        winding: CurveWindingDtoV4,
+    },
+}
+
+/// Current-v4 round/square discriminant for one spiral source.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SpiralShapeDtoV4 {
+    Round,
+    Square,
+}
+
+/// Current-v4 winding discriminant for one spiral source.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CurveWindingDtoV4 {
+    Clockwise,
+    CounterClockwise,
 }
 
 /// Persisted current-v4 signed-side intent for normal-offset guide repetition.
@@ -1314,6 +1359,11 @@ enum PatternOutputLayerDtoV4 {
     GuidePaths {
         id: u64,
         guide_mechanism_id: u64,
+        style: PathStrokeStyle,
+    },
+    ParametricPaths {
+        id: u64,
+        curve_mechanism_id: u64,
         style: PathStrokeStyle,
     },
 }
@@ -2109,6 +2159,13 @@ impl PatternFamilyDtoV4 {
                 exclusion_id: exclusion_id.0,
                 site_product_id: site_product_id.0,
             },
+            toniator_domain::PatternFamily::ParametricCurve {
+                curve_mechanism_id,
+                site_mechanism_id,
+            } => Self::ParametricCurve {
+                curve_mechanism_id: curve_mechanism_id.0,
+                site_mechanism_id: site_mechanism_id.map(|id| id.0),
+            },
         }
     }
     fn into_domain(self) -> toniator_domain::PatternFamily {
@@ -2130,6 +2187,13 @@ impl PatternFamilyDtoV4 {
                 density_modulation_id: PatternMechanismId(density_modulation_id),
                 exclusion_id: PatternMechanismId(exclusion_id),
                 site_product_id: PatternMechanismId(site_product_id),
+            },
+            Self::ParametricCurve {
+                curve_mechanism_id,
+                site_mechanism_id,
+            } => toniator_domain::PatternFamily::ParametricCurve {
+                curve_mechanism_id: PatternMechanismId(curve_mechanism_id),
+                site_mechanism_id: site_mechanism_id.map(PatternMechanismId),
             },
         }
     }
@@ -2187,6 +2251,26 @@ impl PatternMechanismDtoV4 {
                 guide_mechanism_id: guide_mechanism_id.0,
                 dimensions: dimensions.iter().map(|id| id.0).collect(),
                 interval_multiplier: *interval_multiplier,
+                phase: *phase,
+            },
+            toniator_domain::PatternMechanism::ParametricCurveSource {
+                id,
+                curve,
+                repetition,
+            } => Self::ParametricCurveSource {
+                id: id.0,
+                curve: ParametricCurveDtoV4::from_domain(curve),
+                repetition: GuideRepetitionDtoV4::from_domain(repetition),
+            },
+            toniator_domain::PatternMechanism::AlongParametricCurveSites {
+                id,
+                curve_mechanism_id,
+                interval,
+                phase,
+            } => Self::AlongParametricCurveSites {
+                id: id.0,
+                curve_mechanism_id: curve_mechanism_id.0,
+                interval: *interval,
                 phase: *phase,
             },
             toniator_domain::PatternMechanism::RandomSiteProcess {
@@ -2281,6 +2365,26 @@ impl PatternMechanismDtoV4 {
                 guide_mechanism_id: PatternMechanismId(guide_mechanism_id),
                 dimensions: dimensions.into_iter().map(GuideDimensionId).collect(),
                 interval_multiplier,
+                phase,
+            },
+            Self::ParametricCurveSource {
+                id,
+                curve,
+                repetition,
+            } => toniator_domain::PatternMechanism::ParametricCurveSource {
+                id: PatternMechanismId(id),
+                curve: curve.into_domain(),
+                repetition: repetition.into_domain(),
+            },
+            Self::AlongParametricCurveSites {
+                id,
+                curve_mechanism_id,
+                interval,
+                phase,
+            } => toniator_domain::PatternMechanism::AlongParametricCurveSites {
+                id: PatternMechanismId(id),
+                curve_mechanism_id: PatternMechanismId(curve_mechanism_id),
+                interval,
                 phase,
             },
             Self::RandomSiteProcess {
@@ -2481,6 +2585,15 @@ impl PatternOutputLayerDtoV4 {
                 guide_mechanism_id: guide_mechanism_id.0,
                 style: *style,
             },
+            toniator_domain::PatternOutputLayer::ParametricPaths {
+                id,
+                curve_mechanism_id,
+                style,
+            } => Self::ParametricPaths {
+                id: id.0,
+                curve_mechanism_id: curve_mechanism_id.0,
+                style: *style,
+            },
         }
     }
     fn into_domain(self) -> toniator_domain::PatternOutputLayer {
@@ -2512,6 +2625,67 @@ impl PatternOutputLayerDtoV4 {
                 guide_mechanism_id: PatternMechanismId(guide_mechanism_id),
                 style,
             },
+            Self::ParametricPaths {
+                id,
+                curve_mechanism_id,
+                style,
+            } => toniator_domain::PatternOutputLayer::ParametricPaths {
+                id: PatternOutputLayerId(id),
+                curve_mechanism_id: PatternMechanismId(curve_mechanism_id),
+                style,
+            },
+        }
+    }
+}
+
+impl ParametricCurveDtoV4 {
+    /// Projects analytic parametric intent without serializing derived CurvePath geometry.
+    fn from_domain(value: &ParametricCurve) -> Self {
+        match value {
+            ParametricCurve::Spiral(SpiralCurve {
+                shape,
+                turns,
+                radial_spacing,
+                phase_degrees,
+                winding,
+            }) => Self::Spiral {
+                shape: match shape {
+                    SpiralShape::Round => SpiralShapeDtoV4::Round,
+                    SpiralShape::Square => SpiralShapeDtoV4::Square,
+                },
+                turns: *turns,
+                radial_spacing: *radial_spacing,
+                phase_degrees: *phase_degrees,
+                winding: match winding {
+                    CurveWinding::Clockwise => CurveWindingDtoV4::Clockwise,
+                    CurveWinding::CounterClockwise => CurveWindingDtoV4::CounterClockwise,
+                },
+            },
+        }
+    }
+
+    /// Rebuilds analytic parametric intent for later authoritative domain validation.
+    fn into_domain(self) -> ParametricCurve {
+        match self {
+            Self::Spiral {
+                shape,
+                turns,
+                radial_spacing,
+                phase_degrees,
+                winding,
+            } => ParametricCurve::Spiral(SpiralCurve {
+                shape: match shape {
+                    SpiralShapeDtoV4::Round => SpiralShape::Round,
+                    SpiralShapeDtoV4::Square => SpiralShape::Square,
+                },
+                turns,
+                radial_spacing,
+                phase_degrees,
+                winding: match winding {
+                    CurveWindingDtoV4::Clockwise => CurveWinding::Clockwise,
+                    CurveWindingDtoV4::CounterClockwise => CurveWinding::CounterClockwise,
+                },
+            }),
         }
     }
 }

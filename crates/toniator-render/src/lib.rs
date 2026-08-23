@@ -12,6 +12,7 @@ use image::{ColorType, ImageEncoder, codecs::png::PngEncoder};
 use toniator_domain::{CanvasSpec, ChannelId, ColorValue, HalftoneChannelModel};
 use toniator_geometry::{
     CanonicalCircleMark, CanonicalFillRule, CanonicalMark, CanonicalStroke, CurveSegment, Point2,
+    StructuralPathInstanceId, StructuralPathLocationProvenance, StructuralPathSourceId,
 };
 
 const SUBPIXEL_GRID: u32 = 8;
@@ -695,12 +696,7 @@ fn scene_fingerprint(
                 add_scene_bytes(&mut hash, [3]);
                 add_scene_bytes(&mut hash, (strokes.len() as u64).to_le_bytes());
                 for stroke in strokes {
-                    add_scene_bytes(&mut hash, stroke.source_guide_id.dimension_id.to_le_bytes());
-                    add_scene_bytes(&mut hash, stroke.source_guide_id.index.to_le_bytes());
-                    add_scene_bytes(
-                        &mut hash,
-                        stroke.source_guide_id.component_ordinal.to_le_bytes(),
-                    );
+                    append_scene_structural_path_instance(&mut hash, stroke.source_path_id);
                     add_scene_bytes(
                         &mut hash,
                         stroke
@@ -909,6 +905,25 @@ fn append_scene_provenance(hash: &mut u64, provenance: &toniator_geometry::Famil
             add_scene_bytes(hash, absolute_arc_position_bits.to_le_bytes());
             add_scene_bytes(hash, local_arc_position_bits.to_le_bytes());
         }
+        toniator_geometry::FamilySiteProvenance::AlongParametricCurve {
+            location,
+            path_order,
+            sequence,
+            absolute_arc_position_bits,
+            local_arc_position_bits,
+        } => {
+            add_scene_bytes(hash, [6]);
+            append_scene_curve_location(hash, location);
+            add_scene_bytes(
+                hash,
+                u64::try_from(*path_order)
+                    .expect("usize fits u64")
+                    .to_le_bytes(),
+            );
+            add_scene_bytes(hash, sequence.to_le_bytes());
+            add_scene_bytes(hash, absolute_arc_position_bits.to_le_bytes());
+            add_scene_bytes(hash, local_arc_position_bits.to_le_bytes());
+        }
     }
 }
 
@@ -936,11 +951,8 @@ fn append_scene_guide_instance(hash: &mut u64, guide: toniator_geometry::GuideIn
 }
 
 /// Appends one exact curve contributor location.
-fn append_scene_curve_location(
-    hash: &mut u64,
-    location: &toniator_geometry::GuidePathLocationProvenance,
-) {
-    append_scene_guide_instance(hash, location.guide_id);
+fn append_scene_curve_location(hash: &mut u64, location: &StructuralPathLocationProvenance) {
+    append_scene_structural_path_instance(hash, location.path);
     add_scene_bytes(
         hash,
         u64::try_from(location.segment_index)
@@ -948,6 +960,22 @@ fn append_scene_curve_location(
             .to_le_bytes(),
     );
     add_scene_bytes(hash, location.parameter_bits.to_le_bytes());
+}
+
+/// Appends the typed source and ordered component identity used by path-derived scene geometry.
+fn append_scene_structural_path_instance(hash: &mut u64, path: StructuralPathInstanceId) {
+    match path.source {
+        StructuralPathSourceId::GuideDimension(id) => {
+            add_scene_bytes(hash, [1]);
+            add_scene_bytes(hash, id.0.to_le_bytes());
+        }
+        StructuralPathSourceId::ParametricCurve(id) => {
+            add_scene_bytes(hash, [2]);
+            add_scene_bytes(hash, id.0.to_le_bytes());
+        }
+    }
+    add_scene_bytes(hash, path.repetition_index.to_le_bytes());
+    add_scene_bytes(hash, path.component_ordinal.to_le_bytes());
 }
 
 /// Appends canonical fill semantics explicitly instead of relying on renderer defaults.
@@ -2001,6 +2029,10 @@ fn composite_canonical_stroke(
     }
     for y in min_y..max_y {
         work.check()?;
+        let row_edges = outline_edges_for_pixel_row(&edges, y);
+        if row_edges.is_empty() {
+            continue;
+        }
         for x in min_x..max_x {
             let mut covered = 0_u32;
             let samples = if matches!(work.antialiasing, RasterAntialiasing::On) {
@@ -2014,7 +2046,7 @@ fn composite_canonical_stroke(
                         f64::from(x) + (f64::from(sx) + 0.5) / f64::from(samples),
                         f64::from(y) + (f64::from(sy) + 0.5) / f64::from(samples),
                     );
-                    if point_in_nonzero_outline(&edges, point) {
+                    if point_in_nonzero_outline(&row_edges, point) {
                         covered += 1;
                     }
                 }
@@ -2035,6 +2067,17 @@ fn composite_canonical_stroke(
         }
     }
     Ok(())
+}
+
+/// Retains only flattened outline edges that can cross a subpixel sample in one output row.
+fn outline_edges_for_pixel_row(edges: &[(Point2, Point2)], row: u32) -> Vec<(Point2, Point2)> {
+    let row_start = f64::from(row);
+    let row_end = row_start + 1.0;
+    edges
+        .iter()
+        .copied()
+        .filter(|(start, end)| start.y.min(end.y) < row_end && start.y.max(end.y) > row_start)
+        .collect()
 }
 
 /// Flattens stored line and cubic geometry in authored order under the caller's checked edge bound.
@@ -3017,6 +3060,34 @@ mod stage20e2_limit_tests {
             .len(),
             40 * 20 * 4
         );
+    }
+
+    /// Proves row-local winding candidates preserve full-outline membership at every subpixel sample.
+    #[test]
+    fn outline_row_filter_preserves_nonzero_winding_coverage() {
+        let edges = vec![
+            (Point2::new(1.0, 1.0), Point2::new(7.0, 2.0)),
+            (Point2::new(7.0, 2.0), Point2::new(6.0, 7.0)),
+            (Point2::new(6.0, 7.0), Point2::new(2.0, 6.0)),
+            (Point2::new(2.0, 6.0), Point2::new(1.0, 1.0)),
+        ];
+        for row in 0..8 {
+            let row_edges = outline_edges_for_pixel_row(&edges, row);
+            for sub_y in 0..SUBPIXEL_GRID {
+                for x in 0..8 {
+                    for sub_x in 0..SUBPIXEL_GRID {
+                        let point = Point2::new(
+                            f64::from(x) + (f64::from(sub_x) + 0.5) / f64::from(SUBPIXEL_GRID),
+                            f64::from(row) + (f64::from(sub_y) + 0.5) / f64::from(SUBPIXEL_GRID),
+                        );
+                        assert_eq!(
+                            point_in_nonzero_outline(&edges, point),
+                            point_in_nonzero_outline(&row_edges, point)
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Proves complete cubic construction bits affect scene identity while SVG retains one editable

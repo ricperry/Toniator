@@ -459,7 +459,8 @@ persistence. Focused domain, geometry, patterns, engine, IO, render, CLI/SVG,
 Holiday, and private Sway/AT-SPI evidence is green; independent re-review has
 no remaining finding. Automated wlroots evidence is not manual GNOME/Mutter
 review. The user explicitly accepted Stage 20J on 2026-08-22; publication,
-Stage 20K+, protected specification changes, and Legacy work remain separate.
+later Stage 20L+ work, protected specification changes, and Legacy work remain
+separate.
 
 **Terminology follow-up — Tracked.** Revisit the public and internal use of
 `density`, especially `across_x` and `across_y`: those values currently express
@@ -468,8 +469,36 @@ means guides per unit distance. Do not rename the fields or change their
 behavior as part of Stage 20I; scope the schema, persistence, CLI, and UI impact
 in a separately authorized follow-up.
 
-**Remaining Stage 20K+ — Planned.** The approved remaining order is 20K
-parametric curves; 20L adjacency; 20M connection programs; 20N
+**Stage 20K — Accepted awaiting checkpoint.** Parametric Curves implementation remains governed by
+[`STAGE_20K_PARAMETRIC_CURVES_PLAN.md`](docs/STAGE_20K_PARAMETRIC_CURVES_PLAN.md).
+It adds only the common round/square finite spiral family, raw curve paths or
+equal-arc curve sites, and reusable accepted repetition. User review correctly
+rejected the first bounded Stage 20J cusp/reversal correction governed by
+[`STAGE_20J_CUSP_REVERSAL_CORRECTION_PLAN.md`](docs/STAGE_20J_CUSP_REVERSAL_CORRECTION_PLAN.md)
+because its cubic artifact retained a crossing lattice. The reopened repair
+removed that lattice, and the subsequent one-sided diagnostic finding is now
+corrected: its persisted intent requests both sides. User review then found
+zero-source-span endpoint extensions from wholly reversed repetitions re-entering
+the canvas. The follow-up removed those paths but direct inspection of its
+unclipped output found a remaining floating chevron/diamond: cleanup kept
+isolated authored fragments after their tangential endpoint extensions had
+crossed. The extended envelope now collapses at that crossing. The exact
+clipped and clip-released Inkscape outputs were inspected directly: repetition
+14 is the final clean cusp pair, repetition 15 and farther are absent, and no
+floating or re-entering descendants remain. Focused Stage 20J and directly
+relevant Stage 20K verification is green. The user explicitly accepted the
+Stage 20J correction on 2026-08-22. Stage 20K's low-detail render claim is now
+superseded by intrinsic raster/vector evidence using five full turns with
+artboard-derived radial pitch. The correction also replaces pathological
+nanounit polygon/chord arc-length refinement with bounded adaptive quadrature
+and limits raster winding work to row-active outline edges. All eight native
+PNG outputs and all eight Inkscape SVG renderings were inspected directly and
+cover their artboards with coherent round/square path and equal-arc-site
+geometry. The user accepted Stage 20K on 2026-08-22. The implementation
+checkpoint is pending; no checkpoint hash is implied.
+
+**Remaining Stage 20L+ — Planned.** The approved remaining order is 20L
+adjacency; 20M connection programs; 20N
 Voronoi; 20O guide faces; 20P region realization; 20Q composites; 20R gallery
 recipes; 20S Pattern Wizard; and 20T–20W temporal work. Each requires its own
 contract, implementation, review, and acceptance gate.

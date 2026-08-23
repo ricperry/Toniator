@@ -331,7 +331,7 @@ pub enum GuidePrototype {
 /// The bounded Stage 20D repetition vocabulary.  A transform-stack direction
 /// is relative to the owning dimension baseline and never carries scale/shear.
 #[derive(Clone, Debug, PartialEq)]
-pub enum GuideRepetition {
+pub enum CurveRepetition {
     Single,
     TransformStack {
         direction_degrees: f64,
@@ -343,6 +343,42 @@ pub enum GuideRepetition {
         sides: OffsetSides,
         cleanup: OffsetCleanup,
     },
+}
+
+/// Compatibility spelling for persisted/current guide mechanisms. New common
+/// curve sources are authored against `CurveRepetition`; the v4 guide DTO name
+/// intentionally remains unchanged.
+pub type GuideRepetition = CurveRepetition;
+
+/// One bounded analytic curve source owned by the parametric family.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ParametricCurve {
+    /// An open spiral with a round or exact square centerline construction.
+    Spiral(SpiralCurve),
+}
+
+/// Structural intent for one finite spiral centered at the local origin.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpiralCurve {
+    pub shape: SpiralShape,
+    pub turns: f64,
+    pub radial_spacing: f64,
+    pub phase_degrees: f64,
+    pub winding: CurveWinding,
+}
+
+/// Selects the exact local construction family for a spiral source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpiralShape {
+    Round,
+    Square,
+}
+
+/// Selects the signed angular orientation of a spiral source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CurveWinding {
+    Clockwise,
+    CounterClockwise,
 }
 
 /// Selects the signed normal-offset directions derived from one source guide.
@@ -568,6 +604,18 @@ pub struct PatternCapabilityProjection {
 pub enum PatternFamilyCapabilityProjection {
     Grid(GridCapabilityProjection),
     Dispersion(DispersionCapabilityProjection),
+    Parametric(ParametricCapabilityProjection),
+}
+
+/// Read-only workflow facts for a finite parametric curve source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParametricCapabilityProjection {
+    pub generator: GeneratorCapabilities,
+    pub supports_round_spiral: bool,
+    pub supports_square_spiral: bool,
+    pub raw_paths: bool,
+    pub sites_along_curve: bool,
+    pub normal_offset: bool,
 }
 
 /// States which current generator inputs participate in the active family.
@@ -1026,6 +1074,11 @@ pub enum PatternFamily {
         exclusion_id: PatternMechanismId,
         site_product_id: PatternMechanismId,
     },
+    /// One finite analytic source that publishes either raw paths or sites along that path.
+    ParametricCurve {
+        curve_mechanism_id: PatternMechanismId,
+        site_mechanism_id: Option<PatternMechanismId>,
+    },
 }
 
 /// The distinct structural character of an unmodulated candidate process.
@@ -1127,6 +1180,19 @@ pub enum PatternMechanism {
         interval_multiplier: f64,
         phase: f64,
     },
+    /// One finite parametric source and its reusable Stage 20J repetition policy.
+    ParametricCurveSource {
+        id: PatternMechanismId,
+        curve: ParametricCurve,
+        repetition: CurveRepetition,
+    },
+    /// Equal-arc sites along one parametric source. `interval` is absolute document distance.
+    AlongParametricCurveSites {
+        id: PatternMechanismId,
+        curve_mechanism_id: PatternMechanismId,
+        interval: f64,
+        phase: f64,
+    },
     RandomSiteProcess {
         id: PatternMechanismId,
         character: RandomSiteCharacter,
@@ -1162,6 +1228,8 @@ impl PatternMechanism {
             | Self::GuideDimensions { id, .. }
             | Self::SelectedGuideIntersections { id, .. }
             | Self::AlongGuideSites { id, .. }
+            | Self::ParametricCurveSource { id, .. }
+            | Self::AlongParametricCurveSites { id, .. }
             | Self::RandomSiteProcess { id, .. }
             | Self::SiteDensityModulation { id, .. }
             | Self::SiteExclusion { id, .. }
@@ -1190,6 +1258,12 @@ pub enum PatternOutputLayer {
         guide_mechanism_id: PatternMechanismId,
         style: PathStrokeStyle,
     },
+    /// Consumes one ordered parametric source as canonical connected paths.
+    ParametricPaths {
+        id: PatternOutputLayerId,
+        curve_mechanism_id: PatternMechanismId,
+        style: PathStrokeStyle,
+    },
 }
 
 impl PatternOutputLayer {
@@ -1198,6 +1272,7 @@ impl PatternOutputLayer {
             Self::CircularMarks { id, .. }
             | Self::MarkPrototype { id, .. }
             | Self::GuidePaths { id, .. } => *id,
+            Self::ParametricPaths { id, .. } => *id,
         }
     }
 }
@@ -2480,6 +2555,39 @@ impl Document {
                             PropertyFieldId::AlongGuideDimensions,
                             PropertyFieldId::AlongGuideIntervalMultiplier,
                             PropertyFieldId::AlongGuidePhase,
+                        ] {
+                            descriptors.push(descriptor_from_contract(field, target));
+                        }
+                    }
+                    PatternMechanism::ParametricCurveSource { repetition, .. } => {
+                        let mut fields = vec![
+                            PropertyFieldId::ParametricShape,
+                            PropertyFieldId::ParametricTurns,
+                            PropertyFieldId::ParametricRadialSpacing,
+                            PropertyFieldId::ParametricPhase,
+                            PropertyFieldId::ParametricWinding,
+                            PropertyFieldId::ParametricRepetition,
+                        ];
+                        match repetition {
+                            CurveRepetition::Single => {}
+                            CurveRepetition::TransformStack { .. } => fields.extend([
+                                PropertyFieldId::ParametricStackDirection,
+                                PropertyFieldId::ParametricStackSpacingMultiplier,
+                            ]),
+                            CurveRepetition::NormalOffset { .. } => fields.extend([
+                                PropertyFieldId::ParametricOffsetSpacing,
+                                PropertyFieldId::ParametricOffsetSides,
+                                PropertyFieldId::ParametricOffsetCleanup,
+                            ]),
+                        }
+                        for field in fields {
+                            descriptors.push(descriptor_from_contract(field, target));
+                        }
+                    }
+                    PatternMechanism::AlongParametricCurveSites { .. } => {
+                        for field in [
+                            PropertyFieldId::AlongParametricInterval,
+                            PropertyFieldId::AlongParametricPhase,
                         ] {
                             descriptors.push(descriptor_from_contract(field, target));
                         }
@@ -4233,7 +4341,7 @@ impl Document {
     }
 
     /// Allocates fresh definition-internal identities while retaining external authored-resource
-    /// references and remapping only definition-owned guide orientation references.
+    /// references and remapping every definition-owned link, including parametric source/site/output IDs.
     ///
     /// # Errors
     ///
@@ -4464,6 +4572,118 @@ impl Document {
                     source.coverage.clone(),
                 ),
             );
+        }
+        if let PatternFamily::ParametricCurve { .. } = source.family {
+            let id = self.allocate_definition_id()?;
+            let curve_id = self.allocate_mechanism_id()?;
+            let output_id = self.allocate_output_layer_id()?;
+            let [
+                PatternMechanism::ParametricCurveSource {
+                    curve, repetition, ..
+                },
+                rest @ ..,
+            ] = source.mechanisms.as_slice()
+            else {
+                return Err(ValidationError::new(
+                    "pattern_definitions.family",
+                    "parametric definition has an incompatible source mechanism",
+                ));
+            };
+            let (site_id, mechanisms, site_mechanism_id) = match rest {
+                [] => (
+                    None,
+                    vec![PatternMechanism::ParametricCurveSource {
+                        id: curve_id,
+                        curve: curve.clone(),
+                        repetition: repetition.clone(),
+                    }],
+                    None,
+                ),
+                [
+                    PatternMechanism::AlongParametricCurveSites {
+                        interval, phase, ..
+                    },
+                ] => {
+                    let site_id =
+                        PatternMechanismId(curve_id.0.checked_add(1).ok_or_else(|| {
+                            ValidationError::new(
+                                "pattern_definitions.mechanisms.id",
+                                "document mechanism ID space is exhausted",
+                            )
+                        })?);
+                    (
+                        Some(site_id),
+                        vec![
+                            PatternMechanism::ParametricCurveSource {
+                                id: curve_id,
+                                curve: curve.clone(),
+                                repetition: repetition.clone(),
+                            },
+                            PatternMechanism::AlongParametricCurveSites {
+                                id: site_id,
+                                curve_mechanism_id: curve_id,
+                                interval: *interval,
+                                phase: *phase,
+                            },
+                        ],
+                        Some(site_id),
+                    )
+                }
+                _ => {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.family",
+                        "parametric definition has an incompatible site mechanism",
+                    ));
+                }
+            };
+            let output_layers = match (source.output_layers.as_slice(), site_id) {
+                ([PatternOutputLayer::ParametricPaths { style, .. }], None) => {
+                    vec![PatternOutputLayer::ParametricPaths {
+                        id: output_id,
+                        curve_mechanism_id: curve_id,
+                        style: *style,
+                    }]
+                }
+                ([PatternOutputLayer::CircularMarks { .. }], Some(site_id)) => {
+                    vec![PatternOutputLayer::CircularMarks {
+                        id: output_id,
+                        site_mechanism_id: site_id,
+                    }]
+                }
+                (
+                    [
+                        PatternOutputLayer::MarkPrototype {
+                            prototype,
+                            orientation: MarkOrientation::Fixed,
+                            ..
+                        },
+                    ],
+                    Some(site_id),
+                ) => vec![PatternOutputLayer::MarkPrototype {
+                    id: output_id,
+                    site_mechanism_id: site_id,
+                    prototype: prototype.clone(),
+                    orientation: MarkOrientation::Fixed,
+                }],
+                _ => {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.output_layers",
+                        "parametric definition has an incompatible output layer",
+                    ));
+                }
+            };
+            return Ok(PatternDefinition {
+                id,
+                name: source.name.clone(),
+                family: PatternFamily::ParametricCurve {
+                    curve_mechanism_id: curve_id,
+                    site_mechanism_id,
+                },
+                mechanisms,
+                output_layers,
+                modulation: source.modulation.clone(),
+                coverage: source.coverage.clone(),
+            });
         }
         if let PatternFamily::RandomSites { .. } = source.family {
             let id = self.allocate_definition_id()?;
@@ -5217,6 +5437,104 @@ fn recipe_exclusion_transition(
 /// deliberately left unchanged so validation can reject them before this mutation seam is used.
 fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefinitionEdit) {
     match edit {
+        PatternDefinitionEdit::SetParametricShape {
+            mechanism_id,
+            shape,
+        } => apply_parametric_spiral(definition, *mechanism_id, |spiral| spiral.shape = *shape),
+        PatternDefinitionEdit::SetParametricTurns {
+            mechanism_id,
+            turns,
+        } => apply_parametric_spiral(definition, *mechanism_id, |spiral| spiral.turns = *turns),
+        PatternDefinitionEdit::SetParametricRadialSpacing {
+            mechanism_id,
+            radial_spacing,
+        } => apply_parametric_spiral(definition, *mechanism_id, |spiral| {
+            spiral.radial_spacing = *radial_spacing
+        }),
+        PatternDefinitionEdit::SetParametricPhase {
+            mechanism_id,
+            phase_degrees,
+        } => apply_parametric_spiral(definition, *mechanism_id, |spiral| {
+            spiral.phase_degrees = *phase_degrees
+        }),
+        PatternDefinitionEdit::SetParametricWinding {
+            mechanism_id,
+            winding,
+        } => apply_parametric_spiral(definition, *mechanism_id, |spiral| {
+            spiral.winding = *winding
+        }),
+        PatternDefinitionEdit::SetParametricRepetition {
+            mechanism_id,
+            repetition,
+        } => {
+            if let Some(PatternMechanism::ParametricCurveSource {
+                repetition: current,
+                ..
+            }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|item| item.id() == *mechanism_id)
+            {
+                *current = repetition.clone();
+            }
+        }
+        PatternDefinitionEdit::SetParametricOffsetSpacing {
+            mechanism_id,
+            spacing,
+        } => apply_parametric_offset(definition, *mechanism_id, |value, _, _| *value = *spacing),
+        PatternDefinitionEdit::SetParametricOffsetSides {
+            mechanism_id,
+            sides,
+        } => apply_parametric_offset(definition, *mechanism_id, |_, value, _| *value = *sides),
+        PatternDefinitionEdit::SetParametricOffsetCleanup {
+            mechanism_id,
+            cleanup,
+        } => apply_parametric_offset(definition, *mechanism_id, |_, _, value| *value = *cleanup),
+        PatternDefinitionEdit::SetParametricStackDirection {
+            mechanism_id,
+            value,
+        } => apply_parametric_stack(
+            definition,
+            *mechanism_id,
+            |direction, _, next| *direction = next,
+            *value,
+        ),
+        PatternDefinitionEdit::SetParametricStackSpacingMultiplier {
+            mechanism_id,
+            value,
+        } => apply_parametric_stack(
+            definition,
+            *mechanism_id,
+            |_, spacing, next| *spacing = next,
+            *value,
+        ),
+        PatternDefinitionEdit::SetAlongParametricInterval {
+            mechanism_id,
+            interval,
+        } => {
+            if let Some(PatternMechanism::AlongParametricCurveSites {
+                interval: current, ..
+            }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|item| item.id() == *mechanism_id)
+            {
+                *current = *interval;
+            }
+        }
+        PatternDefinitionEdit::SetAlongParametricPhase {
+            mechanism_id,
+            phase,
+        } => {
+            if let Some(PatternMechanism::AlongParametricCurveSites { phase: current, .. }) =
+                definition
+                    .mechanisms
+                    .iter_mut()
+                    .find(|item| item.id() == *mechanism_id)
+            {
+                *current = *phase;
+            }
+        }
         PatternDefinitionEdit::SetCoverageGuardSteps { guard_steps } => {
             definition.coverage.guard_steps = *guard_steps
         }
@@ -5917,7 +6235,8 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
                             orientation: MarkOrientation::Fixed,
                         };
                     }
-                    PatternOutputLayer::GuidePaths { .. } => {}
+                    PatternOutputLayer::GuidePaths { .. }
+                    | PatternOutputLayer::ParametricPaths { .. } => {}
                 }
             }
         }
@@ -6012,9 +6331,70 @@ fn apply_guide_arc_scalar(
     }
 }
 
-/// Applies one active transform-stack payload leaf without creating dormant repetition data.
-///
-/// The caller validates that the target is a generic transform stack before this local mutation.
+/// Mutates one validated parametric spiral source without deriving geometry or changing its repetition.
+fn apply_parametric_spiral(
+    definition: &mut PatternDefinition,
+    mechanism_id: PatternMechanismId,
+    mutate: impl FnOnce(&mut SpiralCurve),
+) {
+    if let Some(PatternMechanism::ParametricCurveSource {
+        curve: ParametricCurve::Spiral(spiral),
+        ..
+    }) = definition
+        .mechanisms
+        .iter_mut()
+        .find(|item| item.id() == mechanism_id)
+    {
+        mutate(spiral);
+    }
+}
+
+/// Mutates one validated active parametric transform-stack payload without switching repetition topology.
+fn apply_parametric_stack(
+    definition: &mut PatternDefinition,
+    mechanism_id: PatternMechanismId,
+    mutate: impl FnOnce(&mut f64, &mut f64, f64),
+    value: f64,
+) {
+    if let Some(PatternMechanism::ParametricCurveSource {
+        repetition:
+            CurveRepetition::TransformStack {
+                direction_degrees,
+                spacing_multiplier,
+            },
+        ..
+    }) = definition
+        .mechanisms
+        .iter_mut()
+        .find(|item| item.id() == mechanism_id)
+    {
+        mutate(direction_degrees, spacing_multiplier, value);
+    }
+}
+
+/// Mutates one validated active parametric normal-offset payload without switching repetition topology.
+fn apply_parametric_offset(
+    definition: &mut PatternDefinition,
+    mechanism_id: PatternMechanismId,
+    mutate: impl FnOnce(&mut f64, &mut OffsetSides, &mut OffsetCleanup),
+) {
+    if let Some(PatternMechanism::ParametricCurveSource {
+        repetition:
+            CurveRepetition::NormalOffset {
+                spacing,
+                sides,
+                cleanup,
+            },
+        ..
+    }) = definition
+        .mechanisms
+        .iter_mut()
+        .find(|item| item.id() == mechanism_id)
+    {
+        mutate(spacing, sides, cleanup);
+    }
+}
+
 fn apply_guide_stack_scalar(
     definition: &mut PatternDefinition,
     mechanism_id: PatternMechanismId,
@@ -6080,6 +6460,97 @@ fn remap_definition_edit_for_duplicate(
     let mechanism = |id| remap_mechanism_id(source, duplicate, id);
     let dimension = |id| remap_dimension_id(source, duplicate, id);
     match edit {
+        PatternDefinitionEdit::SetParametricShape {
+            mechanism_id,
+            shape,
+        } => PatternDefinitionEdit::SetParametricShape {
+            mechanism_id: mechanism(*mechanism_id),
+            shape: *shape,
+        },
+        PatternDefinitionEdit::SetParametricTurns {
+            mechanism_id,
+            turns,
+        } => PatternDefinitionEdit::SetParametricTurns {
+            mechanism_id: mechanism(*mechanism_id),
+            turns: *turns,
+        },
+        PatternDefinitionEdit::SetParametricRadialSpacing {
+            mechanism_id,
+            radial_spacing,
+        } => PatternDefinitionEdit::SetParametricRadialSpacing {
+            mechanism_id: mechanism(*mechanism_id),
+            radial_spacing: *radial_spacing,
+        },
+        PatternDefinitionEdit::SetParametricPhase {
+            mechanism_id,
+            phase_degrees,
+        } => PatternDefinitionEdit::SetParametricPhase {
+            mechanism_id: mechanism(*mechanism_id),
+            phase_degrees: *phase_degrees,
+        },
+        PatternDefinitionEdit::SetParametricWinding {
+            mechanism_id,
+            winding,
+        } => PatternDefinitionEdit::SetParametricWinding {
+            mechanism_id: mechanism(*mechanism_id),
+            winding: *winding,
+        },
+        PatternDefinitionEdit::SetParametricRepetition {
+            mechanism_id,
+            repetition,
+        } => PatternDefinitionEdit::SetParametricRepetition {
+            mechanism_id: mechanism(*mechanism_id),
+            repetition: repetition.clone(),
+        },
+        PatternDefinitionEdit::SetParametricOffsetSpacing {
+            mechanism_id,
+            spacing,
+        } => PatternDefinitionEdit::SetParametricOffsetSpacing {
+            mechanism_id: mechanism(*mechanism_id),
+            spacing: *spacing,
+        },
+        PatternDefinitionEdit::SetParametricOffsetSides {
+            mechanism_id,
+            sides,
+        } => PatternDefinitionEdit::SetParametricOffsetSides {
+            mechanism_id: mechanism(*mechanism_id),
+            sides: *sides,
+        },
+        PatternDefinitionEdit::SetParametricOffsetCleanup {
+            mechanism_id,
+            cleanup,
+        } => PatternDefinitionEdit::SetParametricOffsetCleanup {
+            mechanism_id: mechanism(*mechanism_id),
+            cleanup: *cleanup,
+        },
+        PatternDefinitionEdit::SetParametricStackDirection {
+            mechanism_id,
+            value,
+        } => PatternDefinitionEdit::SetParametricStackDirection {
+            mechanism_id: mechanism(*mechanism_id),
+            value: *value,
+        },
+        PatternDefinitionEdit::SetParametricStackSpacingMultiplier {
+            mechanism_id,
+            value,
+        } => PatternDefinitionEdit::SetParametricStackSpacingMultiplier {
+            mechanism_id: mechanism(*mechanism_id),
+            value: *value,
+        },
+        PatternDefinitionEdit::SetAlongParametricInterval {
+            mechanism_id,
+            interval,
+        } => PatternDefinitionEdit::SetAlongParametricInterval {
+            mechanism_id: mechanism(*mechanism_id),
+            interval: *interval,
+        },
+        PatternDefinitionEdit::SetAlongParametricPhase {
+            mechanism_id,
+            phase,
+        } => PatternDefinitionEdit::SetAlongParametricPhase {
+            mechanism_id: mechanism(*mechanism_id),
+            phase: *phase,
+        },
         PatternDefinitionEdit::SetCoverageGuardSteps { guard_steps } => {
             PatternDefinitionEdit::SetCoverageGuardSteps {
                 guard_steps: *guard_steps,
@@ -6555,6 +7026,104 @@ fn validate_definition_edit(
 ) -> Result<(), ValidationError> {
     validate_property_field_projection(edit.field_projection())?;
     match edit {
+        PatternDefinitionEdit::SetParametricShape { mechanism_id, .. }
+        | PatternDefinitionEdit::SetParametricWinding { mechanism_id, .. } => {
+            validate_parametric_source_target(definition, *mechanism_id).map(|_| ())
+        }
+        PatternDefinitionEdit::SetParametricTurns {
+            mechanism_id,
+            turns,
+        } => {
+            validate_parametric_source_target(definition, *mechanism_id)?;
+            if !turns.is_finite() || *turns <= 0.0 || *turns > 1024.0 {
+                return Err(ValidationError::new(
+                    "pattern_definitions.mechanisms.parametric.turns",
+                    "spiral turns must be finite and in (0, 1024]",
+                ));
+            }
+            Ok(())
+        }
+        PatternDefinitionEdit::SetParametricRadialSpacing {
+            mechanism_id,
+            radial_spacing,
+        } => {
+            validate_parametric_source_target(definition, *mechanism_id)?;
+            validate_positive_finite(
+                *radial_spacing,
+                "pattern_definitions.mechanisms.parametric.radial_spacing",
+            )
+        }
+        PatternDefinitionEdit::SetParametricPhase {
+            mechanism_id,
+            phase_degrees,
+        } => {
+            validate_parametric_source_target(definition, *mechanism_id)?;
+            validate_finite(
+                *phase_degrees,
+                "pattern_definitions.mechanisms.parametric.phase_degrees",
+            )
+        }
+        PatternDefinitionEdit::SetParametricRepetition {
+            mechanism_id,
+            repetition,
+        } => {
+            validate_parametric_source_target(definition, *mechanism_id)?;
+            validate_guide_repetition(repetition)
+        }
+        PatternDefinitionEdit::SetParametricOffsetSpacing {
+            mechanism_id,
+            spacing,
+        } => {
+            validate_active_parametric_offset_target(definition, *mechanism_id)?;
+            validate_positive_finite(
+                *spacing,
+                "pattern_definitions.mechanisms.parametric.repetition.offset.spacing",
+            )
+        }
+        PatternDefinitionEdit::SetParametricOffsetSides { mechanism_id, .. }
+        | PatternDefinitionEdit::SetParametricOffsetCleanup { mechanism_id, .. } => {
+            validate_active_parametric_offset_target(definition, *mechanism_id).map(|_| ())
+        }
+        PatternDefinitionEdit::SetParametricStackDirection {
+            mechanism_id,
+            value,
+        } => {
+            validate_active_parametric_stack_target(definition, *mechanism_id)?;
+            validate_finite(
+                *value,
+                "pattern_definitions.mechanisms.parametric.repetition.direction",
+            )
+        }
+        PatternDefinitionEdit::SetParametricStackSpacingMultiplier {
+            mechanism_id,
+            value,
+        } => {
+            validate_active_parametric_stack_target(definition, *mechanism_id)?;
+            validate_positive_finite(
+                *value,
+                "pattern_definitions.mechanisms.parametric.repetition.spacing_multiplier",
+            )
+        }
+        PatternDefinitionEdit::SetAlongParametricInterval {
+            mechanism_id,
+            interval,
+        } => {
+            validate_along_parametric_target(definition, *mechanism_id)?;
+            validate_positive_finite(
+                *interval,
+                "pattern_definitions.mechanisms.along_parametric.interval",
+            )
+        }
+        PatternDefinitionEdit::SetAlongParametricPhase {
+            mechanism_id,
+            phase,
+        } => {
+            validate_along_parametric_target(definition, *mechanism_id)?;
+            validate_finite(
+                *phase,
+                "pattern_definitions.mechanisms.along_parametric.phase",
+            )
+        }
         PatternDefinitionEdit::SetCoverageGuardSteps { .. } => Ok(()),
         PatternDefinitionEdit::SetCoverageAdditionalMargin { additional_margin } => {
             validate_nonnegative_finite(
@@ -7431,6 +8000,10 @@ fn validate_mark_prototype_output_target(
             "pattern_definitions.output_layers",
             "command targets a guide-path output without a mark-prototype configuration",
         )),
+        PatternOutputLayer::ParametricPaths { .. } => Err(ValidationError::new(
+            "pattern_definitions.output_layers",
+            "command targets a parametric-path output without a mark-prototype configuration",
+        )),
     }
 }
 
@@ -7570,6 +8143,17 @@ fn validate_definition_structure(definition: &PatternDefinition) -> Result<(), V
             site_product_id,
         );
     }
+    if let PatternFamily::ParametricCurve {
+        curve_mechanism_id,
+        site_mechanism_id,
+    } = definition.family
+    {
+        return validate_parametric_curve_definition(
+            definition,
+            curve_mechanism_id,
+            site_mechanism_id,
+        );
+    }
     let PatternFamily::GuideIntersections {
         guide_mechanism_id,
         site_mechanism_id: root_site_id,
@@ -7650,6 +8234,247 @@ fn validate_definition_structure(definition: &PatternDefinition) -> Result<(), V
         ));
     }
     Ok(())
+}
+
+/// Validates the bounded Stage 20K parametric source chain and homogeneous output.
+///
+/// # Errors
+///
+/// Returns a stable structural, numeric, or output-authority diagnostic before installation.
+/// Validates that an edit addresses an active analytic parametric source.
+///
+/// # Errors
+///
+/// Returns the stable missing-or-nonparametric source diagnostic without mutating a definition.
+fn validate_parametric_source_target(
+    definition: &PatternDefinition,
+    mechanism_id: PatternMechanismId,
+) -> Result<(), ValidationError> {
+    matches!(
+        definition
+            .mechanisms
+            .iter()
+            .find(|item| item.id() == mechanism_id),
+        Some(PatternMechanism::ParametricCurveSource { .. })
+    )
+    .then_some(())
+    .ok_or_else(|| {
+        ValidationError::new(
+            "pattern_definitions.mechanisms.parametric",
+            "command targets a missing parametric source",
+        )
+    })
+}
+
+/// Validates that an edit addresses the active transform-stack payload.
+///
+/// # Errors
+///
+/// Returns the stable inactive-repetition diagnostic without mutating a definition.
+fn validate_active_parametric_stack_target(
+    definition: &PatternDefinition,
+    mechanism_id: PatternMechanismId,
+) -> Result<(), ValidationError> {
+    matches!(
+        definition
+            .mechanisms
+            .iter()
+            .find(|item| item.id() == mechanism_id),
+        Some(PatternMechanism::ParametricCurveSource {
+            repetition: CurveRepetition::TransformStack { .. },
+            ..
+        })
+    )
+    .then_some(())
+    .ok_or_else(|| {
+        ValidationError::new(
+            "pattern_definitions.mechanisms.parametric.repetition",
+            "field is inactive for the current parametric repetition",
+        )
+    })
+}
+
+/// Validates that an edit addresses the active normal-offset payload.
+///
+/// # Errors
+///
+/// Returns the stable inactive-repetition diagnostic without mutating a definition.
+fn validate_active_parametric_offset_target(
+    definition: &PatternDefinition,
+    mechanism_id: PatternMechanismId,
+) -> Result<(), ValidationError> {
+    matches!(
+        definition
+            .mechanisms
+            .iter()
+            .find(|item| item.id() == mechanism_id),
+        Some(PatternMechanism::ParametricCurveSource {
+            repetition: CurveRepetition::NormalOffset { .. },
+            ..
+        })
+    )
+    .then_some(())
+    .ok_or_else(|| {
+        ValidationError::new(
+            "pattern_definitions.mechanisms.parametric.repetition",
+            "field is inactive for the current parametric repetition",
+        )
+    })
+}
+
+/// Validates that an edit addresses the active equal-arc parametric site product.
+///
+/// # Errors
+///
+/// Returns the stable missing-site-product diagnostic without mutating a definition.
+fn validate_along_parametric_target(
+    definition: &PatternDefinition,
+    mechanism_id: PatternMechanismId,
+) -> Result<(), ValidationError> {
+    matches!(
+        definition
+            .mechanisms
+            .iter()
+            .find(|item| item.id() == mechanism_id),
+        Some(PatternMechanism::AlongParametricCurveSites { .. })
+    )
+    .then_some(())
+    .ok_or_else(|| {
+        ValidationError::new(
+            "pattern_definitions.mechanisms.along_parametric",
+            "command targets a missing parametric site product",
+        )
+    })
+}
+
+/// Validates one complete parametric source, optional site product, and homogeneous output chain.
+///
+/// # Errors
+///
+/// Returns structural, numeric, or output-authority diagnostics before a definition can publish.
+fn validate_parametric_curve_definition(
+    definition: &PatternDefinition,
+    curve_id: PatternMechanismId,
+    site_id: Option<PatternMechanismId>,
+) -> Result<(), ValidationError> {
+    let Some(PatternMechanism::ParametricCurveSource {
+        id,
+        curve,
+        repetition,
+    }) = definition.mechanisms.first()
+    else {
+        return Err(ValidationError::new(
+            "pattern_definitions.family",
+            "parametric family requires a source mechanism first",
+        ));
+    };
+    if *id != curve_id {
+        return Err(ValidationError::new(
+            "pattern_definitions.family.curve_mechanism_id",
+            "parametric family root must reference its source mechanism",
+        ));
+    }
+    validate_parametric_curve(curve)?;
+    validate_guide_repetition(repetition)?;
+    match (
+        site_id,
+        definition.mechanisms.as_slice(),
+        definition.output_layers.as_slice(),
+    ) {
+        (
+            None,
+            [PatternMechanism::ParametricCurveSource { .. }],
+            [
+                PatternOutputLayer::ParametricPaths {
+                    curve_mechanism_id, ..
+                },
+            ],
+        ) if *curve_mechanism_id == curve_id => Ok(()),
+        (
+            Some(site_id),
+            [
+                PatternMechanism::ParametricCurveSource { .. },
+                PatternMechanism::AlongParametricCurveSites {
+                    id,
+                    curve_mechanism_id,
+                    interval,
+                    phase,
+                },
+            ],
+            [
+                PatternOutputLayer::CircularMarks {
+                    site_mechanism_id, ..
+                },
+            ],
+        ) if *id == site_id && *curve_mechanism_id == curve_id && *site_mechanism_id == site_id => {
+            validate_positive_finite(
+                *interval,
+                "pattern_definitions.mechanisms.along_parametric.interval",
+            )?;
+            validate_finite(
+                *phase,
+                "pattern_definitions.mechanisms.along_parametric.phase",
+            )
+        }
+        (
+            Some(site_id),
+            [
+                PatternMechanism::ParametricCurveSource { .. },
+                PatternMechanism::AlongParametricCurveSites {
+                    id,
+                    curve_mechanism_id,
+                    interval,
+                    phase,
+                },
+            ],
+            [
+                PatternOutputLayer::MarkPrototype {
+                    site_mechanism_id,
+                    orientation: MarkOrientation::Fixed,
+                    ..
+                },
+            ],
+        ) if *id == site_id && *curve_mechanism_id == curve_id && *site_mechanism_id == site_id => {
+            validate_positive_finite(
+                *interval,
+                "pattern_definitions.mechanisms.along_parametric.interval",
+            )?;
+            validate_finite(
+                *phase,
+                "pattern_definitions.mechanisms.along_parametric.phase",
+            )
+        }
+        _ => Err(ValidationError::new(
+            "pattern_definitions.family",
+            "parametric families require exactly one homogeneous raw-path or fixed-mark output",
+        )),
+    }
+}
+
+/// Validates finite authored spiral intent without deriving geometry or normalizing angles.
+///
+/// # Errors
+///
+/// Returns the stable parametric numeric diagnostic for invalid finite source intent.
+fn validate_parametric_curve(curve: &ParametricCurve) -> Result<(), ValidationError> {
+    match curve {
+        ParametricCurve::Spiral(spiral) => {
+            if !spiral.turns.is_finite() || spiral.turns <= 0.0 || spiral.turns > 1024.0 {
+                return Err(ValidationError::new(
+                    "pattern_definitions.mechanisms.parametric.turns",
+                    "spiral turns must be finite and in (0, 1024]",
+                ));
+            }
+            validate_positive_finite(
+                spiral.radial_spacing,
+                "pattern_definitions.mechanisms.parametric.radial_spacing",
+            )?;
+            validate_finite(
+                spiral.phase_degrees,
+                "pattern_definitions.mechanisms.parametric.phase_degrees",
+            )
+        }
+    }
 }
 
 /// Projects one already validated definition through the current structural capability vocabulary.
@@ -7753,6 +8578,31 @@ fn project_validated_pattern_definition(
                 exclusion: exclusion_kind(policy),
             })
         }
+        PatternFamily::ParametricCurve {
+            site_mechanism_id, ..
+        } => PatternFamilyCapabilityProjection::Parametric(ParametricCapabilityProjection {
+            generator: GeneratorCapabilities {
+                density: matches!(
+                    definition.mechanisms.first(),
+                    Some(PatternMechanism::ParametricCurveSource {
+                        repetition: GuideRepetition::TransformStack { .. },
+                        ..
+                    })
+                ),
+                seed: false,
+            },
+            supports_round_spiral: true,
+            supports_square_spiral: true,
+            raw_paths: site_mechanism_id.is_none(),
+            sites_along_curve: site_mechanism_id.is_some(),
+            normal_offset: matches!(
+                definition.mechanisms.first(),
+                Some(PatternMechanism::ParametricCurveSource {
+                    repetition: GuideRepetition::NormalOffset { .. },
+                    ..
+                })
+            ),
+        }),
     };
     Ok(PatternCapabilityProjection {
         definition_id: definition.id,
@@ -7769,7 +8619,10 @@ fn project_validated_pattern_definition(
 fn project_output_capability(
     output: &PatternOutputLayer,
 ) -> Result<PatternOutputCapabilityProjection, ValidationError> {
-    if matches!(output, PatternOutputLayer::GuidePaths { .. }) {
+    if matches!(
+        output,
+        PatternOutputLayer::GuidePaths { .. } | PatternOutputLayer::ParametricPaths { .. }
+    ) {
         return Ok(PatternOutputCapabilityProjection::GuidePaths(
             GuidePathOutputCapabilityProjection {
                 round_join: true,
@@ -7790,7 +8643,9 @@ fn project_output_capability(
             mark_prototype_kind(prototype),
             mark_orientation_kind(orientation),
         ),
-        PatternOutputLayer::GuidePaths { .. } => unreachable!("handled above"),
+        PatternOutputLayer::GuidePaths { .. } | PatternOutputLayer::ParametricPaths { .. } => {
+            unreachable!("handled above")
+        }
     };
     Ok(PatternOutputCapabilityProjection::Marks(
         MarkOutputCapabilityProjection {
@@ -8595,7 +9450,7 @@ fn validate_effective_response_compatibility(
     });
     let paths = matches!(
         definition.output_layers.as_slice(),
-        [PatternOutputLayer::GuidePaths { .. }]
+        [PatternOutputLayer::GuidePaths { .. } | PatternOutputLayer::ParametricPaths { .. }]
     );
     match (response, marks, paths) {
         (PatternGeometryResponse::Marks(_), true, false)
@@ -8937,6 +9792,19 @@ pub enum PropertyFieldId {
     OutputAuthoredClosedShape,
     OutputOrientation,
     OutputOrientationDimension,
+    ParametricShape,
+    ParametricTurns,
+    ParametricRadialSpacing,
+    ParametricPhase,
+    ParametricWinding,
+    ParametricRepetition,
+    ParametricOffsetSpacing,
+    ParametricOffsetSides,
+    ParametricOffsetCleanup,
+    ParametricStackDirection,
+    ParametricStackSpacingMultiplier,
+    AlongParametricInterval,
+    AlongParametricPhase,
 }
 
 /// The authoritative descriptor order.  Keeping this list beside the field
@@ -9018,6 +9886,19 @@ pub const PROPERTY_FIELD_IDS: &[PropertyFieldId] = &[
     PropertyFieldId::OutputAuthoredClosedShape,
     PropertyFieldId::OutputOrientation,
     PropertyFieldId::OutputOrientationDimension,
+    PropertyFieldId::ParametricShape,
+    PropertyFieldId::ParametricTurns,
+    PropertyFieldId::ParametricRadialSpacing,
+    PropertyFieldId::ParametricPhase,
+    PropertyFieldId::ParametricWinding,
+    PropertyFieldId::ParametricRepetition,
+    PropertyFieldId::ParametricOffsetSpacing,
+    PropertyFieldId::ParametricOffsetSides,
+    PropertyFieldId::ParametricOffsetCleanup,
+    PropertyFieldId::ParametricStackDirection,
+    PropertyFieldId::ParametricStackSpacingMultiplier,
+    PropertyFieldId::AlongParametricInterval,
+    PropertyFieldId::AlongParametricPhase,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -9055,6 +9936,9 @@ pub enum PropertyEnumChoice {
     MarkOrientation(MarkOrientationKind),
     GuidePrototype(GuidePrototypeKind),
     GuideRepetition(GuideRepetitionKind),
+    SpiralShape(SpiralShape),
+    CurveWinding(CurveWinding),
+    CurveRepetition(GuideRepetitionKind),
     OffsetSides(OffsetSides),
     OffsetCleanup(OffsetCleanup),
 }
@@ -9213,6 +10097,7 @@ pub enum PropertyChoicePolicy {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PropertyCommandKind {
+    SetParametricCurve,
     SetSourceReference,
     SetChannelDensityDelta,
     SetDocumentPatternSettings,
@@ -9520,6 +10405,102 @@ fn property_value_for_mechanism(
     mechanism: &PatternMechanism,
 ) -> PropertyCurrentValueKind {
     match (field, mechanism) {
+        (
+            PropertyFieldId::ParametricShape,
+            PatternMechanism::ParametricCurveSource {
+                curve: ParametricCurve::Spiral(spiral),
+                ..
+            },
+        ) => PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::SpiralShape(spiral.shape)),
+        (
+            PropertyFieldId::ParametricTurns,
+            PatternMechanism::ParametricCurveSource {
+                curve: ParametricCurve::Spiral(spiral),
+                ..
+            },
+        ) => PropertyCurrentValueKind::FiniteF64(spiral.turns),
+        (
+            PropertyFieldId::ParametricRadialSpacing,
+            PatternMechanism::ParametricCurveSource {
+                curve: ParametricCurve::Spiral(spiral),
+                ..
+            },
+        ) => PropertyCurrentValueKind::FiniteF64(spiral.radial_spacing),
+        (
+            PropertyFieldId::ParametricPhase,
+            PatternMechanism::ParametricCurveSource {
+                curve: ParametricCurve::Spiral(spiral),
+                ..
+            },
+        ) => PropertyCurrentValueKind::FiniteF64(spiral.phase_degrees),
+        (
+            PropertyFieldId::ParametricWinding,
+            PatternMechanism::ParametricCurveSource {
+                curve: ParametricCurve::Spiral(spiral),
+                ..
+            },
+        ) => PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::CurveWinding(spiral.winding)),
+        (
+            PropertyFieldId::ParametricRepetition,
+            PatternMechanism::ParametricCurveSource { repetition, .. },
+        ) => PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::CurveRepetition(
+            match repetition {
+                CurveRepetition::Single => GuideRepetitionKind::Single,
+                CurveRepetition::TransformStack { .. } => GuideRepetitionKind::TransformStack,
+                CurveRepetition::NormalOffset { .. } => GuideRepetitionKind::NormalOffset,
+            },
+        )),
+        (
+            PropertyFieldId::ParametricStackDirection,
+            PatternMechanism::ParametricCurveSource {
+                repetition:
+                    CurveRepetition::TransformStack {
+                        direction_degrees, ..
+                    },
+                ..
+            },
+        ) => PropertyCurrentValueKind::FiniteF64(*direction_degrees),
+        (
+            PropertyFieldId::ParametricStackSpacingMultiplier,
+            PatternMechanism::ParametricCurveSource {
+                repetition:
+                    CurveRepetition::TransformStack {
+                        spacing_multiplier, ..
+                    },
+                ..
+            },
+        ) => PropertyCurrentValueKind::FiniteF64(*spacing_multiplier),
+        (
+            PropertyFieldId::ParametricOffsetSpacing,
+            PatternMechanism::ParametricCurveSource {
+                repetition: CurveRepetition::NormalOffset { spacing, .. },
+                ..
+            },
+        ) => PropertyCurrentValueKind::FiniteF64(*spacing),
+        (
+            PropertyFieldId::ParametricOffsetSides,
+            PatternMechanism::ParametricCurveSource {
+                repetition: CurveRepetition::NormalOffset { sides, .. },
+                ..
+            },
+        ) => PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::OffsetSides(*sides)),
+        (
+            PropertyFieldId::ParametricOffsetCleanup,
+            PatternMechanism::ParametricCurveSource {
+                repetition: CurveRepetition::NormalOffset { .. },
+                ..
+            },
+        ) => PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::OffsetCleanup(
+            OffsetCleanup::DissolveCrossings,
+        )),
+        (
+            PropertyFieldId::AlongParametricInterval,
+            PatternMechanism::AlongParametricCurveSites { interval, .. },
+        ) => PropertyCurrentValueKind::FiniteF64(*interval),
+        (
+            PropertyFieldId::AlongParametricPhase,
+            PatternMechanism::AlongParametricCurveSites { phase, .. },
+        ) => PropertyCurrentValueKind::FiniteF64(*phase),
         (
             PropertyFieldId::IntersectionDimensions,
             PatternMechanism::SelectedGuideIntersections { dimensions, .. },
@@ -10578,6 +11559,19 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
     PropertyFieldContract {
         field,
         command_kind: match field {
+            PropertyFieldId::ParametricShape
+            | PropertyFieldId::ParametricTurns
+            | PropertyFieldId::ParametricRadialSpacing
+            | PropertyFieldId::ParametricPhase
+            | PropertyFieldId::ParametricWinding
+            | PropertyFieldId::ParametricRepetition
+            | PropertyFieldId::ParametricOffsetSpacing
+            | PropertyFieldId::ParametricOffsetSides
+            | PropertyFieldId::ParametricOffsetCleanup
+            | PropertyFieldId::ParametricStackDirection
+            | PropertyFieldId::ParametricStackSpacingMultiplier
+            | PropertyFieldId::AlongParametricInterval
+            | PropertyFieldId::AlongParametricPhase => PropertyCommandKind::SetParametricCurve,
             PropertyFieldId::SourceReference => PropertyCommandKind::SetSourceReference,
             PropertyFieldId::DensityAcrossX | PropertyFieldId::DensityAcrossY => {
                 PropertyCommandKind::SetChannelDensityDelta
@@ -10735,7 +11729,12 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::GuidePrototype
             | PropertyFieldId::GuideRepetition
             | PropertyFieldId::GuideOffsetSides
-            | PropertyFieldId::GuideOffsetCleanup => PropertyValueKind::EnumChoice,
+            | PropertyFieldId::GuideOffsetCleanup
+            | PropertyFieldId::ParametricShape
+            | PropertyFieldId::ParametricWinding
+            | PropertyFieldId::ParametricRepetition
+            | PropertyFieldId::ParametricOffsetSides
+            | PropertyFieldId::ParametricOffsetCleanup => PropertyValueKind::EnumChoice,
             _ => PropertyValueKind::FiniteF64,
         },
         choices: match field {
@@ -10756,6 +11755,11 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::GuideRepetition => GUIDE_REPETITION_CHOICES,
             PropertyFieldId::GuideOffsetSides => OFFSET_SIDES_CHOICES,
             PropertyFieldId::GuideOffsetCleanup => OFFSET_CLEANUP_CHOICES,
+            PropertyFieldId::ParametricShape => SPIRAL_SHAPE_CHOICES,
+            PropertyFieldId::ParametricWinding => CURVE_WINDING_CHOICES,
+            PropertyFieldId::ParametricRepetition => CURVE_REPETITION_CHOICES,
+            PropertyFieldId::ParametricOffsetSides => OFFSET_SIDES_CHOICES,
+            PropertyFieldId::ParametricOffsetCleanup => OFFSET_CLEANUP_CHOICES,
             _ => &[],
         },
         bounds: match field {
@@ -11101,6 +12105,19 @@ const GUIDE_REPETITION_CHOICES: &[PropertyEnumChoice] = &[
     PropertyEnumChoice::GuideRepetition(GuideRepetitionKind::Single),
     PropertyEnumChoice::GuideRepetition(GuideRepetitionKind::TransformStack),
     PropertyEnumChoice::GuideRepetition(GuideRepetitionKind::NormalOffset),
+];
+const SPIRAL_SHAPE_CHOICES: &[PropertyEnumChoice] = &[
+    PropertyEnumChoice::SpiralShape(SpiralShape::Round),
+    PropertyEnumChoice::SpiralShape(SpiralShape::Square),
+];
+const CURVE_WINDING_CHOICES: &[PropertyEnumChoice] = &[
+    PropertyEnumChoice::CurveWinding(CurveWinding::Clockwise),
+    PropertyEnumChoice::CurveWinding(CurveWinding::CounterClockwise),
+];
+const CURVE_REPETITION_CHOICES: &[PropertyEnumChoice] = &[
+    PropertyEnumChoice::CurveRepetition(GuideRepetitionKind::Single),
+    PropertyEnumChoice::CurveRepetition(GuideRepetitionKind::TransformStack),
+    PropertyEnumChoice::CurveRepetition(GuideRepetitionKind::NormalOffset),
 ];
 const OFFSET_SIDES_CHOICES: &[PropertyEnumChoice] = &[
     PropertyEnumChoice::OffsetSides(OffsetSides::Left),
@@ -11640,6 +12657,58 @@ pub fn validate_preset_record(record: &PresetRecord) -> Result<(), ValidationErr
 /// through `DocumentHistory`, which records its exact inverse.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PatternDefinitionEdit {
+    SetParametricShape {
+        mechanism_id: PatternMechanismId,
+        shape: SpiralShape,
+    },
+    SetParametricTurns {
+        mechanism_id: PatternMechanismId,
+        turns: f64,
+    },
+    SetParametricRadialSpacing {
+        mechanism_id: PatternMechanismId,
+        radial_spacing: f64,
+    },
+    SetParametricPhase {
+        mechanism_id: PatternMechanismId,
+        phase_degrees: f64,
+    },
+    SetParametricWinding {
+        mechanism_id: PatternMechanismId,
+        winding: CurveWinding,
+    },
+    SetParametricRepetition {
+        mechanism_id: PatternMechanismId,
+        repetition: CurveRepetition,
+    },
+    SetParametricOffsetSpacing {
+        mechanism_id: PatternMechanismId,
+        spacing: f64,
+    },
+    SetParametricOffsetSides {
+        mechanism_id: PatternMechanismId,
+        sides: OffsetSides,
+    },
+    SetParametricOffsetCleanup {
+        mechanism_id: PatternMechanismId,
+        cleanup: OffsetCleanup,
+    },
+    SetParametricStackDirection {
+        mechanism_id: PatternMechanismId,
+        value: f64,
+    },
+    SetParametricStackSpacingMultiplier {
+        mechanism_id: PatternMechanismId,
+        value: f64,
+    },
+    SetAlongParametricInterval {
+        mechanism_id: PatternMechanismId,
+        interval: f64,
+    },
+    SetAlongParametricPhase {
+        mechanism_id: PatternMechanismId,
+        phase: f64,
+    },
     SetCoverageGuardSteps {
         guard_steps: u32,
     },
@@ -12093,9 +13162,70 @@ pub enum DocumentCommandFieldClassification {
 }
 
 impl PatternDefinitionEdit {
+    /// Projects one typed structural edit into its descriptor contract without changing authority.
     pub fn field_projection(&self) -> PropertyCommandFieldProjection {
         use PatternDefinitionEdit as Edit;
         let (field, value) = match self {
+            Edit::SetParametricShape { shape, .. } => (
+                PropertyFieldId::ParametricShape,
+                PropertyFieldValue::EnumChoice(PropertyEnumChoice::SpiralShape(*shape)),
+            ),
+            Edit::SetParametricTurns { turns, .. } => (
+                PropertyFieldId::ParametricTurns,
+                PropertyFieldValue::FiniteF64(*turns),
+            ),
+            Edit::SetParametricRadialSpacing { radial_spacing, .. } => (
+                PropertyFieldId::ParametricRadialSpacing,
+                PropertyFieldValue::FiniteF64(*radial_spacing),
+            ),
+            Edit::SetParametricPhase { phase_degrees, .. } => (
+                PropertyFieldId::ParametricPhase,
+                PropertyFieldValue::FiniteF64(*phase_degrees),
+            ),
+            Edit::SetParametricWinding { winding, .. } => (
+                PropertyFieldId::ParametricWinding,
+                PropertyFieldValue::EnumChoice(PropertyEnumChoice::CurveWinding(*winding)),
+            ),
+            Edit::SetParametricRepetition { repetition, .. } => (
+                PropertyFieldId::ParametricRepetition,
+                PropertyFieldValue::EnumChoice(PropertyEnumChoice::CurveRepetition(
+                    match repetition {
+                        CurveRepetition::Single => GuideRepetitionKind::Single,
+                        CurveRepetition::TransformStack { .. } => {
+                            GuideRepetitionKind::TransformStack
+                        }
+                        CurveRepetition::NormalOffset { .. } => GuideRepetitionKind::NormalOffset,
+                    },
+                )),
+            ),
+            Edit::SetParametricOffsetSpacing { spacing, .. } => (
+                PropertyFieldId::ParametricOffsetSpacing,
+                PropertyFieldValue::FiniteF64(*spacing),
+            ),
+            Edit::SetParametricOffsetSides { sides, .. } => (
+                PropertyFieldId::ParametricOffsetSides,
+                PropertyFieldValue::EnumChoice(PropertyEnumChoice::OffsetSides(*sides)),
+            ),
+            Edit::SetParametricOffsetCleanup { cleanup, .. } => (
+                PropertyFieldId::ParametricOffsetCleanup,
+                PropertyFieldValue::EnumChoice(PropertyEnumChoice::OffsetCleanup(*cleanup)),
+            ),
+            Edit::SetParametricStackDirection { value, .. } => (
+                PropertyFieldId::ParametricStackDirection,
+                PropertyFieldValue::FiniteF64(*value),
+            ),
+            Edit::SetParametricStackSpacingMultiplier { value, .. } => (
+                PropertyFieldId::ParametricStackSpacingMultiplier,
+                PropertyFieldValue::FiniteF64(*value),
+            ),
+            Edit::SetAlongParametricInterval { interval, .. } => (
+                PropertyFieldId::AlongParametricInterval,
+                PropertyFieldValue::FiniteF64(*interval),
+            ),
+            Edit::SetAlongParametricPhase { phase, .. } => (
+                PropertyFieldId::AlongParametricPhase,
+                PropertyFieldValue::FiniteF64(*phase),
+            ),
             Edit::SetCoverageGuardSteps { guard_steps } => (
                 PropertyFieldId::CoverageGuardSteps,
                 PropertyFieldValue::U32(*guard_steps),
@@ -14604,6 +15734,471 @@ mod history_tests {
         )
         .unwrap();
         DocumentHistory::new(DocumentSession::new(document).unwrap())
+    }
+
+    /// Builds two ordered channels linked to one editable parametric definition.
+    fn parametric_history() -> DocumentHistory {
+        let curve_id = PatternMechanismId(41);
+        let site_id = PatternMechanismId(42);
+        let definition = PatternDefinition {
+            id: PatternDefinitionId(40),
+            name: "parametric history".into(),
+            family: PatternFamily::ParametricCurve {
+                curve_mechanism_id: curve_id,
+                site_mechanism_id: Some(site_id),
+            },
+            mechanisms: vec![
+                PatternMechanism::ParametricCurveSource {
+                    id: curve_id,
+                    curve: ParametricCurve::Spiral(SpiralCurve {
+                        shape: SpiralShape::Round,
+                        turns: 1.0,
+                        radial_spacing: 8.0,
+                        phase_degrees: 0.0,
+                        winding: CurveWinding::CounterClockwise,
+                    }),
+                    repetition: CurveRepetition::Single,
+                },
+                PatternMechanism::AlongParametricCurveSites {
+                    id: site_id,
+                    curve_mechanism_id: curve_id,
+                    interval: 6.0,
+                    phase: 0.0,
+                },
+            ],
+            output_layers: vec![PatternOutputLayer::MarkPrototype {
+                id: PatternOutputLayerId(43),
+                site_mechanism_id: site_id,
+                prototype: MarkPrototype::Circle,
+                orientation: MarkOrientation::Fixed,
+            }],
+            modulation: PatternModulation,
+            coverage: CoveragePolicy {
+                guard_steps: 0,
+                additional_margin: 1.0,
+            },
+        };
+        let mut first = history()
+            .document()
+            .channels()
+            .expect("legacy fixture has channels")[0]
+            .clone();
+        first.pattern_instance.definition_override = Some(definition.id);
+        let mut second = first.clone();
+        second.id = ChannelId(2);
+        let document = Document::new(
+            DocumentId(40),
+            CanvasSpec {
+                width: 80.0,
+                height: 60.0,
+            },
+            vec![definition],
+            DocumentPatternSettings {
+                definition_id: PatternDefinitionId(40),
+                density: DensityMetric2D {
+                    across_x: 8.0,
+                    across_y: 6.0,
+                    aspect_locked: false,
+                },
+                pattern_rotation_degrees: 0.0,
+                shape_rotation_degrees: 0.0,
+                geometry_response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+                    minimum_fill: 0.0,
+                    maximum_fill: 1.0,
+                }),
+            },
+            vec![first, second],
+        )
+        .expect("parametric history document validates");
+        DocumentHistory::new(DocumentSession::new(document).expect("parametric session validates"))
+    }
+
+    /// Proves parametric descriptors and every active edit retain family authority, stale bases,
+    /// copy-on-edit, history, and private-draft squash semantics without UI involvement.
+    #[test]
+    fn parametric_curve_edits_are_descriptor_driven_reversible_and_draft_safe() {
+        let mut history = parametric_history();
+        let expected_fields = [
+            PropertyFieldId::ParametricShape,
+            PropertyFieldId::ParametricTurns,
+            PropertyFieldId::ParametricRadialSpacing,
+            PropertyFieldId::ParametricPhase,
+            PropertyFieldId::ParametricWinding,
+            PropertyFieldId::ParametricRepetition,
+            PropertyFieldId::AlongParametricInterval,
+            PropertyFieldId::AlongParametricPhase,
+        ];
+        let descriptors = history.document().property_descriptors();
+        let values = history.document().property_values();
+        assert!(expected_fields.iter().all(|field| {
+            descriptors
+                .iter()
+                .any(|descriptor| descriptor.field == *field)
+                && values.iter().any(|value| value.descriptor.field == *field)
+        }));
+
+        let original = history
+            .document()
+            .definition(PatternDefinitionId(40))
+            .expect("linked definition")
+            .clone();
+        let edits = [
+            PatternDefinitionEdit::SetParametricShape {
+                mechanism_id: PatternMechanismId(41),
+                shape: SpiralShape::Square,
+            },
+            PatternDefinitionEdit::SetParametricTurns {
+                mechanism_id: PatternMechanismId(41),
+                turns: 1.5,
+            },
+            PatternDefinitionEdit::SetParametricRadialSpacing {
+                mechanism_id: PatternMechanismId(41),
+                radial_spacing: 9.0,
+            },
+            PatternDefinitionEdit::SetParametricPhase {
+                mechanism_id: PatternMechanismId(41),
+                phase_degrees: 12.0,
+            },
+            PatternDefinitionEdit::SetParametricWinding {
+                mechanism_id: PatternMechanismId(41),
+                winding: CurveWinding::Clockwise,
+            },
+            PatternDefinitionEdit::SetParametricRepetition {
+                mechanism_id: PatternMechanismId(41),
+                repetition: CurveRepetition::TransformStack {
+                    direction_degrees: 0.0,
+                    spacing_multiplier: 1.0,
+                },
+            },
+            PatternDefinitionEdit::SetParametricStackDirection {
+                mechanism_id: PatternMechanismId(41),
+                value: 15.0,
+            },
+            PatternDefinitionEdit::SetParametricStackSpacingMultiplier {
+                mechanism_id: PatternMechanismId(41),
+                value: 1.5,
+            },
+            PatternDefinitionEdit::SetParametricRepetition {
+                mechanism_id: PatternMechanismId(41),
+                repetition: CurveRepetition::NormalOffset {
+                    spacing: 7.0,
+                    sides: OffsetSides::Both,
+                    cleanup: OffsetCleanup::DissolveCrossings,
+                },
+            },
+            PatternDefinitionEdit::SetParametricOffsetSpacing {
+                mechanism_id: PatternMechanismId(41),
+                spacing: 8.0,
+            },
+            PatternDefinitionEdit::SetParametricOffsetSides {
+                mechanism_id: PatternMechanismId(41),
+                sides: OffsetSides::Left,
+            },
+            PatternDefinitionEdit::SetParametricOffsetCleanup {
+                mechanism_id: PatternMechanismId(41),
+                cleanup: OffsetCleanup::DissolveCrossings,
+            },
+            PatternDefinitionEdit::SetParametricRepetition {
+                mechanism_id: PatternMechanismId(41),
+                repetition: CurveRepetition::Single,
+            },
+            PatternDefinitionEdit::SetAlongParametricInterval {
+                mechanism_id: PatternMechanismId(42),
+                interval: 7.0,
+            },
+            PatternDefinitionEdit::SetAlongParametricPhase {
+                mechanism_id: PatternMechanismId(42),
+                phase: 0.25,
+            },
+        ];
+        for edit in edits {
+            let active_payload_fields: &[PropertyFieldId] = match &edit {
+                PatternDefinitionEdit::SetParametricRepetition {
+                    repetition: CurveRepetition::TransformStack { .. },
+                    ..
+                } => &[
+                    PropertyFieldId::ParametricStackDirection,
+                    PropertyFieldId::ParametricStackSpacingMultiplier,
+                ],
+                PatternDefinitionEdit::SetParametricRepetition {
+                    repetition: CurveRepetition::NormalOffset { .. },
+                    ..
+                } => &[
+                    PropertyFieldId::ParametricOffsetSpacing,
+                    PropertyFieldId::ParametricOffsetSides,
+                    PropertyFieldId::ParametricOffsetCleanup,
+                ],
+                _ => &[],
+            };
+            let base = history
+                .document()
+                .definition(PatternDefinitionId(40))
+                .expect("shared definition remains current")
+                .clone();
+            if matches!(
+                edit,
+                PatternDefinitionEdit::SetParametricOffsetCleanup { .. }
+            ) {
+                assert!(
+                    history
+                        .apply(&DocumentCommand::EditSharedPatternDefinition {
+                            definition_id: PatternDefinitionId(40),
+                            base_definition: base,
+                            edit,
+                        })
+                        .is_err()
+                );
+                continue;
+            }
+            let result = history
+                .apply(&DocumentCommand::EditSharedPatternDefinition {
+                    definition_id: PatternDefinitionId(40),
+                    base_definition: base,
+                    edit,
+                })
+                .expect("active parametric edit applies");
+            assert_eq!(result.affected_channels, vec![ChannelId(1), ChannelId(2)]);
+            assert_eq!(result.invalidation, Some(InvalidationLevel::Family));
+            assert!(active_payload_fields.iter().all(|field| {
+                history
+                    .document()
+                    .property_values()
+                    .iter()
+                    .any(|value| value.descriptor.field == *field)
+            }));
+        }
+        assert!(matches!(
+            history.apply(&DocumentCommand::EditSharedPatternDefinition {
+                definition_id: PatternDefinitionId(40),
+                base_definition: original.clone(),
+                edit: PatternDefinitionEdit::SetParametricTurns {
+                    mechanism_id: PatternMechanismId(41),
+                    turns: 3.0,
+                },
+            }),
+            Err(DocumentSessionError::Validation(error)) if error.path() == "pattern_definitions.base"
+        ));
+        let current = history
+            .document()
+            .definition(PatternDefinitionId(40))
+            .expect("edited definition")
+            .clone();
+        assert!(
+            history
+                .apply(&DocumentCommand::EditSharedPatternDefinition {
+                    definition_id: PatternDefinitionId(40),
+                    base_definition: current.clone(),
+                    edit: PatternDefinitionEdit::SetParametricTurns {
+                        mechanism_id: PatternMechanismId(41),
+                        turns: 1.5,
+                    },
+                })
+                .is_err()
+        );
+        history.undo().expect("undo succeeds").expect("one inverse");
+        history.redo().expect("redo succeeds").expect("one redo");
+
+        let selected_base = history
+            .document()
+            .definition(PatternDefinitionId(40))
+            .expect("selected base")
+            .clone();
+        let selected = history
+            .apply(&DocumentCommand::EditSelectedChannelPatternDefinition {
+                channel_id: ChannelId(1),
+                base_definition: selected_base,
+                edit: PatternDefinitionEdit::SetParametricTurns {
+                    mechanism_id: PatternMechanismId(41),
+                    turns: 2.0,
+                },
+            })
+            .expect("selected copy-on-edit applies");
+        assert_eq!(selected.affected_channels, vec![ChannelId(1)]);
+        assert_ne!(
+            history.document().pattern_definition_id_for(ChannelId(1)),
+            history.document().pattern_definition_id_for(ChannelId(2))
+        );
+        history
+            .apply(&DocumentCommand::DuplicatePatternDefinition {
+                definition_id: PatternDefinitionId(40),
+            })
+            .expect("parametric duplicate applies");
+        let shared = history
+            .document()
+            .definition(PatternDefinitionId(40))
+            .expect("shared parametric definition");
+        let duplicate = history
+            .document()
+            .pattern_definitions()
+            .iter()
+            .find(|definition| {
+                definition.id != PatternDefinitionId(40)
+                    && definition.id
+                        != history
+                            .document()
+                            .pattern_definition_id_for(ChannelId(1))
+                            .expect("selected clone")
+            })
+            .expect("unreferenced parametric duplicate");
+        assert!(matches!(
+            duplicate.family,
+            PatternFamily::ParametricCurve { .. }
+        ));
+        let (shared_curve, shared_repetition, shared_interval, shared_phase) = match (
+            shared.mechanisms.as_slice(),
+            duplicate.mechanisms.as_slice(),
+        ) {
+            (
+                [
+                    PatternMechanism::ParametricCurveSource {
+                        curve, repetition, ..
+                    },
+                    PatternMechanism::AlongParametricCurveSites {
+                        interval, phase, ..
+                    },
+                ],
+                [
+                    PatternMechanism::ParametricCurveSource {
+                        curve: duplicate_curve,
+                        repetition: duplicate_repetition,
+                        ..
+                    },
+                    PatternMechanism::AlongParametricCurveSites {
+                        interval: duplicate_interval,
+                        phase: duplicate_phase,
+                        ..
+                    },
+                ],
+            ) => {
+                assert_eq!(curve, duplicate_curve);
+                assert_eq!(repetition, duplicate_repetition);
+                assert_eq!(interval.to_bits(), duplicate_interval.to_bits());
+                assert_eq!(phase.to_bits(), duplicate_phase.to_bits());
+                (curve, repetition, interval, phase)
+            }
+            _ => panic!("duplicate preserves parametric source and site chain"),
+        };
+        assert!(matches!(
+            (shared.output_layers.as_slice(), duplicate.output_layers.as_slice()),
+            (
+                [PatternOutputLayer::MarkPrototype { prototype, orientation: MarkOrientation::Fixed, .. }],
+                [PatternOutputLayer::MarkPrototype { prototype: duplicate_prototype, orientation: MarkOrientation::Fixed, .. }]
+            ) if prototype == duplicate_prototype
+        ));
+        let _ = (
+            shared_curve,
+            shared_repetition,
+            shared_interval,
+            shared_phase,
+        );
+
+        let mut draft = DocumentHistory::new_draft(&history);
+        let definition_id = draft
+            .document()
+            .pattern_definition_id_for(ChannelId(1))
+            .expect("selected parametric override");
+        let base = draft
+            .document()
+            .definition(definition_id)
+            .expect("draft selected definition")
+            .clone();
+        let site_mechanism_id = base
+            .mechanisms
+            .iter()
+            .find_map(|mechanism| match mechanism {
+                PatternMechanism::AlongParametricCurveSites { id, .. } => Some(*id),
+                _ => None,
+            })
+            .expect("selected definition retains parametric site mechanism");
+        draft
+            .apply(&DocumentCommand::EditSelectedChannelPatternDefinition {
+                channel_id: ChannelId(1),
+                base_definition: base,
+                edit: PatternDefinitionEdit::SetAlongParametricInterval {
+                    mechanism_id: site_mechanism_id,
+                    interval: 8.0,
+                },
+            })
+            .expect("draft edit applies");
+        let squash = history.squash_draft(&draft).expect("draft squash applies");
+        assert!(!squash.unchanged);
+        assert_eq!(squash.affected_channels, vec![ChannelId(1)]);
+        assert_eq!(squash.invalidation, Some(InvalidationLevel::Family));
+    }
+
+    /// Proves invalid parametric numeric and inactive-payload edits fail before history or document mutation.
+    #[test]
+    fn parametric_curve_validation_rejects_invalid_values_atomically() {
+        let mut history = parametric_history();
+        let before = history.document().clone();
+        let invalid_edits = vec![
+            PatternDefinitionEdit::SetParametricTurns {
+                mechanism_id: PatternMechanismId(41),
+                turns: 0.0,
+            },
+            PatternDefinitionEdit::SetParametricTurns {
+                mechanism_id: PatternMechanismId(41),
+                turns: 1025.0,
+            },
+            PatternDefinitionEdit::SetParametricTurns {
+                mechanism_id: PatternMechanismId(41),
+                turns: f64::NAN,
+            },
+            PatternDefinitionEdit::SetParametricRadialSpacing {
+                mechanism_id: PatternMechanismId(41),
+                radial_spacing: 0.0,
+            },
+            PatternDefinitionEdit::SetParametricPhase {
+                mechanism_id: PatternMechanismId(41),
+                phase_degrees: f64::NAN,
+            },
+            PatternDefinitionEdit::SetAlongParametricInterval {
+                mechanism_id: PatternMechanismId(42),
+                interval: 0.0,
+            },
+            PatternDefinitionEdit::SetAlongParametricPhase {
+                mechanism_id: PatternMechanismId(42),
+                phase: f64::NAN,
+            },
+            PatternDefinitionEdit::SetParametricRepetition {
+                mechanism_id: PatternMechanismId(41),
+                repetition: CurveRepetition::TransformStack {
+                    direction_degrees: f64::NAN,
+                    spacing_multiplier: 1.0,
+                },
+            },
+            PatternDefinitionEdit::SetParametricRepetition {
+                mechanism_id: PatternMechanismId(41),
+                repetition: CurveRepetition::NormalOffset {
+                    spacing: 0.0,
+                    sides: OffsetSides::Both,
+                    cleanup: OffsetCleanup::DissolveCrossings,
+                },
+            },
+            PatternDefinitionEdit::SetParametricStackDirection {
+                mechanism_id: PatternMechanismId(41),
+                value: 10.0,
+            },
+        ];
+        for edit in invalid_edits {
+            let base = history
+                .document()
+                .definition(PatternDefinitionId(40))
+                .expect("unmodified base")
+                .clone();
+            assert!(
+                history
+                    .apply(&DocumentCommand::EditSharedPatternDefinition {
+                        definition_id: PatternDefinitionId(40),
+                        base_definition: base,
+                        edit,
+                    })
+                    .is_err()
+            );
+            assert_eq!(history.document(), &before);
+            assert!(!history.can_undo());
+            assert!(!history.can_redo());
+        }
     }
 
     #[test]

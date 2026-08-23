@@ -232,54 +232,15 @@ impl CurveSegment {
         if let Self::Line(line) = self {
             return distance(line.start, line.end);
         }
-        let Self::CubicBezier(cubic) = self else {
-            unreachable!("line segments returned before cubic subdivision")
-        };
-        let mut stack = vec![(*cubic, 0_u8)];
-        let mut work_items = 0_usize;
-        let mut leaves = 0_usize;
+        let profile =
+            self.arc_length_profile_with_counts(maximum_depth, maximum_work_items, maximum_leaves)?;
         let mut sum = 0.0;
         let mut compensation = 0.0;
-        while let Some((node, depth)) = stack.pop() {
-            work_items += 1;
-            if work_items > maximum_work_items {
-                return Err(CurveError::new(
-                    "curve.path.arc_length.subdivision_limit",
-                    "arc-length subdivision work limit exceeded",
-                ));
-            }
-            let chord = distance(node.start, node.end)?;
-            let polygon = cubic_polygon_length(node)?;
-            if polygon - chord <= tolerance([node.start, node.control_1, node.control_2, node.end])?
-            {
-                leaves += 1;
-                if leaves > maximum_leaves {
-                    return Err(CurveError::new(
-                        "curve.path.arc_length.result_limit",
-                        "arc-length leaf limit exceeded",
-                    ));
-                }
-                let value = (polygon + chord) * 0.5;
-                if !value.is_finite() {
-                    return Err(CurveError::new(
-                        "curve.path.numeric_overflow",
-                        "curve-path arithmetic must remain finite",
-                    ));
-                }
-                let adjusted = value - compensation;
-                let next = sum + adjusted;
-                compensation = (next - sum) - adjusted;
-                sum = next;
-            } else if depth >= maximum_depth {
-                return Err(CurveError::new(
-                    "curve.path.arc_length.subdivision_limit",
-                    "arc-length subdivision depth limit exceeded",
-                ));
-            } else {
-                let (left, right) = split_cubic(node, 0.5)?;
-                stack.push((right, depth + 1));
-                stack.push((left, depth + 1));
-            }
+        for leaf in profile.leaves {
+            let adjusted = leaf.length - compensation;
+            let next = sum + adjusted;
+            compensation = (next - sum) - adjusted;
+            sum = next;
         }
         sum.is_finite().then_some(sum).ok_or(CurveError::new(
             "curve.path.numeric_overflow",
@@ -318,9 +279,17 @@ impl CurveSegment {
                     "arc-length subdivision work limit exceeded",
                 ));
             }
-            let chord = distance(node.start, node.end)?;
-            let polygon = cubic_polygon_length(node)?;
-            if polygon - chord <= tolerance([node.start, node.control_1, node.control_2, node.end])?
+            let whole = cubic_gauss_length(node)?;
+            let (left, right) = split_cubic(node, 0.5)?;
+            let refined = cubic_gauss_length(left)? + cubic_gauss_length(right)?;
+            if !refined.is_finite() {
+                return Err(CurveError::new(
+                    "curve.path.numeric_overflow",
+                    "curve-path arithmetic must remain finite",
+                ));
+            }
+            if (refined - whole).abs()
+                <= tolerance([node.start, node.control_1, node.control_2, node.end])?
             {
                 if leaves.len() >= maximum_leaves {
                     return Err(CurveError::new(
@@ -331,7 +300,7 @@ impl CurveSegment {
                 leaves.push(ArcLengthLeaf {
                     start,
                     end,
-                    length: (polygon + chord) * 0.5,
+                    length: refined,
                 });
             } else if depth >= maximum_depth {
                 return Err(CurveError::new(
@@ -339,7 +308,6 @@ impl CurveSegment {
                     "arc-length subdivision depth limit exceeded",
                 ));
             } else {
-                let (left, right) = split_cubic(node, 0.5)?;
                 let middle = (start + end) * 0.5;
                 stack.push((right, middle, end, depth + 1));
                 stack.push((left, start, middle, depth + 1));
@@ -368,6 +336,38 @@ impl CurveSegment {
             Self::CubicBezier(cubic) => cubic_polygon_length(*cubic),
         }
     }
+}
+
+/// Integrates one cubic speed with fixed five-point Gauss-Legendre quadrature.
+///
+/// # Errors
+///
+/// Returns the stable numeric-overflow diagnostic if derivative evaluation or summation is non-finite.
+fn cubic_gauss_length(cubic: CubicBezierSegment) -> Result<f64, CurveError> {
+    const NODES: [f64; 5] = [
+        -0.906_179_845_938_664,
+        -0.538_469_310_105_683_1,
+        0.0,
+        0.538_469_310_105_683_1,
+        0.906_179_845_938_664,
+    ];
+    const WEIGHTS: [f64; 5] = [
+        0.236_926_885_056_189_08,
+        0.478_628_670_499_366_47,
+        0.568_888_888_888_888_9,
+        0.478_628_670_499_366_47,
+        0.236_926_885_056_189_08,
+    ];
+    let mut sum = 0.0;
+    for (node, weight) in NODES.into_iter().zip(WEIGHTS) {
+        let derivative = cubic_derivative(cubic, (node + 1.0) * 0.5)?;
+        sum += weight * derivative.x.hypot(derivative.y);
+    }
+    let length = sum * 0.5;
+    length.is_finite().then_some(length).ok_or(CurveError::new(
+        "curve.path.numeric_overflow",
+        "curve-path arithmetic must remain finite",
+    ))
 }
 
 /// One immutable adaptive segment-local length interval used by a measured path.

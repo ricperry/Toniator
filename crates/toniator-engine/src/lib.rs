@@ -462,6 +462,18 @@ struct FamilyDefinitionKey {
     family: toniator_domain::PatternFamily,
     mechanisms: Vec<PatternMechanism>,
     resolved_guide_content: Option<String>,
+    path_offset_algorithm: Option<PathOffsetAlgorithmKey>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct PathOffsetAlgorithmKey {
+    contract_id: &'static str,
+    maximum_subdivision_depth: u8,
+    maximum_segments: usize,
+    maximum_components: usize,
+    maximum_cleanup_pairs: usize,
+    maximum_cusp_isolation_work: usize,
+    tolerance: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1138,7 +1150,39 @@ fn family_definition_key(value: &PatternDefinition) -> FamilyDefinitionKey {
         family: value.family.clone(),
         mechanisms: value.mechanisms.clone(),
         resolved_guide_content: None,
+        path_offset_algorithm: path_offset_algorithm_key(value),
     }
+}
+
+/// Captures the versioned geometry algorithm and fixed limits when a definition uses normal offsets.
+fn path_offset_algorithm_key(value: &PatternDefinition) -> Option<PathOffsetAlgorithmKey> {
+    let uses_normal_offsets = value.mechanisms.iter().any(|mechanism| match mechanism {
+        PatternMechanism::GuideDimensions { dimensions, .. } => {
+            dimensions.iter().any(|dimension| {
+                matches!(
+                    &dimension.repetition,
+                    toniator_domain::CurveRepetition::NormalOffset { .. }
+                )
+            })
+        }
+        PatternMechanism::ParametricCurveSource { repetition, .. } => matches!(
+            repetition,
+            toniator_domain::CurveRepetition::NormalOffset { .. }
+        ),
+        _ => false,
+    });
+    uses_normal_offsets.then(|| {
+        let limits = toniator_patterns::PathOffsetLimits::default();
+        PathOffsetAlgorithmKey {
+            contract_id: toniator_patterns::PATH_OFFSET_ALGORITHM_CONTRACT_ID,
+            maximum_subdivision_depth: limits.maximum_subdivision_depth,
+            maximum_segments: limits.maximum_segments,
+            maximum_components: limits.maximum_components,
+            maximum_cleanup_pairs: limits.maximum_cleanup_pairs,
+            maximum_cusp_isolation_work: limits.maximum_cusp_isolation_work,
+            tolerance: limits.tolerance.to_bits(),
+        }
+    })
 }
 
 /// Hashes resolved generic guide content in stored order for both engine family-cache paths.
@@ -2360,7 +2404,7 @@ fn evaluate_document_channel(
 ) -> Result<DocumentRealization, EvaluationError> {
     if matches!(
         definition.output_layers.as_slice(),
-        [PatternOutputLayer::GuidePaths { .. }]
+        [PatternOutputLayer::GuidePaths { .. } | PatternOutputLayer::ParametricPaths { .. }]
     ) {
         let toniator_domain::PatternGeometryResponse::Connected(response) =
             &effective.geometry_response
@@ -2654,7 +2698,7 @@ fn required_support_radius_modeled(
 ) -> Result<f64, EvaluationError> {
     if matches!(
         definition.output_layers.as_slice(),
-        [PatternOutputLayer::GuidePaths { .. }]
+        [PatternOutputLayer::GuidePaths { .. } | PatternOutputLayer::ParametricPaths { .. }]
     ) {
         return Ok(
             maximum_emitted_guide_spacing(family, canvas, &effective.density)
@@ -3441,6 +3485,30 @@ pub(crate) mod test_support {
     fn normal_offset_cache_identity_reuses_and_invalidates_at_the_authoritative_levels() {
         let scheduler = EvaluationScheduler::new_with_limits(EvaluationLimits::default()).unwrap();
         let mut history = DocumentHistory::new(modeled_normal_offset_session());
+        let definition_key = family_definition_key(&history.document().pattern_definitions()[0]);
+        let algorithm_key = definition_key
+            .path_offset_algorithm
+            .expect("normal-offset definitions carry the geometry algorithm cache identity");
+        let limits = toniator_patterns::PathOffsetLimits::default();
+        assert_eq!(
+            algorithm_key.contract_id,
+            toniator_patterns::PATH_OFFSET_ALGORITHM_CONTRACT_ID
+        );
+        assert_eq!(
+            algorithm_key.maximum_subdivision_depth,
+            limits.maximum_subdivision_depth
+        );
+        assert_eq!(algorithm_key.maximum_segments, limits.maximum_segments);
+        assert_eq!(algorithm_key.maximum_components, limits.maximum_components);
+        assert_eq!(
+            algorithm_key.maximum_cleanup_pairs,
+            limits.maximum_cleanup_pairs
+        );
+        assert_eq!(
+            algorithm_key.maximum_cusp_isolation_work,
+            limits.maximum_cusp_isolation_work
+        );
+        assert_eq!(algorithm_key.tolerance, limits.tolerance.to_bits());
         let bytes = valid_document_bytes();
         let submit =
             |scheduler: &EvaluationScheduler, session: &DocumentSession, bytes: Arc<[u8]>| {
@@ -3668,6 +3736,7 @@ mod cache_key_tests {
                 },
                 mechanisms: vec![],
                 resolved_guide_content: None,
+                path_offset_algorithm: None,
             },
             required_support_radius: 4.5_f64.to_bits(),
             max_family_candidates: EvaluationLimits::DEFAULT_MAX_FAMILY_CANDIDATES,

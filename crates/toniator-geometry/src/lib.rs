@@ -4,7 +4,7 @@
 
 use std::{collections::BTreeSet, error::Error, fmt};
 
-use serde::Serialize;
+use serde::{Serialize, Serializer, ser::SerializeStruct};
 use toniator_domain::{GuideDimensionId, PatternMechanismId};
 
 mod curves;
@@ -15,20 +15,21 @@ mod path_offsets;
 pub use curves::{
     CubicBezierSegment, CurveError, CurvePath, CurveSegment, IntersectionKind, LineSegment,
     PathArcLength, PathClosure, PathIntersection, PathLocation, SegmentIntersection,
+    construct_parametric_curve_path_cancellable,
 };
 pub use guides::{
-    GuideCoveragePlan, GuideDimensionCoverage, GuidePathInstance, GuidePathLocationProvenance,
-    GuidePathSet, construct_circular_arc, resolve_guide_prototype,
+    GuideCoveragePlan, GuideDimensionCoverage, StructuralPathInstance, StructuralPathSet,
+    construct_circular_arc, resolve_guide_prototype,
 };
 pub use outlines::{
     CanonicalFilledOutline, CanonicalOutlineContour, VariableWidthOutlineLimits,
     VariableWidthPathSample, build_variable_width_outline_cancellable,
 };
 pub use path_offsets::{
-    MAX_PATH_OFFSET_CLEANUP_PAIRS, MAX_PATH_OFFSET_COMPONENTS, MAX_PATH_OFFSET_SEGMENTS,
-    MAX_PATH_OFFSET_SUBDIVISION_DEPTH, OffsetPathComponent, PathOffsetCleanup,
-    PathOffsetEndpointPolicy, PathOffsetLimits, PathOffsetRequest, PathOffsetResult,
-    offset_path_cancellable,
+    MAX_PATH_OFFSET_CLEANUP_PAIRS, MAX_PATH_OFFSET_COMPONENTS, MAX_PATH_OFFSET_CUSP_ISOLATION_WORK,
+    MAX_PATH_OFFSET_SEGMENTS, MAX_PATH_OFFSET_SUBDIVISION_DEPTH, OffsetPathComponent,
+    PATH_OFFSET_ALGORITHM_CONTRACT_ID, PathOffsetCleanup, PathOffsetEndpointPolicy,
+    PathOffsetLimits, PathOffsetRequest, PathOffsetResult, offset_path_cancellable,
 };
 
 /// A finite document- or pattern-local point.
@@ -289,6 +290,115 @@ pub struct FamilySiteId {
     pub ordinal: usize,
 }
 
+/// Names the structural source of one finite derived path without treating a
+/// parametric curve as a guide dimension.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum StructuralPathSourceId {
+    GuideDimension(GuideDimensionId),
+    ParametricCurve(PatternMechanismId),
+}
+
+impl StructuralPathSourceId {
+    /// Reports whether this typed structural source contains a nonzero authority ID.
+    pub const fn is_valid(self) -> bool {
+        match self {
+            Self::GuideDimension(id) => id.0 != 0,
+            Self::ParametricCurve(id) => id.0 != 0,
+        }
+    }
+}
+
+impl Serialize for StructuralPathSourceId {
+    /// Serializes the typed source without requiring domain IDs to expose a serde contract.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("StructuralPathSourceId", 2)?;
+        match self {
+            Self::GuideDimension(id) => {
+                state.serialize_field("kind", "guide_dimension")?;
+                state.serialize_field("id", &id.0)?;
+            }
+            Self::ParametricCurve(id) => {
+                state.serialize_field("kind", "parametric_curve")?;
+                state.serialize_field("id", &id.0)?;
+            }
+        }
+        state.end()
+    }
+}
+
+/// Stable ordered identity for one repeated structural path component.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StructuralPathInstanceId {
+    pub source: StructuralPathSourceId,
+    pub repetition_index: i64,
+    pub component_ordinal: u32,
+}
+
+impl Serialize for StructuralPathInstanceId {
+    /// Serializes stable structural-path identity as source, repetition, and component fields.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("StructuralPathInstanceId", 3)?;
+        state.serialize_field("source", &self.source)?;
+        state.serialize_field("repetition_index", &self.repetition_index)?;
+        state.serialize_field("component_ordinal", &self.component_ordinal)?;
+        state.end()
+    }
+}
+
+impl StructuralPathInstanceId {
+    /// Builds one ordered finite component identity for a guide-dimension source.
+    pub const fn guide_dimension(
+        dimension_id: GuideDimensionId,
+        repetition_index: i64,
+        component_ordinal: u32,
+    ) -> Self {
+        Self {
+            source: StructuralPathSourceId::GuideDimension(dimension_id),
+            repetition_index,
+            component_ordinal,
+        }
+    }
+
+    /// Builds one ordered finite component identity for a parametric source mechanism.
+    pub const fn parametric_curve(
+        mechanism_id: PatternMechanismId,
+        repetition_index: i64,
+        component_ordinal: u32,
+    ) -> Self {
+        Self {
+            source: StructuralPathSourceId::ParametricCurve(mechanism_id),
+            repetition_index,
+            component_ordinal,
+        }
+    }
+
+    /// Returns the retained guide identity only when this structural path originated from a guide dimension.
+    pub const fn guide_instance(self) -> Option<GuideInstanceId> {
+        match self.source {
+            StructuralPathSourceId::GuideDimension(dimension_id) => Some(GuideInstanceId {
+                dimension_id: dimension_id.0,
+                index: self.repetition_index,
+                component_ordinal: self.component_ordinal,
+            }),
+            StructuralPathSourceId::ParametricCurve(_) => None,
+        }
+    }
+}
+
+/// Exact segment-local provenance for a path-derived site or realization witness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub struct StructuralPathLocationProvenance {
+    pub path: StructuralPathInstanceId,
+    pub segment_index: usize,
+    pub parameter_bits: u64,
+}
+
 /// Truthful structural origin retained for a reusable family site.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FamilySiteProvenance {
@@ -309,12 +419,20 @@ pub enum FamilySiteProvenance {
     },
     /// A site from intersecting finite Stage 20D curve-guide instances.
     CurveGuideIntersection {
-        contributors: Vec<GuidePathLocationProvenance>,
+        contributors: Vec<StructuralPathLocationProvenance>,
     },
     /// A site sampled by arc length along a finite Stage 20D curve guide.
     CurveAlongGuide {
-        location: GuidePathLocationProvenance,
+        location: StructuralPathLocationProvenance,
         guide_order: usize,
+        sequence: i64,
+        absolute_arc_position_bits: u64,
+        local_arc_position_bits: u64,
+    },
+    /// A site sampled along an analytic parametric structural path.
+    AlongParametricCurve {
+        location: StructuralPathLocationProvenance,
+        path_order: usize,
         sequence: i64,
         absolute_arc_position_bits: u64,
         local_arc_position_bits: u64,
@@ -535,7 +653,7 @@ impl FamilySiteSet {
                 if contributors.len() < 2
                     || unique.len() != contributors.len()
                     || contributors.iter().any(|location| {
-                        location.guide_id.dimension_id == 0
+                        !location.path.source.is_valid()
                             || !f64::from_bits(location.parameter_bits).is_finite()
                     })
                 {
@@ -551,7 +669,7 @@ impl FamilySiteSet {
                 local_arc_position_bits,
                 ..
             } => {
-                if location.guide_id.dimension_id == 0
+                if !location.path.source.is_valid()
                     || !f64::from_bits(location.parameter_bits).is_finite()
                     || !f64::from_bits(*absolute_arc_position_bits).is_finite()
                     || !f64::from_bits(*local_arc_position_bits).is_finite()
@@ -559,6 +677,25 @@ impl FamilySiteSet {
                     return Err(FamilySiteError::new(
                         "family_sites.provenance.curve_along_guide",
                         "curve along-guide provenance requires finite nonzero guide locations",
+                    ));
+                }
+            }
+            FamilySiteProvenance::AlongParametricCurve {
+                location,
+                absolute_arc_position_bits,
+                local_arc_position_bits,
+                ..
+            } => {
+                if !matches!(
+                    location.path.source,
+                    StructuralPathSourceId::ParametricCurve(_)
+                ) || !f64::from_bits(location.parameter_bits).is_finite()
+                    || !f64::from_bits(*absolute_arc_position_bits).is_finite()
+                    || !f64::from_bits(*local_arc_position_bits).is_finite()
+                {
+                    return Err(FamilySiteError::new(
+                        "family_sites.provenance.along_parametric_curve",
+                        "parametric provenance requires finite parametric-path locations",
                     ));
                 }
             }
@@ -668,7 +805,7 @@ pub struct StrokeProfileSample {
 /// The original centerline remains immutable and is never clipped by this value.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CanonicalStroke {
-    pub source_guide_id: GuideInstanceId,
+    pub source_path_id: StructuralPathInstanceId,
     pub source_structure_id: Option<toniator_domain::AuthoredStructureId>,
     pub path: CurvePath,
     pub nominal_basis: f64,
@@ -685,7 +822,7 @@ impl CanonicalStroke {
     /// Rejects empty/non-finite profiles, a mismatched outline, or invalid nominal bases before a
     /// renderer can consume it. The outline is derived geometry and is never clipped here.
     pub fn new(
-        source_guide_id: GuideInstanceId,
+        source_path_id: StructuralPathInstanceId,
         source_structure_id: Option<toniator_domain::AuthoredStructureId>,
         path: CurvePath,
         nominal_basis: f64,
@@ -789,7 +926,7 @@ impl CanonicalStroke {
             ));
         }
         Ok(Self {
-            source_guide_id,
+            source_path_id,
             source_structure_id,
             path,
             nominal_basis,

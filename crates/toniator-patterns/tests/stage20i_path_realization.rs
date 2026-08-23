@@ -128,21 +128,21 @@ fn guide_path_provenance_is_not_site_authority_and_profile_is_adaptive() {
         &|| false,
     )
     .expect("path realization succeeds");
-    let RealizationStructuralInput::GuidePaths {
-        guides,
+    let RealizationStructuralInput::StructuralPaths {
+        paths,
         nominal_bases,
     } = &realized.provenance.structural_input
     else {
         panic!("guide output never claims site input");
     };
-    assert_eq!(guides.guides().len(), realized.output.strokes.len());
+    assert_eq!(paths.paths().len(), realized.output.strokes.len());
     assert!(
-        guides
-            .guides()
+        paths
+            .paths()
             .windows(2)
             .all(|pair| pair[0].id <= pair[1].id)
     );
-    assert!(guides.guides().iter().all(|guide| {
+    assert!(paths.paths().iter().all(|guide| {
         nominal_bases
             .get(&guide.id)
             .is_some_and(|basis| *basis > 0.0)

@@ -1,7 +1,7 @@
-use toniator_domain::{AuthoredPoint2, PatternMechanismId};
+use toniator_domain::{AuthoredPoint2, GuideDimensionId, PatternMechanismId};
 use toniator_geometry::{
-    CurvePath, GuideInstanceId, GuidePathInstance, GuidePathSet, IntersectionKind, PathClosure,
-    Point2, construct_circular_arc,
+    CurvePath, IntersectionKind, PathClosure, Point2, StructuralPathInstance,
+    StructuralPathInstanceId, StructuralPathSet, construct_circular_arc,
 };
 
 /// Proves authored and fixed procedural prototypes expose deterministic ordered open curve paths.
@@ -28,43 +28,27 @@ fn authored_and_circular_arc_prototypes_resolve_to_exact_ordered_guide_paths() {
 #[test]
 fn single_and_transform_stack_coverage_emit_complete_deterministic_instances() {
     let path = CurvePath::line(Point2::new(0.0, 0.0), Point2::new(1.0, 0.0)).unwrap();
-    let set = GuidePathSet::new(
+    let set = StructuralPathSet::new(
         "stage20d-order".into(),
         PatternMechanismId(17),
         vec![
-            GuidePathInstance {
-                id: GuideInstanceId {
-                    dimension_id: 41,
-                    index: 0,
-                    component_ordinal: 0,
-                },
+            StructuralPathInstance {
+                id: StructuralPathInstanceId::guide_dimension(GuideDimensionId(41), 0, 0),
                 source_structure_id: None,
                 path: path.clone(),
             },
-            GuidePathInstance {
-                id: GuideInstanceId {
-                    dimension_id: 3,
-                    index: -1,
-                    component_ordinal: 0,
-                },
+            StructuralPathInstance {
+                id: StructuralPathInstanceId::guide_dimension(GuideDimensionId(3), -1, 0),
                 source_structure_id: None,
                 path: path.clone(),
             },
-            GuidePathInstance {
-                id: GuideInstanceId {
-                    dimension_id: 3,
-                    index: 0,
-                    component_ordinal: 0,
-                },
+            StructuralPathInstance {
+                id: StructuralPathInstanceId::guide_dimension(GuideDimensionId(3), 0, 0),
                 source_structure_id: None,
                 path: path.clone(),
             },
-            GuidePathInstance {
-                id: GuideInstanceId {
-                    dimension_id: 3,
-                    index: 1,
-                    component_ordinal: 0,
-                },
+            StructuralPathInstance {
+                id: StructuralPathInstanceId::guide_dimension(GuideDimensionId(3), 1, 0),
                 source_structure_id: None,
                 path,
             },
@@ -72,55 +56,28 @@ fn single_and_transform_stack_coverage_emit_complete_deterministic_instances() {
     )
     .expect("a single guide followed by a transform stack preserves authored dimension order");
     assert_eq!(
-        set.guides()
-            .iter()
-            .map(|guide| guide.id)
-            .collect::<Vec<_>>(),
+        set.paths().iter().map(|guide| guide.id).collect::<Vec<_>>(),
         vec![
-            GuideInstanceId {
-                dimension_id: 41,
-                index: 0,
-                component_ordinal: 0,
-            },
-            GuideInstanceId {
-                dimension_id: 3,
-                index: -1,
-                component_ordinal: 0,
-            },
-            GuideInstanceId {
-                dimension_id: 3,
-                index: 0,
-                component_ordinal: 0,
-            },
-            GuideInstanceId {
-                dimension_id: 3,
-                index: 1,
-                component_ordinal: 0,
-            },
+            StructuralPathInstanceId::guide_dimension(GuideDimensionId(41), 0, 0),
+            StructuralPathInstanceId::guide_dimension(GuideDimensionId(3), -1, 0),
+            StructuralPathInstanceId::guide_dimension(GuideDimensionId(3), 0, 0),
+            StructuralPathInstanceId::guide_dimension(GuideDimensionId(3), 1, 0),
         ]
     );
-    let invalid = GuidePathSet::new(
+    let invalid = StructuralPathSet::new(
         "stage20d-index".into(),
         PatternMechanismId(17),
         vec![
-            set.guides()[0].clone(),
-            GuidePathInstance {
-                id: GuideInstanceId {
-                    dimension_id: 3,
-                    index: 1,
-                    component_ordinal: 0,
-                },
+            set.paths()[0].clone(),
+            StructuralPathInstance {
+                id: StructuralPathInstanceId::guide_dimension(GuideDimensionId(3), 1, 0),
                 source_structure_id: None,
-                path: set.guides()[1].path.clone(),
+                path: set.paths()[1].path.clone(),
             },
-            GuidePathInstance {
-                id: GuideInstanceId {
-                    dimension_id: 3,
-                    index: 0,
-                    component_ordinal: 0,
-                },
+            StructuralPathInstance {
+                id: StructuralPathInstanceId::guide_dimension(GuideDimensionId(3), 0, 0),
                 source_structure_id: None,
-                path: set.guides()[1].path.clone(),
+                path: set.paths()[1].path.clone(),
             },
         ],
     )

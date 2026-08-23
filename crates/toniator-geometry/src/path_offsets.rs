@@ -13,8 +13,13 @@ pub const MAX_PATH_OFFSET_SEGMENTS: usize = 262_144;
 pub const MAX_PATH_OFFSET_COMPONENTS: usize = 65_536;
 /// The maximum nonadjacent segment pairs examined while dissolving one offset component.
 pub const MAX_PATH_OFFSET_CLEANUP_PAIRS: usize = 1_048_576;
+/// The maximum dyadic intervals examined while isolating cubic offset cusps and reversals.
+pub const MAX_PATH_OFFSET_CUSP_ISOLATION_WORK: usize = 262_144;
 /// The default maximum normal-distance fitting error for one compact cubic offset piece.
 pub const DEFAULT_PATH_OFFSET_TOLERANCE: f64 = 1.0 / 64.0;
+/// Versioned identity for the cusp-aware reusable path-offset algorithm and its fixed defaults.
+pub const PATH_OFFSET_ALGORITHM_CONTRACT_ID: &str =
+    "toniator.path-offset.v5.endpoint-envelope-collapse";
 
 /// Endpoint handling requested before a normal offset is constructed.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -43,6 +48,8 @@ pub struct PathOffsetLimits {
     pub maximum_components: usize,
     /// Bounds cleanup pair work independently from emitted geometry.
     pub maximum_cleanup_pairs: usize,
+    /// Bounds dyadic cusp/reversal classification work independently from fitted geometry.
+    pub maximum_cusp_isolation_work: usize,
     /// Bounds deterministic cubic offset fitting error in document units.
     pub tolerance: f64,
 }
@@ -55,6 +62,7 @@ impl Default for PathOffsetLimits {
             maximum_segments: MAX_PATH_OFFSET_SEGMENTS,
             maximum_components: MAX_PATH_OFFSET_COMPONENTS,
             maximum_cleanup_pairs: MAX_PATH_OFFSET_CLEANUP_PAIRS,
+            maximum_cusp_isolation_work: MAX_PATH_OFFSET_CUSP_ISOLATION_WORK,
             tolerance: DEFAULT_PATH_OFFSET_TOLERANCE,
         }
     }
@@ -71,6 +79,8 @@ pub struct PathOffsetRequest<'a> {
     pub endpoint_policy: PathOffsetEndpointPolicy,
     /// Names the accepted cleanup contract without permitting renderer topology work.
     pub cleanup: PathOffsetCleanup,
+    /// Supplies nearer same-side open offsets that the new candidate may touch but never cross.
+    pub crossing_barriers: &'a [&'a CurvePath],
     /// Limits all derived geometry before it can be published.
     pub limits: PathOffsetLimits,
 }
@@ -133,8 +143,57 @@ struct CleanupBudget {
     maximum_pairs: usize,
 }
 
+/// Shared request-wide cusp/reversal work accounting across every cubic source interval.
+struct CuspIsolationBudget {
+    examined_intervals: usize,
+    maximum_intervals: usize,
+}
+
+/// One source-adjacent run that may be joined and cleaned without crossing an omitted interval.
+#[derive(Clone, Debug)]
+struct OrderedOffsetRun {
+    segments: Vec<TracedOffsetSegment>,
+    first_source_segment: CurveSegment,
+    last_source_segment: CurveSegment,
+}
+
+/// One dyadic source-cubic interval proven to retain authored offset traversal.
+#[derive(Clone, Copy, Debug)]
+struct RetainedCubicInterval {
+    source_start: f64,
+    source_end: f64,
+}
+
+/// Conservative signed classification of one cubic offset-orientation interval.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OffsetOrientation {
+    Retained,
+    Reversed,
+    Uncertain,
+}
+
+/// Conservative bounds for the signed offset-orientation numerator and source speed.
+#[derive(Clone, Copy, Debug)]
+struct OffsetOrientationBounds {
+    lower: f64,
+    upper: f64,
+    minimum_speed: f64,
+}
+
 /// Identifies two compact segments, their parameters, and the exact point of one transverse crossing.
 type TransverseCrossing = (usize, usize, f64, f64, Point2);
+
+/// Identifies two ordered runs, their compact segments, parameters, and one transverse crossing.
+type CrossRunTransverseCrossing = (usize, usize, usize, usize, f64, f64, Point2);
+
+/// Locates one candidate crossing in exact ordered-run traversal coordinates.
+#[derive(Clone, Copy, Debug)]
+struct RunBarrierCrossing {
+    run_index: usize,
+    segment_index: usize,
+    parameter: f64,
+    point: Point2,
+}
 
 /// Builds ordered compact signed normal offsets without handing construction work to renderers.
 ///
@@ -155,6 +214,7 @@ pub fn offset_path_cancellable(
         || request.limits.maximum_segments == 0
         || request.limits.maximum_components == 0
         || request.limits.maximum_cleanup_pairs == 0
+        || request.limits.maximum_cusp_isolation_work == 0
         || !request.limits.tolerance.is_finite()
         || request.limits.tolerance <= 0.0
     {
@@ -191,125 +251,123 @@ pub fn offset_path_cancellable(
     } else {
         None
     };
-    let mut derived = Vec::with_capacity(source.path.segments().len().saturating_mul(2));
-    let mut previous_end: Option<Point2> = None;
-    let mut previous_source: Option<CurveSegment> = None;
+    let mut runs = Vec::with_capacity(source.path.segments().len().saturating_mul(2));
+    let mut emitted_segments = 0_usize;
+    let mut cusp_budget = CuspIsolationBudget {
+        examined_intervals: 0,
+        maximum_intervals: request.limits.maximum_cusp_isolation_work,
+    };
     for (index, segment) in source.path.segments().iter().copied().enumerate() {
         if is_cancelled() {
             return Err(cancelled());
         }
-        let Some(mut offsets) = offset_segment(
+        let offset_runs = offset_segment_runs(
             segment,
             index,
             request.signed_distance,
             request.limits,
+            &mut cusp_budget,
             is_cancelled,
-        )?
-        else {
-            continue;
-        };
+        )?;
         let source_interval = source.source_intervals[index];
-        for offset in &mut offsets {
-            offset.source_start =
-                remap_extended_source_location(offset.source_start, index, source_interval)?;
-            offset.source_end =
-                remap_extended_source_location(offset.source_end, index, source_interval)?;
-        }
-        if offsets.is_empty() {
-            continue;
-        }
-        let offset_start = offsets
-            .first()
-            .expect("nonempty segment offsets")
-            .segment
-            .start();
-        if let Some(end) = previous_end {
-            let gap = (end.x - offset_start.x).hypot(end.y - offset_start.y);
-            if gap <= 1.0e-6 {
-                offsets[0].segment = replace_segment_start(offsets[0].segment, end)?;
-            } else if let Some(previous) = previous_source {
-                if !join_offset_segments(
-                    &mut derived,
-                    &mut offsets,
-                    previous,
-                    segment,
-                    source_interval.0,
-                    request.signed_distance,
-                )? {
-                    let location = source_interval.0;
-                    derived.push(TracedOffsetSegment {
-                        segment: CurveSegment::Line(LineSegment::new(end, offset_start)?),
-                        source_start: location,
-                        source_end: location,
-                    });
-                }
-            } else if end != offset_start {
-                let location = source_interval.0;
-                derived.push(TracedOffsetSegment {
-                    segment: CurveSegment::Line(LineSegment::new(end, offset_start)?),
-                    source_start: location,
-                    source_end: location,
-                });
+        for mut offsets in offset_runs {
+            for offset in &mut offsets {
+                offset.source_start =
+                    remap_extended_source_location(offset.source_start, index, source_interval)?;
+                offset.source_end =
+                    remap_extended_source_location(offset.source_end, index, source_interval)?;
             }
+            append_ordered_offset_run(
+                &mut runs,
+                offsets,
+                segment,
+                request.signed_distance,
+                request.limits.maximum_segments,
+                &mut emitted_segments,
+            )?;
         }
-        derived.extend(offsets);
-        if derived.len() > request.limits.maximum_segments {
-            return Err(CurveError::new(
-                "curve.offset.segment_limit",
-                "path offset segment limit exceeded",
-            ));
-        }
-        previous_end = Some(
-            derived
-                .last()
-                .expect("offset segment inserted")
-                .segment
-                .end(),
-        );
-        previous_source = Some(segment);
     }
-    if derived.is_empty() {
+    if runs.is_empty() {
         return Ok(PathOffsetResult::Collapsed);
     }
-    if source.path.closure() == PathClosure::Closed
-        && derived.last().expect("nonempty offset").segment.end() != derived[0].segment.start()
-    {
-        let location = authored_end;
-        derived.push(TracedOffsetSegment {
-            segment: CurveSegment::Line(LineSegment::new(
-                derived.last().expect("nonempty offset").segment.end(),
-                derived[0].segment.start(),
-            )?),
-            source_start: location,
-            source_end: location,
-        });
+    let mut run_closure = PathClosure::Open;
+    if source.path.closure() == PathClosure::Closed {
+        if runs.len() == 1 {
+            close_unbroken_offset_run(
+                &mut runs[0],
+                authored_end,
+                request.limits.maximum_segments,
+                &mut emitted_segments,
+            )?;
+            run_closure = PathClosure::Closed;
+        } else {
+            merge_closed_seam_runs(
+                &mut runs,
+                authored_end,
+                request.signed_distance,
+                request.limits.maximum_segments,
+                &mut emitted_segments,
+            )?;
+        }
     }
-    if derived.len() > request.limits.maximum_segments {
-        return Err(CurveError::new(
-            "curve.offset.segment_limit",
-            "path offset segment limit exceeded",
-        ));
-    }
-    let paths = match request.cleanup {
-        PathOffsetCleanup::DissolveCrossings => dissolve_crossings(
-            derived,
-            source.path.closure(),
-            retained_winding,
-            request.limits.maximum_cleanup_pairs,
-            request.limits.maximum_components,
-            request.limits.tolerance,
-            is_cancelled,
-        )?,
+    let mut cleanup_budget = CleanupBudget {
+        examined_pairs: 0,
+        maximum_pairs: request.limits.maximum_cleanup_pairs,
     };
+    dissolve_cross_run_reversal_crossings(
+        &mut runs,
+        authored_start,
+        authored_end,
+        &mut cleanup_budget,
+        is_cancelled,
+    )?;
+    if request.path.closure() == PathClosure::Open
+        && runs.len() > 1
+        && !request.crossing_barriers.is_empty()
+    {
+        dissolve_crossing_barrier_middle(
+            &mut runs,
+            authored_start,
+            authored_end,
+            request.crossing_barriers,
+            &mut cleanup_budget,
+            is_cancelled,
+        )?;
+    }
+    let mut paths = Vec::new();
+    for run in runs {
+        let closure = if run_closure == PathClosure::Closed {
+            PathClosure::Closed
+        } else {
+            PathClosure::Open
+        };
+        let mut cleaned = match request.cleanup {
+            PathOffsetCleanup::DissolveCrossings => dissolve_crossings_with_budget(
+                run.segments,
+                closure,
+                (closure == PathClosure::Closed)
+                    .then_some(retained_winding)
+                    .flatten(),
+                &mut cleanup_budget,
+                request.limits.maximum_components,
+                request.limits.tolerance,
+                is_cancelled,
+            )?,
+        };
+        paths.append(&mut cleaned);
+        if paths.len() > request.limits.maximum_components {
+            return Err(CurveError::new(
+                "curve.offset.component_limit",
+                "path offset component limit exceeded",
+            ));
+        }
+    }
     if paths.is_empty() {
         return Ok(PathOffsetResult::Collapsed);
     }
-    if paths.len() > request.limits.maximum_components {
-        return Err(CurveError::new(
-            "curve.offset.component_limit",
-            "path offset component limit exceeded",
-        ));
-    }
+    paths.sort_by(|left, right| {
+        source_location_key(left.earliest_source).cmp(&source_location_key(right.earliest_source))
+    });
     Ok(PathOffsetResult::Paths(
         paths
             .into_iter()
@@ -325,27 +383,542 @@ pub fn offset_path_cancellable(
     ))
 }
 
+/// Removes the non-authoritative side of a candidate's first and last barrier crossings.
+///
+/// Nearer same-side offsets are immutable barriers. A candidate crossed on both terminal
+/// extensions has exhausted its extended envelope and collapses; other crossings retain only
+/// source-authoritative pieces. Cleanup never mutates or joins a previously published repetition.
+///
+/// # Errors
+///
+/// Returns bounded intersection, cleanup-limit, cancellation, or finite split diagnostics without
+/// publishing a partially trimmed candidate.
+fn dissolve_crossing_barrier_middle(
+    runs: &mut Vec<OrderedOffsetRun>,
+    authored_start: PathLocation,
+    authored_end: PathLocation,
+    barriers: &[&CurvePath],
+    budget: &mut CleanupBudget,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<(), CurveError> {
+    let Some((first, last)) = crossing_barrier_span(runs, barriers, budget, is_cancelled)? else {
+        return Ok(());
+    };
+    trim_runs_around_crossing_span(runs, authored_start, authored_end, first, last)
+}
+
+/// Finds the first and last source-ordered transverse contacts with immutable barrier paths.
+///
+/// # Errors
+///
+/// Returns stable cleanup-limit, cancellation, overlap, subdivision, or numeric diagnostics before
+/// the caller mutates any candidate run.
+fn crossing_barrier_span(
+    runs: &[OrderedOffsetRun],
+    barriers: &[&CurvePath],
+    budget: &mut CleanupBudget,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<Option<(RunBarrierCrossing, RunBarrierCrossing)>, CurveError> {
+    let mut first = None;
+    let mut last = None;
+    for (run_index, run) in runs.iter().enumerate() {
+        for (segment_index, candidate) in run.segments.iter().enumerate() {
+            for barrier in barriers {
+                for barrier_segment in barrier.segments() {
+                    if is_cancelled() {
+                        return Err(cancelled());
+                    }
+                    budget.examined_pairs =
+                        budget.examined_pairs.checked_add(1).ok_or(CurveError::new(
+                            "curve.offset.cleanup_limit",
+                            "path offset cleanup pair limit exceeded",
+                        ))?;
+                    if budget.examined_pairs > budget.maximum_pairs {
+                        return Err(CurveError::new(
+                            "curve.offset.cleanup_limit",
+                            "path offset cleanup pair limit exceeded",
+                        ));
+                    }
+                    for intersection in candidate.segment.intersections(barrier_segment)? {
+                        if intersection.kind() != crate::IntersectionKind::Crossing
+                            || !strictly_interior(intersection.first_parameter())
+                            || !strictly_interior(intersection.second_parameter())
+                        {
+                            continue;
+                        }
+                        let crossing = RunBarrierCrossing {
+                            run_index,
+                            segment_index,
+                            parameter: intersection.first_parameter(),
+                            point: intersection.point(),
+                        };
+                        if first.is_none_or(|current| {
+                            run_barrier_crossing_order(crossing, current)
+                                == std::cmp::Ordering::Less
+                        }) {
+                            first = Some(crossing);
+                        }
+                        if last.is_none_or(|current| {
+                            run_barrier_crossing_order(crossing, current)
+                                == std::cmp::Ordering::Greater
+                        }) {
+                            last = Some(crossing);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(first.zip(last))
+}
+
+/// Orders candidate/barrier crossings by exact run, segment, and finite local parameter.
+fn run_barrier_crossing_order(
+    left: RunBarrierCrossing,
+    right: RunBarrierCrossing,
+) -> std::cmp::Ordering {
+    left.run_index
+        .cmp(&right.run_index)
+        .then_with(|| left.segment_index.cmp(&right.segment_index))
+        .then_with(|| left.parameter.total_cmp(&right.parameter))
+}
+
+/// Retains the authored side of the first and last barrier crossings without reconnecting runs.
+///
+/// When crossings span both terminal extensions, the exhausted candidate collapses rather than
+/// publishing either exterior extensions or floating authored fragments. Other zero-span
+/// crossings discard only the crossed construction extensions; non-extension crossings retain the
+/// source-outer pieces.
+///
+/// # Errors
+///
+/// Returns finite split diagnostics without reconnecting the omitted crossing span.
+fn trim_runs_around_crossing_span(
+    runs: &mut Vec<OrderedOffsetRun>,
+    authored_start: PathLocation,
+    authored_end: PathLocation,
+    first: RunBarrierCrossing,
+    last: RunBarrierCrossing,
+) -> Result<(), CurveError> {
+    let first_crossed = runs[first.run_index].segments[first.segment_index];
+    let last_crossed = runs[last.run_index].segments[last.segment_index];
+    let crosses_both_terminal_extensions = first_crossed.source_start == authored_start
+        && first_crossed.source_end == authored_start
+        && last_crossed.source_start == authored_end
+        && last_crossed.source_end == authored_end;
+    if crosses_both_terminal_extensions {
+        runs.clear();
+        return Ok(());
+    }
+    let crosses_only_endpoint_extensions = first_crossed.source_start == first_crossed.source_end
+        && last_crossed.source_start == last_crossed.source_end;
+    if crosses_only_endpoint_extensions {
+        if first.run_index == last.run_index {
+            let original = runs[first.run_index].clone();
+            let middle = if first.segment_index < last.segment_index {
+                original.segments[(first.segment_index + 1)..last.segment_index].to_vec()
+            } else {
+                Vec::new()
+            };
+            runs[first.run_index].segments = middle;
+            runs.retain(|run| !run.segments.is_empty());
+            return Ok(());
+        }
+        runs[first.run_index].segments =
+            runs[first.run_index].segments[(first.segment_index + 1)..].to_vec();
+        runs[last.run_index].segments.truncate(last.segment_index);
+        runs.retain(|run| !run.segments.is_empty());
+        return Ok(());
+    }
+    let (first_prefix, _) = split_traced_segment(first_crossed, first.parameter, first.point)?;
+    let (_, last_suffix) = split_traced_segment(last_crossed, last.parameter, last.point)?;
+    if first.run_index == last.run_index {
+        let original = runs[first.run_index].clone();
+        let mut prefix = original.segments[..first.segment_index].to_vec();
+        prefix.push(first_prefix);
+        let mut suffix = vec![last_suffix];
+        suffix.extend_from_slice(&original.segments[(last.segment_index + 1)..]);
+        runs.splice(
+            first.run_index..=first.run_index,
+            [
+                OrderedOffsetRun {
+                    segments: prefix,
+                    first_source_segment: original.first_source_segment,
+                    last_source_segment: original.last_source_segment,
+                },
+                OrderedOffsetRun {
+                    segments: suffix,
+                    first_source_segment: original.first_source_segment,
+                    last_source_segment: original.last_source_segment,
+                },
+            ],
+        );
+        return Ok(());
+    }
+    runs[first.run_index].segments.truncate(first.segment_index);
+    runs[first.run_index].segments.push(first_prefix);
+    let mut suffix = vec![last_suffix];
+    suffix.extend_from_slice(&runs[last.run_index].segments[(last.segment_index + 1)..]);
+    runs[last.run_index].segments = suffix;
+    if last.run_index > first.run_index + 1 {
+        runs.drain((first.run_index + 1)..last.run_index);
+    }
+    Ok(())
+}
+
+/// Dissolves reversal loops that cross between separately retained cusp runs.
+///
+/// A crossing between both terminal endpoint extensions collapses the exhausted extended envelope
+/// rather than publishing floating authored fragments. Other zero-source-span crossings discard
+/// only the crossed construction extensions; non-extension crossings retain the ordered outer
+/// branches. Runs remain disconnected across every discarded source interval.
+///
+/// # Errors
+///
+/// Returns bounded intersection, cleanup-limit, cancellation, or finite split diagnostics without
+/// publishing partially trimmed runs.
+fn dissolve_cross_run_reversal_crossings(
+    runs: &mut Vec<OrderedOffsetRun>,
+    authored_start: PathLocation,
+    authored_end: PathLocation,
+    budget: &mut CleanupBudget,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<(), CurveError> {
+    while let Some(crossing) = first_cross_run_transverse_crossing(runs, budget, is_cancelled)? {
+        let (
+            first_run,
+            first_segment,
+            second_run,
+            second_segment,
+            first_parameter,
+            second_parameter,
+            point,
+        ) = crossing;
+        let first_crossed = runs[first_run].segments[first_segment];
+        let second_crossed = runs[second_run].segments[second_segment];
+        let crosses_both_terminal_extensions = first_crossed.source_start == authored_start
+            && first_crossed.source_end == authored_start
+            && second_crossed.source_start == authored_end
+            && second_crossed.source_end == authored_end;
+        if crosses_both_terminal_extensions {
+            runs.clear();
+            return Ok(());
+        }
+        let crosses_only_endpoint_extensions = first_crossed.source_start
+            == first_crossed.source_end
+            && second_crossed.source_start == second_crossed.source_end;
+        if crosses_only_endpoint_extensions {
+            runs[first_run].segments = runs[first_run].segments[(first_segment + 1)..].to_vec();
+            runs[second_run].segments.truncate(second_segment);
+            runs.retain(|run| !run.segments.is_empty());
+        } else {
+            let (first_prefix, _) = split_traced_segment(first_crossed, first_parameter, point)?;
+            let (_, second_suffix) = split_traced_segment(second_crossed, second_parameter, point)?;
+            runs[first_run].segments.truncate(first_segment);
+            runs[first_run].segments.push(first_prefix);
+            let mut retained_suffix = vec![second_suffix];
+            retained_suffix.extend_from_slice(&runs[second_run].segments[(second_segment + 1)..]);
+            runs[second_run].segments = retained_suffix;
+            if second_run > first_run + 1 {
+                runs.drain((first_run + 1)..second_run);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Finds the earliest source-ordered transverse crossing between distinct retained runs.
+///
+/// # Errors
+///
+/// Returns stable cleanup-limit, cancellation, overlap, subdivision, or numeric diagnostics before
+/// any caller mutates the ordered run set.
+fn first_cross_run_transverse_crossing(
+    runs: &[OrderedOffsetRun],
+    budget: &mut CleanupBudget,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<Option<CrossRunTransverseCrossing>, CurveError> {
+    for first_run in 0..runs.len() {
+        for second_run in (first_run + 1)..runs.len() {
+            for (first_segment, first) in runs[first_run].segments.iter().enumerate() {
+                for (second_segment, second) in runs[second_run].segments.iter().enumerate() {
+                    if is_cancelled() {
+                        return Err(cancelled());
+                    }
+                    budget.examined_pairs =
+                        budget.examined_pairs.checked_add(1).ok_or(CurveError::new(
+                            "curve.offset.cleanup_limit",
+                            "path offset cleanup pair limit exceeded",
+                        ))?;
+                    if budget.examined_pairs > budget.maximum_pairs {
+                        return Err(CurveError::new(
+                            "curve.offset.cleanup_limit",
+                            "path offset cleanup pair limit exceeded",
+                        ));
+                    }
+                    for intersection in first.segment.intersections(&second.segment)? {
+                        if intersection.kind() == crate::IntersectionKind::Crossing
+                            && strictly_interior(intersection.first_parameter())
+                            && strictly_interior(intersection.second_parameter())
+                        {
+                            return Ok(Some((
+                                first_run,
+                                first_segment,
+                                second_run,
+                                second_segment,
+                                intersection.first_parameter(),
+                                intersection.second_parameter(),
+                                intersection.point(),
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Adds one retained source-adjacent segment run, joining only an exact source boundary.
+///
+/// # Errors
+///
+/// Returns finite join or request-wide segment-limit diagnostics without publishing a result.
+fn append_ordered_offset_run(
+    runs: &mut Vec<OrderedOffsetRun>,
+    mut offsets: Vec<TracedOffsetSegment>,
+    source_segment: CurveSegment,
+    distance: f64,
+    maximum_segments: usize,
+    emitted_segments: &mut usize,
+) -> Result<(), CurveError> {
+    if offsets.is_empty() {
+        return Ok(());
+    }
+    let joins_previous = runs.last().is_some_and(|previous| {
+        source_locations_are_adjacent(
+            previous
+                .segments
+                .last()
+                .expect("ordered offset run is nonempty")
+                .source_end,
+            offsets
+                .first()
+                .expect("new ordered offset run is nonempty")
+                .source_start,
+        )
+    });
+    let added = if joins_previous {
+        let previous = runs.last_mut().expect("adjacent run exists");
+        let before = previous.segments.len();
+        let source_boundary = offsets
+            .first()
+            .expect("new ordered offset run is nonempty")
+            .source_start;
+        connect_adjacent_offset_segments(
+            &mut previous.segments,
+            &mut offsets,
+            previous.last_source_segment,
+            source_segment,
+            source_boundary,
+            distance,
+        )?;
+        previous.segments.extend(offsets);
+        previous.last_source_segment = source_segment;
+        previous.segments.len() - before
+    } else {
+        let added = offsets.len();
+        runs.push(OrderedOffsetRun {
+            segments: offsets,
+            first_source_segment: source_segment,
+            last_source_segment: source_segment,
+        });
+        added
+    };
+    *emitted_segments = emitted_segments.checked_add(added).ok_or(CurveError::new(
+        "curve.offset.segment_limit",
+        "path offset segment limit exceeded",
+    ))?;
+    if *emitted_segments > maximum_segments {
+        return Err(CurveError::new(
+            "curve.offset.segment_limit",
+            "path offset segment limit exceeded",
+        ));
+    }
+    Ok(())
+}
+
+/// Joins two source-adjacent offset segment lists without creating a renderer-owned repair.
+///
+/// # Errors
+///
+/// Returns finite line/cubic join diagnostics without connecting a caller-classified source gap.
+fn connect_adjacent_offset_segments(
+    derived: &mut Vec<TracedOffsetSegment>,
+    next: &mut [TracedOffsetSegment],
+    previous_source: CurveSegment,
+    next_source: CurveSegment,
+    source_boundary: PathLocation,
+    distance: f64,
+) -> Result<(), CurveError> {
+    let end = derived
+        .last()
+        .expect("adjacent prior offset run is nonempty")
+        .segment
+        .end();
+    let offset_start = next
+        .first()
+        .expect("adjacent next offset run is nonempty")
+        .segment
+        .start();
+    let gap = (end.x - offset_start.x).hypot(end.y - offset_start.y);
+    if gap <= 1.0e-6 {
+        next[0].segment = replace_segment_start(next[0].segment, end)?;
+    } else if !join_offset_segments(
+        derived,
+        next,
+        previous_source,
+        next_source,
+        source_boundary,
+        distance,
+    )? {
+        derived.push(TracedOffsetSegment {
+            segment: CurveSegment::Line(LineSegment::new(end, offset_start)?),
+            source_start: source_boundary,
+            source_end: source_boundary,
+        });
+    }
+    Ok(())
+}
+
+/// Tests exact monotonic adjacency without treating a small omitted cusp interval as continuous.
+fn source_locations_are_adjacent(end: PathLocation, start: PathLocation) -> bool {
+    (end.segment_index() == start.segment_index() && end.parameter() == start.parameter())
+        || (end.parameter() == 1.0
+            && start.parameter() == 0.0
+            && end.segment_index().checked_add(1) == Some(start.segment_index()))
+}
+
+/// Closes one unbroken closed-source run with the existing deterministic straight fallback.
+///
+/// # Errors
+///
+/// Returns finite construction or segment-limit diagnostics without changing closed winding policy.
+fn close_unbroken_offset_run(
+    run: &mut OrderedOffsetRun,
+    authored_end: PathLocation,
+    maximum_segments: usize,
+    emitted_segments: &mut usize,
+) -> Result<(), CurveError> {
+    let end = run
+        .segments
+        .last()
+        .expect("unbroken closed offset run is nonempty")
+        .segment
+        .end();
+    let start = run
+        .segments
+        .first()
+        .expect("unbroken closed offset run is nonempty")
+        .segment
+        .start();
+    if end != start {
+        run.segments.push(TracedOffsetSegment {
+            segment: CurveSegment::Line(LineSegment::new(end, start)?),
+            source_start: authored_end,
+            source_end: authored_end,
+        });
+        *emitted_segments = emitted_segments.checked_add(1).ok_or(CurveError::new(
+            "curve.offset.segment_limit",
+            "path offset segment limit exceeded",
+        ))?;
+        if *emitted_segments > maximum_segments {
+            return Err(CurveError::new(
+                "curve.offset.segment_limit",
+                "path offset segment limit exceeded",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Merges the first and last broken closed-source runs only when both touch the authored seam.
+///
+/// Every broken result remains open; the merge merely preserves adjacency across the authored seam.
+///
+/// # Errors
+///
+/// Returns finite join or request-wide segment-limit diagnostics without bridging any interior gap.
+fn merge_closed_seam_runs(
+    runs: &mut Vec<OrderedOffsetRun>,
+    authored_end: PathLocation,
+    distance: f64,
+    maximum_segments: usize,
+    emitted_segments: &mut usize,
+) -> Result<(), CurveError> {
+    if runs.len() < 2 {
+        return Ok(());
+    }
+    let authored_start = PathLocation::new(0, 0.0)?;
+    let touches_seam = runs
+        .last()
+        .and_then(|run| run.segments.last())
+        .map(|segment| segment.source_end == authored_end)
+        .unwrap_or(false)
+        && runs
+            .first()
+            .and_then(|run| run.segments.first())
+            .map(|segment| segment.source_start == authored_start)
+            .unwrap_or(false);
+    if !touches_seam {
+        return Ok(());
+    }
+    let mut last = runs.pop().expect("closed seam has a last run");
+    let mut first = runs.remove(0);
+    let before = last.segments.len();
+    connect_adjacent_offset_segments(
+        &mut last.segments,
+        &mut first.segments,
+        last.last_source_segment,
+        first.first_source_segment,
+        authored_end,
+        distance,
+    )?;
+    let first_segment_count = first.segments.len();
+    last.segments.extend(first.segments);
+    last.last_source_segment = first.last_source_segment;
+    let added = last.segments.len() - before - first_segment_count;
+    *emitted_segments = emitted_segments.checked_add(added).ok_or(CurveError::new(
+        "curve.offset.segment_limit",
+        "path offset segment limit exceeded",
+    ))?;
+    if *emitted_segments > maximum_segments {
+        return Err(CurveError::new(
+            "curve.offset.segment_limit",
+            "path offset segment limit exceeded",
+        ));
+    }
+    runs.insert(0, last);
+    Ok(())
+}
+
 /// Splits transverse self-crossings into source-ordered components without reversing any source edge.
 ///
 /// # Errors
 ///
 /// Returns canonical intersection, component-limit, cancellation, or finite path diagnostics without
 /// publishing a partial cleanup.
-fn dissolve_crossings(
+fn dissolve_crossings_with_budget(
     segments: Vec<TracedOffsetSegment>,
     closure: PathClosure,
     retained_winding: Option<WindingDirection>,
-    maximum_pairs: usize,
+    budget: &mut CleanupBudget,
     maximum_components: usize,
     tolerance: f64,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<CleanedOffsetPath>, CurveError> {
     let mut pending = vec![(segments, closure)];
     let mut cleaned = Vec::new();
-    let mut budget = CleanupBudget {
-        examined_pairs: 0,
-        maximum_pairs,
-    };
     while let Some((segments, closure)) = pending.pop() {
         if is_cancelled() {
             return Err(cancelled());
@@ -354,8 +927,7 @@ fn dissolve_crossings(
             .iter()
             .map(|segment| segment.segment)
             .collect::<Vec<_>>();
-        let Some(crossing) =
-            first_transverse_crossing_with_budget(&plain, &mut budget, is_cancelled)?
+        let Some(crossing) = first_transverse_crossing_with_budget(&plain, budget, is_cancelled)?
         else {
             if segments.is_empty() {
                 continue;
@@ -370,13 +942,15 @@ fn dissolve_crossings(
             {
                 continue;
             }
-            let source_start = segments.first().expect("nonempty component").source_start;
-            let source_end = segments.last().expect("nonempty component").source_end;
             let earliest_source = earliest_source_location(&segments);
+            let latest_source = latest_source_location(&segments);
+            if earliest_source == latest_source {
+                continue;
+            }
             cleaned.push(CleanedOffsetPath {
                 path,
-                source_start,
-                source_end,
+                source_start: earliest_source,
+                source_end: latest_source,
                 earliest_source,
             });
             if cleaned.len() + pending.len() > maximum_components {
@@ -402,6 +976,35 @@ fn dissolve_crossings(
         source_location_key(left.earliest_source).cmp(&source_location_key(right.earliest_source))
     });
     Ok(cleaned)
+}
+
+/// Supplies a fresh cleanup budget for focused cleanup-only tests.
+///
+/// # Errors
+///
+/// Returns the same bounded cleanup diagnostics as the request-wide implementation.
+#[cfg(test)]
+fn dissolve_crossings(
+    segments: Vec<TracedOffsetSegment>,
+    closure: PathClosure,
+    retained_winding: Option<WindingDirection>,
+    maximum_pairs: usize,
+    maximum_components: usize,
+    tolerance: f64,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<CleanedOffsetPath>, CurveError> {
+    dissolve_crossings_with_budget(
+        segments,
+        closure,
+        retained_winding,
+        &mut CleanupBudget {
+            examined_pairs: 0,
+            maximum_pairs,
+        },
+        maximum_components,
+        tolerance,
+        is_cancelled,
+    )
 }
 
 /// Splits one earliest crossing into forward-traversal open fragments or closed loops.
@@ -572,6 +1175,15 @@ fn earliest_source_location(segments: &[TracedOffsetSegment]) -> PathLocation {
         .flat_map(|segment| [segment.source_start, segment.source_end])
         .min_by_key(|location| source_location_key(*location))
         .expect("cleaned components are nonempty")
+}
+
+/// Returns the latest exact source location retained by one forward-traversal component.
+fn latest_source_location(segments: &[TracedOffsetSegment]) -> PathLocation {
+    segments
+        .iter()
+        .flat_map(|segment| [segment.source_start, segment.source_end])
+        .max_by_key(|location| source_location_key(*location))
+        .expect("cleaned component is nonempty")
 }
 
 /// Converts one finite source location into a deterministic total-order key.
@@ -986,45 +1598,370 @@ fn ray_to_bounds(origin: Point2, direction: Vector2, bounds: Bounds) -> Result<P
         ))
 }
 
-/// Offsets one nonstationary line or cubic while retaining a compact construction kind.
+/// Offsets one line or cubic into source-adjacent runs without bridging omitted source geometry.
 ///
 /// # Errors
 ///
-/// Propagates source tangent and finite-coordinate errors rather than introducing a fallback normal.
-fn offset_segment(
+/// Propagates source tangent, cusp-isolation, finite-coordinate, cancellation, and limit errors.
+fn offset_segment_runs(
     segment: CurveSegment,
     source_segment_index: usize,
     distance: f64,
     limits: PathOffsetLimits,
+    cusp_budget: &mut CuspIsolationBudget,
     is_cancelled: &dyn Fn() -> bool,
-) -> Result<Option<Vec<TracedOffsetSegment>>, CurveError> {
-    let start_normal = match segment.unit_normal_at(0.0) {
-        Ok(normal) => normal,
-        Err(error) if error.path() == "curve.path.tangent.stationary" => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    let end_normal = match segment.unit_normal_at(1.0) {
-        Ok(normal) => normal,
-        Err(error) if error.path() == "curve.path.tangent.stationary" => return Ok(None),
-        Err(error) => return Err(error),
-    };
+) -> Result<Vec<Vec<TracedOffsetSegment>>, CurveError> {
     let translate = |point: Point2, normal: Vector2| {
         Point2::new(point.x + normal.x * distance, point.y + normal.y * distance)
     };
     match segment {
-        CurveSegment::Line(line) => Ok(Some(vec![TracedOffsetSegment {
-            segment: CurveSegment::Line(LineSegment::new(
-                translate(line.start(), start_normal),
-                translate(line.end(), end_normal),
-            )?),
-            source_start: PathLocation::new(source_segment_index, 0.0)?,
-            source_end: PathLocation::new(source_segment_index, 1.0)?,
-        }])),
-        CurveSegment::CubicBezier(cubic) => {
-            adaptive_cubic_offsets(cubic, source_segment_index, distance, limits, is_cancelled)
-                .map(Some)
+        CurveSegment::Line(line) => {
+            let start_normal = match segment.unit_normal_at(0.0) {
+                Ok(normal) => normal,
+                Err(error) if error.path() == "curve.path.tangent.stationary" => {
+                    return Ok(Vec::new());
+                }
+                Err(error) => return Err(error),
+            };
+            let end_normal = segment.unit_normal_at(1.0)?;
+            Ok(vec![vec![TracedOffsetSegment {
+                segment: CurveSegment::Line(LineSegment::new(
+                    translate(line.start(), start_normal),
+                    translate(line.end(), end_normal),
+                )?),
+                source_start: PathLocation::new(source_segment_index, 0.0)?,
+                source_end: PathLocation::new(source_segment_index, 1.0)?,
+            }]])
+        }
+        CurveSegment::CubicBezier(cubic) => cubic_offset_runs(
+            cubic,
+            source_segment_index,
+            distance,
+            limits,
+            cusp_budget,
+            is_cancelled,
+        ),
+    }
+}
+
+/// Isolates cubic offset orientation before fitting each retained source-adjacent run.
+///
+/// # Errors
+///
+/// Returns stable cusp work/depth, fitting, tangent, cancellation, or finite-arithmetic diagnostics.
+fn cubic_offset_runs(
+    cubic: crate::CubicBezierSegment,
+    source_segment_index: usize,
+    distance: f64,
+    limits: PathOffsetLimits,
+    cusp_budget: &mut CuspIsolationBudget,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<Vec<TracedOffsetSegment>>, CurveError> {
+    let intervals =
+        isolate_cubic_offset_intervals(cubic, distance, limits, cusp_budget, is_cancelled)?;
+    let mut runs = Vec::new();
+    for interval_run in intervals {
+        let source_start = interval_run
+            .first()
+            .expect("retained interval run is nonempty")
+            .source_start;
+        let source_end = interval_run
+            .last()
+            .expect("retained interval run is nonempty")
+            .source_end;
+        let retained_cubic = cubic_subinterval(cubic, source_start, source_end)?;
+        let fitted = adaptive_cubic_offsets(
+            retained_cubic,
+            source_segment_index,
+            source_start,
+            source_end,
+            distance,
+            limits,
+            is_cancelled,
+        )?;
+        if !fitted.is_empty() {
+            runs.push(fitted);
         }
     }
+    Ok(runs)
+}
+
+/// Extracts one finite cubic source interval without changing its authored parameter bounds.
+///
+/// # Errors
+///
+/// Returns canonical split diagnostics for an invalid or non-finite interval.
+fn cubic_subinterval(
+    cubic: crate::CubicBezierSegment,
+    start: f64,
+    end: f64,
+) -> Result<crate::CubicBezierSegment, CurveError> {
+    if start == 0.0 && end == 1.0 {
+        return Ok(cubic);
+    }
+    if !start.is_finite() || !end.is_finite() || start < 0.0 || end > 1.0 || start >= end {
+        return Err(CurveError::new(
+            "curve.offset.source_interval",
+            "retained cubic source interval must be finite and ordered",
+        ));
+    }
+    let prefix = if end == 1.0 {
+        cubic
+    } else {
+        cubic.split(end)?.0
+    };
+    if start == 0.0 {
+        Ok(prefix)
+    } else {
+        Ok(prefix.split(start / end)?.1)
+    }
+}
+
+/// Dyadically classifies cubic intervals by the signed offset-orientation numerator.
+///
+/// Intervals with positive `|v|^3 - distance * cross(v, a)` retain authored traversal;
+/// negative intervals are omitted. An unresolved interval is omitted only after its conservative
+/// offset-locus length is within the fixed geometry tolerance.
+///
+/// # Errors
+///
+/// Returns stable work/depth, cancellation, or non-finite-arithmetic diagnostics atomically.
+fn isolate_cubic_offset_intervals(
+    cubic: crate::CubicBezierSegment,
+    distance: f64,
+    limits: PathOffsetLimits,
+    budget: &mut CuspIsolationBudget,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<Vec<RetainedCubicInterval>>, CurveError> {
+    let mut pending = vec![(cubic, 0_u8, 0.0_f64, 1.0_f64)];
+    let mut retained = Vec::new();
+    while let Some((candidate, depth, source_start, source_end)) = pending.pop() {
+        if is_cancelled() {
+            return Err(cancelled());
+        }
+        budget.examined_intervals =
+            budget
+                .examined_intervals
+                .checked_add(1)
+                .ok_or(CurveError::new(
+                    "curve.offset.cusp_limit",
+                    "path offset cusp-isolation work limit exceeded",
+                ))?;
+        if budget.examined_intervals > budget.maximum_intervals {
+            return Err(CurveError::new(
+                "curve.offset.cusp_limit",
+                "path offset cusp-isolation work limit exceeded",
+            ));
+        }
+        let bounds = cubic_offset_orientation_bounds(candidate, distance)?;
+        match classify_offset_orientation(bounds) {
+            OffsetOrientation::Retained => retained.push(RetainedCubicInterval {
+                source_start,
+                source_end,
+            }),
+            OffsetOrientation::Reversed => {}
+            OffsetOrientation::Uncertain => {
+                if cubic_interval_has_zero_witness(candidate, distance)?
+                    && uncertain_offset_locus_length_bound(bounds)? <= limits.tolerance
+                {
+                    continue;
+                }
+                if depth >= limits.maximum_subdivision_depth {
+                    return Err(CurveError::new(
+                        "curve.offset.subdivision_limit",
+                        "cubic offset cusp cannot be isolated within the subdivision limit",
+                    ));
+                }
+                let (left, right) = candidate.split(0.5)?;
+                let source_middle = (source_start + source_end) * 0.5;
+                pending.push((right, depth + 1, source_middle, source_end));
+                pending.push((left, depth + 1, source_start, source_middle));
+            }
+        }
+    }
+    let mut runs = Vec::<Vec<RetainedCubicInterval>>::new();
+    for interval in retained {
+        if runs
+            .last()
+            .and_then(|run| run.last())
+            .is_some_and(|previous| previous.source_end == interval.source_start)
+        {
+            runs.last_mut()
+                .expect("adjacent retained interval has a run")
+                .push(interval);
+        } else {
+            runs.push(vec![interval]);
+        }
+    }
+    Ok(runs)
+}
+
+/// Detects an exact dyadic zero or a signed reversal bracket inside one uncertain cubic interval.
+///
+/// # Errors
+///
+/// Returns a stable numeric-overflow diagnostic without using a non-finite sign witness.
+fn cubic_interval_has_zero_witness(
+    cubic: crate::CubicBezierSegment,
+    distance: f64,
+) -> Result<bool, CurveError> {
+    let values = [0.0, 0.5, 1.0]
+        .map(|parameter| cubic_offset_orientation_value(cubic, distance, parameter))
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    let minimum = values.iter().copied().fold(f64::INFINITY, f64::min);
+    let maximum = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    Ok(values.contains(&0.0) || (minimum < 0.0 && maximum > 0.0))
+}
+
+/// Evaluates the exact signed cubic offset-orientation numerator at one local parameter.
+///
+/// # Errors
+///
+/// Returns a stable numeric-overflow diagnostic instead of accepting a non-finite sign.
+fn cubic_offset_orientation_value(
+    cubic: crate::CubicBezierSegment,
+    distance: f64,
+    parameter: f64,
+) -> Result<f64, CurveError> {
+    let segment = CurveSegment::CubicBezier(cubic);
+    let velocity = segment.derivative_at(parameter)?;
+    let inverse = 1.0 - parameter;
+    let acceleration_start = Vector2::new(
+        6.0 * (cubic.control_2().x - 2.0 * cubic.control_1().x + cubic.start().x),
+        6.0 * (cubic.control_2().y - 2.0 * cubic.control_1().y + cubic.start().y),
+    );
+    let acceleration_end = Vector2::new(
+        6.0 * (cubic.end().x - 2.0 * cubic.control_2().x + cubic.control_1().x),
+        6.0 * (cubic.end().y - 2.0 * cubic.control_2().y + cubic.control_1().y),
+    );
+    let acceleration = Vector2::new(
+        inverse * acceleration_start.x + parameter * acceleration_end.x,
+        inverse * acceleration_start.y + parameter * acceleration_end.y,
+    );
+    let speed = velocity.x.hypot(velocity.y);
+    let value =
+        speed.powi(3) - distance * (velocity.x * acceleration.y - velocity.y * acceleration.x);
+    value.is_finite().then_some(value).ok_or(CurveError::new(
+        "curve.offset.numeric_overflow",
+        "cubic offset orientation arithmetic overflowed",
+    ))
+}
+
+/// Computes conservative speed and signed orientation-numerator bounds from derivative control hulls.
+///
+/// # Errors
+///
+/// Returns a stable numeric-overflow diagnostic instead of classifying non-finite arithmetic.
+fn cubic_offset_orientation_bounds(
+    cubic: crate::CubicBezierSegment,
+    distance: f64,
+) -> Result<OffsetOrientationBounds, CurveError> {
+    let velocity = [
+        Vector2::new(
+            3.0 * (cubic.control_1().x - cubic.start().x),
+            3.0 * (cubic.control_1().y - cubic.start().y),
+        ),
+        Vector2::new(
+            3.0 * (cubic.control_2().x - cubic.control_1().x),
+            3.0 * (cubic.control_2().y - cubic.control_1().y),
+        ),
+        Vector2::new(
+            3.0 * (cubic.end().x - cubic.control_2().x),
+            3.0 * (cubic.end().y - cubic.control_2().y),
+        ),
+    ];
+    if velocity
+        .iter()
+        .any(|value| !value.x.is_finite() || !value.y.is_finite())
+    {
+        return Err(CurveError::new(
+            "curve.offset.numeric_overflow",
+            "cubic offset orientation arithmetic overflowed",
+        ));
+    }
+    let (minimum_x, maximum_x) = velocity.iter().fold(
+        (f64::INFINITY, f64::NEG_INFINITY),
+        |(minimum, maximum), value| (minimum.min(value.x), maximum.max(value.x)),
+    );
+    let (minimum_y, maximum_y) = velocity.iter().fold(
+        (f64::INFINITY, f64::NEG_INFINITY),
+        |(minimum, maximum), value| (minimum.min(value.y), maximum.max(value.y)),
+    );
+    let distance_to_x = if minimum_x <= 0.0 && maximum_x >= 0.0 {
+        0.0
+    } else {
+        minimum_x.abs().min(maximum_x.abs())
+    };
+    let distance_to_y = if minimum_y <= 0.0 && maximum_y >= 0.0 {
+        0.0
+    } else {
+        minimum_y.abs().min(maximum_y.abs())
+    };
+    let minimum_speed = distance_to_x.hypot(distance_to_y);
+    let maximum_speed = velocity
+        .iter()
+        .map(|value| value.x.hypot(value.y))
+        .fold(0.0_f64, f64::max);
+    let cross = |left: Vector2, right: Vector2| left.x * right.y - left.y * right.x;
+    let cross_controls = [
+        2.0 * cross(velocity[0], velocity[1]),
+        cross(velocity[0], velocity[2]),
+        2.0 * cross(velocity[1], velocity[2]),
+    ];
+    let cross_minimum = cross_controls.iter().copied().fold(f64::INFINITY, f64::min);
+    let cross_maximum = cross_controls
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+    let distance_cross_minimum = (distance * cross_minimum).min(distance * cross_maximum);
+    let distance_cross_maximum = (distance * cross_minimum).max(distance * cross_maximum);
+    let lower = minimum_speed.powi(3) - distance_cross_maximum;
+    let upper = maximum_speed.powi(3) - distance_cross_minimum;
+    if !minimum_speed.is_finite()
+        || !maximum_speed.is_finite()
+        || cross_controls.iter().any(|value| !value.is_finite())
+        || !lower.is_finite()
+        || !upper.is_finite()
+    {
+        return Err(CurveError::new(
+            "curve.offset.numeric_overflow",
+            "cubic offset orientation arithmetic overflowed",
+        ));
+    }
+    Ok(OffsetOrientationBounds {
+        lower,
+        upper,
+        minimum_speed,
+    })
+}
+
+/// Classifies one conservative orientation interval without sampling a sign-changing midpoint.
+fn classify_offset_orientation(bounds: OffsetOrientationBounds) -> OffsetOrientation {
+    if bounds.lower > 0.0 {
+        OffsetOrientation::Retained
+    } else if bounds.upper < 0.0 {
+        OffsetOrientation::Reversed
+    } else {
+        OffsetOrientation::Uncertain
+    }
+}
+
+/// Bounds the complete uncertain offset-locus length from numerator and source-speed bounds.
+///
+/// # Errors
+///
+/// Returns a stable numeric-overflow diagnostic instead of accepting an unbounded finite interval.
+fn uncertain_offset_locus_length_bound(bounds: OffsetOrientationBounds) -> Result<f64, CurveError> {
+    if bounds.minimum_speed == 0.0 {
+        return Ok(f64::INFINITY);
+    }
+    let numerator = bounds.lower.abs().max(bounds.upper.abs());
+    let length = numerator / bounds.minimum_speed.powi(2);
+    length.is_finite().then_some(length).ok_or(CurveError::new(
+        "curve.offset.numeric_overflow",
+        "cubic offset cusp-band arithmetic overflowed",
+    ))
 }
 
 /// Fits a cubic's normal offset adaptively with deterministic dyadic De Casteljau subdivision.
@@ -1036,11 +1973,13 @@ fn offset_segment(
 fn adaptive_cubic_offsets(
     cubic: crate::CubicBezierSegment,
     source_segment_index: usize,
+    source_parameter_start: f64,
+    source_parameter_end: f64,
     distance: f64,
     limits: PathOffsetLimits,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<TracedOffsetSegment>, CurveError> {
-    let mut pending = vec![(cubic, 0_u8, 0.0_f64, 1.0_f64)];
+    let mut pending = vec![(cubic, 0_u8, source_parameter_start, source_parameter_end)];
     let mut pieces: Vec<TracedOffsetSegment> = Vec::new();
     while let Some((candidate, depth, source_start, source_end)) = pending.pop() {
         if is_cancelled() {
@@ -1319,6 +2258,7 @@ mod tests {
             signed_distance,
             endpoint_policy: PathOffsetEndpointPolicy::Preserve,
             cleanup: PathOffsetCleanup::DissolveCrossings,
+            crossing_barriers: &[],
             limits: PathOffsetLimits::default(),
         };
         let positive = offset_path_cancellable(request(3.0), &|| false).expect("positive offset");
@@ -1347,6 +2287,7 @@ mod tests {
                         .expect("finite planning bounds"),
                 },
                 cleanup: PathOffsetCleanup::DissolveCrossings,
+                crossing_barriers: &[],
                 limits: PathOffsetLimits::default(),
             },
             &|| false,
@@ -1378,6 +2319,7 @@ mod tests {
             signed_distance,
             endpoint_policy: PathOffsetEndpointPolicy::Preserve,
             cleanup: PathOffsetCleanup::DissolveCrossings,
+            crossing_barriers: &[],
             limits: PathOffsetLimits::default(),
         };
         let PathOffsetResult::Paths(outer) =
@@ -1428,6 +2370,7 @@ mod tests {
                 signed_distance: -4.0,
                 endpoint_policy: PathOffsetEndpointPolicy::Preserve,
                 cleanup: PathOffsetCleanup::DissolveCrossings,
+                crossing_barriers: &[],
                 limits: PathOffsetLimits::default(),
             },
             &|| false,
@@ -1452,6 +2395,299 @@ mod tests {
                 .expect("offset bounds")
                 .min
                 .is_finite()
+        );
+    }
+
+    /// Builds the compact Stage 20J diagnostic cubic or its vertical mirror.
+    fn diagnostic_cusp_path(mirrored: bool) -> CurvePath {
+        let mirror = |y: f64| if mirrored { -y } else { y };
+        CurvePath::new(
+            vec![CurveSegment::CubicBezier(
+                crate::CubicBezierSegment::new(
+                    Point2::new(20.0, mirror(160.0)),
+                    Point2::new(96.0, mirror(64.0)),
+                    Point2::new(224.0, mirror(64.0)),
+                    Point2::new(300.0, mirror(160.0)),
+                )
+                .expect("finite diagnostic cubic"),
+            )],
+            PathClosure::Open,
+        )
+        .expect("connected diagnostic cubic")
+    }
+
+    /// Proves the diagnostic cubic stays whole below its exact curvature-radius threshold.
+    #[test]
+    fn cubic_below_cusp_threshold_remains_one_source_consistent_component() {
+        let path = diagnostic_cusp_path(false);
+        let PathOffsetResult::Paths(components) = offset_path_cancellable(
+            PathOffsetRequest {
+                path: &path,
+                signed_distance: 162.5,
+                endpoint_policy: PathOffsetEndpointPolicy::Preserve,
+                cleanup: PathOffsetCleanup::DissolveCrossings,
+                crossing_barriers: &[],
+                limits: PathOffsetLimits::default(),
+            },
+            &|| false,
+        )
+        .expect("sub-threshold offset remains regular") else {
+            panic!("sub-threshold diagnostic cubic survives")
+        };
+        assert_eq!(components.len(), 1);
+        assert_eq!(
+            components[0].source_start,
+            PathLocation::new(0, 0.0).unwrap()
+        );
+        assert_eq!(components[0].source_end, PathLocation::new(0, 1.0).unwrap());
+    }
+
+    /// Proves cusp-range offsets omit the reversed middle and publish regular ordered branches.
+    #[test]
+    fn cubic_cusps_split_and_reversal_intervals_disappear_deterministically() {
+        for distance in [162.5625, 162.562_6, 168.0, 216.0] {
+            let path = diagnostic_cusp_path(false);
+            let PathOffsetResult::Paths(first) = offset_path_cancellable(
+                PathOffsetRequest {
+                    path: &path,
+                    signed_distance: distance,
+                    endpoint_policy: PathOffsetEndpointPolicy::Preserve,
+                    cleanup: PathOffsetCleanup::DissolveCrossings,
+                    crossing_barriers: &[],
+                    limits: PathOffsetLimits::default(),
+                },
+                &|| false,
+            )
+            .unwrap_or_else(|error| panic!("distance {distance}: {error}")) else {
+                panic!("distance {distance} retains two regular branches")
+            };
+            let PathOffsetResult::Paths(second) = offset_path_cancellable(
+                PathOffsetRequest {
+                    path: &path,
+                    signed_distance: distance,
+                    endpoint_policy: PathOffsetEndpointPolicy::Preserve,
+                    cleanup: PathOffsetCleanup::DissolveCrossings,
+                    crossing_barriers: &[],
+                    limits: PathOffsetLimits::default(),
+                },
+                &|| false,
+            )
+            .expect("repeated cusp isolation succeeds") else {
+                panic!("repeated cusp isolation retains branches")
+            };
+            assert_eq!(first, second, "distance {distance} is deterministic");
+            assert_eq!(first.len(), 2, "distance {distance}");
+            assert_eq!(first[0].component_ordinal, 0);
+            assert_eq!(first[1].component_ordinal, 1);
+            assert_eq!(first[0].source_start, PathLocation::new(0, 0.0).unwrap());
+            assert_eq!(first[1].source_end, PathLocation::new(0, 1.0).unwrap());
+            assert!(first.iter().all(|component| {
+                source_location_key(component.source_start)
+                    < source_location_key(component.source_end)
+            }));
+            assert!(first[0].source_end.parameter() < 0.5, "distance {distance}");
+            assert!(
+                first[1].source_start.parameter() > 0.5,
+                "distance {distance}"
+            );
+            assert!(
+                first[0].source_end.parameter() < first[1].source_start.parameter(),
+                "distance {distance} retains a real source gap"
+            );
+            let branch_intersections = first[0]
+                .path
+                .intersections(&first[1].path)
+                .expect("surviving cusp branches have bounded intersections");
+            assert!(
+                branch_intersections
+                    .iter()
+                    .all(|intersection| intersection.kind() != crate::IntersectionKind::Crossing),
+                "distance {distance} must not publish cross-hatched surviving branches: {branch_intersections:?}"
+            );
+            for component in &first {
+                for (source_location, output_location) in [
+                    (
+                        component.source_start,
+                        PathLocation::new(0, 0.0).expect("component start location"),
+                    ),
+                    (
+                        component.source_end,
+                        PathLocation::new(component.path.segments().len() - 1, 1.0)
+                            .expect("component end location"),
+                    ),
+                ] {
+                    let source_tangent = path
+                        .unit_tangent_at(source_location)
+                        .expect("retained source endpoint is nonstationary");
+                    let output_tangent = component
+                        .path
+                        .unit_tangent_at(output_location)
+                        .expect("published offset endpoint is nonstationary");
+                    assert!(
+                        source_tangent.x * output_tangent.x + source_tangent.y * output_tangent.y
+                            > 0.999,
+                        "distance {distance} retains authored traversal"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Proves offsets beyond the endpoint curvature radius discard extension-only remnants.
+    #[test]
+    fn cubic_wholly_reversed_offsets_collapse_without_endpoint_extensions() {
+        for (path, sign) in [
+            (diagnostic_cusp_path(false), 1.0),
+            (diagnostic_cusp_path(true), -1.0),
+        ] {
+            let bounds = if sign > 0.0 {
+                Bounds::new(Point2::new(-17.5, -17.5), Point2::new(337.5, 337.5))
+            } else {
+                Bounds::new(Point2::new(-17.5, -337.5), Point2::new(337.5, 17.5))
+            }
+            .expect("finite diagnostic bounds");
+            for distance in [228.0, 240.0, 252.0] {
+                let result = offset_path_cancellable(
+                    PathOffsetRequest {
+                        path: &path,
+                        signed_distance: sign * distance,
+                        endpoint_policy: PathOffsetEndpointPolicy::TangentialExtension { bounds },
+                        cleanup: PathOffsetCleanup::DissolveCrossings,
+                        crossing_barriers: &[],
+                        limits: PathOffsetLimits::default(),
+                    },
+                    &|| false,
+                )
+                .unwrap_or_else(|error| panic!("distance {distance}: {error}"));
+                assert_eq!(result, PathOffsetResult::Collapsed, "distance {distance}");
+            }
+        }
+    }
+
+    /// Proves crossing both terminal extensions collapses the exhausted extended envelope.
+    #[test]
+    fn terminal_endpoint_extension_crossing_collapses_without_floating_fragments() {
+        for (path, signed_distance, bounds) in [
+            (
+                diagnostic_cusp_path(false),
+                180.0_f64,
+                Bounds::new(Point2::new(-17.5, -17.5), Point2::new(337.5, 337.5))
+                    .expect("finite diagnostic bounds"),
+            ),
+            (
+                diagnostic_cusp_path(true),
+                -180.0_f64,
+                Bounds::new(Point2::new(-17.5, -337.5), Point2::new(337.5, 17.5))
+                    .expect("finite mirrored diagnostic bounds"),
+            ),
+        ] {
+            let retained = offset_path_cancellable(
+                PathOffsetRequest {
+                    path: &path,
+                    signed_distance: signed_distance.signum() * 168.0,
+                    endpoint_policy: PathOffsetEndpointPolicy::TangentialExtension { bounds },
+                    cleanup: PathOffsetCleanup::DissolveCrossings,
+                    crossing_barriers: &[],
+                    limits: PathOffsetLimits::default(),
+                },
+                &|| false,
+            )
+            .expect("pre-crossing terminal extensions remain finite");
+            let PathOffsetResult::Paths(retained) = retained else {
+                panic!("pre-crossing terminal extensions retain cusp branches")
+            };
+            assert_eq!(retained.len(), 2);
+            let result = offset_path_cancellable(
+                PathOffsetRequest {
+                    path: &path,
+                    signed_distance,
+                    endpoint_policy: PathOffsetEndpointPolicy::TangentialExtension { bounds },
+                    cleanup: PathOffsetCleanup::DissolveCrossings,
+                    crossing_barriers: &[],
+                    limits: PathOffsetLimits::default(),
+                },
+                &|| false,
+            )
+            .expect("terminal extension crossing collapses deterministically");
+            assert_eq!(result, PathOffsetResult::Collapsed);
+        }
+    }
+
+    /// Proves mirroring the diagnostic curve and signed distance preserves cusp splitting on the other side.
+    #[test]
+    fn mirrored_cubic_and_signed_distance_split_the_same_source_intervals() {
+        let original = diagnostic_cusp_path(false);
+        let mirrored = diagnostic_cusp_path(true);
+        let offset = |path: &CurvePath, signed_distance| {
+            let PathOffsetResult::Paths(components) = offset_path_cancellable(
+                PathOffsetRequest {
+                    path,
+                    signed_distance,
+                    endpoint_policy: PathOffsetEndpointPolicy::Preserve,
+                    cleanup: PathOffsetCleanup::DissolveCrossings,
+                    crossing_barriers: &[],
+                    limits: PathOffsetLimits::default(),
+                },
+                &|| false,
+            )
+            .expect("mirrored cusp isolation succeeds") else {
+                panic!("mirrored cusp branches survive")
+            };
+            components
+        };
+        let original_components = offset(&original, 216.0);
+        let mirrored_components = offset(&mirrored, -216.0);
+        assert_eq!(original_components.len(), 2);
+        assert_eq!(mirrored_components.len(), 2);
+        assert!(
+            original_components
+                .iter()
+                .zip(&mirrored_components)
+                .all(|(first, second)| {
+                    first.source_start == second.source_start
+                        && first.source_end == second.source_end
+                        && (first.path.start().x - second.path.start().x).abs() < 1.0e-9
+                        && (first.path.start().y + second.path.start().y).abs() < 1.0e-9
+                        && (first.path.end().x - second.path.end().x).abs() < 1.0e-9
+                        && (first.path.end().y + second.path.end().y).abs() < 1.0e-9
+                })
+        );
+    }
+
+    /// Proves cusp work and depth limits report distinct stable failures before publishing a branch.
+    #[test]
+    fn cusp_isolation_work_and_depth_limits_fail_atomically() {
+        let path = diagnostic_cusp_path(false);
+        let request = |limits| PathOffsetRequest {
+            path: &path,
+            signed_distance: 240.0,
+            endpoint_policy: PathOffsetEndpointPolicy::Preserve,
+            cleanup: PathOffsetCleanup::DissolveCrossings,
+            crossing_barriers: &[],
+            limits,
+        };
+        let work = offset_path_cancellable(
+            request(PathOffsetLimits {
+                maximum_cusp_isolation_work: 1,
+                ..PathOffsetLimits::default()
+            }),
+            &|| false,
+        )
+        .expect_err("cusp work exhaustion publishes no component");
+        assert_eq!(work.path(), "curve.offset.cusp_limit");
+        let depth = offset_path_cancellable(
+            request(PathOffsetLimits {
+                maximum_subdivision_depth: 1,
+                ..PathOffsetLimits::default()
+            }),
+            &|| false,
+        )
+        .expect_err("cusp depth exhaustion publishes no component");
+        assert_eq!(depth.path(), "curve.offset.subdivision_limit");
+        assert_eq!(MAX_PATH_OFFSET_CUSP_ISOLATION_WORK, 262_144);
+        assert_eq!(
+            PATH_OFFSET_ALGORITHM_CONTRACT_ID,
+            "toniator.path-offset.v5.endpoint-envelope-collapse"
         );
     }
 
@@ -1480,6 +2716,8 @@ mod tests {
         let error = adaptive_cubic_offsets(
             cubic,
             0,
+            0.0,
+            1.0,
             3.0,
             PathOffsetLimits {
                 maximum_subdivision_depth: 1,
@@ -1524,6 +2762,7 @@ mod tests {
                     signed_distance: 2.0,
                     endpoint_policy: PathOffsetEndpointPolicy::Preserve,
                     cleanup: PathOffsetCleanup::DissolveCrossings,
+                    crossing_barriers: &[],
                     limits: PathOffsetLimits::default(),
                 },
                 &|| false,
@@ -1538,6 +2777,7 @@ mod tests {
             signed_distance: 1.0,
             endpoint_policy: PathOffsetEndpointPolicy::Preserve,
             cleanup: PathOffsetCleanup::DissolveCrossings,
+            crossing_barriers: &[],
             limits: PathOffsetLimits {
                 maximum_subdivision_depth: 1,
                 maximum_segments: 1,
@@ -1678,6 +2918,7 @@ mod tests {
                 signed_distance: 0.5,
                 endpoint_policy: PathOffsetEndpointPolicy::Preserve,
                 cleanup: PathOffsetCleanup::DissolveCrossings,
+                crossing_barriers: &[],
                 limits: PathOffsetLimits::default(),
             },
             &|| false,
@@ -1714,6 +2955,7 @@ mod tests {
             signed_distance: 0.5,
             endpoint_policy: PathOffsetEndpointPolicy::Preserve,
             cleanup: PathOffsetCleanup::DissolveCrossings,
+            crossing_barriers: &[],
             limits,
         };
         let pair_error = offset_path_cancellable(
@@ -1762,6 +3004,7 @@ mod tests {
                             .expect("finite diagnostic bounds"),
                     },
                     cleanup: PathOffsetCleanup::DissolveCrossings,
+                    crossing_barriers: &[],
                     limits: PathOffsetLimits::default(),
                 },
                 &|| false,

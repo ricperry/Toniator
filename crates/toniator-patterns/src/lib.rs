@@ -9,21 +9,24 @@ use toniator_domain::{
     ArtworkWeightResponse, AuthoredStructureId, CanvasSpec, ChannelId, DensityMetric2D, Document,
     DocumentCommand, DocumentHistory, DocumentSessionError, GuideDimension, GuideDimensionDraft,
     GuideDimensionId, GuidePrototype, GuideRepetition, MarkOrientation, MarkOrientationDraft,
-    MarkPrototype, OffsetCleanup, OffsetSides, PatternDefinition, PatternDefinitionRecipe,
-    PatternFamily, PatternMechanism, PatternMechanismId, PatternModulation, PatternOutputLayer,
-    PatternOutputLayerId, PresetMetadata, PresetRecord, RandomSiteCharacter, SiteDensityModulation,
-    SiteExclusionPolicy, SourceMapping, StraightGuideDimension, VisibleMarkSizingPolicy,
+    MarkPrototype, OffsetCleanup, OffsetSides, ParametricCurve, PatternDefinition,
+    PatternDefinitionRecipe, PatternFamily, PatternMechanism, PatternMechanismId,
+    PatternModulation, PatternOutputLayer, PatternOutputLayerId, PresetMetadata, PresetRecord,
+    RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy, SourceMapping,
+    StraightGuideDimension, VisibleMarkSizingPolicy,
 };
 pub use toniator_geometry::{
     AffineTransform2D, Bounds, CanonicalCircleMark, CanonicalFillRule, CanonicalMark,
-    CanonicalPathMark, CanonicalStroke, CurveError, CurvePath, CurveSegment, FamilySite,
-    FamilySiteError, FamilySiteId, FamilySiteProvenance, FamilySiteSet, GuideInstanceId,
-    GuideIntersectionProvenance, GuidePathInstance, GuidePathLocationProvenance, GuidePathSet,
-    IntersectionSite, NominalCellBasis, PathClosure, PathLocation, PathOffsetCleanup,
+    CanonicalPathMark, CanonicalStroke, CubicBezierSegment, CurveError, CurvePath, CurveSegment,
+    FamilySite, FamilySiteError, FamilySiteId, FamilySiteProvenance, FamilySiteSet,
+    GuideInstanceId, GuideIntersectionProvenance, IntersectionSite, NominalCellBasis,
+    PATH_OFFSET_ALGORITHM_CONTRACT_ID, PathClosure, PathLocation, PathOffsetCleanup,
     PathOffsetEndpointPolicy, PathOffsetLimits, PathOffsetRequest, PathOffsetResult, Point2,
-    SiteId, SiteScope, StraightGuide, StrokeProfileSample, VariableWidthOutlineLimits,
-    VariableWidthPathSample, Vector2, build_variable_width_outline_cancellable,
-    offset_path_cancellable, projection_range, resolve_guide_prototype,
+    SiteId, SiteScope, StraightGuide, StrokeProfileSample, StructuralPathInstance,
+    StructuralPathInstanceId, StructuralPathLocationProvenance, StructuralPathSet,
+    StructuralPathSourceId, VariableWidthOutlineLimits, VariableWidthPathSample, Vector2,
+    build_variable_width_outline_cancellable, offset_path_cancellable, projection_range,
+    resolve_guide_prototype,
 };
 use toniator_sampling::{
     SampledSourcePaint, SamplingError, SourceComponent, SourceField, SourceMappingComponent,
@@ -443,6 +446,8 @@ pub enum StructuralProductCapability {
     GuideIntersections,
     AlongGuideSites,
     RandomSites,
+    /// One ordered finite parametric source consumed directly by connected realization.
+    ParametricPaths,
 }
 
 /// A stable record of the typed mechanisms that produced a structural product.
@@ -468,6 +473,18 @@ pub struct FamilyCapability {
     pub random: Option<RandomSiteCapability>,
     /// Document-resolved generic guide capability.  Legacy definition-only plans leave this absent.
     pub generic_guides: Option<GenericGuideCapability>,
+    /// Analytic intent retained until this crate converts it to a canonical finite CurvePath.
+    pub parametric_curve: Option<ParametricCurveCapability>,
+}
+
+/// Resolved finite parametric source intent; it never stores generated geometry or sites.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ParametricCurveCapability {
+    pub source_id: toniator_geometry::StructuralPathSourceId,
+    pub curve: ParametricCurve,
+    pub repetition: GuideRepetition,
+    pub site_interval: Option<f64>,
+    pub site_phase: Option<f64>,
 }
 
 /// Resolved document-owned or procedural guide prototypes retained only for one family evaluation.
@@ -475,6 +492,12 @@ pub struct FamilyCapability {
 pub struct GenericGuideCapability {
     pub dimensions: Vec<GuideDimension>,
     pub resolved_paths: Vec<(Option<AuthoredStructureId>, CurvePath)>,
+    /// Optional neutral source used by adapters that reuse finite-path mechanics without becoming guides.
+    pub structural_source: Option<StructuralPathSourceId>,
+    /// Optional absolute along-path interval retained by the parametric adapter.
+    pub absolute_site_interval: Option<f64>,
+    /// Optional authored radial spacing used as the normal basis for a single parametric path.
+    pub single_nominal_spacing: Option<f64>,
 }
 
 /// Resolved Stage 16B structural chain.  The source-dependent modulation is
@@ -579,9 +602,9 @@ struct TypedFamilyStructure {
     guard_steps: u32,
     antialias_margin: f64,
     generation_domain: Bounds,
-    guide_path_set: Option<GuidePathSet>,
+    structural_path_set: Option<StructuralPathSet>,
     /// Per-guide nominal spacing retained with family output so realization never uses a global axis proxy.
-    guide_nominal_bases: BTreeMap<GuideInstanceId, f64>,
+    guide_nominal_bases: BTreeMap<StructuralPathInstanceId, f64>,
 }
 
 impl TypedFamilyOutput {
@@ -606,13 +629,13 @@ impl TypedFamilyOutput {
     }
 
     /// Returns Stage 20D's truthful reusable finite guide authority when this family produces it.
-    pub fn guide_path_set(&self) -> Option<&GuidePathSet> {
-        self.structure.guide_path_set.as_ref()
+    pub fn structural_path_set(&self) -> Option<&StructuralPathSet> {
+        self.structure.structural_path_set.as_ref()
     }
 
     /// Returns the family-resolved nominal basis for one emitted guide path.
-    pub fn guide_nominal_basis(&self, guide_id: GuideInstanceId) -> Option<f64> {
-        self.structure.guide_nominal_bases.get(&guide_id).copied()
+    pub fn guide_nominal_basis(&self, path_id: StructuralPathInstanceId) -> Option<f64> {
+        self.structure.guide_nominal_bases.get(&path_id).copied()
     }
 
     /// Returns retained straight-guide authority for per-site mark orientation.
@@ -642,15 +665,15 @@ pub struct TypedRealizationProvenance {
     pub structural_input: RealizationStructuralInput,
 }
 
-/// Tagged realization input proving whether an output consumed sites or raw ordered guide paths.
+/// Tagged realization input proving whether an output consumed sites or raw ordered structural paths.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RealizationStructuralInput {
     /// Mark outputs consume only evaluator-published sites.
     Sites(FamilySiteSet),
-    /// Connected path outputs consume ordered raw guides and their family-resolved bases.
-    GuidePaths {
-        guides: GuidePathSet,
-        nominal_bases: BTreeMap<GuideInstanceId, f64>,
+    /// Connected path outputs consume ordered raw structural paths and family-resolved bases.
+    StructuralPaths {
+        paths: StructuralPathSet,
+        nominal_bases: BTreeMap<StructuralPathInstanceId, f64>,
     },
 }
 
@@ -728,6 +751,9 @@ pub fn resolve_pattern_pipeline(
     }
     if matches!(definition.family, PatternFamily::RandomSites { .. }) {
         return resolve_random_site_pipeline(definition);
+    }
+    if matches!(definition.family, PatternFamily::ParametricCurve { .. }) {
+        return resolve_parametric_curve_pipeline(definition);
     }
     let PatternFamily::GuideIntersections {
         guide_mechanism_id,
@@ -902,9 +928,163 @@ pub fn resolve_pattern_pipeline(
             along_phase,
             random: None,
             generic_guides: None,
+            parametric_curve: None,
         },
         modulation: definition.modulation.clone(),
         ordered_outputs,
+    })
+}
+
+/// Resolves the bounded Stage 20K source/site chain without deriving geometry.
+///
+/// # Errors
+///
+/// Returns a stable source ordering or homogeneous-output diagnostic.
+fn resolve_parametric_curve_pipeline(
+    definition: &PatternDefinition,
+) -> Result<PatternPipelinePlan, PatternPipelineError> {
+    let PatternFamily::ParametricCurve {
+        curve_mechanism_id,
+        site_mechanism_id: declared_site_mechanism_id,
+    } = definition.family
+    else {
+        unreachable!("parametric resolver receives only a parametric family");
+    };
+    let (curve, repetition, interval, phase, product, mechanism_ids) =
+        match (definition.mechanisms.as_slice(), declared_site_mechanism_id) {
+            (
+                [
+                    PatternMechanism::ParametricCurveSource {
+                        id,
+                        curve,
+                        repetition,
+                    },
+                ],
+                None,
+            ) if *id == curve_mechanism_id => (
+                curve.clone(),
+                repetition.clone(),
+                None,
+                None,
+                StructuralProductCapability::ParametricPaths,
+                vec![*id],
+            ),
+            (
+                [
+                    PatternMechanism::ParametricCurveSource {
+                        id,
+                        curve,
+                        repetition,
+                    },
+                    PatternMechanism::AlongParametricCurveSites {
+                        id: site_id,
+                        curve_mechanism_id: parent,
+                        interval,
+                        phase,
+                    },
+                ],
+                Some(declared_site),
+            ) if *id == curve_mechanism_id
+                && *site_id == declared_site
+                && *parent == curve_mechanism_id =>
+            {
+                (
+                    curve.clone(),
+                    repetition.clone(),
+                    Some(*interval),
+                    Some(*phase),
+                    StructuralProductCapability::AlongGuideSites,
+                    vec![*id, *site_id],
+                )
+            }
+            _ => {
+                return Err(PatternPipelineError::new(
+                    "pattern.family.capability",
+                    "typed parametric mechanisms cannot produce the declared structural product",
+                ));
+            }
+        };
+    let output = match definition.output_layers.as_slice() {
+        [
+            PatternOutputLayer::ParametricPaths {
+                id,
+                curve_mechanism_id: source,
+                style,
+            },
+        ] if product == StructuralProductCapability::ParametricPaths
+            && *source == curve_mechanism_id =>
+        {
+            OutputCapability {
+                layer_id: *id,
+                consumes: product,
+                payload: OutputCapabilityPayload::GuidePaths {
+                    guide_mechanism_id: *source,
+                    style: *style,
+                },
+            }
+        }
+        [
+            PatternOutputLayer::CircularMarks {
+                id,
+                site_mechanism_id,
+            },
+        ] if Some(*site_mechanism_id) == declared_site_mechanism_id => OutputCapability {
+            layer_id: *id,
+            consumes: product,
+            payload: OutputCapabilityPayload::Marks {
+                prototype: MarkPrototype::Circle,
+                orientation: MarkOrientation::Fixed,
+            },
+        },
+        [
+            PatternOutputLayer::MarkPrototype {
+                id,
+                site_mechanism_id,
+                prototype,
+                orientation: MarkOrientation::Fixed,
+            },
+        ] if Some(*site_mechanism_id) == declared_site_mechanism_id => OutputCapability {
+            layer_id: *id,
+            consumes: product,
+            payload: OutputCapabilityPayload::Marks {
+                prototype: prototype.clone(),
+                orientation: MarkOrientation::Fixed,
+            },
+        },
+        _ => {
+            return Err(PatternPipelineError::new(
+                "pattern.output_layers.capability",
+                "parametric output cannot consume the declared structural product",
+            ));
+        }
+    };
+    Ok(PatternPipelinePlan {
+        family: FamilyCapability {
+            product,
+            provenance: StructuralProductProvenance {
+                definition_id: definition.id.0,
+                family_capability: product,
+                mechanism_ids,
+            },
+            dimensions: Vec::new(),
+            site_selection: Vec::new(),
+            merge_epsilon: None,
+            along_interval_multiplier: None,
+            along_phase: phase,
+            random: None,
+            generic_guides: None,
+            parametric_curve: Some(ParametricCurveCapability {
+                source_id: toniator_geometry::StructuralPathSourceId::ParametricCurve(
+                    curve_mechanism_id,
+                ),
+                curve,
+                repetition,
+                site_interval: interval,
+                site_phase: phase,
+            }),
+        },
+        modulation: definition.modulation.clone(),
+        ordered_outputs: vec![output],
     })
 }
 
@@ -974,6 +1154,9 @@ pub fn resolve_document_pattern_pipeline(
     plan.family.generic_guides = Some(GenericGuideCapability {
         dimensions: generic_dimensions,
         resolved_paths,
+        structural_source: None,
+        absolute_site_interval: None,
+        single_nominal_spacing: None,
     });
     Ok(plan)
 }
@@ -1085,6 +1268,7 @@ fn resolve_random_site_pipeline(
                 maximum_neighbor_checks: *maximum_neighbor_checks,
             }),
             generic_guides: None,
+            parametric_curve: None,
         },
         modulation: definition.modulation.clone(),
         ordered_outputs: vec![OutputCapability {
@@ -1157,6 +1341,9 @@ pub fn evaluate_typed_family_product_with_source_cancellable(
     source: Option<&SourceField>,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<TypedFamilyOutput, PatternPipelineError> {
+    if family.parametric_curve.is_some() {
+        return evaluate_parametric_curve_cancellable(family, request, is_cancelled);
+    }
     if family.generic_guides.is_some() {
         return evaluate_generic_curve_guides_cancellable(family, request, is_cancelled);
     }
@@ -1180,7 +1367,7 @@ pub fn evaluate_typed_family_product_with_source_cancellable(
                 guard_steps: request.guard_steps,
                 antialias_margin: ANTIALIAS_MARGIN,
                 generation_domain: output.generation_domain,
-                guide_path_set: None,
+                structural_path_set: None,
                 guide_nominal_bases: BTreeMap::new(),
             },
         });
@@ -1237,8 +1424,12 @@ pub fn evaluate_typed_family_product_with_source_cancellable(
         let guide_paths = output
             .guides
             .iter()
-            .map(|guide| GuidePathInstance {
-                id: guide.id,
+            .map(|guide| StructuralPathInstance {
+                id: StructuralPathInstanceId::guide_dimension(
+                    GuideDimensionId(guide.id.dimension_id),
+                    guide.id.index,
+                    guide.id.component_ordinal,
+                ),
                 source_structure_id: None,
                 path: CurvePath::line(guide.start, guide.end)
                     .expect("validated generalized guide endpoints build a path"),
@@ -1252,11 +1443,20 @@ pub fn evaluate_typed_family_product_with_source_cancellable(
                     .coverage
                     .iter()
                     .find(|coverage| coverage.dimension_id == guide.id.dimension_id)
-                    .map(|coverage| (guide.id, coverage.spacing))
+                    .map(|coverage| {
+                        (
+                            StructuralPathInstanceId::guide_dimension(
+                                GuideDimensionId(guide.id.dimension_id),
+                                guide.id.index,
+                                guide.id.component_ordinal,
+                            ),
+                            coverage.spacing,
+                        )
+                    })
             })
             .collect::<BTreeMap<_, _>>();
-        let guide_path_set = (!guide_paths.is_empty()).then(|| {
-            GuidePathSet::new(
+        let structural_path_set = (!guide_paths.is_empty()).then(|| {
+            StructuralPathSet::new(
                 output.family_fingerprint.clone(),
                 family.provenance.mechanism_ids[0],
                 guide_paths,
@@ -1274,7 +1474,7 @@ pub fn evaluate_typed_family_product_with_source_cancellable(
                 guard_steps: request.guard_steps,
                 antialias_margin: ANTIALIAS_MARGIN,
                 generation_domain,
-                guide_path_set,
+                structural_path_set,
                 guide_nominal_bases,
             },
         });
@@ -1288,6 +1488,89 @@ pub fn evaluate_typed_family_product_with_source_cancellable(
         diagnostics: None,
         structure: TypedFamilyStructure::from_grid(&output, family.provenance.mechanism_ids[0]),
     })
+}
+
+/// Converts one validated analytic parametric source then reuses the accepted finite-path evaluator.
+///
+/// # Errors
+///
+/// Returns construction, cancellation, coverage, offset, or site-product errors without partial output.
+fn evaluate_parametric_curve_cancellable(
+    family: &FamilyCapability,
+    request: &GridInspectRequest,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<TypedFamilyOutput, PatternPipelineError> {
+    let parametric = family
+        .parametric_curve
+        .as_ref()
+        .expect("parametric branch is present");
+    let local_path = toniator_geometry::construct_parametric_curve_path_cancellable(
+        &parametric.curve,
+        Point2::new(0.0, 0.0),
+        is_cancelled,
+    )?;
+    let origin_at_canvas_center = AffineTransform2D::rotate_about_then_translate(
+        Point2::new(0.0, 0.0),
+        0.0,
+        Vector2::new(request.canvas.width / 2.0, request.canvas.height / 2.0),
+    )
+    .ok_or(PatternPipelineError::new(
+        "pattern.parametric.origin",
+        "canvas center placement must remain finite",
+    ))?;
+    let path = local_path.transformed(origin_at_canvas_center)?;
+    let dimension_id = GuideDimensionId(family.provenance.mechanism_ids[0].0);
+    let dimension = GuideDimension {
+        id: dimension_id,
+        baseline_angle_degrees: 0.0,
+        phase: 0.0,
+        prototype: GuidePrototype::CircularArc {
+            center: toniator_domain::AuthoredPoint2 { x: 0.0, y: 0.0 },
+            radius: 1.0,
+            start_angle_degrees: 0.0,
+            sweep_angle_degrees: 90.0,
+        },
+        repetition: parametric.repetition.clone(),
+    };
+    let mut reusable = family.clone();
+    reusable.generic_guides = Some(GenericGuideCapability {
+        dimensions: vec![dimension],
+        resolved_paths: vec![(None, path)],
+        structural_source: Some(parametric.source_id),
+        absolute_site_interval: parametric.site_interval,
+        single_nominal_spacing: match &parametric.curve {
+            ParametricCurve::Spiral(spiral) => Some(spiral.radial_spacing),
+        },
+    });
+    reusable.parametric_curve = None;
+    reusable.site_selection = if reusable.product == StructuralProductCapability::AlongGuideSites {
+        vec![dimension_id]
+    } else {
+        Vec::new()
+    };
+    let mut output = evaluate_generic_curve_guides_cancellable(&reusable, request, is_cancelled)?;
+    output.family = family.clone();
+    Ok(output)
+}
+
+/// Borrows already accepted offsets between the source and one same-side candidate as barriers.
+fn nearer_same_side_offset_barriers(
+    paths_by_index: &BTreeMap<i64, Vec<toniator_geometry::OffsetPathComponent>>,
+    candidate_index: i64,
+) -> Vec<&CurvePath> {
+    paths_by_index
+        .iter()
+        .filter(|(index, _)| {
+            if candidate_index > 0 {
+                **index >= 0 && **index < candidate_index
+            } else if candidate_index < 0 {
+                **index <= 0 && **index > candidate_index
+            } else {
+                false
+            }
+        })
+        .flat_map(|(_, components)| components.iter().map(|component| &component.path))
+        .collect()
 }
 
 /// Proves that surviving outer offset components span authored endpoints and the requested normal side.
@@ -1307,23 +1590,19 @@ fn normal_offset_components_bracket_domain(
     let authored_start = PathLocation::new(0, 0.0)?;
     let authored_end = PathLocation::new(source.segments().len() - 1, 1.0)?;
     let tolerance = PathOffsetLimits::default().tolerance;
-    let mut ordered = paths.iter().collect::<Vec<_>>();
-    ordered.sort_by(|left, right| {
-        left.source_start
-            .segment_index()
-            .cmp(&right.source_start.segment_index())
-            .then_with(|| {
-                left.source_start
-                    .parameter()
-                    .total_cmp(&right.source_start.parameter())
-            })
-    });
-    if ordered.first().map(|component| component.source_start) != Some(authored_start)
-        || ordered.last().map(|component| component.source_end) != Some(authored_end)
-        || ordered.windows(2).any(|pair| {
-            let first_end = pair[0].path.end();
-            let second_start = pair[1].path.start();
-            (first_end.x - second_start.x).hypot(first_end.y - second_start.y) > tolerance
+    if paths.first().map(|component| component.source_start) != Some(authored_start)
+        || paths.last().map(|component| component.source_end) != Some(authored_end)
+        || paths.iter().any(|component| {
+            source_location_order(component.source_start, component.source_end)
+                != std::cmp::Ordering::Less
+                && component.source_start != component.source_end
+        })
+        || paths.windows(2).any(|pair| {
+            pair[0].component_ordinal >= pair[1].component_ordinal
+                || source_location_order(pair[0].source_start, pair[1].source_start)
+                    != std::cmp::Ordering::Less
+                || source_location_order(pair[0].source_end, pair[1].source_start)
+                    == std::cmp::Ordering::Greater
         })
     {
         return Ok(false);
@@ -1361,6 +1640,13 @@ fn normal_offset_components_bracket_domain(
         }
     }
     Ok(true)
+}
+
+/// Orders exact authored path locations without projecting them into a lossy global parameter.
+fn source_location_order(left: PathLocation, right: PathLocation) -> std::cmp::Ordering {
+    left.segment_index()
+        .cmp(&right.segment_index())
+        .then_with(|| left.parameter().total_cmp(&right.parameter()))
 }
 
 /// Evaluates resolved Stage 20D finite guide paths before any current-circle compatibility realization.
@@ -1447,7 +1733,7 @@ fn evaluate_generic_curve_guides_cancellable(
             ))?;
     let mut guides = Vec::new();
     let mut guide_nominal_bases = BTreeMap::new();
-    let mut grouped = Vec::<Vec<GuidePathInstance>>::new();
+    let mut grouped = Vec::<Vec<StructuralPathInstance>>::new();
     for (dimension, (source_structure_id, prototype)) in
         generic.dimensions.iter().zip(&generic.resolved_paths)
     {
@@ -1624,7 +1910,9 @@ fn evaluate_generic_curve_guides_cancellable(
                 )
             }
         };
-        let evaluate_index = |index: i64| -> Result<
+        let evaluate_index = |index: i64,
+                              crossing_barriers: &[&CurvePath]|
+         -> Result<
             Vec<toniator_geometry::OffsetPathComponent>,
             PatternPipelineError,
         > {
@@ -1647,6 +1935,7 @@ fn evaluate_generic_curve_guides_cancellable(
                                 bounds: local_domain,
                             },
                             cleanup,
+                            crossing_barriers,
                             limits: PathOffsetLimits::default(),
                         },
                         is_cancelled,
@@ -1677,9 +1966,22 @@ fn evaluate_generic_curve_guides_cancellable(
         };
         let mut attempts = 0_usize;
         let mut paths_by_index = BTreeMap::new();
-        for index in indices {
+        let mut evaluation_indices = indices;
+        if normal_offset_coverage.is_some() {
+            evaluation_indices.sort_by(|left, right| {
+                left.unsigned_abs()
+                    .cmp(&right.unsigned_abs())
+                    .then_with(|| left.cmp(right))
+            });
+        }
+        for index in evaluation_indices {
             attempts += 1;
-            let paths = evaluate_index(index)?;
+            let barriers = if normal_offset_coverage.is_some() {
+                nearer_same_side_offset_barriers(&paths_by_index, index)
+            } else {
+                Vec::new()
+            };
+            let paths = evaluate_index(index, &barriers)?;
             paths_by_index.insert(index, paths);
         }
         if let Some(coverage) = normal_offset_coverage {
@@ -1693,12 +1995,16 @@ fn evaluate_generic_curve_guides_cancellable(
                 && coverage.last_required > 0
             {
                 let mut probe = coverage.last_required;
-                while !normal_offset_components_bracket_domain(
-                    paths_by_index.get(&probe).map_or(&[], Vec::as_slice),
-                    &base,
-                    local_domain,
-                    1.0,
-                )? {
+                while paths_by_index
+                    .get(&probe)
+                    .is_some_and(|paths| !paths.is_empty())
+                    && !normal_offset_components_bracket_domain(
+                        paths_by_index.get(&probe).map_or(&[], Vec::as_slice),
+                        &base,
+                        local_domain,
+                        1.0,
+                    )?
+                {
                     if attempts >= request.max_family_candidates {
                         return Err(PatternPipelineError::new(
                             "coverage.curved_guides.normal_offset",
@@ -1710,19 +2016,25 @@ fn evaluate_generic_curve_guides_cancellable(
                         "normal-offset coverage arithmetic overflowed",
                     ))?;
                     attempts += 1;
-                    paths_by_index.insert(probe, evaluate_index(probe)?);
+                    let barriers = nearer_same_side_offset_barriers(&paths_by_index, probe);
+                    let paths = evaluate_index(probe, &barriers)?;
+                    paths_by_index.insert(probe, paths);
                 }
             }
             if matches!(coverage.sides, OffsetSides::Right | OffsetSides::Both)
                 && coverage.first_required < 0
             {
                 let mut probe = coverage.first_required;
-                while !normal_offset_components_bracket_domain(
-                    paths_by_index.get(&probe).map_or(&[], Vec::as_slice),
-                    &base,
-                    local_domain,
-                    -1.0,
-                )? {
+                while paths_by_index
+                    .get(&probe)
+                    .is_some_and(|paths| !paths.is_empty())
+                    && !normal_offset_components_bracket_domain(
+                        paths_by_index.get(&probe).map_or(&[], Vec::as_slice),
+                        &base,
+                        local_domain,
+                        -1.0,
+                    )?
+                {
                     if attempts >= request.max_family_candidates {
                         return Err(PatternPipelineError::new(
                             "coverage.curved_guides.normal_offset",
@@ -1734,7 +2046,9 @@ fn evaluate_generic_curve_guides_cancellable(
                         "normal-offset coverage arithmetic overflowed",
                     ))?;
                     attempts += 1;
-                    paths_by_index.insert(probe, evaluate_index(probe)?);
+                    let barriers = nearer_same_side_offset_barriers(&paths_by_index, probe);
+                    let paths = evaluate_index(probe, &barriers)?;
+                    paths_by_index.insert(probe, paths);
                 }
             }
         }
@@ -1743,16 +2057,25 @@ fn evaluate_generic_curve_guides_cancellable(
             let basis = if spacing > 0.0 {
                 spacing
             } else {
-                (request.canvas.width / request.density.across_x)
-                    .max(request.canvas.height / request.density.across_y)
+                generic.single_nominal_spacing.unwrap_or(
+                    (request.canvas.width / request.density.across_x)
+                        .max(request.canvas.height / request.density.across_y),
+                )
             };
             for component in paths {
-                let instance = GuidePathInstance {
-                    id: GuideInstanceId::with_component(
-                        dimension.id,
-                        index,
-                        component.component_ordinal,
-                    ),
+                let instance = StructuralPathInstance {
+                    id: match generic.structural_source {
+                        Some(source) => StructuralPathInstanceId {
+                            source,
+                            repetition_index: index,
+                            component_ordinal: component.component_ordinal,
+                        },
+                        None => StructuralPathInstanceId::guide_dimension(
+                            dimension.id,
+                            index,
+                            component.component_ordinal,
+                        ),
+                    },
                     source_structure_id: *source_structure_id,
                     path: component.path.transformed(channel_transform)?,
                 };
@@ -1770,7 +2093,7 @@ fn evaluate_generic_curve_guides_cancellable(
         grouped.push(this_dimension);
     }
     let fingerprint = generic_curve_fingerprint(family, request, generic);
-    let guide_set = GuidePathSet::new(
+    let path_set = StructuralPathSet::new(
         fingerprint.clone(),
         family.provenance.mechanism_ids[0],
         guides,
@@ -1817,6 +2140,7 @@ fn evaluate_generic_curve_guides_cancellable(
                 &grouped,
                 &selected,
                 multiplier,
+                generic.absolute_site_interval,
                 &request.canvas,
                 &request.density,
                 request.max_family_candidates,
@@ -1827,6 +2151,8 @@ fn evaluate_generic_curve_guides_cancellable(
                 &selected,
                 multiplier,
                 family.along_phase.unwrap_or(0.0),
+                generic.absolute_site_interval,
+                &guide_nominal_bases,
                 &request.canvas,
                 &request.density,
                 canvas,
@@ -1836,11 +2162,16 @@ fn evaluate_generic_curve_guides_cancellable(
                 is_cancelled,
             )?
         }
+        StructuralProductCapability::ParametricPaths => Vec::new(),
         StructuralProductCapability::RandomSites => unreachable!(),
     };
     let site_set = FamilySiteSet::new(
         family_site_fingerprint(&fingerprint, &sites),
-        family.provenance.mechanism_ids[1],
+        *family
+            .provenance
+            .mechanism_ids
+            .last()
+            .expect("parametric provenance has a source"),
         sites,
     )
     .map_err(family_site_error)?;
@@ -1855,7 +2186,7 @@ fn evaluate_generic_curve_guides_cancellable(
             guard_steps: request.guard_steps,
             antialias_margin: ANTIALIAS_MARGIN,
             generation_domain: document_domain,
-            guide_path_set: Some(guide_set),
+            structural_path_set: Some(path_set),
             guide_nominal_bases,
         },
     })
@@ -1867,17 +2198,20 @@ fn evaluate_generic_curve_guides_cancellable(
 ///
 /// Returns the Stage 20D cancellation, numeric, or along-guide-limit diagnostic when a
 /// selected finite guide cannot be measured within the declared family work limit.
+#[allow(clippy::too_many_arguments)] // Keeps the evaluator's explicit authority inputs visible.
 fn preflight_curve_along_work(
-    grouped: &[Vec<GuidePathInstance>],
+    grouped: &[Vec<StructuralPathInstance>],
     selected: &[usize],
     multiplier: f64,
+    absolute_interval: Option<f64>,
     canvas: &CanvasSpec,
     density: &DensityMetric2D,
     limit: usize,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<(), PatternPipelineError> {
-    let minimum_interval =
-        (canvas.width / density.across_x).min(canvas.height / density.across_y) * multiplier;
+    let minimum_interval = absolute_interval.unwrap_or(
+        (canvas.width / density.across_x).min(canvas.height / density.across_y) * multiplier,
+    );
     if !minimum_interval.is_finite() || minimum_interval <= 0.0 {
         return Err(PatternPipelineError::new(
             "coverage.curved_guides.proof",
@@ -1916,7 +2250,7 @@ fn preflight_curve_along_work(
 
 /// Bounds selected guide pairs, segment products, and merge candidates before curve allocation.
 fn preflight_curve_intersection_work(
-    grouped: &[Vec<GuidePathInstance>],
+    grouped: &[Vec<StructuralPathInstance>],
     selected: &[usize],
     limit: usize,
 ) -> Result<(), PatternPipelineError> {
@@ -1987,7 +2321,7 @@ fn preflight_curve_intersection_work(
 /// Builds bounded curve-intersection sites in selected-dimension and guide-instance order.
 #[allow(clippy::too_many_arguments)] // Explicit evaluator inputs preserve the bounded headless authority.
 fn curve_intersection_sites(
-    grouped: &[Vec<GuidePathInstance>],
+    grouped: &[Vec<StructuralPathInstance>],
     selected: &[usize],
     epsilon: f64,
     canvas: Bounds,
@@ -1998,7 +2332,11 @@ fn curve_intersection_sites(
     limit: usize,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<FamilySite>, PatternPipelineError> {
-    let mut raw = Vec::<(Point2, Vec<GuidePathLocationProvenance>, NominalCellBasis)>::new();
+    let mut raw = Vec::<(
+        Point2,
+        Vec<StructuralPathLocationProvenance>,
+        NominalCellBasis,
+    )>::new();
     for (offset, &left) in selected.iter().enumerate() {
         for &right in &selected[offset + 1..] {
             for first in &grouped[left] {
@@ -2057,13 +2395,13 @@ fn curve_intersection_sites(
                         raw.push((
                             point,
                             vec![
-                                GuidePathLocationProvenance {
-                                    guide_id: first.id,
+                                StructuralPathLocationProvenance {
+                                    path: first.id,
                                     segment_index: contact.first_location().segment_index(),
                                     parameter_bits: contact.first_location().parameter().to_bits(),
                                 },
-                                GuidePathLocationProvenance {
-                                    guide_id: second.id,
+                                StructuralPathLocationProvenance {
+                                    path: second.id,
                                     segment_index: contact.second_location().segment_index(),
                                     parameter_bits: contact.second_location().parameter().to_bits(),
                                 },
@@ -2126,10 +2464,12 @@ fn curve_intersection_sites(
 /// Samples selected finite curve paths by bounded arc length and exact tangent-derived directional spacing.
 #[allow(clippy::too_many_arguments)] // Explicit evaluator inputs preserve the bounded headless authority.
 fn curve_along_sites(
-    grouped: &[Vec<GuidePathInstance>],
+    grouped: &[Vec<StructuralPathInstance>],
     selected: &[usize],
     multiplier: f64,
     phase: f64,
+    absolute_interval: Option<f64>,
+    nominal_bases: &BTreeMap<StructuralPathInstanceId, f64>,
     canvas_spec: &CanvasSpec,
     density: &DensityMetric2D,
     canvas: Bounds,
@@ -2141,6 +2481,11 @@ fn curve_along_sites(
     let mut output = Vec::new();
     let mut guide_order = 0;
     for &dimension in selected {
+        let mut active_repetition: Option<(StructuralPathSourceId, i64)> = None;
+        let mut component_origin = 0.0_f64;
+        let mut next_position = 0.0_f64;
+        let mut sequence = 0_i64;
+        let mut previous_end: Option<Point2> = None;
         for guide in &grouped[dimension] {
             if cancelled() {
                 return Err(PatternPipelineError::new(
@@ -2157,25 +2502,41 @@ fn curve_along_sites(
                     "curved along-guide sampling requires a nonstationary tangent",
                 )
             })?;
-            let start_interval =
+            let start_interval = absolute_interval.unwrap_or(
                 directional_spacing(canvas_spec, density, start_tangent.perpendicular())?
-                    * multiplier;
+                    * multiplier,
+            );
             if !start_interval.is_finite() || start_interval <= 0.0 {
                 return Err(PatternPipelineError::new(
                     "coverage.curved_guides.proof",
                     "curved-guide coverage could not prove a complete generation envelope",
                 ));
             }
-            let mut position = phase.rem_euclid(1.0) * start_interval;
-            let mut sequence = 0_i64;
-            while position <= total {
+            let repetition = (guide.id.source, guide.id.repetition_index);
+            if active_repetition != Some(repetition) {
+                active_repetition = Some(repetition);
+                component_origin = 0.0;
+                next_position = phase.rem_euclid(1.0) * start_interval;
+                sequence = 0;
+                previous_end = None;
+            }
+            let shared_join = previous_end.is_some_and(|previous| {
+                (previous.x - guide.path.start().x).hypot(previous.y - guide.path.start().y)
+                    <= 1.0e-9
+            });
+            if shared_join && (next_position - component_origin).abs() <= 1.0e-9 {
+                next_position += start_interval;
+                sequence += 1;
+            }
+            while next_position - component_origin <= total {
                 if cancelled() {
                     return Err(PatternPipelineError::new(
                         "evaluation.cancelled",
                         "evaluation was cancelled",
                     ));
                 }
-                let location = measure.location_at_length(position)?;
+                let local_position = (next_position - component_origin).max(0.0);
+                let location = measure.location_at_length(local_position)?;
                 let tangent = guide.path.unit_tangent_at(location).map_err(|_| {
                     PatternPipelineError::new(
                         "pattern.family.curved_guides.tangent",
@@ -2183,7 +2544,8 @@ fn curve_along_sites(
                     )
                 })?;
                 let normal = tangent.perpendicular();
-                let spacing = directional_spacing(canvas_spec, density, normal)? * multiplier;
+                let spacing = absolute_interval
+                    .unwrap_or(directional_spacing(canvas_spec, density, normal)? * multiplier);
                 if !spacing.is_finite() || spacing <= 0.0 {
                     return Err(PatternPipelineError::new(
                         "coverage.curved_guides.proof",
@@ -2194,7 +2556,7 @@ fn curve_along_sites(
                 let scope = match site_scope(point, canvas, generation_domain) {
                     Some(scope) => scope,
                     None => {
-                        position += spacing;
+                        next_position += spacing;
                         sequence += 1;
                         continue;
                     }
@@ -2207,20 +2569,42 @@ fn curve_along_sites(
                     position: point,
                     nominal_cell_basis: NominalCellBasis::new(
                         tangent.scale(spacing),
-                        normal.scale(directional_spacing(canvas_spec, density, normal)?),
+                        normal.scale(
+                            nominal_bases
+                                .get(&guide.id)
+                                .copied()
+                                .unwrap_or(directional_spacing(canvas_spec, density, normal)?),
+                        ),
                     )
                     .map_err(family_site_error)?,
                     scope,
-                    provenance: FamilySiteProvenance::CurveAlongGuide {
-                        location: GuidePathLocationProvenance {
-                            guide_id: guide.id,
-                            segment_index: location.segment_index(),
-                            parameter_bits: location.parameter().to_bits(),
-                        },
-                        guide_order,
-                        sequence,
-                        absolute_arc_position_bits: position.to_bits(),
-                        local_arc_position_bits: position.to_bits(),
+                    provenance: match guide.id.source {
+                        StructuralPathSourceId::ParametricCurve(_) => {
+                            FamilySiteProvenance::AlongParametricCurve {
+                                location: StructuralPathLocationProvenance {
+                                    path: guide.id,
+                                    segment_index: location.segment_index(),
+                                    parameter_bits: location.parameter().to_bits(),
+                                },
+                                path_order: guide_order,
+                                sequence,
+                                absolute_arc_position_bits: next_position.to_bits(),
+                                local_arc_position_bits: local_position.to_bits(),
+                            }
+                        }
+                        StructuralPathSourceId::GuideDimension(_) => {
+                            FamilySiteProvenance::CurveAlongGuide {
+                                location: StructuralPathLocationProvenance {
+                                    path: guide.id,
+                                    segment_index: location.segment_index(),
+                                    parameter_bits: location.parameter().to_bits(),
+                                },
+                                guide_order,
+                                sequence,
+                                absolute_arc_position_bits: next_position.to_bits(),
+                                local_arc_position_bits: local_position.to_bits(),
+                            }
+                        }
                     },
                 });
                 if output.len() > limit {
@@ -2229,13 +2613,115 @@ fn curve_along_sites(
                         "curved along-guide site count exceeds the configured family limit",
                     ));
                 }
-                position += spacing;
+                next_position += spacing;
                 sequence += 1;
             }
-            guide_order += 1;
+            let endpoint = guide.path.end();
+            previous_end = Some(endpoint);
+            component_origin += total;
+            if grouped[dimension]
+                .iter()
+                .position(|candidate| candidate.id == guide.id)
+                .is_some_and(|index| {
+                    grouped[dimension]
+                        .get(index + 1)
+                        .is_none_or(|next| (next.id.source, next.id.repetition_index) != repetition)
+                })
+            {
+                guide_order += 1;
+            }
         }
     }
     Ok(output)
+}
+
+#[cfg(test)]
+mod parametric_component_sampling_tests {
+    use super::*;
+
+    /// Proves one normal-offset cleanup repetition carries absolute interval, phase, and sequence
+    /// across adjacent parametric components while suppressing their shared join exactly once.
+    #[test]
+    fn parametric_cleanup_components_continue_one_absolute_sampling_sequence() {
+        let source = StructuralPathSourceId::ParametricCurve(PatternMechanismId(701));
+        let first_id = StructuralPathInstanceId {
+            source,
+            repetition_index: 0,
+            component_ordinal: 0,
+        };
+        let second_id = StructuralPathInstanceId {
+            source,
+            repetition_index: 0,
+            component_ordinal: 1,
+        };
+        let path = |start, end| {
+            CurvePath::line(Point2::new(start, 0.0), Point2::new(end, 0.0))
+                .expect("finite cleanup component")
+        };
+        let grouped = vec![vec![
+            StructuralPathInstance {
+                id: first_id,
+                source_structure_id: None,
+                path: path(0.0, 10.0),
+            },
+            StructuralPathInstance {
+                id: second_id,
+                source_structure_id: None,
+                path: path(10.0, 20.0),
+            },
+        ]];
+        let bases = BTreeMap::from([(first_id, 4.0), (second_id, 4.0)]);
+        let sites = curve_along_sites(
+            &grouped,
+            &[0],
+            1.0,
+            0.0,
+            Some(6.0),
+            &bases,
+            &CanvasSpec {
+                width: 40.0,
+                height: 20.0,
+            },
+            &DensityMetric2D {
+                across_x: 4.0,
+                across_y: 2.0,
+                aspect_locked: false,
+            },
+            Bounds::new(Point2::new(0.0, 0.0), Point2::new(40.0, 20.0)).expect("finite canvas"),
+            Bounds::new(Point2::new(0.0, 0.0), Point2::new(40.0, 20.0)).expect("finite domain"),
+            PatternMechanismId(702),
+            32,
+            &|| false,
+        )
+        .expect("component sampler succeeds");
+        let samples = sites
+            .iter()
+            .map(|site| match &site.provenance {
+                FamilySiteProvenance::AlongParametricCurve {
+                    location,
+                    sequence,
+                    absolute_arc_position_bits,
+                    local_arc_position_bits,
+                    ..
+                } => (
+                    location.path.component_ordinal,
+                    *sequence,
+                    f64::from_bits(*absolute_arc_position_bits),
+                    f64::from_bits(*local_arc_position_bits),
+                ),
+                _ => panic!("parametric sampler retains parametric provenance"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            samples,
+            vec![
+                (0, 0, 0.0, 0.0),
+                (0, 1, 6.0, 6.0),
+                (1, 2, 12.0, 2.0),
+                (1, 3, 18.0, 8.0)
+            ]
+        );
+    }
 }
 
 /// Classifies a completed document-space site without manufacturing guard output outside coverage.
@@ -2328,6 +2814,33 @@ pub fn maximum_nominal_cell_diameter(
     canvas: &CanvasSpec,
     density: &DensityMetric2D,
 ) -> Result<f64, PatternPipelineError> {
+    if let Some(parametric) = &family.parametric_curve {
+        let radial_spacing = match &parametric.curve {
+            ParametricCurve::Spiral(spiral) => spiral.radial_spacing,
+        };
+        let repetition_basis = match parametric.repetition {
+            GuideRepetition::Single => radial_spacing,
+            GuideRepetition::TransformStack {
+                direction_degrees,
+                spacing_multiplier,
+            } => {
+                let angle = direction_degrees.to_radians();
+                directional_spacing(canvas, density, Vector2::new(angle.cos(), angle.sin()))?
+                    * spacing_multiplier
+            }
+            GuideRepetition::NormalOffset { spacing, .. } => spacing,
+        };
+        let bound = parametric
+            .site_interval
+            .unwrap_or(repetition_basis)
+            .max(repetition_basis);
+        return (bound.is_finite() && bound > 0.0).then_some(bound).ok_or(
+            PatternPipelineError::new(
+                "pattern.family.nominal_cell_basis",
+                "parametric sources require a finite positive radial or site spacing",
+            ),
+        );
+    }
     let spacing_x = canvas.width / density.across_x;
     let spacing_y = canvas.height / density.across_y;
     if !spacing_x.is_finite() || !spacing_y.is_finite() || spacing_x <= 0.0 || spacing_y <= 0.0 {
@@ -2389,6 +2902,9 @@ pub fn maximum_nominal_cell_diameter(
                 resolved_spacing * (along_multiplier + 1.0)
             }
         }
+        StructuralProductCapability::ParametricPaths => {
+            generic_spacing_bound()?.max(maximum_directional_spacing)
+        }
     };
     (maximum.is_finite() && maximum > 0.0)
         .then_some(maximum)
@@ -2410,6 +2926,29 @@ pub fn maximum_emitted_guide_spacing(
     canvas: &CanvasSpec,
     density: &DensityMetric2D,
 ) -> Result<f64, PatternPipelineError> {
+    if let Some(parametric) = &family.parametric_curve {
+        let spacing = match (&parametric.curve, &parametric.repetition) {
+            (ParametricCurve::Spiral(_), GuideRepetition::NormalOffset { spacing, .. }) => *spacing,
+            (
+                ParametricCurve::Spiral(_),
+                GuideRepetition::TransformStack {
+                    direction_degrees,
+                    spacing_multiplier,
+                },
+            ) => {
+                let angle = direction_degrees.to_radians();
+                directional_spacing(canvas, density, Vector2::new(angle.cos(), angle.sin()))?
+                    * spacing_multiplier
+            }
+            (ParametricCurve::Spiral(spiral), GuideRepetition::Single) => spiral.radial_spacing,
+        };
+        return (spacing.is_finite() && spacing > 0.0)
+            .then_some(spacing)
+            .ok_or(PatternPipelineError::new(
+                "pattern.family.guide_spacing",
+                "parametric sources require finite positive transverse spacing",
+            ));
+    }
     let dimensions = family
         .generic_guides
         .as_ref()
@@ -2488,6 +3027,7 @@ fn generic_curve_fingerprint(
         StructuralProductCapability::GuideIntersections => 1,
         StructuralProductCapability::AlongGuideSites => 2,
         StructuralProductCapability::RandomSites => 3,
+        StructuralProductCapability::ParametricPaths => 4,
     });
     for id in &family.site_selection {
         bytes.extend(id.0.to_le_bytes());
@@ -2553,6 +3093,22 @@ fn generic_curve_fingerprint(
                 bytes.push(match cleanup {
                     OffsetCleanup::DissolveCrossings => 1,
                 });
+                let limits = PathOffsetLimits::default();
+                bytes.extend(PATH_OFFSET_ALGORITHM_CONTRACT_ID.as_bytes());
+                bytes.push(limits.maximum_subdivision_depth);
+                for limit in [
+                    limits.maximum_segments,
+                    limits.maximum_components,
+                    limits.maximum_cleanup_pairs,
+                    limits.maximum_cusp_isolation_work,
+                ] {
+                    bytes.extend(
+                        u64::try_from(limit)
+                            .expect("path-offset fixed limit fits u64")
+                            .to_le_bytes(),
+                    );
+                }
+                bytes.extend(limits.tolerance.to_bits().to_le_bytes());
             }
         }
     }
@@ -2750,15 +3306,19 @@ impl TypedFamilyStructure {
         let paths = output
             .guides
             .iter()
-            .map(|guide| GuidePathInstance {
-                id: guide.id,
+            .map(|guide| StructuralPathInstance {
+                id: StructuralPathInstanceId::guide_dimension(
+                    GuideDimensionId(guide.id.dimension_id),
+                    guide.id.index,
+                    guide.id.component_ordinal,
+                ),
                 source_structure_id: None,
                 path: CurvePath::line(guide.start, guide.end)
                     .expect("validated straight guide endpoints build a path"),
             })
             .collect::<Vec<_>>();
-        let guide_path_set = (!paths.is_empty()).then(|| {
-            GuidePathSet::new(output.family_fingerprint.clone(), guide_mechanism_id, paths)
+        let structural_path_set = (!paths.is_empty()).then(|| {
+            StructuralPathSet::new(output.family_fingerprint.clone(), guide_mechanism_id, paths)
                 .expect("validated ordered straight guides build a path set")
         });
         let guide_nominal_bases = output
@@ -2769,7 +3329,16 @@ impl TypedFamilyStructure {
                     .coverage
                     .iter()
                     .find(|coverage| coverage.dimension_id == guide.id.dimension_id)
-                    .map(|coverage| (guide.id, coverage.spacing))
+                    .map(|coverage| {
+                        (
+                            StructuralPathInstanceId::guide_dimension(
+                                GuideDimensionId(guide.id.dimension_id),
+                                guide.id.index,
+                                guide.id.component_ordinal,
+                            ),
+                            coverage.spacing,
+                        )
+                    })
             })
             .collect();
         Self {
@@ -2779,7 +3348,7 @@ impl TypedFamilyStructure {
             guard_steps: output.guard_steps,
             antialias_margin: output.antialias_margin,
             generation_domain: output.generation_domain,
-            guide_path_set,
+            structural_path_set,
             guide_nominal_bases,
         }
     }
@@ -3395,7 +3964,7 @@ pub fn realize_typed_mapped_outputs(
     response: MarkResponse,
 ) -> Result<TypedRealization<MappedCircularMarkRealization>, PatternPipelineError> {
     let provenance = realization_provenance(family, plan)?;
-    let compatibility = adapt_family_sites_for_current_circular_marks(family);
+    let compatibility = legacy_grid_sites_for_circular_marks(family)?;
     realize_mapped_circular_marks(&compatibility, source, canvas, mapping, response)
         .map(|mut output| {
             output.realization_fingerprint =
@@ -3415,7 +3984,7 @@ pub fn realize_typed_source_color_outputs(
     response: MarkResponse,
 ) -> Result<TypedRealization<SourceColorCircularMarkRealization>, PatternPipelineError> {
     let provenance = realization_provenance(family, plan)?;
-    let compatibility = adapt_family_sites_for_current_circular_marks(family);
+    let compatibility = legacy_grid_sites_for_circular_marks(family)?;
     realize_source_color_circular_marks(&compatibility, source, canvas, mapping, response)
         .map(|mut output| {
             output.realization_fingerprint =
@@ -3437,7 +4006,7 @@ pub fn realize_typed_diagnostic_outputs(
     response: MarkResponse,
 ) -> Result<TypedRealization<CircularMarkRealization>, PatternPipelineError> {
     let provenance = realization_provenance(family, plan)?;
-    let compatibility = adapt_family_sites_for_current_circular_marks(family);
+    let compatibility = legacy_grid_sites_for_circular_marks(family)?;
     realize_circular_marks(
         &compatibility,
         source,
@@ -3883,76 +4452,99 @@ fn site_orientation_degrees(
         MarkOrientation::GuideTangent { dimension_id }
         | MarkOrientation::GuideNormal { dimension_id } => {
             let requested = dimension_id.0;
-            let guide_id = match &site.provenance {
+            let path_id = match &site.provenance {
                 FamilySiteProvenance::GuideIntersection { contributors } => contributors
                     .iter()
                     .find(|id| id.dimension_id == requested)
-                    .copied(),
+                    .map(|id| {
+                        StructuralPathInstanceId::guide_dimension(
+                            GuideDimensionId(id.dimension_id),
+                            id.index,
+                            id.component_ordinal,
+                        )
+                    }),
                 FamilySiteProvenance::AlongGuide { guide_id, .. } => {
-                    (guide_id.dimension_id == requested).then_some(*guide_id)
+                    (guide_id.dimension_id == requested).then_some(
+                        StructuralPathInstanceId::guide_dimension(
+                            GuideDimensionId(guide_id.dimension_id),
+                            guide_id.index,
+                            guide_id.component_ordinal,
+                        ),
+                    )
                 }
                 FamilySiteProvenance::CurveGuideIntersection { contributors } => contributors
                     .iter()
-                    .find(|entry| entry.guide_id.dimension_id == requested)
-                    .map(|entry| entry.guide_id),
+                    .find(|entry| {
+                        matches!(entry.path.source, StructuralPathSourceId::GuideDimension(id) if id.0 == requested)
+                    })
+                    .map(|entry| entry.path),
                 FamilySiteProvenance::CurveAlongGuide { location, .. } => {
-                    (location.guide_id.dimension_id == requested).then_some(location.guide_id)
+                    matches!(location.path.source, StructuralPathSourceId::GuideDimension(id) if id.0 == requested)
+                        .then_some(location.path)
                 }
+                FamilySiteProvenance::AlongParametricCurve { .. } => None,
                 FamilySiteProvenance::Random { .. } => None,
             }
             .ok_or(PatternPipelineError::new(
                 "realization.orientation.contributor",
                 "requested orientation dimension is absent from this site provenance",
             ))?;
-            if let Some(guide) = family
-                .straight_guides()
-                .iter()
-                .find(|guide| guide.id == guide_id)
-            {
-                guide.tangent
-            } else {
-                let location = match &site.provenance {
-                    FamilySiteProvenance::CurveGuideIntersection { contributors } => {
-                        contributors.iter().find(|entry| entry.guide_id == guide_id)
+            if let Some(guide_id) = path_id.guide_instance() {
+                if let Some(guide) = family
+                    .straight_guides()
+                    .iter()
+                    .find(|guide| guide.id == guide_id)
+                {
+                    guide.tangent
+                } else {
+                    let location = match &site.provenance {
+                        FamilySiteProvenance::CurveGuideIntersection { contributors } => {
+                            contributors.iter().find(|entry| entry.path == path_id)
+                        }
+                        FamilySiteProvenance::CurveAlongGuide { location, .. }
+                            if location.path == path_id =>
+                        {
+                            Some(location)
+                        }
+                        _ => None,
                     }
-                    FamilySiteProvenance::CurveAlongGuide { location, .. }
-                        if location.guide_id == guide_id =>
-                    {
-                        Some(location)
-                    }
-                    _ => None,
-                }
-                .ok_or(PatternPipelineError::new(
-                    "realization.orientation.guide",
-                    "site contributor lacks retained guide tangent location",
-                ))?;
-                let guide = family
-                    .guide_path_set()
-                    .and_then(|set| set.guides().iter().find(|guide| guide.id == guide_id))
                     .ok_or(PatternPipelineError::new(
                         "realization.orientation.guide",
-                        "site contributor lacks retained curve guide",
+                        "site contributor lacks retained guide tangent location",
                     ))?;
-                guide
-                    .path
-                    .unit_tangent_at(
-                        PathLocation::new(
-                            location.segment_index,
-                            f64::from_bits(location.parameter_bits),
+                    let guide = family
+                        .structural_path_set()
+                        .and_then(|set| set.paths().iter().find(|guide| guide.id == path_id))
+                        .ok_or(PatternPipelineError::new(
+                            "realization.orientation.guide",
+                            "site contributor lacks retained curve guide",
+                        ))?;
+                    guide
+                        .path
+                        .unit_tangent_at(
+                            PathLocation::new(
+                                location.segment_index,
+                                f64::from_bits(location.parameter_bits),
+                            )
+                            .map_err(|_| {
+                                PatternPipelineError::new(
+                                    "realization.orientation.location",
+                                    "curve contributor has invalid location",
+                                )
+                            })?,
                         )
                         .map_err(|_| {
                             PatternPipelineError::new(
-                                "realization.orientation.location",
-                                "curve contributor has invalid location",
+                                "realization.orientation.tangent",
+                                "curve contributor has no finite tangent",
                             )
-                        })?,
-                    )
-                    .map_err(|_| {
-                        PatternPipelineError::new(
-                            "realization.orientation.tangent",
-                            "curve contributor has no finite tangent",
-                        )
-                    })?
+                        })?
+                }
+            } else {
+                return Err(PatternPipelineError::new(
+                    "realization.orientation.contributor",
+                    "guide orientation cannot address a parametric structural path",
+                ));
             }
         }
     };
@@ -4049,12 +4641,14 @@ fn realization_provenance(
             let structural_input = if output.marks().is_some() {
                 RealizationStructuralInput::Sites(family.site_set().clone())
             } else if output.guide_paths().is_some() {
-                let guides = family.guide_path_set().ok_or(PatternPipelineError::new(
-                    "pattern.output_layers.guide_paths",
-                    "guide-path output requires ordered raw guide paths",
-                ))?;
-                RealizationStructuralInput::GuidePaths {
-                    guides: guides.clone(),
+                let paths = family
+                    .structural_path_set()
+                    .ok_or(PatternPipelineError::new(
+                        "pattern.output_layers.guide_paths",
+                        "guide-path output requires ordered raw guide paths",
+                    ))?;
+                RealizationStructuralInput::StructuralPaths {
+                    paths: paths.clone(),
                     nominal_bases: family.structure.guide_nominal_bases.clone(),
                 }
             } else {
@@ -4091,12 +4685,30 @@ fn realization_provenance(
     }
 }
 
-/// Adapts truthful family sites only at the current circle-realization seam.
+/// Retains pre-Stage-20E2 circle realization only for genuine guide-originated sites.
 ///
-/// This private compatibility object preserves accepted `SiteId` and
-/// contributor bytes for existing canonical circles. It is deliberately never
-/// published as structural output, persisted, or used for cache identity.
-fn adapt_family_sites_for_current_circular_marks(family: &TypedFamilyOutput) -> GridFamilyOutput {
+/// Parametric sites must use `realize_typed_canonical_marks`, which retains their
+/// path-neutral `FamilySiteId` and `AlongParametricCurve` provenance without
+/// synthesizing a `GuideInstanceId`.
+///
+/// # Errors
+///
+/// Rejects parametric site provenance because the retained circle representation
+/// has guide-only identity fields and cannot truthfully represent it.
+fn legacy_grid_sites_for_circular_marks(
+    family: &TypedFamilyOutput,
+) -> Result<GridFamilyOutput, PatternPipelineError> {
+    if family.site_set().iter().any(|site| {
+        matches!(
+            site.provenance,
+            FamilySiteProvenance::AlongParametricCurve { .. }
+        )
+    }) {
+        return Err(PatternPipelineError::new(
+            "realization.legacy_circle.parametric_provenance",
+            "parametric sites require the path-neutral canonical mark realization",
+        ));
+    }
     let sites = family
         .site_set()
         .iter()
@@ -4127,8 +4739,14 @@ fn adapt_family_sites_for_current_circular_marks(family: &TypedFamilyOutput) -> 
                     vec![*guide_id],
                 ),
                 FamilySiteProvenance::CurveGuideIntersection { contributors } => {
-                    let first = contributors[0].guide_id;
-                    let second = contributors[1].guide_id;
+                    let first = contributors[0]
+                        .path
+                        .guide_instance()
+                        .expect("curve-guide provenance has a guide source");
+                    let second = contributors[1]
+                        .path
+                        .guide_instance()
+                        .expect("curve-guide provenance has a guide source");
                     (
                         SiteId {
                             first_dimension_id: first.dimension_id,
@@ -4138,7 +4756,12 @@ fn adapt_family_sites_for_current_circular_marks(family: &TypedFamilyOutput) -> 
                         },
                         contributors
                             .iter()
-                            .map(|location| location.guide_id)
+                            .map(|location| {
+                                location
+                                    .path
+                                    .guide_instance()
+                                    .expect("curve-guide provenance has a guide source")
+                            })
                             .collect(),
                     )
                 }
@@ -4146,13 +4769,33 @@ fn adapt_family_sites_for_current_circular_marks(family: &TypedFamilyOutput) -> 
                     location, sequence, ..
                 } => (
                     SiteId {
-                        first_dimension_id: location.guide_id.dimension_id,
-                        first_index: location.guide_id.index,
-                        second_dimension_id: location.guide_id.dimension_id,
+                        first_dimension_id: location
+                            .path
+                            .guide_instance()
+                            .expect("curve-guide provenance has a guide source")
+                            .dimension_id,
+                        first_index: location
+                            .path
+                            .guide_instance()
+                            .expect("curve-guide provenance has a guide source")
+                            .index,
+                        second_dimension_id: location
+                            .path
+                            .guide_instance()
+                            .expect("curve-guide provenance has a guide source")
+                            .dimension_id,
                         second_index: *sequence,
                     },
-                    vec![location.guide_id],
+                    vec![
+                        location
+                            .path
+                            .guide_instance()
+                            .expect("curve-guide provenance has a guide source"),
+                    ],
                 ),
+                FamilySiteProvenance::AlongParametricCurve { .. } => {
+                    unreachable!("parametric sites were rejected before the legacy circle seam")
+                }
                 FamilySiteProvenance::Random {
                     accepted_ordinal, ..
                 } => {
@@ -4188,16 +4831,16 @@ fn adapt_family_sites_for_current_circular_marks(family: &TypedFamilyOutput) -> 
                     )
                 }
             };
-            IntersectionSite {
+            Ok(IntersectionSite {
                 id,
                 position: site.position,
                 nominal_cell_diameter: site.nominal_cell_basis.diameter(),
                 scope: site.scope,
                 provenance: GuideIntersectionProvenance { contributors },
-            }
+            })
         })
-        .collect();
-    GridFamilyOutput {
+        .collect::<Result<Vec<_>, PatternPipelineError>>()?;
+    Ok(GridFamilyOutput {
         family_fingerprint: family.family_fingerprint().to_owned(),
         guard_steps: family.structure.guard_steps,
         support_radius: family.structure.support_radius,
@@ -4206,7 +4849,7 @@ fn adapt_family_sites_for_current_circular_marks(family: &TypedFamilyOutput) -> 
         coverage: family.structure.coverage.clone(),
         guides: family.structure.guides.clone(),
         sites,
-    }
+    })
 }
 
 /// Headless input to the two-dimension straight-grid family.
@@ -4527,6 +5170,12 @@ pub fn evaluate_generalized_straight_guides_cancellable(
                 "random-site products are evaluated by the random-site family evaluator",
             ));
         }
+        StructuralProductCapability::ParametricPaths => {
+            return Err(GridError::new(
+                "pattern.family.parametric",
+                "parametric paths are evaluated through their finite CurvePath adapter",
+            ));
+        }
     };
     Ok(GeneralizedStraightGuideOutput {
         family_fingerprint: generalized_fingerprint(family, request),
@@ -4838,6 +5487,7 @@ fn generalized_fingerprint(
         StructuralProductCapability::GuideIntersections => 1,
         StructuralProductCapability::AlongGuideSites => 2,
         StructuralProductCapability::RandomSites => 3,
+        StructuralProductCapability::ParametricPaths => 4,
     });
     bytes.extend(family.merge_epsilon.unwrap_or(0.0).to_bits().to_le_bytes());
     bytes.extend(
@@ -4952,14 +5602,16 @@ pub fn realize_typed_canonical_strokes_cancellable(
             "canonical stroke realization requires a guide-path output",
         ));
     }
-    let guides = family.guide_path_set().ok_or(PatternPipelineError::new(
-        "pattern.output_layers.guide_paths",
-        "guide-path output requires derived guide paths",
-    ))?;
-    let mut strokes = Vec::with_capacity(guides.guides().len());
+    let paths = family
+        .structural_path_set()
+        .ok_or(PatternPipelineError::new(
+            "pattern.output_layers.guide_paths",
+            "guide-path output requires derived guide paths",
+        ))?;
+    let mut strokes = Vec::with_capacity(paths.paths().len());
     let mut profile_samples = 0_usize;
     let mut outline_segments = 0_usize;
-    for guide in guides.guides() {
+    for guide in paths.paths() {
         if is_cancelled() {
             return Err(PatternPipelineError::new(
                 "evaluation.cancelled",
@@ -5095,9 +5747,7 @@ pub fn realize_typed_canonical_strokes_cancellable(
     bytes.extend(response.minimum_thickness.to_bits().to_le_bytes());
     bytes.extend(response.maximum_thickness.to_bits().to_le_bytes());
     for stroke in &strokes {
-        bytes.extend(stroke.source_guide_id.dimension_id.to_le_bytes());
-        bytes.extend(stroke.source_guide_id.index.to_le_bytes());
-        bytes.extend(stroke.source_guide_id.component_ordinal.to_le_bytes());
+        append_structural_path_instance_identity(&mut bytes, stroke.source_path_id);
         for sample in &stroke.profile {
             bytes.extend(sample.center.x.to_bits().to_le_bytes());
             bytes.extend(sample.center.y.to_bits().to_le_bytes());
@@ -5860,6 +6510,7 @@ fn append_output_capability_identity(bytes: &mut Vec<u8>, output: &OutputCapabil
         StructuralProductCapability::GuideIntersections => 1,
         StructuralProductCapability::AlongGuideSites => 2,
         StructuralProductCapability::RandomSites => 3,
+        StructuralProductCapability::ParametricPaths => 4,
     });
     match &output.payload {
         OutputCapabilityPayload::Marks {
@@ -6022,6 +6673,24 @@ fn append_family_site_provenance_identity(bytes: &mut Vec<u8>, provenance: &Fami
             bytes.extend(absolute_arc_position_bits.to_le_bytes());
             bytes.extend(local_arc_position_bits.to_le_bytes());
         }
+        FamilySiteProvenance::AlongParametricCurve {
+            location,
+            path_order,
+            sequence,
+            absolute_arc_position_bits,
+            local_arc_position_bits,
+        } => {
+            bytes.push(6);
+            append_guide_path_location_identity(bytes, location);
+            bytes.extend(
+                u64::try_from(*path_order)
+                    .expect("usize fits u64")
+                    .to_le_bytes(),
+            );
+            bytes.extend(sequence.to_le_bytes());
+            bytes.extend(absolute_arc_position_bits.to_le_bytes());
+            bytes.extend(local_arc_position_bits.to_le_bytes());
+        }
     }
 }
 
@@ -6047,15 +6716,31 @@ fn append_guide_instance_identity(bytes: &mut Vec<u8>, guide_id: GuideInstanceId
 /// Appends one exact curve-guide contributor location.
 fn append_guide_path_location_identity(
     bytes: &mut Vec<u8>,
-    location: &GuidePathLocationProvenance,
+    location: &StructuralPathLocationProvenance,
 ) {
-    append_guide_instance_identity(bytes, location.guide_id);
+    append_structural_path_instance_identity(bytes, location.path);
     bytes.extend(
         u64::try_from(location.segment_index)
             .expect("usize fits u64")
             .to_le_bytes(),
     );
     bytes.extend(location.parameter_bits.to_le_bytes());
+}
+
+/// Appends one stable path-neutral source/repetition/component identity for fingerprints.
+fn append_structural_path_instance_identity(bytes: &mut Vec<u8>, path: StructuralPathInstanceId) {
+    match path.source {
+        StructuralPathSourceId::GuideDimension(id) => {
+            bytes.push(1);
+            bytes.extend(id.0.to_le_bytes());
+        }
+        StructuralPathSourceId::ParametricCurve(id) => {
+            bytes.push(2);
+            bytes.extend(id.0.to_le_bytes());
+        }
+    }
+    bytes.extend(path.repetition_index.to_le_bytes());
+    bytes.extend(path.component_ordinal.to_le_bytes());
 }
 
 /// Appends explicit even-odd fill semantics rather than relying on a renderer default.
@@ -7326,15 +8011,16 @@ mod coverage_tests {
     fn normal_offset_outer_components_must_bracket_the_generation_domain() {
         let source = CurvePath::line(Point2::new(2.0, 5.0), Point2::new(8.0, 5.0)).unwrap();
         let domain = Bounds::new(Point2::new(0.0, 0.0), Point2::new(10.0, 10.0)).unwrap();
-        let component = |start, end, first_x, last_x, y| toniator_geometry::OffsetPathComponent {
-            component_ordinal: 0,
-            source_start: PathLocation::new(0, start).unwrap(),
-            source_end: PathLocation::new(0, end).unwrap(),
-            path: CurvePath::line(Point2::new(first_x, y), Point2::new(last_x, y)).unwrap(),
-        };
+        let component =
+            |ordinal, start, end, first_x, last_x, y| toniator_geometry::OffsetPathComponent {
+                component_ordinal: ordinal,
+                source_start: PathLocation::new(0, start).unwrap(),
+                source_end: PathLocation::new(0, end).unwrap(),
+                path: CurvePath::line(Point2::new(first_x, y), Point2::new(last_x, y)).unwrap(),
+            };
         assert!(
             !normal_offset_components_bracket_domain(
-                &[component(0.4, 0.6, 0.0, 10.0, 11.0)],
+                &[component(0, 0.4, 0.6, 0.0, 10.0, 11.0)],
                 &source,
                 domain,
                 1.0,
@@ -7343,7 +8029,7 @@ mod coverage_tests {
         );
         assert!(
             !normal_offset_components_bracket_domain(
-                &[component(0.0, 1.0, 0.0, 10.0, 9.0)],
+                &[component(0, 0.0, 1.0, 0.0, 10.0, 9.0)],
                 &source,
                 domain,
                 1.0,
@@ -7352,7 +8038,7 @@ mod coverage_tests {
         );
         assert!(
             normal_offset_components_bracket_domain(
-                &[component(0.0, 1.0, 0.0, 10.0, 11.0)],
+                &[component(0, 0.0, 1.0, 0.0, 10.0, 11.0)],
                 &source,
                 domain,
                 1.0,
@@ -7361,7 +8047,7 @@ mod coverage_tests {
         );
         assert!(
             normal_offset_components_bracket_domain(
-                &[component(0.0, 1.0, 0.0, 10.0, -1.0)],
+                &[component(0, 0.0, 1.0, 0.0, 10.0, -1.0)],
                 &source,
                 domain,
                 -1.0,
@@ -7369,10 +8055,10 @@ mod coverage_tests {
             .unwrap()
         );
         assert!(
-            !normal_offset_components_bracket_domain(
+            normal_offset_components_bracket_domain(
                 &[
-                    component(0.0, 0.4, 0.0, 4.0, 11.0),
-                    component(0.6, 1.0, 6.0, 10.0, 11.0),
+                    component(0, 0.0, 0.4, 0.0, 4.0, 11.0),
+                    component(1, 0.6, 1.0, 6.0, 10.0, 11.0),
                 ],
                 &source,
                 domain,
@@ -7383,14 +8069,63 @@ mod coverage_tests {
         assert!(
             normal_offset_components_bracket_domain(
                 &[
-                    component(0.0, 0.4, 0.0, 5.0, 11.0),
-                    component(0.6, 1.0, 5.0, 10.0, 11.0),
+                    component(0, 0.0, 0.4, 0.0, 5.0, 11.0),
+                    component(1, 0.6, 1.0, 5.0, 10.0, 11.0),
                 ],
                 &source,
                 domain,
                 1.0,
             )
             .unwrap()
+        );
+        assert!(
+            !normal_offset_components_bracket_domain(
+                &[
+                    component(0, 0.0, 0.7, 0.0, 7.0, 11.0),
+                    component(1, 0.6, 1.0, 6.0, 10.0, 11.0),
+                ],
+                &source,
+                domain,
+                1.0,
+            )
+            .unwrap(),
+            "overlapping source intervals are not authoritative cusp gaps"
+        );
+        assert!(
+            !normal_offset_components_bracket_domain(
+                &[
+                    component(1, 0.6, 1.0, 6.0, 10.0, 11.0),
+                    component(0, 0.0, 0.4, 0.0, 4.0, 11.0),
+                ],
+                &source,
+                domain,
+                1.0,
+            )
+            .unwrap(),
+            "source-disordered components are rejected rather than sorted"
+        );
+        assert!(
+            !normal_offset_components_bracket_domain(
+                &[component(0, 0.7, 0.3, 0.0, 10.0, 11.0)],
+                &source,
+                domain,
+                1.0,
+            )
+            .unwrap(),
+            "reversed source intervals are rejected"
+        );
+        assert!(
+            !normal_offset_components_bracket_domain(
+                &[
+                    component(0, 0.0, 0.4, 1.0, 4.0, 9.0),
+                    component(1, 0.6, 1.0, 6.0, 9.0, 9.0),
+                ],
+                &source,
+                domain,
+                1.0,
+            )
+            .unwrap(),
+            "ordered gaps still require complete requested-side projection"
         );
     }
 

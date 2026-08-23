@@ -4,11 +4,13 @@ mod arc_length;
 mod authored;
 mod clipping;
 mod intersections;
+mod parametric;
 mod path;
 mod segment;
 
 pub use arc_length::PathArcLength;
 pub use intersections::{IntersectionKind, PathIntersection, SegmentIntersection};
+pub use parametric::construct_parametric_curve_path_cancellable;
 pub use path::{CurvePath, PathClosure, PathLocation};
 pub use segment::{CubicBezierSegment, CurveSegment, LineSegment};
 

@@ -1,32 +1,24 @@
 use toniator_domain::{AuthoredStructureId, PatternMechanismId};
 
-use crate::{CurveError, CurvePath, GuideInstanceId};
+use crate::{CurveError, CurvePath, StructuralPathInstanceId};
 
-/// One complete derived finite guide path with deterministic dimension/index identity.
+/// One complete derived finite structural path with path-neutral source identity.
 #[derive(Clone, Debug, PartialEq)]
-pub struct GuidePathInstance {
-    pub id: GuideInstanceId,
+pub struct StructuralPathInstance {
+    pub id: StructuralPathInstanceId,
     pub source_structure_id: Option<AuthoredStructureId>,
     pub path: CurvePath,
 }
 
-/// Exact segment-local contributor location for a curve-derived site.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct GuidePathLocationProvenance {
-    pub guide_id: GuideInstanceId,
-    pub segment_index: usize,
-    pub parameter_bits: u64,
-}
-
-/// Ordered guide emission for one resolved family root; it preserves caller order exactly.
+/// Ordered structural-path emission for one resolved family root; it preserves caller order exactly.
 #[derive(Clone, Debug, PartialEq)]
-pub struct GuidePathSet {
+pub struct StructuralPathSet {
     family_fingerprint: String,
-    guide_mechanism_id: PatternMechanismId,
-    guides: Vec<GuidePathInstance>,
+    source_mechanism_id: PatternMechanismId,
+    paths: Vec<StructuralPathInstance>,
 }
 
-impl GuidePathSet {
+impl StructuralPathSet {
     /// Validates a nonempty ordered unique guide result without sorting or renumbering it.
     ///
     /// # Errors
@@ -34,56 +26,56 @@ impl GuidePathSet {
     /// Returns a stable guide-set diagnostic for empty identity, duplicate IDs, or invalid paths.
     pub fn new(
         family_fingerprint: String,
-        guide_mechanism_id: PatternMechanismId,
-        guides: Vec<GuidePathInstance>,
+        source_mechanism_id: PatternMechanismId,
+        paths: Vec<StructuralPathInstance>,
     ) -> Result<Self, CurveError> {
-        if family_fingerprint.is_empty() || guide_mechanism_id.0 == 0 || guides.is_empty() {
+        if family_fingerprint.is_empty() || source_mechanism_id.0 == 0 || paths.is_empty() {
             return Err(CurveError::new(
                 "curve.guide.path_set",
                 "guide path sets require nonempty family identity and guides",
             ));
         }
         let mut ids = std::collections::BTreeSet::new();
-        let mut completed_dimensions = std::collections::BTreeSet::new();
-        let mut previous_dimension = None;
+        let mut completed_sources = std::collections::BTreeSet::new();
+        let mut previous_source = None;
         let mut previous_identity = None;
-        for guide in &guides {
+        for guide in &paths {
             if !ids.insert(guide.id)
-                || (previous_dimension != Some(guide.id.dimension_id)
-                    && !completed_dimensions.insert(guide.id.dimension_id))
-                || (previous_dimension == Some(guide.id.dimension_id)
+                || (previous_source != Some(guide.id.source)
+                    && !completed_sources.insert(guide.id.source))
+                || (previous_source == Some(guide.id.source)
                     && previous_identity
-                        .is_some_and(|identity: GuideInstanceId| identity >= guide.id))
+                        .is_some_and(|identity: StructuralPathInstanceId| identity >= guide.id))
             {
                 return Err(CurveError::new(
                     "curve.guide.path_set",
                     "guide path IDs must be unique in emission order",
                 ));
             }
-            previous_dimension = Some(guide.id.dimension_id);
+            previous_source = Some(guide.id.source);
             previous_identity = Some(guide.id);
         }
-        for guide in &guides {
+        for guide in &paths {
             guide.path.bounds()?;
         }
         Ok(Self {
             family_fingerprint,
-            guide_mechanism_id,
-            guides,
+            source_mechanism_id,
+            paths,
         })
     }
 
-    /// Returns ordered immutable derived guide paths.
-    pub fn guides(&self) -> &[GuidePathInstance] {
-        &self.guides
+    /// Returns ordered immutable derived structural paths.
+    pub fn paths(&self) -> &[StructuralPathInstance] {
+        &self.paths
     }
     /// Returns the family fingerprint associated with this derived immutable guide output.
     pub fn family_fingerprint(&self) -> &str {
         &self.family_fingerprint
     }
-    /// Returns the guide root mechanism that owns emitted guide identities.
-    pub const fn guide_mechanism_id(&self) -> PatternMechanismId {
-        self.guide_mechanism_id
+    /// Returns the source mechanism that owns emitted structural-path identities.
+    pub const fn source_mechanism_id(&self) -> PatternMechanismId {
+        self.source_mechanism_id
     }
 }
 
@@ -104,23 +96,23 @@ mod tests {
             PathClosure::Open,
         )
         .expect("finite path");
-        let guides = GuidePathSet::new(
+        let paths = StructuralPathSet::new(
             "split-components".into(),
             PatternMechanismId(1),
             vec![
-                GuidePathInstance {
-                    id: GuideInstanceId::with_component(GuideDimensionId(1), 2, 0),
+                StructuralPathInstance {
+                    id: StructuralPathInstanceId::guide_dimension(GuideDimensionId(1), 2, 0),
                     source_structure_id: None,
                     path: path.clone(),
                 },
-                GuidePathInstance {
-                    id: GuideInstanceId::with_component(GuideDimensionId(1), 2, 1),
+                StructuralPathInstance {
+                    id: StructuralPathInstanceId::guide_dimension(GuideDimensionId(1), 2, 1),
                     source_structure_id: None,
                     path,
                 },
             ],
         )
         .expect("ordered split components remain unique");
-        assert_eq!(guides.guides()[1].id.component_ordinal, 1);
+        assert_eq!(paths.paths()[1].id.component_ordinal, 1);
     }
 }

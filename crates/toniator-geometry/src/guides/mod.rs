@@ -6,4 +6,4 @@ mod repetition;
 
 pub use coverage::{GuideCoveragePlan, GuideDimensionCoverage};
 pub use prototype::{construct_circular_arc, resolve_guide_prototype};
-pub use repetition::{GuidePathInstance, GuidePathLocationProvenance, GuidePathSet};
+pub use repetition::{StructuralPathInstance, StructuralPathSet};
