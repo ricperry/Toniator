@@ -2,8 +2,9 @@
 
 ## Status and authority
 
-**Implemented awaiting review.** The user authorized this bounded implementation on
-2026-08-23 and clarified that `GridMaze` means a conventional wall maze whose
+**Complete at implementation checkpoint
+`33f1bde3be9afdc3fb88f479c4ee7ec52b80114a`.** The user authorized this bounded
+implementation on 2026-08-23 and accepted it on 2026-08-24. The user clarified that `GridMaze` means a conventional wall maze whose
 solution traverses cells formed by site-derived walls. This contract is
 subordinate to the five protected files under `Project Specification/`, with
 `Addendum.md` taking precedence, and to the approved ordering in
@@ -12,18 +13,21 @@ subordinate to the five protected files under `Project Specification/`, with
 Stage 20M adds document-authored deterministic positive connection programs
 over the accepted Stage 20L mutual-nearest graph and a distinct conventional
 wall-maze program over complete straight-guide arrangement cells. It does not
-authorize Stage 20N or later work, publication, a checkpoint, or a protected-
-specification revision. The bounded straight-grid face/dual-cell primitive
+authorize Stage 20N or later work, publication, or a protected-specification
+revision; the implementation checkpoint is recorded above. The bounded
+straight-grid face/dual-cell primitive
 introduced here is reusable topology authority, not Stage 20O region
 realization.
 
 The one-writer implementation, focused verification, intrinsic artifact
-inspection, prior independent read-only reviews, bounded repair re-reviews, and
-the final centered-origin review found no material findings. The formal status
-remains **Implemented awaiting review** until the user accepts it; the
-implementation is ready for that acceptance decision. A final requirement audit additionally made the
+inspection, independent read-only reviews, bounded repair re-reviews, and the
+final centered-origin review found no material findings. A final requirement audit additionally made the
 two-/three-guide geometry witness direct and added public connection/maze
 capability-projection coverage; neither repair changed production behavior.
+The accepted headless scope retains the centered grid-prototype origin, positive
+nearest/random/tree paths, conventional two-/three-guide wall mazes,
+intent-only current-v4/preset-v2 persistence, normalized `0.0..=2.0` response,
+no GTK work, no renderer topology repair, and no Stage 20N work.
 
 ## Bounded scope
 
@@ -290,8 +294,10 @@ face/dual authority are expressly included.
 
 ## Gates
 
-Use one writer, then an independent read-only implementation reviewer. Stop at
+Use one writer, then an independent read-only implementation reviewer. During
+implementation, stop at
 **Implemented awaiting review**, repair only confirmed in-scope findings, then
-stop again at **Implemented awaiting review** pending parent and user review. Do not mark accepted/complete,
-commit, push, publish, deploy, or begin Stage 20N without explicit user
-authorization.
+stop again at **Implemented awaiting review** pending parent and user review.
+After explicit user acceptance, record the implementation checkpoint and keep
+publication and the next stage separately gated. Do not commit, push, publish,
+deploy, or begin Stage 20N without explicit authorization.

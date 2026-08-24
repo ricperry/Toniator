@@ -348,8 +348,18 @@ deterministic, mechanism-neutral derived site-adjacency boundary over eligible
 cancellation, ordered graph identity, and failure-atomic engine derivation. It
 adds no persisted connection intent, schema or preset field, renderer path,
 CLI/GTK behavior, or connection-program selection. The user accepted Stage
-20L on 2026-08-23; publication remains separate. Stage 20M+ and the Pattern
-Wizard remain separately gated and planned.
+20L on 2026-08-23; publication remains separate.
+
+Stage 20M is complete at implementation checkpoint
+`33f1bde3be9afdc3fb88f479c4ee7ec52b80114a`. It adds deterministic positive
+nearest/random/tree connection paths and conventional two-/three-guide wall
+mazes over the accepted adjacency and straight-grid face/dual authority. Grid
+prototypes use the geometric canvas center as local `(0, 0)`; current-v4 and
+preset-v2 persistence stores authored intent only, with normalized `0.0..=2.0`
+response. The accepted scope is headless: GTK and renderer-side topology repair
+remain out of scope, and Stage 20N remains Planned. The user accepted Stage 20M
+on 2026-08-24; publication remains separate. The Pattern Wizard remains
+separately gated and planned.
 
 Low-resolution fixtures and outputs are supplementary only. Every future stage
 that exercises source loading, sampling, rendering, preview, or export must

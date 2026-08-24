@@ -156,6 +156,13 @@ on a plotted canvas because no visible-output stage exists yet. Marks,
 rendering, and Stage 4 remain unimplemented. The historical contract below
 remains the bounded scope; do not begin marks or rendering from it.
 
+The user-authorized 2026-08-24 Stage 20M worktree correction establishes the
+current centered local grid-prototype contract and regenerates the current
+Stage 3 fixture: local `(0, 0)` maps to the geometric canvas center, rotates
+about that local origin, then receives document-axis translation. It does not
+rewrite the historical `f60eb65` checkpoint or introduce a schema/persistence
+migration.
+
 ### Objective and invariant
 
 Produce deterministic output for two straight guide dimensions and their
@@ -197,8 +204,11 @@ or broad legacy compatibility.
 
 - Use a 900×600 document with 90×60 density as the fixed planning reference:
   nominal spacing is 10 document units in both axes.
-- Generate two stable-ID straight dimensions. Rotate about the canvas center,
-  then apply document-axis X/Y translation.
+- Generate two stable-ID straight dimensions in local grid coordinates: local
+  `(0, 0)` maps to the geometric canvas center, authored rotation occurs about
+  that local origin, then document-axis X/Y translation applies. Random-site
+  distributions and parametric structural-source adapters remain outside this
+  grid-prototype transform contract.
 - Derive periodic phase modulo spacing while retaining authored translation in
   state. Plan with `guard_steps = 2`, support radius `4.5`, and any additional
   antialiasing/support margin required by validation.
@@ -1530,6 +1540,12 @@ is checkpointed at `ccec466`. The acceptance does not retroactively replace the
 recorded 90×60 generalized review artifacts, but establishes the cross-stage
 natural-resolution rule above for all future applicable tests.
 
+The user-authorized 2026-08-24 Stage 20M worktree correction establishes the
+current shared centered grid-prototype placement for generalized straight guides
+and authored generic curve-grid prototypes. It leaves the historical `ccec466`
+checkpoint, random distributions, parametric structural-source geometry, and
+their fingerprints intact; no schema/persistence migration is introduced.
+
 ## Stage 16B — Random and site-distribution mechanisms
 
 **Status: Complete at commit `77bad7c`.** The typed random-site family proves the
@@ -1910,10 +1926,37 @@ contains the user-edited `.agents/skills/toniator-orchestrator/SKILL.md`, which
 remains user-owned guidance and is not product authority. Publication and Stage
 20M remain separate gates.
 
-**Remaining Stage 20M+ — Planned.** The approved remainder is 20M connection
-programs; 20N Voronoi; 20O guide faces; 20P region realization; 20Q composites;
-20R gallery recipes; 20S Pattern Wizard; and 20T–20W temporal work. Every row
-remains separately gated.
+**Stage 20M — Complete at implementation checkpoint
+`33f1bde3be9afdc3fb88f479c4ee7ec52b80114a`.** The user authorized the bounded headless
+connection-program implementation on 2026-08-23 and accepted it on 2026-08-24 under
+[`STAGE_20M_CONNECTION_PROGRAMS_PLAN.md`](STAGE_20M_CONNECTION_PROGRAMS_PLAN.md).
+The implemented contract provides conventional wall-maze semantics over the
+actual straight-grid intersections on or inside the canvas. Every inclusive
+site remains candidate and fingerprint authority; geometry connects consecutive
+real guide sites, extracts every positively oriented bounded face, and selects
+the largest stable connected face component only when finite candidates are
+disconnected. It emits only walls bounding selected cells, with no degree test,
+fixed shell, stroke-width inset, or site-clearance policy. Positive wall width
+and caps may extend past the canvas and are handled only by final canonical
+clipping. The selected cells form one dual spanning tree with exactly two
+deterministic perimeter openings and one derived cell-to-cell solution. A
+rectangular final clip can leave disconnected transparent fringe outside bounded
+maze cells because the canvas never invents closure.
+Positive grid spanning trees remain a separate connection-path output. Focused
+verification, artifact inspection, independent read-only review, bounded repair
+re-review, and the final centered-origin review found no material findings. The
+accepted headless scope retains the centered grid-prototype origin, positive
+nearest/random/tree paths, normalized `0.0..=2.0` response, intent-only
+current-v4/preset-v2 persistence, no GTK work, and no renderer topology repair.
+A final requirement audit
+also made two-/three-guide geometry coverage direct and added public
+connection/maze capability-projection coverage without changing production
+behavior. Publication remains separate; Stage 20N remains Planned and
+separately gated.
+
+**Remaining Stage 20N+ — Planned.** The approved remainder is 20N Voronoi; 20O
+guide faces; 20P region realization; 20Q composites; 20R gallery recipes; 20S
+Pattern Wizard; and 20T–20W temporal work. Every row remains separately gated.
 
 Every mechanism must enter through the Stage 14 typed schema, Stage 15 generic
 pipeline, Stage 17 command/descriptor contract, canonical geometry, and

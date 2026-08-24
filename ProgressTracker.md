@@ -1,6 +1,6 @@
 # Toniator Progress Tracker
 
-Last updated: **2026-08-22**. The durable execution contract is
+Last updated: **2026-08-24**. The durable execution contract is
 [GREENFIELD_REWRITE_PLAN.md](docs/GREENFIELD_REWRITE_PLAN.md). Normative
 architecture remains in the five protected [Project Specification files](Project%20Specification/Addendum.md).
 
@@ -51,8 +51,11 @@ the applicable canonical consumer boundary.
 
 **Complete at commit `f60eb65`.** The accepted bounded implementation provides
 deterministic headless straight-guide family output: two rotated/translated
-guide dimensions, analytical off-canvas guard coverage, intersection sites
-with stable provenance/fingerprint, and canonical sorted JSON inspection.
+guide dimensions, analytical off-canvas guard coverage, intersection sites with
+stable provenance/fingerprint, and canonical sorted JSON inspection. The
+user-authorized 2026-08-24 Stage 20M worktree correction establishes the
+current centered local grid-prototype contract and regenerates the current
+Stage 3 fixture without rewriting that checkpoint or migrating schema/persistence.
 Focused crate and workspace tests, strict Clippy/checks, architecture
 validation, and the canonical JSON comparison passed. During Stage 3,
 point-site correctness was not visually confirmable on a plotted canvas because
@@ -237,7 +240,11 @@ reusable mark prototypes, and complete transformed guard coverage without named
 rectangular/triangular branches. The user provisionally accepted the stage on
 2026-08-09 and required natural-resolution PNG/SVG validation in addition to
 low-resolution tests for every future applicable stage. The implementation is
-checkpointed at `ccec466`.
+checkpointed at `ccec466`. The user-authorized 2026-08-24 Stage 20M worktree
+correction establishes the current centered local grid-prototype placement for
+generalized and authored generic curve-grid guides; random distributions and
+parametric structural sources retain their existing geometry/fingerprints, with
+no schema/persistence migration or historical-checkpoint rewrite.
 
 **Stage 16B — Complete at commit `77bad7c`.** The typed `RandomSites` family
 adds an ordered raw-uniform/even/clustered base process, uniform or
@@ -513,8 +520,39 @@ no material issue. The checkpoint includes the user-edited
 preserved as user-owned and is not Stage 20L product authority. Publication and
 Stage 20M remain separate gates.
 
-**Remaining Stage 20M+ — Planned.** The approved remaining order is 20M
-connection programs; 20N
+**Stage 20M — Complete at implementation checkpoint
+`33f1bde3be9afdc3fb88f479c4ee7ec52b80114a`.** The user authorized the bounded headless
+connection-program implementation on 2026-08-23 and accepted it on 2026-08-24 under
+[`STAGE_20M_CONNECTION_PROGRAMS_PLAN.md`](docs/STAGE_20M_CONNECTION_PROGRAMS_PLAN.md).
+The user then clarified that `GridMaze` is a conventional wall maze: every
+evaluated grid site on or inside the canvas is valid candidate arrangement and
+fingerprint authority, while outside sites are excluded. The emitted maze
+connects consecutive actual guide sites, extracts every positively oriented
+bounded face, and selects the largest stable connected bounded-face component
+only when finite candidates are disconnected. Every inclusive candidate stays
+source/fingerprint authority, but only walls bounding selected cells emit; there
+is no degree filter, fixed shell, stroke-width inset, or site-clearance rule.
+Positive wall width and caps may spill past the canvas and are handled by final
+clipping. Selected faces form one connected dual cell graph, recursive
+backtracking removes one spanning tree of shared walls, and exactly two existing
+perimeter openings bound the one derived cell-traversing solution. A rectangular
+final clip may leave disconnected transparent fringe outside bounded maze cells
+because canvas bounds do not create closure. Positive
+`GridSpanningTree` remains a separate connection-path program. Focused
+verification, artifact inspection, independent read-only review, bounded repair
+re-review, and the final centered-origin review found no material findings. The
+accepted headless scope retains the centered grid-prototype origin, positive
+nearest/random/tree paths, normalized `0.0..=2.0` response, intent-only
+current-v4/preset-v2 persistence, no GTK work, and no renderer topology repair.
+The final boundary repair added square/triangular clip-aligned
+regressions and confirmed that all selected maze cells remain reachable in one
+dual spanning tree while disconnected candidate components are discarded before
+post-selection connectivity is required. A final requirement audit additionally made two-/three-guide geometry
+coverage direct and added public connection/maze capability-projection
+coverage without changing production behavior. Publication remains separate;
+Stage 20N remains Planned and separately gated.
+
+**Remaining Stage 20N+ — Planned.** The approved remaining order is 20N
 Voronoi; 20O guide faces; 20P region realization; 20Q composites; 20R gallery
 recipes; 20S Pattern Wizard; and 20T–20W temporal work. Each requires its own
 contract, implementation, review, and acceptance gate.
