@@ -1,7 +1,7 @@
-```yaml
+---
 name: toniator-orchestrator
 description: Coordinate focused Toniator greenfield design, exploration, implementation, and verification through project custom subagents.
-```
+---
 
 # Toniator Orchestrator
 

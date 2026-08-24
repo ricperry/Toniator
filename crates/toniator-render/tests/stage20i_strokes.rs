@@ -1,8 +1,11 @@
-use toniator_domain::{CanvasSpec, ChannelId, ColorValue, GuideDimensionId, PathStrokeStyle};
+use toniator_domain::{
+    CanvasSpec, ChannelId, ColorValue, GuideDimensionId, PathStrokeStyle, PatternMechanismId,
+    PatternOutputLayerId,
+};
 use toniator_geometry::{
-    CanonicalStroke, CurvePath, PathLocation, Point2, StrokeProfileSample,
-    StructuralPathInstanceId, VariableWidthOutlineLimits, VariableWidthPathSample,
-    build_variable_width_outline_cancellable,
+    CanonicalStroke, ConnectionPathId, CurvePath, FamilySiteId, MazeVertexId, MazeWallId,
+    MazeWallPathId, PathLocation, Point2, StrokeProfileSample, StructuralPathInstanceId,
+    VariableWidthOutlineLimits, VariableWidthPathSample, build_variable_width_outline_cancellable,
 };
 use toniator_render::{
     GeometryOutput, RasterBackground, RenderLayer, RenderScene, rasterize, write_svg,
@@ -53,6 +56,179 @@ fn stroke(y: f64) -> CanonicalStroke {
         outline,
     )
     .expect("stroke")
+}
+
+/// Builds one finite connection-owned canonical stroke for renderer-only parity coverage.
+fn connection_stroke() -> CanonicalStroke {
+    let path = CurvePath::line(Point2::new(-2.0, 4.0), Point2::new(10.0, 4.0)).expect("line");
+    let profile = vec![
+        StrokeProfileSample {
+            location: PathLocation::new(0, 0.0).expect("location"),
+            center: Point2::new(-2.0, 4.0),
+            normalized_thickness: 1.0,
+            width: 4.0,
+        },
+        StrokeProfileSample {
+            location: PathLocation::new(0, 1.0).expect("location"),
+            center: Point2::new(10.0, 4.0),
+            normalized_thickness: 1.0,
+            width: 4.0,
+        },
+    ];
+    let outline = build_variable_width_outline_cancellable(
+        &path,
+        &[
+            VariableWidthPathSample {
+                location: profile[0].location,
+                width: 4.0,
+            },
+            VariableWidthPathSample {
+                location: profile[1].location,
+                width: 4.0,
+            },
+        ],
+        PathStrokeStyle::default(),
+        1.0 / 8.0,
+        VariableWidthOutlineLimits::new(32).expect("limit"),
+        &|| false,
+    )
+    .expect("outline");
+    let component = FamilySiteId {
+        mechanism_id: PatternMechanismId(8),
+        ordinal: 0,
+    };
+    CanonicalStroke::new_connection(
+        ConnectionPathId {
+            output_layer_id: PatternOutputLayerId(9),
+            component_minimum: component,
+            component_ordinal: 0,
+            first_endpoint: component,
+            last_endpoint: FamilySiteId {
+                mechanism_id: PatternMechanismId(8),
+                ordinal: 1,
+            },
+            ordinal: 0,
+        },
+        path,
+        4.0,
+        PathStrokeStyle::default(),
+        profile,
+        outline,
+    )
+    .expect("connection stroke")
+}
+
+/// Builds one maze-owned canonical stroke with the same already-validated direct-outline
+/// geometry, isolating renderer parity from maze arrangement construction.
+fn maze_stroke() -> CanonicalStroke {
+    let mut stroke = connection_stroke();
+    stroke.source_id = toniator_geometry::CanonicalStrokeSourceId::Maze(MazeWallPathId {
+        output_layer_id: PatternOutputLayerId(10),
+        wall: MazeWallId::new(MazeVertexId(3), MazeVertexId(7)).expect("distinct maze vertices"),
+    });
+    stroke
+}
+
+/// Proves connection renderers consume the canonical outline directly with matching SVG/PNG presence.
+#[test]
+fn connection_stroke_svg_and_png_share_one_canonical_direct_outline() {
+    let scene = RenderScene::new(
+        CanvasSpec {
+            width: 8.0,
+            height: 8.0,
+        },
+        "connection-family".into(),
+        "connection-realization".into(),
+        vec![
+            RenderLayer::new(
+                ChannelId(9),
+                true,
+                ColorValue {
+                    red: 0.0,
+                    green: 0.5,
+                    blue: 1.0,
+                    alpha: 1.0,
+                },
+                1.0,
+                GeometryOutput::CanonicalStrokes(vec![connection_stroke()]),
+            )
+            .expect("connection layer"),
+        ],
+    )
+    .expect("connection scene");
+    let svg = write_svg(&scene);
+    let png = rasterize(&scene, RasterBackground::Transparent).expect("connection PNG");
+    assert!(svg.contains("fill-rule=\"nonzero\""));
+    assert!(svg.contains("<path "));
+    assert!(png.pixels().chunks_exact(4).any(|pixel| pixel[3] > 0));
+}
+
+/// Proves SVG and PNG consume a typed maze wall's direct canonical outline without introducing a
+/// renderer-side maze interpretation or a separate raster path.
+#[test]
+fn maze_wall_stroke_svg_and_png_share_one_canonical_direct_outline() {
+    let scene = RenderScene::new(
+        CanvasSpec {
+            width: 8.0,
+            height: 8.0,
+        },
+        "maze-family".into(),
+        "maze-realization".into(),
+        vec![
+            RenderLayer::new(
+                ChannelId(10),
+                true,
+                ColorValue {
+                    red: 0.0,
+                    green: 0.5,
+                    blue: 1.0,
+                    alpha: 1.0,
+                },
+                1.0,
+                GeometryOutput::CanonicalStrokes(vec![maze_stroke()]),
+            )
+            .expect("maze wall layer"),
+        ],
+    )
+    .expect("maze wall scene");
+    let svg = write_svg(&scene);
+    let png = rasterize(&scene, RasterBackground::Transparent).expect("maze wall PNG");
+    assert!(svg.contains("fill-rule=\"nonzero\""));
+    assert!(svg.contains("<path "));
+    assert!(png.pixels().chunks_exact(4).any(|pixel| pixel[3] > 0));
+}
+
+/// Locks the pre-connection-generalization structural stroke scene identity byte-for-byte.
+#[test]
+fn structural_stroke_scene_fingerprint_remains_exact() {
+    let scene = RenderScene::new(
+        CanvasSpec {
+            width: 8.0,
+            height: 8.0,
+        },
+        "family".into(),
+        "realization".into(),
+        vec![
+            RenderLayer::new(
+                ChannelId(1),
+                true,
+                ColorValue {
+                    red: 1.0,
+                    green: 0.0,
+                    blue: 0.0,
+                    alpha: 1.0,
+                },
+                0.5,
+                GeometryOutput::CanonicalStrokes(vec![stroke(4.0)]),
+            )
+            .expect("structural layer"),
+        ],
+    )
+    .expect("structural scene");
+    assert_eq!(
+        scene.identity().scene_fingerprint(),
+        "fnv1a64:fc370509e4e82939"
+    );
 }
 
 /// Proves SVG writes direct nonzero outline paths and keeps off-canvas canonical geometry intact.

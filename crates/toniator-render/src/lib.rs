@@ -696,7 +696,47 @@ fn scene_fingerprint(
                 add_scene_bytes(&mut hash, [3]);
                 add_scene_bytes(&mut hash, (strokes.len() as u64).to_le_bytes());
                 for stroke in strokes {
-                    append_scene_structural_path_instance(&mut hash, stroke.source_path_id);
+                    match &stroke.source_id {
+                        toniator_geometry::CanonicalStrokeSourceId::Structural(id) => {
+                            append_scene_structural_path_instance(&mut hash, *id);
+                        }
+                        toniator_geometry::CanonicalStrokeSourceId::Connection(id) => {
+                            add_scene_bytes(&mut hash, [0x43]);
+                            add_scene_bytes(&mut hash, id.output_layer_id.0.to_le_bytes());
+                            add_scene_bytes(
+                                &mut hash,
+                                id.component_minimum.mechanism_id.0.to_le_bytes(),
+                            );
+                            add_scene_bytes(
+                                &mut hash,
+                                (id.component_minimum.ordinal as u64).to_le_bytes(),
+                            );
+                            add_scene_bytes(&mut hash, id.component_ordinal.to_le_bytes());
+                            add_scene_bytes(
+                                &mut hash,
+                                id.first_endpoint.mechanism_id.0.to_le_bytes(),
+                            );
+                            add_scene_bytes(
+                                &mut hash,
+                                (id.first_endpoint.ordinal as u64).to_le_bytes(),
+                            );
+                            add_scene_bytes(
+                                &mut hash,
+                                id.last_endpoint.mechanism_id.0.to_le_bytes(),
+                            );
+                            add_scene_bytes(
+                                &mut hash,
+                                (id.last_endpoint.ordinal as u64).to_le_bytes(),
+                            );
+                            add_scene_bytes(&mut hash, id.ordinal.to_le_bytes());
+                        }
+                        toniator_geometry::CanonicalStrokeSourceId::Maze(id) => {
+                            add_scene_bytes(&mut hash, [0x4d]);
+                            add_scene_bytes(&mut hash, id.output_layer_id.0.to_le_bytes());
+                            add_scene_bytes(&mut hash, id.wall.first.0.to_le_bytes());
+                            add_scene_bytes(&mut hash, id.wall.second.0.to_le_bytes());
+                        }
+                    }
                     add_scene_bytes(
                         &mut hash,
                         stroke
@@ -2197,9 +2237,14 @@ fn flatten_cubic(
     points: &mut Vec<Point2>,
     work: &mut RasterWork<'_>,
 ) -> Result<(), RenderError> {
+    const PIXEL_TOLERANCE: f64 = 1.0 / 64.0;
+    if control_polygon_extent([a, b, c, d]) <= PIXEL_TOLERANCE {
+        work.check()?;
+        return push_flattened_point(points, d, work);
+    }
     let flatness = point_line_distance(b, a, d).max(point_line_distance(c, a, d));
     work.check()?;
-    if flatness <= 1.0 / 64.0 {
+    if flatness <= PIXEL_TOLERANCE {
         return push_flattened_point(points, d, work);
     }
     let ab = midpoint(a, b);
@@ -2209,6 +2254,9 @@ fn flatten_cubic(
     let bcd = midpoint(bc, cd);
     let mid = midpoint(abc, bcd);
     if depth >= 60 || mid == a || mid == d {
+        if control_polygon_extent([a, b, c, d]) <= PIXEL_TOLERANCE {
+            return push_flattened_point(points, d, work);
+        }
         return Err(RenderError::new(
             "raster.flatten.numeric",
             "cubic subdivision cannot meet output-pixel tolerance",
@@ -2216,6 +2264,19 @@ fn flatten_cubic(
     }
     flatten_cubic(a, ab, abc, mid, depth + 1, points, work)?;
     flatten_cubic(mid, bcd, cd, d, depth + 1, points, work)
+}
+
+/// Returns the finite transformed control-polygon diameter before chord-based flattening.
+fn control_polygon_extent(points: [Point2; 4]) -> f64 {
+    points
+        .iter()
+        .enumerate()
+        .flat_map(|(index, first)| {
+            points[index + 1..]
+                .iter()
+                .map(move |second| (first.x - second.x).hypot(first.y - second.y))
+        })
+        .fold(0.0_f64, f64::max)
 }
 
 /// Appends one flattened endpoint only while the exact request edge budget remains available.
@@ -3192,5 +3253,23 @@ mod stage20e2_limit_tests {
         )
         .expect_err("canonical ellipse sampling must stop when the probe cancels");
         assert_eq!(error.path(), "evaluation.cancelled");
+    }
+
+    /// Accepts a tiny cubic at large finite coordinates through the control-polygon tolerance fast path.
+    #[test]
+    fn flatten_cubic_avoids_numeric_failure_for_tiny_large_coordinate_control_polygon() {
+        let a = Point2::new(1.0e12, -1.0e12);
+        let b = Point2::new(1.0e12 + 0.001, -1.0e12 + 0.001);
+        let c = Point2::new(1.0e12 + 0.002, -1.0e12 + 0.001);
+        let d = Point2::new(1.0e12 + 0.003, -1.0e12);
+        let mut points = vec![a];
+        let mut work = RasterWork::new(
+            RasterizationLimits::default(),
+            RasterAntialiasing::On,
+            &|| false,
+        );
+        flatten_cubic(a, b, c, d, 0, &mut points, &mut work)
+            .expect("tiny control polygon flattens without numeric subdivision");
+        assert_eq!(points, vec![a, d]);
     }
 }

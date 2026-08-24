@@ -509,16 +509,12 @@ fn push_join_or_rail(
     }
     let same_center = first.center == second.center;
     let turn = first.tangent.x * second.tangent.y - first.tangent.y * second.tangent.x;
-    let outer = turn > 0.0;
+    // The right rail is traversed in reverse by `build_positive_run`, so `turn` is already in
+    // each rail's local ordered direction. Its exterior join is therefore always the local
+    // right turn, and its short arc is clockwise; the other rail remains a direct inner join.
+    let outer = turn < 0.0;
     if same_center && outer && first.half_width == second.half_width {
-        return push_round_arc(
-            segments,
-            first.center,
-            start,
-            end,
-            if left { turn < 0.0 } else { turn > 0.0 },
-            remaining_segments,
-        );
+        return push_round_arc(segments, first.center, start, end, true, remaining_segments);
     }
     push_rail(segments, start, end, remaining_segments)
 }
@@ -601,7 +597,7 @@ fn push_round_arc(
     center: Point2,
     start: Point2,
     end: Point2,
-    clockwise: bool,
+    _clockwise: bool,
     remaining_segments: &mut usize,
 ) -> Result<(), CurveError> {
     let start_vector = Vector2::new(start.x - center.x, start.y - center.y);
@@ -610,9 +606,12 @@ fn push_round_arc(
     let start_angle = start_vector.y.atan2(start_vector.x);
     let end_angle = end_vector.y.atan2(end_vector.x);
     let mut sweep = end_angle - start_angle;
-    if clockwise && sweep > 0.0 {
+    // Every caller represents a cap quarter or an exterior corner no wider than a right angle.
+    // Select that shortest geometric sweep defensively instead of permitting a requested winding
+    // to turn a local join into an almost-full circle.
+    if sweep > std::f64::consts::PI {
         sweep -= std::f64::consts::TAU;
-    } else if !clockwise && sweep < 0.0 {
+    } else if sweep < -std::f64::consts::PI {
         sweep += std::f64::consts::TAU;
     }
     let parts = (sweep.abs() / (std::f64::consts::FRAC_PI_2))
@@ -709,4 +708,50 @@ struct OutlineVertex {
     right: Point2,
     tangent: Vector2,
     half_width: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Proves either 90-degree exterior corner and an endpoint cap remain compact local arcs.
+    #[test]
+    fn right_angle_corners_and_round_caps_never_form_full_circle_loops_or_spikes() {
+        for end in [Point2::new(0.0, 1.0), Point2::new(0.0, -1.0)] {
+            let mut segments = Vec::new();
+            let mut remaining = 8;
+            push_round_arc(
+                &mut segments,
+                Point2::new(0.0, 0.0),
+                Point2::new(1.0, 0.0),
+                end,
+                true,
+                &mut remaining,
+            )
+            .expect("right-angle corner arc");
+            assert_eq!(segments.len(), 1, "a right angle remains one short cubic");
+            assert!(
+                outline_segment_points(&segments[0])
+                    .into_iter()
+                    .all(|point| point.x.abs() <= 1.1 && point.y.abs() <= 1.1)
+            );
+        }
+        let mut cap = Vec::new();
+        let mut remaining = 8;
+        push_round_cap(
+            &mut cap,
+            Point2::new(0.0, 1.0),
+            Point2::new(0.0, -1.0),
+            Vector2::new(1.0, 0.0),
+            true,
+            &mut remaining,
+        )
+        .expect("round cap");
+        assert_eq!(cap.len(), 2, "a round cap remains two short quarter arcs");
+        assert!(
+            cap.into_iter()
+                .flat_map(|segment| outline_segment_points(&segment))
+                .all(|point| point.x.abs() <= 1.1 && point.y.abs() <= 1.1)
+        );
+    }
 }

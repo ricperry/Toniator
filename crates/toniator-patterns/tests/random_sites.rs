@@ -153,6 +153,38 @@ fn raw_even_and_clustered_are_seeded_distinct_and_even_is_not_an_alias() {
     assert!(pairwise_minimum(&raw) < 8.0);
 }
 
+/// Locks random-family geometry and identity outside the centered grid-local transform contract.
+///
+/// # Panics
+///
+/// Panics when a straight-grid origin correction changes random-site distribution authority.
+#[test]
+fn random_family_geometry_and_identity_ignore_grid_local_origin_corrections() {
+    let raw = output(&definition(
+        RandomSiteCharacter::RawUniform,
+        SiteDensityModulation::Uniform,
+        SiteExclusionPolicy::None,
+        32,
+    ));
+    assert_eq!(
+        raw.family_fingerprint(),
+        "fnv1a64:17bc903a56a17094:nominal-cell-basis:fnv1a64:196b26aef625706e"
+    );
+    assert_eq!(
+        raw.site_set()
+            .sites()
+            .iter()
+            .take(3)
+            .map(|site| site.position)
+            .collect::<Vec<_>>(),
+        vec![
+            toniator_patterns::Point2::new(27.267939708601112, 30.89005276569381),
+            toniator_patterns::Point2::new(8.362231366714191, 29.374360154250454),
+            toniator_patterns::Point2::new(118.74257947936493, 21.419246591692083),
+        ]
+    );
+}
+
 #[test]
 /// Proves zero-seed normalization and process metrics remain deterministic.
 fn zero_seed_is_repeatable_distinct_and_quality_metrics_separate_processes() {

@@ -134,18 +134,18 @@ fn curved_guides_reuse_existing_site_products_with_truthful_guide_and_site_sets(
         vec![
             line(
                 9,
-                AuthoredPoint2 { x: 0.0, y: 50.0 },
-                AuthoredPoint2 { x: 100.0, y: 50.0 },
+                AuthoredPoint2 { x: -50.0, y: 0.0 },
+                AuthoredPoint2 { x: 50.0, y: 0.0 },
             ),
             line(
                 2,
-                AuthoredPoint2 { x: 50.0, y: 0.0 },
-                AuthoredPoint2 { x: 50.0, y: 100.0 },
+                AuthoredPoint2 { x: 0.0, y: -50.0 },
+                AuthoredPoint2 { x: 0.0, y: 50.0 },
             ),
             line(
                 7,
-                AuthoredPoint2 { x: 0.0, y: 0.0 },
-                AuthoredPoint2 { x: 100.0, y: 100.0 },
+                AuthoredPoint2 { x: -50.0, y: -50.0 },
+                AuthoredPoint2 { x: 50.0, y: 50.0 },
             ),
         ],
     );
@@ -180,6 +180,79 @@ fn curved_guides_reuse_existing_site_products_with_truthful_guide_and_site_sets(
     }
 }
 
+/// Places generic curve-guide prototypes from their shared local grid origin.
+///
+/// # Panics
+///
+/// Panics when local generic prototypes do not rotate about zero and then translate from the
+/// geometric canvas center, or when their typed family loses the zero-index intersection.
+#[test]
+fn generic_curve_grid_prototypes_share_the_centered_local_origin_transform() {
+    let definition = definition(
+        vec![
+            GuideDimension {
+                id: GuideDimensionId(71),
+                baseline_angle_degrees: 0.0,
+                phase: 0.0,
+                prototype: GuidePrototype::AuthoredOpenPath {
+                    structure_id: AuthoredStructureId(71),
+                },
+                repetition: GuideRepetition::Single,
+            },
+            GuideDimension {
+                id: GuideDimensionId(72),
+                baseline_angle_degrees: 0.0,
+                phase: 0.0,
+                prototype: GuidePrototype::AuthoredOpenPath {
+                    structure_id: AuthoredStructureId(72),
+                },
+                repetition: GuideRepetition::Single,
+            },
+        ],
+        GeneralizedSiteProduct::Intersections {
+            dimensions: vec![GuideDimensionId(71), GuideDimensionId(72)],
+            merge_epsilon: 1e-9,
+        },
+    );
+    let document = document(
+        definition.clone(),
+        vec![
+            line(
+                71,
+                AuthoredPoint2 { x: -40.0, y: 0.0 },
+                AuthoredPoint2 { x: 40.0, y: 0.0 },
+            ),
+            line(
+                72,
+                AuthoredPoint2 { x: 0.0, y: -40.0 },
+                AuthoredPoint2 { x: 0.0, y: 40.0 },
+            ),
+        ],
+    );
+    let output = evaluate_document_typed_family_cancellable(
+        &document,
+        &definition,
+        &request(1_000),
+        &|| false,
+    )
+    .expect("local curve-grid prototypes evaluate");
+    let expected = AffineTransform2D::rotate_about_then_translate(
+        Point2::new(0.0, 0.0),
+        17.0,
+        Vector2::new(54.0, 47.0),
+    )
+    .expect("finite centered transform")
+    .apply_point(Point2::new(0.0, 0.0));
+    assert!(
+        output
+            .site_set()
+            .sites()
+            .iter()
+            .any(|site| (site.position.x - expected.x).abs() < 1.0e-9
+                && (site.position.y - expected.y).abs() < 1.0e-9)
+    );
+}
+
 /// Proves curved guide limits, tangencies, overlaps, and cancellation fail before any family output publishes.
 #[test]
 fn curved_guide_limits_cancellation_and_geometry_failures_publish_no_partial_output() {
@@ -189,7 +262,7 @@ fn curved_guide_limits_cancellation_and_geometry_failures_publish_no_partial_out
             baseline_angle_degrees: 0.0,
             phase: 0.0,
             prototype: GuidePrototype::CircularArc {
-                center: AuthoredPoint2 { x: 40.0, y: 50.0 },
+                center: AuthoredPoint2 { x: -10.0, y: 0.0 },
                 radius: 10.0,
                 start_angle_degrees: 0.0,
                 sweep_angle_degrees: 360.0,
@@ -201,7 +274,7 @@ fn curved_guide_limits_cancellation_and_geometry_failures_publish_no_partial_out
             baseline_angle_degrees: 0.0,
             phase: 0.0,
             prototype: GuidePrototype::CircularArc {
-                center: AuthoredPoint2 { x: 60.0, y: 50.0 },
+                center: AuthoredPoint2 { x: 10.0, y: 0.0 },
                 radius: 10.0,
                 start_angle_degrees: 0.0,
                 sweep_angle_degrees: 360.0,
@@ -285,7 +358,7 @@ fn curved_transform_stacks_and_along_guides_preserve_scope_phase_and_variable_in
             baseline_angle_degrees: 0.0,
             phase: 27.0,
             prototype: GuidePrototype::CircularArc {
-                center: AuthoredPoint2 { x: 50.0, y: 50.0 },
+                center: AuthoredPoint2 { x: 0.0, y: 0.0 },
                 radius: 55.0,
                 start_angle_degrees: 0.0,
                 sweep_angle_degrees: 360.0,
@@ -323,12 +396,12 @@ fn curved_transform_stacks_and_along_guides_preserve_scope_phase_and_variable_in
             "index zero must retain the raw authored phase rather than a normalized lattice label",
         );
     let expected = AffineTransform2D::rotate_about_then_translate(
-        Point2::new(50.0, 50.0),
+        Point2::new(0.0, 0.0),
         17.0,
-        Vector2::new(4.0, -3.0),
+        Vector2::new(54.0, 47.0),
     )
     .unwrap()
-    .apply_point(Point2::new(105.0 + 27.0, 50.0));
+    .apply_point(Point2::new(55.0 + 27.0, 0.0));
     assert!((raw_phase.path.start().x - expected.x).abs() < 1.0e-10);
     assert!((raw_phase.path.start().y - expected.y).abs() < 1.0e-10);
     let next = guides
@@ -336,12 +409,12 @@ fn curved_transform_stacks_and_along_guides_preserve_scope_phase_and_variable_in
         .find(|guide| guide.id.repetition_index == 1)
         .expect("the raw phase lattice also retains index one");
     let expected_next = AffineTransform2D::rotate_about_then_translate(
-        Point2::new(50.0, 50.0),
+        Point2::new(0.0, 0.0),
         17.0,
-        Vector2::new(4.0, -3.0),
+        Vector2::new(54.0, 47.0),
     )
     .unwrap()
-    .apply_point(Point2::new(105.0 + 27.0 + 5.0, 50.0));
+    .apply_point(Point2::new(55.0 + 27.0 + 5.0, 0.0));
     assert!((next.path.start().x - expected_next.x).abs() < 1.0e-10);
     assert!((next.path.start().y - expected_next.y).abs() < 1.0e-10);
     let sites = output.site_set().sites();
@@ -417,8 +490,8 @@ fn normal_offsets_publish_signed_constant_gap_centerlines() {
         definition.clone(),
         vec![line(
             31,
-            AuthoredPoint2 { x: 20.0, y: 50.0 },
-            AuthoredPoint2 { x: 80.0, y: 50.0 },
+            AuthoredPoint2 { x: -30.0, y: 0.0 },
+            AuthoredPoint2 { x: 30.0, y: 0.0 },
         )],
     );
     let output = evaluate_document_typed_family_cancellable(
@@ -453,11 +526,11 @@ fn normal_offsets_publish_signed_constant_gap_centerlines() {
     assert!((distance(prior.path.start(), source.path.start()) - 12.0).abs() < 1.0e-9);
     assert!((distance(source.path.start(), next.path.start()) - 12.0).abs() < 1.0e-9);
     assert_eq!(output.guide_nominal_basis(source.id), Some(12.0));
-    let authored_points = [Point2::new(20.0, 50.0), Point2::new(80.0, 50.0)].map(|point| {
+    let authored_points = [Point2::new(-30.0, 0.0), Point2::new(30.0, 0.0)].map(|point| {
         AffineTransform2D::rotate_about_then_translate(
-            Point2::new(50.0, 50.0),
+            Point2::new(0.0, 0.0),
             17.0,
-            Vector2::new(4.0, -3.0),
+            Vector2::new(54.0, 47.0),
         )
         .unwrap()
         .apply_point(point)
@@ -479,16 +552,16 @@ fn normal_offset_cleanup_components_publish_without_identity_collision() {
         AuthoredStructureKind::OpenPath,
         vec![
             AuthoredCurveSegment::Line {
-                start: AuthoredPoint2 { x: 10.0, y: 10.0 },
-                end: AuthoredPoint2 { x: 90.0, y: 90.0 },
+                start: AuthoredPoint2 { x: -40.0, y: -40.0 },
+                end: AuthoredPoint2 { x: 40.0, y: 40.0 },
             },
             AuthoredCurveSegment::Line {
-                start: AuthoredPoint2 { x: 90.0, y: 90.0 },
-                end: AuthoredPoint2 { x: 10.0, y: 90.0 },
+                start: AuthoredPoint2 { x: 40.0, y: 40.0 },
+                end: AuthoredPoint2 { x: -40.0, y: 40.0 },
             },
             AuthoredCurveSegment::Line {
-                start: AuthoredPoint2 { x: 10.0, y: 90.0 },
-                end: AuthoredPoint2 { x: 90.0, y: 10.0 },
+                start: AuthoredPoint2 { x: -40.0, y: 40.0 },
+                end: AuthoredPoint2 { x: 40.0, y: -40.0 },
             },
         ],
     )
@@ -601,10 +674,10 @@ fn diagnostic_cubic_stops_when_terminal_extensions_cross() {
         AuthoredStructureId(61),
         AuthoredStructureKind::OpenPath,
         vec![AuthoredCurveSegment::CubicBezier {
-            start: AuthoredPoint2 { x: 20.0, y: 160.0 },
-            control_1: AuthoredPoint2 { x: 96.0, y: 64.0 },
-            control_2: AuthoredPoint2 { x: 224.0, y: 64.0 },
-            end: AuthoredPoint2 { x: 300.0, y: 160.0 },
+            start: AuthoredPoint2 { x: -140.0, y: 0.0 },
+            control_1: AuthoredPoint2 { x: -64.0, y: -96.0 },
+            control_2: AuthoredPoint2 { x: 64.0, y: -96.0 },
+            end: AuthoredPoint2 { x: 140.0, y: 0.0 },
         }],
     )
     .expect("diagnostic cubic validates");
@@ -757,8 +830,8 @@ fn normal_offset_one_sided_collapse_fails_coverage_atomically() {
     );
     let stationary = line(
         51,
-        AuthoredPoint2 { x: 50.0, y: 50.0 },
-        AuthoredPoint2 { x: 50.0, y: 50.0 },
+        AuthoredPoint2 { x: 0.0, y: 0.0 },
+        AuthoredPoint2 { x: 0.0, y: 0.0 },
     );
     let error = evaluate_document_typed_family_cancellable(
         &document(definition.clone(), vec![stationary]),

@@ -7,12 +7,21 @@ use std::{collections::BTreeSet, error::Error, fmt};
 use serde::{Serialize, Serializer, ser::SerializeStruct};
 use toniator_domain::{GuideDimensionId, PatternMechanismId};
 
+mod connection_paths;
 mod curves;
 mod guides;
+mod maze_walls;
 mod outlines;
 mod path_offsets;
 mod site_adjacency;
 
+pub use connection_paths::{
+    CONNECTION_NEAREST_SELECTION_CONTRACT_ID, CONNECTION_PATH_CONTRACT_ID,
+    CONNECTION_PRIM_SELECTION_CONTRACT_ID, CONNECTION_RANDOM_SELECTION_CONTRACT_ID,
+    CONNECTION_TRAIL_CONTRACT_ID, ConnectionPath, ConnectionPathDiagnostics, ConnectionPathError,
+    ConnectionPathId, ConnectionPathLimits, ConnectionPathSet, build_connection_paths_cancellable,
+    connection_program_contract_id,
+};
 pub use curves::{
     CubicBezierSegment, CurveError, CurvePath, CurveSegment, IntersectionKind, LineSegment,
     PathArcLength, PathClosure, PathIntersection, PathLocation, SegmentIntersection,
@@ -21,6 +30,12 @@ pub use curves::{
 pub use guides::{
     GuideCoveragePlan, GuideDimensionCoverage, StructuralPathInstance, StructuralPathSet,
     construct_circular_arc, resolve_guide_prototype,
+};
+pub use maze_walls::{
+    MAZE_WALL_CONTRACT_ID, MazeCell, MazeCellId, MazeDiagnostics, MazeDualEdge, MazeDualEdgeId,
+    MazeError, MazeGuideAxis, MazeLimits, MazeOpening, MazeOpeningSide, MazeProgramResult,
+    MazeSolution, MazeSourceSite, MazeVertexId, MazeWall, MazeWallId, MazeWallPath, MazeWallPathId,
+    build_maze_walls_cancellable, build_maze_walls_from_sites_cancellable,
 };
 pub use outlines::{
     CanonicalFilledOutline, CanonicalOutlineContour, VariableWidthOutlineLimits,
@@ -806,12 +821,20 @@ pub struct StrokeProfileSample {
     pub width: f64,
 }
 
-/// Ordered canonical stroke geometry derived from exactly one existing guide path.
+/// Typed origin identity for canonical strokes; renderers consume strokes but never reinterpret their topology.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CanonicalStrokeSourceId {
+    Structural(StructuralPathInstanceId),
+    Connection(ConnectionPathId),
+    Maze(MazeWallPathId),
+}
+
+/// Ordered canonical stroke geometry derived from exactly one structural or connection path.
 ///
 /// The original centerline remains immutable and is never clipped by this value.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CanonicalStroke {
-    pub source_path_id: StructuralPathInstanceId,
+    pub source_id: CanonicalStrokeSourceId,
     pub source_structure_id: Option<toniator_domain::AuthoredStructureId>,
     pub path: CurvePath,
     pub nominal_basis: f64,
@@ -829,6 +852,32 @@ impl CanonicalStroke {
     /// renderer can consume it. The outline is derived geometry and is never clipped here.
     pub fn new(
         source_path_id: StructuralPathInstanceId,
+        source_structure_id: Option<toniator_domain::AuthoredStructureId>,
+        path: CurvePath,
+        nominal_basis: f64,
+        style: toniator_domain::PathStrokeStyle,
+        profile: Vec<StrokeProfileSample>,
+        outline: CanonicalFilledOutline,
+    ) -> Result<Self, CurveError> {
+        Self::new_with_source(
+            CanonicalStrokeSourceId::Structural(source_path_id),
+            source_structure_id,
+            path,
+            nominal_basis,
+            style,
+            profile,
+            outline,
+        )
+    }
+
+    /// Validates one canonical stroke while preserving its sole typed source identity.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed finite profile or outline geometry before a renderer can consume either
+    /// structural or connection provenance. It never derives an alternate source identifier.
+    fn new_with_source(
+        source_id: CanonicalStrokeSourceId,
         source_structure_id: Option<toniator_domain::AuthoredStructureId>,
         path: CurvePath,
         nominal_basis: f64,
@@ -932,7 +981,7 @@ impl CanonicalStroke {
             ));
         }
         Ok(Self {
-            source_path_id,
+            source_id,
             source_structure_id,
             path,
             nominal_basis,
@@ -940,6 +989,56 @@ impl CanonicalStroke {
             profile,
             outline,
         })
+    }
+
+    /// Builds one finite connection stroke while retaining its non-structural path identity.
+    ///
+    /// # Errors
+    ///
+    /// Preserves all canonical stroke geometry validation and never substitutes connection identity
+    /// for a structural fingerprint in pre-existing callers.
+    pub fn new_connection(
+        connection_path_id: ConnectionPathId,
+        path: CurvePath,
+        nominal_basis: f64,
+        style: toniator_domain::PathStrokeStyle,
+        profile: Vec<StrokeProfileSample>,
+        outline: CanonicalFilledOutline,
+    ) -> Result<Self, CurveError> {
+        Self::new_with_source(
+            CanonicalStrokeSourceId::Connection(connection_path_id),
+            None,
+            path,
+            nominal_basis,
+            style,
+            profile,
+            outline,
+        )
+    }
+
+    /// Builds one finite maze-wall stroke while retaining its typed arrangement-path identity.
+    ///
+    /// # Errors
+    ///
+    /// Preserves canonical stroke validation and never turns a maze wall into a structural or
+    /// connection path for renderer or cache consumers.
+    pub fn new_maze(
+        maze_wall_path_id: MazeWallPathId,
+        path: CurvePath,
+        nominal_basis: f64,
+        style: toniator_domain::PathStrokeStyle,
+        profile: Vec<StrokeProfileSample>,
+        outline: CanonicalFilledOutline,
+    ) -> Result<Self, CurveError> {
+        Self::new_with_source(
+            CanonicalStrokeSourceId::Maze(maze_wall_path_id),
+            None,
+            path,
+            nominal_basis,
+            style,
+            profile,
+            outline,
+        )
     }
 }
 

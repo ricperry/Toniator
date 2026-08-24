@@ -6,28 +6,33 @@ use std::{collections::BTreeMap, error::Error, fmt};
 
 use serde::Serialize;
 use toniator_domain::{
-    ArtworkWeightResponse, AuthoredStructureId, CanvasSpec, ChannelId, DensityMetric2D, Document,
-    DocumentCommand, DocumentHistory, DocumentSessionError, GuideDimension, GuideDimensionDraft,
-    GuideDimensionId, GuidePrototype, GuideRepetition, MarkOrientation, MarkOrientationDraft,
-    MarkPrototype, OffsetCleanup, OffsetSides, ParametricCurve, PatternDefinition,
-    PatternDefinitionRecipe, PatternFamily, PatternMechanism, PatternMechanismId,
-    PatternModulation, PatternOutputLayer, PatternOutputLayerId, PresetMetadata, PresetRecord,
-    RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy, SourceMapping,
-    StraightGuideDimension, VisibleMarkSizingPolicy,
+    ArtworkWeightResponse, AuthoredStructureId, CanvasSpec, ChannelId, ConnectionProgram,
+    DensityMetric2D, Document, DocumentCommand, DocumentHistory, DocumentSessionError,
+    GuideDimension, GuideDimensionDraft, GuideDimensionId, GuidePrototype, GuideRepetition,
+    MarkOrientation, MarkOrientationDraft, MarkPrototype, MazeProgram, OffsetCleanup, OffsetSides,
+    ParametricCurve, PatternDefinition, PatternDefinitionRecipe, PatternFamily, PatternMechanism,
+    PatternMechanismId, PatternModulation, PatternOutputLayer, PatternOutputLayerId,
+    PresetMetadata, PresetRecord, RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy,
+    SourceMapping, StraightGuideDimension, VisibleMarkSizingPolicy,
 };
 pub use toniator_geometry::{
-    AffineTransform2D, Bounds, CanonicalCircleMark, CanonicalFillRule, CanonicalMark,
-    CanonicalPathMark, CanonicalStroke, CubicBezierSegment, CurveError, CurvePath, CurveSegment,
-    FamilySite, FamilySiteError, FamilySiteId, FamilySiteProvenance, FamilySiteSet,
-    GuideInstanceId, GuideIntersectionProvenance, IntersectionSite, NominalCellBasis,
-    PATH_OFFSET_ALGORITHM_CONTRACT_ID, PathClosure, PathLocation, PathOffsetCleanup,
-    PathOffsetEndpointPolicy, PathOffsetLimits, PathOffsetRequest, PathOffsetResult, Point2,
-    SiteAdjacencyError, SiteAdjacencyGraph, SiteAdjacencyLimits, SiteAdjacencyPolicy, SiteId,
-    SiteScope, StraightGuide, StrokeProfileSample, StructuralPathInstance,
-    StructuralPathInstanceId, StructuralPathLocationProvenance, StructuralPathSet,
-    StructuralPathSourceId, VariableWidthOutlineLimits, VariableWidthPathSample, Vector2,
+    AffineTransform2D, Bounds, CONNECTION_PATH_CONTRACT_ID, CONNECTION_TRAIL_CONTRACT_ID,
+    CanonicalCircleMark, CanonicalFillRule, CanonicalMark, CanonicalPathMark, CanonicalStroke,
+    CanonicalStrokeSourceId, ConnectionPathLimits, ConnectionPathSet, CubicBezierSegment,
+    CurveError, CurvePath, CurveSegment, FamilySite, FamilySiteError, FamilySiteId,
+    FamilySiteProvenance, FamilySiteSet, GuideInstanceId, GuideIntersectionProvenance,
+    IntersectionSite, MAZE_WALL_CONTRACT_ID, MazeGuideAxis, MazeLimits, MazeProgramResult,
+    NominalCellBasis, PATH_OFFSET_ALGORITHM_CONTRACT_ID, PathClosure, PathLocation,
+    PathOffsetCleanup, PathOffsetEndpointPolicy, PathOffsetLimits, PathOffsetRequest,
+    PathOffsetResult, Point2, SITE_ADJACENCY_CONTRACT_ID, SiteAdjacencyError, SiteAdjacencyGraph,
+    SiteAdjacencyLimits, SiteAdjacencyPolicy, SiteId, SiteScope, StraightGuide,
+    StrokeProfileSample, StructuralPathInstance, StructuralPathInstanceId,
+    StructuralPathLocationProvenance, StructuralPathSet, StructuralPathSourceId,
+    VariableWidthOutlineLimits, VariableWidthPathSample, Vector2,
+    build_connection_paths_cancellable, build_maze_walls_from_sites_cancellable,
     build_site_adjacency_cancellable, build_variable_width_outline_cancellable,
-    offset_path_cancellable, projection_range, resolve_guide_prototype,
+    connection_program_contract_id, offset_path_cancellable, projection_range,
+    resolve_guide_prototype,
 };
 use toniator_sampling::{
     SampledSourcePaint, SamplingError, SourceComponent, SourceField, SourceMappingComponent,
@@ -548,6 +553,18 @@ pub enum OutputCapabilityPayload {
         guide_mechanism_id: PatternMechanismId,
         style: toniator_domain::PathStrokeStyle,
     },
+    /// Connection selection remains authored while graph/path products are derived at evaluation time.
+    ConnectionPaths {
+        site_mechanism_id: PatternMechanismId,
+        program: ConnectionProgram,
+        style: toniator_domain::PathStrokeStyle,
+    },
+    /// Conventional wall-maze selection remains authored while its arrangement and retained walls are derived.
+    MazeWalls {
+        site_mechanism_id: PatternMechanismId,
+        program: MazeProgram,
+        style: toniator_domain::PathStrokeStyle,
+    },
 }
 
 impl OutputCapability {
@@ -559,6 +576,8 @@ impl OutputCapability {
                 orientation,
             } => Some((prototype, orientation)),
             OutputCapabilityPayload::GuidePaths { .. } => None,
+            OutputCapabilityPayload::ConnectionPaths { .. } => None,
+            OutputCapabilityPayload::MazeWalls { .. } => None,
         }
     }
 
@@ -570,6 +589,44 @@ impl OutputCapability {
                 guide_mechanism_id,
                 style,
             } => Some((guide_mechanism_id, style)),
+            OutputCapabilityPayload::ConnectionPaths { .. } => None,
+            OutputCapabilityPayload::MazeWalls { .. } => None,
+        }
+    }
+
+    /// Returns connection authority only when this output consumes a site product as paths.
+    pub fn connection_paths(
+        &self,
+    ) -> Option<(
+        PatternMechanismId,
+        &ConnectionProgram,
+        toniator_domain::PathStrokeStyle,
+    )> {
+        match &self.payload {
+            OutputCapabilityPayload::ConnectionPaths {
+                site_mechanism_id,
+                program,
+                style,
+            } => Some((*site_mechanism_id, program, *style)),
+            _ => None,
+        }
+    }
+
+    /// Returns wall-maze authority only when this output consumes typed straight intersections.
+    pub fn maze_walls(
+        &self,
+    ) -> Option<(
+        PatternMechanismId,
+        &MazeProgram,
+        toniator_domain::PathStrokeStyle,
+    )> {
+        match &self.payload {
+            OutputCapabilityPayload::MazeWalls {
+                site_mechanism_id,
+                program,
+                style,
+            } => Some((*site_mechanism_id, program, *style)),
+            _ => None,
         }
     }
 }
@@ -601,6 +658,14 @@ pub struct TypedFamilyOutput {
 pub struct SiteAdjacencyEvaluation {
     pub family: TypedFamilyOutput,
     pub graph: SiteAdjacencyGraph,
+}
+
+/// One complete derived connection evaluation paired with its guard-inclusive family envelope.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConnectionPathEvaluation {
+    pub family: TypedFamilyOutput,
+    pub graph: SiteAdjacencyGraph,
+    pub paths: ConnectionPathSet,
 }
 
 /// Truthful non-site metadata retained for the current circle compatibility adapter.
@@ -914,6 +979,38 @@ pub fn resolve_pattern_pipeline(
                     style: *style,
                 },
             }),
+            PatternOutputLayer::ConnectionPaths {
+                id,
+                site_mechanism_id: source_id,
+                program,
+                style,
+            } if *source_id == site_mechanism_id => ordered_outputs.push(OutputCapability {
+                layer_id: *id,
+                consumes: product,
+                payload: OutputCapabilityPayload::ConnectionPaths {
+                    site_mechanism_id: *source_id,
+                    program: program.clone(),
+                    style: *style,
+                },
+            }),
+            PatternOutputLayer::MazeWalls {
+                id,
+                site_mechanism_id: source_id,
+                program,
+                style,
+            } if *source_id == site_mechanism_id
+                && product == StructuralProductCapability::GuideIntersections =>
+            {
+                ordered_outputs.push(OutputCapability {
+                    layer_id: *id,
+                    consumes: product,
+                    payload: OutputCapabilityPayload::MazeWalls {
+                        site_mechanism_id: *source_id,
+                        program: program.clone(),
+                        style: *style,
+                    },
+                })
+            }
             _ => {
                 return Err(PatternPipelineError::new(
                     "pattern.output_layers.capability",
@@ -1066,6 +1163,22 @@ fn resolve_parametric_curve_pipeline(
                 orientation: MarkOrientation::Fixed,
             },
         },
+        [
+            PatternOutputLayer::ConnectionPaths {
+                id,
+                site_mechanism_id,
+                program,
+                style,
+            },
+        ] if Some(*site_mechanism_id) == declared_site_mechanism_id => OutputCapability {
+            layer_id: *id,
+            consumes: product,
+            payload: OutputCapabilityPayload::ConnectionPaths {
+                site_mechanism_id: *site_mechanism_id,
+                program: program.clone(),
+                style: *style,
+            },
+        },
         _ => {
             return Err(PatternPipelineError::new(
                 "pattern.output_layers.capability",
@@ -1176,7 +1289,7 @@ pub fn resolve_document_pattern_pipeline(
     Ok(plan)
 }
 
-/// Resolves the fixed random mechanism chain and its ordinary typed mark prototype capability.
+/// Resolves the fixed random mechanism chain and its typed mark or connection output capability.
 ///
 /// # Errors
 ///
@@ -1235,21 +1348,60 @@ fn resolve_random_site_pipeline(
             "random-site mechanism references do not match the family root",
         ));
     }
-    let [
-        PatternOutputLayer::MarkPrototype {
-            id,
-            site_mechanism_id,
-            prototype,
-            orientation: MarkOrientation::Fixed,
+    let output = match definition.output_layers.as_slice() {
+        [
+            PatternOutputLayer::MarkPrototype {
+                id,
+                site_mechanism_id: _,
+                prototype,
+                orientation: MarkOrientation::Fixed,
+            },
+        ] => OutputCapability {
+            layer_id: *id,
+            consumes: StructuralProductCapability::RandomSites,
+            payload: OutputCapabilityPayload::Marks {
+                prototype: prototype.clone(),
+                orientation: MarkOrientation::Fixed,
+            },
         },
-    ] = definition.output_layers.as_slice()
-    else {
-        return Err(PatternPipelineError::new(
-            "pattern.output_layers.capability",
-            "random-site products require one fixed mark-prototype output",
-        ));
+        [
+            PatternOutputLayer::ConnectionPaths {
+                id,
+                site_mechanism_id,
+                program,
+                style,
+            },
+        ] => OutputCapability {
+            layer_id: *id,
+            consumes: StructuralProductCapability::RandomSites,
+            payload: OutputCapabilityPayload::ConnectionPaths {
+                site_mechanism_id: *site_mechanism_id,
+                program: program.clone(),
+                style: *style,
+            },
+        },
+        _ => {
+            return Err(PatternPipelineError::new(
+                "pattern.output_layers.capability",
+                "random-site products require one fixed mark or connection output",
+            ));
+        }
     };
-    if *site_mechanism_id != site_product_id {
+    let site_mechanism_id = match &output.payload {
+        OutputCapabilityPayload::ConnectionPaths {
+            site_mechanism_id, ..
+        } => *site_mechanism_id,
+        OutputCapabilityPayload::Marks { .. } => match definition.output_layers.as_slice() {
+            [
+                PatternOutputLayer::MarkPrototype {
+                    site_mechanism_id, ..
+                },
+            ] => *site_mechanism_id,
+            _ => unreachable!("the output match retains one mark layer"),
+        },
+        _ => unreachable!("the random resolver creates only site outputs"),
+    };
+    if site_mechanism_id != site_product_id {
         return Err(PatternPipelineError::new(
             "pattern.output_layers.capability",
             "random-site output must consume its declared site product",
@@ -1286,14 +1438,7 @@ fn resolve_random_site_pipeline(
             parametric_curve: None,
         },
         modulation: definition.modulation.clone(),
-        ordered_outputs: vec![OutputCapability {
-            layer_id: *id,
-            consumes: product,
-            payload: OutputCapabilityPayload::Marks {
-                prototype: prototype.clone(),
-                orientation: MarkOrientation::Fixed,
-            },
-        }],
+        ordered_outputs: vec![output],
     })
 }
 
@@ -1576,6 +1721,303 @@ pub fn evaluate_typed_site_adjacency_with_source_cancellable(
     })
 }
 
+/// Evaluates one authored connection output through capability validation, full support coverage, graph construction, and path selection.
+///
+/// # Errors
+///
+/// Returns a stable program, capability, coverage, adjacency, connection, or cancellation diagnostic
+/// without exposing partial derived products.
+#[allow(clippy::too_many_arguments)] // This public boundary keeps the existing family/coverage/limit authorities explicit.
+pub fn evaluate_typed_connection_paths_with_source_cancellable(
+    family: &FamilyCapability,
+    request: &GridInspectRequest,
+    source: Option<&SourceField>,
+    output_layer_id: PatternOutputLayerId,
+    program: &ConnectionProgram,
+    adjacency_limits: SiteAdjacencyLimits,
+    connection_limits: ConnectionPathLimits,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<ConnectionPathEvaluation, PatternPipelineError> {
+    program
+        .validate()
+        .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
+    validate_connection_product(family.product, program)?;
+    let adjacency = program.adjacency();
+    let policy = SiteAdjacencyPolicy::MutualNearest {
+        maximum_degree: adjacency.maximum_degree as usize,
+        maximum_distance: adjacency.maximum_distance,
+    };
+    let evaluated = evaluate_typed_site_adjacency_with_source_cancellable(
+        family,
+        request,
+        source,
+        policy,
+        adjacency_limits,
+        is_cancelled,
+    )?;
+    let paths = build_connection_paths_cancellable(
+        output_layer_id,
+        &evaluated.graph,
+        program,
+        connection_limits,
+        is_cancelled,
+    )
+    .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
+    Ok(ConnectionPathEvaluation {
+        family: evaluated.family,
+        graph: evaluated.graph,
+        paths,
+    })
+}
+
+/// Evaluates one typed straight-guide intersection family into conventional retained maze walls.
+///
+/// The family envelope includes one complete outer cell ring for coverage, while geometry retains
+/// only actual sites inside or on the document canvas before deriving walls and cells. The canvas
+/// never manufactures arrangement edges or faces.
+///
+/// # Errors
+///
+/// Returns a stable typed-product, coverage, family, arrangement, limit, or cancellation error
+/// without exposing a partial maze result.
+pub fn evaluate_typed_maze_walls_cancellable(
+    family: &FamilyCapability,
+    request: &GridInspectRequest,
+    output_layer_id: PatternOutputLayerId,
+    program: &MazeProgram,
+    limits: MazeLimits,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<MazeProgramResult, PatternPipelineError> {
+    if request.guard_steps == 0 {
+        return Err(PatternPipelineError::new(
+            "maze.coverage.guard_steps",
+            "wall mazes require at least one request coverage guard step",
+        ));
+    }
+    if family.product != StructuralProductCapability::GuideIntersections
+        || family.generic_guides.is_some()
+        || family.dimensions.len() < 2
+        || family.dimensions.len() > 3
+    {
+        return Err(PatternPipelineError::new(
+            "maze.family.product",
+            "wall mazes require two or three typed straight-guide intersection dimensions",
+        ));
+    }
+    program
+        .validate()
+        .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
+    if !request.support_radius.is_finite() {
+        return Err(PatternPipelineError::new(
+            "maze.coverage.support",
+            "maze outer-cell-ring support must remain finite",
+        ));
+    }
+    // The generalized family evaluator already expands the base support by its active
+    // guard-step spacing.  Supplying the base request here therefore retains one complete
+    // outer cell ring without applying that guard expansion a second time.
+    let evaluated = evaluate_typed_family_product_cancellable(family, request, is_cancelled)?;
+    evaluate_typed_maze_walls_from_family_cancellable(
+        &evaluated,
+        request,
+        output_layer_id,
+        program,
+        limits,
+        is_cancelled,
+    )
+}
+
+/// Builds a maze from an accepted family after retaining only its inclusive document-canvas sites.
+///
+/// # Errors
+///
+/// Returns a stable support, typed-product, arrangement, limit, or cancellation error atomically.
+pub fn evaluate_typed_maze_walls_from_family_cancellable(
+    family: &TypedFamilyOutput,
+    request: &GridInspectRequest,
+    output_layer_id: PatternOutputLayerId,
+    program: &MazeProgram,
+    limits: MazeLimits,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<MazeProgramResult, PatternPipelineError> {
+    if is_cancelled() {
+        return Err(PatternPipelineError::new(
+            "evaluation.cancelled",
+            "evaluation was cancelled",
+        ));
+    }
+    if request.guard_steps == 0 {
+        return Err(PatternPipelineError::new(
+            "maze.coverage.guard_steps",
+            "wall mazes require at least one request coverage guard step",
+        ));
+    }
+    if family.guard_steps() == 0 || family.guard_steps() != request.guard_steps {
+        return Err(PatternPipelineError::new(
+            "maze.coverage.family_guard_steps",
+            "accepted maze family guard policy must exactly match the requested nonzero guard",
+        ));
+    }
+    if family.family.product != StructuralProductCapability::GuideIntersections
+        || family.family.generic_guides.is_some()
+        || !(2..=3).contains(&family.family.dimensions.len())
+    {
+        return Err(PatternPipelineError::new(
+            "maze.family.product",
+            "wall mazes require two or three typed straight-guide intersection dimensions",
+        ));
+    }
+    let exact_support = request.support_radius;
+    if !exact_support.is_finite() || family.planned_support_radius() + 1e-12 < exact_support {
+        return Err(PatternPipelineError::new(
+            "maze.coverage.support",
+            "accepted family envelope does not cover the requested maze support",
+        ));
+    }
+    let canvas = Bounds::new(
+        Point2::new(0.0, 0.0),
+        Point2::new(request.canvas.width, request.canvas.height),
+    )
+    .ok_or(PatternPipelineError::new(
+        "maze.coverage.support",
+        "maze canvas must remain finite",
+    ))?;
+    let mut site_count = 0_usize;
+    for site in family.site_set().iter() {
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        if canvas.contains(site.position) {
+            site_count = site_count.checked_add(1).ok_or(PatternPipelineError::new(
+                "maze.allocation",
+                "exact maze site selection overflows its allocation size",
+            ))?;
+        }
+    }
+    let mut sites = Vec::new();
+    reserve_stage20m(
+        &mut sites,
+        site_count,
+        "maze.allocation",
+        "exact maze site selection allocation failed",
+    )?;
+    for site in family.site_set().iter() {
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        if canvas.contains(site.position) {
+            sites.push(site.clone());
+        }
+    }
+    if sites.is_empty() {
+        return Err(PatternPipelineError::new(
+            "maze.coverage.support",
+            "requested maze support contains no family sites",
+        ));
+    }
+    let identity = generalized_fingerprint(
+        &family.family,
+        &StraightGuideInspectRequest {
+            canvas: request.canvas.clone(),
+            density: request.density.clone(),
+            rotation_degrees: request.rotation_degrees,
+            translation_x: request.translation_x,
+            translation_y: request.translation_y,
+            guard_steps: request.guard_steps,
+            support_radius: exact_support,
+            max_family_candidates: request.max_family_candidates,
+        },
+    );
+    let mut guide_axes = Vec::new();
+    reserve_stage20m(
+        &mut guide_axes,
+        family.straight_guides().len(),
+        "maze.allocation",
+        "maze guide-axis allocation failed",
+    )?;
+    for guide in family.straight_guides() {
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        guide_axes.push(
+            MazeGuideAxis::new(guide.id, guide.tangent)
+                .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?,
+        );
+    }
+    build_maze_walls_from_sites_cancellable(
+        output_layer_id,
+        &identity,
+        canvas,
+        &guide_axes,
+        &sites,
+        program,
+        limits,
+        is_cancelled,
+    )
+    .map_err(|error| PatternPipelineError::new(error.path(), error.message()))
+}
+
+/// Reserves bounded material Stage 20M vectors through one stable allocation diagnostic mapping.
+///
+/// # Errors
+///
+/// Returns the supplied stable allocation diagnostic when `Vec` cannot reserve the requested
+/// bounded material capacity. Standard `BTreeMap`/`BTreeSet` insertion remains infallible in the
+/// Rust standard library and is deliberately not replaced here.
+fn reserve_stage20m<T>(
+    values: &mut Vec<T>,
+    additional: usize,
+    path: &'static str,
+    message: &'static str,
+) -> Result<(), PatternPipelineError> {
+    values
+        .try_reserve(additional)
+        .map_err(|_| PatternPipelineError::new(path, message))
+}
+
+/// Enforces the typed site-product eligibility contract before family or graph allocation.
+fn validate_connection_product(
+    product: StructuralProductCapability,
+    program: &ConnectionProgram,
+) -> Result<(), PatternPipelineError> {
+    if product == StructuralProductCapability::ParametricPaths {
+        return Err(PatternPipelineError::new(
+            "connection.family.product",
+            "raw parametric-path products do not publish sites for connections",
+        ));
+    }
+    let broadly_eligible = matches!(
+        product,
+        StructuralProductCapability::GuideIntersections
+            | StructuralProductCapability::AlongGuideSites
+            | StructuralProductCapability::RandomSites
+    );
+    if !broadly_eligible {
+        return Err(PatternPipelineError::new(
+            "connection.family.product",
+            "resolved family product does not publish eligible connection sites",
+        ));
+    }
+    if matches!(program, ConnectionProgram::GridSpanningTree { .. })
+        && product != StructuralProductCapability::GuideIntersections
+    {
+        return Err(PatternPipelineError::new(
+            "connection.family.product",
+            "maze and spanning-tree programs require guide-intersection sites",
+        ));
+    }
+    Ok(())
+}
+
 /// Derives topology from one already evaluated typed site product without reinterpreting its mechanism.
 ///
 /// # Errors
@@ -1795,7 +2237,16 @@ fn source_location_order(left: PathLocation, right: PathLocation) -> std::cmp::O
         .then_with(|| left.parameter().total_cmp(&right.parameter()))
 }
 
-/// Evaluates resolved Stage 20D finite guide paths before any current-circle compatibility realization.
+/// Evaluates resolved finite guide paths using the authoritative local-grid placement policy.
+///
+/// Authored grid prototypes use the centered local origin, while the parametric structural-source
+/// adapter retains its already-established document placement. Cancellation is observed before
+/// allocation and during finite-path expansion.
+///
+/// # Errors
+///
+/// Returns bounded coverage, numeric, path, or cancellation errors without publishing a partial
+/// typed family.
 fn evaluate_generic_curve_guides_cancellable(
     family: &FamilyCapability,
     request: &GridInspectRequest,
@@ -1861,11 +2312,21 @@ fn evaluate_generic_curve_guides_cancellable(
         "coverage.curved_guides.proof",
         "curved-guide coverage could not prove a complete generation envelope",
     ))?;
-    let channel_transform = AffineTransform2D::rotate_about_then_translate(
-        Point2::new(request.canvas.width / 2.0, request.canvas.height / 2.0),
-        request.rotation_degrees,
-        Vector2::new(request.translation_x, request.translation_y),
-    )
+    let channel_transform = if generic.structural_source.is_some() {
+        // Parametric curves are explicitly centered by their adapter before this shared
+        // finite-path evaluator runs, so retain that adapter's established channel transform.
+        AffineTransform2D::rotate_about_then_translate(
+            Point2::new(request.canvas.width / 2.0, request.canvas.height / 2.0),
+            request.rotation_degrees,
+            Vector2::new(request.translation_x, request.translation_y),
+        )
+    } else {
+        grid_prototype_local_to_document_transform(
+            &request.canvas,
+            request.rotation_degrees,
+            Vector2::new(request.translation_x, request.translation_y),
+        )
+    }
     .ok_or(PatternPipelineError::new(
         "coverage.curved_guides.proof",
         "curved-guide coverage could not prove a complete generation envelope",
@@ -3157,14 +3618,22 @@ fn family_site_fingerprint(base: &str, sites: &[FamilySite]) -> String {
     format!("{base}:nominal-cell-basis:{}", fnv1a64(bytes))
 }
 
-/// Hashes complete resolved generic guide intent and layout inputs under the fixed Stage 20D identity prefix.
+/// Hashes complete resolved generic-guide intent and layout inputs under its placement contract.
+///
+/// Parametric structural sources keep their Stage 20D v1 identity because their adapter retains
+/// its historic document transform. Authored grid prototypes use the centered-local v2 identity.
 fn generic_curve_fingerprint(
     family: &FamilyCapability,
     request: &GridInspectRequest,
     generic: &GenericGuideCapability,
 ) -> String {
-    let mut bytes =
-        b"toniator-stage-20d-guide-family-v1|arc-policy-fixed-90-degree-cubic-v1".to_vec();
+    let prefix = if generic.structural_source.is_some() {
+        b"toniator-stage-20d-guide-family-v1|arc-policy-fixed-90-degree-cubic-v1".as_slice()
+    } else {
+        b"toniator-stage-20d-guide-family-v2-centered-local-origin|arc-policy-fixed-90-degree-cubic-v1"
+            .as_slice()
+    };
+    let mut bytes = prefix.to_vec();
     bytes.extend(family.provenance.definition_id.to_le_bytes());
     for id in &family.provenance.mechanism_ids {
         bytes.extend(id.0.to_le_bytes());
@@ -4784,7 +5253,10 @@ fn realization_provenance(
     }
     match plan.ordered_outputs.as_slice() {
         [output @ OutputCapability { consumes, .. }] if *consumes == family.family().product => {
-            let structural_input = if output.marks().is_some() {
+            let structural_input = if output.marks().is_some()
+                || output.connection_paths().is_some()
+                || output.maze_walls().is_some()
+            {
                 RealizationStructuralInput::Sites(family.site_set().clone())
             } else if output.guide_paths().is_some() {
                 let paths = family
@@ -5020,7 +5492,7 @@ pub struct GridInspectRequest {
 pub struct GuideCoverage {
     pub dimension_id: u64,
     pub spacing: f64,
-    /// The phase is normalized only for reporting; authored translation remains input state.
+    /// The local phase projected through the placed center and translation, normalized only for reporting.
     pub normalized_phase: f64,
     pub first_index: i64,
     pub last_index: i64,
@@ -5086,8 +5558,15 @@ pub struct GeneralizedStraightGuideOutput {
     pub sites: Vec<GeneralizedSite>,
 }
 
-/// Evaluate a selected generalized product with bounded cancellation points.
-/// It is intentionally independent of source/modulation/output presentation.
+/// Evaluates a selected generalized straight-guide product with bounded cancellation points.
+///
+/// Local guide coordinates map through the shared centered-origin transform and remain independent
+/// of source, modulation, and output presentation.
+///
+/// # Errors
+///
+/// Returns validation, bounded coverage, numeric, candidate-limit, or cancellation errors before
+/// exposing a partial structural output.
 pub fn evaluate_generalized_straight_guides_cancellable(
     family: &FamilyCapability,
     request: &StraightGuideInspectRequest,
@@ -5106,8 +5585,8 @@ pub fn evaluate_generalized_straight_guides_cancellable(
             "straight-guide family requires one through four dimensions",
         ));
     }
-    let transform = AffineTransform2D::rotate_about_then_translate(
-        Point2::new(request.canvas.width / 2.0, request.canvas.height / 2.0),
+    let transform = grid_prototype_local_to_document_transform(
+        &request.canvas,
         request.rotation_degrees,
         Vector2::new(request.translation_x, request.translation_y),
     )
@@ -5168,20 +5647,7 @@ pub fn evaluate_generalized_straight_guides_cancellable(
         let spacing = directional_spacing(&request.canvas, &request.density, normal)?
             * dimension.repetition.spacing_multiplier;
         let plan = DimensionPlan::new(dimension.id, normal, spacing, dimension.phase);
-        let item = plan.coverage(
-            domain,
-            transform,
-            &GridInspectRequest {
-                canvas: request.canvas.clone(),
-                density: request.density.clone(),
-                rotation_degrees: request.rotation_degrees,
-                translation_x: request.translation_x,
-                translation_y: request.translation_y,
-                guard_steps: request.guard_steps,
-                support_radius: request.support_radius,
-                max_family_candidates: request.max_family_candidates,
-            },
-        )?;
+        let item = plan.coverage(domain, transform)?;
         guide_total = guide_total
             .checked_add(guide_range_count(item)?)
             .ok_or(GridError::new(
@@ -5331,6 +5797,11 @@ pub fn evaluate_generalized_straight_guides_cancellable(
     })
 }
 
+/// Produces bounded pairwise guide intersections and merges every epsilon-coincident contributor set.
+///
+/// # Errors
+///
+/// Returns stable coverage or cancellation diagnostics before returning an incomplete site list.
 fn generalized_intersections(
     grouped: &[Vec<StraightGuide>],
     selected: &[usize],
@@ -5402,6 +5873,7 @@ fn generalized_intersections(
                 }
                 for guide_b in &grouped[right] {
                     if let Some(point) = line_intersection(guide_a, guide_b)
+                        .map(|point| snap_intersection_to_canvas_boundary(point, canvas))
                         && distance_to_canvas(point, canvas) <= margin
                     {
                         raw.push((point, vec![guide_a.id, guide_b.id]));
@@ -5423,6 +5895,7 @@ fn generalized_intersections(
             .then(a.1.cmp(&b.1))
     });
     let mut sites: Vec<GeneralizedSite> = Vec::with_capacity(raw.len());
+    let mut merge_comparisons = 0_usize;
     for (point, contributors) in raw {
         if cancelled() {
             return Err(GridError::new(
@@ -5430,10 +5903,34 @@ fn generalized_intersections(
                 "evaluation was cancelled",
             ));
         }
-        if let Some(existing) = sites
-            .last_mut()
-            .filter(|site| distance(site.position, point) <= epsilon)
-        {
+        let mut existing_index = None;
+        for index in (0..sites.len()).rev() {
+            if cancelled() {
+                return Err(GridError::new(
+                    "evaluation.cancelled",
+                    "evaluation was cancelled",
+                ));
+            }
+            if point.x - sites[index].position.x > epsilon {
+                break;
+            }
+            merge_comparisons = merge_comparisons.checked_add(1).ok_or(GridError::new(
+                "coverage.intersections.merge_limit",
+                "coincident merge work overflowed",
+            ))?;
+            if merge_comparisons > limit {
+                return Err(GridError::new(
+                    "coverage.intersections.merge_limit",
+                    "coincident merge work exceeds the configured limit",
+                ));
+            }
+            if distance(sites[index].position, point) <= epsilon {
+                existing_index = Some(index);
+                break;
+            }
+        }
+        if let Some(index) = existing_index {
+            let existing = &mut sites[index];
             let GeneralizedSiteProvenance::Intersection {
                 contributors: existing_contributors,
             } = &mut existing.provenance
@@ -5461,6 +5958,44 @@ fn generalized_intersections(
         });
     }
     Ok(sites)
+}
+
+/// Canonicalizes only numerical intersection noise that lies immediately beside a canvas edge.
+///
+/// Generalized-guide phases stay authored in their existing coordinate frame. This helper changes
+/// neither that phase nor a genuine guard-row coordinate: it clamps a finite coordinate only when
+/// it is within a scale-aware floating-point tolerance of the corresponding canvas minimum or
+/// maximum, before coverage, scope, merging, provenance, and identity are published.
+fn snap_intersection_to_canvas_boundary(point: Point2, canvas: Bounds) -> Point2 {
+    let coordinate_scale = canvas
+        .min
+        .x
+        .abs()
+        .max(canvas.min.y.abs())
+        .max(canvas.max.x.abs())
+        .max(canvas.max.y.abs())
+        .max(1.0);
+    let tolerance = 64.0 * f64::EPSILON * coordinate_scale;
+    Point2::new(
+        snap_coordinate_to_canvas_boundary(point.x, canvas.min.x, canvas.max.x, tolerance),
+        snap_coordinate_to_canvas_boundary(point.y, canvas.min.y, canvas.max.y, tolerance),
+    )
+}
+
+/// Clamps one finite coordinate only when roundoff places it beside an exact canvas boundary.
+fn snap_coordinate_to_canvas_boundary(
+    value: f64,
+    minimum: f64,
+    maximum: f64,
+    tolerance: f64,
+) -> f64 {
+    if (value - minimum).abs() <= tolerance {
+        minimum
+    } else if (value - maximum).abs() <= tolerance {
+        maximum
+    } else {
+        value
+    }
 }
 
 #[allow(clippy::too_many_arguments)] // Explicit structural inputs keep this product independent of render state.
@@ -5605,11 +6140,12 @@ fn validate_straight_request(request: &StraightGuideInspectRequest) -> Result<()
     })
 }
 
+/// Hashes generalized straight-guide intent under the centered-local placement contract.
 fn generalized_fingerprint(
     family: &FamilyCapability,
     request: &StraightGuideInspectRequest,
 ) -> String {
-    let mut bytes = b"toniator-stage-16a-straight-guide-family-v1".to_vec();
+    let mut bytes = b"toniator-stage-16a-straight-guide-family-v2-centered-local-origin".to_vec();
     bytes.extend(family.provenance.definition_id.to_le_bytes());
     for mechanism_id in &family.provenance.mechanism_ids {
         bytes.extend(mechanism_id.0.to_le_bytes());
@@ -5851,7 +6387,16 @@ pub fn realize_typed_canonical_strokes_cancellable(
             })?,
             is_cancelled,
         )
-        .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
+        .map_err(|error| {
+            if error.path() == "curve.outline.segment_limit" {
+                PatternPipelineError::new(
+                    "connection.stroke.outline_limit",
+                    "connection stroke outline exceeds the segment limit",
+                )
+            } else {
+                PatternPipelineError::new(error.path(), error.message())
+            }
+        })?;
         outline_segments = outline_segments
             .checked_add(
                 outline
@@ -5893,7 +6438,29 @@ pub fn realize_typed_canonical_strokes_cancellable(
     bytes.extend(response.minimum_thickness.to_bits().to_le_bytes());
     bytes.extend(response.maximum_thickness.to_bits().to_le_bytes());
     for stroke in &strokes {
-        append_structural_path_instance_identity(&mut bytes, stroke.source_path_id);
+        match &stroke.source_id {
+            toniator_geometry::CanonicalStrokeSourceId::Structural(id) => {
+                append_structural_path_instance_identity(&mut bytes, *id);
+            }
+            toniator_geometry::CanonicalStrokeSourceId::Connection(id) => {
+                bytes.push(0x43);
+                bytes.extend(id.output_layer_id.0.to_le_bytes());
+                bytes.extend(id.component_minimum.mechanism_id.0.to_le_bytes());
+                bytes.extend((id.component_minimum.ordinal as u64).to_le_bytes());
+                bytes.extend(id.component_ordinal.to_le_bytes());
+                bytes.extend(id.first_endpoint.mechanism_id.0.to_le_bytes());
+                bytes.extend((id.first_endpoint.ordinal as u64).to_le_bytes());
+                bytes.extend(id.last_endpoint.mechanism_id.0.to_le_bytes());
+                bytes.extend((id.last_endpoint.ordinal as u64).to_le_bytes());
+                bytes.extend(id.ordinal.to_le_bytes());
+            }
+            toniator_geometry::CanonicalStrokeSourceId::Maze(id) => {
+                bytes.push(0x4d);
+                bytes.extend(id.output_layer_id.0.to_le_bytes());
+                bytes.extend(id.wall.first.0.to_le_bytes());
+                bytes.extend(id.wall.second.0.to_le_bytes());
+            }
+        }
         for sample in &stroke.profile {
             bytes.extend(sample.center.x.to_bits().to_le_bytes());
             bytes.extend(sample.center.y.to_bits().to_le_bytes());
@@ -5914,6 +6481,566 @@ pub fn realize_typed_canonical_strokes_cancellable(
             response,
             strokes,
         },
+    })
+}
+
+/// Realizes selected connection paths as canonical round strokes without exposing adjacency to renderers.
+///
+/// # Errors
+///
+/// Returns stable sampling, geometry, configured-limit, or cancellation diagnostics before any
+/// connection stroke collection is published.
+#[allow(clippy::too_many_arguments)] // The existing canonical stroke boundary keeps source, canvas, response, and limits explicit.
+pub fn realize_connection_canonical_strokes_cancellable(
+    paths: &ConnectionPathSet,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: StrokeResponse,
+    style: toniator_domain::PathStrokeStyle,
+    max_profile_samples: usize,
+    max_outline_segments: usize,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<CanonicalStrokeRealization, PatternPipelineError> {
+    let mut strokes = Vec::new();
+    reserve_stage20m(
+        &mut strokes,
+        paths.paths.len(),
+        "connection.allocation",
+        "connection canonical-stroke allocation failed",
+    )?;
+    let mut profile_samples = 0_usize;
+    let mut outline_segments = 0_usize;
+    for connection in &paths.paths {
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        let mut profile = Vec::new();
+        let profile_capacity =
+            connection
+                .path
+                .segments()
+                .len()
+                .checked_mul(2)
+                .ok_or(PatternPipelineError::new(
+                    "connection.allocation",
+                    "connection stroke-profile allocation size overflows",
+                ))?;
+        reserve_stage20m(
+            &mut profile,
+            profile_capacity,
+            "connection.allocation",
+            "connection stroke-profile allocation failed",
+        )?;
+        for (segment_index, segment) in connection.path.segments().iter().enumerate() {
+            for parameter in [0.0, 1.0] {
+                if is_cancelled() {
+                    return Err(PatternPipelineError::new(
+                        "evaluation.cancelled",
+                        "evaluation was cancelled",
+                    ));
+                }
+                let sample = stroke_sample(
+                    segment,
+                    segment_index,
+                    parameter,
+                    source,
+                    canvas,
+                    mapping,
+                    response,
+                    connection.nominal_basis,
+                )?;
+                // Preserve both segment-local locations at a shared graph vertex. The outline
+                // authority consumes that same-center tangent discontinuity to construct its
+                // round join; only duplicate locations, not duplicate centers, are redundant.
+                if profile.last().is_none_or(|previous: &StrokeProfileSample| {
+                    previous.location != sample.location
+                }) {
+                    profile_samples =
+                        profile_samples
+                            .checked_add(1)
+                            .ok_or(PatternPipelineError::new(
+                                "connection.stroke.profile_limit",
+                                "connection stroke profile exceeds the sample limit",
+                            ))?;
+                    if profile_samples > max_profile_samples {
+                        return Err(PatternPipelineError::new(
+                            "connection.stroke.profile_limit",
+                            "connection stroke profile exceeds the sample limit",
+                        ));
+                    }
+                    profile.push(sample);
+                }
+            }
+        }
+        let mut outline_input = Vec::new();
+        reserve_stage20m(
+            &mut outline_input,
+            profile.len(),
+            "connection.allocation",
+            "connection outline-input allocation failed",
+        )?;
+        for sample in &profile {
+            if is_cancelled() {
+                return Err(PatternPipelineError::new(
+                    "evaluation.cancelled",
+                    "evaluation was cancelled",
+                ));
+            }
+            outline_input.push(VariableWidthPathSample {
+                location: sample.location,
+                width: sample.width,
+            });
+        }
+        let outline = build_variable_width_outline_cancellable(
+            &connection.path,
+            &outline_input,
+            style,
+            1.0 / 8.0,
+            VariableWidthOutlineLimits::new(
+                max_outline_segments.saturating_sub(outline_segments).max(1),
+            )
+            .map_err(|_| {
+                PatternPipelineError::new(
+                    "connection.stroke.outline_limit",
+                    "configured connection stroke outline limit must be nonzero",
+                )
+            })?,
+            is_cancelled,
+        )
+        .map_err(|error| {
+            if error.path() == "curve.outline.segment_limit" {
+                PatternPipelineError::new(
+                    "connection.stroke.outline_limit",
+                    "connection stroke outline exceeds the segment limit",
+                )
+            } else {
+                PatternPipelineError::new(error.path(), error.message())
+            }
+        })?;
+        outline_segments = outline_segments
+            .checked_add(
+                outline
+                    .contours
+                    .iter()
+                    .map(|contour| contour.segments.len())
+                    .sum::<usize>(),
+            )
+            .ok_or(PatternPipelineError::new(
+                "connection.stroke.outline_limit",
+                "connection stroke outline exceeds the segment limit",
+            ))?;
+        if outline_segments > max_outline_segments {
+            return Err(PatternPipelineError::new(
+                "connection.stroke.outline_limit",
+                "connection stroke outline exceeds the segment limit",
+            ));
+        }
+        strokes.push(
+            CanonicalStroke::new_connection(
+                connection.id.clone(),
+                connection.path.clone(),
+                connection.nominal_basis,
+                style,
+                profile,
+                outline,
+            )
+            .map_err(|_| {
+                PatternPipelineError::new(
+                    "connection.stroke.geometry",
+                    "connection canonical stroke geometry must remain finite",
+                )
+            })?,
+        );
+    }
+    let mut identity_capacity = paths
+        .fingerprint()
+        .len()
+        .checked_add(CANONICAL_STROKE_OUTLINE_CONTRACT_ID.len())
+        .and_then(|value| value.checked_add(16))
+        .ok_or(PatternPipelineError::new(
+            "connection.allocation",
+            "connection identity allocation size overflows",
+        ))?;
+    for stroke in &strokes {
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        let profile_bytes =
+            stroke
+                .profile
+                .len()
+                .checked_mul(24)
+                .ok_or(PatternPipelineError::new(
+                    "connection.allocation",
+                    "connection identity profile allocation size overflows",
+                ))?;
+        identity_capacity = identity_capacity
+            .checked_add(72)
+            .and_then(|value| value.checked_add(profile_bytes))
+            .ok_or(PatternPipelineError::new(
+                "connection.allocation",
+                "connection identity allocation size overflows",
+            ))?;
+    }
+    let mut bytes = Vec::new();
+    reserve_stage20m(
+        &mut bytes,
+        identity_capacity,
+        "connection.allocation",
+        "connection identity allocation failed",
+    )?;
+    bytes.extend(paths.fingerprint().as_bytes());
+    bytes.extend(CANONICAL_STROKE_OUTLINE_CONTRACT_ID.as_bytes());
+    bytes.extend(response.minimum_thickness.to_bits().to_le_bytes());
+    bytes.extend(response.maximum_thickness.to_bits().to_le_bytes());
+    for stroke in &strokes {
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        let toniator_geometry::CanonicalStrokeSourceId::Connection(id) = &stroke.source_id else {
+            unreachable!("connection realizer sets connection provenance");
+        };
+        bytes.extend(id.output_layer_id.0.to_le_bytes());
+        bytes.extend(id.component_minimum.mechanism_id.0.to_le_bytes());
+        bytes.extend((id.component_minimum.ordinal as u64).to_le_bytes());
+        bytes.extend(id.component_ordinal.to_le_bytes());
+        bytes.extend(id.first_endpoint.mechanism_id.0.to_le_bytes());
+        bytes.extend((id.first_endpoint.ordinal as u64).to_le_bytes());
+        bytes.extend(id.last_endpoint.mechanism_id.0.to_le_bytes());
+        bytes.extend((id.last_endpoint.ordinal as u64).to_le_bytes());
+        bytes.extend(id.ordinal.to_le_bytes());
+        for sample in &stroke.profile {
+            bytes.extend(sample.center.x.to_bits().to_le_bytes());
+            bytes.extend(sample.center.y.to_bits().to_le_bytes());
+            bytes.extend(sample.normalized_thickness.to_bits().to_le_bytes());
+        }
+    }
+    Ok(CanonicalStrokeRealization {
+        family_fingerprint: paths.fingerprint().to_owned(),
+        realization_fingerprint: fnv1a64(bytes),
+        source_identity: source.identity().clone(),
+        response,
+        strokes,
+    })
+}
+
+/// Realizes retained conventional maze walls as canonical round strokes without exposing faces or passages.
+///
+/// # Errors
+///
+/// Returns stable sampling, outline-limit, geometry, or cancellation errors before publishing any
+/// partial wall-stroke collection.
+#[allow(clippy::too_many_arguments)] // The canonical stroke boundary keeps all resource policy explicit.
+pub fn realize_maze_canonical_strokes_cancellable(
+    maze: &MazeProgramResult,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: StrokeResponse,
+    style: toniator_domain::PathStrokeStyle,
+    max_profile_samples: usize,
+    max_outline_segments: usize,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<CanonicalStrokeRealization, PatternPipelineError> {
+    let mut strokes = Vec::new();
+    reserve_stage20m(
+        &mut strokes,
+        maze.wall_paths.len(),
+        "maze.allocation",
+        "maze canonical-stroke allocation failed",
+    )?;
+    let mut profile_samples = 0_usize;
+    let mut outline_segments = 0_usize;
+    for wall in &maze.wall_paths {
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        let mut profile = Vec::new();
+        let profile_capacity =
+            wall.path
+                .segments()
+                .len()
+                .checked_mul(2)
+                .ok_or(PatternPipelineError::new(
+                    "maze.allocation",
+                    "maze stroke-profile allocation size overflows",
+                ))?;
+        reserve_stage20m(
+            &mut profile,
+            profile_capacity,
+            "maze.allocation",
+            "maze stroke-profile allocation failed",
+        )?;
+        for (segment_index, segment) in wall.path.segments().iter().enumerate() {
+            for parameter in [0.0, 1.0] {
+                if is_cancelled() {
+                    return Err(PatternPipelineError::new(
+                        "evaluation.cancelled",
+                        "evaluation was cancelled",
+                    ));
+                }
+                let sample = stroke_sample(
+                    segment,
+                    segment_index,
+                    parameter,
+                    source,
+                    canvas,
+                    mapping,
+                    response,
+                    wall.nominal_basis,
+                )?;
+                if profile.last().is_none_or(|previous: &StrokeProfileSample| {
+                    previous.location != sample.location
+                }) {
+                    profile_samples =
+                        profile_samples
+                            .checked_add(1)
+                            .ok_or(PatternPipelineError::new(
+                                "maze.stroke.profile_limit",
+                                "maze stroke profile exceeds the sample limit",
+                            ))?;
+                    if profile_samples > max_profile_samples {
+                        return Err(PatternPipelineError::new(
+                            "maze.stroke.profile_limit",
+                            "maze stroke profile exceeds the sample limit",
+                        ));
+                    }
+                    profile.push(sample);
+                }
+            }
+        }
+        let mut outline_input = Vec::new();
+        reserve_stage20m(
+            &mut outline_input,
+            profile.len(),
+            "maze.allocation",
+            "maze outline-input allocation failed",
+        )?;
+        for sample in &profile {
+            if is_cancelled() {
+                return Err(PatternPipelineError::new(
+                    "evaluation.cancelled",
+                    "evaluation was cancelled",
+                ));
+            }
+            outline_input.push(VariableWidthPathSample {
+                location: sample.location,
+                width: sample.width,
+            });
+        }
+        let outline = build_variable_width_outline_cancellable(
+            &wall.path,
+            &outline_input,
+            style,
+            1.0 / 8.0,
+            VariableWidthOutlineLimits::new(
+                max_outline_segments.saturating_sub(outline_segments).max(1),
+            )
+            .map_err(|_| {
+                PatternPipelineError::new(
+                    "maze.stroke.outline_limit",
+                    "configured maze stroke outline limit must be nonzero",
+                )
+            })?,
+            is_cancelled,
+        )
+        .map_err(|error| {
+            if error.path() == "curve.outline.segment_limit" {
+                PatternPipelineError::new(
+                    "maze.stroke.outline_limit",
+                    "maze stroke outline exceeds the segment limit",
+                )
+            } else {
+                PatternPipelineError::new(error.path(), error.message())
+            }
+        })?;
+        outline_segments = outline_segments
+            .checked_add(
+                outline
+                    .contours
+                    .iter()
+                    .map(|contour| contour.segments.len())
+                    .sum::<usize>(),
+            )
+            .ok_or(PatternPipelineError::new(
+                "maze.stroke.outline_limit",
+                "maze stroke outline exceeds the segment limit",
+            ))?;
+        if outline_segments > max_outline_segments {
+            return Err(PatternPipelineError::new(
+                "maze.stroke.outline_limit",
+                "maze stroke outline exceeds the segment limit",
+            ));
+        }
+        strokes.push(
+            CanonicalStroke::new_maze(
+                wall.id,
+                wall.path.clone(),
+                wall.nominal_basis,
+                style,
+                profile,
+                outline,
+            )
+            .map_err(|_| {
+                PatternPipelineError::new(
+                    "maze.stroke.geometry",
+                    "maze canonical stroke geometry must remain finite",
+                )
+            })?,
+        );
+    }
+    let mut identity_capacity = maze
+        .fingerprint()
+        .len()
+        .checked_add(CANONICAL_STROKE_OUTLINE_CONTRACT_ID.len())
+        .and_then(|value| value.checked_add(16))
+        .ok_or(PatternPipelineError::new(
+            "maze.allocation",
+            "maze identity allocation size overflows",
+        ))?;
+    for stroke in &strokes {
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        let profile_bytes =
+            stroke
+                .profile
+                .len()
+                .checked_mul(24)
+                .ok_or(PatternPipelineError::new(
+                    "maze.allocation",
+                    "maze identity profile allocation size overflows",
+                ))?;
+        identity_capacity = identity_capacity
+            .checked_add(16)
+            .and_then(|value| value.checked_add(profile_bytes))
+            .ok_or(PatternPipelineError::new(
+                "maze.allocation",
+                "maze identity allocation size overflows",
+            ))?;
+    }
+    let mut bytes = Vec::new();
+    reserve_stage20m(
+        &mut bytes,
+        identity_capacity,
+        "maze.allocation",
+        "maze identity allocation failed",
+    )?;
+    bytes.extend(maze.fingerprint().as_bytes());
+    bytes.extend(CANONICAL_STROKE_OUTLINE_CONTRACT_ID.as_bytes());
+    bytes.extend(response.minimum_thickness.to_bits().to_le_bytes());
+    bytes.extend(response.maximum_thickness.to_bits().to_le_bytes());
+    for stroke in &strokes {
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        let toniator_geometry::CanonicalStrokeSourceId::Maze(id) = stroke.source_id else {
+            unreachable!("maze realizer sets maze-wall provenance");
+        };
+        bytes.extend(id.output_layer_id.0.to_le_bytes());
+        bytes.extend(id.wall.first.0.to_le_bytes());
+        bytes.extend(id.wall.second.0.to_le_bytes());
+        for sample in &stroke.profile {
+            bytes.extend(sample.center.x.to_bits().to_le_bytes());
+            bytes.extend(sample.center.y.to_bits().to_le_bytes());
+            bytes.extend(sample.normalized_thickness.to_bits().to_le_bytes());
+        }
+    }
+    Ok(CanonicalStrokeRealization {
+        family_fingerprint: maze.fingerprint().to_owned(),
+        realization_fingerprint: fnv1a64(bytes),
+        source_identity: source.identity().clone(),
+        response,
+        strokes,
+    })
+}
+
+/// Binds canonical maze-wall strokes to the validated typed family and output plan before rendering.
+///
+/// # Errors
+///
+/// Returns a plan-provenance, stroke, limit, or cancellation error without publishing partial output.
+#[allow(clippy::too_many_arguments)]
+pub fn realize_typed_maze_canonical_strokes_cancellable(
+    family: &TypedFamilyOutput,
+    plan: &PatternPipelinePlan,
+    maze: &MazeProgramResult,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: StrokeResponse,
+    style: toniator_domain::PathStrokeStyle,
+    max_profile_samples: usize,
+    max_outline_segments: usize,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<TypedRealization<CanonicalStrokeRealization>, PatternPipelineError> {
+    Ok(TypedRealization {
+        provenance: realization_provenance(family, plan)?,
+        output: realize_maze_canonical_strokes_cancellable(
+            maze,
+            source,
+            canvas,
+            mapping,
+            response,
+            style,
+            max_profile_samples,
+            max_outline_segments,
+            is_cancelled,
+        )?,
+    })
+}
+
+/// Binds connection strokes to the validated typed family/plan provenance before renderer consumption.
+///
+/// # Errors
+///
+/// Returns a stable plan-provenance or canonical-connection diagnostic without publishing partial strokes.
+#[allow(clippy::too_many_arguments)]
+pub fn realize_typed_connection_canonical_strokes_cancellable(
+    family: &TypedFamilyOutput,
+    plan: &PatternPipelinePlan,
+    paths: &ConnectionPathSet,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: StrokeResponse,
+    style: toniator_domain::PathStrokeStyle,
+    max_profile_samples: usize,
+    max_outline_segments: usize,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<TypedRealization<CanonicalStrokeRealization>, PatternPipelineError> {
+    Ok(TypedRealization {
+        provenance: realization_provenance(family, plan)?,
+        output: realize_connection_canonical_strokes_cancellable(
+            paths,
+            source,
+            canvas,
+            mapping,
+            response,
+            style,
+            max_profile_samples,
+            max_outline_segments,
+            is_cancelled,
+        )?,
     })
 }
 
@@ -6696,6 +7823,65 @@ fn append_output_capability_identity(bytes: &mut Vec<u8>, output: &OutputCapabil
                 toniator_domain::StrokeCap::Round => 1,
             });
         }
+        OutputCapabilityPayload::MazeWalls {
+            site_mechanism_id,
+            program,
+            style,
+        } => {
+            bytes.push(4);
+            bytes.extend(site_mechanism_id.0.to_le_bytes());
+            bytes.extend(program.seed.to_le_bytes());
+            bytes.push(match program.algorithm {
+                toniator_domain::GridMazeAlgorithm::RecursiveBacktracker => 1,
+            });
+            bytes.push(match style.join {
+                toniator_domain::StrokeJoin::Round => 1,
+            });
+            bytes.push(match style.cap {
+                toniator_domain::StrokeCap::Round => 1,
+            });
+        }
+        OutputCapabilityPayload::ConnectionPaths {
+            site_mechanism_id,
+            program,
+            style,
+        } => {
+            bytes.push(3);
+            bytes.extend(site_mechanism_id.0.to_le_bytes());
+            append_connection_program_identity(bytes, program);
+            bytes.push(match style.join {
+                toniator_domain::StrokeJoin::Round => 1,
+            });
+            bytes.push(match style.cap {
+                toniator_domain::StrokeCap::Round => 1,
+            });
+        }
+    }
+}
+
+/// Appends complete authored connection intent so program and seed changes cannot reuse a realization identity.
+fn append_connection_program_identity(bytes: &mut Vec<u8>, program: &ConnectionProgram) {
+    // Geometry owns the selection-algorithm discriminator. This stays in the connection-only
+    // realization identity; the family structural fingerprint has no output/program bytes.
+    append_identity_text(bytes, connection_program_contract_id(program));
+    let adjacency = program.adjacency();
+    bytes.extend(adjacency.maximum_degree.to_le_bytes());
+    bytes.extend(adjacency.maximum_distance.to_bits().to_le_bytes());
+    match program {
+        ConnectionProgram::NearestLinks { .. } => bytes.push(1),
+        ConnectionProgram::RandomLinks {
+            minimum_degree,
+            seed,
+            ..
+        } => {
+            bytes.push(2);
+            bytes.extend(minimum_degree.to_le_bytes());
+            bytes.extend(seed.to_le_bytes());
+        }
+        ConnectionProgram::GridSpanningTree { seed, .. } => {
+            bytes.push(3);
+            bytes.extend(seed.to_le_bytes());
+        }
     }
 }
 
@@ -6950,6 +8136,39 @@ fn fnv1a64(bytes: impl IntoIterator<Item = u8>) -> String {
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     format!("fnv1a64:{hash:016x}")
+}
+
+#[cfg(test)]
+mod stage20m_allocation_tests {
+    use super::*;
+
+    /// Exercises Stage 20M's fallible vector reservation mapping without a process-wide allocator.
+    #[test]
+    fn impossible_reservation_reports_the_requested_stage20m_allocation_path() {
+        let mut values = Vec::<u8>::new();
+        assert_eq!(
+            reserve_stage20m(
+                &mut values,
+                usize::MAX,
+                "maze.allocation",
+                "test allocation failure",
+            )
+            .expect_err("an impossible capacity reservation fails deterministically")
+            .path(),
+            "maze.allocation"
+        );
+        assert_eq!(
+            reserve_stage20m(
+                &mut values,
+                usize::MAX,
+                "connection.allocation",
+                "test allocation failure",
+            )
+            .expect_err("connection reservation reports its own stable path")
+            .path(),
+            "connection.allocation"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -7399,6 +8618,111 @@ mod realization_tests {
         decode_source(&bytes, SourceFormatHint::Png).unwrap()
     }
 
+    /// Realizes a cornered connection trail while retaining segment-local round-join samples.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the local finite graph fixture no longer satisfies the public adjacency or
+    /// connection-program contracts.
+    #[test]
+    fn connection_corner_profiles_preserve_round_join_locations_without_stationarity() {
+        let mechanism = PatternMechanismId(991);
+        let sites = FamilySiteSet::new(
+            "connection-corner-profile".into(),
+            mechanism,
+            [
+                Point2::new(0.0, 0.0),
+                Point2::new(10.0, 0.0),
+                Point2::new(10.0, 10.0),
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, position)| FamilySite {
+                id: FamilySiteId {
+                    mechanism_id: mechanism,
+                    ordinal,
+                },
+                position,
+                nominal_cell_basis: NominalCellBasis::new(
+                    Vector2::new(10.0, 0.0),
+                    Vector2::new(0.0, 10.0),
+                )
+                .expect("finite local basis"),
+                scope: SiteScope::Canvas,
+                provenance: FamilySiteProvenance::Random {
+                    candidate_ordinal: ordinal,
+                    accepted_ordinal: ordinal,
+                    exclusion_neighbor_ordinal: None,
+                },
+            })
+            .collect(),
+        )
+        .expect("finite connection sites");
+        let adjacency = toniator_domain::ConnectionAdjacencyIntent {
+            maximum_degree: 2,
+            maximum_distance: 20.0,
+        };
+        let graph = build_site_adjacency_cancellable(
+            &sites,
+            SiteAdjacencyPolicy::MutualNearest {
+                maximum_degree: adjacency.maximum_degree as usize,
+                maximum_distance: adjacency.maximum_distance,
+            },
+            SiteAdjacencyLimits::default(),
+            &|| false,
+        )
+        .expect("corner adjacency");
+        let paths = build_connection_paths_cancellable(
+            PatternOutputLayerId(992),
+            &graph,
+            &ConnectionProgram::NearestLinks { adjacency },
+            ConnectionPathLimits::default(),
+            &|| false,
+        )
+        .expect("corner connection paths");
+        assert!(
+            paths
+                .paths
+                .iter()
+                .any(|path| path.path.segments().len() > 1)
+        );
+        let source = source_from_rgba(
+            11,
+            (0_u8..11)
+                .flat_map(|index| {
+                    let value = index.saturating_mul(24);
+                    [value, value, value, 255]
+                })
+                .collect(),
+        );
+        let realized = realize_connection_canonical_strokes_cancellable(
+            &paths,
+            &source,
+            &CanvasSpec {
+                width: 10.0,
+                height: 10.0,
+            },
+            SourceMapping::canonical(SourceMappingComponent::Luminance),
+            StrokeResponse {
+                minimum_thickness: 0.1,
+                maximum_thickness: 0.6,
+            },
+            toniator_domain::PathStrokeStyle::default(),
+            MAX_STROKE_PROFILE_SAMPLES,
+            MAX_STROKE_OUTLINE_SEGMENTS,
+            &|| false,
+        )
+        .expect("corner connection outline");
+        assert!(
+            realized.strokes.iter().any(|stroke| {
+                stroke.profile.windows(2).any(|pair| {
+                    pair[0].center == pair[1].center && pair[0].location != pair[1].location
+                })
+            }),
+            "connection profiles retain segment-local samples for a round join"
+        );
+    }
+
     fn sites_at_positions(positions: &[f64]) -> GridFamilyOutput {
         let mut output = family();
         let prototype = output.sites[0].clone();
@@ -7846,8 +9170,15 @@ pub fn evaluate_straight_grid(request: &GridInspectRequest) -> Result<GridFamily
     evaluate_straight_grid_cancellable(request, &|| false)
 }
 
-/// The cancellation-aware structural planner used by the generic evaluator.
-/// It retains the exact accepted output when the probe never cancels.
+/// Evaluates the cancellation-aware legacy straight-grid structural planner.
+///
+/// It uses the shared centered local origin and retains the exact accepted output when the probe
+/// never cancels.
+///
+/// # Errors
+///
+/// Returns validation, bounded coverage, candidate-limit, numeric, or cancellation errors without
+/// publishing a partial family.
 pub fn evaluate_straight_grid_cancellable(
     request: &GridInspectRequest,
     is_cancelled: &dyn Fn() -> bool,
@@ -7862,8 +9193,8 @@ pub fn evaluate_straight_grid_cancellable(
 
     let spacing_x = directional_spacing(&request.canvas, &request.density, Vector2::new(1.0, 0.0))?;
     let spacing_y = directional_spacing(&request.canvas, &request.density, Vector2::new(0.0, 1.0))?;
-    let transform = AffineTransform2D::rotate_about_then_translate(
-        Point2::new(request.canvas.width / 2.0, request.canvas.height / 2.0),
+    let transform = grid_prototype_local_to_document_transform(
+        &request.canvas,
         request.rotation_degrees,
         Vector2::new(request.translation_x, request.translation_y),
     )
@@ -7896,8 +9227,8 @@ pub fn evaluate_straight_grid_cancellable(
         DimensionPlan::new(SECOND_DIMENSION_ID, Vector2::new(0.0, 1.0), spacing_y, 0.0),
     ];
     let plans = [
-        dimensions[0].coverage(generation_domain, transform, request)?,
-        dimensions[1].coverage(generation_domain, transform, request)?,
+        dimensions[0].coverage(generation_domain, transform)?,
+        dimensions[1].coverage(generation_domain, transform)?,
     ];
     if is_cancelled() {
         return Err(GridError::new(
@@ -8016,24 +9347,27 @@ impl DimensionPlan {
         }
     }
 
+    /// Computes bounded local index coverage and the final document-space line phase.
+    ///
+    /// # Errors
+    ///
+    /// Returns `coverage` when the finite local generation domain cannot be projected.
     fn coverage(
         self,
         domain: Bounds,
         transform: AffineTransform2D,
-        request: &GridInspectRequest,
     ) -> Result<GuideCoverage, GridError> {
         let (minimum, maximum) = projection_range(domain.corners(), self.normal)
             .ok_or(GridError::new("coverage", "could not project local domain"))?;
         let first_index = checked_index(((minimum - self.phase) / self.spacing).floor())?;
         let last_index = checked_index(((maximum - self.phase) / self.spacing).ceil())?;
         let document_normal = transform.apply_vector(self.normal);
-        let translated_phase = request
-            .translation_x
-            .mul_add(document_normal.x, request.translation_y * document_normal.y);
+        let placed_origin = transform.apply_point(Point2::new(0.0, 0.0));
+        let placed_phase = placed_origin.dot(document_normal);
         Ok(GuideCoverage {
             dimension_id: self.id.0,
             spacing: self.spacing,
-            normalized_phase: (self.phase + translated_phase).rem_euclid(self.spacing),
+            normalized_phase: (self.phase + placed_phase).rem_euclid(self.spacing),
             first_index,
             last_index,
         })
@@ -8209,6 +9543,30 @@ fn distance_to_canvas(point: Point2, canvas: Bounds) -> f64 {
     dx.hypot(dy)
 }
 
+/// Places local grid-prototype coordinates at the document canvas center before authored translation.
+///
+/// Legacy/generalized straight grids and generic-guide prototypes share this authority: local `(0, 0)` maps to
+/// the geometric canvas center, rotation occurs about that local origin, and translation then
+/// moves the placed result in document axes. The helper returns `None` only when the finite
+/// canvas/translation combination cannot produce a finite affine transform.
+fn grid_prototype_local_to_document_transform(
+    canvas: &CanvasSpec,
+    rotation_degrees: f64,
+    translation: Vector2,
+) -> Option<AffineTransform2D> {
+    let placed_origin = Point2::new(
+        canvas.width * 0.5 + translation.x,
+        canvas.height * 0.5 + translation.y,
+    );
+    placed_origin.is_finite().then_some(())?;
+    AffineTransform2D::rotate_about_then_translate(
+        Point2::new(0.0, 0.0),
+        rotation_degrees,
+        Vector2::new(placed_origin.x, placed_origin.y),
+    )
+}
+
+/// Hashes legacy straight-grid intent under the centered-local placement contract.
 fn fingerprint(request: &GridInspectRequest, spacing_x: f64, spacing_y: f64) -> String {
     let values = [
         request.canvas.width,
@@ -8223,7 +9581,7 @@ fn fingerprint(request: &GridInspectRequest, spacing_x: f64, spacing_y: f64) -> 
         spacing_y,
     ];
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for byte in b"toniator-stage-3-straight-grid-v2-world-support-envelope"
+    for byte in b"toniator-stage-3-straight-grid-v3-centered-local-origin"
         .iter()
         .copied()
         .chain(request.guard_steps.to_le_bytes())
@@ -8385,6 +9743,75 @@ mod coverage_tests {
         );
     }
 
+    /// Places zero-index legacy grid lines at the canvas center before rotation and translation.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the centered local-origin transform, zero-index intersection, or reported
+    /// document-space phase diverges from the shared straight-grid authority.
+    #[test]
+    fn legacy_grid_local_origin_maps_to_center_then_document_translation() {
+        let mut request = GridInspectRequest {
+            canvas: CanvasSpec {
+                width: 137.0,
+                height: 83.0,
+            },
+            density: DensityMetric2D {
+                across_x: 13.7,
+                across_y: 8.3,
+                aspect_locked: false,
+            },
+            rotation_degrees: 47.0,
+            translation_x: 0.0,
+            translation_y: 0.0,
+            guard_steps: 1,
+            support_radius: 2.0,
+            max_family_candidates: 20_000,
+        };
+        let center = Point2::new(request.canvas.width * 0.5, request.canvas.height * 0.5);
+        let centered = evaluate_straight_grid(&request).expect("centered legacy grid evaluates");
+        for dimension_id in [FIRST_DIMENSION_ID, SECOND_DIMENSION_ID] {
+            let guide = centered
+                .guides
+                .iter()
+                .find(|guide| guide.id == GuideInstanceId::new(dimension_id, 0))
+                .expect("zero-index guide remains covered");
+            assert_eq!(guide.anchor, center);
+        }
+        assert!(centered.sites.iter().any(|site| site.id.first_index == 0
+            && site.id.second_index == 0
+            && site.position == center));
+
+        request.translation_x = 7.25;
+        request.translation_y = -11.5;
+        let output = evaluate_straight_grid(&request).expect("translated legacy grid evaluates");
+        let origin = Point2::new(
+            center.x + request.translation_x,
+            center.y + request.translation_y,
+        );
+        for dimension_id in [FIRST_DIMENSION_ID, SECOND_DIMENSION_ID] {
+            let guide = output
+                .guides
+                .iter()
+                .find(|guide| guide.id == GuideInstanceId::new(dimension_id, 0))
+                .expect("zero-index guide remains covered");
+            assert_eq!(guide.anchor, origin);
+            let coverage = output
+                .coverage
+                .iter()
+                .find(|coverage| coverage.dimension_id == dimension_id.0)
+                .expect("zero-index guide has coverage");
+            let expected_phase = origin.dot(guide.normal).rem_euclid(coverage.spacing);
+            assert!((coverage.normalized_phase - expected_phase).abs() < 1.0e-12);
+        }
+        let site = output
+            .sites
+            .iter()
+            .find(|site| site.id.first_index == 0 && site.id.second_index == 0)
+            .expect("zero-index intersection remains covered");
+        assert_eq!(site.position, origin);
+    }
+
     /// Proves nominal intersection bases reject parallel and near-parallel contributor tangents.
     #[test]
     fn straight_intersection_basis_rejects_parallel_contributors() {
@@ -8511,7 +9938,7 @@ mod typed_pipeline_tests {
         let generic = evaluate_typed_family(&definition, &request()).unwrap();
         assert_eq!(
             generic.family_fingerprint(),
-            "fnv1a64:392c46103de1f1ab:nominal-cell-basis:fnv1a64:ed9b878e62f6850b"
+            "fnv1a64:5793408be43e029e:nominal-cell-basis:fnv1a64:2d456031fa9b767c"
         );
         assert_eq!(generic.site_set().len(), expected.sites.len());
         assert_eq!(
@@ -8663,6 +10090,66 @@ mod generalized_straight_guide_tests {
                 || pair[0].id.dimension_id != pair[1].id.dimension_id));
             assert!(output.sites.iter().all(|site| matches!(&site.provenance, GeneralizedSiteProvenance::Intersection { contributors } if contributors.len() >= 2)));
         }
+    }
+
+    /// Places generalized zero-index guides and their shared intersection at the centered local origin.
+    ///
+    /// # Panics
+    ///
+    /// Panics when generalized straight-guide placement diverges from the shared legacy transform.
+    #[test]
+    fn generalized_grid_local_origin_maps_to_center_then_document_translation() {
+        let definition = intersections(
+            vec![dimension(1, 0.0), dimension(2, 90.0)],
+            vec![GuideDimensionId(1), GuideDimensionId(2)],
+        );
+        let plan = resolve_pattern_pipeline(&definition).expect("generalized plan resolves");
+        let mut request = request();
+        request.canvas = CanvasSpec {
+            width: 137.0,
+            height: 83.0,
+        };
+        request.density = DensityMetric2D {
+            across_x: 13.7,
+            across_y: 8.3,
+            aspect_locked: false,
+        };
+        request.rotation_degrees = 47.0;
+        request.translation_x = 0.0;
+        request.translation_y = 0.0;
+        let centered =
+            evaluate_generalized_straight_guides_cancellable(&plan.family, &request, &|| false)
+                .expect("centered generalized grid evaluates");
+        let center = Point2::new(request.canvas.width * 0.5, request.canvas.height * 0.5);
+        for dimension_id in [GuideDimensionId(1), GuideDimensionId(2)] {
+            let guide = centered
+                .guides
+                .iter()
+                .find(|guide| guide.id == GuideInstanceId::new(dimension_id, 0))
+                .expect("zero-index generalized guide remains covered");
+            assert_eq!(guide.anchor, center);
+        }
+        request.translation_x = 7.25;
+        request.translation_y = -11.5;
+        let output =
+            evaluate_generalized_straight_guides_cancellable(&plan.family, &request, &|| false)
+                .expect("translated generalized grid evaluates");
+        let origin = Point2::new(
+            center.x + request.translation_x,
+            center.y + request.translation_y,
+        );
+        for dimension_id in [GuideDimensionId(1), GuideDimensionId(2)] {
+            let guide = output
+                .guides
+                .iter()
+                .find(|guide| guide.id == GuideInstanceId::new(dimension_id, 0))
+                .expect("zero-index generalized guide remains covered");
+            assert_eq!(guide.anchor, origin);
+        }
+        assert!(output.sites.iter().any(|site| {
+            (site.position.x - origin.x).abs() < 1.0e-12
+                && (site.position.y - origin.y).abs() < 1.0e-12
+        }));
     }
 
     #[test]

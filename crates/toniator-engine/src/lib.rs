@@ -31,19 +31,26 @@ use toniator_domain::{
     ChannelPaint, DocumentEvaluationSnapshot, DocumentEvaluationToken, DocumentSession,
     HalftoneChannelModel, HalftoneChannelRole, ModeledChannelState,
 };
+use toniator_patterns::{
+    CONNECTION_PATH_CONTRACT_ID, CONNECTION_TRAIL_CONTRACT_ID, CurvePath, CurveSegment,
+    FamilyCapability, GenericGuideCapability, GridFamilyOutput, MAZE_WALL_CONTRACT_ID,
+    MappedCircularMarkRealization, MazeLimits, PatternPipelineError, SITE_ADJACENCY_CONTRACT_ID,
+    SourceColorCircularMarkRealization, StrokeResponse, TypedFamilyOutput, TypedRealization,
+    build_connection_paths_cancellable, build_typed_site_adjacency_cancellable,
+    connection_program_contract_id, evaluate_straight_grid,
+    evaluate_typed_connection_paths_with_source_cancellable,
+    evaluate_typed_family_product_with_source_cancellable,
+    evaluate_typed_maze_walls_from_family_cancellable, family_requires_decoded_source,
+    maximum_emitted_guide_spacing, maximum_nominal_cell_diameter, realize_circular_marks,
+    realize_typed_canonical_strokes_cancellable,
+    realize_typed_connection_canonical_strokes_cancellable, realize_typed_mapped_outputs,
+    realize_typed_maze_canonical_strokes_cancellable, realize_typed_source_color_outputs,
+};
 pub use toniator_patterns::{
     CanonicalCircleMark, CanonicalMark, CanonicalMarkRealization, CanonicalStrokeRealization,
-    CircularMarkRealization, MarkResponse, Point2, RealizationError, SiteAdjacencyGraph,
+    CircularMarkRealization, ConnectionPathEvaluation, ConnectionPathLimits, ConnectionPathSet,
+    MarkResponse, MazeProgramResult, Point2, RealizationError, SiteAdjacencyGraph,
     SiteAdjacencyLimits, SiteAdjacencyPolicy, SiteId, SiteScope,
-};
-use toniator_patterns::{
-    CurvePath, CurveSegment, FamilyCapability, GenericGuideCapability, GridFamilyOutput,
-    MappedCircularMarkRealization, PatternPipelineError, SourceColorCircularMarkRealization,
-    StrokeResponse, TypedFamilyOutput, TypedRealization, build_typed_site_adjacency_cancellable,
-    evaluate_straight_grid, evaluate_typed_family_product_with_source_cancellable,
-    family_requires_decoded_source, maximum_emitted_guide_spacing, maximum_nominal_cell_diameter,
-    realize_circular_marks, realize_typed_canonical_strokes_cancellable,
-    realize_typed_mapped_outputs, realize_typed_source_color_outputs,
 };
 pub use toniator_render::{
     GeometryOutput, OutputRasterTarget, PreviewRasterTarget, RasterAntialiasing, RasterBackground,
@@ -104,6 +111,35 @@ pub fn derive_site_adjacency_cancellable(
         base_support_radius,
         policy,
         limits.site_adjacency_limits(),
+        is_cancelled,
+    )
+    .map_err(EvaluationError::from_pipeline)
+}
+
+/// Derives one authored connection program from a typed family without adding an adjacency or connection cache.
+///
+/// # Errors
+///
+/// Returns stable family, coverage, topology, connection, resource, or cancellation diagnostics and
+/// never modifies accepted document cache state.
+#[allow(clippy::too_many_arguments)]
+pub fn derive_connection_paths_cancellable(
+    family: &FamilyCapability,
+    request: &GridInspectRequest,
+    source: Option<&SourceField>,
+    output_layer_id: toniator_domain::PatternOutputLayerId,
+    program: &toniator_domain::ConnectionProgram,
+    limits: EvaluationLimits,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<ConnectionPathEvaluation, EvaluationError> {
+    evaluate_typed_connection_paths_with_source_cancellable(
+        family,
+        request,
+        source,
+        output_layer_id,
+        program,
+        limits.site_adjacency_limits(),
+        limits.connection_path_limits(),
         is_cancelled,
     )
     .map_err(EvaluationError::from_pipeline)
@@ -202,6 +238,8 @@ pub struct EvaluationLimits {
     max_stroke_profile_samples: usize,
     max_stroke_outline_segments: usize,
     site_adjacency: SiteAdjacencyLimits,
+    connection_paths: ConnectionPathLimits,
+    maze: MazeLimits,
 }
 
 impl EvaluationLimits {
@@ -227,6 +265,8 @@ impl EvaluationLimits {
             max_stroke_profile_samples: toniator_patterns::MAX_STROKE_PROFILE_SAMPLES,
             max_stroke_outline_segments: toniator_patterns::MAX_STROKE_OUTLINE_SEGMENTS,
             site_adjacency: SiteAdjacencyLimits::default(),
+            connection_paths: ConnectionPathLimits::default(),
+            maze: MazeLimits::default(),
         })
     }
 
@@ -335,6 +375,56 @@ impl EvaluationLimits {
         self.site_adjacency
     }
 
+    /// Returns the bounded derived connection selection and trail policy.
+    pub const fn connection_path_limits(self) -> ConnectionPathLimits {
+        self.connection_paths
+    }
+
+    /// Returns the bounded arrangement, dual traversal, and retained-wall policy for maze outputs.
+    pub const fn maze_limits(self) -> MazeLimits {
+        self.maze
+    }
+
+    /// Replaces maze work limits without changing authored document authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns the geometry-owned maze limit diagnostic before any arrangement allocation.
+    pub fn with_maze_limits(mut self, limits: MazeLimits) -> Result<Self, EvaluationError> {
+        MazeLimits::new(
+            limits.maximum_source_walls,
+            limits.maximum_faces,
+            limits.maximum_dual_adjacencies,
+            limits.maximum_passages,
+            limits.maximum_wall_trails,
+            limits.maximum_retained_points,
+            limits.maximum_inspections,
+        )
+        .map_err(|error| EvaluationError::new(error.path(), error.message()))?;
+        self.maze = limits;
+        Ok(self)
+    }
+
+    /// Replaces connection work limits without changing authored document authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable geometry-owned diagnostic when any connection work category is disabled.
+    pub fn with_connection_path_limits(
+        mut self,
+        limits: ConnectionPathLimits,
+    ) -> Result<Self, EvaluationError> {
+        ConnectionPathLimits::new(
+            limits.maximum_selected_edges,
+            limits.maximum_trails,
+            limits.maximum_retained_path_points,
+            limits.maximum_inspections,
+        )
+        .map_err(|error| EvaluationError::new(error.path(), error.message()))?;
+        self.connection_paths = limits;
+        Ok(self)
+    }
+
     /// Replaces the complete nonzero adjacency resource policy without changing document authority.
     ///
     /// # Errors
@@ -367,6 +457,8 @@ impl Default for EvaluationLimits {
             max_stroke_profile_samples: toniator_patterns::MAX_STROKE_PROFILE_SAMPLES,
             max_stroke_outline_segments: toniator_patterns::MAX_STROKE_OUTLINE_SEGMENTS,
             site_adjacency: SiteAdjacencyLimits::default(),
+            connection_paths: ConnectionPathLimits::default(),
+            maze: MazeLimits::default(),
         }
     }
 }
@@ -2185,6 +2277,15 @@ fn evaluate_cached_document_impl(
                         outline_contract: toniator_patterns::CANONICAL_STROKE_OUTLINE_CONTRACT_ID,
                         profile_limit: limits.max_stroke_profile_samples(),
                         outline_segment_limit: limits.max_stroke_outline_segments(),
+                        connection_contracts: Box::new(connection_cache_contracts(
+                            definition,
+                            limits.site_adjacency_limits(),
+                            limits.connection_path_limits(),
+                        )),
+                        maze_contracts: Box::new(maze_cache_contracts(
+                            definition,
+                            limits.maze_limits(),
+                        )),
                     }
                 }
             },
@@ -2208,9 +2309,13 @@ fn evaluate_cached_document_impl(
                             &source,
                             &family,
                             plan,
+                            limits.max_family_candidates(),
                             remaining_transformed_curve_segment_instances,
                             limits.max_stroke_profile_samples(),
                             limits.max_stroke_outline_segments(),
+                            limits.site_adjacency_limits(),
+                            limits.connection_path_limits(),
+                            limits.maze_limits(),
                             &|| cancellation.is_cancelled(),
                         )
                     }) {
@@ -2380,6 +2485,43 @@ fn evaluate_cached_document_impl(
     })
 }
 
+/// Returns geometry-owned algorithm identities only for a typed connection output.
+fn connection_cache_contracts(
+    definition: &PatternDefinition,
+    adjacency_limits: SiteAdjacencyLimits,
+    connection_limits: ConnectionPathLimits,
+) -> Option<ConnectionCacheContracts> {
+    let [PatternOutputLayer::ConnectionPaths { program, .. }] = definition.output_layers.as_slice()
+    else {
+        return None;
+    };
+    Some(ConnectionCacheContracts {
+        site_adjacency: SITE_ADJACENCY_CONTRACT_ID,
+        path_selection: CONNECTION_PATH_CONTRACT_ID,
+        trail_decomposition: CONNECTION_TRAIL_CONTRACT_ID,
+        program_selection: connection_program_contract_id(program),
+        adjacency_limits,
+        connection_limits,
+    })
+}
+
+/// Returns geometry-owned identity and bounded work inputs only for a typed maze-wall output.
+fn maze_cache_contracts(
+    definition: &PatternDefinition,
+    limits: MazeLimits,
+) -> Option<MazeCacheContracts> {
+    let [PatternOutputLayer::MazeWalls { program, .. }] = definition.output_layers.as_slice()
+    else {
+        return None;
+    };
+    Some(MazeCacheContracts {
+        arrangement: MAZE_WALL_CONTRACT_ID,
+        algorithm: program.algorithm,
+        seed: program.seed,
+        limits,
+    })
+}
+
 #[derive(Clone)]
 enum DocumentRealization {
     Mapped(TypedRealization<MappedCircularMarkRealization>),
@@ -2453,11 +2595,135 @@ fn evaluate_document_channel(
     source: &SourceField,
     family: &TypedFamilyOutput,
     plan: &toniator_patterns::PatternPipelinePlan,
+    max_family_candidates: usize,
     max_transformed_curve_segment_instances: usize,
     max_stroke_profile_samples: usize,
     max_stroke_outline_segments: usize,
+    adjacency_limits: SiteAdjacencyLimits,
+    connection_limits: ConnectionPathLimits,
+    maze_limits: MazeLimits,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<DocumentRealization, EvaluationError> {
+    if let Some((_site_mechanism_id, program, style)) = plan.ordered_outputs[0].maze_walls() {
+        let toniator_domain::PatternGeometryResponse::Connected(response) =
+            &effective.geometry_response
+        else {
+            return Err(EvaluationError::new(
+                "evaluation.maze.response",
+                "maze-wall output requires the connected response branch",
+            ));
+        };
+        let ChannelPaint::Solid(_) = channel.paint else {
+            return Err(EvaluationError::new(
+                "evaluation.maze.paint",
+                "maze-wall output requires solid channel paint",
+            ));
+        };
+        let request = GridInspectRequest {
+            canvas: document.canvas().clone(),
+            density: effective.density.clone(),
+            rotation_degrees: effective.pattern_rotation_degrees,
+            translation_x: effective.translation_x,
+            translation_y: effective.translation_y,
+            guard_steps: definition.coverage.guard_steps,
+            support_radius: required_support_radius_modeled(
+                document.canvas(),
+                effective,
+                definition,
+                &plan.family,
+            )?,
+            max_family_candidates,
+        };
+        let maze = evaluate_typed_maze_walls_from_family_cancellable(
+            family,
+            &request,
+            plan.ordered_outputs[0].layer_id,
+            program,
+            maze_limits,
+            is_cancelled,
+        )
+        .map_err(EvaluationError::from_pipeline)?;
+        return Ok(DocumentRealization::Strokes(
+            realize_typed_maze_canonical_strokes_cancellable(
+                family,
+                plan,
+                &maze,
+                source,
+                document.canvas(),
+                channel.mapping,
+                StrokeResponse {
+                    minimum_thickness: response.minimum_thickness,
+                    maximum_thickness: response.maximum_thickness,
+                },
+                style,
+                max_stroke_profile_samples,
+                max_stroke_outline_segments,
+                is_cancelled,
+            )
+            .map_err(EvaluationError::from_pipeline)?,
+        ));
+    }
+    if let Some((_site_mechanism_id, program, style)) = plan.ordered_outputs[0].connection_paths() {
+        let toniator_domain::PatternGeometryResponse::Connected(response) =
+            &effective.geometry_response
+        else {
+            return Err(EvaluationError::new(
+                "evaluation.connection.response",
+                "connection output requires the connected response branch",
+            ));
+        };
+        let ChannelPaint::Solid(_) = channel.paint else {
+            return Err(EvaluationError::new(
+                "evaluation.connection.paint",
+                "connection output requires solid channel paint",
+            ));
+        };
+        let adjacency = program.adjacency();
+        let base_support = required_connection_base_support(
+            document.canvas(),
+            effective,
+            definition,
+            &plan.family,
+        )?;
+        let graph = build_typed_site_adjacency_cancellable(
+            family,
+            base_support,
+            SiteAdjacencyPolicy::MutualNearest {
+                maximum_degree: adjacency.maximum_degree as usize,
+                maximum_distance: adjacency.maximum_distance,
+            },
+            adjacency_limits,
+            is_cancelled,
+        )
+        .map_err(EvaluationError::from_pipeline)?;
+        let paths = build_connection_paths_cancellable(
+            plan.ordered_outputs[0].layer_id,
+            &graph,
+            program,
+            connection_limits,
+            is_cancelled,
+        )
+        .map_err(|error| EvaluationError::new(error.path(), error.message()))?;
+        return Ok(DocumentRealization::Strokes(
+            realize_typed_connection_canonical_strokes_cancellable(
+                family,
+                plan,
+                &paths,
+                source,
+                document.canvas(),
+                channel.mapping,
+                StrokeResponse {
+                    minimum_thickness: response.minimum_thickness,
+                    maximum_thickness: response.maximum_thickness,
+                },
+                style,
+                max_stroke_profile_samples,
+                max_stroke_outline_segments,
+                is_cancelled,
+            )
+            .map_err(EvaluationError::from_pipeline)?,
+        ));
+    }
     if matches!(
         definition.output_layers.as_slice(),
         [PatternOutputLayer::GuidePaths { .. } | PatternOutputLayer::ParametricPaths { .. }]
@@ -2752,6 +3018,24 @@ fn required_support_radius_modeled(
     definition: &toniator_domain::PatternDefinition,
     family: &FamilyCapability,
 ) -> Result<f64, EvaluationError> {
+    if let [PatternOutputLayer::ConnectionPaths { program, .. }] =
+        definition.output_layers.as_slice()
+    {
+        return Ok(
+            required_connection_base_support(canvas, effective, definition, family)?
+                + f64::from(definition.coverage.guard_steps) * program.adjacency().maximum_distance,
+        );
+    }
+    if matches!(
+        definition.output_layers.as_slice(),
+        [PatternOutputLayer::MazeWalls { .. }]
+    ) {
+        return Ok(
+            maximum_emitted_guide_spacing(family, canvas, &effective.density)
+                .map_err(EvaluationError::from_pipeline)?
+                + definition.coverage.additional_margin,
+        );
+    }
     if matches!(
         definition.output_layers.as_slice(),
         [PatternOutputLayer::GuidePaths { .. } | PatternOutputLayer::ParametricPaths { .. }]
@@ -2769,6 +3053,28 @@ fn required_support_radius_modeled(
         definition.coverage.additional_margin,
         family,
     )
+}
+
+/// Returns the connected-stroke family envelope before topology guard expansion.
+///
+/// # Errors
+///
+/// Preserves patterns-owned nominal-cell and guide-spacing diagnostics before engine cache lookup
+/// or graph construction; the result includes authored additional margin but excludes only guard
+/// steps times the program maximum distance.
+fn required_connection_base_support(
+    canvas: &CanvasSpec,
+    effective: &toniator_domain::EffectiveChannelPatternInstance,
+    definition: &toniator_domain::PatternDefinition,
+    family: &FamilyCapability,
+) -> Result<f64, EvaluationError> {
+    let basis = if family.product == toniator_patterns::StructuralProductCapability::RandomSites {
+        maximum_nominal_cell_diameter(family, canvas, &effective.density)
+    } else {
+        maximum_emitted_guide_spacing(family, canvas, &effective.density)
+    }
+    .map_err(EvaluationError::from_pipeline)?;
+    Ok(basis + definition.coverage.additional_margin)
 }
 
 /// Computes the conservative family-specific nominal-cell bound before any allocation.
@@ -2811,7 +3117,29 @@ enum DocumentResponseIdentity {
         outline_contract: &'static str,
         profile_limit: usize,
         outline_segment_limit: usize,
+        connection_contracts: Box<Option<ConnectionCacheContracts>>,
+        maze_contracts: Box<Option<MazeCacheContracts>>,
     },
+}
+
+/// Geometry-owned contracts that must invalidate only connection realization cache entries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ConnectionCacheContracts {
+    site_adjacency: &'static str,
+    path_selection: &'static str,
+    trail_decomposition: &'static str,
+    program_selection: &'static str,
+    adjacency_limits: SiteAdjacencyLimits,
+    connection_limits: ConnectionPathLimits,
+}
+
+/// Geometry-owned contracts and limits that distinguish maze realization cache entries only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MazeCacheContracts {
+    arrangement: &'static str,
+    algorithm: toniator_domain::GridMazeAlgorithm,
+    seed: u32,
+    limits: MazeLimits,
 }
 
 #[derive(Clone, Default)]
@@ -2870,11 +3198,12 @@ pub(crate) mod test_support {
         AuthoredCurveSegment, AuthoredPoint2, AuthoredStructure, AuthoredStructureId,
         AuthoredStructureKind, CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternInstance,
         ChannelPatternLayoutDelta, ChannelSourceMapping, ChannelState, ChannelTopologyTemplate,
-        ColorValue, ConnectedGeometryResponse, CoveragePolicy, DensityMetric2D, Document,
-        DocumentCommand, DocumentHistory, DocumentId, DocumentPatternSettings, DocumentSession,
-        GeneralizedSiteProduct, GuideDimension, GuideDimensionId, GuidePrototype, GuideRepetition,
-        HalftoneChannelModel, MarkGeometryResponse, MarkOrientation, MarkPrototype, OffsetCleanup,
-        OffsetSides, PatternDefinition, PatternDefinitionEdit, PatternDefinitionId,
+        ColorValue, ConnectedGeometryResponse, ConnectionAdjacencyIntent, ConnectionProgram,
+        CoveragePolicy, DensityMetric2D, Document, DocumentCommand, DocumentHistory, DocumentId,
+        DocumentPatternSettings, DocumentSession, GeneralizedSiteProduct, GuideDimension,
+        GuideDimensionId, GuidePrototype, GuideRepetition, HalftoneChannelModel,
+        MarkGeometryResponse, MarkOrientation, MarkPrototype, OffsetCleanup, OffsetSides,
+        PathStrokeStyle, PatternDefinition, PatternDefinitionEdit, PatternDefinitionId,
         PatternGeometryResponse, PatternMechanismId, PatternOutputLayer, PatternOutputLayerId,
         SourceComponent, SourcePlacement, SourceReference, SourceReferenceId,
         StraightGuideDimension, StraightGuideRepetition,
@@ -3139,6 +3468,197 @@ pub(crate) mod test_support {
             .unwrap(),
         )
         .unwrap()
+    }
+
+    /// Builds one valid three-direction intersection document whose channels all realize the
+    /// supplied connection program with solid paint and an active coverage guard.
+    fn modeled_connection_session(program: ConnectionProgram) -> DocumentSession {
+        let source_id = SourceReferenceId::new("cancellation-test-source").unwrap();
+        let base = Document::new_default_document(
+            CanvasSpec {
+                width: 64.0,
+                height: 48.0,
+            },
+            SourceReference::Assigned(source_id),
+        )
+        .unwrap();
+        let guide_mechanism_id = PatternMechanismId(120);
+        let site_mechanism_id = PatternMechanismId(121);
+        let output_layer_id = PatternOutputLayerId(122);
+        let mut definition = PatternDefinition::generalized_straight_guides(
+            PatternDefinitionId(119),
+            "triangular connection cache",
+            guide_mechanism_id,
+            site_mechanism_id,
+            output_layer_id,
+            vec![
+                StraightGuideDimension {
+                    id: GuideDimensionId(123),
+                    baseline_angle_degrees: 0.0,
+                    phase: 0.0,
+                    repetition: StraightGuideRepetition {
+                        spacing_multiplier: 1.0,
+                    },
+                },
+                StraightGuideDimension {
+                    id: GuideDimensionId(124),
+                    baseline_angle_degrees: 60.0,
+                    phase: 0.0,
+                    repetition: StraightGuideRepetition {
+                        spacing_multiplier: 1.0,
+                    },
+                },
+                StraightGuideDimension {
+                    id: GuideDimensionId(125),
+                    baseline_angle_degrees: 120.0,
+                    phase: 0.0,
+                    repetition: StraightGuideRepetition {
+                        spacing_multiplier: 1.0,
+                    },
+                },
+            ],
+            GeneralizedSiteProduct::Intersections {
+                dimensions: vec![
+                    GuideDimensionId(123),
+                    GuideDimensionId(124),
+                    GuideDimensionId(125),
+                ],
+                merge_epsilon: 1e-8,
+            },
+            MarkOrientation::Fixed,
+            CoveragePolicy {
+                guard_steps: 1,
+                additional_margin: 0.0,
+            },
+        );
+        definition.output_layers = vec![PatternOutputLayer::ConnectionPaths {
+            id: output_layer_id,
+            site_mechanism_id,
+            program,
+            style: PathStrokeStyle::default(),
+        }];
+        let mut settings = base.pattern_settings().clone();
+        settings.definition_id = definition.id;
+        settings.density.across_x = 5.0;
+        settings.density.across_y = settings.density.across_x * 48.0 / 64.0;
+        settings.geometry_response =
+            PatternGeometryResponse::Connected(ConnectedGeometryResponse {
+                minimum_thickness: 0.1,
+                maximum_thickness: 0.25,
+            });
+        DocumentSession::new(
+            Document::with_source_topology_and_authored_structures(
+                base.id(),
+                base.canvas().clone(),
+                base.source().clone(),
+                vec![definition],
+                settings,
+                base.channel_model().unwrap(),
+                base.channel_topology().unwrap().clone(),
+                Vec::new(),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// Builds a 24-across phase-aligned triangular family with a typed conventional wall-maze output.
+    fn modeled_maze_session(seed: u32) -> DocumentSession {
+        let connection = modeled_connection_session(random_connection_program(seed, 24.0));
+        let document = connection.document();
+        let mut definition = document.pattern_definitions()[0].clone();
+        definition.output_layers = vec![PatternOutputLayer::MazeWalls {
+            id: PatternOutputLayerId(122),
+            site_mechanism_id: PatternMechanismId(121),
+            program: toniator_domain::MazeProgram {
+                algorithm: toniator_domain::GridMazeAlgorithm::RecursiveBacktracker,
+                seed,
+            },
+            style: PathStrokeStyle::default(),
+        }];
+        let mut settings = document.pattern_settings().clone();
+        settings.density.across_x = 24.0;
+        settings.density.across_y = settings.density.across_x * 48.0 / 64.0;
+        DocumentSession::new(
+            Document::with_source_topology_and_authored_structures(
+                document.id(),
+                document.canvas().clone(),
+                document.source().clone(),
+                vec![definition],
+                settings,
+                document
+                    .channel_model()
+                    .expect("modeled document has a channel model"),
+                document
+                    .channel_topology()
+                    .expect("modeled document has a channel topology")
+                    .clone(),
+                document.authored_structures().to_vec(),
+            )
+            .expect("typed maze output validates against triangular intersections"),
+        )
+        .expect("modeled maze document starts a session")
+    }
+
+    /// Returns a valid random-link intent whose seed and distance may exercise connection-only
+    /// realization cache invalidation without changing the family definition.
+    fn random_connection_program(seed: u32, maximum_distance: f64) -> ConnectionProgram {
+        ConnectionProgram::RandomLinks {
+            adjacency: ConnectionAdjacencyIntent {
+                maximum_degree: 6,
+                maximum_distance,
+            },
+            minimum_degree: 0,
+            seed,
+        }
+    }
+
+    /// Replaces the sole typed connection output through the document's validated shared edit
+    /// authority, preserving the fixture's output-layer identity.
+    fn replace_connection_program(history: &mut DocumentHistory, program: ConnectionProgram) {
+        let base_definition = history.document().pattern_definitions()[0].clone();
+        history
+            .apply(&DocumentCommand::EditSharedPatternDefinition {
+                definition_id: base_definition.id,
+                base_definition,
+                edit: PatternDefinitionEdit::SetConnectionProgram {
+                    output_layer_id: PatternOutputLayerId(122),
+                    program,
+                },
+            })
+            .unwrap();
+    }
+
+    /// Replaces only the typed maze seed through the validated document history authority, so
+    /// family geometry remains eligible for reuse while the maze realization must be rebuilt.
+    fn replace_maze_seed(history: &mut DocumentHistory, seed: u32) {
+        let base_definition = history.document().pattern_definitions()[0].clone();
+        history
+            .apply(&DocumentCommand::EditSharedPatternDefinition {
+                definition_id: base_definition.id,
+                base_definition,
+                edit: PatternDefinitionEdit::SetMazeSeed {
+                    output_layer_id: PatternOutputLayerId(122),
+                    seed,
+                },
+            })
+            .expect("typed maze seed edit validates");
+    }
+
+    /// Extracts the rendered canonical connection strokes without asking the renderer to
+    /// synthesize topology or reinterpret their centerlines.
+    fn connection_strokes(
+        result: &EvaluationResult,
+    ) -> Vec<Vec<toniator_patterns::CanonicalStroke>> {
+        result
+            .scene()
+            .layers()
+            .iter()
+            .map(|layer| match layer.geometry() {
+                GeometryOutput::CanonicalStrokes(strokes) => strokes.clone(),
+                other => panic!("connection fixture produced unexpected geometry: {other:?}"),
+            })
+            .collect()
     }
 
     /// Builds a current generic-guide session whose persisted repetition exercises Stage 20J and Stage 20I together.
@@ -3536,6 +4056,566 @@ pub(crate) mod test_support {
         scheduler.shutdown().unwrap();
     }
 
+    /// Evaluates a typed maze through the cached document pipeline and publishes only canonical walls.
+    #[test]
+    fn maze_document_evaluates_and_reuses_its_family_and_realization() {
+        let scheduler = EvaluationScheduler::new_with_limits(EvaluationLimits::default()).unwrap();
+        let session = modeled_maze_session(23);
+        let bytes = valid_document_bytes();
+        let first_ticket = scheduler
+            .submit(document_request(&session, Arc::clone(&bytes)))
+            .unwrap();
+        let first = wait_for_document_completion(&scheduler);
+        assert_eq!(first.ticket(), first_ticket);
+        assert!(
+            first.result().is_some(),
+            "maze evaluation failed: {:?}",
+            first.error()
+        );
+        assert_eq!(
+            first
+                .cache_diagnostics()
+                .expect("maze diagnostics")
+                .aggregate,
+            CacheDiagnostics {
+                decoded_source: CacheDisposition::Miss,
+                family: CacheDisposition::Miss,
+                realization: CacheDisposition::Miss,
+                scene: CacheDisposition::Miss,
+                raster: CacheDisposition::Miss,
+            }
+        );
+        let result = first.result().expect("maze document evaluates");
+        assert!(
+            connection_strokes(result)
+                .iter()
+                .flatten()
+                .all(|stroke| matches!(
+                    stroke.source_id,
+                    toniator_patterns::CanonicalStrokeSourceId::Maze(_)
+                ))
+        );
+        assert!(scheduler.accept_completion(&first, &session).unwrap());
+        let second_ticket = scheduler.submit(document_request(&session, bytes)).unwrap();
+        let second = wait_for_document_completion(&scheduler);
+        assert_eq!(second.ticket(), second_ticket);
+        assert_eq!(
+            second
+                .cache_diagnostics()
+                .expect("maze cache diagnostics")
+                .aggregate,
+            CacheDiagnostics {
+                decoded_source: CacheDisposition::Hit,
+                family: CacheDisposition::Hit,
+                realization: CacheDisposition::Hit,
+                scene: CacheDisposition::Hit,
+                raster: CacheDisposition::Hit,
+            }
+        );
+        assert!(scheduler.accept_completion(&second, &session).unwrap());
+        scheduler.shutdown().unwrap();
+    }
+
+    /// Proves a maze seed changes only maze realization topology while preserving the accepted
+    /// family cache identity and the exact evaluated site positions used by that family.
+    #[test]
+    fn maze_document_seed_change_reuses_family_and_rebuilds_canonical_walls() {
+        let scheduler = EvaluationScheduler::new_with_limits(EvaluationLimits::default()).unwrap();
+        let mut history = DocumentHistory::new(modeled_maze_session(23));
+        let bytes = valid_document_bytes();
+        let first_ticket = scheduler
+            .submit(document_request(history.session(), Arc::clone(&bytes)))
+            .expect("first maze job submits");
+        let first = wait_for_document_completion(&scheduler);
+        assert_eq!(first.ticket(), first_ticket);
+        assert!(
+            scheduler
+                .accept_completion(&first, history.session())
+                .unwrap(),
+            "first maze completion publishes its accepted family"
+        );
+        let first_result = first.result().expect("first maze result");
+        let first_family = first_result
+            .channels()
+            .iter()
+            .map(|channel| channel.family_identity().to_owned())
+            .collect::<Vec<_>>();
+        let first_walls = connection_strokes(first_result);
+
+        replace_maze_seed(&mut history, 29);
+        let seeded_ticket = scheduler
+            .submit(document_request(history.session(), Arc::clone(&bytes)))
+            .expect("seeded maze job submits");
+        let seeded = wait_for_document_completion(&scheduler);
+        assert_eq!(seeded.ticket(), seeded_ticket);
+        let diagnostics = seeded
+            .cache_diagnostics()
+            .expect("seeded maze diagnostics")
+            .aggregate;
+        assert_eq!(diagnostics.decoded_source, CacheDisposition::Hit);
+        assert_eq!(diagnostics.family, CacheDisposition::Hit);
+        assert_eq!(diagnostics.realization, CacheDisposition::Miss);
+        assert_eq!(diagnostics.scene, CacheDisposition::Miss);
+        assert_eq!(diagnostics.raster, CacheDisposition::Miss);
+        let seeded_result = seeded.result().expect("seeded maze result");
+        assert_eq!(
+            seeded_result
+                .channels()
+                .iter()
+                .map(|channel| channel.family_identity().to_owned())
+                .collect::<Vec<_>>(),
+            first_family,
+            "maze seed is not a site-family input"
+        );
+        assert_ne!(
+            connection_strokes(seeded_result),
+            first_walls,
+            "different recursive-backtracker seeds select a different retained-wall topology"
+        );
+        assert!(
+            scheduler
+                .accept_completion(&seeded, history.session())
+                .unwrap()
+        );
+        scheduler.shutdown().unwrap();
+    }
+
+    /// Proves the accepted cached family preserves exact site IDs and positions across a maze seed
+    /// edit, while the geometry-owned recursive-backtracker realization remains seed-specific.
+    #[test]
+    fn maze_seed_change_keeps_cached_family_sites_exact() {
+        let mut accepted = DocumentDerivedCache::default();
+        let mut history = DocumentHistory::new(modeled_maze_session(23));
+        let bytes = valid_document_bytes();
+        let first = evaluate_cached_document(
+            document_request(history.session(), Arc::clone(&bytes)),
+            EvaluationLimits::default(),
+            &accepted,
+            &NeverCancelled,
+        )
+        .expect("first maze candidate evaluates");
+        let first_sites = first.transaction.families[0]
+            .1
+            .site_set()
+            .iter()
+            .map(|site| (site.id, site.position))
+            .collect::<Vec<_>>();
+        let first_walls = connection_strokes(&first.result);
+        accepted.commit(first.transaction);
+
+        replace_maze_seed(&mut history, 29);
+        let seeded = evaluate_cached_document(
+            document_request(history.session(), bytes),
+            EvaluationLimits::default(),
+            &accepted,
+            &NeverCancelled,
+        )
+        .expect("seeded maze candidate evaluates");
+        assert_eq!(seeded.diagnostics.aggregate.family, CacheDisposition::Hit);
+        assert_eq!(
+            accepted.families[0]
+                .1
+                .site_set()
+                .iter()
+                .map(|site| (site.id, site.position))
+                .collect::<Vec<_>>(),
+            first_sites,
+            "the cached typed FamilySiteSet is the sole site authority for both seeds"
+        );
+        assert_ne!(
+            connection_strokes(&seeded.result),
+            first_walls,
+            "maze seed changes retained walls without moving family sites"
+        );
+    }
+
+    /// Proves a cancelled stale maze realization cannot publish a cache transaction before the
+    /// newest seed completion is explicitly accepted by the scheduler.
+    #[test]
+    fn maze_scheduler_stale_realization_cannot_publish_before_acceptance() {
+        let (gate, entered) =
+            EvaluationStageGate::new(EvaluationStage::Realization, EvaluationCheckpoint::After);
+        let scheduler =
+            EvaluationScheduler::new_with_test_gate(EvaluationLimits::default(), Arc::clone(&gate))
+                .expect("maze scheduler starts");
+        let mut history = DocumentHistory::new(modeled_maze_session(23));
+        let bytes = valid_document_bytes();
+        let stale_ticket = scheduler
+            .submit(document_request(history.session(), Arc::clone(&bytes)))
+            .expect("stale maze job submits");
+        entered
+            .recv_timeout(GUARD)
+            .expect("stale maze reaches realization gate");
+        replace_maze_seed(&mut history, 29);
+        let newest_ticket = scheduler
+            .submit(document_request(history.session(), Arc::clone(&bytes)))
+            .expect("newest maze job submits");
+        gate.release();
+        let newest = wait_for_document_completion(&scheduler);
+        assert_ne!(stale_ticket, newest_ticket);
+        assert_eq!(newest.ticket(), newest_ticket);
+        assert_eq!(
+            newest
+                .cache_diagnostics()
+                .expect("newest maze diagnostics")
+                .aggregate,
+            CacheDiagnostics {
+                decoded_source: CacheDisposition::Miss,
+                family: CacheDisposition::Miss,
+                realization: CacheDisposition::Miss,
+                scene: CacheDisposition::Miss,
+                raster: CacheDisposition::Miss,
+            },
+            "cancelled stale maze work cannot publish any cache authority"
+        );
+        assert!(
+            scheduler
+                .accept_completion(&newest, history.session())
+                .unwrap()
+        );
+        let repeated_ticket = scheduler
+            .submit(document_request(history.session(), bytes))
+            .expect("accepted maze repeat submits");
+        let repeated = wait_for_document_completion(&scheduler);
+        assert_eq!(repeated.ticket(), repeated_ticket);
+        assert_eq!(
+            repeated
+                .cache_diagnostics()
+                .expect("accepted maze repeat diagnostics")
+                .aggregate,
+            CacheDiagnostics {
+                decoded_source: CacheDisposition::Hit,
+                family: CacheDisposition::Hit,
+                realization: CacheDisposition::Hit,
+                scene: CacheDisposition::Hit,
+                raster: CacheDisposition::Hit,
+            }
+        );
+        assert!(
+            scheduler
+                .accept_completion(&repeated, history.session())
+                .unwrap()
+        );
+        scheduler.shutdown().expect("maze scheduler shuts down");
+    }
+
+    /// Proves full cached document evaluation keeps the immutable triangular-site family while
+    /// seed and program intent rebuild only connection realization, scene, and raster products.
+    #[test]
+    fn connection_document_cache_reuses_family_for_seed_and_program_changes() {
+        let scheduler = EvaluationScheduler::new_with_limits(EvaluationLimits::default()).unwrap();
+        let mut history = DocumentHistory::new(modeled_connection_session(
+            random_connection_program(2, 24.0),
+        ));
+        let bytes = valid_document_bytes();
+        let submit =
+            |scheduler: &EvaluationScheduler, session: &DocumentSession, bytes: Arc<[u8]>| {
+                let ticket = scheduler.submit(document_request(session, bytes)).unwrap();
+                let completion = wait_for_document_completion(scheduler);
+                assert_eq!(completion.ticket(), ticket);
+                assert!(
+                    completion.result().is_some(),
+                    "connection evaluation failed: {:?}",
+                    completion.error()
+                );
+                assert!(scheduler.accept_completion(&completion, session).unwrap());
+                completion
+            };
+        let first = submit(&scheduler, history.session(), Arc::clone(&bytes));
+        assert_eq!(
+            first.cache_diagnostics().unwrap().aggregate,
+            CacheDiagnostics {
+                decoded_source: CacheDisposition::Miss,
+                family: CacheDisposition::Miss,
+                realization: CacheDisposition::Miss,
+                scene: CacheDisposition::Miss,
+                raster: CacheDisposition::Miss,
+            }
+        );
+        let first_result = first.result().unwrap();
+        let first_families = first_result
+            .channels()
+            .iter()
+            .map(|channel| channel.family_identity().to_owned())
+            .collect::<Vec<_>>();
+        let first_strokes = connection_strokes(first_result);
+
+        let repeated = submit(&scheduler, history.session(), Arc::clone(&bytes));
+        assert_eq!(
+            repeated.cache_diagnostics().unwrap().aggregate,
+            CacheDiagnostics {
+                decoded_source: CacheDisposition::Hit,
+                family: CacheDisposition::Hit,
+                realization: CacheDisposition::Hit,
+                scene: CacheDisposition::Hit,
+                raster: CacheDisposition::Hit,
+            }
+        );
+
+        replace_connection_program(&mut history, random_connection_program(3, 24.0));
+        let seeded = submit(&scheduler, history.session(), Arc::clone(&bytes));
+        let seeded_diagnostics = seeded.cache_diagnostics().unwrap().aggregate;
+        assert_eq!(seeded_diagnostics.decoded_source, CacheDisposition::Hit);
+        assert_eq!(seeded_diagnostics.family, CacheDisposition::Hit);
+        assert_eq!(seeded_diagnostics.realization, CacheDisposition::Miss);
+        assert_eq!(seeded_diagnostics.scene, CacheDisposition::Miss);
+        assert_eq!(seeded_diagnostics.raster, CacheDisposition::Miss);
+        let seeded_result = seeded.result().unwrap();
+        assert_eq!(
+            seeded_result
+                .channels()
+                .iter()
+                .map(|channel| channel.family_identity().to_owned())
+                .collect::<Vec<_>>(),
+            first_families,
+            "seed is selected-edge intent, not a site-family input"
+        );
+        assert_ne!(
+            connection_strokes(seeded_result),
+            first_strokes,
+            "different random seeds must expose a distinct canonical selected topology"
+        );
+
+        replace_connection_program(
+            &mut history,
+            ConnectionProgram::NearestLinks {
+                adjacency: ConnectionAdjacencyIntent {
+                    maximum_degree: 6,
+                    maximum_distance: 24.0,
+                },
+            },
+        );
+        let typed = submit(&scheduler, history.session(), bytes);
+        let typed_diagnostics = typed.cache_diagnostics().unwrap().aggregate;
+        assert_eq!(typed_diagnostics.decoded_source, CacheDisposition::Hit);
+        assert_eq!(typed_diagnostics.family, CacheDisposition::Hit);
+        assert_eq!(typed_diagnostics.realization, CacheDisposition::Miss);
+        assert_eq!(typed_diagnostics.scene, CacheDisposition::Miss);
+        assert_eq!(typed_diagnostics.raster, CacheDisposition::Miss);
+        assert_eq!(
+            typed
+                .result()
+                .unwrap()
+                .channels()
+                .iter()
+                .map(|channel| channel.family_identity().to_owned())
+                .collect::<Vec<_>>(),
+            first_families,
+            "program kind changes do not move family sites"
+        );
+        scheduler.shutdown().unwrap();
+    }
+
+    /// Proves document evaluation derives graph nodes and canonical connection centerlines only
+    /// from the exact cached `FamilySiteSet`, without a renderer-side substitute site set.
+    #[test]
+    fn connection_document_consumes_cached_family_sites_by_id_and_position() {
+        let session = modeled_connection_session(random_connection_program(2, 24.0));
+        let request = document_request(&session, valid_document_bytes());
+        let candidate = evaluate_cached_document(
+            request,
+            EvaluationLimits::default(),
+            &DocumentDerivedCache::default(),
+            &NeverCancelled,
+        )
+        .expect("connection document evaluates before cache publication");
+        let family = &candidate.transaction.families[0].1;
+        let document = session.document();
+        let definition = &document.pattern_definitions()[0];
+        let effective = document
+            .effective_channel_pattern(ChannelId(1))
+            .expect("modeled red channel resolves its shared connection definition");
+        let plan = toniator_patterns::resolve_document_pattern_pipeline(document, definition)
+            .expect("connection definition resolves a typed pipeline");
+        let [PatternOutputLayer::ConnectionPaths { program, .. }] =
+            definition.output_layers.as_slice()
+        else {
+            panic!("fixture retains exactly one connection output")
+        };
+        let graph = build_typed_site_adjacency_cancellable(
+            family,
+            required_connection_base_support(
+                document.canvas(),
+                &effective,
+                definition,
+                &plan.family,
+            )
+            .expect("connection base support is finite"),
+            SiteAdjacencyPolicy::MutualNearest {
+                maximum_degree: program.adjacency().maximum_degree as usize,
+                maximum_distance: program.adjacency().maximum_distance,
+            },
+            EvaluationLimits::default().site_adjacency_limits(),
+            &|| false,
+        )
+        .expect("cached family derives its requested connection graph");
+        assert_eq!(graph.nodes().len(), family.site_set().len());
+        for (node, site) in graph.nodes().iter().zip(family.site_set().iter()) {
+            assert_eq!(node.id, site.id);
+            assert_eq!(node.position, site.position);
+        }
+        let positions = family
+            .site_set()
+            .iter()
+            .map(|site| site.position)
+            .collect::<Vec<_>>();
+        for (_, realization) in &candidate.transaction.realizations {
+            let DocumentRealization::Strokes(strokes) = realization.as_ref() else {
+                panic!("connection fixture cannot realize marks")
+            };
+            for stroke in &strokes.output.strokes {
+                for segment in stroke.path.segments() {
+                    assert!(positions.contains(&segment.start()));
+                    assert!(positions.contains(&segment.end()));
+                }
+            }
+        }
+    }
+
+    /// Proves a broader accepted connection family envelope is reused for a narrower distance,
+    /// while a narrower envelope cannot satisfy a subsequent broader adjacency request.
+    #[test]
+    fn connection_document_family_cache_respects_guard_inclusive_distance_envelopes() {
+        let bytes = valid_document_bytes();
+        let scheduler = EvaluationScheduler::new_with_limits(EvaluationLimits::default()).unwrap();
+        let mut broad_history = DocumentHistory::new(modeled_connection_session(
+            random_connection_program(2, 30.0),
+        ));
+        let broad_ticket = scheduler
+            .submit(document_request(
+                broad_history.session(),
+                Arc::clone(&bytes),
+            ))
+            .unwrap();
+        let broad = wait_for_document_completion(&scheduler);
+        assert_eq!(broad.ticket(), broad_ticket);
+        assert!(broad.result().is_some());
+        assert!(
+            scheduler
+                .accept_completion(&broad, broad_history.session())
+                .unwrap()
+        );
+        replace_connection_program(&mut broad_history, random_connection_program(2, 12.0));
+        let narrow_ticket = scheduler
+            .submit(document_request(
+                broad_history.session(),
+                Arc::clone(&bytes),
+            ))
+            .unwrap();
+        let narrow = wait_for_document_completion(&scheduler);
+        assert_eq!(narrow.ticket(), narrow_ticket);
+        assert_eq!(
+            narrow.cache_diagnostics().unwrap().aggregate.family,
+            CacheDisposition::Hit,
+            "broader guard-inclusive coverage supports a narrower adjacency request"
+        );
+        assert!(
+            scheduler
+                .accept_completion(&narrow, broad_history.session())
+                .unwrap()
+        );
+        scheduler.shutdown().unwrap();
+
+        let reverse = EvaluationScheduler::new_with_limits(EvaluationLimits::default()).unwrap();
+        let mut narrow_history = DocumentHistory::new(modeled_connection_session(
+            random_connection_program(2, 12.0),
+        ));
+        let initial_ticket = reverse
+            .submit(document_request(
+                narrow_history.session(),
+                Arc::clone(&bytes),
+            ))
+            .unwrap();
+        let initial = wait_for_document_completion(&reverse);
+        assert_eq!(initial.ticket(), initial_ticket);
+        assert!(
+            reverse
+                .accept_completion(&initial, narrow_history.session())
+                .unwrap()
+        );
+        replace_connection_program(&mut narrow_history, random_connection_program(2, 30.0));
+        let expanded_ticket = reverse
+            .submit(document_request(narrow_history.session(), bytes))
+            .unwrap();
+        let expanded = wait_for_document_completion(&reverse);
+        assert_eq!(expanded.ticket(), expanded_ticket);
+        assert_eq!(
+            expanded.cache_diagnostics().unwrap().aggregate.family,
+            CacheDisposition::Miss,
+            "an insufficient accepted envelope cannot be reused for broader adjacency"
+        );
+        assert!(
+            reverse
+                .accept_completion(&expanded, narrow_history.session())
+                .unwrap()
+        );
+        reverse.shutdown().unwrap();
+    }
+
+    /// Proves a superseded connection realization cannot publish a cache transaction and that
+    /// only an explicitly accepted newest completion becomes reusable by the scheduler.
+    #[test]
+    fn connection_scheduler_stale_realization_cannot_publish_before_acceptance() {
+        let (gate, entered) =
+            EvaluationStageGate::new(EvaluationStage::Realization, EvaluationCheckpoint::After);
+        let scheduler =
+            EvaluationScheduler::new_with_test_gate(EvaluationLimits::default(), Arc::clone(&gate))
+                .unwrap();
+        let mut history = DocumentHistory::new(modeled_connection_session(
+            random_connection_program(2, 24.0),
+        ));
+        let bytes = valid_document_bytes();
+        let stale_ticket = scheduler
+            .submit(document_request(history.session(), Arc::clone(&bytes)))
+            .unwrap();
+        entered.recv_timeout(GUARD).unwrap();
+        replace_connection_program(&mut history, random_connection_program(3, 24.0));
+        let newest_ticket = scheduler
+            .submit(document_request(history.session(), Arc::clone(&bytes)))
+            .unwrap();
+        gate.release();
+        let newest = wait_for_document_completion(&scheduler);
+        assert_ne!(stale_ticket, newest_ticket);
+        assert_eq!(newest.ticket(), newest_ticket);
+        assert_eq!(
+            newest.cache_diagnostics().unwrap().aggregate,
+            CacheDiagnostics {
+                decoded_source: CacheDisposition::Miss,
+                family: CacheDisposition::Miss,
+                realization: CacheDisposition::Miss,
+                scene: CacheDisposition::Miss,
+                raster: CacheDisposition::Miss,
+            },
+            "cancelled stale work cannot publish a connection cache transaction"
+        );
+        assert!(
+            scheduler
+                .accept_completion(&newest, history.session())
+                .unwrap()
+        );
+        let repeated_ticket = scheduler
+            .submit(document_request(history.session(), bytes))
+            .unwrap();
+        let repeated = wait_for_document_completion(&scheduler);
+        assert_eq!(repeated.ticket(), repeated_ticket);
+        assert_eq!(
+            repeated.cache_diagnostics().unwrap().aggregate,
+            CacheDiagnostics {
+                decoded_source: CacheDisposition::Hit,
+                family: CacheDisposition::Hit,
+                realization: CacheDisposition::Hit,
+                scene: CacheDisposition::Hit,
+                raster: CacheDisposition::Hit,
+            }
+        );
+        assert!(
+            scheduler
+                .accept_completion(&repeated, history.session())
+                .unwrap()
+        );
+        scheduler.shutdown().unwrap();
+    }
+
     /// Proves Stage 20J structural edits miss family cache while Stage 20I thickness remains realization-only.
     #[test]
     fn normal_offset_cache_identity_reuses_and_invalidates_at_the_authoritative_levels() {
@@ -3922,8 +5002,186 @@ mod cache_key_tests {
             canvas: (900.0_f64.to_bits(), 600.0_f64.to_bits()),
             source_component: 1,
             placement: 1,
-            response: (2.0_f64.to_bits(), 9.0_f64.to_bits(), 0.0_f64.to_bits()),
+            response: (0.25_f64.to_bits(), 1.0_f64.to_bits(), 0.0_f64.to_bits()),
         }
+    }
+
+    /// Includes geometry-owned connection algorithm contracts only in connection cache discrimination.
+    #[test]
+    fn connection_cache_contracts_track_program_kind_and_leave_mark_keys_empty() {
+        let mut connection = PatternDefinition::supported_straight_grid(
+            toniator_domain::PatternDefinitionId(8),
+            "connection",
+            toniator_domain::PatternMechanismId(9),
+            toniator_domain::PatternMechanismId(10),
+            toniator_domain::PatternOutputLayerId(11),
+            toniator_domain::CoveragePolicy {
+                guard_steps: 1,
+                additional_margin: 0.0,
+            },
+        );
+        connection.output_layers = vec![PatternOutputLayer::ConnectionPaths {
+            id: toniator_domain::PatternOutputLayerId(11),
+            site_mechanism_id: toniator_domain::PatternMechanismId(10),
+            program: toniator_domain::ConnectionProgram::RandomLinks {
+                adjacency: toniator_domain::ConnectionAdjacencyIntent {
+                    maximum_degree: 2,
+                    maximum_distance: 12.0,
+                },
+                minimum_degree: 0,
+                seed: 7,
+            },
+            style: toniator_domain::PathStrokeStyle::default(),
+        }];
+        let maze = connection_cache_contracts(
+            &connection,
+            SiteAdjacencyLimits::default(),
+            ConnectionPathLimits::default(),
+        )
+        .expect("connection contracts");
+        let mut tree = connection.clone();
+        let [PatternOutputLayer::ConnectionPaths { program, .. }] =
+            tree.output_layers.as_mut_slice()
+        else {
+            panic!("connection fixture retains output")
+        };
+        *program = toniator_domain::ConnectionProgram::GridSpanningTree {
+            adjacency: toniator_domain::ConnectionAdjacencyIntent {
+                maximum_degree: 2,
+                maximum_distance: 12.0,
+            },
+            algorithm: toniator_domain::GridSpanningTreeAlgorithm::RandomizedPrim,
+            seed: 7,
+        };
+        assert_ne!(
+            maze,
+            connection_cache_contracts(
+                &tree,
+                SiteAdjacencyLimits::default(),
+                ConnectionPathLimits::default(),
+            )
+            .expect("tree contracts")
+        );
+        let marks = PatternDefinition::supported_straight_grid(
+            toniator_domain::PatternDefinitionId(12),
+            "marks",
+            toniator_domain::PatternMechanismId(13),
+            toniator_domain::PatternMechanismId(14),
+            toniator_domain::PatternOutputLayerId(15),
+            toniator_domain::CoveragePolicy {
+                guard_steps: 1,
+                additional_margin: 0.0,
+            },
+        );
+        assert_eq!(
+            connection_cache_contracts(
+                &marks,
+                SiteAdjacencyLimits::default(),
+                ConnectionPathLimits::default(),
+            ),
+            None
+        );
+    }
+
+    /// Keeps maze family identity structural while seed, fixed recursive-backtracker contract, and
+    /// bounded maze limits discriminate only the derived realization cache key.
+    #[test]
+    fn maze_cache_contracts_track_seed_contract_and_limits_without_changing_family_key() {
+        let mut definition = PatternDefinition::supported_straight_grid(
+            toniator_domain::PatternDefinitionId(21),
+            "maze",
+            toniator_domain::PatternMechanismId(22),
+            toniator_domain::PatternMechanismId(23),
+            toniator_domain::PatternOutputLayerId(24),
+            toniator_domain::CoveragePolicy {
+                guard_steps: 1,
+                additional_margin: 0.0,
+            },
+        );
+        definition.output_layers = vec![PatternOutputLayer::MazeWalls {
+            id: toniator_domain::PatternOutputLayerId(24),
+            site_mechanism_id: toniator_domain::PatternMechanismId(23),
+            program: toniator_domain::MazeProgram {
+                algorithm: toniator_domain::GridMazeAlgorithm::RecursiveBacktracker,
+                seed: 7,
+            },
+            style: toniator_domain::PathStrokeStyle::default(),
+        }];
+        let baseline_limits = MazeLimits::default();
+        let baseline = maze_cache_contracts(&definition, baseline_limits).expect("maze contracts");
+        assert_eq!(baseline.arrangement, MAZE_WALL_CONTRACT_ID);
+        assert_eq!(
+            baseline.algorithm,
+            toniator_domain::GridMazeAlgorithm::RecursiveBacktracker,
+            "the only current algorithm still participates as an explicit contract field"
+        );
+        let mut seeded = definition.clone();
+        let [PatternOutputLayer::MazeWalls { program, .. }] = seeded.output_layers.as_mut_slice()
+        else {
+            panic!("maze fixture retains its maze output")
+        };
+        program.seed = 11;
+        assert_ne!(
+            baseline,
+            maze_cache_contracts(&seeded, baseline_limits).expect("seeded maze contracts")
+        );
+        let changed_limits = MazeLimits {
+            maximum_faces: baseline_limits.maximum_faces - 1,
+            ..baseline_limits
+        };
+        assert_ne!(
+            baseline,
+            maze_cache_contracts(&definition, changed_limits).expect("limited maze contracts")
+        );
+        assert_eq!(
+            family(true),
+            family(true),
+            "maze realization intent never enters the structural family cache key"
+        );
+    }
+
+    /// Keeps ordinary connected guide/parametric cache identities independent of connection-only limits.
+    #[test]
+    fn ordinary_connected_response_key_omits_connection_limits_and_contracts() {
+        let ordinary = DocumentResponseIdentity::Connected {
+            minimum: 0.25_f64.to_bits(),
+            maximum: 1.0_f64.to_bits(),
+            shape_rotation: 0.0_f64.to_bits(),
+            outline_contract: toniator_patterns::CANONICAL_STROKE_OUTLINE_CONTRACT_ID,
+            profile_limit: 128,
+            outline_segment_limit: 256,
+            connection_contracts: Box::new(None),
+            maze_contracts: Box::new(None),
+        };
+        assert_eq!(ordinary, ordinary.clone());
+        let connection = ConnectionCacheContracts {
+            site_adjacency: SITE_ADJACENCY_CONTRACT_ID,
+            path_selection: CONNECTION_PATH_CONTRACT_ID,
+            trail_decomposition: CONNECTION_TRAIL_CONTRACT_ID,
+            program_selection: connection_program_contract_id(
+                &toniator_domain::ConnectionProgram::NearestLinks {
+                    adjacency: toniator_domain::ConnectionAdjacencyIntent {
+                        maximum_degree: 1,
+                        maximum_distance: 1.0,
+                    },
+                },
+            ),
+            adjacency_limits: SiteAdjacencyLimits::default(),
+            connection_limits: ConnectionPathLimits::default(),
+        };
+        assert_ne!(
+            ordinary,
+            DocumentResponseIdentity::Connected {
+                minimum: 0.25_f64.to_bits(),
+                maximum: 1.0_f64.to_bits(),
+                shape_rotation: 0.0_f64.to_bits(),
+                outline_contract: toniator_patterns::CANONICAL_STROKE_OUTLINE_CONTRACT_ID,
+                profile_limit: 128,
+                outline_segment_limit: 256,
+                connection_contracts: Box::new(Some(connection)),
+                maze_contracts: Box::new(None),
+            }
+        );
     }
 
     #[test]

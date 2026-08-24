@@ -122,6 +122,26 @@ fn round_spiral_publishes_one_cubic_path_product() {
     );
 }
 
+/// Locks parametric geometry and identity outside the centered grid-prototype transform contract.
+///
+/// # Panics
+///
+/// Panics when the parametric structural-source adapter changes its established placement or
+/// family identity while local grid prototypes adopt the centered origin.
+#[test]
+fn parametric_family_geometry_and_identity_ignore_grid_local_origin_corrections() {
+    let output = evaluate_typed_family(&definition(SpiralShape::Round, true), &request())
+        .expect("parametric family evaluates");
+    assert_eq!(
+        output.family_fingerprint(),
+        "toniator-stage-20d-guide-family-v1:fnv1a64:c9d411712b5a44b4:nominal-cell-basis:fnv1a64:4ec48ee5f2b4ecf5"
+    );
+    assert_eq!(
+        output.site_set().sites()[0].position,
+        toniator_patterns::Point2::new(162.024_440_794_682_28, 123.336_300_100_532_98)
+    );
+}
+
 /// Proves NormalOffset cleanup components retain one ordered parametric source and phase sequence.
 #[test]
 fn normal_offset_sites_keep_path_neutral_repetition_identity() {

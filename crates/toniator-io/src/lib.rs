@@ -26,12 +26,12 @@ use toniator_domain::{
     DocumentPatternSettings, GeneralizedSiteProductDraft, GuideDimension, GuideDimensionDraft,
     GuideDimensionId, GuidePrototype, GuideRepetition, HalftoneChannelModel, HalftoneChannelRole,
     MarkGeometryResponse, MarkGeometryResponseDelta, MarkOrientation, MarkOrientationDraft,
-    MarkPrototype, ModeledChannelState, ParametricCurve, PathStrokeStyle, PatternDefinition,
-    PatternDefinitionDraft, PatternDefinitionId, PatternDefinitionRecipe, PatternGeometryResponse,
-    PatternMechanismId, PatternOutputLayerId, PresetMetadata, PresetRecord, RandomSiteCharacter,
-    SiteDensityModulation, SiteExclusionPolicy, SourceComponent, SourceMapping,
-    SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId, SpiralCurve,
-    SpiralShape, StraightGuideDimension, StraightGuideRepetition, ValidationError,
+    MarkPrototype, MazeProgram, ModeledChannelState, ParametricCurve, PathStrokeStyle,
+    PatternDefinition, PatternDefinitionDraft, PatternDefinitionId, PatternDefinitionRecipe,
+    PatternGeometryResponse, PatternMechanismId, PatternOutputLayerId, PresetMetadata,
+    PresetRecord, RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy, SourceComponent,
+    SourceMapping, SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId,
+    SpiralCurve, SpiralShape, StraightGuideDimension, StraightGuideRepetition, ValidationError,
     VisibleMarkSizingPolicy,
 };
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
@@ -848,6 +848,16 @@ enum PresetRecipeDto {
         maximum_attempts: u32,
         maximum_neighbor_checks: u32,
     },
+    ConnectionPaths {
+        definition: Box<PresetRecipeDto>,
+        program: ConnectionProgramDtoV4,
+        style: PathStrokeStyle,
+    },
+    MazeWalls {
+        definition: Box<PresetRecipeDto>,
+        program: MazeProgramDtoV4,
+        style: PathStrokeStyle,
+    },
     AuthoredClosedShapeMarks {
         definition: Box<PresetRecipeDto>,
         segments: Vec<AuthoredCurveSegmentDtoV4>,
@@ -1366,6 +1376,60 @@ enum PatternOutputLayerDtoV4 {
         curve_mechanism_id: u64,
         style: PathStrokeStyle,
     },
+    ConnectionPaths {
+        id: u64,
+        site_mechanism_id: u64,
+        program: ConnectionProgramDtoV4,
+        style: PathStrokeStyle,
+    },
+    MazeWalls {
+        id: u64,
+        site_mechanism_id: u64,
+        program: MazeProgramDtoV4,
+        style: PathStrokeStyle,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ConnectionProgramDtoV4 {
+    NearestLinks {
+        adjacency: ConnectionAdjacencyIntentDtoV4,
+    },
+    RandomLinks {
+        adjacency: ConnectionAdjacencyIntentDtoV4,
+        minimum_degree: u32,
+        seed: u32,
+    },
+    GridSpanningTree {
+        adjacency: ConnectionAdjacencyIntentDtoV4,
+        algorithm: GridSpanningTreeAlgorithmDtoV4,
+        seed: u32,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+struct ConnectionAdjacencyIntentDtoV4 {
+    maximum_degree: u32,
+    maximum_distance: f64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GridMazeAlgorithmDtoV4 {
+    RecursiveBacktracker,
+}
+
+#[derive(Serialize, Deserialize)]
+struct MazeProgramDtoV4 {
+    algorithm: GridMazeAlgorithmDtoV4,
+    seed: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GridSpanningTreeAlgorithmDtoV4 {
+    RandomizedPrim,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1497,6 +1561,24 @@ impl PresetRecipeDto {
                 maximum_attempts: *maximum_attempts,
                 maximum_neighbor_checks: *maximum_neighbor_checks,
             },
+            PatternDefinitionRecipe::ConnectionPaths {
+                definition,
+                program,
+                style,
+            } => Self::ConnectionPaths {
+                definition: Box::new(Self::from_domain(definition)),
+                program: ConnectionProgramDtoV4::from_domain(program),
+                style: *style,
+            },
+            PatternDefinitionRecipe::MazeWalls {
+                definition,
+                program,
+                style,
+            } => Self::MazeWalls {
+                definition: Box::new(Self::from_domain(definition)),
+                program: MazeProgramDtoV4::from_domain(program),
+                style: *style,
+            },
             PatternDefinitionRecipe::AuthoredClosedShapeMarks { definition, shape } => {
                 Self::AuthoredClosedShapeMarks {
                     definition: Box::new(Self::from_domain(definition)),
@@ -1565,6 +1647,24 @@ impl PresetRecipeDto {
                 exclusion: exclusion.into_domain(),
                 maximum_attempts,
                 maximum_neighbor_checks,
+            }),
+            Self::ConnectionPaths {
+                definition,
+                program,
+                style,
+            } => Ok(PatternDefinitionRecipe::ConnectionPaths {
+                definition: Box::new(definition.into_domain()?),
+                program: program.into_domain(),
+                style,
+            }),
+            Self::MazeWalls {
+                definition,
+                program,
+                style,
+            } => Ok(PatternDefinitionRecipe::MazeWalls {
+                definition: Box::new(definition.into_domain()?),
+                program: program.into_domain(),
+                style,
             }),
             Self::AuthoredClosedShapeMarks {
                 definition,
@@ -2594,6 +2694,28 @@ impl PatternOutputLayerDtoV4 {
                 curve_mechanism_id: curve_mechanism_id.0,
                 style: *style,
             },
+            toniator_domain::PatternOutputLayer::ConnectionPaths {
+                id,
+                site_mechanism_id,
+                program,
+                style,
+            } => Self::ConnectionPaths {
+                id: id.0,
+                site_mechanism_id: site_mechanism_id.0,
+                program: ConnectionProgramDtoV4::from_domain(program),
+                style: *style,
+            },
+            toniator_domain::PatternOutputLayer::MazeWalls {
+                id,
+                site_mechanism_id,
+                program,
+                style,
+            } => Self::MazeWalls {
+                id: id.0,
+                site_mechanism_id: site_mechanism_id.0,
+                program: MazeProgramDtoV4::from_domain(program),
+                style: *style,
+            },
         }
     }
     fn into_domain(self) -> toniator_domain::PatternOutputLayer {
@@ -2634,6 +2756,151 @@ impl PatternOutputLayerDtoV4 {
                 curve_mechanism_id: PatternMechanismId(curve_mechanism_id),
                 style,
             },
+            Self::ConnectionPaths {
+                id,
+                site_mechanism_id,
+                program,
+                style,
+            } => toniator_domain::PatternOutputLayer::ConnectionPaths {
+                id: PatternOutputLayerId(id),
+                site_mechanism_id: PatternMechanismId(site_mechanism_id),
+                program: program.into_domain(),
+                style,
+            },
+            Self::MazeWalls {
+                id,
+                site_mechanism_id,
+                program,
+                style,
+            } => toniator_domain::PatternOutputLayer::MazeWalls {
+                id: PatternOutputLayerId(id),
+                site_mechanism_id: PatternMechanismId(site_mechanism_id),
+                program: program.into_domain(),
+                style,
+            },
+        }
+    }
+}
+
+impl ConnectionProgramDtoV4 {
+    /// Serializes authored program intent without materializing a graph or path result.
+    fn from_domain(value: &toniator_domain::ConnectionProgram) -> Self {
+        use toniator_domain::ConnectionProgram;
+        match value {
+            ConnectionProgram::NearestLinks { adjacency } => Self::NearestLinks {
+                adjacency: ConnectionAdjacencyIntentDtoV4::from_domain(*adjacency),
+            },
+            ConnectionProgram::RandomLinks {
+                adjacency,
+                minimum_degree,
+                seed,
+            } => Self::RandomLinks {
+                adjacency: ConnectionAdjacencyIntentDtoV4::from_domain(*adjacency),
+                minimum_degree: *minimum_degree,
+                seed: *seed,
+            },
+            ConnectionProgram::GridSpanningTree {
+                adjacency,
+                algorithm,
+                seed,
+            } => Self::GridSpanningTree {
+                adjacency: ConnectionAdjacencyIntentDtoV4::from_domain(*adjacency),
+                algorithm: GridSpanningTreeAlgorithmDtoV4::from_domain(*algorithm),
+                seed: *seed,
+            },
+        }
+    }
+
+    /// Rebuilds authored program intent without accepting derived state from persistent bytes.
+    fn into_domain(self) -> toniator_domain::ConnectionProgram {
+        use toniator_domain::ConnectionProgram;
+        match self {
+            Self::NearestLinks { adjacency } => ConnectionProgram::NearestLinks {
+                adjacency: adjacency.into_domain(),
+            },
+            Self::RandomLinks {
+                adjacency,
+                minimum_degree,
+                seed,
+            } => ConnectionProgram::RandomLinks {
+                adjacency: adjacency.into_domain(),
+                minimum_degree,
+                seed,
+            },
+            Self::GridSpanningTree {
+                adjacency,
+                algorithm,
+                seed,
+            } => ConnectionProgram::GridSpanningTree {
+                adjacency: adjacency.into_domain(),
+                algorithm: algorithm.into_domain(),
+                seed,
+            },
+        }
+    }
+}
+
+impl MazeProgramDtoV4 {
+    /// Serializes only recursive-backtracker maze intent and its deterministic seed.
+    fn from_domain(value: &MazeProgram) -> Self {
+        Self {
+            algorithm: GridMazeAlgorithmDtoV4::from_domain(value.algorithm),
+            seed: value.seed,
+        }
+    }
+
+    /// Rebuilds maze intent without accepting any derived arrangement or path state.
+    fn into_domain(self) -> MazeProgram {
+        MazeProgram {
+            algorithm: self.algorithm.into_domain(),
+            seed: self.seed,
+        }
+    }
+}
+
+impl ConnectionAdjacencyIntentDtoV4 {
+    /// Serializes only finite authored adjacency controls.
+    fn from_domain(value: toniator_domain::ConnectionAdjacencyIntent) -> Self {
+        Self {
+            maximum_degree: value.maximum_degree,
+            maximum_distance: value.maximum_distance,
+        }
+    }
+    /// Rebuilds unvalidated authored adjacency controls for the document validation boundary.
+    fn into_domain(self) -> toniator_domain::ConnectionAdjacencyIntent {
+        toniator_domain::ConnectionAdjacencyIntent {
+            maximum_degree: self.maximum_degree,
+            maximum_distance: self.maximum_distance,
+        }
+    }
+}
+
+impl GridMazeAlgorithmDtoV4 {
+    /// Serializes the fixed maze algorithm contract.
+    fn from_domain(value: toniator_domain::GridMazeAlgorithm) -> Self {
+        match value {
+            toniator_domain::GridMazeAlgorithm::RecursiveBacktracker => Self::RecursiveBacktracker,
+        }
+    }
+    /// Rebuilds the fixed maze algorithm contract.
+    fn into_domain(self) -> toniator_domain::GridMazeAlgorithm {
+        match self {
+            Self::RecursiveBacktracker => toniator_domain::GridMazeAlgorithm::RecursiveBacktracker,
+        }
+    }
+}
+
+impl GridSpanningTreeAlgorithmDtoV4 {
+    /// Serializes the fixed spanning-tree algorithm contract.
+    fn from_domain(value: toniator_domain::GridSpanningTreeAlgorithm) -> Self {
+        match value {
+            toniator_domain::GridSpanningTreeAlgorithm::RandomizedPrim => Self::RandomizedPrim,
+        }
+    }
+    /// Rebuilds the fixed spanning-tree algorithm contract.
+    fn into_domain(self) -> toniator_domain::GridSpanningTreeAlgorithm {
+        match self {
+            Self::RandomizedPrim => toniator_domain::GridSpanningTreeAlgorithm::RandomizedPrim,
         }
     }
 }

@@ -502,8 +502,9 @@ pub struct DocumentPatternSettings {
     pub geometry_response: PatternGeometryResponse,
 }
 
-/// The presently supported output-response branch.  Future path and region
-/// responses intentionally do not exist in this current-format authority.
+/// The presently supported normalized output-response branches. Mark fill and
+/// connected-path thickness remain in `0.0..=2.0` nominal-cell-diameter units;
+/// region responses intentionally do not exist in this current-format authority.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PatternGeometryResponse {
     Marks(MarkGeometryResponse),
@@ -592,7 +593,7 @@ pub enum PatternCapabilityScope {
 
 /// Describes the active structural capabilities of one validated definition.
 /// It is derived-only workflow information and is never persisted or cached.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PatternCapabilityProjection {
     pub definition_id: PatternDefinitionId,
     pub family: PatternFamilyCapabilityProjection,
@@ -660,11 +661,15 @@ pub struct DispersionCapabilityProjection {
 }
 
 /// Describes one active output layer in stored definition order.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum PatternOutputCapabilityProjection {
     Marks(MarkOutputCapabilityProjection),
     /// Reports the structural guide-path output without evaluator or renderer authority.
     GuidePaths(GuidePathOutputCapabilityProjection),
+    /// Reports authored connection controls without exposing a derived graph or path collection.
+    ConnectionPaths(ConnectionPathOutputCapabilityProjection),
+    /// Reports authored conventional wall-maze controls without exposing derived arrangement state.
+    MazeWalls(MazeWallOutputCapabilityProjection),
 }
 
 /// Describes the active current mark output without creating renderer authority.
@@ -678,6 +683,37 @@ pub struct MarkOutputCapabilityProjection {
 /// Describes the only accepted Stage 20I stroke style.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GuidePathOutputCapabilityProjection {
+    pub round_join: bool,
+    pub round_cap: bool,
+    pub thickness_range: bool,
+}
+
+/// Read-only connection-output controls projected from one validated definition.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ConnectionPathOutputCapabilityProjection {
+    pub program_kind: ConnectionProgramKind,
+    pub maximum_degree: u32,
+    pub maximum_distance: f64,
+    pub minimum_degree: Option<u32>,
+    pub seed: Option<u32>,
+    pub round_join: bool,
+    pub round_cap: bool,
+    pub thickness_range: bool,
+}
+
+/// Payload-free connection program discriminant for capability consumers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectionProgramKind {
+    NearestLinks,
+    RandomLinks,
+    GridSpanningTree,
+}
+
+/// Read-only authored controls for one conventional wall-maze output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MazeWallOutputCapabilityProjection {
+    pub seeded_recursive_backtracker: bool,
+    pub seed: u32,
     pub round_join: bool,
     pub round_cap: bool,
     pub thickness_range: bool,
@@ -700,6 +736,148 @@ pub enum StrokeCap {
 pub struct PathStrokeStyle {
     pub join: StrokeJoin,
     pub cap: StrokeCap,
+}
+
+/// Authored mutual-nearest bounds consumed by one connection program.
+#[derive(Clone, Copy, Debug)]
+pub struct ConnectionAdjacencyIntent {
+    pub maximum_degree: u32,
+    pub maximum_distance: f64,
+}
+
+impl Eq for ConnectionAdjacencyIntent {}
+
+impl PartialEq for ConnectionAdjacencyIntent {
+    /// Compares exactly persisted control bits so invalid constructible NaNs remain reflexive under `Eq`.
+    fn eq(&self, other: &Self) -> bool {
+        self.maximum_degree == other.maximum_degree
+            && self.maximum_distance.to_bits() == other.maximum_distance.to_bits()
+    }
+}
+
+impl ConnectionAdjacencyIntent {
+    /// Validates the bounded finite adjacency intent without deriving a graph.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable document diagnostic when the degree or distance is outside the Stage 20M contract.
+    pub fn validate(self) -> Result<(), ValidationError> {
+        if !(1..=32).contains(&self.maximum_degree) {
+            return Err(ValidationError::new(
+                "connection.adjacency.maximum_degree",
+                "connection maximum degree must be in 1..=32",
+            ));
+        }
+        if !self.maximum_distance.is_finite() || self.maximum_distance <= 0.0 {
+            return Err(ValidationError::new(
+                "connection.adjacency.maximum_distance",
+                "connection maximum distance must be finite and positive",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The deterministic Stage 20M maze selection contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GridMazeAlgorithm {
+    RecursiveBacktracker,
+}
+
+/// Persisted conventional wall-maze intent; all walls, faces, passages, and solutions remain derived.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MazeProgram {
+    pub algorithm: GridMazeAlgorithm,
+    pub seed: u32,
+}
+
+impl MazeProgram {
+    /// Validates the fixed recursive-backtracker selector before arrangement allocation.
+    ///
+    /// # Errors
+    ///
+    /// This present finite program has no invalid payload values and therefore cannot fail.
+    pub const fn validate(&self) -> Result<(), ValidationError> {
+        match self.algorithm {
+            GridMazeAlgorithm::RecursiveBacktracker => Ok(()),
+        }
+    }
+}
+
+/// The deterministic Stage 20M spanning-tree selection contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GridSpanningTreeAlgorithm {
+    RandomizedPrim,
+}
+
+/// Persisted connection intent; selected edges and paths remain derived-only geometry.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ConnectionProgram {
+    NearestLinks {
+        adjacency: ConnectionAdjacencyIntent,
+    },
+    RandomLinks {
+        adjacency: ConnectionAdjacencyIntent,
+        minimum_degree: u32,
+        seed: u32,
+    },
+    GridSpanningTree {
+        adjacency: ConnectionAdjacencyIntent,
+        algorithm: GridSpanningTreeAlgorithm,
+        seed: u32,
+    },
+}
+
+impl Eq for ConnectionProgram {}
+
+impl ConnectionProgram {
+    /// Returns the payload-free authored program choice without deriving topology.
+    pub const fn kind(&self) -> ConnectionProgramKind {
+        match self {
+            Self::NearestLinks { .. } => ConnectionProgramKind::NearestLinks,
+            Self::RandomLinks { .. } => ConnectionProgramKind::RandomLinks,
+            Self::GridSpanningTree { .. } => ConnectionProgramKind::GridSpanningTree,
+        }
+    }
+
+    /// Returns the authored adjacency intent without constructing derived topology.
+    pub const fn adjacency(&self) -> ConnectionAdjacencyIntent {
+        match self {
+            Self::NearestLinks { adjacency }
+            | Self::RandomLinks { adjacency, .. }
+            | Self::GridSpanningTree { adjacency, .. } => *adjacency,
+        }
+    }
+
+    /// Returns the program seed when selection is randomized.
+    pub const fn seed(&self) -> Option<u32> {
+        match self {
+            Self::NearestLinks { .. } => None,
+            Self::RandomLinks { seed, .. } | Self::GridSpanningTree { seed, .. } => Some(*seed),
+        }
+    }
+
+    /// Validates all authored program controls before any family, graph, or path allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns stable connection diagnostics for invalid adjacency or random-degree intent.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        self.adjacency().validate()?;
+        if let Self::RandomLinks {
+            adjacency,
+            minimum_degree,
+            ..
+        } = self
+            && *minimum_degree > adjacency.maximum_degree
+        {
+            return Err(ValidationError::new(
+                "connection.minimum_degree",
+                "connection minimum degree must not exceed maximum degree",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Default for PathStrokeStyle {
@@ -1264,6 +1442,20 @@ pub enum PatternOutputLayer {
         curve_mechanism_id: PatternMechanismId,
         style: PathStrokeStyle,
     },
+    /// Consumes one typed site product as deterministic positive connection paths.
+    ConnectionPaths {
+        id: PatternOutputLayerId,
+        site_mechanism_id: PatternMechanismId,
+        program: ConnectionProgram,
+        style: PathStrokeStyle,
+    },
+    /// Consumes a straight-guide intersection site product as positive retained maze walls.
+    MazeWalls {
+        id: PatternOutputLayerId,
+        site_mechanism_id: PatternMechanismId,
+        program: MazeProgram,
+        style: PathStrokeStyle,
+    },
 }
 
 impl PatternOutputLayer {
@@ -1271,8 +1463,10 @@ impl PatternOutputLayer {
         match self {
             Self::CircularMarks { id, .. }
             | Self::MarkPrototype { id, .. }
-            | Self::GuidePaths { id, .. } => *id,
-            Self::ParametricPaths { id, .. } => *id,
+            | Self::GuidePaths { id, .. }
+            | Self::ParametricPaths { id, .. }
+            | Self::ConnectionPaths { id, .. }
+            | Self::MazeWalls { id, .. } => *id,
         }
     }
 }
@@ -1915,7 +2109,9 @@ impl Document {
         validate_effective_response_compatibility(definition, &effective.geometry_response)?;
         if matches!(
             definition.output_layers.as_slice(),
-            [PatternOutputLayer::GuidePaths { .. }]
+            [PatternOutputLayer::GuidePaths { .. }
+                | PatternOutputLayer::ConnectionPaths { .. }
+                | PatternOutputLayer::MazeWalls { .. }]
         ) && effective.shape_rotation_degrees != 0.0
         {
             return Err(ValidationError::new(
@@ -2690,6 +2886,30 @@ impl Document {
             }
             for layer in &definition.output_layers {
                 let target = PropertyTarget::OutputLayer(definition.id, layer.id());
+                if let PatternOutputLayer::ConnectionPaths { program, .. } = layer {
+                    for field in [
+                        PropertyFieldId::ConnectionProgram,
+                        PropertyFieldId::ConnectionMaximumDegree,
+                        PropertyFieldId::ConnectionMaximumDistance,
+                    ] {
+                        descriptors.push(descriptor_from_contract(field, target));
+                    }
+                    if matches!(program, ConnectionProgram::RandomLinks { .. }) {
+                        descriptors.push(descriptor_from_contract(
+                            PropertyFieldId::ConnectionMinimumDegree,
+                            target,
+                        ));
+                    }
+                    if program.seed().is_some() {
+                        descriptors.push(descriptor_from_contract(
+                            PropertyFieldId::ConnectionSeed,
+                            target,
+                        ));
+                    }
+                }
+                if matches!(layer, PatternOutputLayer::MazeWalls { .. }) {
+                    descriptors.push(descriptor_from_contract(PropertyFieldId::MazeSeed, target));
+                }
                 if matches!(
                     layer,
                     PatternOutputLayer::CircularMarks { .. }
@@ -3228,6 +3448,36 @@ impl Document {
                     })
                     .expect("active output descriptor");
                 match (descriptor.field, layer) {
+                    (
+                        PropertyFieldId::ConnectionProgram,
+                        PatternOutputLayer::ConnectionPaths { program, .. },
+                    ) => PropertyCurrentValueKind::EnumChoice(
+                        PropertyEnumChoice::ConnectionProgram(program.kind()),
+                    ),
+                    (
+                        PropertyFieldId::ConnectionMaximumDegree,
+                        PatternOutputLayer::ConnectionPaths { program, .. },
+                    ) => PropertyCurrentValueKind::U32(program.adjacency().maximum_degree),
+                    (
+                        PropertyFieldId::ConnectionMaximumDistance,
+                        PatternOutputLayer::ConnectionPaths { program, .. },
+                    ) => PropertyCurrentValueKind::FiniteF64(program.adjacency().maximum_distance),
+                    (
+                        PropertyFieldId::ConnectionMinimumDegree,
+                        PatternOutputLayer::ConnectionPaths {
+                            program: ConnectionProgram::RandomLinks { minimum_degree, .. },
+                            ..
+                        },
+                    ) => PropertyCurrentValueKind::U32(*minimum_degree),
+                    (
+                        PropertyFieldId::ConnectionSeed,
+                        PatternOutputLayer::ConnectionPaths { program, .. },
+                    ) => PropertyCurrentValueKind::U32(
+                        program.seed().expect("active connection seed descriptor"),
+                    ),
+                    (PropertyFieldId::MazeSeed, PatternOutputLayer::MazeWalls { program, .. }) => {
+                        PropertyCurrentValueKind::U32(program.seed)
+                    }
                     (
                         PropertyFieldId::OutputSiteProduct,
                         PatternOutputLayer::CircularMarks {
@@ -3782,11 +4032,27 @@ impl Document {
         channel_id: Option<ChannelId>,
         recipe: &PatternDefinitionRecipe,
     ) -> Result<MaterializedPatternDefinitionRecipe, ValidationError> {
-        let (definition_recipe, shape_draft) = match recipe {
+        let (definition_recipe, shape_draft, connection, maze) = match recipe {
             PatternDefinitionRecipe::AuthoredClosedShapeMarks { definition, shape } => {
-                (definition.as_ref(), Some(shape))
+                (definition.as_ref(), Some(shape), None, None)
             }
-            _ => (recipe, None),
+            PatternDefinitionRecipe::ConnectionPaths {
+                definition,
+                program,
+                style,
+            } => {
+                validate_connection_recipe(definition, program)?;
+                (definition.as_ref(), None, Some((program, *style)), None)
+            }
+            PatternDefinitionRecipe::MazeWalls {
+                definition,
+                program,
+                style,
+            } => {
+                validate_maze_recipe(definition, program)?;
+                (definition.as_ref(), None, None, Some((program, *style)))
+            }
+            _ => (recipe, None, None, None),
         };
         let neutral = self.allocate_neutral_definition_from_recipe(definition_recipe)?;
         let mut candidate = self.clone();
@@ -3797,6 +4063,76 @@ impl Document {
             candidate.pattern_settings.definition_id = neutral.id;
         }
         candidate.apply_recipe_controls(neutral.id, definition_recipe)?;
+        if let Some((program, style)) = connection {
+            let definition = candidate
+                .pattern_definitions
+                .iter_mut()
+                .find(|definition| definition.id == neutral.id)
+                .expect("fresh recipe definition");
+            let (output_id, site_mechanism_id) = match definition.output_layers.as_slice() {
+                [
+                    PatternOutputLayer::CircularMarks {
+                        id,
+                        site_mechanism_id,
+                    },
+                ]
+                | [
+                    PatternOutputLayer::MarkPrototype {
+                        id,
+                        site_mechanism_id,
+                        ..
+                    },
+                ] => (*id, *site_mechanism_id),
+                _ => {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.recipe.connection",
+                        "connection recipe materialized an incompatible output",
+                    ));
+                }
+            };
+            definition.output_layers = vec![PatternOutputLayer::ConnectionPaths {
+                id: output_id,
+                site_mechanism_id,
+                program: program.clone(),
+                style,
+            }];
+            validate_definition(definition)?;
+        }
+        if let Some((program, style)) = maze {
+            let definition = candidate
+                .pattern_definitions
+                .iter_mut()
+                .find(|definition| definition.id == neutral.id)
+                .expect("fresh recipe definition");
+            let (output_id, site_mechanism_id) = match definition.output_layers.as_slice() {
+                [
+                    PatternOutputLayer::CircularMarks {
+                        id,
+                        site_mechanism_id,
+                    },
+                ]
+                | [
+                    PatternOutputLayer::MarkPrototype {
+                        id,
+                        site_mechanism_id,
+                        ..
+                    },
+                ] => (*id, *site_mechanism_id),
+                _ => {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.recipe.maze",
+                        "maze recipe materialized an incompatible output",
+                    ));
+                }
+            };
+            definition.output_layers = vec![PatternOutputLayer::MazeWalls {
+                id: output_id,
+                site_mechanism_id,
+                program: program.clone(),
+                style,
+            }];
+            validate_definition(definition)?;
+        }
         let authored_structure = if let Some(shape_draft) = shape_draft {
             let definition = candidate
                 .pattern_definitions
@@ -3992,8 +4328,10 @@ impl Document {
                 validate_definition(&definition)?;
                 Ok(definition)
             }
-            PatternDefinitionRecipe::AuthoredClosedShapeMarks { .. } => {
-                unreachable!("shape recipe wrapper is removed before neutral allocation")
+            PatternDefinitionRecipe::ConnectionPaths { .. }
+            | PatternDefinitionRecipe::MazeWalls { .. }
+            | PatternDefinitionRecipe::AuthoredClosedShapeMarks { .. } => {
+                unreachable!("output recipe wrapper is removed before neutral allocation")
             }
         }
     }
@@ -4265,8 +4603,10 @@ impl Document {
                 let _ = (modulation_id, exclusion_id);
                 Ok(())
             }
-            PatternDefinitionRecipe::AuthoredClosedShapeMarks { .. } => {
-                unreachable!("shape recipe wrapper is removed before control application")
+            PatternDefinitionRecipe::ConnectionPaths { .. }
+            | PatternDefinitionRecipe::MazeWalls { .. }
+            | PatternDefinitionRecipe::AuthoredClosedShapeMarks { .. } => {
+                unreachable!("output recipe wrapper is removed before control application")
             }
         }
     }
@@ -4350,6 +4690,92 @@ impl Document {
         &self,
         source: &PatternDefinition,
     ) -> Result<PatternDefinition, ValidationError> {
+        if let (
+            [
+                PatternMechanism::StraightGuides { .. },
+                PatternMechanism::GuideIntersections { .. },
+            ],
+            [PatternOutputLayer::ConnectionPaths { program, style, .. }],
+        ) = (
+            source.mechanisms.as_slice(),
+            source.output_layers.as_slice(),
+        ) {
+            let id = self.allocate_definition_id()?;
+            let guide_id = self.allocate_mechanism_id()?;
+            let site_id = PatternMechanismId(guide_id.0.checked_add(1).ok_or_else(|| {
+                ValidationError::new(
+                    "pattern_definitions.mechanisms.id",
+                    "document mechanism ID space is exhausted",
+                )
+            })?);
+            let output_id = self.allocate_output_layer_id()?;
+            return Ok(PatternDefinition {
+                id,
+                name: source.name.clone(),
+                family: PatternFamily::GuideIntersections {
+                    guide_mechanism_id: guide_id,
+                    site_mechanism_id: site_id,
+                },
+                mechanisms: vec![
+                    PatternMechanism::StraightGuides { id: guide_id },
+                    PatternMechanism::GuideIntersections {
+                        id: site_id,
+                        guide_mechanism_id: guide_id,
+                    },
+                ],
+                output_layers: vec![PatternOutputLayer::ConnectionPaths {
+                    id: output_id,
+                    site_mechanism_id: site_id,
+                    program: program.clone(),
+                    style: *style,
+                }],
+                modulation: source.modulation.clone(),
+                coverage: source.coverage.clone(),
+            });
+        }
+        if let (
+            [
+                PatternMechanism::StraightGuides { .. },
+                PatternMechanism::GuideIntersections { .. },
+            ],
+            [PatternOutputLayer::MazeWalls { program, style, .. }],
+        ) = (
+            source.mechanisms.as_slice(),
+            source.output_layers.as_slice(),
+        ) {
+            let id = self.allocate_definition_id()?;
+            let guide_id = self.allocate_mechanism_id()?;
+            let site_id = PatternMechanismId(guide_id.0.checked_add(1).ok_or_else(|| {
+                ValidationError::new(
+                    "pattern_definitions.mechanisms.id",
+                    "document mechanism ID space is exhausted",
+                )
+            })?);
+            let output_id = self.allocate_output_layer_id()?;
+            return Ok(PatternDefinition {
+                id,
+                name: source.name.clone(),
+                family: PatternFamily::GuideIntersections {
+                    guide_mechanism_id: guide_id,
+                    site_mechanism_id: site_id,
+                },
+                mechanisms: vec![
+                    PatternMechanism::StraightGuides { id: guide_id },
+                    PatternMechanism::GuideIntersections {
+                        id: site_id,
+                        guide_mechanism_id: guide_id,
+                    },
+                ],
+                output_layers: vec![PatternOutputLayer::MazeWalls {
+                    id: output_id,
+                    site_mechanism_id: site_id,
+                    program: program.clone(),
+                    style: *style,
+                }],
+                modulation: source.modulation.clone(),
+                coverage: source.coverage.clone(),
+            });
+        }
         if let [PatternMechanism::GuideDimensions { dimensions, .. }, site] =
             source.mechanisms.as_slice()
         {
@@ -4416,6 +4842,28 @@ impl Document {
                     ));
                 }
             };
+            if let [PatternOutputLayer::ConnectionPaths { program, style, .. }] =
+                source.output_layers.as_slice()
+            {
+                let mut duplicate = PatternDefinition::generalized_guides(
+                    id,
+                    source.name.clone(),
+                    guide_id,
+                    site_id,
+                    output_id,
+                    remapped.into_iter().map(|(_, value)| value).collect(),
+                    product,
+                    MarkOrientation::Fixed,
+                    source.coverage.clone(),
+                );
+                duplicate.output_layers = vec![PatternOutputLayer::ConnectionPaths {
+                    id: output_id,
+                    site_mechanism_id: site_id,
+                    program: program.clone(),
+                    style: *style,
+                }];
+                return Ok(duplicate);
+            }
             let orientation = match source.output_layers.as_slice() {
                 [
                     PatternOutputLayer::MarkPrototype {
@@ -4528,6 +4976,28 @@ impl Document {
                     ));
                 }
             };
+            if let [PatternOutputLayer::ConnectionPaths { program, style, .. }] =
+                source.output_layers.as_slice()
+            {
+                let mut duplicate = PatternDefinition::generalized_straight_guides(
+                    id,
+                    source.name.clone(),
+                    guide_id,
+                    site_id,
+                    output_id,
+                    remapped.into_iter().map(|(_, value)| value).collect(),
+                    product,
+                    MarkOrientation::Fixed,
+                    source.coverage.clone(),
+                );
+                duplicate.output_layers = vec![PatternOutputLayer::ConnectionPaths {
+                    id: output_id,
+                    site_mechanism_id: site_id,
+                    program: program.clone(),
+                    style: *style,
+                }];
+                return Ok(duplicate);
+            }
             let orientation = match source.output_layers.as_slice() {
                 [
                     PatternOutputLayer::MarkPrototype {
@@ -4665,6 +5135,14 @@ impl Document {
                     prototype: prototype.clone(),
                     orientation: MarkOrientation::Fixed,
                 }],
+                ([PatternOutputLayer::ConnectionPaths { program, style, .. }], Some(site_id)) => {
+                    vec![PatternOutputLayer::ConnectionPaths {
+                        id: output_id,
+                        site_mechanism_id: site_id,
+                        program: program.clone(),
+                        style: *style,
+                    }]
+                }
                 _ => {
                     return Err(ValidationError::new(
                         "pattern_definitions.output_layers",
@@ -4726,25 +5204,34 @@ impl Document {
                     "random definition has an incompatible mechanism chain",
                 ));
             };
-            return retain_duplicated_mark_prototype(
-                source,
-                PatternDefinition::random_sites(
-                    id,
-                    source.name.clone(),
-                    base_id,
-                    modulation_id,
-                    exclusion_id,
-                    site_id,
-                    output_id,
-                    character.clone(),
-                    *seed,
-                    modulation.clone(),
-                    policy.clone(),
-                    *maximum_attempts,
-                    *maximum_neighbor_checks,
-                    source.coverage.clone(),
-                ),
+            let mut duplicate = PatternDefinition::random_sites(
+                id,
+                source.name.clone(),
+                base_id,
+                modulation_id,
+                exclusion_id,
+                site_id,
+                output_id,
+                character.clone(),
+                *seed,
+                modulation.clone(),
+                policy.clone(),
+                *maximum_attempts,
+                *maximum_neighbor_checks,
+                source.coverage.clone(),
             );
+            if let [PatternOutputLayer::ConnectionPaths { program, style, .. }] =
+                source.output_layers.as_slice()
+            {
+                duplicate.output_layers = vec![PatternOutputLayer::ConnectionPaths {
+                    id: output_id,
+                    site_mechanism_id: site_id,
+                    program: program.clone(),
+                    style: *style,
+                }];
+                return Ok(duplicate);
+            }
+            return retain_duplicated_mark_prototype(source, duplicate);
         }
         let draft = PatternDefinitionDraft {
             name: source.name.clone(),
@@ -4956,7 +5443,8 @@ impl Document {
                 .is_some_and(|definition| {
                     matches!(
                         definition.output_layers.as_slice(),
-                        [PatternOutputLayer::GuidePaths { .. }]
+                        [PatternOutputLayer::GuidePaths { .. }
+                            | PatternOutputLayer::ConnectionPaths { .. }]
                     )
                 })
             {
@@ -6236,7 +6724,9 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
                         };
                     }
                     PatternOutputLayer::GuidePaths { .. }
-                    | PatternOutputLayer::ParametricPaths { .. } => {}
+                    | PatternOutputLayer::ParametricPaths { .. }
+                    | PatternOutputLayer::ConnectionPaths { .. }
+                    | PatternOutputLayer::MazeWalls { .. } => {}
                 }
             }
         }
@@ -6293,6 +6783,89 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
                 }
             }
         }
+        PatternDefinitionEdit::SetConnectionProgram {
+            output_layer_id,
+            program,
+        } => apply_connection_program(definition, *output_layer_id, |current| {
+            *current = program.clone()
+        }),
+        PatternDefinitionEdit::SetConnectionMaximumDegree {
+            output_layer_id,
+            maximum_degree,
+        } => apply_connection_program(definition, *output_layer_id, |current| match current {
+            ConnectionProgram::NearestLinks { adjacency }
+            | ConnectionProgram::RandomLinks { adjacency, .. }
+            | ConnectionProgram::GridSpanningTree { adjacency, .. } => {
+                adjacency.maximum_degree = *maximum_degree;
+            }
+        }),
+        PatternDefinitionEdit::SetConnectionMaximumDistance {
+            output_layer_id,
+            maximum_distance,
+        } => apply_connection_program(definition, *output_layer_id, |current| match current {
+            ConnectionProgram::NearestLinks { adjacency }
+            | ConnectionProgram::RandomLinks { adjacency, .. }
+            | ConnectionProgram::GridSpanningTree { adjacency, .. } => {
+                adjacency.maximum_distance = *maximum_distance;
+            }
+        }),
+        PatternDefinitionEdit::SetConnectionMinimumDegree {
+            output_layer_id,
+            minimum_degree,
+        } => apply_connection_program(definition, *output_layer_id, |current| {
+            if let ConnectionProgram::RandomLinks {
+                minimum_degree: existing,
+                ..
+            } = current
+            {
+                *existing = *minimum_degree;
+            }
+        }),
+        PatternDefinitionEdit::SetConnectionSeed {
+            output_layer_id,
+            seed,
+        } => apply_connection_program(definition, *output_layer_id, |current| match current {
+            ConnectionProgram::RandomLinks { seed: existing, .. }
+            | ConnectionProgram::GridSpanningTree { seed: existing, .. } => *existing = *seed,
+            ConnectionProgram::NearestLinks { .. } => {}
+        }),
+        PatternDefinitionEdit::SetMazeSeed {
+            output_layer_id,
+            seed,
+        } => apply_maze_program(definition, *output_layer_id, |current| current.seed = *seed),
+    }
+}
+
+/// Applies one validated connection-program mutation without altering the output's site mechanism.
+///
+/// The helper intentionally ignores absent or non-connection targets because validation rejects
+/// them before candidate publication; it never introduces a new output variant.
+fn apply_connection_program(
+    definition: &mut PatternDefinition,
+    output_layer_id: PatternOutputLayerId,
+    mutate: impl FnOnce(&mut ConnectionProgram),
+) {
+    if let Some(PatternOutputLayer::ConnectionPaths { program, .. }) = definition
+        .output_layers
+        .iter_mut()
+        .find(|layer| layer.id() == output_layer_id)
+    {
+        mutate(program);
+    }
+}
+
+/// Applies one validated maze-program mutation without changing its output or site mechanism.
+fn apply_maze_program(
+    definition: &mut PatternDefinition,
+    output_layer_id: PatternOutputLayerId,
+    mutate: impl FnOnce(&mut MazeProgram),
+) {
+    if let Some(PatternOutputLayer::MazeWalls { program, .. }) = definition
+        .output_layers
+        .iter_mut()
+        .find(|layer| layer.id() == output_layer_id)
+    {
+        mutate(program);
     }
 }
 
@@ -6911,6 +7484,48 @@ fn remap_definition_edit_for_duplicate(
         } => PatternDefinitionEdit::SetOutputOrientationDimension {
             output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
             dimension_id: dimension(*dimension_id),
+        },
+        PatternDefinitionEdit::SetConnectionProgram {
+            output_layer_id,
+            program,
+        } => PatternDefinitionEdit::SetConnectionProgram {
+            output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
+            program: program.clone(),
+        },
+        PatternDefinitionEdit::SetConnectionMaximumDegree {
+            output_layer_id,
+            maximum_degree,
+        } => PatternDefinitionEdit::SetConnectionMaximumDegree {
+            output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
+            maximum_degree: *maximum_degree,
+        },
+        PatternDefinitionEdit::SetConnectionMaximumDistance {
+            output_layer_id,
+            maximum_distance,
+        } => PatternDefinitionEdit::SetConnectionMaximumDistance {
+            output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
+            maximum_distance: *maximum_distance,
+        },
+        PatternDefinitionEdit::SetConnectionMinimumDegree {
+            output_layer_id,
+            minimum_degree,
+        } => PatternDefinitionEdit::SetConnectionMinimumDegree {
+            output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
+            minimum_degree: *minimum_degree,
+        },
+        PatternDefinitionEdit::SetConnectionSeed {
+            output_layer_id,
+            seed,
+        } => PatternDefinitionEdit::SetConnectionSeed {
+            output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
+            seed: *seed,
+        },
+        PatternDefinitionEdit::SetMazeSeed {
+            output_layer_id,
+            seed,
+        } => PatternDefinitionEdit::SetMazeSeed {
+            output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
+            seed: *seed,
         },
     }
 }
@@ -7594,6 +8209,88 @@ fn validate_definition_edit(
                 "field is inactive for fixed output orientation",
             )),
         },
+        PatternDefinitionEdit::SetConnectionProgram {
+            output_layer_id,
+            program,
+        } => {
+            validate_connection_output_target(definition, *output_layer_id)?;
+            program.validate()
+        }
+        PatternDefinitionEdit::SetConnectionMaximumDegree {
+            output_layer_id,
+            maximum_degree,
+        } => {
+            let mut candidate =
+                validate_connection_output_target(definition, *output_layer_id)?.clone();
+            match &mut candidate {
+                ConnectionProgram::NearestLinks { adjacency }
+                | ConnectionProgram::RandomLinks { adjacency, .. }
+                | ConnectionProgram::GridSpanningTree { adjacency, .. } => {
+                    adjacency.maximum_degree = *maximum_degree;
+                }
+            }
+            candidate.validate()
+        }
+        PatternDefinitionEdit::SetConnectionMaximumDistance {
+            output_layer_id,
+            maximum_distance,
+        } => {
+            let mut candidate =
+                validate_connection_output_target(definition, *output_layer_id)?.clone();
+            match &mut candidate {
+                ConnectionProgram::NearestLinks { adjacency }
+                | ConnectionProgram::RandomLinks { adjacency, .. }
+                | ConnectionProgram::GridSpanningTree { adjacency, .. } => {
+                    adjacency.maximum_distance = *maximum_distance;
+                }
+            }
+            candidate.validate()
+        }
+        PatternDefinitionEdit::SetConnectionMinimumDegree {
+            output_layer_id,
+            minimum_degree,
+        } => {
+            let mut candidate =
+                validate_connection_output_target(definition, *output_layer_id)?.clone();
+            let ConnectionProgram::RandomLinks {
+                minimum_degree: current,
+                ..
+            } = &mut candidate
+            else {
+                return Err(ValidationError::new(
+                    "pattern_definitions.output_layers.connection.minimum_degree",
+                    "field is inactive for the current connection program",
+                ));
+            };
+            *current = *minimum_degree;
+            candidate.validate()
+        }
+        PatternDefinitionEdit::SetConnectionSeed {
+            output_layer_id,
+            seed,
+        } => {
+            let mut candidate =
+                validate_connection_output_target(definition, *output_layer_id)?.clone();
+            match &mut candidate {
+                ConnectionProgram::RandomLinks { seed: current, .. }
+                | ConnectionProgram::GridSpanningTree { seed: current, .. } => {
+                    *current = *seed;
+                    candidate.validate()
+                }
+                ConnectionProgram::NearestLinks { .. } => Err(ValidationError::new(
+                    "pattern_definitions.output_layers.connection.seed",
+                    "field is inactive for the current connection program",
+                )),
+            }
+        }
+        PatternDefinitionEdit::SetMazeSeed {
+            output_layer_id,
+            seed,
+        } => {
+            let mut candidate = validate_maze_output_target(definition, *output_layer_id)?.clone();
+            candidate.seed = *seed;
+            candidate.validate()
+        }
     }
 }
 
@@ -8004,6 +8701,50 @@ fn validate_mark_prototype_output_target(
             "pattern_definitions.output_layers",
             "command targets a parametric-path output without a mark-prototype configuration",
         )),
+        PatternOutputLayer::ConnectionPaths { .. } => Err(ValidationError::new(
+            "pattern_definitions.output_layers",
+            "command targets a connection-path output without a mark-prototype configuration",
+        )),
+        PatternOutputLayer::MazeWalls { .. } => Err(ValidationError::new(
+            "pattern_definitions.output_layers",
+            "command targets a maze-wall output without a mark-prototype configuration",
+        )),
+    }
+}
+
+/// Returns the authored connection program for one connection-path output target.
+///
+/// # Errors
+///
+/// Returns a stable missing-target or incompatible-output diagnostic without mutating the definition.
+fn validate_connection_output_target(
+    definition: &PatternDefinition,
+    output_layer_id: PatternOutputLayerId,
+) -> Result<&ConnectionProgram, ValidationError> {
+    match validate_output_layer_target(definition, output_layer_id)? {
+        PatternOutputLayer::ConnectionPaths { program, .. } => Ok(program),
+        _ => Err(ValidationError::new(
+            "pattern_definitions.output_layers.connection",
+            "command targets an output without a connection-program configuration",
+        )),
+    }
+}
+
+/// Returns the authored maze program only for a maze-wall output target.
+///
+/// # Errors
+///
+/// Returns a stable target diagnostic without mutating the definition.
+fn validate_maze_output_target(
+    definition: &PatternDefinition,
+    output_layer_id: PatternOutputLayerId,
+) -> Result<&MazeProgram, ValidationError> {
+    match validate_output_layer_target(definition, output_layer_id)? {
+        PatternOutputLayer::MazeWalls { program, .. } => Ok(program),
+        _ => Err(ValidationError::new(
+            "pattern_definitions.output_layers.maze",
+            "command targets an output without a maze-program configuration",
+        )),
     }
 }
 
@@ -8127,6 +8868,12 @@ fn validate_definition_structure(definition: &PatternDefinition) -> Result<(), V
                 "output layer IDs must be unique and deterministically ordered",
             ));
         }
+        if let PatternOutputLayer::ConnectionPaths { program, .. } = layer {
+            program.validate()?;
+        }
+        if let PatternOutputLayer::MazeWalls { program, .. } = layer {
+            program.validate()?;
+        }
     }
     if let PatternFamily::RandomSites {
         base_site_process_id,
@@ -8179,6 +8926,7 @@ fn validate_definition_structure(definition: &PatternDefinition) -> Result<(), V
             *id,
             root_site_id,
             dimensions,
+            site,
         )?;
         return Ok(());
     }
@@ -8225,6 +8973,20 @@ fn validate_definition_structure(definition: &PatternDefinition) -> Result<(), V
                 ..
             },
         ] => *output_guide_id == guide_mechanism_id,
+        [
+            PatternOutputLayer::ConnectionPaths {
+                site_mechanism_id,
+                program,
+                ..
+            },
+        ] => *site_mechanism_id == root_site_id && program.validate().is_ok(),
+        [
+            PatternOutputLayer::MazeWalls {
+                site_mechanism_id,
+                program,
+                ..
+            },
+        ] => *site_mechanism_id == root_site_id && program.validate().is_ok(),
         _ => false,
     };
     if !has_compatible_output {
@@ -8631,6 +9393,53 @@ fn project_output_capability(
             },
         ));
     }
+    if let PatternOutputLayer::ConnectionPaths { program, .. } = output {
+        let (program_kind, minimum_degree, seed) = match program {
+            ConnectionProgram::NearestLinks { .. } => {
+                (ConnectionProgramKind::NearestLinks, None, None)
+            }
+            ConnectionProgram::RandomLinks {
+                minimum_degree,
+                seed,
+                ..
+            } => (
+                ConnectionProgramKind::RandomLinks,
+                Some(*minimum_degree),
+                Some(*seed),
+            ),
+            ConnectionProgram::GridSpanningTree { seed, .. } => {
+                (ConnectionProgramKind::GridSpanningTree, None, Some(*seed))
+            }
+        };
+        let adjacency = program.adjacency();
+        return Ok(PatternOutputCapabilityProjection::ConnectionPaths(
+            ConnectionPathOutputCapabilityProjection {
+                program_kind,
+                maximum_degree: adjacency.maximum_degree,
+                maximum_distance: adjacency.maximum_distance,
+                minimum_degree,
+                seed,
+                round_join: true,
+                round_cap: true,
+                thickness_range: true,
+            },
+        ));
+    }
+    if let PatternOutputLayer::MazeWalls { program, .. } = output {
+        program.validate()?;
+        return Ok(PatternOutputCapabilityProjection::MazeWalls(
+            MazeWallOutputCapabilityProjection {
+                seeded_recursive_backtracker: matches!(
+                    program.algorithm,
+                    GridMazeAlgorithm::RecursiveBacktracker
+                ),
+                seed: program.seed,
+                round_join: true,
+                round_cap: true,
+                thickness_range: true,
+            },
+        ));
+    }
     let (prototype, orientation) = match output {
         PatternOutputLayer::CircularMarks { .. } => {
             (MarkPrototypeKind::Circle, MarkOrientationKind::Fixed)
@@ -8644,6 +9453,9 @@ fn project_output_capability(
             mark_orientation_kind(orientation),
         ),
         PatternOutputLayer::GuidePaths { .. } | PatternOutputLayer::ParametricPaths { .. } => {
+            unreachable!("handled above")
+        }
+        PatternOutputLayer::ConnectionPaths { .. } | PatternOutputLayer::MazeWalls { .. } => {
             unreachable!("handled above")
         }
     };
@@ -8776,20 +9588,34 @@ fn validate_random_site_definition(
             "random-site maximum neighbor checks must be nonzero",
         ));
     }
-    let [
-        PatternOutputLayer::MarkPrototype {
-            site_mechanism_id,
-            orientation: MarkOrientation::Fixed,
-            ..
-        },
-    ] = definition.output_layers.as_slice()
-    else {
+    let [output] = definition.output_layers.as_slice() else {
         return Err(ValidationError::new(
             "pattern_definitions.output_layers",
             "random-site products require exactly one fixed mark prototype layer",
         ));
     };
-    if *site_mechanism_id != site_id {
+    let source_id = match output {
+        PatternOutputLayer::MarkPrototype {
+            site_mechanism_id,
+            orientation: MarkOrientation::Fixed,
+            ..
+        } => *site_mechanism_id,
+        PatternOutputLayer::ConnectionPaths {
+            site_mechanism_id,
+            program,
+            ..
+        } => {
+            program.validate()?;
+            *site_mechanism_id
+        }
+        _ => {
+            return Err(ValidationError::new(
+                "pattern_definitions.output_layers",
+                "random-site products require one fixed mark or connection layer",
+            ));
+        }
+    };
+    if source_id != site_id {
         return Err(ValidationError::new(
             "pattern_definitions.output_layers.site_mechanism_id",
             "output layer must consume the declared random-site product",
@@ -9158,6 +9984,22 @@ fn validate_generalized_output_layers_ids(
     dimensions: &[GuideDimensionId],
 ) -> Result<(), ValidationError> {
     if let [
+        PatternOutputLayer::ConnectionPaths {
+            site_mechanism_id,
+            program,
+            ..
+        },
+    ] = layers
+    {
+        program.validate()?;
+        return (*site_mechanism_id == site_id)
+            .then_some(())
+            .ok_or(ValidationError::new(
+                "pattern_definitions.output_layers.site_mechanism_id",
+                "connection output must consume its declared site mechanism",
+            ));
+    }
+    if let [
         PatternOutputLayer::GuidePaths {
             guide_mechanism_id, ..
         },
@@ -9264,7 +10106,24 @@ fn validate_generalized_output_layers(
     guide_id: PatternMechanismId,
     site_id: PatternMechanismId,
     dimensions: &[StraightGuideDimension],
+    site_mechanism: &PatternMechanism,
 ) -> Result<(), ValidationError> {
+    if let [
+        PatternOutputLayer::ConnectionPaths {
+            site_mechanism_id,
+            program,
+            ..
+        },
+    ] = layers
+    {
+        program.validate()?;
+        return (*site_mechanism_id == site_id)
+            .then_some(())
+            .ok_or(ValidationError::new(
+                "pattern_definitions.output_layers.site_mechanism_id",
+                "connection output must consume its declared site mechanism",
+            ));
+    }
     if let [
         PatternOutputLayer::GuidePaths {
             guide_mechanism_id, ..
@@ -9277,6 +10136,32 @@ fn validate_generalized_output_layers(
                 "pattern_definitions.output_layers.guide_mechanism_id",
                 "guide-path output must consume its declared guide mechanism",
             ));
+    }
+    if let [
+        PatternOutputLayer::MazeWalls {
+            site_mechanism_id,
+            program,
+            ..
+        },
+    ] = layers
+    {
+        program.validate()?;
+        if *site_mechanism_id != site_id {
+            return Err(ValidationError::new(
+                "pattern_definitions.output_layers.site_mechanism_id",
+                "maze output must consume its declared site mechanism",
+            ));
+        }
+        return match site_mechanism {
+            PatternMechanism::SelectedGuideIntersections {
+                dimensions: selection,
+                ..
+            } if (2..=3).contains(&selection.len()) => Ok(()),
+            _ => Err(ValidationError::new(
+                "pattern_definitions.output_layers.maze",
+                "maze-wall output requires a two- or three-guide intersection site product",
+            )),
+        };
     }
     let [
         PatternOutputLayer::MarkPrototype {
@@ -9450,7 +10335,10 @@ fn validate_effective_response_compatibility(
     });
     let paths = matches!(
         definition.output_layers.as_slice(),
-        [PatternOutputLayer::GuidePaths { .. } | PatternOutputLayer::ParametricPaths { .. }]
+        [PatternOutputLayer::GuidePaths { .. }
+            | PatternOutputLayer::ParametricPaths { .. }
+            | PatternOutputLayer::ConnectionPaths { .. }
+            | PatternOutputLayer::MazeWalls { .. }]
     );
     match (response, marks, paths) {
         (PatternGeometryResponse::Marks(_), true, false)
@@ -9792,6 +10680,12 @@ pub enum PropertyFieldId {
     OutputAuthoredClosedShape,
     OutputOrientation,
     OutputOrientationDimension,
+    ConnectionProgram,
+    ConnectionMaximumDegree,
+    ConnectionMaximumDistance,
+    ConnectionMinimumDegree,
+    ConnectionSeed,
+    MazeSeed,
     ParametricShape,
     ParametricTurns,
     ParametricRadialSpacing,
@@ -9886,6 +10780,12 @@ pub const PROPERTY_FIELD_IDS: &[PropertyFieldId] = &[
     PropertyFieldId::OutputAuthoredClosedShape,
     PropertyFieldId::OutputOrientation,
     PropertyFieldId::OutputOrientationDimension,
+    PropertyFieldId::ConnectionProgram,
+    PropertyFieldId::ConnectionMaximumDegree,
+    PropertyFieldId::ConnectionMaximumDistance,
+    PropertyFieldId::ConnectionMinimumDegree,
+    PropertyFieldId::ConnectionSeed,
+    PropertyFieldId::MazeSeed,
     PropertyFieldId::ParametricShape,
     PropertyFieldId::ParametricTurns,
     PropertyFieldId::ParametricRadialSpacing,
@@ -9934,6 +10834,7 @@ pub enum PropertyEnumChoice {
     VisibleMarkSizingPolicy(VisibleMarkSizingPolicy),
     MarkPrototype(MarkPrototypeKind),
     MarkOrientation(MarkOrientationKind),
+    ConnectionProgram(ConnectionProgramKind),
     GuidePrototype(GuidePrototypeKind),
     GuideRepetition(GuideRepetitionKind),
     SpiralShape(SpiralShape),
@@ -10058,6 +10959,10 @@ pub enum PropertyApplicability {
     MarkPrototypeOutput,
     AuthoredClosedShapeMark,
     GuidedOutputOrientation,
+    ConnectionPathOutput,
+    RandomLinkProgram,
+    SeededConnectionProgram,
+    MazeWallProgram,
     CurrentPaint,
     CurrentDensityModulation,
     CurrentExclusion,
@@ -10158,6 +11063,12 @@ pub enum PropertyCommandKind {
     SetOutputAuthoredClosedShape,
     SetOutputOrientation,
     SetOutputOrientationDimension,
+    SetConnectionProgram,
+    SetConnectionMaximumDegree,
+    SetConnectionMaximumDistance,
+    SetConnectionMinimumDegree,
+    SetConnectionSeed,
+    SetMazeSeed,
     SetCoverageGuardSteps,
     SetCoverageAdditionalMargin,
 }
@@ -11690,6 +12601,18 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::OutputOrientationDimension => {
                 PropertyCommandKind::SetOutputOrientationDimension
             }
+            PropertyFieldId::ConnectionProgram => PropertyCommandKind::SetConnectionProgram,
+            PropertyFieldId::ConnectionMaximumDegree => {
+                PropertyCommandKind::SetConnectionMaximumDegree
+            }
+            PropertyFieldId::ConnectionMaximumDistance => {
+                PropertyCommandKind::SetConnectionMaximumDistance
+            }
+            PropertyFieldId::ConnectionMinimumDegree => {
+                PropertyCommandKind::SetConnectionMinimumDegree
+            }
+            PropertyFieldId::ConnectionSeed => PropertyCommandKind::SetConnectionSeed,
+            PropertyFieldId::MazeSeed => PropertyCommandKind::SetMazeSeed,
             PropertyFieldId::CoverageGuardSteps => PropertyCommandKind::SetCoverageGuardSteps,
             PropertyFieldId::CoverageAdditionalMargin => {
                 PropertyCommandKind::SetCoverageAdditionalMargin
@@ -11710,6 +12633,10 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::Visibility => PropertyValueKind::Boolean,
             PropertyFieldId::CoverageGuardSteps
             | PropertyFieldId::RandomSeed
+            | PropertyFieldId::ConnectionMaximumDegree
+            | PropertyFieldId::ConnectionMinimumDegree
+            | PropertyFieldId::ConnectionSeed
+            | PropertyFieldId::MazeSeed
             | PropertyFieldId::RandomMaximumAttempts
             | PropertyFieldId::RandomMaximumNeighborChecks => PropertyValueKind::U32,
             PropertyFieldId::LegacyMappingComponent
@@ -11726,6 +12653,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::VisibleMarkSizingPolicy
             | PropertyFieldId::OutputPrototype
             | PropertyFieldId::OutputOrientation
+            | PropertyFieldId::ConnectionProgram
             | PropertyFieldId::GuidePrototype
             | PropertyFieldId::GuideRepetition
             | PropertyFieldId::GuideOffsetSides
@@ -11760,6 +12688,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::ParametricRepetition => CURVE_REPETITION_CHOICES,
             PropertyFieldId::ParametricOffsetSides => OFFSET_SIDES_CHOICES,
             PropertyFieldId::ParametricOffsetCleanup => OFFSET_CLEANUP_CHOICES,
+            PropertyFieldId::ConnectionProgram => CONNECTION_PROGRAM_CHOICES,
             _ => &[],
         },
         bounds: match field {
@@ -11776,6 +12705,19 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::ExclusionMinimumCenterDistance
             | PropertyFieldId::RandomMaximumAttempts
             | PropertyFieldId::RandomMaximumNeighborChecks => positive_bounds(),
+            PropertyFieldId::ConnectionMaximumDegree => Some(PropertyBounds {
+                minimum: Some(1.0),
+                minimum_inclusive: true,
+                maximum: Some(32.0),
+                maximum_inclusive: true,
+            }),
+            PropertyFieldId::ConnectionMinimumDegree => Some(PropertyBounds {
+                minimum: Some(0.0),
+                minimum_inclusive: true,
+                maximum: Some(32.0),
+                maximum_inclusive: true,
+            }),
+            PropertyFieldId::ConnectionMaximumDistance => positive_bounds(),
             PropertyFieldId::MarkMinimumFill
             | PropertyFieldId::MarkMaximumFill
             | PropertyFieldId::ConnectedMinimumThickness
@@ -11815,6 +12757,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::RandomClusterSpread
             | PropertyFieldId::ExclusionMinimumCenterDistance
             | PropertyFieldId::VisibleMarkMargin => PropertyUnit::DocumentDistance,
+            PropertyFieldId::ConnectionMaximumDistance => PropertyUnit::DocumentDistance,
             PropertyFieldId::GuideArcCenterX
             | PropertyFieldId::GuideArcCenterY
             | PropertyFieldId::GuideArcRadius
@@ -11832,6 +12775,10 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::ArtworkWeightStrength => PropertyUnit::NormalizedComponent,
             PropertyFieldId::CoverageGuardSteps
             | PropertyFieldId::RandomSeed
+            | PropertyFieldId::ConnectionMaximumDegree
+            | PropertyFieldId::ConnectionMinimumDegree
+            | PropertyFieldId::ConnectionSeed
+            | PropertyFieldId::MazeSeed
             | PropertyFieldId::RandomMaximumAttempts
             | PropertyFieldId::RandomMaximumNeighborChecks => PropertyUnit::Count,
             _ => PropertyUnit::None,
@@ -11914,6 +12861,14 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::OutputOrientationDimension => {
                 PropertyApplicability::GuidedOutputOrientation
             }
+            PropertyFieldId::ConnectionProgram
+            | PropertyFieldId::ConnectionMaximumDegree
+            | PropertyFieldId::ConnectionMaximumDistance => {
+                PropertyApplicability::ConnectionPathOutput
+            }
+            PropertyFieldId::ConnectionMinimumDegree => PropertyApplicability::RandomLinkProgram,
+            PropertyFieldId::ConnectionSeed => PropertyApplicability::SeededConnectionProgram,
+            PropertyFieldId::MazeSeed => PropertyApplicability::MazeWallProgram,
             _ => PropertyApplicability::Always,
         },
         invalidation: match field {
@@ -11992,6 +12947,12 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
                 | PropertyFieldId::OutputAuthoredClosedShape
                 | PropertyFieldId::OutputOrientation
                 | PropertyFieldId::OutputOrientationDimension
+                | PropertyFieldId::ConnectionProgram
+                | PropertyFieldId::ConnectionMaximumDegree
+                | PropertyFieldId::ConnectionMaximumDistance
+                | PropertyFieldId::ConnectionMinimumDegree
+                | PropertyFieldId::ConnectionSeed
+                | PropertyFieldId::MazeSeed
         ),
         structural_support: match field {
             PropertyFieldId::MarkMaximumFill => {
@@ -12097,6 +13058,11 @@ const MARK_ORIENTATION_CHOICES: &[PropertyEnumChoice] = &[
     PropertyEnumChoice::MarkOrientation(MarkOrientationKind::GuideTangent),
     PropertyEnumChoice::MarkOrientation(MarkOrientationKind::GuideNormal),
 ];
+const CONNECTION_PROGRAM_CHOICES: &[PropertyEnumChoice] = &[
+    PropertyEnumChoice::ConnectionProgram(ConnectionProgramKind::NearestLinks),
+    PropertyEnumChoice::ConnectionProgram(ConnectionProgramKind::RandomLinks),
+    PropertyEnumChoice::ConnectionProgram(ConnectionProgramKind::GridSpanningTree),
+];
 const GUIDE_PROTOTYPE_CHOICES: &[PropertyEnumChoice] = &[
     PropertyEnumChoice::GuidePrototype(GuidePrototypeKind::AuthoredOpenPath),
     PropertyEnumChoice::GuidePrototype(GuidePrototypeKind::CircularArc),
@@ -12157,6 +13123,10 @@ const fn dependency_for_contract(
         PropertyApplicability::GuidedOutputOrientation => {
             PropertyDependency::GuidedOutputOrientation
         }
+        PropertyApplicability::ConnectionPathOutput
+        | PropertyApplicability::RandomLinkProgram
+        | PropertyApplicability::SeededConnectionProgram
+        | PropertyApplicability::MazeWallProgram => PropertyDependency::Always,
         PropertyApplicability::CurrentPaint
         | PropertyApplicability::CurrentDensityModulation
         | PropertyApplicability::CurrentExclusion => dynamic,
@@ -12419,6 +13389,20 @@ pub enum PatternDefinitionRecipe {
         maximum_attempts: u32,
         maximum_neighbor_checks: u32,
     },
+    /// Wraps one eligible ID-free site-family recipe with authored connection intent.
+    /// Materialization retains the allocated output and site-product IDs while replacing only
+    /// its mark output; graphs, paths, diagnostics, and limits remain derived-only.
+    ConnectionPaths {
+        definition: Box<PatternDefinitionRecipe>,
+        program: ConnectionProgram,
+        style: PathStrokeStyle,
+    },
+    /// Wraps a two- or three-guide straight intersection recipe with conventional wall-maze intent.
+    MazeWalls {
+        definition: Box<PatternDefinitionRecipe>,
+        program: MazeProgram,
+        style: PathStrokeStyle,
+    },
     /// Wraps one ordinary ID-free family recipe with a validated closed-shape payload.
     /// Materialization allocates both the document-owned structure and the definition
     /// atomically, then installs the ordinary typed output reference.
@@ -12629,6 +13613,28 @@ pub fn validate_preset_record(record: &PresetRecord) -> Result<(), ValidationErr
             }
             Ok(())
         }
+        PatternDefinitionRecipe::ConnectionPaths {
+            definition,
+            program,
+            ..
+        } => {
+            validate_connection_recipe(definition, program)?;
+            validate_preset_record(&PresetRecord {
+                metadata: record.metadata.clone(),
+                recipe: definition.as_ref().clone(),
+            })
+        }
+        PatternDefinitionRecipe::MazeWalls {
+            definition,
+            program,
+            ..
+        } => {
+            validate_maze_recipe(definition, program)?;
+            validate_preset_record(&PresetRecord {
+                metadata: record.metadata.clone(),
+                recipe: definition.as_ref().clone(),
+            })
+        }
         PatternDefinitionRecipe::AuthoredClosedShapeMarks { definition, shape } => {
             if shape.kind() != AuthoredStructureKind::ClosedShape {
                 return Err(ValidationError::new(
@@ -12639,10 +13645,12 @@ pub fn validate_preset_record(record: &PresetRecord) -> Result<(), ValidationErr
             if matches!(
                 definition.as_ref(),
                 PatternDefinitionRecipe::AuthoredClosedShapeMarks { .. }
+                    | PatternDefinitionRecipe::ConnectionPaths { .. }
+                    | PatternDefinitionRecipe::MazeWalls { .. }
             ) {
                 return Err(ValidationError::new(
                     "preset.recipe.definition",
-                    "authored mark recipe wrappers cannot be nested",
+                    "authored mark recipes cannot wrap another output recipe wrapper",
                 ));
             }
             validate_preset_record(&PresetRecord {
@@ -12650,6 +13658,76 @@ pub fn validate_preset_record(record: &PresetRecord) -> Result<(), ValidationErr
                 recipe: definition.as_ref().clone(),
             })
         }
+    }
+}
+
+/// Validates whether one ID-free family recipe can own the supplied connection program.
+///
+/// # Errors
+///
+/// Returns stable wrapper, program, or family-eligibility diagnostics before any document IDs,
+/// authored structures, or candidate definitions are allocated.
+fn validate_connection_recipe(
+    definition: &PatternDefinitionRecipe,
+    program: &ConnectionProgram,
+) -> Result<(), ValidationError> {
+    program.validate()?;
+    let nearest_or_random = matches!(
+        program,
+        ConnectionProgram::NearestLinks { .. } | ConnectionProgram::RandomLinks { .. }
+    );
+    match definition {
+        PatternDefinitionRecipe::StraightGrid(_) => Ok(()),
+        PatternDefinitionRecipe::GeneralizedStraightGuides { product, .. } => match product {
+            GeneralizedSiteProductDraft::Intersections { .. } => Ok(()),
+            GeneralizedSiteProductDraft::AlongGuides { .. } if nearest_or_random => Ok(()),
+            GeneralizedSiteProductDraft::AlongGuides { .. } => Err(ValidationError::new(
+                "preset.recipe.connection.program",
+                "maze and spanning-tree programs require an intersection site recipe",
+            )),
+        },
+        PatternDefinitionRecipe::RandomSites { .. } if nearest_or_random => Ok(()),
+        PatternDefinitionRecipe::RandomSites { .. } => Err(ValidationError::new(
+            "preset.recipe.connection.program",
+            "maze and spanning-tree programs require an intersection site recipe",
+        )),
+        PatternDefinitionRecipe::ConnectionPaths { .. }
+        | PatternDefinitionRecipe::MazeWalls { .. }
+        | PatternDefinitionRecipe::AuthoredClosedShapeMarks { .. } => Err(ValidationError::new(
+            "preset.recipe.definition",
+            "connection recipes cannot wrap another output recipe wrapper",
+        )),
+    }
+}
+
+/// Validates the narrow straight-intersection recipe authority for conventional wall mazes.
+///
+/// # Errors
+///
+/// Rejects wrappers, nonintersection products, and invalid maze intent before any ID allocation.
+fn validate_maze_recipe(
+    definition: &PatternDefinitionRecipe,
+    program: &MazeProgram,
+) -> Result<(), ValidationError> {
+    program.validate()?;
+    match definition {
+        PatternDefinitionRecipe::StraightGrid(_) => Ok(()),
+        PatternDefinitionRecipe::GeneralizedStraightGuides {
+            dimensions,
+            product: GeneralizedSiteProductDraft::Intersections { .. },
+            ..
+        } if matches!(dimensions.len(), 2 | 3) => Ok(()),
+        PatternDefinitionRecipe::GeneralizedStraightGuides { .. } => Err(ValidationError::new(
+            "preset.recipe.maze.family",
+            "maze recipes require two or three straight guide intersection dimensions",
+        )),
+        PatternDefinitionRecipe::RandomSites { .. }
+        | PatternDefinitionRecipe::ConnectionPaths { .. }
+        | PatternDefinitionRecipe::MazeWalls { .. }
+        | PatternDefinitionRecipe::AuthoredClosedShapeMarks { .. } => Err(ValidationError::new(
+            "preset.recipe.maze.family",
+            "maze recipes require an unwrapped straight guide intersection family",
+        )),
     }
 }
 
@@ -12915,6 +13993,31 @@ pub enum PatternDefinitionEdit {
     SetOutputOrientationDimension {
         output_layer_id: PatternOutputLayerId,
         dimension_id: GuideDimensionId,
+    },
+    SetConnectionProgram {
+        output_layer_id: PatternOutputLayerId,
+        program: ConnectionProgram,
+    },
+    SetConnectionMaximumDegree {
+        output_layer_id: PatternOutputLayerId,
+        maximum_degree: u32,
+    },
+    SetConnectionMaximumDistance {
+        output_layer_id: PatternOutputLayerId,
+        maximum_distance: f64,
+    },
+    SetConnectionMinimumDegree {
+        output_layer_id: PatternOutputLayerId,
+        minimum_degree: u32,
+    },
+    SetConnectionSeed {
+        output_layer_id: PatternOutputLayerId,
+        seed: u32,
+    },
+    /// Changes only the authored recursive-backtracker seed of one maze-wall output.
+    SetMazeSeed {
+        output_layer_id: PatternOutputLayerId,
+        seed: u32,
     },
 }
 
@@ -13495,6 +14598,33 @@ impl PatternDefinitionEdit {
                 PropertyFieldId::OutputOrientationDimension,
                 PropertyFieldValue::StableIdReference,
             ),
+            Edit::SetConnectionProgram { program, .. } => (
+                PropertyFieldId::ConnectionProgram,
+                PropertyFieldValue::EnumChoice(PropertyEnumChoice::ConnectionProgram(
+                    program.kind(),
+                )),
+            ),
+            Edit::SetConnectionMaximumDegree { maximum_degree, .. } => (
+                PropertyFieldId::ConnectionMaximumDegree,
+                PropertyFieldValue::U32(*maximum_degree),
+            ),
+            Edit::SetConnectionMaximumDistance {
+                maximum_distance, ..
+            } => (
+                PropertyFieldId::ConnectionMaximumDistance,
+                PropertyFieldValue::FiniteF64(*maximum_distance),
+            ),
+            Edit::SetConnectionMinimumDegree { minimum_degree, .. } => (
+                PropertyFieldId::ConnectionMinimumDegree,
+                PropertyFieldValue::U32(*minimum_degree),
+            ),
+            Edit::SetConnectionSeed { seed, .. } => (
+                PropertyFieldId::ConnectionSeed,
+                PropertyFieldValue::U32(*seed),
+            ),
+            Edit::SetMazeSeed { seed, .. } => {
+                (PropertyFieldId::MazeSeed, PropertyFieldValue::U32(*seed))
+            }
         };
         PropertyCommandFieldProjection { field, value }
     }
@@ -15813,6 +16943,86 @@ mod history_tests {
         DocumentHistory::new(DocumentSession::new(document).expect("parametric session validates"))
     }
 
+    /// Builds two channels linked to one connection-path definition with the supplied authored program.
+    fn connection_history(program: ConnectionProgram) -> DocumentHistory {
+        let definition_id = PatternDefinitionId(60);
+        let guide_id = PatternMechanismId(61);
+        let site_id = PatternMechanismId(62);
+        let output_id = PatternOutputLayerId(63);
+        let mut definition = PatternDefinition::supported_straight_grid(
+            definition_id,
+            "connection history",
+            guide_id,
+            site_id,
+            output_id,
+            CoveragePolicy {
+                guard_steps: 1,
+                additional_margin: 0.0,
+            },
+        );
+        definition.output_layers = vec![PatternOutputLayer::ConnectionPaths {
+            id: output_id,
+            site_mechanism_id: site_id,
+            program,
+            style: PathStrokeStyle::default(),
+        }];
+        let mut first = history()
+            .document()
+            .channels()
+            .expect("legacy fixture has a channel")[0]
+            .clone();
+        let mut second = first.clone();
+        second.id = ChannelId(2);
+        first.pattern_instance.definition_override = None;
+        second.pattern_instance.definition_override = None;
+        let document = Document::new(
+            DocumentId(60),
+            CanvasSpec {
+                width: 80.0,
+                height: 60.0,
+            },
+            vec![definition],
+            DocumentPatternSettings {
+                definition_id,
+                density: DensityMetric2D {
+                    across_x: 8.0,
+                    across_y: 6.0,
+                    aspect_locked: false,
+                },
+                pattern_rotation_degrees: 0.0,
+                shape_rotation_degrees: 0.0,
+                geometry_response: PatternGeometryResponse::Connected(ConnectedGeometryResponse {
+                    minimum_thickness: 0.1,
+                    maximum_thickness: 1.0,
+                }),
+            },
+            vec![first, second],
+        )
+        .expect("connection history document validates");
+        DocumentHistory::new(DocumentSession::new(document).expect("connection session validates"))
+    }
+
+    /// Returns one valid connection program for each descriptor applicability witness.
+    fn connection_program(kind: ConnectionProgramKind) -> ConnectionProgram {
+        let adjacency = ConnectionAdjacencyIntent {
+            maximum_degree: 3,
+            maximum_distance: 12.0,
+        };
+        match kind {
+            ConnectionProgramKind::NearestLinks => ConnectionProgram::NearestLinks { adjacency },
+            ConnectionProgramKind::RandomLinks => ConnectionProgram::RandomLinks {
+                adjacency,
+                minimum_degree: 1,
+                seed: 7,
+            },
+            ConnectionProgramKind::GridSpanningTree => ConnectionProgram::GridSpanningTree {
+                adjacency,
+                algorithm: GridSpanningTreeAlgorithm::RandomizedPrim,
+                seed: 9,
+            },
+        }
+    }
+
     /// Proves parametric descriptors and every active edit retain family authority, stale bases,
     /// copy-on-edit, history, and private-draft squash semantics without UI involvement.
     #[test]
@@ -16241,5 +17451,470 @@ mod history_tests {
         assert!(main.squash_draft(&draft).is_err());
         assert_eq!(main.document(), &before);
         assert!(!main.can_undo());
+    }
+
+    /// Proves connection descriptors expose exact current values and only the active program payloads.
+    #[test]
+    fn connection_program_descriptors_are_conditional_and_current() {
+        for kind in [
+            ConnectionProgramKind::NearestLinks,
+            ConnectionProgramKind::RandomLinks,
+            ConnectionProgramKind::GridSpanningTree,
+        ] {
+            let document = connection_history(connection_program(kind))
+                .document()
+                .clone();
+            let values = document.property_values();
+            let current = |field| {
+                values
+                    .iter()
+                    .find(|value| value.descriptor.field == field)
+                    .expect("active connection descriptor")
+                    .value
+                    .clone()
+            };
+            assert_eq!(
+                current(PropertyFieldId::ConnectionProgram),
+                PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::ConnectionProgram(kind))
+            );
+            assert_eq!(
+                current(PropertyFieldId::ConnectionMaximumDegree),
+                PropertyCurrentValueKind::U32(3)
+            );
+            assert_eq!(
+                current(PropertyFieldId::ConnectionMaximumDistance),
+                PropertyCurrentValueKind::FiniteF64(12.0)
+            );
+            assert_eq!(
+                values
+                    .iter()
+                    .any(|value| value.descriptor.field == PropertyFieldId::ConnectionMinimumDegree),
+                kind == ConnectionProgramKind::RandomLinks
+            );
+            assert_eq!(
+                values
+                    .iter()
+                    .any(|value| value.descriptor.field == PropertyFieldId::ConnectionSeed),
+                kind != ConnectionProgramKind::NearestLinks
+            );
+        }
+    }
+
+    /// Proves the public capability projection exposes only each active connection or maze intent.
+    #[test]
+    fn pattern_capabilities_project_connection_program_and_maze_wall_controls() {
+        for (kind, expected_minimum, expected_seed) in [
+            (ConnectionProgramKind::NearestLinks, None, None),
+            (ConnectionProgramKind::RandomLinks, Some(1), Some(7)),
+            (ConnectionProgramKind::GridSpanningTree, None, Some(9)),
+        ] {
+            let document = connection_history(connection_program(kind))
+                .document()
+                .clone();
+            let projection = document
+                .pattern_capabilities(PatternCapabilityScope::DocumentBase)
+                .expect("validated connection definition projects through the public authority");
+            let [PatternOutputCapabilityProjection::ConnectionPaths(connection)] =
+                projection.outputs.as_slice()
+            else {
+                panic!("connection definition projects exactly one connection output")
+            };
+            assert_eq!(connection.program_kind, kind);
+            assert_eq!(connection.maximum_degree, 3);
+            assert_eq!(connection.maximum_distance, 12.0);
+            assert_eq!(connection.minimum_degree, expected_minimum);
+            assert_eq!(connection.seed, expected_seed);
+            assert!(connection.round_join);
+            assert!(connection.round_cap);
+            assert!(connection.thickness_range);
+        }
+
+        let mut maze_document =
+            connection_history(connection_program(ConnectionProgramKind::NearestLinks))
+                .document()
+                .clone();
+        maze_document
+            .pattern_definitions
+            .iter_mut()
+            .find(|definition| definition.id == PatternDefinitionId(60))
+            .expect("connection fixture definition exists")
+            .output_layers = vec![PatternOutputLayer::MazeWalls {
+            id: PatternOutputLayerId(63),
+            site_mechanism_id: PatternMechanismId(62),
+            program: MazeProgram {
+                algorithm: GridMazeAlgorithm::RecursiveBacktracker,
+                seed: 17,
+            },
+            style: PathStrokeStyle::default(),
+        }];
+        let projection = maze_document
+            .pattern_capabilities(PatternCapabilityScope::DocumentBase)
+            .expect("validated maze definition projects through the public authority");
+        let [PatternOutputCapabilityProjection::MazeWalls(maze)] = projection.outputs.as_slice()
+        else {
+            panic!("maze definition projects exactly one maze-wall output")
+        };
+        assert!(maze.seeded_recursive_backtracker);
+        assert_eq!(maze.seed, 17);
+        assert!(maze.round_join);
+        assert!(maze.round_cap);
+        assert!(maze.thickness_range);
+    }
+
+    /// Proves typed program replacement and scalar edits retain output identity, family invalidation, and history truth.
+    #[test]
+    fn connection_program_edits_are_reversible_and_family_invalidating() {
+        let mut history =
+            connection_history(connection_program(ConnectionProgramKind::NearestLinks));
+        let base = history
+            .document()
+            .definition(PatternDefinitionId(60))
+            .expect("connection definition")
+            .clone();
+        let replacement = connection_program(ConnectionProgramKind::RandomLinks);
+        let result = history
+            .apply(&DocumentCommand::EditSharedPatternDefinition {
+                definition_id: PatternDefinitionId(60),
+                base_definition: base,
+                edit: PatternDefinitionEdit::SetConnectionProgram {
+                    output_layer_id: PatternOutputLayerId(63),
+                    program: replacement.clone(),
+                },
+            })
+            .expect("typed replacement applies");
+        assert_eq!(result.invalidation, Some(InvalidationLevel::Family));
+        assert_eq!(result.affected_channels, vec![ChannelId(1), ChannelId(2)]);
+        let after_replacement = history.document().clone();
+        history.undo().expect("replacement undo applies");
+        assert!(matches!(
+            history
+                .document()
+                .definition(PatternDefinitionId(60))
+                .expect("definition")
+                .output_layers
+                .as_slice(),
+            [PatternOutputLayer::ConnectionPaths {
+                program: ConnectionProgram::NearestLinks { .. },
+                ..
+            }]
+        ));
+        history.redo().expect("replacement redo applies");
+        assert_eq!(history.document(), &after_replacement);
+
+        let base = history
+            .document()
+            .definition(PatternDefinitionId(60))
+            .expect("replaced definition")
+            .clone();
+        history
+            .apply(&DocumentCommand::EditSharedPatternDefinition {
+                definition_id: PatternDefinitionId(60),
+                base_definition: base,
+                edit: PatternDefinitionEdit::SetConnectionMinimumDegree {
+                    output_layer_id: PatternOutputLayerId(63),
+                    minimum_degree: 2,
+                },
+            })
+            .expect("random scalar edit applies");
+        assert!(matches!(
+            history.document().definition(PatternDefinitionId(60)).expect("definition").output_layers.as_slice(),
+            [PatternOutputLayer::ConnectionPaths { program: ConnectionProgram::RandomLinks { adjacency, minimum_degree: 2, seed: 7 }, .. }]
+                if adjacency.maximum_degree == 3 && adjacency.maximum_distance == 12.0
+        ));
+    }
+
+    /// Proves invalid bounds and inactive connection variants leave document and history state untouched.
+    #[test]
+    fn connection_program_edits_reject_invalid_or_inactive_payloads_atomically() {
+        let mut history =
+            connection_history(connection_program(ConnectionProgramKind::NearestLinks));
+        let before = history.document().clone();
+        for edit in [
+            PatternDefinitionEdit::SetConnectionMaximumDegree {
+                output_layer_id: PatternOutputLayerId(63),
+                maximum_degree: 0,
+            },
+            PatternDefinitionEdit::SetConnectionMaximumDistance {
+                output_layer_id: PatternOutputLayerId(63),
+                maximum_distance: 0.0,
+            },
+            PatternDefinitionEdit::SetConnectionMinimumDegree {
+                output_layer_id: PatternOutputLayerId(63),
+                minimum_degree: 1,
+            },
+            PatternDefinitionEdit::SetConnectionSeed {
+                output_layer_id: PatternOutputLayerId(63),
+                seed: 1,
+            },
+        ] {
+            let base = history
+                .document()
+                .definition(PatternDefinitionId(60))
+                .expect("unchanged definition")
+                .clone();
+            assert!(
+                history
+                    .apply(&DocumentCommand::EditSharedPatternDefinition {
+                        definition_id: PatternDefinitionId(60),
+                        base_definition: base,
+                        edit,
+                    })
+                    .is_err()
+            );
+            assert_eq!(history.document(), &before);
+            assert!(!history.can_undo());
+        }
+    }
+
+    /// Proves selected connection edits clone and retarget only one channel while shared edits retain both links.
+    #[test]
+    fn connection_program_selected_copy_and_shared_edit_preserve_authority() {
+        let mut history =
+            connection_history(connection_program(ConnectionProgramKind::RandomLinks));
+        let original = history
+            .document()
+            .definition(PatternDefinitionId(60))
+            .expect("shared connection definition")
+            .clone();
+        let selected = history
+            .apply(&DocumentCommand::EditSelectedChannelPatternDefinition {
+                channel_id: ChannelId(1),
+                base_definition: original,
+                edit: PatternDefinitionEdit::SetConnectionSeed {
+                    output_layer_id: PatternOutputLayerId(63),
+                    seed: 99,
+                },
+            })
+            .expect("selected copy applies");
+        assert_eq!(selected.invalidation, Some(InvalidationLevel::Family));
+        let copied_id = history
+            .document()
+            .pattern_definition_id_for(ChannelId(1))
+            .expect("selected definition");
+        assert_ne!(copied_id, PatternDefinitionId(60));
+        assert_eq!(
+            history.document().pattern_definition_id_for(ChannelId(2)),
+            Some(PatternDefinitionId(60))
+        );
+        let shared_base = history
+            .document()
+            .definition(PatternDefinitionId(60))
+            .expect("shared definition remains")
+            .clone();
+        let shared = history
+            .apply(&DocumentCommand::EditSharedPatternDefinition {
+                definition_id: PatternDefinitionId(60),
+                base_definition: shared_base,
+                edit: PatternDefinitionEdit::SetConnectionMaximumDegree {
+                    output_layer_id: PatternOutputLayerId(63),
+                    maximum_degree: 4,
+                },
+            })
+            .expect("shared edit applies");
+        assert_eq!(shared.invalidation, Some(InvalidationLevel::Family));
+        assert_eq!(shared.affected_channels, vec![ChannelId(2)]);
+    }
+
+    /// Keeps maze-wall seed edits typed, reversible, family-invalidating, and copy-on-edit safe.
+    #[test]
+    fn maze_seed_edit_is_targeted_reversible_and_copy_on_edit_safe() {
+        let mut history =
+            connection_history(connection_program(ConnectionProgramKind::NearestLinks));
+        history
+            .session
+            .document
+            .pattern_definitions
+            .iter_mut()
+            .find(|definition| definition.id == PatternDefinitionId(60))
+            .expect("connection definition exists")
+            .output_layers = vec![PatternOutputLayer::MazeWalls {
+            id: PatternOutputLayerId(63),
+            site_mechanism_id: PatternMechanismId(62),
+            program: MazeProgram {
+                algorithm: GridMazeAlgorithm::RecursiveBacktracker,
+                seed: 7,
+            },
+            style: PathStrokeStyle::default(),
+        }];
+        let base = history
+            .document()
+            .definition(PatternDefinitionId(60))
+            .expect("maze definition")
+            .clone();
+        let result = history
+            .apply(&DocumentCommand::EditSelectedChannelPatternDefinition {
+                channel_id: ChannelId(1),
+                base_definition: base,
+                edit: PatternDefinitionEdit::SetMazeSeed {
+                    output_layer_id: PatternOutputLayerId(63),
+                    seed: 99,
+                },
+            })
+            .expect("selected maze seed applies");
+        assert_eq!(result.invalidation, Some(InvalidationLevel::Family));
+        assert_eq!(result.affected_channels, vec![ChannelId(1)]);
+        let edited = history.document().clone();
+        assert!(matches!(
+            history
+                .document()
+                .pattern_definition_for(ChannelId(1))
+                .expect("selected copied maze definition")
+                .output_layers
+                .as_slice(),
+            [PatternOutputLayer::MazeWalls {
+                program: MazeProgram { seed: 99, .. },
+                ..
+            }]
+        ));
+        history.undo().expect("maze seed undo applies");
+        history.redo().expect("maze seed redo applies");
+        assert_eq!(history.document(), &edited);
+    }
+
+    /// Materializes one connection preset wrapper atomically while retaining the fresh output/site IDs.
+    #[test]
+    fn connection_recipe_wrapper_materializes_only_eligible_families() {
+        let mut history = connection_history(ConnectionProgram::NearestLinks {
+            adjacency: ConnectionAdjacencyIntent {
+                maximum_degree: 3,
+                maximum_distance: 12.0,
+            },
+        });
+        let program = ConnectionProgram::GridSpanningTree {
+            adjacency: ConnectionAdjacencyIntent {
+                maximum_degree: 3,
+                maximum_distance: 12.0,
+            },
+            algorithm: GridSpanningTreeAlgorithm::RandomizedPrim,
+            seed: 7,
+        };
+        let recipe = PatternDefinitionRecipe::ConnectionPaths {
+            definition: Box::new(PatternDefinitionRecipe::StraightGrid(
+                PatternDefinitionDraft {
+                    name: "maze grid".into(),
+                    coverage: CoveragePolicy {
+                        guard_steps: 1,
+                        additional_margin: 0.0,
+                    },
+                },
+            )),
+            program: program.clone(),
+            style: PathStrokeStyle::default(),
+        };
+        let base = history.document().pattern_settings().clone();
+        let base_definition = history
+            .document()
+            .definition(base.definition_id)
+            .expect("base definition")
+            .clone();
+        history
+            .apply(&DocumentCommand::ReplaceDocumentPatternDefinitionRecipe {
+                base,
+                base_definition,
+                recipe,
+            })
+            .expect("eligible connection recipe materializes");
+        let definition = history
+            .document()
+            .definition(history.document().pattern_settings().definition_id)
+            .expect("materialized definition");
+        let [
+            PatternOutputLayer::ConnectionPaths {
+                id,
+                site_mechanism_id,
+                program: materialized_program,
+                style,
+            },
+        ] = definition.output_layers.as_slice()
+        else {
+            panic!("connection recipe must replace its one mark output")
+        };
+        assert_eq!(materialized_program, &program);
+        assert_eq!(*style, PathStrokeStyle::default());
+        assert!(
+            definition
+                .mechanisms
+                .iter()
+                .any(|mechanism| mechanism.id() == *site_mechanism_id)
+        );
+        assert_eq!(*id, PatternOutputLayerId(64));
+
+        let before_invalid = history.document().clone();
+        let base = history.document().pattern_settings().clone();
+        let base_definition = history
+            .document()
+            .definition(base.definition_id)
+            .expect("materialized base definition")
+            .clone();
+        let invalid = PatternDefinitionRecipe::ConnectionPaths {
+            definition: Box::new(PatternDefinitionRecipe::RandomSites {
+                name: "invalid maze dispersion".into(),
+                coverage: CoveragePolicy {
+                    guard_steps: 1,
+                    additional_margin: 0.0,
+                },
+                character: RandomSiteCharacter::RawUniform,
+                seed: 0,
+                density_modulation: SiteDensityModulation::Uniform,
+                exclusion: SiteExclusionPolicy::None,
+                maximum_attempts: 1,
+                maximum_neighbor_checks: 1,
+            }),
+            program,
+            style: PathStrokeStyle::default(),
+        };
+        assert!(
+            history
+                .apply(&DocumentCommand::ReplaceDocumentPatternDefinitionRecipe {
+                    base,
+                    base_definition,
+                    recipe: invalid,
+                })
+                .is_err()
+        );
+        assert_eq!(history.document(), &before_invalid);
+    }
+
+    /// Fixes the persisted connection-program numeric contract before patterns can allocate topology.
+    #[test]
+    fn connection_program_validation_bounds_are_explicit() {
+        assert!(
+            ConnectionProgram::RandomLinks {
+                adjacency: ConnectionAdjacencyIntent {
+                    maximum_degree: 2,
+                    maximum_distance: 10.0
+                },
+                minimum_degree: 2,
+                seed: 7,
+            }
+            .validate()
+            .is_ok()
+        );
+        assert_eq!(
+            ConnectionProgram::NearestLinks {
+                adjacency: ConnectionAdjacencyIntent {
+                    maximum_degree: 0,
+                    maximum_distance: 1.0
+                },
+            }
+            .validate()
+            .expect_err("zero degree rejects")
+            .path(),
+            "connection.adjacency.maximum_degree"
+        );
+        assert_eq!(
+            ConnectionProgram::RandomLinks {
+                adjacency: ConnectionAdjacencyIntent {
+                    maximum_degree: 1,
+                    maximum_distance: 1.0
+                },
+                minimum_degree: 2,
+                seed: 0,
+            }
+            .validate()
+            .expect_err("minimum over maximum rejects")
+            .path(),
+            "connection.minimum_degree"
+        );
     }
 }
