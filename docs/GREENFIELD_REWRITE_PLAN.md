@@ -1978,17 +1978,23 @@ inspection. Its headless authority accepts eligible `FamilySiteSet` products,
 including along-guide and `AlongParametricCurveSites`, rejects direct raw
 `ParametricPaths`, preserves duplicate co-ownership through a geometry-private
 Spade adapter, persists authored v5/v3 intent only, and renders fixed solid
-Full regions with final clipping only. Stage 20P+ remains Planned and
+Full regions with final clipping only. Stage 20Q+ remains Planned and
 separately gated.
 
-**Stage 20P — Accepted awaiting checkpoint.** The user accepted Guide
+**Stage 20P — Complete at implementation checkpoint
+`cd531eb65dd2e161e62f355905ad936b8c1ca3c4`.** The user accepted Guide
 Arrangement Faces on 2026-08-25 after independent read-only review and final
 artifact inspection. Its headless authority derives deterministic complete
 bounded faces from two or three selected straight or authored-open guide
-dimensions, preserves the shared centered grid origin and Stage 20M maze
-identities, persists authored v5/v3 intent only, and renders canonical Full
-regions with final clipping only. The implementation checkpoint is pending;
-Stage 20Q+ remains Planned and separately gated.
+dimensions through the normal production family evaluator, preserves the
+shared centered document origin and Stage 20M maze identities, persists
+authored v5/v3 intent only, and renders canonical fixed Full regions with
+final clipping only. The phase-aligned 0/60/120 witness proves equal physical
+spacing and three-line equilateral faces. Existing generic one-through-four
+guide support remains unchanged; Stage 20P adds no four-guide Guide Faces
+behavior or evidence. Direct raw `ParametricPaths` remain Guide-Faces-ineligible,
+while typed parametric site/Voronoi mechanisms remain valid. Stage 20Q+
+remains Planned and separately gated.
 
 **Remaining Stage 20N+ — Stage 20Q+ Planned.** The user accepted the revised headless
 remainder roadmap on 2026-08-24 under

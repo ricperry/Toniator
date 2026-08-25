@@ -1,8 +1,9 @@
 # Stage 20P — Guide-Arrangement Faces
 
-Status: **Accepted awaiting checkpoint** (user acceptance recorded 2026-08-25;
-independent read-only review, parent verification, and final artifact
-inspection passed; implementation checkpoint pending).
+Status: **Complete at implementation checkpoint
+`cd531eb65dd2e161e62f355905ad936b8c1ca3c4`** (user acceptance recorded
+2026-08-25; independent read-only review, parent verification, and final
+artifact inspection passed).
 
 Stage 20P adds `RegionSourceIntent::GuideFaces { guide_mechanism_id,
 dimensions }` for ordered selections of two or three eligible guide
@@ -52,7 +53,14 @@ artifacts use `assets/raster-sample.png` at 1024x1024 and
 
 The writer stopped first at **Implemented awaiting review**. Independent
 read-only review and parent verification passed, including direct inspection
-of every native and SVG-rasterized representative. User acceptance on
-2026-08-25 moves the stage to **Accepted awaiting checkpoint**. The
-implementation checkpoint remains pending; this does not authorize
-publication or Stage 20Q, which remains separately gated.
+of every native and SVG-rasterized representative. The production
+0/60/120 three-guide witness uses the shared centered document origin and
+proves equal physical spacing and three-line equilateral faces; the prior
+canvas-relative renderer-only proof was removed. Existing generic
+one-through-four guide support remains unchanged, and Stage 20P adds no
+four-guide Guide Faces behavior or evidence. User acceptance on 2026-08-25
+and implementation checkpoint `cd531eb65dd2e161e62f355905ad936b8c1ca3c4`
+move the stage to **Complete at the implementation checkpoint**. Direct raw
+`ParametricPaths` remain Guide-Faces-ineligible, while typed parametric
+site/Voronoi mechanisms remain valid. Publication and Stage 20Q remain
+separately gated.

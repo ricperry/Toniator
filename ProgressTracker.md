@@ -574,18 +574,17 @@ final clipping. Eligible `FamilySiteSet` products include along-guide and
 It adds guard-inclusive realization, exact-duplicate co-ownership, bounded
 geometry-private Spade topology, and fixed solid Full regions without a
 channel-specific region treatment. Independent re-review and final artifact
-inspection passed. Stage 20P+ remains Planned and separately gated.
+inspection passed. Stage 20Q+ remains Planned and separately gated.
 
-**Stage 20P — Accepted awaiting checkpoint.** The user accepted the bounded
-headless
-guide-arrangement-face implementation under
+**Stage 20P — Complete at implementation checkpoint
+`cd531eb65dd2e161e62f355905ad936b8c1ca3c4`.** The user accepted the bounded
+headless guide-arrangement-face implementation on 2026-08-25 under
 [`STAGE_20P_GUIDE_ARRANGEMENT_FACES_PLAN.md`](docs/STAGE_20P_GUIDE_ARRANGEMENT_FACES_PLAN.md).
-It adds typed `GuideFaces` region intent for two or three selected dimensions,
-deterministic complete bounded guide arrangements, canonical regions,
-persistence, and the existing final-clip renderer path. Existing generic
-one-through-four guide support remains unchanged; Stage 20P adds no four-guide
-Guide Faces behavior or evidence. Region treatments, sampling, composites,
-GTK controls, raw-parametric face sources, and Stage 20Q remain out of scope.
+It adds typed `GuideFaces` region intent for two or three selected straight or
+authored-open guide dimensions, deterministic complete bounded guide
+arrangements, canonical regions, v5/v3 authored-intent persistence, and the
+existing final-clip renderer path. Region treatments, sampling, composites,
+GTK controls, and raw-parametric face sources remain out of scope.
 The final 0°/60°/120° witness runs the normal production family evaluator from
 the shared centered document origin at equal spacing; each retained pre-clip
 face is asserted to be a three-line equilateral triangle with all three guide
@@ -594,10 +593,12 @@ shared Stage 20M grid transform and maze fingerprints remain unchanged; a
 Guide Faces relevance correction rejects disjoint off-canvas faces before
 corner containment classification. Writer verification, focused replay gates,
 intrinsic native/SVG artifact generation, visual inspection, independent
-read-only review, and parent verification are complete. The implementation
-checkpoint is pending; do not push, publish, or begin Stage 20Q.
+read-only review, and parent verification are complete. Direct raw
+`ParametricPaths` remain Guide-Faces-ineligible, while typed parametric
+site/Voronoi mechanisms remain valid. Do not push, publish, or begin Stage
+20Q.
 
-**Remaining Stage 20N+ — Stage 20P Accepted awaiting checkpoint; Stage 20Q+ Planned.** The user accepted the revised remainder
+**Remaining Stage 20N+ — Stage 20Q+ Planned.** The user accepted the revised remainder
 roadmap on 2026-08-24 under
 [`STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md`](docs/STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md).
 The accepted order after completed 20N is 20O
@@ -605,13 +606,14 @@ ordinary Voronoi; 20P guide faces; 20Q filled-region realization; 20R
 composites and site-use filters; and 20S headless capability/gallery recipe
 completion. Stage 21 owns pattern-authoring GTK, Stage 22 owns all headless
 frame/media/sequence/simple-transition work, and Stage 23 owns temporal GTK
-with start/end pins. Stage 20P is accepted awaiting checkpoint; Stage 20Q+ and
-Stages 21–23 remain Planned and separately gated.
+with start/end pins. Stage 20Q+ and Stages 21–23 remain Planned and separately
+gated.
 
 ## Maintenance rules
 
 - Use only these status words: Planned, In progress, Implemented awaiting
-  review, Accepted awaiting checkpoint, and Complete at commit `<hash>`.
+  review, Ready for user acceptance, Accepted awaiting checkpoint, and
+  Complete at commit `<hash>`.
 - For this closeout, Stage 20B is **Complete in the Stage 20B acceptance
   checkpoint**. That single local checkpoint contains all tracked Stage 20B
   implementation, fixture, and durable documentation; it is not split into a

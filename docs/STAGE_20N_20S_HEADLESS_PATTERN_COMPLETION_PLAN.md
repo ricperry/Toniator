@@ -1,9 +1,9 @@
 # Stages 20N–20S — Headless Pattern Completion Plan
 
-Status: **Accepted roadmap; Stages 20N and 20O are complete, Stage 20P is
-Accepted awaiting checkpoint, and Stages 20Q–20S remain Planned and separately
-gated** (Stage 20O checkpoint
-`7ab97f01ec372ab1e6201b3913742476a1511c02`; Stage 20P checkpoint pending).
+Status: **Accepted roadmap; Stages 20N, 20O, and 20P are complete, while
+Stages 20Q–20S remain Planned and separately gated** (Stage 20O checkpoint
+`7ab97f01ec372ab1e6201b3913742476a1511c02`; Stage 20P checkpoint
+`cd531eb65dd2e161e62f355905ad936b8c1ca3c4`).
 
 ## Summary and stage boundary
 
@@ -65,7 +65,7 @@ independent read-only review, user acceptance, and checkpoint gate.
 Status: **Complete at implementation checkpoint
 `7ab97f01ec372ab1e6201b3913742476a1511c02`** (user acceptance recorded
 2026-08-25; independent re-review and final artifact inspection passed).
-Stage 20P+ remains Planned and separately gated.
+Stage 20Q+ remains Planned and separately gated.
 
 - Add `PatternOutputLayer::Regions` with
   `RegionSourceIntent::VoronoiSites { site_mechanism_id }` for eligible
@@ -99,14 +99,24 @@ Stage 20P+ remains Planned and separately gated.
 
 ## Stage 20P — Guide-arrangement faces
 
-Status: **Accepted awaiting checkpoint** (user acceptance recorded 2026-08-25;
-independent read-only review, parent verification, and final artifact
-inspection passed; implementation checkpoint pending). Stage 20Q+ remains
-Planned and separately gated.
+Status: **Complete at implementation checkpoint
+`cd531eb65dd2e161e62f355905ad936b8c1ca3c4`** (user acceptance recorded
+2026-08-25; independent read-only review, parent verification, and final
+artifact inspection passed). Stage 20Q+ remains Planned and separately gated.
+
+The accepted implementation derives complete deterministic bounded faces from
+two or three selected straight or authored-open guide dimensions through the
+normal production family evaluator. The shared centered document origin and
+equal physical spacing are exercised by the 0/60/120 witness, whose retained
+pre-clip faces are three-line equilateral triangles. Existing generic
+one-through-four guide support remains unchanged; Stage 20P adds no four-guide
+Guide Faces behavior or evidence. Direct raw `ParametricPaths` remain
+Guide-Faces-ineligible, while typed parametric site/Voronoi mechanisms remain
+valid.
 
 - Add `RegionSourceIntent::GuideFaces { guide_mechanism_id, dimensions }` for
-  typed grid structural guides with at least two selected dimensions, including
-  currently supported straight and authored curved guides. Reject site-only,
+  typed grid structural guides with two or three selected dimensions, including
+  currently supported straight and authored-open guides. Reject site-only,
   dispersion, and raw-parametric products.
 - Extract a reusable geometry-owned planar-arrangement builder from the
   accepted Stage 20M maze face machinery without changing Stage 20M behavior or
@@ -213,7 +223,7 @@ Planned and separately gated.
   `scripts/validate_architecture.sh`, protected-path review, immutable-asset
   hashes, and semantic-map reconciliation. No GTK/Wayland run is required;
   compile-check only any unavoidable mechanical app adapter.
-- For Stages 20P–20S, stop each stage at **Implemented awaiting review** and
+- For Stages 20Q–20S, stop each stage at **Implemented awaiting review** and
   again at **Ready for user acceptance**. Do not commit, push, publish, or
   begin the next stage without explicit authorization.
 

@@ -106,7 +106,8 @@ implementation checkpoint `f848ff995c9e30f89a85fbc01b5b8d97cc8de3d5`;
 Stage 20N was separately gated and is now complete at its own checkpoint. The user accepted the revised
 headless remainder roadmap on 2026-08-24 under
 [`STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md`](STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md);
-all remaining stages remain Planned.
+Stage 20P is now complete at its implementation checkpoint; Stage 20Q+ and
+later stages remain Planned and separately gated.
 
 Stage 20K adds the headless finite round/square parametric-curve family, raw
 canonical paths or equal-arc curve sites, reusable repetition, and current-v4
@@ -129,6 +130,19 @@ verification, intrinsic native artifacts, and independent correction re-review
 passed; derived effective values, regions, diagnostics, limits, caches, and
 scheduler state are not persisted.
 
+Stage 20P is complete at implementation checkpoint
+`cd531eb65dd2e161e62f355905ad936b8c1ca3c4` and was explicitly accepted by the
+user on 2026-08-25. It derives deterministic complete bounded Guide Faces
+from two or three selected straight or authored-open guide dimensions through
+the production family evaluator, shared centered document origin, and fixed
+solid Full canonical regions with final clipping. The phase-aligned 0/60/120
+witness proves equal physical spacing and three-line equilateral faces.
+Existing generic one-through-four guide support remains unchanged; Stage 20P
+adds no four-guide Guide Faces behavior or evidence. Direct raw
+`ParametricPaths` remain Guide-Faces-ineligible, while typed parametric
+site/Voronoi mechanisms remain valid. Publication and Stage 20Q+ remain
+separately gated.
+
 ## Later Goal candidates
 
 Do not execute a later Goal until the prerequisite checkpoint is accepted and
@@ -150,8 +164,8 @@ fresh planning validates its contract against actual implementation evidence.
 | 20L | **Complete at implementation checkpoint `b41fa3fcf2e1089ea422ba18524c2c4a26f568e8`:** Site Adjacency, a deterministic mechanism-neutral graph over eligible `FamilySiteSet` outputs with guard-inclusive evaluation and bounded cancellable construction. | Ordering/degeneracy/degree/distance/component/fingerprint/cancellation/limit, eligible-family, guard, cache, stale-publication, and cross-family tests. | 20A, 20G, 20H. | Connection-program selection/rendering belongs to Stage 20M. | **User accepted on 2026-08-23; publication remains separate.** |
 | 20M | Connection Programs: bounded nearest/random links and grid maze/tree paths, with centered grid-prototype origin and conventional two-/three-guide wall mazes. | Replay/seed/legality/open-path, dual-tree/solution, wall-complement, canonical-output, and intrinsic PNG/SVG artifact tests. | 20I, 20L. | TSP, motifs, regions, and curved-guide faces deferred. | **Complete at implementation checkpoint `33f1bde3be9afdc3fb88f479c4ee7ec52b80114a`; user accepted on 2026-08-24; publication remains separate.** |
 | 20N | Multi-output and Canonical-region Foundation: ordered per-output settings, current-only document-v5/preset-v3 authority, independently keyed realization, and canonical filled-region/render contracts. | Alignment/validation/history/persistence/identity/canonical-region/PNG-SVG tests. | 20G, 20H, 20I, 20M. | Concrete region sources and UI deferred. | **Complete at `b8701686042a69fcd1ac68a4038adbad4c0ccdc9`; user accepted on 2026-08-25; publication remains separate.** |
-| 20O | **Complete at `7ab97f01ec372ab1e6201b3913742476a1511c02`:** ordinary Voronoi Regions from eligible `FamilySiteSet` products, including along-guide and `AlongParametricCurveSites`; direct raw `ParametricPaths` excluded. Exact duplicates co-own a region; private Spade, authored v5/v3 persistence, fixed solid Full, and final clipping only. | Guard/duplicate/degeneracy/canonical-region/PNG-SVG tests. | 20A, 20N. | Power diagrams and UI deferred. | User accepted 2026-08-25; Stage 20P+ remains separately gated. |
-| 20P | Guide Arrangement Faces: complete off-canvas faces from eligible straight/curved guide arrangements. | Arrangement/coverage/degeneracy tests. | 20B, 20D, 20M, 20N. | Curved Triagrid/Tetragrid editing deferred. | Planned; separate contract and gate. |
+| 20O | **Complete at `7ab97f01ec372ab1e6201b3913742476a1511c02`:** ordinary Voronoi Regions from eligible `FamilySiteSet` products, including along-guide and `AlongParametricCurveSites`; direct raw `ParametricPaths` excluded. Exact duplicates co-own a region; private Spade, authored v5/v3 persistence, fixed solid Full, and final clipping only. | Guard/duplicate/degeneracy/canonical-region/PNG-SVG tests. | 20A, 20N. | Power diagrams and UI deferred. | User accepted 2026-08-25; Stage 20Q+ remains separately gated. |
+| 20P | **Complete at `cd531eb65dd2e161e62f355905ad936b8c1ca3c4`:** Guide Arrangement Faces from two or three selected straight or authored-open guide dimensions, with deterministic complete bounded canonical regions, authored v5/v3 persistence, fixed Full rendering, and final clipping. The production 0/60/120 witness proves equal physical spacing and three-line equilateral faces; existing generic one-through-four guide support is unchanged and Stage 20P adds no four-guide behavior or evidence. Direct raw `ParametricPaths` remain Guide-Faces-ineligible while typed parametric site/Voronoi mechanisms remain valid. | Arrangement/coverage/degeneracy tests plus intrinsic two-guide, three-guide, authored-cubic, and off-canvas evidence. | 20B, 20D, 20M, 20N. | Curved Triagrid/Tetragrid editing deferred. | User accepted 2026-08-25; Stage 20Q+ remains separately gated. |
 | 20Q | Filled-region Realization: Full, Scale, and Constant Gap fill treatments with reference/area-average sampling and deterministic cleanup/collapse. | Offset/collapse/winding/sampling/clipping tests. | 20N–20P. | Outlines, wall complements, and fallback marks excluded. | Planned; separate contract and gate. |
 | 20R | Composite Outputs: ordered typed marks, paths, regions, and site-use dependency filters with persistence and canonical consumption. | DAG/filter/order/persistence/cache/PNG-SVG tests. | 20E2, 20I, 20N–20Q. | Renderer z-order shortcuts excluded. | Planned; separate contract and gate. |
 | 20S | Capability and Gallery Completion: headless capability witnesses and ordinary serialized baseline recipes. | Recipe reconstruction/capability-completeness tests. | 20H, 20R. | Gallery UI excluded. | Planned; separate contract and gate. |

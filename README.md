@@ -391,7 +391,18 @@ direct raw `ParametricPaths`. Exact duplicates co-own a region; the private
 Spade adapter remains geometry-owned. Schema-v5 documents and preset-v3
 recipes persist authored intent only. Regions are fixed solid Full fills with
 no channel-specific treatment, and renderers apply only the final canvas clip.
-Stage 20P+ remains Planned and separately gated.
+Stage 20P is complete at implementation checkpoint
+`cd531eb65dd2e161e62f355905ad936b8c1ca3c4`. Its accepted headless authority
+derives deterministic complete bounded faces from two or three selected
+straight or authored-open guide dimensions through the production family
+evaluator, shared centered document origin, and equal physical spacing. The
+phase-aligned 0/60/120 witness produces three-line equilateral faces. Schema-v5
+documents and preset-v3 recipes persist authored intent only; Guide Faces use
+fixed solid Full regions and final canvas clipping. Existing generic
+one-through-four guide support remains unchanged; Stage 20P adds no four-guide
+Guide Faces behavior or evidence. Direct raw `ParametricPaths` remain
+Guide-Faces-ineligible, while typed parametric site/Voronoi mechanisms remain
+valid. Stage 20Q+ remains Planned and separately gated.
 
 Low-resolution fixtures and outputs are supplementary only. Every future stage
 that exercises source loading, sampling, rendering, preview, or export must
