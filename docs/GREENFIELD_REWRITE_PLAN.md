@@ -1971,10 +1971,15 @@ so concrete region sources, treatments, heterogeneous composites, and GTK
 workflow remain outside this stage. Focused tests, intrinsic native artifacts,
 and independent correction re-review passed.
 
-**Stage 20O — Accepted awaiting checkpoint.** The user accepted Ordinary
+**Stage 20O — Complete at implementation checkpoint
+`7ab97f01ec372ab1e6201b3913742476a1511c02`.** The user accepted Ordinary
 Voronoi Regions on 2026-08-25 after independent re-review and final artifact
-inspection. The implementation checkpoint is pending; Stage 20P+ remains
-Planned and separately gated.
+inspection. Its headless authority accepts eligible `FamilySiteSet` products,
+including along-guide and `AlongParametricCurveSites`, rejects direct raw
+`ParametricPaths`, preserves duplicate co-ownership through a geometry-private
+Spade adapter, persists authored v5/v3 intent only, and renders fixed solid
+Full regions with final clipping only. Stage 20P+ remains Planned and
+separately gated.
 
 **Remaining Stage 20N+ — Stage 20P+ Planned.** The user accepted the revised headless
 remainder roadmap on 2026-08-24 under

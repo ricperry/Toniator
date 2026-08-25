@@ -5,7 +5,7 @@ Status: **approved future-work plan; implementation remains gated** (accepted
 
 This document records the intended replacement direction for the artist-facing
 Pattern Editor workflow. It does not authorize implementation, change the
-accepted Stage 20F–20N ledger state, or begin Stage 20O+ or Stage 21. The
+accepted Stage 20F–20O ledger state, or begin Stage 20P+ or Stage 21. The
 user-authorized normative effective-pattern direction is recorded in the
 protected specifications and implemented by accepted Stage 20G authority.
 The complete Pattern Wizard remains a separately gated Stage 21 UI milestone
@@ -14,10 +14,10 @@ after the remaining Stage 20N–20S headless capabilities it exposes exist. The
 [`STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md`](STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md).
 
 The plan is informed by the notes, visual studies, and representative pattern
-assets under `assets/Stage20FCorrectionHints/`, the accepted Stage 20A–20N
+assets under `assets/Stage20FCorrectionHints/`, the accepted Stage 20A–20O
 architecture, the accepted Stage 20K implementation, the accepted Stage 20L
 adjacency boundary, the accepted Stage 20F infrastructure, and the planned
-Stage 20O+ engine sequence. Stage 20N supplies only the multi-output and
+Stage 20P+ engine sequence. Stage 20N supplies only the multi-output and
 canonical-region/render foundation; it does not supply concrete region sources,
 region treatments, or heterogeneous composite output.
 
@@ -178,7 +178,7 @@ normal gallery rather than leading to a dead wizard page.
 | `sites.exclusion` | Candidate acceptance has a spacing policy | Overlap allowed / Minimum spacing / Visible-mark margin and amount | Current |
 | `sites.connections` | Sites may be connected into paths | Connections choice; program, degree/distance rules, seed | Accepted headless Stage 20M; wizard exposure remains planned |
 | `sites.tsp_route` | Sites may form one bounded ordered route | Traveling Route program; open/closed route and deterministic settings | Deferred separate program decision |
-| `regions.voronoi` | Sites may form ordinary Voronoi regions | Voronoi Cells choice | Stage 20O |
+| `regions.voronoi` | Sites may form ordinary Voronoi regions | Voronoi Cells choice | Complete headless Stage 20O; wizard exposure remains separately planned |
 | `regions.guide_faces` | Closed guide faces may form regions | Guide Cells choice | Stage 20P |
 | `marks.at_sites` | Sites may realize marks | Marks at Sites choice and Configure Marks page | Current |
 | `marks.shape` | Mark prototype is selectable | Circle / built-in / custom shape; **Edit shape…** | Current circle/authored shape; Stage 20F infrastructure |
@@ -207,10 +207,11 @@ realization flags.
 
 Availability terms:
 
-- **Current engine**: accepted Stage 20A–20M authority exists; Stage 20F owns only bounded
+- **Current engine**: accepted Stage 20A–20O authority exists; Stage 20F owns only bounded
   authoring exposure, not the final wizard.
-- **Accepted 20M / Planned 20N+**: Stages 20L and 20M name accepted headless
-  primitives; later rows name planned headless capabilities.
+- **Accepted 20O / Planned 20P+**: Stages 20L–20O name accepted headless
+  primitives; later rows name planned headless capabilities. Their wizard
+  exposure may remain separately planned.
 - **Future contract**: the supplied asset expresses intent, but no existing
   stage contract yet owns all required behavior.
 - **Advanced/deferred**: excluded from the primary workflow until justified.
@@ -233,7 +234,7 @@ Availability terms:
 | Triagrid — Marks | Three fixed directions -> intersection sites -> marks | Prior row plus `sites.intersections`, `marks.at_sites`, `marks.shape` | Intersection set; mark controls | Current engine | `triangrid-dots.svg` |
 | Tetragrid | Four fixed straight directions -> selected product | `family.grid`, `guides.count.4`, `guides.fixed_straight` plus chosen use flags | Advanced spacing/phase and supported use only | Advanced/deferred | `tetragrid.svg` |
 | Guide Cells | Closed faces from eligible guides -> regions | `family.grid`, `regions.guide_faces`, then a region-realization flag | Guide topology; Scale or Constant Gap region controls | Planned 20P–20Q | `CellsGrid.svg` |
-| Grid Voronoi | Grid sites -> Voronoi -> regions | A valid grid site source plus `regions.voronoi`, then a region-realization flag | Site source; Voronoi; region controls | Planned 20O–20Q | `Voronoi_GridFamily.svg` |
+| Grid Voronoi | Grid sites -> Voronoi -> regions | A valid grid site source plus `regions.voronoi`, then a region-realization flag | Site source; Voronoi; region controls | Complete headless Stage 20O; wizard exposure and Stage 20Q treatments remain planned | `Voronoi_GridFamily.svg` |
 
 The `GridShapesMaster.svg` layer labelled “triangrid-curve - does not work -
 invalid intersections” is treated as a negative design witness: Triagrid and
@@ -248,7 +249,7 @@ Tetragrid must not enable `guides.editable_curve`.
 | Clustered Dispersion — Marks | Clustered sites -> marks | `family.dispersion`, `generator.density`, `generator.seed`, `sites.dispersed`, `sites.exclusion`, `marks.at_sites` | Cluster density/spread/strength; exclusion; mark controls | Current engine | Uses the dispersion family visuals |
 | Connected Dispersion | Dispersed sites -> bounded connection program -> paths | Dispersion flags plus `sites.connections`, `paths.raw` and a path-spacing choice | Minimum/maximum links; maximum distance; selection bias; seed; path controls | Accepted headless 20M; wizard card remains planned | `poisson-disc-connected.svg` |
 | Traveling Route | Weighted or unweighted sites -> one ordered route -> path | A site source plus `sites.connections`, `sites.tsp_route`, `paths.raw` | Open/closed route; deterministic route settings; path controls | Deferred separate program decision | `TSP_example.png` |
-| Dispersion Voronoi | Dispersed sites -> Voronoi -> regions | Dispersion site flags plus `regions.voronoi` and a region-realization flag | Distribution; Voronoi; Scale or Constant Gap | Planned 20O–20Q | Reuses the Voronoi structural thumbnail with a dispersion source |
+| Dispersion Voronoi | Dispersed sites -> Voronoi -> regions | Dispersion site flags plus `regions.voronoi` and a region-realization flag | Distribution; Voronoi; Scale or Constant Gap | Complete headless Stage 20O; wizard exposure and Stage 20Q treatments remain planned | Reuses the Voronoi structural thumbnail with a dispersion source |
 
 ### Parametric baselines
 
@@ -494,7 +495,7 @@ geometry or inventing frontend-only document state. The approved order is:
 | 20L | **Complete at `b41fa3fcf2e1089ea422ba18524c2c4a26f568e8`:** mechanism-neutral site adjacency over eligible `FamilySiteSet` outputs; user accepted on 2026-08-23. |
 | 20M | **Complete at `33f1bde3be9afdc3fb88f479c4ee7ec52b80114a`:** bounded nearest/random/tree connection programs and conventional two-/three-guide wall mazes; user accepted on 2026-08-24. |
 | 20N | **Complete at `b8701686042a69fcd1ac68a4038adbad4c0ccdc9`:** ordered per-output settings, current-only document-v5/preset-v3 transition, independently keyed realization/cache units, and canonical filled-region/render foundation; concrete region sources and heterogeneous output remain deferred. |
-| 20O | Guard-inclusive ordinary Voronoi regions. |
+| 20O | **Complete at `7ab97f01ec372ab1e6201b3913742476a1511c02`:** ordinary Voronoi regions from eligible `FamilySiteSet` products, including along-guide and `AlongParametricCurveSites`; direct raw `ParametricPaths` are excluded. Exact duplicates co-own regions; Spade remains private; authored v5/v3 persistence, fixed solid Full, and final clipping only. |
 | 20P | Guide-arrangement faces. |
 | 20Q | Fill-only Full, Scale, and Constant Gap region realization with reference/area-average sampling. |
 | 20R | Ordered typed composite outputs and site-use dependency filters. |
@@ -503,7 +504,7 @@ geometry or inventing frontend-only document state. The approved order is:
 | 22 | Headless frame/media authority, frame sequences/export, and simple start/end transitions. |
 | 23 | Temporal GTK with descriptor-driven start/end pins only. |
 
-Stages 20G–20N are accepted headless authority; every Stage 20O–20S and Stage
+Stages 20G–20O are accepted headless authority; every Stage 20P–20S and Stage
 21–23 row remains separately gated. TSP,
 aligned curved-guide sampling, wrap-around constant-gap
 endpoints, user-defined motifs, additional parametric forms, and the Tetragrid

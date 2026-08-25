@@ -1,7 +1,8 @@
 # Stages 20N–20S — Headless Pattern Completion Plan
 
-Status: **Accepted roadmap; Stage 20N is complete and Stages 20O–20S remain
-Planned and separately gated** (Stage 20N accepted 2026-08-25).
+Status: **Accepted roadmap; Stages 20N and 20O are complete and Stages 20P–20S
+remain Planned and separately gated** (Stage 20O checkpoint
+`7ab97f01ec372ab1e6201b3913742476a1511c02`).
 
 ## Summary and stage boundary
 
@@ -24,7 +25,7 @@ one-output authoring/validation gate while providing ordered keyed output
 authority, schema-v5/preset-v3 persistence, independently keyed realization and
 cache units, and canonical-region/render foundations. It does not add a
 concrete region source or treatment. This roadmap does not authorize Stage
-20O+ implementation, a tracker status advance for those stages, a commit,
+20P+ implementation, a tracker status advance for those stages, a commit,
 publication, Stage 21+, or a protected-specification revision. Every remaining
 row retains its own decision-complete plan, one-writer implementation,
 independent read-only review, user acceptance, and checkpoint gate.
@@ -60,9 +61,10 @@ independent read-only review, user acceptance, and checkpoint gate.
 
 ## Stage 20O — Ordinary Voronoi regions
 
-Status: **Accepted awaiting checkpoint** (user acceptance recorded 2026-08-25;
-independent re-review and final artifact inspection passed; implementation
-checkpoint pending). Stage 20P+ remains Planned and separately gated.
+Status: **Complete at implementation checkpoint
+`7ab97f01ec372ab1e6201b3913742476a1511c02`** (user acceptance recorded
+2026-08-25; independent re-review and final artifact inspection passed).
+Stage 20P+ remains Planned and separately gated.
 
 - Add `PatternOutputLayer::Regions` with
   `RegionSourceIntent::VoronoiSites { site_mechanism_id }` for eligible
@@ -205,7 +207,7 @@ checkpoint pending). Stage 20P+ remains Planned and separately gated.
   `scripts/validate_architecture.sh`, protected-path review, immutable-asset
   hashes, and semantic-map reconciliation. No GTK/Wayland run is required;
   compile-check only any unavoidable mechanical app adapter.
-- For Stages 20O–20S, stop each stage at **Implemented awaiting review** and
+- For Stages 20P–20S, stop each stage at **Implemented awaiting review** and
   again at **Ready for user acceptance**. Do not commit, push, publish, or
   begin the next stage without explicit authorization.
 

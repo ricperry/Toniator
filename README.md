@@ -383,6 +383,16 @@ moves all remaining pattern-authoring GTK work to Stage 21, all headless
 frame/media/sequence/simple-transition work to Stage 22, and temporal GTK to
 Stage 23. Every future stage remains separately gated.
 
+Stage 20O is complete at implementation checkpoint
+`7ab97f01ec372ab1e6201b3913742476a1511c02`. Its accepted headless authority
+realizes ordinary Voronoi regions from eligible `FamilySiteSet` products,
+including along-guide sites and `AlongParametricCurveSites`, while rejecting
+direct raw `ParametricPaths`. Exact duplicates co-own a region; the private
+Spade adapter remains geometry-owned. Schema-v5 documents and preset-v3
+recipes persist authored intent only. Regions are fixed solid Full fills with
+no channel-specific treatment, and renderers apply only the final canvas clip.
+Stage 20P+ remains Planned and separately gated.
+
 Low-resolution fixtures and outputs are supplementary only. Every future stage
 that exercises source loading, sampling, rendering, preview, or export must
 also test the immutable PNG at its natural 1024×1024 dimensions and the SVG at

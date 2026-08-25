@@ -1,8 +1,8 @@
 # Stage 20O — Ordinary Voronoi Regions
 
-Status: **Accepted awaiting checkpoint** (user acceptance recorded 2026-08-25;
-independent re-review and final artifact inspection passed; implementation
-checkpoint pending).
+Status: **Complete at implementation checkpoint
+`7ab97f01ec372ab1e6201b3913742476a1511c02`** (user acceptance recorded
+2026-08-25; independent re-review and final artifact inspection passed).
 
 Stage 20O adds the first concrete canonical-region output. A `Regions` output
 references one site-producing mechanism and realizes ordinary, unweighted
@@ -124,6 +124,6 @@ or Stage 20P+ work enters this stage.
 The writer stopped first at **Implemented awaiting review**. Independent
 read-only re-review passed after bounded repairs, and the parent visually
 inspected the final native PNG/SVG-raster representatives with user cell
-confirmation. User acceptance on 2026-08-25 moves the stage to **Accepted
-awaiting checkpoint**. The implementation checkpoint remains pending; this does
-not authorize publication or Stage 20P, which remains separately gated.
+confirmation. User acceptance on 2026-08-25 completes the stage at
+implementation checkpoint `7ab97f01ec372ab1e6201b3913742476a1511c02`. This
+does not authorize publication or Stage 20P, which remains separately gated.

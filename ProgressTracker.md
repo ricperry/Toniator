@@ -565,15 +565,16 @@ source or region treatment. Schema v5 documents and preset v3 recipes persist
 authored keyed output settings and channel deltas; derived effective values,
 regions, diagnostics, limits, caches, and scheduler state remain absent.
 
-**Stage 20O — Accepted awaiting checkpoint.** The user accepted the bounded
+**Stage 20O — Complete at implementation checkpoint
+`7ab97f01ec372ab1e6201b3913742476a1511c02`.** The user accepted the bounded
 ordinary Voronoi implementation on 2026-08-25. It retains the Stage 20N
-one-output gate, schema-v5/preset-v3 persistence, and renderer-owned final
-clipping. It adds guard-inclusive site-set realization, duplicate co-ownership,
-bounded geometry/private Spade topology, and fixed solid full-region rendering.
-Independent re-review passed after bounded repairs; the parent visually
-inspected the final artifacts and the user confirmed the representative cells.
-The implementation checkpoint is pending; Stage 20P+ remains Planned and
-separately gated.
+one-output gate, schema-v5/preset-v3 authored persistence, and renderer-owned
+final clipping. Eligible `FamilySiteSet` products include along-guide and
+`AlongParametricCurveSites`; direct raw `ParametricPaths` remain ineligible.
+It adds guard-inclusive realization, exact-duplicate co-ownership, bounded
+geometry-private Spade topology, and fixed solid Full regions without a
+channel-specific region treatment. Independent re-review and final artifact
+inspection passed. Stage 20P+ remains Planned and separately gated.
 
 **Remaining Stage 20N+ — Stage 20P+ Planned.** The user accepted the revised remainder
 roadmap on 2026-08-24 under
