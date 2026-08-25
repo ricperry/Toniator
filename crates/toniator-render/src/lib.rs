@@ -11,8 +11,9 @@ use std::{collections::HashSet, error::Error, fmt};
 use image::{ColorType, ImageEncoder, codecs::png::PngEncoder};
 use toniator_domain::{CanvasSpec, ChannelId, ColorValue, HalftoneChannelModel};
 use toniator_geometry::{
-    CanonicalCircleMark, CanonicalFillRule, CanonicalMark, CanonicalStroke, CurveSegment, Point2,
-    StructuralPathInstanceId, StructuralPathLocationProvenance, StructuralPathSourceId,
+    CanonicalCircleMark, CanonicalFillRule, CanonicalMark, CanonicalRegionSet, CanonicalStroke,
+    CurveSegment, Point2, StructuralPathInstanceId, StructuralPathLocationProvenance,
+    StructuralPathSourceId,
 };
 
 const SUBPIXEL_GRID: u32 = 8;
@@ -85,10 +86,22 @@ pub struct RenderLayer {
     /// Canonical linear RGBA. It is converted only at output boundaries.
     color: ColorValue,
     opacity: f64,
+    outputs: Vec<RenderOutputLayer>,
+    /// Retained first-output projection while Stage 20N moves consumers to `outputs`.
     geometry: GeometryOutput,
-    /// SourceColorAlpha carries immutable straight-linear paint per canonical
-    /// mark. Solid layers leave this as `None`.
+    /// Retained first-output sampled paint projection while Stage 20N moves consumers to `outputs`.
     mark_paints: Option<Vec<ColorValue>>,
+}
+
+/// One output-owned canonical geometry payload in painter order within a channel.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RenderOutputLayer {
+    /// Stable structural output identity supplied by the domain/pattern pipeline.
+    pub output_layer_id: toniator_domain::PatternOutputLayerId,
+    /// Canonical geometry consumed only by raster and SVG final consumers.
+    pub geometry: GeometryOutput,
+    /// Optional sampled paint, valid only for mark primitives and cardinally aligned to them.
+    pub primitive_paints: Option<Vec<ColorValue>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -96,6 +109,8 @@ pub enum GeometryOutput {
     CircularMarks(Vec<CanonicalCircleMark>),
     CanonicalMarks(Vec<CanonicalMark>),
     CanonicalStrokes(Vec<CanonicalStroke>),
+    /// Geometry-owned, closed positive regions with fixed nonzero fill semantics.
+    CanonicalRegions(CanonicalRegionSet),
 }
 
 /// Renderer-owned immutable source-colored circle. Stage 9D may adapt the
@@ -209,7 +224,11 @@ impl RenderScene {
             validate_layer(layer)?;
             match model {
                 None => {
-                    if layer.mark_paints.is_some() {
+                    if layer
+                        .outputs
+                        .iter()
+                        .any(|output| output.primitive_paints.is_some())
+                    {
                         return Err(RenderError::new(
                             "scene.layers",
                             "unmodeled legacy scenes cannot carry sampled per-mark paints",
@@ -217,7 +236,11 @@ impl RenderScene {
                     }
                 }
                 Some(HalftoneChannelModel::Rgb | HalftoneChannelModel::Cmyk) => {
-                    if layer.mark_paints.is_some() {
+                    if layer
+                        .outputs
+                        .iter()
+                        .any(|output| output.primitive_paints.is_some())
+                    {
                         return Err(RenderError::new(
                             "scene.layers",
                             "RGB and CMYK layers must use solid paint",
@@ -225,7 +248,11 @@ impl RenderScene {
                     }
                 }
                 Some(HalftoneChannelModel::SourceColorAlpha) => {
-                    if layer.mark_paints.is_none() {
+                    if !layer
+                        .outputs
+                        .iter()
+                        .any(|output| output.primitive_paints.is_some())
+                    {
                         return Err(RenderError::new(
                             "scene.layers",
                             "SourceColorAlpha requires sampled per-mark paint",
@@ -267,6 +294,7 @@ impl RenderScene {
                 GeometryOutput::CircularMarks(marks) => marks.len(),
                 GeometryOutput::CanonicalMarks(marks) => marks.len(),
                 GeometryOutput::CanonicalStrokes(strokes) => strokes.len(),
+                GeometryOutput::CanonicalRegions(regions) => regions.regions().len(),
             })
             .sum()
     }
@@ -298,6 +326,32 @@ impl SceneIdentity {
 }
 
 impl RenderLayer {
+    /// Builds one solid-paint output layer with its structural output identity retained for rendering.
+    ///
+    /// # Errors
+    ///
+    /// Returns stable presentation or geometry diagnostics before scene construction.
+    pub fn new_for_output(
+        channel_id: ChannelId,
+        visible: bool,
+        color: ColorValue,
+        opacity: f64,
+        output_layer_id: toniator_domain::PatternOutputLayerId,
+        geometry: GeometryOutput,
+    ) -> Result<Self, RenderError> {
+        Self::new_outputs(
+            channel_id,
+            visible,
+            color,
+            opacity,
+            vec![RenderOutputLayer {
+                output_layer_id,
+                geometry,
+                primitive_paints: None,
+            }],
+        )
+    }
+
     pub fn new(
         channel_id: ChannelId,
         visible: bool,
@@ -310,6 +364,11 @@ impl RenderLayer {
             visible,
             color,
             opacity,
+            outputs: vec![RenderOutputLayer {
+                output_layer_id: toniator_domain::PatternOutputLayerId(0),
+                geometry: geometry.clone(),
+                primitive_paints: None,
+            }],
             geometry,
             mark_paints: None,
         };
@@ -332,7 +391,7 @@ impl RenderLayer {
                 .map(|source_mark| source_mark.mark.clone())
                 .collect(),
         );
-        let mark_paints = marks
+        let mark_paints: Vec<ColorValue> = marks
             .into_iter()
             .map(|source_mark| ColorValue {
                 red: source_mark.paint.red,
@@ -351,6 +410,11 @@ impl RenderLayer {
                 alpha: 1.0,
             },
             opacity,
+            outputs: vec![RenderOutputLayer {
+                output_layer_id: toniator_domain::PatternOutputLayerId(0),
+                geometry: geometry.clone(),
+                primitive_paints: Some(mark_paints.clone()),
+            }],
             geometry,
             mark_paints: Some(mark_paints),
         };
@@ -380,6 +444,11 @@ impl RenderLayer {
                 alpha: 1.0,
             },
             opacity,
+            outputs: vec![RenderOutputLayer {
+                output_layer_id: toniator_domain::PatternOutputLayerId(0),
+                geometry: GeometryOutput::CanonicalMarks(marks.clone()),
+                primitive_paints: Some(paints.clone()),
+            }],
             geometry: GeometryOutput::CanonicalMarks(marks),
             mark_paints: Some(paints),
         };
@@ -399,15 +468,56 @@ impl RenderLayer {
     pub const fn opacity(&self) -> f64 {
         self.opacity
     }
+    /// Returns every channel output in deterministic painter order.
+    pub fn outputs(&self) -> &[RenderOutputLayer] {
+        &self.outputs
+    }
+    /// Returns the preserved legacy sole-output geometry projection.
     pub fn geometry(&self) -> &GeometryOutput {
-        &self.geometry
+        &self.outputs[0].geometry
     }
 
-    fn mark_paint(&self, index: usize) -> &ColorValue {
-        self.mark_paints
-            .as_ref()
-            .and_then(|paints| paints.get(index))
-            .unwrap_or(&self.color)
+    /// Builds an ordered output layer with channel-owned presentation authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns stable presentation, output identity, geometry, or sampled-paint diagnostics.
+    pub fn new_outputs(
+        channel_id: ChannelId,
+        visible: bool,
+        color: ColorValue,
+        opacity: f64,
+        outputs: Vec<RenderOutputLayer>,
+    ) -> Result<Self, RenderError> {
+        let first = outputs.first().ok_or(RenderError::new(
+            "scene.layer.outputs",
+            "at least one ordered output is required",
+        ))?;
+        let layer = Self {
+            channel_id,
+            visible,
+            color,
+            opacity,
+            geometry: first.geometry.clone(),
+            mark_paints: first.primitive_paints.clone(),
+            outputs,
+        };
+        validate_layer(&layer)?;
+        Ok(layer)
+    }
+
+    /// Retargets the sole legacy output projection to an explicit structural output ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an output validation diagnostic if the retained layer invariant is violated.
+    pub fn with_output_layer_id(
+        mut self,
+        output_layer_id: toniator_domain::PatternOutputLayerId,
+    ) -> Result<Self, RenderError> {
+        self.outputs[0].output_layer_id = output_layer_id;
+        validate_layer(&self)?;
+        Ok(self)
     }
 }
 
@@ -445,7 +555,32 @@ fn validate_layer(layer: &RenderLayer) -> Result<(), RenderError> {
             ));
         }
     }
-    match &layer.geometry {
+    if layer.outputs.is_empty() {
+        return Err(RenderError::new(
+            "scene.layer.outputs",
+            "at least one ordered output is required",
+        ));
+    }
+    let mut ids = HashSet::new();
+    for output in &layer.outputs {
+        if !ids.insert(output.output_layer_id) {
+            return Err(RenderError::new(
+                "scene.layer.outputs",
+                "output layer IDs must be unique in painter order",
+            ));
+        }
+        validate_output_geometry(output)?;
+    }
+    Ok(())
+}
+
+/// Validates one output geometry and its optional sampled paint without changing channel presentation.
+///
+/// # Errors
+///
+/// Returns stable geometry or sampled-paint diagnostics before scene construction.
+fn validate_output_geometry(output: &RenderOutputLayer) -> Result<(), RenderError> {
+    match &output.geometry {
         GeometryOutput::CircularMarks(marks) => {
             if marks.iter().any(|mark| {
                 !mark.center.is_finite() || !mark.radius.is_finite() || mark.radius < 0.0
@@ -500,18 +635,34 @@ fn validate_layer(layer: &RenderLayer) -> Result<(), RenderError> {
                 ));
             }
         }
+        GeometryOutput::CanonicalRegions(regions) => {
+            if regions.regions().iter().any(|region| {
+                region.area <= 0.0
+                    || !region.area.is_finite()
+                    || !region.bounds.min.is_finite()
+                    || !region.bounds.max.is_finite()
+            }) {
+                return Err(RenderError::new(
+                    "scene.layer.geometry",
+                    "canonical regions must be finite positive-area geometry",
+                ));
+            }
+        }
     }
-    if let Some(paints) = &layer.mark_paints {
-        if matches!(layer.geometry, GeometryOutput::CanonicalStrokes(_)) {
+    if let Some(paints) = &output.primitive_paints {
+        if matches!(
+            output.geometry,
+            GeometryOutput::CanonicalStrokes(_) | GeometryOutput::CanonicalRegions(_)
+        ) {
             return Err(RenderError::new(
                 "scene.layer.source_color",
-                "guide-path strokes require solid channel paint",
+                "strokes and regions require solid channel paint",
             ));
         }
-        let marks = match &layer.geometry {
+        let marks = match &output.geometry {
             GeometryOutput::CircularMarks(marks) => marks.len(),
             GeometryOutput::CanonicalMarks(marks) => marks.len(),
-            GeometryOutput::CanonicalStrokes(strokes) => strokes.len(),
+            GeometryOutput::CanonicalStrokes(_) | GeometryOutput::CanonicalRegions(_) => 0,
         };
         if paints.len() != marks {
             return Err(RenderError::new(
@@ -580,255 +731,274 @@ fn scene_fingerprint(
         add_scene_bytes(&mut hash, layer.color.blue.to_bits().to_le_bytes());
         add_scene_bytes(&mut hash, layer.color.alpha.to_bits().to_le_bytes());
         add_scene_bytes(&mut hash, layer.opacity.to_bits().to_le_bytes());
-        match &layer.geometry {
-            GeometryOutput::CircularMarks(marks) => {
-                add_scene_bytes(&mut hash, (marks.len() as u64).to_le_bytes());
-                for mark in marks {
-                    add_scene_bytes(
-                        &mut hash,
-                        mark.source_site_id.first_dimension_id.to_le_bytes(),
-                    );
-                    add_scene_bytes(&mut hash, mark.source_site_id.first_index.to_le_bytes());
-                    add_scene_bytes(
-                        &mut hash,
-                        mark.source_site_id.second_dimension_id.to_le_bytes(),
-                    );
-                    add_scene_bytes(&mut hash, mark.source_site_id.second_index.to_le_bytes());
-                    add_scene_bytes(&mut hash, mark.center.x.to_bits().to_le_bytes());
-                    add_scene_bytes(&mut hash, mark.center.y.to_bits().to_le_bytes());
-                    add_scene_bytes(&mut hash, mark.radius.to_bits().to_le_bytes());
-                    add_scene_bytes(
-                        &mut hash,
-                        [match mark.scope {
-                            toniator_geometry::SiteScope::Canvas => 1,
-                            toniator_geometry::SiteScope::Guard => 2,
-                        }],
-                    );
-                    for contributor in &mark.provenance.contributors {
-                        append_scene_guide_instance(&mut hash, *contributor);
-                    }
-                }
-            }
-            GeometryOutput::CanonicalMarks(marks) => {
-                add_scene_bytes(&mut hash, (marks.len() as u64).to_le_bytes());
-                for mark in marks {
-                    match mark {
-                        CanonicalMark::Circle {
-                            source_site_id,
-                            center,
-                            radius,
-                            scope,
-                            provenance,
-                            fill_rule,
-                        } => {
-                            add_scene_bytes(&mut hash, [1]);
-                            append_scene_family_site_id(&mut hash, *source_site_id);
-                            append_scene_scope(&mut hash, *scope);
-                            append_scene_provenance(&mut hash, provenance);
-                            append_scene_fill_rule(&mut hash, *fill_rule);
-                            add_scene_bytes(&mut hash, [1]);
-                            add_scene_bytes(&mut hash, 1_u64.to_le_bytes());
-                            add_scene_bytes(&mut hash, [0]);
-                            add_scene_bytes(&mut hash, center.x.to_bits().to_le_bytes());
-                            add_scene_bytes(&mut hash, center.y.to_bits().to_le_bytes());
-                            add_scene_bytes(&mut hash, radius.to_bits().to_le_bytes());
-                        }
-                        CanonicalMark::ClosedPath(mark) => {
-                            add_scene_bytes(&mut hash, [2]);
-                            append_scene_family_site_id(&mut hash, mark.source_site_id);
-                            append_scene_scope(&mut hash, mark.scope);
-                            append_scene_provenance(&mut hash, &mark.provenance);
-                            append_scene_fill_rule(&mut hash, mark.fill_rule);
-                            add_scene_bytes(&mut hash, [2]);
-                            add_scene_bytes(
-                                &mut hash,
-                                u64::try_from(mark.path.segments().len())
-                                    .expect("usize fits u64")
-                                    .to_le_bytes(),
-                            );
-                            add_scene_bytes(
-                                &mut hash,
-                                [match mark.path.closure() {
-                                    toniator_geometry::PathClosure::Open => 1,
-                                    toniator_geometry::PathClosure::Closed => 2,
-                                }],
-                            );
-                            for segment in mark.path.segments() {
-                                match segment {
-                                    CurveSegment::Line(line) => {
-                                        add_scene_bytes(&mut hash, [1]);
-                                        for point in [line.start(), line.end()] {
-                                            add_scene_bytes(
-                                                &mut hash,
-                                                point.x.to_bits().to_le_bytes(),
-                                            );
-                                            add_scene_bytes(
-                                                &mut hash,
-                                                point.y.to_bits().to_le_bytes(),
-                                            );
-                                        }
-                                    }
-                                    CurveSegment::CubicBezier(cubic) => {
-                                        add_scene_bytes(&mut hash, [2]);
-                                        for point in [
-                                            cubic.start(),
-                                            cubic.control_1(),
-                                            cubic.control_2(),
-                                            cubic.end(),
-                                        ] {
-                                            add_scene_bytes(
-                                                &mut hash,
-                                                point.x.to_bits().to_le_bytes(),
-                                            );
-                                            add_scene_bytes(
-                                                &mut hash,
-                                                point.y.to_bits().to_le_bytes(),
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            GeometryOutput::CanonicalStrokes(strokes) => {
-                add_scene_bytes(&mut hash, [3]);
-                add_scene_bytes(&mut hash, (strokes.len() as u64).to_le_bytes());
-                for stroke in strokes {
-                    match &stroke.source_id {
-                        toniator_geometry::CanonicalStrokeSourceId::Structural(id) => {
-                            append_scene_structural_path_instance(&mut hash, *id);
-                        }
-                        toniator_geometry::CanonicalStrokeSourceId::Connection(id) => {
-                            add_scene_bytes(&mut hash, [0x43]);
-                            add_scene_bytes(&mut hash, id.output_layer_id.0.to_le_bytes());
-                            add_scene_bytes(
-                                &mut hash,
-                                id.component_minimum.mechanism_id.0.to_le_bytes(),
-                            );
-                            add_scene_bytes(
-                                &mut hash,
-                                (id.component_minimum.ordinal as u64).to_le_bytes(),
-                            );
-                            add_scene_bytes(&mut hash, id.component_ordinal.to_le_bytes());
-                            add_scene_bytes(
-                                &mut hash,
-                                id.first_endpoint.mechanism_id.0.to_le_bytes(),
-                            );
-                            add_scene_bytes(
-                                &mut hash,
-                                (id.first_endpoint.ordinal as u64).to_le_bytes(),
-                            );
-                            add_scene_bytes(
-                                &mut hash,
-                                id.last_endpoint.mechanism_id.0.to_le_bytes(),
-                            );
-                            add_scene_bytes(
-                                &mut hash,
-                                (id.last_endpoint.ordinal as u64).to_le_bytes(),
-                            );
-                            add_scene_bytes(&mut hash, id.ordinal.to_le_bytes());
-                        }
-                        toniator_geometry::CanonicalStrokeSourceId::Maze(id) => {
-                            add_scene_bytes(&mut hash, [0x4d]);
-                            add_scene_bytes(&mut hash, id.output_layer_id.0.to_le_bytes());
-                            add_scene_bytes(&mut hash, id.wall.first.0.to_le_bytes());
-                            add_scene_bytes(&mut hash, id.wall.second.0.to_le_bytes());
-                        }
-                    }
-                    add_scene_bytes(
-                        &mut hash,
-                        stroke
-                            .source_structure_id
-                            .map_or(0, |id| id.0)
-                            .to_le_bytes(),
-                    );
-                    add_scene_bytes(&mut hash, stroke.nominal_basis.to_bits().to_le_bytes());
-                    add_scene_bytes(
-                        &mut hash,
-                        [
-                            match stroke.style.join {
-                                toniator_domain::StrokeJoin::Round => 1,
-                            },
-                            match stroke.style.cap {
-                                toniator_domain::StrokeCap::Round => 1,
-                            },
-                        ],
-                    );
-                    add_scene_bytes(
-                        &mut hash,
-                        [match stroke.path.closure() {
-                            toniator_geometry::PathClosure::Open => 1,
-                            toniator_geometry::PathClosure::Closed => 2,
-                        }],
-                    );
-                    add_scene_bytes(
-                        &mut hash,
-                        (stroke.path.segments().len() as u64).to_le_bytes(),
-                    );
-                    for segment in stroke.path.segments() {
-                        match segment {
-                            CurveSegment::Line(line) => {
-                                add_scene_bytes(&mut hash, [1]);
-                                for point in [line.start(), line.end()] {
-                                    add_scene_bytes(&mut hash, point.x.to_bits().to_le_bytes());
-                                    add_scene_bytes(&mut hash, point.y.to_bits().to_le_bytes());
-                                }
-                            }
-                            CurveSegment::CubicBezier(cubic) => {
-                                add_scene_bytes(&mut hash, [2]);
-                                for point in [
-                                    cubic.start(),
-                                    cubic.control_1(),
-                                    cubic.control_2(),
-                                    cubic.end(),
-                                ] {
-                                    add_scene_bytes(&mut hash, point.x.to_bits().to_le_bytes());
-                                    add_scene_bytes(&mut hash, point.y.to_bits().to_le_bytes());
-                                }
-                            }
-                        }
-                    }
-                    for sample in &stroke.profile {
-                        add_scene_bytes(&mut hash, sample.center.x.to_bits().to_le_bytes());
-                        add_scene_bytes(&mut hash, sample.center.y.to_bits().to_le_bytes());
-                        add_scene_bytes(&mut hash, sample.location.segment_index().to_le_bytes());
-                        add_scene_bytes(
-                            &mut hash,
-                            sample.location.parameter().to_bits().to_le_bytes(),
-                        );
-                        add_scene_bytes(
-                            &mut hash,
-                            sample.normalized_thickness.to_bits().to_le_bytes(),
-                        );
-                        add_scene_bytes(&mut hash, sample.width.to_bits().to_le_bytes());
-                    }
-                    append_scene_fill_rule(&mut hash, stroke.outline.fill_rule);
-                    add_scene_bytes(
-                        &mut hash,
-                        (stroke.outline.contours.len() as u64).to_le_bytes(),
-                    );
-                    for contour in &stroke.outline.contours {
-                        add_scene_bytes(&mut hash, (contour.segments.len() as u64).to_le_bytes());
-                        for segment in &contour.segments {
-                            append_scene_outline_segment(&mut hash, segment);
-                        }
-                    }
-                }
-            }
+        if layer.outputs.len() > 1 {
+            add_scene_bytes(&mut hash, [0x4f]);
+            add_scene_bytes(&mut hash, (layer.outputs.len() as u64).to_le_bytes());
         }
-        if model.is_some() {
-            if let Some(paints) = &layer.mark_paints {
-                add_scene_bytes(&mut hash, [1]);
-                for paint in paints {
-                    add_scene_bytes(&mut hash, paint.red.to_bits().to_le_bytes());
-                    add_scene_bytes(&mut hash, paint.green.to_bits().to_le_bytes());
-                    add_scene_bytes(&mut hash, paint.blue.to_bits().to_le_bytes());
-                    add_scene_bytes(&mut hash, paint.alpha.to_bits().to_le_bytes());
+        for output in &layer.outputs {
+            if layer.outputs.len() > 1 {
+                add_scene_bytes(&mut hash, output.output_layer_id.0.to_le_bytes());
+            }
+            match &output.geometry {
+                GeometryOutput::CircularMarks(marks) => {
+                    add_scene_bytes(&mut hash, (marks.len() as u64).to_le_bytes());
+                    for mark in marks {
+                        add_scene_bytes(
+                            &mut hash,
+                            mark.source_site_id.first_dimension_id.to_le_bytes(),
+                        );
+                        add_scene_bytes(&mut hash, mark.source_site_id.first_index.to_le_bytes());
+                        add_scene_bytes(
+                            &mut hash,
+                            mark.source_site_id.second_dimension_id.to_le_bytes(),
+                        );
+                        add_scene_bytes(&mut hash, mark.source_site_id.second_index.to_le_bytes());
+                        add_scene_bytes(&mut hash, mark.center.x.to_bits().to_le_bytes());
+                        add_scene_bytes(&mut hash, mark.center.y.to_bits().to_le_bytes());
+                        add_scene_bytes(&mut hash, mark.radius.to_bits().to_le_bytes());
+                        add_scene_bytes(
+                            &mut hash,
+                            [match mark.scope {
+                                toniator_geometry::SiteScope::Canvas => 1,
+                                toniator_geometry::SiteScope::Guard => 2,
+                            }],
+                        );
+                        for contributor in &mark.provenance.contributors {
+                            append_scene_guide_instance(&mut hash, *contributor);
+                        }
+                    }
                 }
-            } else {
-                add_scene_bytes(&mut hash, [0]);
+                GeometryOutput::CanonicalMarks(marks) => {
+                    add_scene_bytes(&mut hash, (marks.len() as u64).to_le_bytes());
+                    for mark in marks {
+                        match mark {
+                            CanonicalMark::Circle {
+                                source_site_id,
+                                center,
+                                radius,
+                                scope,
+                                provenance,
+                                fill_rule,
+                            } => {
+                                add_scene_bytes(&mut hash, [1]);
+                                append_scene_family_site_id(&mut hash, *source_site_id);
+                                append_scene_scope(&mut hash, *scope);
+                                append_scene_provenance(&mut hash, provenance);
+                                append_scene_fill_rule(&mut hash, *fill_rule);
+                                add_scene_bytes(&mut hash, [1]);
+                                add_scene_bytes(&mut hash, 1_u64.to_le_bytes());
+                                add_scene_bytes(&mut hash, [0]);
+                                add_scene_bytes(&mut hash, center.x.to_bits().to_le_bytes());
+                                add_scene_bytes(&mut hash, center.y.to_bits().to_le_bytes());
+                                add_scene_bytes(&mut hash, radius.to_bits().to_le_bytes());
+                            }
+                            CanonicalMark::ClosedPath(mark) => {
+                                add_scene_bytes(&mut hash, [2]);
+                                append_scene_family_site_id(&mut hash, mark.source_site_id);
+                                append_scene_scope(&mut hash, mark.scope);
+                                append_scene_provenance(&mut hash, &mark.provenance);
+                                append_scene_fill_rule(&mut hash, mark.fill_rule);
+                                add_scene_bytes(&mut hash, [2]);
+                                add_scene_bytes(
+                                    &mut hash,
+                                    u64::try_from(mark.path.segments().len())
+                                        .expect("usize fits u64")
+                                        .to_le_bytes(),
+                                );
+                                add_scene_bytes(
+                                    &mut hash,
+                                    [match mark.path.closure() {
+                                        toniator_geometry::PathClosure::Open => 1,
+                                        toniator_geometry::PathClosure::Closed => 2,
+                                    }],
+                                );
+                                for segment in mark.path.segments() {
+                                    match segment {
+                                        CurveSegment::Line(line) => {
+                                            add_scene_bytes(&mut hash, [1]);
+                                            for point in [line.start(), line.end()] {
+                                                add_scene_bytes(
+                                                    &mut hash,
+                                                    point.x.to_bits().to_le_bytes(),
+                                                );
+                                                add_scene_bytes(
+                                                    &mut hash,
+                                                    point.y.to_bits().to_le_bytes(),
+                                                );
+                                            }
+                                        }
+                                        CurveSegment::CubicBezier(cubic) => {
+                                            add_scene_bytes(&mut hash, [2]);
+                                            for point in [
+                                                cubic.start(),
+                                                cubic.control_1(),
+                                                cubic.control_2(),
+                                                cubic.end(),
+                                            ] {
+                                                add_scene_bytes(
+                                                    &mut hash,
+                                                    point.x.to_bits().to_le_bytes(),
+                                                );
+                                                add_scene_bytes(
+                                                    &mut hash,
+                                                    point.y.to_bits().to_le_bytes(),
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                GeometryOutput::CanonicalStrokes(strokes) => {
+                    add_scene_bytes(&mut hash, [3]);
+                    add_scene_bytes(&mut hash, (strokes.len() as u64).to_le_bytes());
+                    for stroke in strokes {
+                        match &stroke.source_id {
+                            toniator_geometry::CanonicalStrokeSourceId::Structural(id) => {
+                                append_scene_structural_path_instance(&mut hash, *id);
+                            }
+                            toniator_geometry::CanonicalStrokeSourceId::Connection(id) => {
+                                add_scene_bytes(&mut hash, [0x43]);
+                                add_scene_bytes(&mut hash, id.output_layer_id.0.to_le_bytes());
+                                add_scene_bytes(
+                                    &mut hash,
+                                    id.component_minimum.mechanism_id.0.to_le_bytes(),
+                                );
+                                add_scene_bytes(
+                                    &mut hash,
+                                    (id.component_minimum.ordinal as u64).to_le_bytes(),
+                                );
+                                add_scene_bytes(&mut hash, id.component_ordinal.to_le_bytes());
+                                add_scene_bytes(
+                                    &mut hash,
+                                    id.first_endpoint.mechanism_id.0.to_le_bytes(),
+                                );
+                                add_scene_bytes(
+                                    &mut hash,
+                                    (id.first_endpoint.ordinal as u64).to_le_bytes(),
+                                );
+                                add_scene_bytes(
+                                    &mut hash,
+                                    id.last_endpoint.mechanism_id.0.to_le_bytes(),
+                                );
+                                add_scene_bytes(
+                                    &mut hash,
+                                    (id.last_endpoint.ordinal as u64).to_le_bytes(),
+                                );
+                                add_scene_bytes(&mut hash, id.ordinal.to_le_bytes());
+                            }
+                            toniator_geometry::CanonicalStrokeSourceId::Maze(id) => {
+                                add_scene_bytes(&mut hash, [0x4d]);
+                                add_scene_bytes(&mut hash, id.output_layer_id.0.to_le_bytes());
+                                add_scene_bytes(&mut hash, id.wall.first.0.to_le_bytes());
+                                add_scene_bytes(&mut hash, id.wall.second.0.to_le_bytes());
+                            }
+                        }
+                        add_scene_bytes(
+                            &mut hash,
+                            stroke
+                                .source_structure_id
+                                .map_or(0, |id| id.0)
+                                .to_le_bytes(),
+                        );
+                        add_scene_bytes(&mut hash, stroke.nominal_basis.to_bits().to_le_bytes());
+                        add_scene_bytes(
+                            &mut hash,
+                            [
+                                match stroke.style.join {
+                                    toniator_domain::StrokeJoin::Round => 1,
+                                },
+                                match stroke.style.cap {
+                                    toniator_domain::StrokeCap::Round => 1,
+                                },
+                            ],
+                        );
+                        add_scene_bytes(
+                            &mut hash,
+                            [match stroke.path.closure() {
+                                toniator_geometry::PathClosure::Open => 1,
+                                toniator_geometry::PathClosure::Closed => 2,
+                            }],
+                        );
+                        add_scene_bytes(
+                            &mut hash,
+                            (stroke.path.segments().len() as u64).to_le_bytes(),
+                        );
+                        for segment in stroke.path.segments() {
+                            match segment {
+                                CurveSegment::Line(line) => {
+                                    add_scene_bytes(&mut hash, [1]);
+                                    for point in [line.start(), line.end()] {
+                                        add_scene_bytes(&mut hash, point.x.to_bits().to_le_bytes());
+                                        add_scene_bytes(&mut hash, point.y.to_bits().to_le_bytes());
+                                    }
+                                }
+                                CurveSegment::CubicBezier(cubic) => {
+                                    add_scene_bytes(&mut hash, [2]);
+                                    for point in [
+                                        cubic.start(),
+                                        cubic.control_1(),
+                                        cubic.control_2(),
+                                        cubic.end(),
+                                    ] {
+                                        add_scene_bytes(&mut hash, point.x.to_bits().to_le_bytes());
+                                        add_scene_bytes(&mut hash, point.y.to_bits().to_le_bytes());
+                                    }
+                                }
+                            }
+                        }
+                        for sample in &stroke.profile {
+                            add_scene_bytes(&mut hash, sample.center.x.to_bits().to_le_bytes());
+                            add_scene_bytes(&mut hash, sample.center.y.to_bits().to_le_bytes());
+                            add_scene_bytes(
+                                &mut hash,
+                                sample.location.segment_index().to_le_bytes(),
+                            );
+                            add_scene_bytes(
+                                &mut hash,
+                                sample.location.parameter().to_bits().to_le_bytes(),
+                            );
+                            add_scene_bytes(
+                                &mut hash,
+                                sample.normalized_thickness.to_bits().to_le_bytes(),
+                            );
+                            add_scene_bytes(&mut hash, sample.width.to_bits().to_le_bytes());
+                        }
+                        append_scene_fill_rule(&mut hash, stroke.outline.fill_rule);
+                        add_scene_bytes(
+                            &mut hash,
+                            (stroke.outline.contours.len() as u64).to_le_bytes(),
+                        );
+                        for contour in &stroke.outline.contours {
+                            add_scene_bytes(
+                                &mut hash,
+                                (contour.segments.len() as u64).to_le_bytes(),
+                            );
+                            for segment in &contour.segments {
+                                append_scene_outline_segment(&mut hash, segment);
+                            }
+                        }
+                    }
+                }
+                GeometryOutput::CanonicalRegions(regions) => {
+                    add_scene_bytes(&mut hash, [4]);
+                    add_scene_bytes(&mut hash, regions.fingerprint().bytes());
+                }
+            }
+            if model.is_some() {
+                if let Some(paints) = &output.primitive_paints {
+                    add_scene_bytes(&mut hash, [1]);
+                    for paint in paints {
+                        add_scene_bytes(&mut hash, paint.red.to_bits().to_le_bytes());
+                        add_scene_bytes(&mut hash, paint.green.to_bits().to_le_bytes());
+                        add_scene_bytes(&mut hash, paint.blue.to_bits().to_le_bytes());
+                        add_scene_bytes(&mut hash, paint.alpha.to_bits().to_le_bytes());
+                    }
+                } else {
+                    add_scene_bytes(&mut hash, [0]);
+                }
             }
         }
     }
@@ -1460,46 +1630,70 @@ fn rasterize_stage5(
         if !layer.visible {
             continue;
         }
-        match &layer.geometry {
-            GeometryOutput::CircularMarks(marks) => {
-                for (index, mark) in marks.iter().enumerate() {
-                    composite_circle(
-                        &mut linear_pixels,
-                        width,
-                        height,
-                        mark,
-                        layer.mark_paint(index),
-                        layer.opacity,
-                        work,
-                    )?;
+        for output in &layer.outputs {
+            match &output.geometry {
+                GeometryOutput::CircularMarks(marks) => {
+                    for (index, mark) in marks.iter().enumerate() {
+                        composite_circle(
+                            &mut linear_pixels,
+                            width,
+                            height,
+                            mark,
+                            output
+                                .primitive_paints
+                                .as_ref()
+                                .and_then(|paints| paints.get(index))
+                                .unwrap_or(&layer.color),
+                            layer.opacity,
+                            work,
+                        )?;
+                    }
                 }
-            }
-            GeometryOutput::CanonicalMarks(marks) => {
-                for (index, mark) in marks.iter().enumerate() {
-                    composite_canonical_mark(
-                        &mut linear_pixels,
-                        width,
-                        height,
-                        mark,
-                        layer.mark_paint(index),
-                        layer.opacity,
-                        CanonicalRasterTransform::native(),
-                        work,
-                    )?;
+                GeometryOutput::CanonicalMarks(marks) => {
+                    for (index, mark) in marks.iter().enumerate() {
+                        composite_canonical_mark(
+                            &mut linear_pixels,
+                            width,
+                            height,
+                            mark,
+                            output
+                                .primitive_paints
+                                .as_ref()
+                                .and_then(|paints| paints.get(index))
+                                .unwrap_or(&layer.color),
+                            layer.opacity,
+                            CanonicalRasterTransform::native(),
+                            work,
+                        )?;
+                    }
                 }
-            }
-            GeometryOutput::CanonicalStrokes(strokes) => {
-                for stroke in strokes {
-                    composite_canonical_stroke(
-                        &mut linear_pixels,
-                        width,
-                        height,
-                        stroke,
-                        &layer.color,
-                        layer.opacity,
-                        CanonicalRasterTransform::native(),
-                        work,
-                    )?;
+                GeometryOutput::CanonicalStrokes(strokes) => {
+                    for stroke in strokes {
+                        composite_canonical_stroke(
+                            &mut linear_pixels,
+                            width,
+                            height,
+                            stroke,
+                            &layer.color,
+                            layer.opacity,
+                            CanonicalRasterTransform::native(),
+                            work,
+                        )?;
+                    }
+                }
+                GeometryOutput::CanonicalRegions(regions) => {
+                    for region in regions.regions() {
+                        composite_canonical_region(
+                            &mut linear_pixels,
+                            width,
+                            height,
+                            region,
+                            &layer.color,
+                            layer.opacity,
+                            CanonicalRasterTransform::native(),
+                            work,
+                        )?;
+                    }
                 }
             }
         }
@@ -1554,46 +1748,70 @@ fn rasterize_layer(
     if !layer.visible {
         return Ok(pixels);
     }
-    match &layer.geometry {
-        GeometryOutput::CircularMarks(marks) => {
-            for (index, mark) in marks.iter().enumerate() {
-                composite_circle(
-                    &mut pixels,
-                    width,
-                    height,
-                    mark,
-                    layer.mark_paint(index),
-                    layer.opacity,
-                    work,
-                )?;
+    for output in &layer.outputs {
+        match &output.geometry {
+            GeometryOutput::CircularMarks(marks) => {
+                for (index, mark) in marks.iter().enumerate() {
+                    composite_circle(
+                        &mut pixels,
+                        width,
+                        height,
+                        mark,
+                        output
+                            .primitive_paints
+                            .as_ref()
+                            .and_then(|paints| paints.get(index))
+                            .unwrap_or(&layer.color),
+                        layer.opacity,
+                        work,
+                    )?;
+                }
             }
-        }
-        GeometryOutput::CanonicalMarks(marks) => {
-            for (index, mark) in marks.iter().enumerate() {
-                composite_canonical_mark(
-                    &mut pixels,
-                    width,
-                    height,
-                    mark,
-                    layer.mark_paint(index),
-                    layer.opacity,
-                    CanonicalRasterTransform::native(),
-                    work,
-                )?;
+            GeometryOutput::CanonicalMarks(marks) => {
+                for (index, mark) in marks.iter().enumerate() {
+                    composite_canonical_mark(
+                        &mut pixels,
+                        width,
+                        height,
+                        mark,
+                        output
+                            .primitive_paints
+                            .as_ref()
+                            .and_then(|paints| paints.get(index))
+                            .unwrap_or(&layer.color),
+                        layer.opacity,
+                        CanonicalRasterTransform::native(),
+                        work,
+                    )?;
+                }
             }
-        }
-        GeometryOutput::CanonicalStrokes(strokes) => {
-            for stroke in strokes {
-                composite_canonical_stroke(
-                    &mut pixels,
-                    width,
-                    height,
-                    stroke,
-                    &layer.color,
-                    layer.opacity,
-                    CanonicalRasterTransform::native(),
-                    work,
-                )?;
+            GeometryOutput::CanonicalStrokes(strokes) => {
+                for stroke in strokes {
+                    composite_canonical_stroke(
+                        &mut pixels,
+                        width,
+                        height,
+                        stroke,
+                        &layer.color,
+                        layer.opacity,
+                        CanonicalRasterTransform::native(),
+                        work,
+                    )?;
+                }
+            }
+            GeometryOutput::CanonicalRegions(regions) => {
+                for region in regions.regions() {
+                    composite_canonical_region(
+                        &mut pixels,
+                        width,
+                        height,
+                        region,
+                        &layer.color,
+                        layer.opacity,
+                        CanonicalRasterTransform::native(),
+                        work,
+                    )?;
+                }
             }
         }
     }
@@ -1617,47 +1835,71 @@ fn rasterize_layer_with_transform(
     if !layer.visible {
         return Ok(pixels);
     }
-    match &layer.geometry {
-        GeometryOutput::CircularMarks(marks) => {
-            for (index, mark) in marks.iter().enumerate() {
-                composite_circle_transformed(
-                    &mut pixels,
-                    width,
-                    height,
-                    mark,
-                    layer.mark_paint(index),
-                    layer.opacity,
-                    transform,
-                    work,
-                )?;
+    for output in &layer.outputs {
+        match &output.geometry {
+            GeometryOutput::CircularMarks(marks) => {
+                for (index, mark) in marks.iter().enumerate() {
+                    composite_circle_transformed(
+                        &mut pixels,
+                        width,
+                        height,
+                        mark,
+                        output
+                            .primitive_paints
+                            .as_ref()
+                            .and_then(|paints| paints.get(index))
+                            .unwrap_or(&layer.color),
+                        layer.opacity,
+                        transform,
+                        work,
+                    )?;
+                }
             }
-        }
-        GeometryOutput::CanonicalMarks(marks) => {
-            for (index, mark) in marks.iter().enumerate() {
-                composite_canonical_mark(
-                    &mut pixels,
-                    width,
-                    height,
-                    mark,
-                    layer.mark_paint(index),
-                    layer.opacity,
-                    CanonicalRasterTransform::preview(transform),
-                    work,
-                )?;
+            GeometryOutput::CanonicalMarks(marks) => {
+                for (index, mark) in marks.iter().enumerate() {
+                    composite_canonical_mark(
+                        &mut pixels,
+                        width,
+                        height,
+                        mark,
+                        output
+                            .primitive_paints
+                            .as_ref()
+                            .and_then(|paints| paints.get(index))
+                            .unwrap_or(&layer.color),
+                        layer.opacity,
+                        CanonicalRasterTransform::preview(transform),
+                        work,
+                    )?;
+                }
             }
-        }
-        GeometryOutput::CanonicalStrokes(strokes) => {
-            for stroke in strokes {
-                composite_canonical_stroke(
-                    &mut pixels,
-                    width,
-                    height,
-                    stroke,
-                    &layer.color,
-                    layer.opacity,
-                    CanonicalRasterTransform::preview(transform),
-                    work,
-                )?;
+            GeometryOutput::CanonicalStrokes(strokes) => {
+                for stroke in strokes {
+                    composite_canonical_stroke(
+                        &mut pixels,
+                        width,
+                        height,
+                        stroke,
+                        &layer.color,
+                        layer.opacity,
+                        CanonicalRasterTransform::preview(transform),
+                        work,
+                    )?;
+                }
+            }
+            GeometryOutput::CanonicalRegions(regions) => {
+                for region in regions.regions() {
+                    composite_canonical_region(
+                        &mut pixels,
+                        width,
+                        height,
+                        region,
+                        &layer.color,
+                        layer.opacity,
+                        CanonicalRasterTransform::preview(transform),
+                        work,
+                    )?;
+                }
             }
         }
     }
@@ -1748,50 +1990,74 @@ fn rasterize_layer_for_output(
     if !layer.visible {
         return Ok(pixels);
     }
-    match &layer.geometry {
-        GeometryOutput::CircularMarks(marks) => {
-            for (index, mark) in marks.iter().enumerate() {
-                composite_ellipse(
-                    &mut pixels,
-                    target.width,
-                    target.height,
-                    mark.center.x * transform.scale_x,
-                    mark.center.y * transform.scale_y,
-                    mark.radius * transform.scale_x,
-                    mark.radius * transform.scale_y,
-                    layer.mark_paint(index),
-                    layer.opacity,
-                    antialiasing,
-                    None,
-                )?;
+    for output in &layer.outputs {
+        match &output.geometry {
+            GeometryOutput::CircularMarks(marks) => {
+                for (index, mark) in marks.iter().enumerate() {
+                    composite_ellipse(
+                        &mut pixels,
+                        target.width,
+                        target.height,
+                        mark.center.x * transform.scale_x,
+                        mark.center.y * transform.scale_y,
+                        mark.radius * transform.scale_x,
+                        mark.radius * transform.scale_y,
+                        output
+                            .primitive_paints
+                            .as_ref()
+                            .and_then(|paints| paints.get(index))
+                            .unwrap_or(&layer.color),
+                        layer.opacity,
+                        antialiasing,
+                        None,
+                    )?;
+                }
             }
-        }
-        GeometryOutput::CanonicalMarks(marks) => {
-            for (index, mark) in marks.iter().enumerate() {
-                composite_canonical_mark(
-                    &mut pixels,
-                    target.width,
-                    target.height,
-                    mark,
-                    layer.mark_paint(index),
-                    layer.opacity,
-                    CanonicalRasterTransform::output(transform),
-                    work,
-                )?;
+            GeometryOutput::CanonicalMarks(marks) => {
+                for (index, mark) in marks.iter().enumerate() {
+                    composite_canonical_mark(
+                        &mut pixels,
+                        target.width,
+                        target.height,
+                        mark,
+                        output
+                            .primitive_paints
+                            .as_ref()
+                            .and_then(|paints| paints.get(index))
+                            .unwrap_or(&layer.color),
+                        layer.opacity,
+                        CanonicalRasterTransform::output(transform),
+                        work,
+                    )?;
+                }
             }
-        }
-        GeometryOutput::CanonicalStrokes(strokes) => {
-            for stroke in strokes {
-                composite_canonical_stroke(
-                    &mut pixels,
-                    target.width,
-                    target.height,
-                    stroke,
-                    &layer.color,
-                    layer.opacity,
-                    CanonicalRasterTransform::output(transform),
-                    work,
-                )?;
+            GeometryOutput::CanonicalStrokes(strokes) => {
+                for stroke in strokes {
+                    composite_canonical_stroke(
+                        &mut pixels,
+                        target.width,
+                        target.height,
+                        stroke,
+                        &layer.color,
+                        layer.opacity,
+                        CanonicalRasterTransform::output(transform),
+                        work,
+                    )?;
+                }
+            }
+            GeometryOutput::CanonicalRegions(regions) => {
+                for region in regions.regions() {
+                    composite_canonical_region(
+                        &mut pixels,
+                        target.width,
+                        target.height,
+                        region,
+                        &layer.color,
+                        layer.opacity,
+                        CanonicalRasterTransform::output(transform),
+                        work,
+                    )?;
+                }
             }
         }
     }
@@ -2035,6 +2301,54 @@ fn composite_canonical_mark(
             Ok(())
         }
     }
+}
+
+/// Rasterizes one geometry-owned region with fixed nonzero fill and final pixel clipping only.
+///
+/// # Errors
+///
+/// Returns cancellation, flattening, or request-wide edge-limit diagnostics without changing the
+/// already-closed region ring or constructing renderer topology.
+#[allow(clippy::too_many_arguments)]
+fn composite_canonical_region(
+    pixels: &mut [PremultipliedLinearPixel],
+    width: u32,
+    height: u32,
+    region: &toniator_geometry::CanonicalRegion,
+    color: &ColorValue,
+    opacity: f64,
+    transform: CanonicalRasterTransform,
+    work: &mut RasterWork<'_>,
+) -> Result<(), RenderError> {
+    let edges = flattened_path_edges(&region.ring, transform, work)?;
+    if edges.is_empty() {
+        return Ok(());
+    }
+    let min = transform.point(region.bounds.min);
+    let max = transform.point(region.bounds.max);
+    let min_x = (min.x - 1.0).floor().max(0.0) as u32;
+    let min_y = (min.y - 1.0).floor().max(0.0) as u32;
+    let max_x = (max.x + 1.0).ceil().min(f64::from(width)) as u32;
+    let max_y = (max.y + 1.0).ceil().min(f64::from(height)) as u32;
+    for y in min_y..max_y {
+        work.check()?;
+        for x in min_x..max_x {
+            let coverage = polygon_coverage_nonzero(&edges, x, y, work)?;
+            if coverage == 0.0 {
+                continue;
+            }
+            source_over(
+                &mut pixels[y as usize * width as usize + x as usize],
+                PremultipliedLinearPixel {
+                    red: color.red * color.alpha * opacity * coverage,
+                    green: color.green * color.alpha * opacity * coverage,
+                    blue: color.blue * color.alpha * opacity * coverage,
+                    alpha: color.alpha * opacity * coverage,
+                },
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Composites one canonical stroke once per pixel from its nonzero filled outline.
@@ -2350,6 +2664,38 @@ fn polygon_coverage_even_odd(
     Ok(f64::from(inside) / f64::from(samples * samples))
 }
 
+/// Samples one closed canonical region through fixed nonzero winding coverage.
+///
+/// # Errors
+///
+/// Returns cancellation while visiting finite subpixel and edge work.
+fn polygon_coverage_nonzero(
+    edges: &[(Point2, Point2)],
+    x: u32,
+    y: u32,
+    work: &RasterWork<'_>,
+) -> Result<f64, RenderError> {
+    let samples = if matches!(work.antialiasing, RasterAntialiasing::On) {
+        SUBPIXEL_GRID
+    } else {
+        1
+    };
+    let mut inside = 0_u32;
+    for sub_y in 0..samples {
+        for sub_x in 0..samples {
+            work.check()?;
+            let point = Point2::new(
+                f64::from(x) + (f64::from(sub_x) + 0.5) / f64::from(samples),
+                f64::from(y) + (f64::from(sub_y) + 0.5) / f64::from(samples),
+            );
+            if point_in_nonzero_outline(edges, point) {
+                inside += 1;
+            }
+        }
+    }
+    Ok(f64::from(inside) / f64::from(samples * samples))
+}
+
 /// Composites one native or anisotropically transformed ellipse under optional shared cancellation.
 ///
 /// # Errors
@@ -2641,13 +2987,16 @@ fn write_stage5_svg(scene: &RenderScene) -> String {
         let color = color_hex(&layer.color);
         let opacity = compact_number(layer.color.alpha * layer.opacity);
         document.push_str(&format!("<g id=\"channel-{}\" clip-path=\"url(#canvas-clip)\" fill=\"{color}\" fill-opacity=\"{opacity}\">\n", layer.channel_id.0));
-        write_svg_geometry(
-            &mut document,
-            &layer.geometry,
-            layer.channel_id.0,
-            None,
-            &scene.canvas,
-        );
+        for output in &layer.outputs {
+            write_svg_geometry(
+                &mut document,
+                &output.geometry,
+                layer.channel_id.0,
+                None,
+                None,
+                &scene.canvas,
+            );
+        }
         document.push_str("</g>\n");
     }
     document.push_str("</svg>\n");
@@ -2704,13 +3053,16 @@ fn write_svg_channel_group(
         layer.channel_id.0,
         style.unwrap_or_default(),
     ));
-    write_svg_geometry(
-        document,
-        &layer.geometry,
-        layer.channel_id.0,
-        Some(layer),
-        canvas,
-    );
+    for output in &layer.outputs {
+        write_svg_geometry(
+            document,
+            &output.geometry,
+            layer.channel_id.0,
+            Some(layer),
+            Some(output),
+            canvas,
+        );
+    }
     document.push_str("</g>\n");
 }
 
@@ -2720,20 +3072,26 @@ fn write_svg_geometry(
     geometry: &GeometryOutput,
     channel_id: u64,
     layer: Option<&RenderLayer>,
+    output: Option<&RenderOutputLayer>,
     canvas: &CanvasSpec,
 ) {
     match geometry {
         GeometryOutput::CircularMarks(marks) => {
             for (index, mark) in marks.iter().enumerate() {
                 let paint = layer.map_or_else(String::new, |layer| {
-                    format!(" fill=\"{}\"", color_hex(layer.mark_paint(index)))
+                    format!(
+                        " fill=\"{}\"",
+                        color_hex(svg_mark_paint(layer, output, index))
+                    )
                 });
                 let opacity = layer.map_or_else(
                     || "".to_owned(),
                     |layer| {
                         format!(
                             " fill-opacity=\"{}\"",
-                            compact_number(layer.mark_paint(index).alpha * layer.opacity)
+                            compact_number(
+                                svg_mark_paint(layer, output, index).alpha * layer.opacity
+                            )
                         )
                     },
                 );
@@ -2751,14 +3109,19 @@ fn write_svg_geometry(
         GeometryOutput::CanonicalMarks(marks) => {
             for (index, mark) in marks.iter().enumerate() {
                 let paint = layer.map_or_else(String::new, |layer| {
-                    format!(" fill=\"{}\"", color_hex(layer.mark_paint(index)))
+                    format!(
+                        " fill=\"{}\"",
+                        color_hex(svg_mark_paint(layer, output, index))
+                    )
                 });
                 let opacity = layer.map_or_else(
                     || "".to_owned(),
                     |layer| {
                         format!(
                             " fill-opacity=\"{}\"",
-                            compact_number(layer.mark_paint(index).alpha * layer.opacity)
+                            compact_number(
+                                svg_mark_paint(layer, output, index).alpha * layer.opacity
+                            )
                         )
                     },
                 );
@@ -2840,7 +3203,82 @@ fn write_svg_geometry(
                 ));
             }
         }
+        GeometryOutput::CanonicalRegions(regions) => {
+            for (index, region) in regions.regions().iter().enumerate() {
+                if region.bounds.max.x < 0.0
+                    || region.bounds.max.y < 0.0
+                    || region.bounds.min.x > canvas.width
+                    || region.bounds.min.y > canvas.height
+                {
+                    continue;
+                }
+                let data = svg_curve_path_data(&region.ring);
+                let paint = layer.map_or_else(String::new, |value| {
+                    format!(
+                        " fill=\"{}\" fill-opacity=\"{}\"",
+                        color_hex(&value.color),
+                        compact_number(value.color.alpha * value.opacity)
+                    )
+                });
+                document.push_str(&format!("<path id=\"channel-{channel_id}-region-{index}\" d=\"{data}\" fill-rule=\"nonzero\"{paint}/>\n"));
+            }
+        }
     }
+}
+
+/// Resolves one output-local sampled paint while preserving channel-owned solid-paint fallback.
+fn svg_mark_paint<'a>(
+    layer: &'a RenderLayer,
+    output: Option<&'a RenderOutputLayer>,
+    index: usize,
+) -> &'a ColorValue {
+    output
+        .and_then(|output| output.primitive_paints.as_ref())
+        .and_then(|paints| paints.get(index))
+        .unwrap_or(&layer.color)
+}
+
+/// Serializes one already-closed canonical curve path without constructing or repairing topology.
+fn svg_curve_path_data(path: &toniator_geometry::CurvePath) -> String {
+    let mut data = String::new();
+    for (index, segment) in path.segments().iter().enumerate() {
+        match segment {
+            CurveSegment::Line(line) => {
+                if index == 0 {
+                    data.push_str(&format!(
+                        "M {} {} ",
+                        compact_number(line.start().x),
+                        compact_number(line.start().y)
+                    ));
+                }
+                data.push_str(&format!(
+                    "L {} {} ",
+                    compact_number(line.end().x),
+                    compact_number(line.end().y)
+                ));
+            }
+            CurveSegment::CubicBezier(cubic) => {
+                if index == 0 {
+                    data.push_str(&format!(
+                        "M {} {} ",
+                        compact_number(cubic.start().x),
+                        compact_number(cubic.start().y)
+                    ));
+                }
+                data.push_str(&format!(
+                    "C {} {},{} {},{} {} ",
+                    compact_number(cubic.control_1().x),
+                    compact_number(cubic.control_1().y),
+                    compact_number(cubic.control_2().x),
+                    compact_number(cubic.control_2().y),
+                    compact_number(cubic.end().x),
+                    compact_number(cubic.end().y)
+                ));
+            }
+        }
+    }
+    data.push('Z');
+    data
 }
 
 /// Reports whether derived outline bounds reach the final SVG canvas without clipping geometry.

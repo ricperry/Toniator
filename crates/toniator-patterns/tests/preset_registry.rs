@@ -3,8 +3,9 @@ use toniator_domain::{
     AuthoredStructureKind, CanvasSpec, ChannelId, Document, DocumentHistory, DocumentSession,
     GeneralizedSiteProductDraft, GuideDimensionDraft, MarkOrientation, MarkOrientationDraft,
     MarkPrototype, PatternDefinitionDraft, PatternDefinitionRecipe, PatternMechanism,
-    PatternOutputLayer, PresetMetadata, PresetRecord, RandomSiteCharacter, SiteDensityModulation,
-    SiteExclusionPolicy, SourceMapping, SourceMappingComponent, SourceReference,
+    PatternOutputLayer, PatternStructureRecipe, PresetMetadata, PresetRecord, RandomSiteCharacter,
+    SiteDensityModulation, SiteExclusionPolicy, SourceMapping, SourceMappingComponent,
+    SourceReference,
 };
 use toniator_patterns::{BUNDLED_PRESET_REGISTRY_VERSION, PresetRegistry};
 
@@ -51,13 +52,15 @@ fn registry_validation_rejects_duplicate_ids() {
             description: "Validation fixture.".into(),
             thumbnail: None,
         },
-        recipe: PatternDefinitionRecipe::StraightGrid(toniator_domain::PatternDefinitionDraft {
-            name: "Grid".into(),
-            coverage: toniator_domain::CoveragePolicy {
-                guard_steps: 2,
-                additional_margin: 4.5,
+        recipe: PatternDefinitionRecipe::marks(PatternStructureRecipe::StraightGrid(
+            toniator_domain::PatternDefinitionDraft {
+                name: "Grid".into(),
+                coverage: toniator_domain::CoveragePolicy {
+                    guard_steps: 2,
+                    additional_margin: 4.5,
+                },
             },
-        }),
+        )),
     };
     assert!(PresetRegistry::new(1, vec![entry.clone(), entry]).is_err());
 }
@@ -74,7 +77,7 @@ fn invalid_recipe_reference_is_rejected_without_publishing_history() {
             description: "Validation fixture.".into(),
             thumbnail: None,
         },
-        recipe: PatternDefinitionRecipe::GeneralizedStraightGuides {
+        recipe: PatternDefinitionRecipe::marks(PatternStructureRecipe::GeneralizedStraightGuides {
             name: "Invalid".into(),
             coverage: toniator_domain::CoveragePolicy {
                 guard_steps: 2,
@@ -90,7 +93,7 @@ fn invalid_recipe_reference_is_rejected_without_publishing_history() {
                 merge_epsilon: 0.0,
             },
             orientation: MarkOrientationDraft::Fixed,
-        },
+        }),
     };
     let history = history();
     let before = history.document().clone();
@@ -111,7 +114,7 @@ fn recipe_compound_variants_use_transition_drafts_and_preserve_payloads() {
             description: "Transition draft fixture.".into(),
             thumbnail: None,
         },
-        recipe: PatternDefinitionRecipe::RandomSites {
+        recipe: PatternDefinitionRecipe::marks(PatternStructureRecipe::RandomSites {
             name: "Compound random".into(),
             coverage: toniator_domain::CoveragePolicy {
                 guard_steps: 3,
@@ -140,7 +143,7 @@ fn recipe_compound_variants_use_transition_drafts_and_preserve_payloads() {
             },
             maximum_attempts: 100,
             maximum_neighbor_checks: 100,
-        },
+        }),
     };
     let guided = PresetRecord {
         metadata: PresetMetadata {
@@ -150,7 +153,7 @@ fn recipe_compound_variants_use_transition_drafts_and_preserve_payloads() {
             description: "Transition draft fixture.".into(),
             thumbnail: None,
         },
-        recipe: PatternDefinitionRecipe::GeneralizedStraightGuides {
+        recipe: PatternDefinitionRecipe::marks(PatternStructureRecipe::GeneralizedStraightGuides {
             name: "Guided grid".into(),
             coverage: toniator_domain::CoveragePolicy {
                 guard_steps: 2,
@@ -173,7 +176,7 @@ fn recipe_compound_variants_use_transition_drafts_and_preserve_payloads() {
                 merge_epsilon: 0.0,
             },
             orientation: MarkOrientationDraft::GuideTangent { dimension_index: 1 },
-        },
+        }),
     };
     let registry = PresetRegistry::new(1, vec![random, guided]).unwrap();
     let mut history = history();
@@ -351,18 +354,20 @@ fn shape_preset_materialization_is_atomic_and_uses_an_ordinary_typed_reference()
                 description: "Atomic shape materialization fixture.".into(),
                 thumbnail: None,
             },
-            recipe: PatternDefinitionRecipe::AuthoredClosedShapeMarks {
-                definition: Box::new(PatternDefinitionRecipe::StraightGrid(
-                    PatternDefinitionDraft {
-                        name: "Triangle grid".into(),
-                        coverage: toniator_domain::CoveragePolicy {
-                            guard_steps: 2,
-                            additional_margin: 4.5,
+            recipe: PatternDefinitionRecipe::marks(
+                PatternStructureRecipe::AuthoredClosedShapeMarks {
+                    definition: Box::new(PatternStructureRecipe::StraightGrid(
+                        PatternDefinitionDraft {
+                            name: "Triangle grid".into(),
+                            coverage: toniator_domain::CoveragePolicy {
+                                guard_steps: 2,
+                                additional_margin: 4.5,
+                            },
                         },
-                    },
-                )),
-                shape,
-            },
+                    )),
+                    shape,
+                },
+            ),
         }],
     )
     .expect("the shape registry entry is valid");

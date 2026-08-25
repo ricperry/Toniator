@@ -5,8 +5,8 @@ use toniator_domain::{
     DocumentHistory, DocumentId, DocumentSession, DocumentSessionError, InvalidationLevel,
     MarkGeometryFieldEdit, MarkGeometryResponse, MarkGeometryResponseDelta, PatternDefinition,
     PatternDefinitionDraft, PatternDefinitionId, PatternDefinitionRecipe, PatternGeometryResponse,
-    PatternMechanismId, PatternOutputLayerId, PropertyFieldId, PropertyInheritance, PropertyTarget,
-    SourceComponent, SourcePlacement, SourceReference,
+    PatternMechanismId, PatternOutputLayerId, PatternStructureRecipe, PropertyFieldId,
+    PropertyInheritance, PropertyTarget, SourceComponent, SourcePlacement, SourceReference,
 };
 
 /// Builds a current-format authority fixture with a resolved RGB topology.
@@ -54,11 +54,11 @@ fn apply(document: Document, command: DocumentCommand) -> Document {
 /// Builds the retained legacy channel configuration against the same base authority.
 fn legacy_document() -> Document {
     let modeled = document();
-    let definition = modeled.pattern_definitions()[0].clone();
+    let bundle = modeled.pattern_definition_bundles()[0].clone();
     Document::new(
         DocumentId(9),
         modeled.canvas().clone(),
-        vec![definition],
+        vec![bundle],
         modeled.pattern_settings().clone(),
         vec![ChannelState {
             id: ChannelId(41),
@@ -71,7 +71,7 @@ fn legacy_document() -> Document {
                     translation_y: -2.0,
                 },
                 shape_rotation_delta_degrees: None,
-                geometry_response_delta: None,
+                output_response_deltas: Vec::new(),
             },
             appearance: ChannelAppearance {
                 visible: true,
@@ -118,8 +118,9 @@ fn effective_pattern_composes_typed_channel_deltas() {
         .expect("shape delta builds");
     let (document, _) = document.apply_command(&shape).expect("shape applies");
     let response = document
-        .set_channel_geometry_response_for_effective(
+        .set_channel_output_response_for_effective(
             ChannelId(2),
+            PatternOutputLayerId(1),
             PatternGeometryResponse::Marks(MarkGeometryResponse {
                 minimum_fill: 0.25,
                 maximum_fill: 1.5,
@@ -133,7 +134,7 @@ fn effective_pattern_composes_typed_channel_deltas() {
     assert_eq!(effective.density.across_y, 16.0);
     assert_eq!(effective.pattern_rotation_degrees, 33.0);
     assert_eq!(effective.shape_rotation_degrees, -12.0);
-    let PatternGeometryResponse::Marks(response) = effective.geometry_response else {
+    let PatternGeometryResponse::Marks(response) = &effective.output_settings[0].response else {
         panic!("mark fixture resolves the marks branch");
     };
     assert_eq!(response.minimum_fill, 0.25);
@@ -160,8 +161,9 @@ fn channel_delta_rejects_stale_document_base() {
 fn reset_response_removes_intent_and_later_base_change_flows_through() {
     let document = document();
     let command = document
-        .set_channel_geometry_response_for_effective(
+        .set_channel_output_response_for_effective(
             ChannelId(1),
+            PatternOutputLayerId(1),
             PatternGeometryResponse::Marks(MarkGeometryResponse {
                 minimum_fill: 0.5,
                 maximum_fill: 1.0,
@@ -169,37 +171,28 @@ fn reset_response_removes_intent_and_later_base_change_flows_through() {
         )
         .expect("response command builds");
     let (document, _) = document.apply_command(&command).expect("response applies");
-    let reset = DocumentCommand::ResetChannelGeometryResponseDelta {
+    let reset = DocumentCommand::ResetChannelOutputResponseDelta {
         base: document.pattern_settings().clone(),
         channel_id: ChannelId(1),
+        output_layer_id: PatternOutputLayerId(1),
     };
     let (document, _) = document.apply_command(&reset).expect("reset applies");
     assert!(
         document
             .channel_pattern_instance(ChannelId(1))
             .expect("channel instance")
-            .geometry_response_delta
-            .is_none()
+            .output_response_deltas
+            .is_empty()
     );
-    let mut settings = document.pattern_settings().clone();
-    settings.geometry_response = PatternGeometryResponse::Marks(MarkGeometryResponse {
-        minimum_fill: 0.2,
-        maximum_fill: 1.2,
-    });
-    let (document, _) = document
-        .apply_command(&DocumentCommand::SetDocumentPatternSettings {
-            base: document.pattern_settings().clone(),
-            settings,
-        })
-        .expect("base applies");
-    let PatternGeometryResponse::Marks(response) = document
+    let PatternGeometryResponse::Marks(response) = &document
         .effective_channel_pattern(ChannelId(1))
         .expect("effective response")
-        .geometry_response
+        .output_settings[0]
+        .response
     else {
         panic!("mark fixture resolves the marks branch");
     };
-    assert_eq!(response.minimum_fill, 0.2);
+    assert_eq!(response.minimum_fill, 0.0);
 }
 
 /// Retains an untouched mark-response member as inherited and exposes reset
@@ -210,6 +203,7 @@ fn partial_mark_delta_keeps_companion_inherited_and_base_not_resettable() {
     let command = document
         .set_channel_mark_response_field_for_effective(
             ChannelId(1),
+            PatternOutputLayerId(1),
             MarkGeometryFieldEdit::MinimumFill(0.25),
         )
         .expect("field command builds");
@@ -220,28 +214,22 @@ fn partial_mark_delta_keeps_companion_inherited_and_base_not_resettable() {
     let minimum = values
         .iter()
         .find(|value| {
-            value.descriptor.target == PropertyTarget::Channel(ChannelId(1))
+            value.descriptor.target
+                == PropertyTarget::ChannelOutput(ChannelId(1), PatternOutputLayerId(1))
                 && value.descriptor.field == PropertyFieldId::MarkMinimumFill
         })
         .expect("minimum descriptor");
     let maximum = values
         .iter()
         .find(|value| {
-            value.descriptor.target == PropertyTarget::Channel(ChannelId(1))
+            value.descriptor.target
+                == PropertyTarget::ChannelOutput(ChannelId(1), PatternOutputLayerId(1))
                 && value.descriptor.field == PropertyFieldId::MarkMaximumFill
         })
         .expect("maximum descriptor");
-    let base = values
-        .iter()
-        .find(|value| {
-            value.descriptor.target == PropertyTarget::Document
-                && value.descriptor.field == PropertyFieldId::MarkMinimumFill
-        })
-        .expect("base descriptor");
     assert_eq!(minimum.inheritance, PropertyInheritance::Explicit);
     assert_eq!(maximum.inheritance, PropertyInheritance::Inherited);
     assert!(minimum.descriptor.reset_capable);
-    assert!(!base.descriptor.reset_capable);
     assert!(!values.iter().any(|value| {
         matches!(value.descriptor.target, PropertyTarget::Channel(_))
             && value.descriptor.field == PropertyFieldId::DensityAspectLocked
@@ -381,8 +369,9 @@ fn invalid_effective_values_never_publish_a_candidate() {
     ] {
         assert!(
             document
-                .set_channel_geometry_response_for_effective(
+                .set_channel_output_response_for_effective(
                     ChannelId(1),
+                    PatternOutputLayerId(1),
                     PatternGeometryResponse::Marks(response),
                 )
                 .is_err()
@@ -520,8 +509,9 @@ fn resets_remove_intent_and_follow_later_document_base_changes() {
         .expect("shape builds");
     let document = apply(document, shape);
     let response = document
-        .set_channel_geometry_response_for_effective(
+        .set_channel_output_response_for_effective(
             ChannelId(1),
+            PatternOutputLayerId(2),
             PatternGeometryResponse::Marks(MarkGeometryResponse {
                 minimum_fill: 0.2,
                 maximum_fill: 1.4,
@@ -546,10 +536,6 @@ fn resets_remove_intent_and_follow_later_document_base_changes() {
             base: document.pattern_settings().clone(),
             channel_id: ChannelId(1),
         },
-        DocumentCommand::ResetChannelGeometryResponseDelta {
-            base: document.pattern_settings().clone(),
-            channel_id: ChannelId(1),
-        },
     ] {
         document = apply(document, command);
     }
@@ -560,7 +546,7 @@ fn resets_remove_intent_and_follow_later_document_base_changes() {
     assert_eq!(instance.layout_delta.density, None);
     assert_eq!(instance.layout_delta.rotation_degrees, None);
     assert_eq!(instance.shape_rotation_delta_degrees, None);
-    assert_eq!(instance.geometry_response_delta, None);
+    assert!(instance.output_response_deltas.is_empty());
 
     let mut settings = document.pattern_settings().clone();
     settings.definition_id = PatternDefinitionId(2);
@@ -568,10 +554,6 @@ fn resets_remove_intent_and_follow_later_document_base_changes() {
     settings.density.across_y = 20.0;
     settings.pattern_rotation_degrees = 10.0;
     settings.shape_rotation_degrees = -10.0;
-    settings.geometry_response = PatternGeometryResponse::Marks(MarkGeometryResponse {
-        minimum_fill: 0.1,
-        maximum_fill: 1.1,
-    });
     let document = apply(
         document.clone(),
         DocumentCommand::SetDocumentPatternSettings {
@@ -592,35 +574,38 @@ fn resets_remove_intent_and_follow_later_document_base_changes() {
 #[test]
 fn direct_partial_mark_delta_composes_and_resets_atomically() {
     let document = document();
-    let command = DocumentCommand::SetChannelGeometryResponseDelta {
+    let command = DocumentCommand::SetChannelOutputResponseDelta {
         base: document.pattern_settings().clone(),
         channel_id: ChannelId(3),
-        geometry_response: ChannelGeometryResponseDelta::Marks(MarkGeometryResponseDelta {
+        output_layer_id: PatternOutputLayerId(1),
+        delta: ChannelGeometryResponseDelta::Marks(MarkGeometryResponseDelta {
             minimum_fill_delta: Some(0.25),
             maximum_fill_delta: None,
         }),
     };
     let document = apply(document, command);
-    let PatternGeometryResponse::Marks(response) = document
+    let PatternGeometryResponse::Marks(response) = &document
         .effective_channel_pattern(ChannelId(3))
         .expect("partial response resolves")
-        .geometry_response
+        .output_settings[0]
+        .response
     else {
         panic!("mark fixture resolves the marks branch");
     };
     assert_eq!(response.minimum_fill, 0.25);
     assert_eq!(response.maximum_fill, 1.0);
-    let reset = DocumentCommand::ResetChannelGeometryResponseDelta {
+    let reset = DocumentCommand::ResetChannelOutputResponseDelta {
         base: document.pattern_settings().clone(),
         channel_id: ChannelId(3),
+        output_layer_id: PatternOutputLayerId(1),
     };
     let document = apply(document, reset);
     assert_eq!(
         document
             .channel_pattern_instance(ChannelId(3))
             .expect("channel intent")
-            .geometry_response_delta,
-        None
+            .output_response_deltas,
+        Vec::new()
     );
 }
 
@@ -655,9 +640,10 @@ fn every_channel_reset_is_stale_against_a_later_document_base() {
             base: stale_base.clone(),
             channel_id: ChannelId(1),
         },
-        DocumentCommand::ResetChannelGeometryResponseDelta {
+        DocumentCommand::ResetChannelOutputResponseDelta {
             base: stale_base.clone(),
             channel_id: ChannelId(1),
+            output_layer_id: PatternOutputLayerId(1),
         },
     ] {
         assert!(document.apply_command(&command).is_err());
@@ -715,14 +701,16 @@ fn recipe_materialization_is_fresh_stale_aware_and_history_owned() {
     let document = document();
     let command = DocumentCommand::ReplaceDocumentPatternDefinitionRecipe {
         base: document.pattern_settings().clone(),
-        base_definition: document.pattern_definitions()[0].clone(),
-        recipe: PatternDefinitionRecipe::StraightGrid(PatternDefinitionDraft {
-            name: "replacement".into(),
-            coverage: CoveragePolicy {
-                guard_steps: 3,
-                additional_margin: 1.0,
+        base_definition: document.pattern_definition_bundles()[0].definition.clone(),
+        recipe: PatternDefinitionRecipe::marks(PatternStructureRecipe::StraightGrid(
+            PatternDefinitionDraft {
+                name: "replacement".into(),
+                coverage: CoveragePolicy {
+                    guard_steps: 3,
+                    additional_margin: 1.0,
+                },
             },
-        }),
+        )),
     };
     let mut session = DocumentSession::new(document.clone()).expect("valid session");
     assert_eq!(
@@ -733,7 +721,7 @@ fn recipe_materialization_is_fresh_stale_aware_and_history_owned() {
     history
         .apply(&command)
         .expect("history materializes recipe");
-    assert_eq!(history.document().pattern_definitions().len(), 2);
+    assert_eq!(history.document().pattern_definition_bundles().len(), 2);
     assert_eq!(
         history.document().pattern_settings().definition_id,
         PatternDefinitionId(2)
@@ -742,12 +730,12 @@ fn recipe_materialization_is_fresh_stale_aware_and_history_owned() {
         .undo()
         .expect("undo succeeds")
         .expect("entry exists");
-    assert_eq!(history.document().pattern_definitions().len(), 1);
+    assert_eq!(history.document().pattern_definition_bundles().len(), 1);
     history
         .redo()
         .expect("redo succeeds")
         .expect("entry exists");
-    assert_eq!(history.document().pattern_definitions().len(), 2);
+    assert_eq!(history.document().pattern_definition_bundles().len(), 2);
 }
 
 /// Materializes a document-base recipe without assuming that a valid legacy document has channels.
@@ -757,21 +745,23 @@ fn document_recipe_materialization_supports_zero_channel_legacy_authority() {
     let document = Document::new(
         DocumentId(10),
         fixture.canvas().clone(),
-        fixture.pattern_definitions().to_vec(),
+        fixture.pattern_definition_bundles().to_vec(),
         fixture.pattern_settings().clone(),
         Vec::new(),
     )
     .expect("zero-channel legacy documents remain valid");
     let command = DocumentCommand::ReplaceDocumentPatternDefinitionRecipe {
         base: document.pattern_settings().clone(),
-        base_definition: document.pattern_definitions()[0].clone(),
-        recipe: PatternDefinitionRecipe::StraightGrid(PatternDefinitionDraft {
-            name: "zero-channel replacement".into(),
-            coverage: CoveragePolicy {
-                guard_steps: 1,
-                additional_margin: 0.0,
+        base_definition: document.pattern_definition_bundles()[0].definition.clone(),
+        recipe: PatternDefinitionRecipe::marks(PatternStructureRecipe::StraightGrid(
+            PatternDefinitionDraft {
+                name: "zero-channel replacement".into(),
+                coverage: CoveragePolicy {
+                    guard_steps: 1,
+                    additional_margin: 0.0,
+                },
             },
-        }),
+        )),
     };
     let mut history = DocumentHistory::new(
         DocumentSession::new(document).expect("zero-channel session remains valid"),
@@ -779,7 +769,7 @@ fn document_recipe_materialization_supports_zero_channel_legacy_authority() {
     history
         .apply(&command)
         .expect("document-base recipe does not require a channel");
-    assert_eq!(history.document().pattern_definitions().len(), 2);
+    assert_eq!(history.document().pattern_definition_bundles().len(), 2);
     assert_eq!(
         history.document().pattern_settings().definition_id,
         PatternDefinitionId(2)

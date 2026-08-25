@@ -35,16 +35,13 @@ use toniator_patterns::{
     CONNECTION_PATH_CONTRACT_ID, CONNECTION_TRAIL_CONTRACT_ID, CurvePath, CurveSegment,
     FamilyCapability, GenericGuideCapability, GridFamilyOutput, MAZE_WALL_CONTRACT_ID,
     MappedCircularMarkRealization, MazeLimits, PatternPipelineError, SITE_ADJACENCY_CONTRACT_ID,
-    SourceColorCircularMarkRealization, StrokeResponse, TypedFamilyOutput, TypedRealization,
+    SourceColorCircularMarkRealization, TypedFamilyOutput, TypedRealization,
     build_connection_paths_cancellable, build_typed_site_adjacency_cancellable,
     connection_program_contract_id, evaluate_straight_grid,
     evaluate_typed_connection_paths_with_source_cancellable,
     evaluate_typed_family_product_with_source_cancellable,
     evaluate_typed_maze_walls_from_family_cancellable, family_requires_decoded_source,
     maximum_emitted_guide_spacing, maximum_nominal_cell_diameter, realize_circular_marks,
-    realize_typed_canonical_strokes_cancellable,
-    realize_typed_connection_canonical_strokes_cancellable, realize_typed_mapped_outputs,
-    realize_typed_maze_canonical_strokes_cancellable, realize_typed_source_color_outputs,
 };
 pub use toniator_patterns::{
     CanonicalCircleMark, CanonicalMark, CanonicalMarkRealization, CanonicalStrokeRealization,
@@ -1036,9 +1033,10 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
         .into());
     }
     let definition = document
-        .pattern_definitions()
+        .pattern_definition_bundles()
         .iter()
         .find(|definition| definition.id == effective.definition_id)
+        .map(|bundle| &bundle.definition)
         .ok_or(EvaluationError::new(
             "evaluation.pattern_definition",
             "channel references a missing pattern definition",
@@ -1048,9 +1046,11 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
     // artifact into a last-successful cache.
     let plan = toniator_patterns::resolve_document_pattern_pipeline(document, definition)
         .map_err(EvaluationError::from_pipeline)?;
-    let toniator_domain::PatternGeometryResponse::Marks(mark_response) =
-        &effective.geometry_response
-    else {
+    let output = ordered_output_bindings(&effective, &plan)?
+        .into_iter()
+        .next()
+        .expect("one-output gate retains one binding");
+    let toniator_domain::PatternGeometryResponse::Marks(mark_response) = &output.1.response else {
         return Err(EvaluationError::new(
             "evaluation.stroke.single_channel",
             "guide-path output is available through complete document evaluation only",
@@ -1625,10 +1625,19 @@ pub struct ChannelEvaluationSummary {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// One independent output realization cache disposition within a channel.
+pub struct OutputCacheDiagnostics {
+    pub output_layer_id: toniator_domain::PatternOutputLayerId,
+    pub realization: CacheDisposition,
+}
+
+/// Cache dispositions for one evaluated channel and its ordered output units.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChannelCacheDiagnostics {
     pub channel_id: ChannelId,
     pub family: CacheDisposition,
     pub realization: CacheDisposition,
+    pub outputs: Vec<OutputCacheDiagnostics>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2145,9 +2154,10 @@ fn evaluate_cached_document_impl(
                 .effective_channel_pattern(channel.id)
                 .map_err(EvaluationError::from_domain)?;
             let definition = document
-                .pattern_definitions()
+                .pattern_definition_bundles()
                 .iter()
                 .find(|value| value.id == effective.definition_id)
+                .map(|bundle| &bundle.definition)
                 .ok_or(EvaluationError::new(
                     "evaluation.pattern_definition",
                     "channel resolves a missing pattern definition",
@@ -2199,6 +2209,7 @@ fn evaluate_cached_document_impl(
     let mut realizations = Vec::with_capacity(topology.channels().len());
     let mut family_dispositions = Vec::with_capacity(topology.channels().len());
     let mut realization_dispositions = Vec::with_capacity(topology.channels().len());
+    let mut output_realization_dispositions = Vec::with_capacity(topology.channels().len());
     let mut remaining_transformed_curve_segment_instances =
         limits.max_transformed_curve_segment_instances();
     for (channel, effective, definition, plan) in &resolved {
@@ -2210,12 +2221,14 @@ fn evaluate_cached_document_impl(
         if cancellation.is_cancelled() {
             return Err(EvaluationRunError::Cancelled);
         }
+        let output_bindings = ordered_output_bindings(effective, plan)?;
         let key = document_family_cache_key(
             document.canvas(),
             definition,
             effective,
             limits,
             &plan.family,
+            &plan.ordered_outputs,
             &source,
         )?;
         let (family, disposition) = match accepted
@@ -2234,11 +2247,12 @@ fn evaluate_cached_document_impl(
                         translation_x: effective.translation_x,
                         translation_y: effective.translation_y,
                         guard_steps: definition.coverage.guard_steps,
-                        support_radius: required_support_radius_modeled(
+                        support_radius: required_support_radius_for_outputs(
                             document.canvas(),
                             effective,
                             definition,
                             &plan.family,
+                            &plan.ordered_outputs,
                         )?,
                         max_family_candidates: limits.max_family_candidates(),
                     },
@@ -2248,106 +2262,114 @@ fn evaluate_cached_document_impl(
                 CacheDisposition::Miss,
             ),
         };
-        let realization_key = DocumentRealizationCacheKey {
-            family_content: key.content.clone(),
-            contract: realization_contract_key(definition),
-            resolved_shape_content: resolved_shape_content_identity(document, definition)?,
-            source_identity: realization_source_identity(source.identity()),
-            mapping: format!(
-                "{:?}:{:?}:{}:{}:{}",
-                channel.mapping.component,
-                channel.mapping.placement,
-                channel.mapping.inverted,
-                channel.mapping.gain.to_bits(),
-                channel.mapping.bias.to_bits()
-            ),
-            response: match &effective.geometry_response {
-                toniator_domain::PatternGeometryResponse::Marks(response) => {
-                    DocumentResponseIdentity::Marks {
-                        minimum: response.minimum_fill.to_bits(),
-                        maximum: response.maximum_fill.to_bits(),
-                        shape_rotation: effective.shape_rotation_degrees.to_bits(),
-                    }
-                }
-                toniator_domain::PatternGeometryResponse::Connected(response) => {
-                    DocumentResponseIdentity::Connected {
-                        minimum: response.minimum_thickness.to_bits(),
-                        maximum: response.maximum_thickness.to_bits(),
-                        shape_rotation: effective.shape_rotation_degrees.to_bits(),
-                        outline_contract: toniator_patterns::CANONICAL_STROKE_OUTLINE_CONTRACT_ID,
-                        profile_limit: limits.max_stroke_profile_samples(),
-                        outline_segment_limit: limits.max_stroke_outline_segments(),
-                        connection_contracts: Box::new(connection_cache_contracts(
-                            definition,
-                            limits.site_adjacency_limits(),
-                            limits.connection_path_limits(),
-                        )),
-                        maze_contracts: Box::new(maze_cache_contracts(
-                            definition,
-                            limits.maze_limits(),
-                        )),
-                    }
-                }
-            },
-            sampled_paint: matches!(channel.paint, ChannelPaint::SampledSource),
-            max_transformed_curve_segment_instances: remaining_transformed_curve_segment_instances,
-        };
-        let (realization, realization_disposition) = match accepted
-            .realizations
-            .iter()
-            .find(|(candidate, _)| *candidate == realization_key)
-        {
-            Some((_, realization)) => (Arc::clone(realization), CacheDisposition::Hit),
-            None => (
-                Arc::new(
-                    match evaluate_stage(EvaluationStage::Realization, cancellation, || {
-                        evaluate_document_channel(
-                            document,
-                            definition,
-                            channel,
-                            effective,
-                            &source,
-                            &family,
-                            plan,
-                            limits.max_family_candidates(),
-                            remaining_transformed_curve_segment_instances,
-                            limits.max_stroke_profile_samples(),
-                            limits.max_stroke_outline_segments(),
-                            limits.site_adjacency_limits(),
-                            limits.connection_path_limits(),
-                            limits.maze_limits(),
-                            &|| cancellation.is_cancelled(),
-                        )
-                    }) {
-                        Err(EvaluationRunError::Evaluation(error))
-                            if error.path() == "evaluation.cancelled" =>
-                        {
-                            return Err(EvaluationRunError::Cancelled);
-                        }
-                        result => result?,
-                    },
+        let mut channel_outputs = Vec::with_capacity(output_bindings.len());
+        let mut channel_output_dispositions = Vec::with_capacity(output_bindings.len());
+        for (output_capability, output_setting) in output_bindings {
+            if cancellation.is_cancelled() {
+                return Err(EvaluationRunError::Cancelled);
+            }
+            let realization_key = document_realization_cache_key(
+                document,
+                definition,
+                channel,
+                effective,
+                &key,
+                &source,
+                output_setting,
+                limits,
+                remaining_transformed_curve_segment_instances,
+            )?;
+            let (realization, realization_disposition) = match accepted
+                .realizations
+                .iter()
+                .find(|(candidate, _)| *candidate == realization_key)
+            {
+                Some((_, realization)) => (Arc::clone(realization), CacheDisposition::Hit),
+                None => (
+                    Arc::new(
+                        match evaluate_stage(EvaluationStage::Realization, cancellation, || {
+                            evaluate_document_output(
+                                document,
+                                definition,
+                                channel,
+                                effective,
+                                &source,
+                                &family,
+                                plan,
+                                output_capability,
+                                output_setting,
+                                limits.max_family_candidates(),
+                                remaining_transformed_curve_segment_instances,
+                                limits.max_stroke_profile_samples(),
+                                limits.max_stroke_outline_segments(),
+                                limits.site_adjacency_limits(),
+                                limits.connection_path_limits(),
+                                limits.maze_limits(),
+                                &|| cancellation.is_cancelled(),
+                            )
+                        }) {
+                            Err(EvaluationRunError::Evaluation(error))
+                                if error.path() == "evaluation.cancelled" =>
+                            {
+                                return Err(EvaluationRunError::Cancelled);
+                            }
+                            result => result?,
+                        },
+                    ),
+                    CacheDisposition::Miss,
                 ),
-                CacheDisposition::Miss,
-            ),
+            };
+            remaining_transformed_curve_segment_instances =
+                remaining_transformed_curve_segment_instances
+                    .checked_sub(transformed_curve_segment_instances(
+                        &realization.realization,
+                    )?)
+                    .ok_or(EvaluationError::new(
+                        "realization.mark.segment_limit",
+                        "transformed curve-segment instance limit exceeded",
+                    ))?;
+            channel_output_dispositions.push(OutputCacheDiagnostics {
+                output_layer_id: output_setting.output_layer_id,
+                realization: realization_disposition,
+            });
+            realizations.push((realization_key, Arc::clone(&realization)));
+            channel_outputs.push(realization);
+        }
+        let realization_disposition = if channel_output_dispositions
+            .iter()
+            .all(|value| value.realization == CacheDisposition::Hit)
+        {
+            CacheDisposition::Hit
+        } else {
+            CacheDisposition::Miss
         };
-        remaining_transformed_curve_segment_instances =
-            remaining_transformed_curve_segment_instances
-                .checked_sub(transformed_curve_segment_instances(&realization)?)
-                .ok_or(EvaluationError::new(
-                    "realization.mark.segment_limit",
-                    "transformed curve-segment instance limit exceeded",
-                ))?;
         summaries.push(ChannelEvaluationSummary {
             role: channel.role,
             channel_id: channel.id,
             family_identity: family.family_fingerprint().to_owned(),
-            realization_identity: document_realization_identity(&realization).to_owned(),
+            realization_identity: aggregate_output_realization_identity(
+                &channel_outputs
+                    .iter()
+                    .map(|output| {
+                        (
+                            output.output_layer_id,
+                            document_realization_identity(&output.realization),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            ),
         });
-        layers.push(document_render_layer(channel, (*realization).clone())?);
+        layers.push(document_render_layer(
+            channel,
+            channel_outputs
+                .into_iter()
+                .map(|output| (*output).clone())
+                .collect(),
+        )?);
         families.push((key, family));
-        realizations.push((realization_key, realization));
         family_dispositions.push(disposition);
         realization_dispositions.push(realization_disposition);
+        output_realization_dispositions.push(channel_output_dispositions);
         if cancellation.is_cancelled() {
             return Err(EvaluationRunError::Cancelled);
         }
@@ -2447,6 +2469,7 @@ fn evaluate_cached_document_impl(
             channel_id: value.channel_id,
             family: family_dispositions[index],
             realization: realization_dispositions[index],
+            outputs: output_realization_dispositions[index].clone(),
         })
         .collect();
     Ok(CachedDocumentEvaluation {
@@ -2529,6 +2552,56 @@ enum DocumentRealization {
     Canonical(TypedRealization<CanonicalMarkRealization>),
     Strokes(TypedRealization<CanonicalStrokeRealization>),
 }
+
+/// One independently cached channel-output realization assembled only after its explicit binding validates.
+#[derive(Clone)]
+struct DocumentOutputRealization {
+    output_layer_id: toniator_domain::PatternOutputLayerId,
+    capability: toniator_patterns::OutputCapability,
+    setting: toniator_domain::EffectivePatternOutputSettings,
+    realization: DocumentRealization,
+}
+
+/// Validates the current authoring gate and pairs outputs in authoritative definition order.
+///
+/// # Errors
+///
+/// Returns a stable pipeline diagnostic when a definition bypasses the current one-output gate
+/// or the effective settings cannot bind to the resolved output plan. The loop-consuming return
+/// type deliberately remains plural so Stage 20R can lift only the gate.
+fn ordered_output_bindings<'a>(
+    effective: &'a toniator_domain::EffectiveChannelPatternInstance,
+    plan: &'a toniator_patterns::PatternPipelinePlan,
+) -> Result<
+    Vec<(
+        &'a toniator_patterns::OutputCapability,
+        &'a toniator_domain::EffectivePatternOutputSettings,
+    )>,
+    EvaluationError,
+> {
+    if effective.output_settings.len() != 1 || plan.ordered_outputs.len() != 1 {
+        return Err(EvaluationError::new(
+            "evaluation.output_gate",
+            "current evaluation accepts exactly one compatible output",
+        ));
+    }
+    effective
+        .output_settings
+        .iter()
+        .map(|setting| {
+            let capability =
+                plan.output_capability(setting.output_layer_id)
+                    .ok_or(EvaluationError::new(
+                        "evaluation.output_binding",
+                        "effective output setting has no matching pipeline capability",
+                    ))?;
+            toniator_patterns::validate_output_realization_binding(plan, capability, setting)
+                .map_err(EvaluationError::from_pipeline)?;
+            Ok((capability, setting))
+        })
+        .collect()
+}
+
 /// Returns the complete immutable realization fingerprint for any retained or canonical variant.
 fn document_realization_identity(value: &DocumentRealization) -> &str {
     match value {
@@ -2536,6 +2609,79 @@ fn document_realization_identity(value: &DocumentRealization) -> &str {
         DocumentRealization::SourceColor(value) => &value.output.realization_fingerprint,
         DocumentRealization::Canonical(value) => &value.output.realization_fingerprint,
         DocumentRealization::Strokes(value) => &value.output.realization_fingerprint,
+    }
+}
+
+/// Evaluates one explicit output unit while retaining the current one-output authoring gate outside this cache unit.
+///
+/// # Errors
+///
+/// Returns cancellation or a stable family, response, realization, or work-limit diagnostic without
+/// producing a cache candidate.
+#[allow(clippy::too_many_arguments)]
+fn evaluate_document_output(
+    document: &toniator_domain::Document,
+    definition: &PatternDefinition,
+    channel: &ModeledChannelState,
+    effective: &toniator_domain::EffectiveChannelPatternInstance,
+    source: &SourceField,
+    family: &TypedFamilyOutput,
+    plan: &toniator_patterns::PatternPipelinePlan,
+    capability: &toniator_patterns::OutputCapability,
+    setting: &toniator_domain::EffectivePatternOutputSettings,
+    max_family_candidates: usize,
+    max_transformed_curve_segment_instances: usize,
+    max_stroke_profile_samples: usize,
+    max_stroke_outline_segments: usize,
+    adjacency_limits: SiteAdjacencyLimits,
+    connection_limits: ConnectionPathLimits,
+    maze_limits: MazeLimits,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<DocumentOutputRealization, EvaluationError> {
+    let realization = evaluate_document_channel(
+        document,
+        definition,
+        channel,
+        effective,
+        source,
+        family,
+        plan,
+        capability,
+        setting,
+        max_family_candidates,
+        max_transformed_curve_segment_instances,
+        max_stroke_profile_samples,
+        max_stroke_outline_segments,
+        adjacency_limits,
+        connection_limits,
+        maze_limits,
+        is_cancelled,
+    )?;
+    Ok(DocumentOutputRealization {
+        output_layer_id: capability.layer_id,
+        capability: capability.clone(),
+        setting: setting.clone(),
+        realization,
+    })
+}
+
+/// Aggregates ordered output fingerprints without rewriting existing one-output identities.
+///
+/// Stage 20N keeps the one-output authoring gate, so the single-unit branch preserves all
+/// established fingerprint bytes. Future heterogeneous documents obtain an ordered, layer-ID
+/// qualified aggregate only above independently cached units.
+fn aggregate_output_realization_identity(
+    outputs: &[(toniator_domain::PatternOutputLayerId, &str)],
+) -> String {
+    match outputs {
+        [(_, fingerprint)] => (*fingerprint).to_owned(),
+        _ => {
+            let mut identity = String::from("toniator-stage20n-output-aggregate-v1");
+            for (output_layer_id, fingerprint) in outputs {
+                identity.push_str(&format!(":{}:{fingerprint}", output_layer_id.0));
+            }
+            identity
+        }
     }
 }
 
@@ -2595,6 +2741,8 @@ fn evaluate_document_channel(
     source: &SourceField,
     family: &TypedFamilyOutput,
     plan: &toniator_patterns::PatternPipelinePlan,
+    output_capability: &toniator_patterns::OutputCapability,
+    output_setting: &toniator_domain::EffectivePatternOutputSettings,
     max_family_candidates: usize,
     max_transformed_curve_segment_instances: usize,
     max_stroke_profile_samples: usize,
@@ -2604,15 +2752,9 @@ fn evaluate_document_channel(
     maze_limits: MazeLimits,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<DocumentRealization, EvaluationError> {
-    if let Some((_site_mechanism_id, program, style)) = plan.ordered_outputs[0].maze_walls() {
-        let toniator_domain::PatternGeometryResponse::Connected(response) =
-            &effective.geometry_response
-        else {
-            return Err(EvaluationError::new(
-                "evaluation.maze.response",
-                "maze-wall output requires the connected response branch",
-            ));
-        };
+    toniator_patterns::validate_output_realization_binding(plan, output_capability, output_setting)
+        .map_err(EvaluationError::from_pipeline)?;
+    if let Some((_site_mechanism_id, program, _style)) = output_capability.maze_walls() {
         let ChannelPaint::Solid(_) = channel.paint else {
             return Err(EvaluationError::new(
                 "evaluation.maze.paint",
@@ -2626,52 +2768,43 @@ fn evaluate_document_channel(
             translation_x: effective.translation_x,
             translation_y: effective.translation_y,
             guard_steps: definition.coverage.guard_steps,
-            support_radius: required_support_radius_modeled(
+            support_radius: required_support_radius_for_outputs(
                 document.canvas(),
                 effective,
                 definition,
                 &plan.family,
+                &plan.ordered_outputs,
             )?,
             max_family_candidates,
         };
         let maze = evaluate_typed_maze_walls_from_family_cancellable(
             family,
             &request,
-            plan.ordered_outputs[0].layer_id,
+            output_capability.layer_id,
             program,
             maze_limits,
             is_cancelled,
         )
         .map_err(EvaluationError::from_pipeline)?;
         return Ok(DocumentRealization::Strokes(
-            realize_typed_maze_canonical_strokes_cancellable(
+            toniator_patterns::realize_typed_maze_canonical_stroke_output_cancellable(
                 family,
                 plan,
+                output_capability,
+                output_setting,
                 &maze,
                 source,
                 document.canvas(),
                 channel.mapping,
-                StrokeResponse {
-                    minimum_thickness: response.minimum_thickness,
-                    maximum_thickness: response.maximum_thickness,
-                },
-                style,
                 max_stroke_profile_samples,
                 max_stroke_outline_segments,
                 is_cancelled,
             )
-            .map_err(EvaluationError::from_pipeline)?,
+            .map_err(EvaluationError::from_pipeline)?
+            .realization,
         ));
     }
-    if let Some((_site_mechanism_id, program, style)) = plan.ordered_outputs[0].connection_paths() {
-        let toniator_domain::PatternGeometryResponse::Connected(response) =
-            &effective.geometry_response
-        else {
-            return Err(EvaluationError::new(
-                "evaluation.connection.response",
-                "connection output requires the connected response branch",
-            ));
-        };
+    if let Some((_site_mechanism_id, program, _style)) = output_capability.connection_paths() {
         let ChannelPaint::Solid(_) = channel.paint else {
             return Err(EvaluationError::new(
                 "evaluation.connection.paint",
@@ -2697,7 +2830,7 @@ fn evaluate_document_channel(
         )
         .map_err(EvaluationError::from_pipeline)?;
         let paths = build_connection_paths_cancellable(
-            plan.ordered_outputs[0].layer_id,
+            output_capability.layer_id,
             &graph,
             program,
             connection_limits,
@@ -2705,37 +2838,36 @@ fn evaluate_document_channel(
         )
         .map_err(|error| EvaluationError::new(error.path(), error.message()))?;
         return Ok(DocumentRealization::Strokes(
-            realize_typed_connection_canonical_strokes_cancellable(
+            toniator_patterns::realize_typed_connection_canonical_stroke_output_cancellable(
                 family,
                 plan,
+                output_capability,
+                output_setting,
                 &paths,
                 source,
                 document.canvas(),
                 channel.mapping,
-                StrokeResponse {
-                    minimum_thickness: response.minimum_thickness,
-                    maximum_thickness: response.maximum_thickness,
-                },
-                style,
                 max_stroke_profile_samples,
                 max_stroke_outline_segments,
                 is_cancelled,
             )
-            .map_err(EvaluationError::from_pipeline)?,
+            .map_err(EvaluationError::from_pipeline)?
+            .realization,
         ));
     }
     if matches!(
         definition.output_layers.as_slice(),
         [PatternOutputLayer::GuidePaths { .. } | PatternOutputLayer::ParametricPaths { .. }]
     ) {
-        let toniator_domain::PatternGeometryResponse::Connected(response) =
-            &effective.geometry_response
-        else {
+        if !matches!(
+            output_setting.response,
+            toniator_domain::PatternGeometryResponse::Connected(_)
+        ) {
             return Err(EvaluationError::new(
                 "evaluation.stroke.response",
                 "guide-path output requires the connected response branch",
             ));
-        };
+        }
         let ChannelPaint::Solid(_) = channel.paint else {
             return Err(EvaluationError::new(
                 "evaluation.stroke.paint",
@@ -2743,165 +2875,180 @@ fn evaluate_document_channel(
             ));
         };
         return Ok(DocumentRealization::Strokes(
-            realize_typed_canonical_strokes_cancellable(
+            toniator_patterns::realize_typed_canonical_stroke_output_cancellable(
                 family,
                 plan,
+                output_capability,
+                output_setting,
                 source,
                 document.canvas(),
                 channel.mapping,
-                StrokeResponse {
-                    minimum_thickness: response.minimum_thickness,
-                    maximum_thickness: response.maximum_thickness,
-                },
-                1.0,
                 max_stroke_profile_samples,
                 max_stroke_outline_segments,
                 is_cancelled,
             )
-            .map_err(EvaluationError::from_pipeline)?,
+            .map_err(EvaluationError::from_pipeline)?
+            .realization,
         ));
     }
-    let toniator_domain::PatternGeometryResponse::Marks(mark_response) =
-        &effective.geometry_response
-    else {
-        return Err(EvaluationError::new(
-            "evaluation.mark.response",
-            "mark output requires the marks response branch",
-        ));
-    };
-    let response = MarkResponse {
-        minimum_fill: mark_response.minimum_fill,
-        maximum_fill: mark_response.maximum_fill,
-        rotation_offset_degrees: effective.shape_rotation_degrees,
-    };
     let realization = if matches!(
         definition.output_layers.as_slice(),
         [PatternOutputLayer::MarkPrototype { .. }]
     ) {
         DocumentRealization::Canonical(
-            toniator_patterns::realize_typed_canonical_marks_cancellable(
+            toniator_patterns::realize_typed_canonical_mark_output_cancellable(
                 document,
                 family,
                 plan,
+                output_capability,
+                output_setting,
                 source,
                 document.canvas(),
-                toniator_patterns::CanonicalMarkRequest {
-                    mapping: channel.mapping,
-                    sampled_paint: matches!(channel.paint, ChannelPaint::SampledSource),
-                    response,
-                    max_transformed_curve_segment_instances,
-                },
+                channel.mapping,
+                matches!(channel.paint, ChannelPaint::SampledSource),
+                effective.shape_rotation_degrees,
+                max_transformed_curve_segment_instances,
                 is_cancelled,
             )
-            .map_err(EvaluationError::from_pipeline)?,
+            .map_err(EvaluationError::from_pipeline)?
+            .realization,
         )
     } else {
         match channel.paint {
             ChannelPaint::Solid(_) => DocumentRealization::Mapped(
-                realize_typed_mapped_outputs(
+                toniator_patterns::realize_typed_mapped_output(
                     family,
                     plan,
+                    output_capability,
+                    output_setting,
                     source,
                     document.canvas(),
                     channel.mapping,
-                    response,
+                    effective.shape_rotation_degrees,
                 )
-                .map_err(EvaluationError::from_pipeline)?,
+                .map_err(EvaluationError::from_pipeline)?
+                .realization,
             ),
             ChannelPaint::SampledSource => DocumentRealization::SourceColor(
-                realize_typed_source_color_outputs(
+                toniator_patterns::realize_typed_source_color_output(
                     family,
                     plan,
+                    output_capability,
+                    output_setting,
                     source,
                     document.canvas(),
                     channel.mapping,
-                    response,
+                    effective.shape_rotation_degrees,
                 )
-                .map_err(EvaluationError::from_pipeline)?,
+                .map_err(EvaluationError::from_pipeline)?
+                .realization,
             ),
         }
     };
     Ok(realization)
 }
-/// Converts one completed channel realization into a renderer-owned layer without resource lookup.
+/// Converts all completed channel-output units into one renderer-owned layer without resource lookup.
 ///
 /// # Errors
 ///
 /// Returns stable layer validation failures before a scene can publish.
 fn document_render_layer(
     channel: &ModeledChannelState,
-    realization: DocumentRealization,
+    outputs: Vec<DocumentOutputRealization>,
 ) -> Result<RenderLayer, EvaluationError> {
-    match realization {
+    let color = match &channel.paint {
+        ChannelPaint::Solid(color) => color.clone(),
+        ChannelPaint::SampledSource => toniator_domain::ColorValue {
+            red: 0.0,
+            green: 0.0,
+            blue: 0.0,
+            alpha: 1.0,
+        },
+    };
+    let outputs = outputs
+        .into_iter()
+        .map(|output| document_render_output(channel, output))
+        .collect::<Result<Vec<_>, _>>()?;
+    RenderLayer::new_outputs(channel.id, channel.visible, color, channel.opacity, outputs)
+        .map_err(EvaluationError::from_render)
+}
+
+/// Converts one independently realized output into its ordered renderer payload.
+///
+/// # Errors
+///
+/// Returns a stable renderer validation error before the containing channel layer is assembled.
+fn document_render_output(
+    channel: &ModeledChannelState,
+    output: DocumentOutputRealization,
+) -> Result<toniator_render::RenderOutputLayer, EvaluationError> {
+    let _capability = &output.capability;
+    let _setting = &output.setting;
+    let output_layer_id = output.output_layer_id;
+    match output.realization {
         DocumentRealization::Mapped(value) => match channel.paint {
-            ChannelPaint::Solid(ref color) => RenderLayer::new(
-                channel.id,
-                channel.visible,
-                color.clone(),
-                channel.opacity,
-                GeometryOutput::CircularMarks(value.output.marks),
-            )
-            .map_err(EvaluationError::from_render),
+            ChannelPaint::Solid(_) => Ok(toniator_render::RenderOutputLayer {
+                output_layer_id,
+                geometry: GeometryOutput::CircularMarks(value.output.marks),
+                primitive_paints: None,
+            }),
             ChannelPaint::SampledSource => unreachable!(),
         },
-        DocumentRealization::SourceColor(value) => RenderLayer::new_source_color(
-            channel.id,
-            channel.visible,
-            channel.opacity,
-            value
-                .output
-                .marks
-                .into_iter()
-                .map(|entry| toniator_render::SourceColorCircle {
-                    mark: entry.mark,
-                    paint: toniator_domain::ColorValue {
+        DocumentRealization::SourceColor(value) => Ok(toniator_render::RenderOutputLayer {
+            output_layer_id,
+            geometry: GeometryOutput::CircularMarks(
+                value
+                    .output
+                    .marks
+                    .iter()
+                    .map(|entry| entry.mark.clone())
+                    .collect(),
+            ),
+            primitive_paints: Some(
+                value
+                    .output
+                    .marks
+                    .into_iter()
+                    .map(|entry| toniator_domain::ColorValue {
                         red: entry.paint.red,
                         green: entry.paint.green,
                         blue: entry.paint.blue,
                         alpha: entry.paint.alpha,
-                    },
-                })
-                .collect(),
-        )
-        .map_err(EvaluationError::from_render),
-        DocumentRealization::Canonical(value) => match channel.paint {
-            ChannelPaint::Solid(ref color) => RenderLayer::new(
-                channel.id,
-                channel.visible,
-                color.clone(),
-                channel.opacity,
-                GeometryOutput::CanonicalMarks(value.output.marks),
-            )
-            .map_err(EvaluationError::from_render),
-            ChannelPaint::SampledSource => RenderLayer::new_source_color_geometry(
-                channel.id,
-                channel.visible,
-                channel.opacity,
-                value.output.marks,
-                value
-                    .output
-                    .paints
-                    .expect("sampled canonical realization retains paint")
-                    .into_iter()
-                    .map(|paint| toniator_domain::ColorValue {
-                        red: paint.red,
-                        green: paint.green,
-                        blue: paint.blue,
-                        alpha: paint.alpha,
                     })
                     .collect(),
-            )
-            .map_err(EvaluationError::from_render),
+            ),
+        }),
+        DocumentRealization::Canonical(value) => match channel.paint {
+            ChannelPaint::Solid(_) => Ok(toniator_render::RenderOutputLayer {
+                output_layer_id,
+                geometry: GeometryOutput::CanonicalMarks(value.output.marks),
+                primitive_paints: None,
+            }),
+            ChannelPaint::SampledSource => Ok(toniator_render::RenderOutputLayer {
+                output_layer_id,
+                geometry: GeometryOutput::CanonicalMarks(value.output.marks),
+                primitive_paints: Some(
+                    value
+                        .output
+                        .paints
+                        .expect("sampled canonical realization retains paint")
+                        .into_iter()
+                        .map(|paint| toniator_domain::ColorValue {
+                            red: paint.red,
+                            green: paint.green,
+                            blue: paint.blue,
+                            alpha: paint.alpha,
+                        })
+                        .collect(),
+                ),
+            }),
         },
         DocumentRealization::Strokes(value) => match channel.paint {
-            ChannelPaint::Solid(ref color) => RenderLayer::new(
-                channel.id,
-                channel.visible,
-                color.clone(),
-                channel.opacity,
-                GeometryOutput::CanonicalStrokes(value.output.strokes),
-            )
-            .map_err(EvaluationError::from_render),
+            ChannelPaint::Solid(_) => Ok(toniator_render::RenderOutputLayer {
+                output_layer_id,
+                geometry: GeometryOutput::CanonicalStrokes(value.output.strokes),
+                primitive_paints: None,
+            }),
             ChannelPaint::SampledSource => unreachable!("stroke realization rejects sampled paint"),
         },
     }
@@ -2965,6 +3112,7 @@ fn document_family_cache_key(
     effective: &toniator_domain::EffectiveChannelPatternInstance,
     limits: EvaluationLimits,
     family: &FamilyCapability,
+    outputs: &[toniator_patterns::OutputCapability],
     source: &SourceField,
 ) -> Result<DocumentFamilyCacheKey, EvaluationError> {
     Ok(DocumentFamilyCacheKey {
@@ -2980,8 +3128,8 @@ fn document_family_cache_key(
                 effective.translation_y.to_bits(),
             ),
             guard_steps: definition.coverage.guard_steps,
-            required_support_radius: required_support_radius_modeled(
-                canvas, effective, definition, family,
+            required_support_radius: required_support_radius_for_outputs(
+                canvas, effective, definition, family, outputs,
             )?
             .to_bits(),
             definition: FamilyDefinitionKey {
@@ -3011,35 +3159,57 @@ fn required_support_radius_legacy(
     )
 }
 
-/// Derives modeled family support from the accepted fill ceiling, independent of current response intent.
-fn required_support_radius_modeled(
+/// Derives the maximum modeled family support request across every ordered output capability.
+///
+/// A shared family must be broad enough for all of its independently realized outputs. The
+/// current authoring gate admits one output, so its result is byte-for-byte the former request.
+///
+/// # Errors
+///
+/// Returns a stable capability or geometry support diagnostic before family allocation.
+fn required_support_radius_for_outputs(
     canvas: &CanvasSpec,
     effective: &toniator_domain::EffectiveChannelPatternInstance,
     definition: &toniator_domain::PatternDefinition,
     family: &FamilyCapability,
+    outputs: &[toniator_patterns::OutputCapability],
 ) -> Result<f64, EvaluationError> {
-    if let [PatternOutputLayer::ConnectionPaths { program, .. }] =
-        definition.output_layers.as_slice()
-    {
+    outputs
+        .iter()
+        .map(|output| {
+            required_support_radius_for_output(canvas, effective, definition, family, output)
+        })
+        .try_fold(None, |maximum, candidate| {
+            let candidate = candidate?;
+            Ok(Some(
+                maximum.map_or(candidate, |current: f64| current.max(candidate)),
+            ))
+        })?
+        .ok_or(EvaluationError::new(
+            "evaluation.output_gate",
+            "pattern pipeline must expose at least one output capability",
+        ))
+}
+
+/// Derives one output's conservative family support request from its explicit capability.
+///
+/// # Errors
+///
+/// Returns patterns-owned guide-spacing or nominal-cell diagnostics without evaluating a family.
+fn required_support_radius_for_output(
+    canvas: &CanvasSpec,
+    effective: &toniator_domain::EffectiveChannelPatternInstance,
+    definition: &toniator_domain::PatternDefinition,
+    family: &FamilyCapability,
+    output: &toniator_patterns::OutputCapability,
+) -> Result<f64, EvaluationError> {
+    if let Some((_site_mechanism_id, program, _style)) = output.connection_paths() {
         return Ok(
             required_connection_base_support(canvas, effective, definition, family)?
                 + f64::from(definition.coverage.guard_steps) * program.adjacency().maximum_distance,
         );
     }
-    if matches!(
-        definition.output_layers.as_slice(),
-        [PatternOutputLayer::MazeWalls { .. }]
-    ) {
-        return Ok(
-            maximum_emitted_guide_spacing(family, canvas, &effective.density)
-                .map_err(EvaluationError::from_pipeline)?
-                + definition.coverage.additional_margin,
-        );
-    }
-    if matches!(
-        definition.output_layers.as_slice(),
-        [PatternOutputLayer::GuidePaths { .. } | PatternOutputLayer::ParametricPaths { .. }]
-    ) {
+    if output.maze_walls().is_some() || output.guide_paths().is_some() {
         return Ok(
             maximum_emitted_guide_spacing(family, canvas, &effective.density)
                 .map_err(EvaluationError::from_pipeline)?
@@ -3093,6 +3263,7 @@ fn required_support_radius_from_fill(
 #[derive(Clone, Debug, PartialEq)]
 struct DocumentRealizationCacheKey {
     family_content: DocumentFamilyContentKey,
+    output_layer_id: toniator_domain::PatternOutputLayerId,
     contract: RealizationContractKey,
     resolved_shape_content: String,
     source_identity: RealizationSourceIdentity,
@@ -3100,6 +3271,73 @@ struct DocumentRealizationCacheKey {
     response: DocumentResponseIdentity,
     sampled_paint: bool,
     max_transformed_curve_segment_instances: usize,
+}
+
+/// Constructs the independent cache identity for one ordered output realization.
+///
+/// The key excludes aggregate scene state while including every source, mapping, response,
+/// algorithm, and bounded-work input that can change this output's canonical geometry.
+///
+/// # Errors
+///
+/// Returns the authoritative shape-content diagnostic before a cache candidate can be installed.
+#[allow(clippy::too_many_arguments)]
+fn document_realization_cache_key(
+    document: &toniator_domain::Document,
+    definition: &PatternDefinition,
+    channel: &ModeledChannelState,
+    effective: &toniator_domain::EffectiveChannelPatternInstance,
+    family_key: &DocumentFamilyCacheKey,
+    source: &SourceField,
+    output_setting: &toniator_domain::EffectivePatternOutputSettings,
+    limits: EvaluationLimits,
+    remaining_transformed_curve_segment_instances: usize,
+) -> Result<DocumentRealizationCacheKey, EvaluationError> {
+    Ok(DocumentRealizationCacheKey {
+        family_content: family_key.content.clone(),
+        output_layer_id: output_setting.output_layer_id,
+        contract: realization_contract_key(definition),
+        resolved_shape_content: resolved_shape_content_identity(document, definition)?,
+        source_identity: realization_source_identity(source.identity()),
+        mapping: format!(
+            "{:?}:{:?}:{}:{}:{}",
+            channel.mapping.component,
+            channel.mapping.placement,
+            channel.mapping.inverted,
+            channel.mapping.gain.to_bits(),
+            channel.mapping.bias.to_bits()
+        ),
+        response: match &output_setting.response {
+            toniator_domain::PatternGeometryResponse::Marks(response) => {
+                DocumentResponseIdentity::Marks {
+                    minimum: response.minimum_fill.to_bits(),
+                    maximum: response.maximum_fill.to_bits(),
+                    shape_rotation: effective.shape_rotation_degrees.to_bits(),
+                }
+            }
+            toniator_domain::PatternGeometryResponse::Connected(response) => {
+                DocumentResponseIdentity::Connected {
+                    minimum: response.minimum_thickness.to_bits(),
+                    maximum: response.maximum_thickness.to_bits(),
+                    shape_rotation: effective.shape_rotation_degrees.to_bits(),
+                    outline_contract: toniator_patterns::CANONICAL_STROKE_OUTLINE_CONTRACT_ID,
+                    profile_limit: limits.max_stroke_profile_samples(),
+                    outline_segment_limit: limits.max_stroke_outline_segments(),
+                    connection_contracts: Box::new(connection_cache_contracts(
+                        definition,
+                        limits.site_adjacency_limits(),
+                        limits.connection_path_limits(),
+                    )),
+                    maze_contracts: Box::new(maze_cache_contracts(
+                        definition,
+                        limits.maze_limits(),
+                    )),
+                }
+            }
+        },
+        sampled_paint: matches!(channel.paint, ChannelPaint::SampledSource),
+        max_transformed_curve_segment_instances: remaining_transformed_curve_segment_instances,
+    })
 }
 
 /// Tagged response identity prevents mark and connected-stroke realizations from colliding.
@@ -3146,7 +3384,7 @@ struct MazeCacheContracts {
 struct DocumentDerivedCache {
     decoded_source: Option<(SourceCacheKey, Arc<SourceField>)>,
     families: Vec<(DocumentFamilyCacheKey, Arc<TypedFamilyOutput>)>,
-    realizations: Vec<(DocumentRealizationCacheKey, Arc<DocumentRealization>)>,
+    realizations: Vec<(DocumentRealizationCacheKey, Arc<DocumentOutputRealization>)>,
     scene: Option<(String, Arc<RenderScene>)>,
     raster: Option<(String, Arc<RasterSurface>)>,
 }
@@ -3155,7 +3393,7 @@ struct DocumentDerivedCache {
 struct DocumentCacheTransaction {
     decoded_source: Option<(SourceCacheKey, Arc<SourceField>)>,
     families: Vec<(DocumentFamilyCacheKey, Arc<TypedFamilyOutput>)>,
-    realizations: Vec<(DocumentRealizationCacheKey, Arc<DocumentRealization>)>,
+    realizations: Vec<(DocumentRealizationCacheKey, Arc<DocumentOutputRealization>)>,
     scene: Option<(String, Arc<RenderScene>)>,
     raster: Option<(String, Arc<RasterSurface>)>,
 }
@@ -3203,16 +3441,59 @@ pub(crate) mod test_support {
         DocumentPatternSettings, DocumentSession, GeneralizedSiteProduct, GuideDimension,
         GuideDimensionId, GuidePrototype, GuideRepetition, HalftoneChannelModel,
         MarkGeometryResponse, MarkOrientation, MarkPrototype, OffsetCleanup, OffsetSides,
-        PathStrokeStyle, PatternDefinition, PatternDefinitionEdit, PatternDefinitionId,
-        PatternGeometryResponse, PatternMechanismId, PatternOutputLayer, PatternOutputLayerId,
-        SourceComponent, SourcePlacement, SourceReference, SourceReferenceId,
-        StraightGuideDimension, StraightGuideRepetition,
+        PathStrokeStyle, PatternDefinition, PatternDefinitionBundle, PatternDefinitionEdit,
+        PatternDefinitionId, PatternGeometryResponse, PatternMechanismId, PatternOutputLayer,
+        PatternOutputLayerId, PatternOutputSettings, SourceComponent, SourcePlacement,
+        SourceReference, SourceReferenceId, StraightGuideDimension, StraightGuideRepetition,
     };
 
     use super::*;
 
     const GUARD: Duration = Duration::from_secs(15);
     const CHANNEL_ID: ChannelId = ChannelId(1);
+
+    /// Binds the current default typed response to each output in one test-only structural definition.
+    fn bundle_from_test_definition(definition: PatternDefinition) -> PatternDefinitionBundle {
+        let output_settings = definition
+            .output_layers
+            .iter()
+            .map(|output| PatternOutputSettings {
+                output_layer_id: output.id(),
+                response: match output {
+                    PatternOutputLayer::CircularMarks { .. }
+                    | PatternOutputLayer::MarkPrototype { .. } => {
+                        PatternGeometryResponse::Marks(MarkGeometryResponse {
+                            minimum_fill: 0.0,
+                            maximum_fill: 1.0,
+                        })
+                    }
+                    PatternOutputLayer::GuidePaths { .. }
+                    | PatternOutputLayer::ParametricPaths { .. }
+                    | PatternOutputLayer::ConnectionPaths { .. }
+                    | PatternOutputLayer::MazeWalls { .. } => {
+                        PatternGeometryResponse::Connected(ConnectedGeometryResponse {
+                            minimum_thickness: 0.0,
+                            maximum_thickness: 1.0,
+                        })
+                    }
+                },
+            })
+            .collect();
+        PatternDefinitionBundle {
+            definition,
+            output_settings,
+        }
+    }
+
+    /// Replaces the sole current test fixture base response after preserving its structural output ID.
+    fn bundle_with_sole_response(
+        definition: PatternDefinition,
+        response: PatternGeometryResponse,
+    ) -> PatternDefinitionBundle {
+        let mut bundle = bundle_from_test_definition(definition);
+        bundle.output_settings[0].response = response;
+        bundle
+    }
 
     pub(crate) fn request() -> ChannelDiagnosticRequest {
         request_with_bytes(Arc::<[u8]>::from(
@@ -3234,16 +3515,22 @@ pub(crate) mod test_support {
                 height: 600.0,
             },
             SourceReference::Assigned(source_id.clone()),
-            vec![PatternDefinition::supported_straight_grid(
-                PatternDefinitionId(1),
-                "straight-grid",
-                PatternMechanismId(1),
-                PatternMechanismId(2),
-                PatternOutputLayerId(1),
-                CoveragePolicy {
-                    guard_steps: 2,
-                    additional_margin: 4.5,
-                },
+            vec![bundle_with_sole_response(
+                PatternDefinition::supported_straight_grid(
+                    PatternDefinitionId(1),
+                    "straight-grid",
+                    PatternMechanismId(1),
+                    PatternMechanismId(2),
+                    PatternOutputLayerId(1),
+                    CoveragePolicy {
+                        guard_steps: 2,
+                        additional_margin: 4.5,
+                    },
+                ),
+                PatternGeometryResponse::Marks(MarkGeometryResponse {
+                    minimum_fill: 0.2,
+                    maximum_fill: 0.9,
+                }),
             )],
             DocumentPatternSettings {
                 definition_id: PatternDefinitionId(1),
@@ -3254,10 +3541,6 @@ pub(crate) mod test_support {
                 },
                 pattern_rotation_degrees: 17.0,
                 shape_rotation_degrees: 0.0,
-                geometry_response: PatternGeometryResponse::Marks(MarkGeometryResponse {
-                    minimum_fill: 0.2,
-                    maximum_fill: 0.9,
-                }),
             },
             vec![ChannelState {
                 id: CHANNEL_ID,
@@ -3270,7 +3553,7 @@ pub(crate) mod test_support {
                         translation_y: -4.5,
                     },
                     shape_rotation_delta_degrees: None,
-                    geometry_response_delta: None,
+                    output_response_deltas: Vec::new(),
                 },
                 appearance: ChannelAppearance {
                     visible: true,
@@ -3392,7 +3675,7 @@ pub(crate) mod test_support {
                 base.id(),
                 base.canvas().clone(),
                 base.source().clone(),
-                vec![definition],
+                vec![bundle_from_test_definition(definition)],
                 base.pattern_settings().clone(),
                 base.channel_model().unwrap(),
                 base.channel_topology().unwrap().clone(),
@@ -3449,17 +3732,19 @@ pub(crate) mod test_support {
         settings.definition_id = definition.id;
         settings.density.across_x = 2.0;
         settings.density.across_y = 2.0;
-        settings.geometry_response =
+        let bundle = bundle_with_sole_response(
+            definition,
             PatternGeometryResponse::Connected(ConnectedGeometryResponse {
                 minimum_thickness: 0.01,
                 maximum_thickness: 0.02,
-            });
+            }),
+        );
         DocumentSession::new(
             Document::with_source_topology_and_authored_structures(
                 base.id(),
                 base.canvas().clone(),
                 base.source().clone(),
-                vec![definition],
+                vec![bundle],
                 settings,
                 base.channel_model().unwrap(),
                 base.channel_topology().unwrap().clone(),
@@ -3541,17 +3826,19 @@ pub(crate) mod test_support {
         settings.definition_id = definition.id;
         settings.density.across_x = 5.0;
         settings.density.across_y = settings.density.across_x * 48.0 / 64.0;
-        settings.geometry_response =
+        let bundle = bundle_with_sole_response(
+            definition,
             PatternGeometryResponse::Connected(ConnectedGeometryResponse {
                 minimum_thickness: 0.1,
                 maximum_thickness: 0.25,
-            });
+            }),
+        );
         DocumentSession::new(
             Document::with_source_topology_and_authored_structures(
                 base.id(),
                 base.canvas().clone(),
                 base.source().clone(),
-                vec![definition],
+                vec![bundle],
                 settings,
                 base.channel_model().unwrap(),
                 base.channel_topology().unwrap().clone(),
@@ -3566,7 +3853,7 @@ pub(crate) mod test_support {
     fn modeled_maze_session(seed: u32) -> DocumentSession {
         let connection = modeled_connection_session(random_connection_program(seed, 24.0));
         let document = connection.document();
-        let mut definition = document.pattern_definitions()[0].clone();
+        let mut definition = document.pattern_definition_bundles()[0].definition.clone();
         definition.output_layers = vec![PatternOutputLayer::MazeWalls {
             id: PatternOutputLayerId(122),
             site_mechanism_id: PatternMechanismId(121),
@@ -3584,7 +3871,7 @@ pub(crate) mod test_support {
                 document.id(),
                 document.canvas().clone(),
                 document.source().clone(),
-                vec![definition],
+                vec![bundle_from_test_definition(definition)],
                 settings,
                 document
                     .channel_model()
@@ -3616,7 +3903,9 @@ pub(crate) mod test_support {
     /// Replaces the sole typed connection output through the document's validated shared edit
     /// authority, preserving the fixture's output-layer identity.
     fn replace_connection_program(history: &mut DocumentHistory, program: ConnectionProgram) {
-        let base_definition = history.document().pattern_definitions()[0].clone();
+        let base_definition = history.document().pattern_definition_bundles()[0]
+            .definition
+            .clone();
         history
             .apply(&DocumentCommand::EditSharedPatternDefinition {
                 definition_id: base_definition.id,
@@ -3632,7 +3921,9 @@ pub(crate) mod test_support {
     /// Replaces only the typed maze seed through the validated document history authority, so
     /// family geometry remains eligible for reuse while the maze realization must be rebuilt.
     fn replace_maze_seed(history: &mut DocumentHistory, seed: u32) {
-        let base_definition = history.document().pattern_definitions()[0].clone();
+        let base_definition = history.document().pattern_definition_bundles()[0]
+            .definition
+            .clone();
         history
             .apply(&DocumentCommand::EditSharedPatternDefinition {
                 definition_id: base_definition.id,
@@ -3722,17 +4013,19 @@ pub(crate) mod test_support {
         settings.definition_id = definition.id;
         settings.density.across_x = 2.0;
         settings.density.across_y = 2.0;
-        settings.geometry_response =
+        let bundle = bundle_with_sole_response(
+            definition,
             PatternGeometryResponse::Connected(ConnectedGeometryResponse {
                 minimum_thickness: 0.01,
                 maximum_thickness: 0.02,
-            });
+            }),
+        );
         DocumentSession::new(
             Document::with_source_topology_and_authored_structures(
                 base.id(),
                 base.canvas().clone(),
                 base.source().clone(),
-                vec![definition],
+                vec![bundle],
                 settings,
                 base.channel_model().unwrap(),
                 base.channel_topology().unwrap().clone(),
@@ -4033,8 +4326,9 @@ pub(crate) mod test_support {
         assert!(scheduler.accept_completion(&first, &session).unwrap());
         let command = session
             .document()
-            .set_channel_geometry_response_for_effective(
+            .set_channel_output_response_for_effective(
                 ChannelId(1),
+                PatternOutputLayerId(73),
                 PatternGeometryResponse::Connected(ConnectedGeometryResponse {
                     minimum_thickness: 0.015,
                     maximum_thickness: 0.025,
@@ -4421,7 +4715,7 @@ pub(crate) mod test_support {
         .expect("connection document evaluates before cache publication");
         let family = &candidate.transaction.families[0].1;
         let document = session.document();
-        let definition = &document.pattern_definitions()[0];
+        let definition = &document.pattern_definition_bundles()[0].definition;
         let effective = document
             .effective_channel_pattern(ChannelId(1))
             .expect("modeled red channel resolves its shared connection definition");
@@ -4460,7 +4754,7 @@ pub(crate) mod test_support {
             .map(|site| site.position)
             .collect::<Vec<_>>();
         for (_, realization) in &candidate.transaction.realizations {
-            let DocumentRealization::Strokes(strokes) = realization.as_ref() else {
+            let DocumentRealization::Strokes(strokes) = &realization.realization else {
                 panic!("connection fixture cannot realize marks")
             };
             for stroke in &strokes.output.strokes {
@@ -4621,7 +4915,8 @@ pub(crate) mod test_support {
     fn normal_offset_cache_identity_reuses_and_invalidates_at_the_authoritative_levels() {
         let scheduler = EvaluationScheduler::new_with_limits(EvaluationLimits::default()).unwrap();
         let mut history = DocumentHistory::new(modeled_normal_offset_session());
-        let definition_key = family_definition_key(&history.document().pattern_definitions()[0]);
+        let definition_key =
+            family_definition_key(&history.document().pattern_definition_bundles()[0].definition);
         let algorithm_key = definition_key
             .path_offset_algorithm
             .expect("normal-offset definitions carry the geometry algorithm cache identity");
@@ -4684,8 +4979,9 @@ pub(crate) mod test_support {
 
         let thickness = history
             .document()
-            .set_channel_geometry_response_for_effective(
+            .set_channel_output_response_for_effective(
                 CHANNEL_ID,
+                PatternOutputLayerId(94),
                 PatternGeometryResponse::Connected(ConnectedGeometryResponse {
                     minimum_thickness: 0.012,
                     maximum_thickness: 0.024,
@@ -4701,7 +4997,9 @@ pub(crate) mod test_support {
         assert_eq!(thickness_cache.scene, CacheDisposition::Miss);
         assert_eq!(thickness_cache.raster, CacheDisposition::Miss);
 
-        let base_definition = history.document().pattern_definitions()[0].clone();
+        let base_definition = history.document().pattern_definition_bundles()[0]
+            .definition
+            .clone();
         history
             .apply(&DocumentCommand::EditSharedPatternDefinition {
                 definition_id: PatternDefinitionId(90),
@@ -4736,7 +5034,9 @@ pub(crate) mod test_support {
             .submit(document_request(history.session(), valid_document_bytes()))
             .unwrap();
         entered.recv_timeout(GUARD).unwrap();
-        let base_definition = history.document().pattern_definitions()[0].clone();
+        let base_definition = history.document().pattern_definition_bundles()[0]
+            .definition
+            .clone();
         history
             .apply(&DocumentCommand::EditSharedPatternDefinition {
                 definition_id: PatternDefinitionId(90),

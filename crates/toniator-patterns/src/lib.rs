@@ -8,12 +8,14 @@ use serde::Serialize;
 use toniator_domain::{
     ArtworkWeightResponse, AuthoredStructureId, CanvasSpec, ChannelId, ConnectionProgram,
     DensityMetric2D, Document, DocumentCommand, DocumentHistory, DocumentSessionError,
-    GuideDimension, GuideDimensionDraft, GuideDimensionId, GuidePrototype, GuideRepetition,
-    MarkOrientation, MarkOrientationDraft, MarkPrototype, MazeProgram, OffsetCleanup, OffsetSides,
-    ParametricCurve, PatternDefinition, PatternDefinitionRecipe, PatternFamily, PatternMechanism,
+    EffectivePatternOutputSettings, GuideDimension, GuideDimensionDraft, GuideDimensionId,
+    GuidePrototype, GuideRepetition, MarkOrientation, MarkOrientationDraft, MarkPrototype,
+    MazeProgram, OffsetCleanup, OffsetSides, ParametricCurve, PatternDefinition,
+    PatternDefinitionRecipe, PatternFamily, PatternGeometryResponse, PatternMechanism,
     PatternMechanismId, PatternModulation, PatternOutputLayer, PatternOutputLayerId,
-    PresetMetadata, PresetRecord, RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy,
-    SourceMapping, StraightGuideDimension, VisibleMarkSizingPolicy,
+    PatternStructureRecipe, PresetMetadata, PresetRecord, RandomSiteCharacter,
+    SiteDensityModulation, SiteExclusionPolicy, SourceMapping, StraightGuideDimension,
+    VisibleMarkSizingPolicy,
 };
 pub use toniator_geometry::{
     AffineTransform2D, Bounds, CONNECTION_PATH_CONTRACT_ID, CONNECTION_TRAIL_CONTRACT_ID,
@@ -261,7 +263,7 @@ impl PresetRegistry {
                         description: "Evenly separated deterministic circular marks.".into(),
                         thumbnail: Some("builtin:even-random-circles".into()),
                     },
-                    recipe: PatternDefinitionRecipe::RandomSites {
+                    recipe: PatternDefinitionRecipe::marks(PatternStructureRecipe::RandomSites {
                         name: "Even random circles".into(),
                         coverage: toniator_domain::CoveragePolicy {
                             guard_steps: 2,
@@ -275,7 +277,7 @@ impl PresetRegistry {
                         exclusion: SiteExclusionPolicy::None,
                         maximum_attempts: 16_000_000,
                         maximum_neighbor_checks: 16_000_000,
-                    },
+                    }),
                 },
                 PresetRecord {
                     metadata: PresetMetadata {
@@ -286,30 +288,32 @@ impl PresetRegistry {
                             .into(),
                         thumbnail: Some("builtin:straight-grid-circles".into()),
                     },
-                    recipe: PatternDefinitionRecipe::GeneralizedStraightGuides {
-                        name: "Straight grid circles".into(),
-                        coverage: toniator_domain::CoveragePolicy {
-                            guard_steps: 2,
-                            additional_margin: 0.0,
-                        },
-                        dimensions: vec![
-                            GuideDimensionDraft {
-                                baseline_angle_degrees: 17.0,
-                                phase: 0.23,
-                                spacing_multiplier: 0.82,
+                    recipe: PatternDefinitionRecipe::marks(
+                        PatternStructureRecipe::GeneralizedStraightGuides {
+                            name: "Straight grid circles".into(),
+                            coverage: toniator_domain::CoveragePolicy {
+                                guard_steps: 2,
+                                additional_margin: 0.0,
                             },
-                            GuideDimensionDraft {
-                                baseline_angle_degrees: 107.0,
-                                phase: -0.31,
-                                spacing_multiplier: 1.18,
+                            dimensions: vec![
+                                GuideDimensionDraft {
+                                    baseline_angle_degrees: 17.0,
+                                    phase: 0.23,
+                                    spacing_multiplier: 0.82,
+                                },
+                                GuideDimensionDraft {
+                                    baseline_angle_degrees: 107.0,
+                                    phase: -0.31,
+                                    spacing_multiplier: 1.18,
+                                },
+                            ],
+                            product: toniator_domain::GeneralizedSiteProductDraft::Intersections {
+                                dimension_indices: vec![0, 1],
+                                merge_epsilon: 1e-9,
                             },
-                        ],
-                        product: toniator_domain::GeneralizedSiteProductDraft::Intersections {
-                            dimension_indices: vec![0, 1],
-                            merge_epsilon: 1e-9,
+                            orientation: MarkOrientationDraft::Fixed,
                         },
-                        orientation: MarkOrientationDraft::Fixed,
-                    },
+                    ),
                 },
             ],
         )
@@ -393,10 +397,11 @@ impl PresetRegistry {
         let base = history.document().pattern_settings().clone();
         let base_definition = history
             .document()
-            .pattern_definitions()
+            .pattern_definition_bundles()
             .iter()
             .find(|definition| definition.id == base.definition_id)
             .expect("validated document base definition")
+            .definition
             .clone();
         history.apply(&DocumentCommand::ReplaceDocumentPatternDefinitionRecipe {
             base,
@@ -425,7 +430,7 @@ impl PresetRegistry {
             .clone();
         let base_definition = history
             .document()
-            .pattern_definitions()
+            .pattern_definition_bundles()
             .iter()
             .find(|definition| definition.id == definition_id)
             .ok_or_else(|| {
@@ -434,6 +439,7 @@ impl PresetRegistry {
                     "shared preset replacement targets a missing definition",
                 ))
             })?
+            .definition
             .clone();
         let affected_channels = history.document().linked_channels(definition_id);
         Ok(PreparedSharedPresetReplacement {
@@ -762,6 +768,76 @@ pub enum RealizationStructuralInput {
 pub struct TypedRealization<T> {
     pub provenance: TypedRealizationProvenance,
     pub output: T,
+}
+
+/// One independently addressed output realization unit.
+///
+/// The family remains shared across outputs, but this record binds exactly one
+/// structural capability to its matching domain-resolved response. Stage 20N
+/// keeps the authoring gate at one output; later orchestration must aggregate
+/// these units in capability order rather than recover a global response.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TypedOutputRealization<T> {
+    pub output_layer_id: PatternOutputLayerId,
+    pub capability: OutputCapability,
+    pub effective_setting: EffectivePatternOutputSettings,
+    pub realization: TypedRealization<T>,
+}
+
+impl PatternPipelinePlan {
+    /// Resolves one structural output capability by its stable output-layer ID.
+    pub fn output_capability(
+        &self,
+        output_layer_id: PatternOutputLayerId,
+    ) -> Option<&OutputCapability> {
+        self.ordered_outputs
+            .iter()
+            .find(|capability| capability.layer_id == output_layer_id)
+    }
+}
+
+/// Validates one explicit capability and effective setting before output realization.
+///
+/// The document remains responsible for resolving inheritance and typed response arithmetic.
+/// This boundary only proves that the resolved setting addresses exactly one ordered capability
+/// and has the response kind the structural output consumes.
+///
+/// # Errors
+///
+/// Returns a stable output-order, output-ID, or response-kind diagnostic without realizing
+/// source samples or publishing geometry.
+pub fn validate_output_realization_binding(
+    plan: &PatternPipelinePlan,
+    capability: &OutputCapability,
+    setting: &EffectivePatternOutputSettings,
+) -> Result<(), PatternPipelineError> {
+    if plan.output_capability(capability.layer_id) != Some(capability) {
+        return Err(PatternPipelineError::new(
+            "pattern.output_layers.capability",
+            "realization capability is not a member of the ordered pipeline plan",
+        ));
+    }
+    if capability.layer_id != setting.output_layer_id {
+        return Err(PatternPipelineError::new(
+            "pattern.output_layers.setting",
+            "effective output setting must address the realized output layer",
+        ));
+    }
+    match (&capability.payload, &setting.response) {
+        (OutputCapabilityPayload::Marks { .. }, PatternGeometryResponse::Marks(_))
+        | (OutputCapabilityPayload::GuidePaths { .. }, PatternGeometryResponse::Connected(_))
+        | (
+            OutputCapabilityPayload::ConnectionPaths { .. },
+            PatternGeometryResponse::Connected(_),
+        )
+        | (OutputCapabilityPayload::MazeWalls { .. }, PatternGeometryResponse::Connected(_)) => {
+            Ok(())
+        }
+        _ => Err(PatternPipelineError::new(
+            "pattern.output_layers.setting",
+            "effective output response kind is incompatible with its structural capability",
+        )),
+    }
 }
 
 /// Stable typed diagnostic emitted before family output, cache publication, or
@@ -4609,6 +4685,93 @@ pub fn realize_typed_source_color_outputs(
         .map_err(|error| PatternPipelineError::new(error.path(), error.message()))
 }
 
+/// Realizes one explicit mark output into a capability-addressed mapped unit.
+///
+/// # Errors
+///
+/// Returns binding, response-kind, source, or canonical-mark diagnostics without exposing a
+/// partially realized output unit.
+#[allow(clippy::too_many_arguments)]
+pub fn realize_typed_mapped_output(
+    family: &TypedFamilyOutput,
+    plan: &PatternPipelinePlan,
+    capability: &OutputCapability,
+    setting: &EffectivePatternOutputSettings,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    shape_rotation_degrees: f64,
+) -> Result<TypedOutputRealization<MappedCircularMarkRealization>, PatternPipelineError> {
+    validate_output_realization_binding(plan, capability, setting)?;
+    let PatternGeometryResponse::Marks(response) = &setting.response else {
+        return Err(PatternPipelineError::new(
+            "pattern.output_layers.setting",
+            "mapped mark realization requires a mark response",
+        ));
+    };
+    let realization = realize_typed_mapped_outputs(
+        family,
+        plan,
+        source,
+        canvas,
+        mapping,
+        MarkResponse {
+            minimum_fill: response.minimum_fill,
+            maximum_fill: response.maximum_fill,
+            rotation_offset_degrees: shape_rotation_degrees,
+        },
+    )?;
+    Ok(TypedOutputRealization {
+        output_layer_id: capability.layer_id,
+        capability: capability.clone(),
+        effective_setting: setting.clone(),
+        realization,
+    })
+}
+
+/// Realizes one explicit sampled-paint mark output into a capability-addressed unit.
+///
+/// # Errors
+///
+/// Returns the first explicit-binding or source/mark realization diagnostic without partial output.
+#[allow(clippy::too_many_arguments)]
+pub fn realize_typed_source_color_output(
+    family: &TypedFamilyOutput,
+    plan: &PatternPipelinePlan,
+    capability: &OutputCapability,
+    setting: &EffectivePatternOutputSettings,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    shape_rotation_degrees: f64,
+) -> Result<TypedOutputRealization<SourceColorCircularMarkRealization>, PatternPipelineError> {
+    validate_output_realization_binding(plan, capability, setting)?;
+    let PatternGeometryResponse::Marks(response) = &setting.response else {
+        return Err(PatternPipelineError::new(
+            "pattern.output_layers.setting",
+            "sampled mark realization requires a mark response",
+        ));
+    };
+    let realization = realize_typed_source_color_outputs(
+        family,
+        plan,
+        source,
+        canvas,
+        mapping,
+        MarkResponse {
+            minimum_fill: response.minimum_fill,
+            maximum_fill: response.maximum_fill,
+            rotation_offset_degrees: shape_rotation_degrees,
+        },
+    )?;
+    Ok(TypedOutputRealization {
+        output_layer_id: capability.layer_id,
+        capability: capability.clone(),
+        effective_setting: setting.clone(),
+        realization,
+    })
+}
+
 /// Retained diagnostic realization, now routed through the same typed output
 /// capability boundary as authoritative document evaluation.
 pub fn realize_typed_diagnostic_outputs(
@@ -4900,6 +5063,60 @@ pub fn realize_typed_canonical_marks_cancellable(
     Ok(TypedRealization {
         provenance,
         output: realization,
+    })
+}
+
+/// Realizes one explicit canonical-mark output while retaining its output capability and setting.
+///
+/// # Errors
+///
+/// Returns explicit-binding, mark response, cancellation, or canonical geometry diagnostics
+/// without exposing a partial output unit.
+#[allow(clippy::too_many_arguments)]
+pub fn realize_typed_canonical_mark_output_cancellable(
+    document: &Document,
+    family: &TypedFamilyOutput,
+    plan: &PatternPipelinePlan,
+    capability: &OutputCapability,
+    setting: &EffectivePatternOutputSettings,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    sampled_paint: bool,
+    shape_rotation_degrees: f64,
+    max_transformed_curve_segment_instances: usize,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<TypedOutputRealization<CanonicalMarkRealization>, PatternPipelineError> {
+    validate_output_realization_binding(plan, capability, setting)?;
+    let PatternGeometryResponse::Marks(response) = &setting.response else {
+        return Err(PatternPipelineError::new(
+            "pattern.output_layers.setting",
+            "canonical mark realization requires a mark response",
+        ));
+    };
+    let realization = realize_typed_canonical_marks_cancellable(
+        document,
+        family,
+        plan,
+        source,
+        canvas,
+        CanonicalMarkRequest {
+            mapping,
+            sampled_paint,
+            response: MarkResponse {
+                minimum_fill: response.minimum_fill,
+                maximum_fill: response.maximum_fill,
+                rotation_offset_degrees: shape_rotation_degrees,
+            },
+            max_transformed_curve_segment_instances,
+        },
+        is_cancelled,
+    )?;
+    Ok(TypedOutputRealization {
+        output_layer_id: capability.layer_id,
+        capability: capability.clone(),
+        effective_setting: setting.clone(),
+        realization,
     })
 }
 
@@ -6484,6 +6701,54 @@ pub fn realize_typed_canonical_strokes_cancellable(
     })
 }
 
+/// Realizes one explicit guide-path output into a capability-addressed canonical-stroke unit.
+///
+/// # Errors
+///
+/// Returns binding, response-kind, cancellation, sampling, or outline diagnostics without partial output.
+#[allow(clippy::too_many_arguments)]
+pub fn realize_typed_canonical_stroke_output_cancellable(
+    family: &TypedFamilyOutput,
+    plan: &PatternPipelinePlan,
+    capability: &OutputCapability,
+    setting: &EffectivePatternOutputSettings,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    max_profile_samples: usize,
+    max_outline_segments: usize,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<TypedOutputRealization<CanonicalStrokeRealization>, PatternPipelineError> {
+    validate_output_realization_binding(plan, capability, setting)?;
+    let PatternGeometryResponse::Connected(response) = &setting.response else {
+        return Err(PatternPipelineError::new(
+            "pattern.output_layers.setting",
+            "guide-path realization requires a connected response",
+        ));
+    };
+    let realization = realize_typed_canonical_strokes_cancellable(
+        family,
+        plan,
+        source,
+        canvas,
+        mapping,
+        StrokeResponse {
+            minimum_thickness: response.minimum_thickness,
+            maximum_thickness: response.maximum_thickness,
+        },
+        1.0,
+        max_profile_samples,
+        max_outline_segments,
+        is_cancelled,
+    )?;
+    Ok(TypedOutputRealization {
+        output_layer_id: capability.layer_id,
+        capability: capability.clone(),
+        effective_setting: setting.clone(),
+        realization,
+    })
+}
+
 /// Realizes selected connection paths as canonical round strokes without exposing adjacency to renderers.
 ///
 /// # Errors
@@ -7009,6 +7274,63 @@ pub fn realize_typed_maze_canonical_strokes_cancellable(
     })
 }
 
+/// Realizes one explicit maze-wall output while retaining its capability and effective setting.
+///
+/// # Errors
+///
+/// Returns explicit-binding, connected-response, cancellation, sampling, or outline diagnostics
+/// without exposing a partial output unit.
+#[allow(clippy::too_many_arguments)]
+pub fn realize_typed_maze_canonical_stroke_output_cancellable(
+    family: &TypedFamilyOutput,
+    plan: &PatternPipelinePlan,
+    capability: &OutputCapability,
+    setting: &EffectivePatternOutputSettings,
+    maze: &MazeProgramResult,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    max_profile_samples: usize,
+    max_outline_segments: usize,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<TypedOutputRealization<CanonicalStrokeRealization>, PatternPipelineError> {
+    validate_output_realization_binding(plan, capability, setting)?;
+    let PatternGeometryResponse::Connected(response) = &setting.response else {
+        return Err(PatternPipelineError::new(
+            "pattern.output_layers.setting",
+            "maze realization requires a connected response",
+        ));
+    };
+    let Some((_site_mechanism, _program, style)) = capability.maze_walls() else {
+        return Err(PatternPipelineError::new(
+            "pattern.output_layers.capability",
+            "maze realization requires a maze-wall capability",
+        ));
+    };
+    let realization = realize_typed_maze_canonical_strokes_cancellable(
+        family,
+        plan,
+        maze,
+        source,
+        canvas,
+        mapping,
+        StrokeResponse {
+            minimum_thickness: response.minimum_thickness,
+            maximum_thickness: response.maximum_thickness,
+        },
+        style,
+        max_profile_samples,
+        max_outline_segments,
+        is_cancelled,
+    )?;
+    Ok(TypedOutputRealization {
+        output_layer_id: capability.layer_id,
+        capability: capability.clone(),
+        effective_setting: setting.clone(),
+        realization,
+    })
+}
+
 /// Binds connection strokes to the validated typed family/plan provenance before renderer consumption.
 ///
 /// # Errors
@@ -7041,6 +7363,62 @@ pub fn realize_typed_connection_canonical_strokes_cancellable(
             max_outline_segments,
             is_cancelled,
         )?,
+    })
+}
+
+/// Realizes one explicit connection-path output while retaining its capability and effective setting.
+///
+/// # Errors
+///
+/// Returns binding, response, cancellation, source, or canonical-outline diagnostics without partial output.
+#[allow(clippy::too_many_arguments)]
+pub fn realize_typed_connection_canonical_stroke_output_cancellable(
+    family: &TypedFamilyOutput,
+    plan: &PatternPipelinePlan,
+    capability: &OutputCapability,
+    setting: &EffectivePatternOutputSettings,
+    paths: &ConnectionPathSet,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    max_profile_samples: usize,
+    max_outline_segments: usize,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<TypedOutputRealization<CanonicalStrokeRealization>, PatternPipelineError> {
+    validate_output_realization_binding(plan, capability, setting)?;
+    let PatternGeometryResponse::Connected(response) = &setting.response else {
+        return Err(PatternPipelineError::new(
+            "pattern.output_layers.setting",
+            "connection realization requires a connected response",
+        ));
+    };
+    let Some((_site_mechanism, _program, style)) = capability.connection_paths() else {
+        return Err(PatternPipelineError::new(
+            "pattern.output_layers.capability",
+            "connection realization requires a connection-path capability",
+        ));
+    };
+    let realization = realize_typed_connection_canonical_strokes_cancellable(
+        family,
+        plan,
+        paths,
+        source,
+        canvas,
+        mapping,
+        StrokeResponse {
+            minimum_thickness: response.minimum_thickness,
+            maximum_thickness: response.maximum_thickness,
+        },
+        style,
+        max_profile_samples,
+        max_outline_segments,
+        is_cancelled,
+    )?;
+    Ok(TypedOutputRealization {
+        output_layer_id: capability.layer_id,
+        capability: capability.clone(),
+        effective_setting: setting.clone(),
+        realization,
     })
 }
 

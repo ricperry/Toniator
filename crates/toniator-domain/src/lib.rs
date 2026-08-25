@@ -2,7 +2,12 @@
 
 //! Authoritative, headless document concepts for Toniator.
 
-use std::{collections::HashSet, error::Error, fmt};
+use std::{
+    collections::HashSet,
+    error::Error,
+    fmt,
+    ops::{Deref, DerefMut},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -499,7 +504,6 @@ pub struct DocumentPatternSettings {
     pub density: DensityMetric2D,
     pub pattern_rotation_degrees: f64,
     pub shape_rotation_degrees: f64,
-    pub geometry_response: PatternGeometryResponse,
 }
 
 /// The presently supported normalized output-response branches. Mark fill and
@@ -510,6 +514,384 @@ pub enum PatternGeometryResponse {
     Marks(MarkGeometryResponse),
     /// Defines normalized round-brush widths for a guide-path output.
     Connected(ConnectedGeometryResponse),
+}
+
+/// One structural-output response bound atomically to an output-layer identity.
+///
+/// Stage 20N keeps this value separate from document-wide layout settings so every future
+/// heterogeneous output has exactly one typed base response owned by its definition bundle.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PatternOutputSettings {
+    pub output_layer_id: PatternOutputLayerId,
+    pub response: PatternGeometryResponse,
+}
+
+/// Atomic structural definition and ordered typed output-response settings.
+///
+/// This is the Stage 20N authority boundary. Existing current-format adapters may construct
+/// it from their singular response until schema-v5 replacement is completed, but consumers
+/// must validate this record before treating it as effective state.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PatternDefinitionBundle {
+    pub definition: PatternDefinition,
+    pub output_settings: Vec<PatternOutputSettings>,
+}
+
+/// Optional additive delta for exactly one typed structural output response.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PatternOutputResponseDelta {
+    pub output_layer_id: PatternOutputLayerId,
+    pub delta: ChannelGeometryResponseDelta,
+}
+
+/// One resolved output response projected in structural output order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EffectivePatternOutputSettings {
+    pub output_layer_id: PatternOutputLayerId,
+    pub response: PatternGeometryResponse,
+}
+
+impl PatternDefinitionBundle {
+    /// Validates atomic output settings against the exact definition output order and kinds.
+    ///
+    /// # Errors
+    ///
+    /// Returns stable bundle alignment, duplicate, foreign, or response-kind diagnostics without
+    /// mutating the supplied definition or exposing a partially accepted bundle.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.definition.output_layers.len() != self.output_settings.len() {
+            return Err(ValidationError::new(
+                "pattern.bundle.output_settings.cardinality",
+                "pattern definition bundles require one output setting per structural output",
+            ));
+        }
+        for (output, settings) in self
+            .definition
+            .output_layers
+            .iter()
+            .zip(&self.output_settings)
+        {
+            if output.id() != settings.output_layer_id {
+                return Err(ValidationError::new(
+                    "pattern.bundle.output_settings.order",
+                    "pattern definition bundle settings must match structural output IDs in order",
+                ));
+            }
+            validate_response_for_output(output, &settings.response)?;
+        }
+        Ok(())
+    }
+
+    /// Returns one validated ordered base response by output identity.
+    pub fn output_settings(&self) -> &[PatternOutputSettings] {
+        &self.output_settings
+    }
+}
+
+impl Deref for PatternDefinitionBundle {
+    type Target = PatternDefinition;
+
+    fn deref(&self) -> &Self::Target {
+        &self.definition
+    }
+}
+
+impl DerefMut for PatternDefinitionBundle {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.definition
+    }
+}
+
+/// Binds every internally allocated structural output to its sole current typed base response.
+///
+/// The helper is only used while materializing a new authoritative bundle; validation still
+/// checks the exact output IDs, order, and kinds before the candidate can be published.
+fn bundle_from_definition(definition: PatternDefinition) -> PatternDefinitionBundle {
+    let output_settings = definition
+        .output_layers
+        .iter()
+        .map(|output| PatternOutputSettings {
+            output_layer_id: output.id(),
+            response: match output {
+                PatternOutputLayer::CircularMarks { .. }
+                | PatternOutputLayer::MarkPrototype { .. } => {
+                    PatternGeometryResponse::Marks(MarkGeometryResponse {
+                        minimum_fill: 0.0,
+                        maximum_fill: 1.0,
+                    })
+                }
+                PatternOutputLayer::GuidePaths { .. }
+                | PatternOutputLayer::ParametricPaths { .. }
+                | PatternOutputLayer::ConnectionPaths { .. }
+                | PatternOutputLayer::MazeWalls { .. } => {
+                    PatternGeometryResponse::Connected(ConnectedGeometryResponse {
+                        minimum_thickness: 0.0,
+                        maximum_thickness: 1.0,
+                    })
+                }
+            },
+        })
+        .collect();
+    PatternDefinitionBundle {
+        definition,
+        output_settings,
+    }
+}
+
+/// Binds ID-free ordered recipe responses to freshly allocated structural outputs.
+///
+/// # Errors
+///
+/// Returns a stable cardinality or response-kind diagnostic when a complete
+/// recipe cannot bind one response to every output. Stage 20N retains the
+/// current single-output authoring gate but does not collapse the ordered
+/// representation.
+fn bind_recipe_output_settings(
+    definition: PatternDefinition,
+    recipes: &[PatternOutputSettingsRecipe],
+) -> Result<PatternDefinitionBundle, ValidationError> {
+    if recipes.len() != definition.output_layers.len() {
+        return Err(ValidationError::new(
+            "preset.recipe.output_settings.cardinality",
+            "recipe output settings must cover every structural output",
+        ));
+    }
+    let bundle = PatternDefinitionBundle {
+        output_settings: definition
+            .output_layers
+            .iter()
+            .zip(recipes)
+            .map(|(output, recipe)| PatternOutputSettings {
+                output_layer_id: output.id(),
+                response: recipe.response.clone(),
+            })
+            .collect(),
+        definition,
+    };
+    bundle.validate()?;
+    Ok(bundle)
+}
+
+/// Validates ordered keyed deltas against a definition bundle without applying arithmetic.
+///
+/// # Errors
+///
+/// Returns stable cardinality/order/foreign/type diagnostics; absent entries inherit and are valid.
+pub fn validate_pattern_output_deltas(
+    bundle: &PatternDefinitionBundle,
+    deltas: &[PatternOutputResponseDelta],
+) -> Result<(), ValidationError> {
+    bundle.validate()?;
+    let mut previous = None;
+    for entry in deltas {
+        let Some(index) = bundle
+            .output_settings
+            .iter()
+            .position(|base| base.output_layer_id == entry.output_layer_id)
+        else {
+            return Err(ValidationError::new(
+                "channel.pattern.output_deltas.foreign",
+                "channel output response delta targets a foreign output layer",
+            ));
+        };
+        if previous.is_some_and(|value| index <= value) {
+            return Err(ValidationError::new(
+                "channel.pattern.output_deltas.order",
+                "channel output response deltas must be unique and structural-order sorted",
+            ));
+        }
+        previous = Some(index);
+        validate_response_delta_kind(&bundle.output_settings[index].response, &entry.delta)?;
+    }
+    Ok(())
+}
+
+/// Inserts or replaces one keyed response delta in the bundle's structural output order.
+///
+/// This preserves the persisted ordered-intent invariant without deriving an effective response.
+/// The caller supplies a validated bundle selected by its channel; foreign output IDs and
+/// response-kind mismatches are rejected before any delta vector mutation becomes authoritative.
+///
+/// # Errors
+///
+/// Returns stable foreign, response-kind, or ordered-delta diagnostics and leaves `deltas`
+/// unchanged when the supplied entry cannot belong to `bundle`.
+fn upsert_pattern_output_delta_in_order(
+    bundle: &PatternDefinitionBundle,
+    deltas: &mut Vec<PatternOutputResponseDelta>,
+    entry: PatternOutputResponseDelta,
+) -> Result<(), ValidationError> {
+    validate_pattern_output_deltas(bundle, deltas)?;
+    let target_index = bundle
+        .output_settings
+        .iter()
+        .position(|setting| setting.output_layer_id == entry.output_layer_id)
+        .ok_or(ValidationError::new(
+            "channel.pattern.output_layer_id",
+            "response delta targets a missing output",
+        ))?;
+    validate_response_delta_kind(&bundle.output_settings[target_index].response, &entry.delta)?;
+    if let Some(existing) = deltas
+        .iter_mut()
+        .find(|existing| existing.output_layer_id == entry.output_layer_id)
+    {
+        existing.delta = entry.delta;
+        return Ok(());
+    }
+    let insertion_index = deltas
+        .iter()
+        .position(|existing| {
+            bundle
+                .output_settings
+                .iter()
+                .position(|setting| setting.output_layer_id == existing.output_layer_id)
+                .expect("validated delta belongs to bundle")
+                > target_index
+        })
+        .unwrap_or(deltas.len());
+    deltas.insert(insertion_index, entry);
+    Ok(())
+}
+
+/// Retains only deltas that bind to the supplied replacement bundle, in structural output order.
+///
+/// This is used after definition selection or shared-recipe replacement. It preserves an exact
+/// output-ID and response-kind match verbatim while deterministically dropping foreign or
+/// incompatible intent without deriving effective values.
+fn prune_output_response_deltas_for_bundle(
+    bundle: &PatternDefinitionBundle,
+    deltas: &[PatternOutputResponseDelta],
+) -> Vec<PatternOutputResponseDelta> {
+    bundle
+        .output_settings
+        .iter()
+        .filter_map(|setting| {
+            deltas
+                .iter()
+                .find(|entry| {
+                    entry.output_layer_id == setting.output_layer_id
+                        && validate_response_delta_kind(&setting.response, &entry.delta).is_ok()
+                })
+                .cloned()
+        })
+        .collect()
+}
+
+/// Resolves finite typed output responses in structural order while retaining unclamped arithmetic.
+///
+/// # Errors
+///
+/// Returns the base/delta alignment or finite response diagnostic atomically; no frontend computes
+/// this inheritance or arithmetic itself.
+pub fn effective_pattern_output_settings(
+    bundle: &PatternDefinitionBundle,
+    deltas: &[PatternOutputResponseDelta],
+) -> Result<Vec<EffectivePatternOutputSettings>, ValidationError> {
+    validate_pattern_output_deltas(bundle, deltas)?;
+    bundle
+        .output_settings
+        .iter()
+        .map(|base| {
+            let response = match deltas
+                .iter()
+                .find(|delta| delta.output_layer_id == base.output_layer_id)
+            {
+                None => base.response.clone(),
+                Some(delta) => apply_response_delta(&base.response, &delta.delta)?,
+            };
+            validate_pattern_geometry_response(&response)?;
+            Ok(EffectivePatternOutputSettings {
+                output_layer_id: base.output_layer_id,
+                response,
+            })
+        })
+        .collect()
+}
+
+/// Validates that one response branch belongs to the exact structural output kind.
+fn validate_response_for_output(
+    output: &PatternOutputLayer,
+    response: &PatternGeometryResponse,
+) -> Result<(), ValidationError> {
+    let marks = matches!(
+        output,
+        PatternOutputLayer::CircularMarks { .. } | PatternOutputLayer::MarkPrototype { .. }
+    );
+    let connected = matches!(
+        output,
+        PatternOutputLayer::GuidePaths { .. }
+            | PatternOutputLayer::ParametricPaths { .. }
+            | PatternOutputLayer::ConnectionPaths { .. }
+            | PatternOutputLayer::MazeWalls { .. }
+    );
+    match (marks, connected, response) {
+        (true, false, PatternGeometryResponse::Marks(_))
+        | (false, true, PatternGeometryResponse::Connected(_)) => {
+            validate_pattern_geometry_response(response)
+        }
+        _ => Err(ValidationError::new(
+            "pattern.bundle.output_settings.kind",
+            "pattern output setting response must match its structural output kind",
+        )),
+    }
+}
+
+/// Validates that one optional additive response delta has the exact base response branch.
+fn validate_response_delta_kind(
+    base: &PatternGeometryResponse,
+    delta: &ChannelGeometryResponseDelta,
+) -> Result<(), ValidationError> {
+    match (base, delta) {
+        (PatternGeometryResponse::Marks(_), ChannelGeometryResponseDelta::Marks(_))
+        | (PatternGeometryResponse::Connected(_), ChannelGeometryResponseDelta::Connected(_)) => {
+            Ok(())
+        }
+        _ => Err(ValidationError::new(
+            "channel.pattern.output_deltas.kind",
+            "channel output response delta must match its base response kind",
+        )),
+    }
+}
+
+/// Applies one typed response delta without clamping and retains finite domain validation.
+fn apply_response_delta(
+    base: &PatternGeometryResponse,
+    delta: &ChannelGeometryResponseDelta,
+) -> Result<PatternGeometryResponse, ValidationError> {
+    let response = match (base, delta) {
+        (PatternGeometryResponse::Marks(base), ChannelGeometryResponseDelta::Marks(delta)) => {
+            PatternGeometryResponse::Marks(MarkGeometryResponse {
+                minimum_fill: base.minimum_fill + delta.minimum_fill_delta.unwrap_or(0.0),
+                maximum_fill: base.maximum_fill + delta.maximum_fill_delta.unwrap_or(0.0),
+            })
+        }
+        (
+            PatternGeometryResponse::Connected(base),
+            ChannelGeometryResponseDelta::Connected(delta),
+        ) => PatternGeometryResponse::Connected(ConnectedGeometryResponse {
+            minimum_thickness: base.minimum_thickness
+                + delta.minimum_thickness_delta.unwrap_or(0.0),
+            maximum_thickness: base.maximum_thickness
+                + delta.maximum_thickness_delta.unwrap_or(0.0),
+        }),
+        _ => {
+            return Err(ValidationError::new(
+                "channel.pattern.output_deltas.kind",
+                "channel output response delta must match its base response kind",
+            ));
+        }
+    };
+    Ok(response)
+}
+
+/// Validates one typed geometry response through the existing domain-owned bounds authority.
+fn validate_pattern_geometry_response(
+    response: &PatternGeometryResponse,
+) -> Result<(), ValidationError> {
+    match response {
+        PatternGeometryResponse::Marks(value) => validate_mark_response(value),
+        PatternGeometryResponse::Connected(value) => validate_connected_response(value),
+    }
 }
 
 /// An optional additive density adjustment for one channel.
@@ -567,7 +949,7 @@ pub struct ChannelPatternInstance {
     pub definition_override: Option<PatternDefinitionId>,
     pub layout_delta: ChannelPatternLayoutDelta,
     pub shape_rotation_delta_degrees: Option<f64>,
-    pub geometry_response_delta: Option<ChannelGeometryResponseDelta>,
+    pub output_response_deltas: Vec<PatternOutputResponseDelta>,
 }
 
 /// The sole resolved pattern input for one channel.  Engine and frontends read
@@ -580,7 +962,7 @@ pub struct EffectiveChannelPatternInstance {
     pub translation_x: f64,
     pub translation_y: f64,
     pub shape_rotation_degrees: f64,
-    pub geometry_response: PatternGeometryResponse,
+    pub output_settings: Vec<EffectivePatternOutputSettings>,
 }
 
 /// Selects the authoritative definition whose active structural capabilities
@@ -1754,7 +2136,7 @@ pub struct Document {
     id: DocumentId,
     canvas: CanvasSpec,
     source: SourceReference,
-    pattern_definitions: Vec<PatternDefinition>,
+    pattern_definition_bundles: Vec<PatternDefinitionBundle>,
     channel_configuration: ChannelConfiguration,
     authored_structures: Vec<AuthoredStructure>,
     pattern_settings: DocumentPatternSettings,
@@ -1794,10 +2176,6 @@ impl Document {
             },
             pattern_rotation_degrees: 0.0,
             shape_rotation_degrees: 0.0,
-            geometry_response: PatternGeometryResponse::Marks(MarkGeometryResponse {
-                minimum_fill: 0.0,
-                maximum_fill: 1.0,
-            }),
         };
         let definition = PatternDefinition::supported_straight_grid(
             PatternDefinitionId(1),
@@ -1810,6 +2188,16 @@ impl Document {
                 additional_margin: 0.0,
             },
         );
+        let bundle = PatternDefinitionBundle {
+            output_settings: vec![PatternOutputSettings {
+                output_layer_id: PatternOutputLayerId(1),
+                response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+                    minimum_fill: 0.0,
+                    maximum_fill: 1.0,
+                }),
+            }],
+            definition,
+        };
         let template = ChannelTopologyTemplate {
             pattern_instance: ChannelPatternInstance {
                 definition_override: None,
@@ -1820,7 +2208,7 @@ impl Document {
                     translation_y: 0.0,
                 },
                 shape_rotation_delta_degrees: None,
-                geometry_response_delta: None,
+                output_response_deltas: Vec::new(),
             },
         };
         let topology = ChannelTopology::canonical(HalftoneChannelModel::Rgb, template)?;
@@ -1828,7 +2216,7 @@ impl Document {
             DocumentId(1),
             canvas,
             source,
-            vec![definition],
+            vec![bundle],
             settings,
             HalftoneChannelModel::Rgb,
             topology,
@@ -1845,7 +2233,7 @@ impl Document {
     pub fn new(
         id: DocumentId,
         canvas: CanvasSpec,
-        pattern_definitions: Vec<PatternDefinition>,
+        pattern_definition_bundles: Vec<PatternDefinitionBundle>,
         pattern_settings: DocumentPatternSettings,
         channels: Vec<ChannelState>,
     ) -> Result<Self, ValidationError> {
@@ -1853,7 +2241,7 @@ impl Document {
             id,
             canvas,
             SourceReference::Unassigned,
-            pattern_definitions,
+            pattern_definition_bundles,
             pattern_settings,
             channels,
         )
@@ -1870,7 +2258,7 @@ impl Document {
         id: DocumentId,
         canvas: CanvasSpec,
         source: SourceReference,
-        pattern_definitions: Vec<PatternDefinition>,
+        pattern_definition_bundles: Vec<PatternDefinitionBundle>,
         pattern_settings: DocumentPatternSettings,
         channels: Vec<ChannelState>,
     ) -> Result<Self, ValidationError> {
@@ -1878,7 +2266,7 @@ impl Document {
             id,
             canvas,
             source,
-            pattern_definitions,
+            pattern_definition_bundles,
             channel_configuration: ChannelConfiguration::Legacy(channels),
             authored_structures: Vec::new(),
             pattern_settings,
@@ -1901,7 +2289,7 @@ impl Document {
         id: DocumentId,
         canvas: CanvasSpec,
         source: SourceReference,
-        pattern_definitions: Vec<PatternDefinition>,
+        pattern_definition_bundles: Vec<PatternDefinitionBundle>,
         pattern_settings: DocumentPatternSettings,
         model: HalftoneChannelModel,
         topology: ChannelTopology,
@@ -1910,7 +2298,7 @@ impl Document {
             id,
             canvas,
             source,
-            pattern_definitions,
+            pattern_definition_bundles,
             channel_configuration: ChannelConfiguration::Topology { model, topology },
             authored_structures: Vec::new(),
             pattern_settings,
@@ -1929,7 +2317,7 @@ impl Document {
         id: DocumentId,
         canvas: CanvasSpec,
         source: SourceReference,
-        pattern_definitions: Vec<PatternDefinition>,
+        pattern_definition_bundles: Vec<PatternDefinitionBundle>,
         pattern_settings: DocumentPatternSettings,
         channels: Vec<ChannelState>,
         authored_structures: Vec<AuthoredStructure>,
@@ -1938,7 +2326,7 @@ impl Document {
             id,
             canvas,
             source,
-            pattern_definitions,
+            pattern_definition_bundles,
             channel_configuration: ChannelConfiguration::Legacy(channels),
             authored_structures,
             pattern_settings,
@@ -1958,7 +2346,7 @@ impl Document {
         id: DocumentId,
         canvas: CanvasSpec,
         source: SourceReference,
-        pattern_definitions: Vec<PatternDefinition>,
+        pattern_definition_bundles: Vec<PatternDefinitionBundle>,
         pattern_settings: DocumentPatternSettings,
         model: HalftoneChannelModel,
         topology: ChannelTopology,
@@ -1968,7 +2356,7 @@ impl Document {
             id,
             canvas,
             source,
-            pattern_definitions,
+            pattern_definition_bundles,
             channel_configuration: ChannelConfiguration::Topology { model, topology },
             authored_structures,
             pattern_settings,
@@ -1989,8 +2377,8 @@ impl Document {
         &self.source
     }
 
-    pub fn pattern_definitions(&self) -> &[PatternDefinition] {
-        &self.pattern_definitions
+    pub fn pattern_definition_bundles(&self) -> &[PatternDefinitionBundle] {
+        &self.pattern_definition_bundles
     }
 
     /// Returns the persisted document-wide base settings.  This is the only
@@ -2016,6 +2404,106 @@ impl Document {
                 .iter()
                 .find(|channel| channel.id == channel_id)
                 .map(|channel| &channel.pattern_instance),
+        }
+    }
+
+    /// Removes only response deltas that cannot apply to this channel's newly
+    /// selected definition bundle.
+    ///
+    /// Definition selection is allowed to replace an output contract.  This
+    /// keeps matching output IDs and response kinds verbatim while dropping
+    /// foreign or incompatible deltas before the candidate is validated, so a
+    /// valid structural replacement never fails solely because of stale
+    /// channel-relative response intent.
+    fn prune_incompatible_output_response_deltas(&mut self, channel_id: ChannelId) {
+        let definition_id = self
+            .channel_pattern_instance(channel_id)
+            .expect("validated channel exists")
+            .definition_override
+            .unwrap_or(self.pattern_settings.definition_id);
+        let bundle = self
+            .bundle(definition_id)
+            .expect("validated selected bundle exists")
+            .clone();
+        let instance = self
+            .channel_pattern_instance_mut(channel_id)
+            .expect("validated channel exists");
+        instance.output_response_deltas =
+            prune_output_response_deltas_for_bundle(&bundle, &instance.output_response_deltas);
+    }
+
+    /// Removes only deltas made foreign or type-incompatible by a document
+    /// base-definition replacement while preserving overridden channels.
+    fn prune_document_base_output_response_deltas(&mut self) {
+        let channel_ids = self.channel_ids();
+        for channel_id in channel_ids {
+            self.prune_incompatible_output_response_deltas(channel_id);
+        }
+    }
+
+    /// Rebinds one cloned definition's base responses to the duplicate output
+    /// IDs in exact structural order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an allocation/remap diagnostic when the clone does not retain a
+    /// one-to-one, response-kind-compatible output correspondence. It never
+    /// exposes an unbound duplicate bundle.
+    fn bundle_for_duplicate(
+        &self,
+        source: &PatternDefinitionBundle,
+        duplicate: PatternDefinition,
+    ) -> Result<PatternDefinitionBundle, ValidationError> {
+        if source.definition.output_layers.len() != duplicate.output_layers.len() {
+            return Err(ValidationError::new(
+                "pattern.bundle.duplicate.outputs",
+                "duplicated definitions must retain exact output correspondence",
+            ));
+        }
+        let output_settings = source
+            .output_settings
+            .iter()
+            .zip(&duplicate.output_layers)
+            .map(|(settings, output)| {
+                validate_response_for_output(output, &settings.response)?;
+                Ok(PatternOutputSettings {
+                    output_layer_id: output.id(),
+                    response: settings.response.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, ValidationError>>()?;
+        let bundle = PatternDefinitionBundle {
+            definition: duplicate,
+            output_settings,
+        };
+        bundle.validate()?;
+        Ok(bundle)
+    }
+
+    /// Remaps one channel's stored deltas through a validated copy-on-edit
+    /// output correspondence, retaining their authored order and values.
+    fn remap_channel_output_response_deltas(
+        &mut self,
+        channel_id: ChannelId,
+        source: &PatternDefinitionBundle,
+        duplicate: &PatternDefinitionBundle,
+    ) {
+        let correspondences: Vec<_> = source
+            .output_settings
+            .iter()
+            .zip(&duplicate.output_settings)
+            .map(|(old, new)| (old.output_layer_id, new.output_layer_id))
+            .collect();
+        let deltas = &mut self
+            .channel_pattern_instance_mut(channel_id)
+            .expect("validated channel exists")
+            .output_response_deltas;
+        for entry in deltas {
+            entry.output_layer_id = correspondences
+                .iter()
+                .find(|(old, _)| *old == entry.output_layer_id)
+                .map(|(_, new)| *new)
+                .expect("validated source delta has duplicate correspondence");
         }
     }
 
@@ -2047,10 +2535,11 @@ impl Document {
         let definition_id = instance
             .definition_override
             .unwrap_or(self.pattern_settings.definition_id);
-        let definition = self.definition(definition_id).ok_or(ValidationError::new(
+        let bundle = self.bundle(definition_id).ok_or(ValidationError::new(
             "channel.pattern.definition_id",
             "channel resolves a missing pattern definition",
         ))?;
+        let definition = &bundle.definition;
         let density_delta = instance.layout_delta.density.as_ref();
         let density = DensityMetric2D {
             across_x: self.pattern_settings.density.across_x
@@ -2063,39 +2552,8 @@ impl Document {
             + instance.layout_delta.rotation_degrees.unwrap_or(0.0);
         let shape_rotation_degrees = self.pattern_settings.shape_rotation_degrees
             + instance.shape_rotation_delta_degrees.unwrap_or(0.0);
-        let geometry_response = match (
-            &self.pattern_settings.geometry_response,
-            &instance.geometry_response_delta,
-        ) {
-            (PatternGeometryResponse::Marks(base), None) => {
-                PatternGeometryResponse::Marks(base.clone())
-            }
-            (
-                PatternGeometryResponse::Marks(base),
-                Some(ChannelGeometryResponseDelta::Marks(delta)),
-            ) => PatternGeometryResponse::Marks(MarkGeometryResponse {
-                minimum_fill: base.minimum_fill + delta.minimum_fill_delta.unwrap_or(0.0),
-                maximum_fill: base.maximum_fill + delta.maximum_fill_delta.unwrap_or(0.0),
-            }),
-            (PatternGeometryResponse::Connected(base), None) => {
-                PatternGeometryResponse::Connected(base.clone())
-            }
-            (
-                PatternGeometryResponse::Connected(base),
-                Some(ChannelGeometryResponseDelta::Connected(delta)),
-            ) => PatternGeometryResponse::Connected(ConnectedGeometryResponse {
-                minimum_thickness: base.minimum_thickness
-                    + delta.minimum_thickness_delta.unwrap_or(0.0),
-                maximum_thickness: base.maximum_thickness
-                    + delta.maximum_thickness_delta.unwrap_or(0.0),
-            }),
-            _ => {
-                return Err(ValidationError::new(
-                    "channel.pattern.geometry_response_delta",
-                    "channel response delta must match the document response branch",
-                ));
-            }
-        };
+        let output_settings =
+            effective_pattern_output_settings(bundle, &instance.output_response_deltas)?;
         let effective = EffectiveChannelPatternInstance {
             definition_id,
             density,
@@ -2103,10 +2561,10 @@ impl Document {
             translation_x: instance.layout_delta.translation_x,
             translation_y: instance.layout_delta.translation_y,
             shape_rotation_degrees,
-            geometry_response,
+            output_settings,
         };
         validate_effective_pattern(&effective)?;
-        validate_effective_response_compatibility(definition, &effective.geometry_response)?;
+        validate_effective_response_compatibility(definition, &effective.output_settings)?;
         if matches!(
             definition.output_layers.as_slice(),
             [PatternOutputLayer::GuidePaths { .. }
@@ -2266,13 +2724,27 @@ impl Document {
         })
     }
 
-    /// Builds a stale-aware mark-response delta from desired effective values.
-    pub fn set_channel_geometry_response_for_effective(
+    /// Builds a stale-aware output-keyed response delta from desired effective values.
+    pub fn set_channel_output_response_for_effective(
         &self,
         channel_id: ChannelId,
+        output_layer_id: PatternOutputLayerId,
         desired: PatternGeometryResponse,
     ) -> Result<DocumentCommand, ValidationError> {
-        let geometry_response = match (&self.pattern_settings.geometry_response, desired) {
+        let effective = self.effective_channel_pattern(channel_id)?;
+        let base = self
+            .bundle(effective.definition_id)
+            .and_then(|bundle| {
+                bundle
+                    .output_settings
+                    .iter()
+                    .find(|setting| setting.output_layer_id == output_layer_id)
+            })
+            .ok_or(ValidationError::new(
+                "channel.pattern.output_layer_id",
+                "channel output response targets a missing structural output",
+            ))?;
+        let delta = match (&base.response, desired) {
             (PatternGeometryResponse::Marks(base), PatternGeometryResponse::Marks(desired)) => {
                 validate_mark_response(&desired)?;
                 ChannelGeometryResponseDelta::Marks(MarkGeometryResponseDelta {
@@ -2301,10 +2773,11 @@ impl Document {
                 ));
             }
         };
-        Ok(DocumentCommand::SetChannelGeometryResponseDelta {
+        Ok(DocumentCommand::SetChannelOutputResponseDelta {
             base: self.pattern_settings.clone(),
             channel_id,
-            geometry_response,
+            output_layer_id,
+            delta,
         })
     }
 
@@ -2314,18 +2787,20 @@ impl Document {
     ///
     /// Returns a validation error when the requested channel does not exist; command execution
     /// still validates that remaining overrides are compatible atomically.
-    pub fn reset_channel_geometry_response_delta(
+    pub fn reset_channel_output_response_delta(
         &self,
         channel_id: ChannelId,
+        output_layer_id: PatternOutputLayerId,
     ) -> Result<DocumentCommand, ValidationError> {
         self.channel_pattern_instance(channel_id)
             .ok_or(ValidationError::new(
                 "channel.pattern.channel",
                 "channel pattern instance is missing",
             ))?;
-        Ok(DocumentCommand::ResetChannelGeometryResponseDelta {
+        Ok(DocumentCommand::ResetChannelOutputResponseDelta {
             base: self.pattern_settings.clone(),
             channel_id,
+            output_layer_id,
         })
     }
 
@@ -2341,16 +2816,31 @@ impl Document {
     pub fn set_channel_mark_response_field_for_effective(
         &self,
         channel_id: ChannelId,
+        output_layer_id: PatternOutputLayerId,
         edit: MarkGeometryFieldEdit,
     ) -> Result<DocumentCommand, ValidationError> {
         let effective = self.effective_channel_pattern(channel_id)?;
-        let PatternGeometryResponse::Marks(mut desired) = effective.geometry_response else {
+        let Some(PatternGeometryResponse::Marks(mut desired)) = effective
+            .output_settings
+            .iter()
+            .find(|setting| setting.output_layer_id == output_layer_id)
+            .map(|setting| setting.response.clone())
+        else {
             return Err(ValidationError::new(
                 "channel.pattern.geometry_response",
                 "mark response editing requires the marks branch",
             ));
         };
-        let PatternGeometryResponse::Marks(base) = &self.pattern_settings.geometry_response else {
+        let Some(PatternGeometryResponse::Marks(base)) = self
+            .bundle(effective.definition_id)
+            .and_then(|bundle| {
+                bundle
+                    .output_settings
+                    .iter()
+                    .find(|setting| setting.output_layer_id == output_layer_id)
+            })
+            .map(|setting| &setting.response)
+        else {
             return Err(ValidationError::new(
                 "channel.pattern.geometry_response",
                 "mark response editing requires the marks base",
@@ -2362,7 +2852,12 @@ impl Document {
                 "channel.id",
                 "command targets a missing channel",
             ))?;
-        let mut delta = match &instance.geometry_response_delta {
+        let mut delta = match instance
+            .output_response_deltas
+            .iter()
+            .find(|delta| delta.output_layer_id == output_layer_id)
+            .map(|delta| &delta.delta)
+        {
             Some(ChannelGeometryResponseDelta::Marks(delta)) => delta.clone(),
             Some(ChannelGeometryResponseDelta::Connected(_)) => {
                 return Err(ValidationError::new(
@@ -2386,10 +2881,11 @@ impl Document {
             }
         }
         validate_mark_response(&desired)?;
-        Ok(DocumentCommand::SetChannelGeometryResponseDelta {
+        Ok(DocumentCommand::SetChannelOutputResponseDelta {
             base: self.pattern_settings.clone(),
             channel_id,
-            geometry_response: ChannelGeometryResponseDelta::Marks(delta),
+            output_layer_id,
+            delta: ChannelGeometryResponseDelta::Marks(delta),
         })
     }
 
@@ -2458,7 +2954,8 @@ impl Document {
     /// The document owns this referential-integrity boundary; evaluators and
     /// renderers must not retain resources that this method permits removing.
     fn authored_structure_is_referenced(&self, id: AuthoredStructureId) -> bool {
-        self.pattern_definitions.iter().any(|definition| {
+        self.pattern_definition_bundles.iter().any(|bundle| {
+            let definition = &bundle.definition;
             definition.mechanisms.iter().any(|mechanism| {
                 matches!(mechanism,
                     PatternMechanism::GuideDimensions { dimensions, .. }
@@ -2547,7 +3044,7 @@ impl Document {
         template: ChannelTopologyTemplate,
     ) -> Result<ChannelTopology, ValidationError> {
         let topology = ChannelTopology::canonical(model, template)?;
-        validate_topology(model, &topology, &self.pattern_definitions)?;
+        validate_topology(model, &topology, &self.pattern_definition_bundles)?;
         Ok(topology)
     }
 
@@ -2584,19 +3081,6 @@ impl Document {
         ] {
             descriptors.push(descriptor_from_contract(field, PropertyTarget::Document));
         }
-        let response_fields = match &self.pattern_settings.geometry_response {
-            PatternGeometryResponse::Marks(_) => [
-                PropertyFieldId::MarkMinimumFill,
-                PropertyFieldId::MarkMaximumFill,
-            ],
-            PatternGeometryResponse::Connected(_) => [
-                PropertyFieldId::ConnectedMinimumThickness,
-                PropertyFieldId::ConnectedMaximumThickness,
-            ],
-        };
-        for field in response_fields {
-            descriptors.push(descriptor_from_contract(field, PropertyTarget::Document));
-        }
         for channel_id in self.channel_ids() {
             let target = PropertyTarget::Channel(channel_id);
             for field in [
@@ -2612,8 +3096,31 @@ impl Document {
             ] {
                 descriptors.push(descriptor_from_contract(field, target));
             }
-            for field in response_fields {
-                descriptors.push(descriptor_from_contract(field, target));
+            if let Ok(effective) = self.effective_channel_pattern(channel_id)
+                && let Some(definition) = self.definition(effective.definition_id)
+            {
+                for output in &definition.output_layers {
+                    let fields = match output {
+                        PatternOutputLayer::CircularMarks { .. }
+                        | PatternOutputLayer::MarkPrototype { .. } => [
+                            PropertyFieldId::MarkMinimumFill,
+                            PropertyFieldId::MarkMaximumFill,
+                        ],
+                        PatternOutputLayer::GuidePaths { .. }
+                        | PatternOutputLayer::ParametricPaths { .. }
+                        | PatternOutputLayer::ConnectionPaths { .. }
+                        | PatternOutputLayer::MazeWalls { .. } => [
+                            PropertyFieldId::ConnectedMinimumThickness,
+                            PropertyFieldId::ConnectedMaximumThickness,
+                        ],
+                    };
+                    for field in fields {
+                        descriptors.push(descriptor_from_contract(
+                            field,
+                            PropertyTarget::ChannelOutput(channel_id, output.id()),
+                        ));
+                    }
+                }
             }
             if let Some(model) = self.channel_model() {
                 for field in [
@@ -2664,7 +3171,8 @@ impl Document {
                 }
             }
         }
-        for definition in &self.pattern_definitions {
+        for bundle in &self.pattern_definition_bundles {
+            let definition = &bundle.definition;
             let definition_target = PropertyTarget::Definition(definition.id);
             for field in [
                 PropertyFieldId::CoverageGuardSteps,
@@ -3056,45 +3564,11 @@ impl Document {
                 PropertyFieldId::ShapeRotationDegrees => PropertyCurrentValueKind::FiniteF64(
                     self.pattern_settings.shape_rotation_degrees,
                 ),
-                PropertyFieldId::MarkMinimumFill => {
-                    match &self.pattern_settings.geometry_response {
-                        PatternGeometryResponse::Marks(response) => {
-                            PropertyCurrentValueKind::FiniteF64(response.minimum_fill)
-                        }
-                        PatternGeometryResponse::Connected(_) => {
-                            unreachable!("inactive mark descriptor")
-                        }
-                    }
-                }
-                PropertyFieldId::MarkMaximumFill => {
-                    match &self.pattern_settings.geometry_response {
-                        PatternGeometryResponse::Marks(response) => {
-                            PropertyCurrentValueKind::FiniteF64(response.maximum_fill)
-                        }
-                        PatternGeometryResponse::Connected(_) => {
-                            unreachable!("inactive mark descriptor")
-                        }
-                    }
-                }
-                PropertyFieldId::ConnectedMinimumThickness => {
-                    match &self.pattern_settings.geometry_response {
-                        PatternGeometryResponse::Connected(response) => {
-                            PropertyCurrentValueKind::FiniteF64(response.minimum_thickness)
-                        }
-                        PatternGeometryResponse::Marks(_) => {
-                            unreachable!("inactive connected descriptor")
-                        }
-                    }
-                }
-                PropertyFieldId::ConnectedMaximumThickness => {
-                    match &self.pattern_settings.geometry_response {
-                        PatternGeometryResponse::Connected(response) => {
-                            PropertyCurrentValueKind::FiniteF64(response.maximum_thickness)
-                        }
-                        PatternGeometryResponse::Marks(_) => {
-                            unreachable!("inactive connected descriptor")
-                        }
-                    }
+                PropertyFieldId::MarkMinimumFill
+                | PropertyFieldId::MarkMaximumFill
+                | PropertyFieldId::ConnectedMinimumThickness
+                | PropertyFieldId::ConnectedMaximumThickness => {
+                    unreachable!("document-wide response descriptors are not active")
                 }
                 _ => unreachable!("document descriptor is not a document-base field"),
             },
@@ -3122,7 +3596,12 @@ impl Document {
                     PropertyFieldId::TranslationY => {
                         PropertyCurrentValueKind::FiniteF64(effective.translation_y)
                     }
-                    PropertyFieldId::MarkMinimumFill => match effective.geometry_response {
+                    PropertyFieldId::MarkMinimumFill => match &effective
+                        .output_settings
+                        .first()
+                        .expect("active output setting")
+                        .response
+                    {
                         PatternGeometryResponse::Marks(response) => {
                             PropertyCurrentValueKind::FiniteF64(response.minimum_fill)
                         }
@@ -3130,7 +3609,12 @@ impl Document {
                             unreachable!("inactive mark descriptor")
                         }
                     },
-                    PropertyFieldId::MarkMaximumFill => match effective.geometry_response {
+                    PropertyFieldId::MarkMaximumFill => match &effective
+                        .output_settings
+                        .first()
+                        .expect("active output setting")
+                        .response
+                    {
                         PatternGeometryResponse::Marks(response) => {
                             PropertyCurrentValueKind::FiniteF64(response.maximum_fill)
                         }
@@ -3138,7 +3622,11 @@ impl Document {
                             unreachable!("inactive mark descriptor")
                         }
                     },
-                    PropertyFieldId::ConnectedMinimumThickness => match effective.geometry_response
+                    PropertyFieldId::ConnectedMinimumThickness => match &effective
+                        .output_settings
+                        .first()
+                        .expect("active output setting")
+                        .response
                     {
                         PatternGeometryResponse::Connected(response) => {
                             PropertyCurrentValueKind::FiniteF64(response.minimum_thickness)
@@ -3147,7 +3635,11 @@ impl Document {
                             unreachable!("inactive connected descriptor")
                         }
                     },
-                    PropertyFieldId::ConnectedMaximumThickness => match effective.geometry_response
+                    PropertyFieldId::ConnectedMaximumThickness => match &effective
+                        .output_settings
+                        .first()
+                        .expect("active output setting")
+                        .response
                     {
                         PatternGeometryResponse::Connected(response) => {
                             PropertyCurrentValueKind::FiniteF64(response.maximum_thickness)
@@ -3234,9 +3726,61 @@ impl Document {
                     _ => unreachable!("channel descriptor field"),
                 }
             }
+            PropertyTarget::ChannelOutput(channel_id, output_layer_id) => {
+                let effective = self
+                    .effective_channel_pattern(channel_id)
+                    .expect("active output descriptor resolves an effective pattern");
+                let definition = self
+                    .definition(effective.definition_id)
+                    .expect("active output descriptor resolves a definition");
+                let output = definition
+                    .output_layers
+                    .iter()
+                    .find(|output| output.id() == output_layer_id)
+                    .expect("active output descriptor targets a structural output");
+                let response = effective
+                    .output_settings
+                    .iter()
+                    .find(|setting| setting.output_layer_id == output_layer_id)
+                    .map(|setting| &setting.response)
+                    .expect("active output descriptor resolves an output setting");
+                match (descriptor.field, output, response) {
+                    (
+                        PropertyFieldId::MarkMinimumFill,
+                        PatternOutputLayer::CircularMarks { .. }
+                        | PatternOutputLayer::MarkPrototype { .. },
+                        PatternGeometryResponse::Marks(response),
+                    ) => PropertyCurrentValueKind::FiniteF64(response.minimum_fill),
+                    (
+                        PropertyFieldId::MarkMaximumFill,
+                        PatternOutputLayer::CircularMarks { .. }
+                        | PatternOutputLayer::MarkPrototype { .. },
+                        PatternGeometryResponse::Marks(response),
+                    ) => PropertyCurrentValueKind::FiniteF64(response.maximum_fill),
+                    (
+                        PropertyFieldId::ConnectedMinimumThickness,
+                        PatternOutputLayer::GuidePaths { .. }
+                        | PatternOutputLayer::ParametricPaths { .. }
+                        | PatternOutputLayer::ConnectionPaths { .. }
+                        | PatternOutputLayer::MazeWalls { .. },
+                        PatternGeometryResponse::Connected(response),
+                    ) => PropertyCurrentValueKind::FiniteF64(response.minimum_thickness),
+                    (
+                        PropertyFieldId::ConnectedMaximumThickness,
+                        PatternOutputLayer::GuidePaths { .. }
+                        | PatternOutputLayer::ParametricPaths { .. }
+                        | PatternOutputLayer::ConnectionPaths { .. }
+                        | PatternOutputLayer::MazeWalls { .. },
+                        PatternGeometryResponse::Connected(response),
+                    ) => PropertyCurrentValueKind::FiniteF64(response.maximum_thickness),
+                    _ => {
+                        unreachable!("output response descriptor must match structural output kind")
+                    }
+                }
+            }
             PropertyTarget::Definition(definition_id) => {
                 let definition = self
-                    .pattern_definitions
+                    .pattern_definition_bundles
                     .iter()
                     .find(|definition| definition.id == definition_id)
                     .expect("active definition descriptor");
@@ -3252,7 +3796,7 @@ impl Document {
             }
             PropertyTarget::GuideDimension(definition_id, mechanism_id, dimension_id) => {
                 let mechanism = self
-                    .pattern_definitions
+                    .pattern_definition_bundles
                     .iter()
                     .find(|definition| definition.id == definition_id)
                     .and_then(|definition| {
@@ -3423,7 +3967,7 @@ impl Document {
             }
             PropertyTarget::Mechanism(definition_id, mechanism_id) => {
                 let mechanism = self
-                    .pattern_definitions
+                    .pattern_definition_bundles
                     .iter()
                     .find(|definition| definition.id == definition_id)
                     .and_then(|definition| {
@@ -3437,7 +3981,7 @@ impl Document {
             }
             PropertyTarget::OutputLayer(definition_id, output_layer_id) => {
                 let layer = self
-                    .pattern_definitions
+                    .pattern_definition_bundles
                     .iter()
                     .find(|definition| definition.id == definition_id)
                     .and_then(|definition| {
@@ -3542,11 +4086,22 @@ impl Document {
     /// document base or an explicitly stored delta/override. It is metadata
     /// only and never changes the resolver's authority.
     fn property_inheritance_for(&self, descriptor: &PropertyDescriptor) -> PropertyInheritance {
-        let PropertyTarget::Channel(channel_id) = descriptor.target else {
-            return PropertyInheritance::NotApplicable;
+        let channel_id = match descriptor.target {
+            PropertyTarget::Channel(channel_id) | PropertyTarget::ChannelOutput(channel_id, _) => {
+                channel_id
+            }
+            _ => return PropertyInheritance::NotApplicable,
         };
         let Some(instance) = self.channel_pattern_instance(channel_id) else {
             return PropertyInheritance::NotApplicable;
+        };
+        let output_delta = match descriptor.target {
+            PropertyTarget::ChannelOutput(_, output_layer_id) => instance
+                .output_response_deltas
+                .iter()
+                .find(|entry| entry.output_layer_id == output_layer_id)
+                .map(|entry| &entry.delta),
+            _ => None,
         };
         match descriptor.field {
             PropertyFieldId::DensityAcrossX | PropertyFieldId::DensityAcrossY => {
@@ -3570,7 +4125,7 @@ impl Document {
                     PropertyInheritance::Inherited
                 }
             }
-            PropertyFieldId::MarkMinimumFill => match &instance.geometry_response_delta {
+            PropertyFieldId::MarkMinimumFill => match output_delta {
                 Some(ChannelGeometryResponseDelta::Marks(delta))
                     if delta.minimum_fill_delta.is_some() =>
                 {
@@ -3578,7 +4133,7 @@ impl Document {
                 }
                 _ => PropertyInheritance::Inherited,
             },
-            PropertyFieldId::MarkMaximumFill => match &instance.geometry_response_delta {
+            PropertyFieldId::MarkMaximumFill => match output_delta {
                 Some(ChannelGeometryResponseDelta::Marks(delta))
                     if delta.maximum_fill_delta.is_some() =>
                 {
@@ -3586,7 +4141,7 @@ impl Document {
                 }
                 _ => PropertyInheritance::Inherited,
             },
-            PropertyFieldId::ConnectedMinimumThickness => match &instance.geometry_response_delta {
+            PropertyFieldId::ConnectedMinimumThickness => match output_delta {
                 Some(ChannelGeometryResponseDelta::Connected(delta))
                     if delta.minimum_thickness_delta.is_some() =>
                 {
@@ -3594,7 +4149,7 @@ impl Document {
                 }
                 _ => PropertyInheritance::Inherited,
             },
-            PropertyFieldId::ConnectedMaximumThickness => match &instance.geometry_response_delta {
+            PropertyFieldId::ConnectedMaximumThickness => match output_delta {
                 Some(ChannelGeometryResponseDelta::Connected(delta))
                     if delta.maximum_thickness_delta.is_some() =>
                 {
@@ -3640,38 +4195,10 @@ impl Document {
                 PropertyFieldId::ShapeRotationDegrees => Some(PropertyCurrentValueKind::FiniteF64(
                     self.pattern_settings.shape_rotation_degrees,
                 )),
-                PropertyFieldId::MarkMinimumFill => {
-                    match &self.pattern_settings.geometry_response {
-                        PatternGeometryResponse::Marks(response) => {
-                            Some(PropertyCurrentValueKind::FiniteF64(response.minimum_fill))
-                        }
-                        PatternGeometryResponse::Connected(_) => None,
-                    }
-                }
-                PropertyFieldId::MarkMaximumFill => {
-                    match &self.pattern_settings.geometry_response {
-                        PatternGeometryResponse::Marks(response) => {
-                            Some(PropertyCurrentValueKind::FiniteF64(response.maximum_fill))
-                        }
-                        PatternGeometryResponse::Connected(_) => None,
-                    }
-                }
-                PropertyFieldId::ConnectedMinimumThickness => {
-                    match &self.pattern_settings.geometry_response {
-                        PatternGeometryResponse::Connected(response) => Some(
-                            PropertyCurrentValueKind::FiniteF64(response.minimum_thickness),
-                        ),
-                        PatternGeometryResponse::Marks(_) => None,
-                    }
-                }
-                PropertyFieldId::ConnectedMaximumThickness => {
-                    match &self.pattern_settings.geometry_response {
-                        PatternGeometryResponse::Connected(response) => Some(
-                            PropertyCurrentValueKind::FiniteF64(response.maximum_thickness),
-                        ),
-                        PatternGeometryResponse::Marks(_) => None,
-                    }
-                }
+                PropertyFieldId::MarkMinimumFill
+                | PropertyFieldId::MarkMaximumFill
+                | PropertyFieldId::ConnectedMinimumThickness
+                | PropertyFieldId::ConnectedMaximumThickness => None,
                 _ => None,
             },
             PropertyTarget::Channel(channel_id) => {
@@ -3701,22 +4228,9 @@ impl Document {
                     PropertyFieldId::ShapeRotationDegrees => instance
                         .shape_rotation_delta_degrees
                         .map(PropertyCurrentValueKind::FiniteF64),
-                    PropertyFieldId::MarkMinimumFill => match &instance.geometry_response_delta {
-                        Some(ChannelGeometryResponseDelta::Marks(delta)) => delta
-                            .minimum_fill_delta
-                            .map(PropertyCurrentValueKind::FiniteF64),
-                        Some(ChannelGeometryResponseDelta::Connected(_)) => None,
-                        None => None,
-                    },
-                    PropertyFieldId::MarkMaximumFill => match &instance.geometry_response_delta {
-                        Some(ChannelGeometryResponseDelta::Marks(delta)) => delta
-                            .maximum_fill_delta
-                            .map(PropertyCurrentValueKind::FiniteF64),
-                        Some(ChannelGeometryResponseDelta::Connected(_)) => None,
-                        None => None,
-                    },
+                    PropertyFieldId::MarkMinimumFill | PropertyFieldId::MarkMaximumFill => None,
                     PropertyFieldId::ConnectedMinimumThickness => {
-                        match &instance.geometry_response_delta {
+                        match None::<&ChannelGeometryResponseDelta> {
                             Some(ChannelGeometryResponseDelta::Connected(delta)) => delta
                                 .minimum_thickness_delta
                                 .map(PropertyCurrentValueKind::FiniteF64),
@@ -3724,7 +4238,7 @@ impl Document {
                         }
                     }
                     PropertyFieldId::ConnectedMaximumThickness => {
-                        match &instance.geometry_response_delta {
+                        match None::<&ChannelGeometryResponseDelta> {
                             Some(ChannelGeometryResponseDelta::Connected(delta)) => delta
                                 .maximum_thickness_delta
                                 .map(PropertyCurrentValueKind::FiniteF64),
@@ -3822,10 +4336,14 @@ impl Document {
             .map(|effective| effective.definition_id)
     }
 
-    fn definition(&self, id: PatternDefinitionId) -> Option<&PatternDefinition> {
-        self.pattern_definitions
+    fn bundle(&self, id: PatternDefinitionId) -> Option<&PatternDefinitionBundle> {
+        self.pattern_definition_bundles
             .iter()
-            .find(|definition| definition.id == id)
+            .find(|bundle| bundle.definition.id == id)
+    }
+
+    fn definition(&self, id: PatternDefinitionId) -> Option<&PatternDefinition> {
+        self.bundle(id).map(|bundle| &bundle.definition)
     }
 
     /// Returns the channels targeting one definition in authoritative document
@@ -3840,9 +4358,9 @@ impl Document {
 
     fn allocate_definition_id(&self) -> Result<PatternDefinitionId, ValidationError> {
         next_id(
-            self.pattern_definitions
+            self.pattern_definition_bundles
                 .iter()
-                .map(|definition| definition.id.0),
+                .map(|bundle| bundle.definition.id.0),
             "pattern_definitions.id",
         )
         .map(PatternDefinitionId)
@@ -3850,8 +4368,9 @@ impl Document {
 
     fn allocate_mechanism_id(&self) -> Result<PatternMechanismId, ValidationError> {
         next_id(
-            self.pattern_definitions.iter().flat_map(|definition| {
-                definition
+            self.pattern_definition_bundles.iter().flat_map(|bundle| {
+                bundle
+                    .definition
                     .mechanisms
                     .iter()
                     .map(|mechanism| mechanism.id().0)
@@ -3863,9 +4382,13 @@ impl Document {
 
     fn allocate_output_layer_id(&self) -> Result<PatternOutputLayerId, ValidationError> {
         next_id(
-            self.pattern_definitions
-                .iter()
-                .flat_map(|definition| definition.output_layers.iter().map(|layer| layer.id().0)),
+            self.pattern_definition_bundles.iter().flat_map(|bundle| {
+                bundle
+                    .definition
+                    .output_layers
+                    .iter()
+                    .map(|layer| layer.id().0)
+            }),
             "pattern_definitions.output_layers.id",
         )
         .map(PatternOutputLayerId)
@@ -3873,9 +4396,9 @@ impl Document {
 
     fn allocate_dimension_id(&self) -> Result<GuideDimensionId, ValidationError> {
         next_id(
-            self.pattern_definitions
+            self.pattern_definition_bundles
                 .iter()
-                .flat_map(|definition| definition.mechanisms.iter())
+                .flat_map(|bundle| bundle.definition.mechanisms.iter())
                 .flat_map(|mechanism| match mechanism {
                     PatternMechanism::StraightGuideDimensions { dimensions, .. } => dimensions
                         .iter()
@@ -3996,7 +4519,7 @@ impl Document {
             )
         })?);
         if self
-            .pattern_definitions
+            .pattern_definition_bundles
             .iter()
             .flat_map(|definition| definition.mechanisms.iter())
             .any(|mechanism| mechanism.id() == intersection_id)
@@ -4032,11 +4555,11 @@ impl Document {
         channel_id: Option<ChannelId>,
         recipe: &PatternDefinitionRecipe,
     ) -> Result<MaterializedPatternDefinitionRecipe, ValidationError> {
-        let (definition_recipe, shape_draft, connection, maze) = match recipe {
-            PatternDefinitionRecipe::AuthoredClosedShapeMarks { definition, shape } => {
+        let (definition_recipe, shape_draft, connection, maze) = match &recipe.structure {
+            PatternStructureRecipe::AuthoredClosedShapeMarks { definition, shape } => {
                 (definition.as_ref(), Some(shape), None, None)
             }
-            PatternDefinitionRecipe::ConnectionPaths {
+            PatternStructureRecipe::ConnectionPaths {
                 definition,
                 program,
                 style,
@@ -4044,7 +4567,7 @@ impl Document {
                 validate_connection_recipe(definition, program)?;
                 (definition.as_ref(), None, Some((program, *style)), None)
             }
-            PatternDefinitionRecipe::MazeWalls {
+            PatternStructureRecipe::MazeWalls {
                 definition,
                 program,
                 style,
@@ -4052,11 +4575,13 @@ impl Document {
                 validate_maze_recipe(definition, program)?;
                 (definition.as_ref(), None, None, Some((program, *style)))
             }
-            _ => (recipe, None, None, None),
+            _ => (&recipe.structure, None, None, None),
         };
         let neutral = self.allocate_neutral_definition_from_recipe(definition_recipe)?;
         let mut candidate = self.clone();
-        candidate.pattern_definitions.push(neutral.clone());
+        candidate
+            .pattern_definition_bundles
+            .push(bundle_from_definition(neutral.clone()));
         if let Some(channel_id) = channel_id {
             candidate.retarget_channel(channel_id, neutral.id);
         } else {
@@ -4065,7 +4590,7 @@ impl Document {
         candidate.apply_recipe_controls(neutral.id, definition_recipe)?;
         if let Some((program, style)) = connection {
             let definition = candidate
-                .pattern_definitions
+                .pattern_definition_bundles
                 .iter_mut()
                 .find(|definition| definition.id == neutral.id)
                 .expect("fresh recipe definition");
@@ -4100,7 +4625,7 @@ impl Document {
         }
         if let Some((program, style)) = maze {
             let definition = candidate
-                .pattern_definitions
+                .pattern_definition_bundles
                 .iter_mut()
                 .find(|definition| definition.id == neutral.id)
                 .expect("fresh recipe definition");
@@ -4135,7 +4660,7 @@ impl Document {
         }
         let authored_structure = if let Some(shape_draft) = shape_draft {
             let definition = candidate
-                .pattern_definitions
+                .pattern_definition_bundles
                 .iter_mut()
                 .find(|definition| definition.id == neutral.id)
                 .expect("fresh recipe definition");
@@ -4182,8 +4707,9 @@ impl Document {
                 "recipe materialization lost its fresh definition",
             )
         })?;
+        let bundle = bind_recipe_output_settings(definition, &recipe.output_settings)?;
         Ok(MaterializedPatternDefinitionRecipe {
-            definition,
+            bundle,
             authored_structure,
         })
     }
@@ -4193,13 +4719,13 @@ impl Document {
     /// the public transition-draft authority.
     fn allocate_neutral_definition_from_recipe(
         &self,
-        recipe: &PatternDefinitionRecipe,
+        recipe: &PatternStructureRecipe,
     ) -> Result<PatternDefinition, ValidationError> {
         match recipe {
-            PatternDefinitionRecipe::StraightGrid(draft) => {
+            PatternStructureRecipe::StraightGrid(draft) => {
                 self.allocate_definition_from_draft(draft)
             }
-            PatternDefinitionRecipe::GeneralizedStraightGuides {
+            PatternStructureRecipe::GeneralizedStraightGuides {
                 name,
                 coverage,
                 dimensions,
@@ -4276,7 +4802,7 @@ impl Document {
                 validate_definition(&definition)?;
                 Ok(definition)
             }
-            PatternDefinitionRecipe::RandomSites {
+            PatternStructureRecipe::RandomSites {
                 name,
                 coverage,
                 character: _,
@@ -4328,9 +4854,9 @@ impl Document {
                 validate_definition(&definition)?;
                 Ok(definition)
             }
-            PatternDefinitionRecipe::ConnectionPaths { .. }
-            | PatternDefinitionRecipe::MazeWalls { .. }
-            | PatternDefinitionRecipe::AuthoredClosedShapeMarks { .. } => {
+            PatternStructureRecipe::ConnectionPaths { .. }
+            | PatternStructureRecipe::MazeWalls { .. }
+            | PatternStructureRecipe::AuthoredClosedShapeMarks { .. } => {
                 unreachable!("output recipe wrapper is removed before neutral allocation")
             }
         }
@@ -4342,11 +4868,11 @@ impl Document {
     fn apply_recipe_controls(
         &mut self,
         definition_id: PatternDefinitionId,
-        recipe: &PatternDefinitionRecipe,
+        recipe: &PatternStructureRecipe,
     ) -> Result<(), ValidationError> {
         match recipe {
-            PatternDefinitionRecipe::StraightGrid(_) => Ok(()),
-            PatternDefinitionRecipe::GeneralizedStraightGuides {
+            PatternStructureRecipe::StraightGrid(_) => Ok(()),
+            PatternStructureRecipe::GeneralizedStraightGuides {
                 coverage,
                 dimensions,
                 product,
@@ -4512,7 +5038,7 @@ impl Document {
                     )],
                 )
             }
-            PatternDefinitionRecipe::RandomSites {
+            PatternStructureRecipe::RandomSites {
                 coverage,
                 character,
                 seed,
@@ -4603,9 +5129,9 @@ impl Document {
                 let _ = (modulation_id, exclusion_id);
                 Ok(())
             }
-            PatternDefinitionRecipe::ConnectionPaths { .. }
-            | PatternDefinitionRecipe::MazeWalls { .. }
-            | PatternDefinitionRecipe::AuthoredClosedShapeMarks { .. } => {
+            PatternStructureRecipe::ConnectionPaths { .. }
+            | PatternStructureRecipe::MazeWalls { .. }
+            | PatternStructureRecipe::AuthoredClosedShapeMarks { .. } => {
                 unreachable!("output recipe wrapper is removed before control application")
             }
         }
@@ -4624,7 +5150,7 @@ impl Document {
             .expect("fresh recipe definition");
         validate_definition_edit(&definition, &edit)?;
         let target = self
-            .pattern_definitions
+            .pattern_definition_bundles
             .iter_mut()
             .find(|definition| definition.id == definition_id)
             .expect("fresh recipe definition");
@@ -5327,7 +5853,9 @@ impl Document {
         let mut mechanism_ids = HashSet::new();
         let mut output_layer_ids = HashSet::new();
         let mut dimension_ids = HashSet::new();
-        for definition in &self.pattern_definitions {
+        for bundle in &self.pattern_definition_bundles {
+            bundle.validate()?;
+            let definition = &bundle.definition;
             if !definition_ids.insert(definition.id) {
                 return Err(ValidationError::new(
                     "pattern_definitions",
@@ -5393,10 +5921,6 @@ impl Document {
             self.pattern_settings.shape_rotation_degrees,
             "document.pattern_settings.shape_rotation_degrees",
         )?;
-        match &self.pattern_settings.geometry_response {
-            PatternGeometryResponse::Marks(response) => validate_mark_response(response)?,
-            PatternGeometryResponse::Connected(response) => validate_connected_response(response)?,
-        }
         if self
             .definition(self.pattern_settings.definition_id)
             .is_none()
@@ -5427,7 +5951,7 @@ impl Document {
                 }
             }
             ChannelConfiguration::Topology { model, topology } => {
-                validate_topology(*model, topology, &self.pattern_definitions)?;
+                validate_topology(*model, topology, &self.pattern_definition_bundles)?;
             }
         }
         for channel_id in self.channel_ids() {
@@ -10262,8 +10786,8 @@ fn validate_channel_pattern_instance(
     if let Some(rotation) = instance.shape_rotation_delta_degrees {
         validate_finite(rotation, "channel.pattern.shape_rotation_delta_degrees")?;
     }
-    if let Some(delta) = &instance.geometry_response_delta {
-        let (minimum, maximum) = match delta {
+    for entry in &instance.output_response_deltas {
+        let (minimum, maximum) = match &entry.delta {
             ChannelGeometryResponseDelta::Marks(value) => {
                 (value.minimum_fill_delta, value.maximum_fill_delta)
             }
@@ -10311,10 +10835,10 @@ fn validate_effective_pattern(
         effective.shape_rotation_degrees,
         "effective_pattern.shape_rotation_degrees",
     )?;
-    match &effective.geometry_response {
-        PatternGeometryResponse::Marks(response) => validate_mark_response(response),
-        PatternGeometryResponse::Connected(response) => validate_connected_response(response),
+    for output in &effective.output_settings {
+        validate_pattern_geometry_response(&output.response)?;
     }
+    Ok(())
 }
 
 /// Confirms that the resolved definition can realize the persisted response branch.
@@ -10325,33 +10849,24 @@ fn validate_effective_pattern(
 /// the one homogeneous output kind do not agree.
 fn validate_effective_response_compatibility(
     definition: &PatternDefinition,
-    response: &PatternGeometryResponse,
+    settings: &[EffectivePatternOutputSettings],
 ) -> Result<(), ValidationError> {
-    let marks = definition.output_layers.iter().all(|layer| {
-        matches!(
-            layer,
-            PatternOutputLayer::CircularMarks { .. } | PatternOutputLayer::MarkPrototype { .. }
-        )
-    });
-    let paths = matches!(
-        definition.output_layers.as_slice(),
-        [PatternOutputLayer::GuidePaths { .. }
-            | PatternOutputLayer::ParametricPaths { .. }
-            | PatternOutputLayer::ConnectionPaths { .. }
-            | PatternOutputLayer::MazeWalls { .. }]
-    );
-    match (response, marks, paths) {
-        (PatternGeometryResponse::Marks(_), true, false)
-            if !definition.output_layers.is_empty() =>
-        {
-            Ok(())
-        }
-        (PatternGeometryResponse::Connected(_), false, true) => Ok(()),
-        _ => Err(ValidationError::new(
-            "channel.pattern.geometry_response",
-            "geometry response must match the definition's homogeneous output kind",
-        )),
+    if definition.output_layers.len() != settings.len() {
+        return Err(ValidationError::new(
+            "effective_pattern.output_settings.cardinality",
+            "effective settings must cover every structural output",
+        ));
     }
+    for (output, setting) in definition.output_layers.iter().zip(settings) {
+        if output.id() != setting.output_layer_id {
+            return Err(ValidationError::new(
+                "effective_pattern.output_settings.order",
+                "effective settings must retain structural output order",
+            ));
+        }
+        validate_response_for_output(output, &setting.response)?;
+    }
+    Ok(())
 }
 
 fn validate_mark_response(response: &MarkGeometryResponse) -> Result<(), ValidationError> {
@@ -10400,7 +10915,7 @@ fn validate_connected_response(
 fn validate_topology(
     model: HalftoneChannelModel,
     topology: &ChannelTopology,
-    definitions: &[PatternDefinition],
+    bundles: &[PatternDefinitionBundle],
 ) -> Result<(), ValidationError> {
     let required_roles = model.canonical_roles();
     if topology.channels.len() != required_roles.len() {
@@ -10424,9 +10939,9 @@ fn validate_topology(
             ));
         }
         if let Some(definition_id) = channel.pattern_instance.definition_override
-            && !definitions
+            && !bundles
                 .iter()
-                .any(|definition| definition.id == definition_id)
+                .any(|bundle| bundle.definition.id == definition_id)
         {
             return Err(ValidationError::new(
                 "channel.pattern.definition_id",
@@ -10805,6 +11320,8 @@ pub const PROPERTY_FIELD_IDS: &[PropertyFieldId] = &[
 pub enum PropertyTarget {
     Document,
     Channel(ChannelId),
+    /// Addresses one channel's inherited/additive response for an explicit structural output.
+    ChannelOutput(ChannelId, PatternOutputLayerId),
     Definition(PatternDefinitionId),
     Mechanism(PatternDefinitionId, PatternMechanismId),
     OutputLayer(PatternDefinitionId, PatternOutputLayerId),
@@ -13263,17 +13780,19 @@ const fn property_authority(field: PropertyFieldId, target: PropertyTarget) -> P
 /// States whether reset removes optional Stage 20G channel intent for one
 /// field rather than copying its current effective value.
 const fn property_reset_capable(field: PropertyFieldId, target: PropertyTarget) -> bool {
-    matches!(target, PropertyTarget::Channel(_))
-        && matches!(
-            field,
-            PropertyFieldId::DensityAcrossX
-                | PropertyFieldId::DensityAcrossY
-                | PropertyFieldId::RotationDegrees
-                | PropertyFieldId::ShapeRotationDegrees
-                | PropertyFieldId::MarkMinimumFill
-                | PropertyFieldId::MarkMaximumFill
-                | PropertyFieldId::DefinitionSelection
-        )
+    matches!(
+        target,
+        PropertyTarget::Channel(_) | PropertyTarget::ChannelOutput(_, _)
+    ) && matches!(
+        field,
+        PropertyFieldId::DensityAcrossX
+            | PropertyFieldId::DensityAcrossY
+            | PropertyFieldId::RotationDegrees
+            | PropertyFieldId::ShapeRotationDegrees
+            | PropertyFieldId::MarkMinimumFill
+            | PropertyFieldId::MarkMaximumFill
+            | PropertyFieldId::DefinitionSelection
+    )
 }
 
 const fn positive_bounds() -> Option<PropertyBounds> {
@@ -13365,12 +13884,12 @@ pub enum MarkOrientationDraft {
     GuideNormal { dimension_index: usize },
 }
 
-/// A complete ID-free recipe for an ordinary supported pattern definition.
+/// The structural, ID-free portion of a complete pattern recipe.
 ///
 /// All fields map directly to current typed schema controls; this recipe
 /// contains neither a preset discriminator nor evaluator/cache/render state.
 #[derive(Clone, Debug, PartialEq)]
-pub enum PatternDefinitionRecipe {
+pub enum PatternStructureRecipe {
     StraightGrid(PatternDefinitionDraft),
     GeneralizedStraightGuides {
         name: String,
@@ -13393,13 +13912,13 @@ pub enum PatternDefinitionRecipe {
     /// Materialization retains the allocated output and site-product IDs while replacing only
     /// its mark output; graphs, paths, diagnostics, and limits remain derived-only.
     ConnectionPaths {
-        definition: Box<PatternDefinitionRecipe>,
+        definition: Box<PatternStructureRecipe>,
         program: ConnectionProgram,
         style: PathStrokeStyle,
     },
     /// Wraps a two- or three-guide straight intersection recipe with conventional wall-maze intent.
     MazeWalls {
-        definition: Box<PatternDefinitionRecipe>,
+        definition: Box<PatternStructureRecipe>,
         program: MazeProgram,
         style: PathStrokeStyle,
     },
@@ -13407,16 +13926,62 @@ pub enum PatternDefinitionRecipe {
     /// Materialization allocates both the document-owned structure and the definition
     /// atomically, then installs the ordinary typed output reference.
     AuthoredClosedShapeMarks {
-        definition: Box<PatternDefinitionRecipe>,
+        definition: Box<PatternStructureRecipe>,
         shape: AuthoredStructureDraft,
     },
+}
+
+/// One ordered ID-free base response authored alongside a structural output.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PatternOutputSettingsRecipe {
+    pub response: PatternGeometryResponse,
+}
+
+/// Complete ID-free pattern definition authority.
+///
+/// The structure never carries document IDs, while settings are ordered to
+/// bind atomically to output IDs allocated during materialization. Current
+/// Stage 20N validation deliberately retains the one-output authoring gate;
+/// the ordered form is the authority Stage 20R will generalize.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PatternDefinitionRecipe {
+    pub structure: PatternStructureRecipe,
+    pub output_settings: Vec<PatternOutputSettingsRecipe>,
+}
+
+impl PatternDefinitionRecipe {
+    /// Builds the complete current one-mark-output recipe without assigning any document ID.
+    pub fn marks(structure: PatternStructureRecipe) -> Self {
+        Self {
+            structure,
+            output_settings: vec![PatternOutputSettingsRecipe {
+                response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+                    minimum_fill: 0.0,
+                    maximum_fill: 1.0,
+                }),
+            }],
+        }
+    }
+
+    /// Builds the complete current one-connected-output recipe without assigning any document ID.
+    pub fn connected(structure: PatternStructureRecipe) -> Self {
+        Self {
+            structure,
+            output_settings: vec![PatternOutputSettingsRecipe {
+                response: PatternGeometryResponse::Connected(ConnectedGeometryResponse {
+                    minimum_thickness: 0.0,
+                    maximum_thickness: 1.0,
+                }),
+            }],
+        }
+    }
 }
 
 /// One unpublished recipe result whose optional resource and definition must
 /// be installed together before authoritative validation can succeed.
 #[derive(Clone, Debug, PartialEq)]
 struct MaterializedPatternDefinitionRecipe {
-    definition: PatternDefinition,
+    bundle: PatternDefinitionBundle,
     authored_structure: Option<AuthoredStructure>,
 }
 
@@ -13461,9 +14026,17 @@ pub fn validate_preset_record(record: &PresetRecord) -> Result<(), ValidationErr
             "must be printable text when present",
         ));
     }
-    match &record.recipe {
-        PatternDefinitionRecipe::StraightGrid(draft) => validate_definition_draft(draft),
-        PatternDefinitionRecipe::GeneralizedStraightGuides {
+    validate_recipe_output_settings(&record.recipe)?;
+    validate_pattern_structure_recipe(&record.recipe.structure)
+}
+
+/// Validates one ID-free structural recipe without allocating output IDs.
+fn validate_pattern_structure_recipe(
+    recipe: &PatternStructureRecipe,
+) -> Result<(), ValidationError> {
+    match recipe {
+        PatternStructureRecipe::StraightGrid(draft) => validate_definition_draft(draft),
+        PatternStructureRecipe::GeneralizedStraightGuides {
             name,
             coverage,
             dimensions,
@@ -13547,7 +14120,7 @@ pub fn validate_preset_record(record: &PresetRecord) -> Result<(), ValidationErr
                 )),
             }
         }
-        PatternDefinitionRecipe::RandomSites {
+        PatternStructureRecipe::RandomSites {
             name,
             coverage,
             character,
@@ -13613,29 +14186,23 @@ pub fn validate_preset_record(record: &PresetRecord) -> Result<(), ValidationErr
             }
             Ok(())
         }
-        PatternDefinitionRecipe::ConnectionPaths {
+        PatternStructureRecipe::ConnectionPaths {
             definition,
             program,
             ..
         } => {
             validate_connection_recipe(definition, program)?;
-            validate_preset_record(&PresetRecord {
-                metadata: record.metadata.clone(),
-                recipe: definition.as_ref().clone(),
-            })
+            validate_pattern_structure_recipe(definition)
         }
-        PatternDefinitionRecipe::MazeWalls {
+        PatternStructureRecipe::MazeWalls {
             definition,
             program,
             ..
         } => {
             validate_maze_recipe(definition, program)?;
-            validate_preset_record(&PresetRecord {
-                metadata: record.metadata.clone(),
-                recipe: definition.as_ref().clone(),
-            })
+            validate_pattern_structure_recipe(definition)
         }
-        PatternDefinitionRecipe::AuthoredClosedShapeMarks { definition, shape } => {
+        PatternStructureRecipe::AuthoredClosedShapeMarks { definition, shape } => {
             if shape.kind() != AuthoredStructureKind::ClosedShape {
                 return Err(ValidationError::new(
                     "preset.recipe.shape.kind",
@@ -13644,20 +14211,49 @@ pub fn validate_preset_record(record: &PresetRecord) -> Result<(), ValidationErr
             }
             if matches!(
                 definition.as_ref(),
-                PatternDefinitionRecipe::AuthoredClosedShapeMarks { .. }
-                    | PatternDefinitionRecipe::ConnectionPaths { .. }
-                    | PatternDefinitionRecipe::MazeWalls { .. }
+                PatternStructureRecipe::AuthoredClosedShapeMarks { .. }
+                    | PatternStructureRecipe::ConnectionPaths { .. }
+                    | PatternStructureRecipe::MazeWalls { .. }
             ) {
                 return Err(ValidationError::new(
                     "preset.recipe.definition",
                     "authored mark recipes cannot wrap another output recipe wrapper",
                 ));
             }
-            validate_preset_record(&PresetRecord {
-                metadata: record.metadata.clone(),
-                recipe: definition.as_ref().clone(),
-            })
+            validate_pattern_structure_recipe(definition)
         }
+    }
+}
+
+/// Validates the ordered ID-free response collection against the current
+/// one-output authoring gate and its structural response kind.
+fn validate_recipe_output_settings(
+    recipe: &PatternDefinitionRecipe,
+) -> Result<(), ValidationError> {
+    if recipe.output_settings.len() != 1 {
+        return Err(ValidationError::new(
+            "preset.recipe.output_settings.cardinality",
+            "current pattern recipes require exactly one output setting",
+        ));
+    }
+    let setting = recipe.output_settings.first().ok_or(ValidationError::new(
+        "preset.recipe.output_settings.cardinality",
+        "current pattern recipes require exactly one output setting",
+    ))?;
+    let response = &setting.response;
+    let connected = matches!(
+        recipe.structure,
+        PatternStructureRecipe::ConnectionPaths { .. } | PatternStructureRecipe::MazeWalls { .. }
+    );
+    match (connected, response) {
+        (false, PatternGeometryResponse::Marks(_))
+        | (true, PatternGeometryResponse::Connected(_)) => {
+            validate_pattern_geometry_response(response)
+        }
+        _ => Err(ValidationError::new(
+            "preset.recipe.output_settings.kind",
+            "recipe response kind must match its structural output",
+        )),
     }
 }
 
@@ -13668,7 +14264,7 @@ pub fn validate_preset_record(record: &PresetRecord) -> Result<(), ValidationErr
 /// Returns stable wrapper, program, or family-eligibility diagnostics before any document IDs,
 /// authored structures, or candidate definitions are allocated.
 fn validate_connection_recipe(
-    definition: &PatternDefinitionRecipe,
+    definition: &PatternStructureRecipe,
     program: &ConnectionProgram,
 ) -> Result<(), ValidationError> {
     program.validate()?;
@@ -13677,8 +14273,8 @@ fn validate_connection_recipe(
         ConnectionProgram::NearestLinks { .. } | ConnectionProgram::RandomLinks { .. }
     );
     match definition {
-        PatternDefinitionRecipe::StraightGrid(_) => Ok(()),
-        PatternDefinitionRecipe::GeneralizedStraightGuides { product, .. } => match product {
+        PatternStructureRecipe::StraightGrid(_) => Ok(()),
+        PatternStructureRecipe::GeneralizedStraightGuides { product, .. } => match product {
             GeneralizedSiteProductDraft::Intersections { .. } => Ok(()),
             GeneralizedSiteProductDraft::AlongGuides { .. } if nearest_or_random => Ok(()),
             GeneralizedSiteProductDraft::AlongGuides { .. } => Err(ValidationError::new(
@@ -13686,14 +14282,14 @@ fn validate_connection_recipe(
                 "maze and spanning-tree programs require an intersection site recipe",
             )),
         },
-        PatternDefinitionRecipe::RandomSites { .. } if nearest_or_random => Ok(()),
-        PatternDefinitionRecipe::RandomSites { .. } => Err(ValidationError::new(
+        PatternStructureRecipe::RandomSites { .. } if nearest_or_random => Ok(()),
+        PatternStructureRecipe::RandomSites { .. } => Err(ValidationError::new(
             "preset.recipe.connection.program",
             "maze and spanning-tree programs require an intersection site recipe",
         )),
-        PatternDefinitionRecipe::ConnectionPaths { .. }
-        | PatternDefinitionRecipe::MazeWalls { .. }
-        | PatternDefinitionRecipe::AuthoredClosedShapeMarks { .. } => Err(ValidationError::new(
+        PatternStructureRecipe::ConnectionPaths { .. }
+        | PatternStructureRecipe::MazeWalls { .. }
+        | PatternStructureRecipe::AuthoredClosedShapeMarks { .. } => Err(ValidationError::new(
             "preset.recipe.definition",
             "connection recipes cannot wrap another output recipe wrapper",
         )),
@@ -13706,25 +14302,25 @@ fn validate_connection_recipe(
 ///
 /// Rejects wrappers, nonintersection products, and invalid maze intent before any ID allocation.
 fn validate_maze_recipe(
-    definition: &PatternDefinitionRecipe,
+    definition: &PatternStructureRecipe,
     program: &MazeProgram,
 ) -> Result<(), ValidationError> {
     program.validate()?;
     match definition {
-        PatternDefinitionRecipe::StraightGrid(_) => Ok(()),
-        PatternDefinitionRecipe::GeneralizedStraightGuides {
+        PatternStructureRecipe::StraightGrid(_) => Ok(()),
+        PatternStructureRecipe::GeneralizedStraightGuides {
             dimensions,
             product: GeneralizedSiteProductDraft::Intersections { .. },
             ..
         } if matches!(dimensions.len(), 2 | 3) => Ok(()),
-        PatternDefinitionRecipe::GeneralizedStraightGuides { .. } => Err(ValidationError::new(
+        PatternStructureRecipe::GeneralizedStraightGuides { .. } => Err(ValidationError::new(
             "preset.recipe.maze.family",
             "maze recipes require two or three straight guide intersection dimensions",
         )),
-        PatternDefinitionRecipe::RandomSites { .. }
-        | PatternDefinitionRecipe::ConnectionPaths { .. }
-        | PatternDefinitionRecipe::MazeWalls { .. }
-        | PatternDefinitionRecipe::AuthoredClosedShapeMarks { .. } => Err(ValidationError::new(
+        PatternStructureRecipe::RandomSites { .. }
+        | PatternStructureRecipe::ConnectionPaths { .. }
+        | PatternStructureRecipe::MazeWalls { .. }
+        | PatternStructureRecipe::AuthoredClosedShapeMarks { .. } => Err(ValidationError::new(
             "preset.recipe.maze.family",
             "maze recipes require an unwrapped straight guide intersection family",
         )),
@@ -14095,16 +14691,18 @@ pub enum DocumentCommand {
         base: DocumentPatternSettings,
         channel_id: ChannelId,
     },
-    /// Stores mark-only deltas derived by the domain from desired effective response values.
-    SetChannelGeometryResponseDelta {
+    /// Stores one output-keyed typed response delta derived by the domain.
+    SetChannelOutputResponseDelta {
         base: DocumentPatternSettings,
         channel_id: ChannelId,
-        geometry_response: ChannelGeometryResponseDelta,
+        output_layer_id: PatternOutputLayerId,
+        delta: ChannelGeometryResponseDelta,
     },
-    /// Removes stored mark-response intent.
-    ResetChannelGeometryResponseDelta {
+    /// Removes one output-keyed response delta without materializing its inherited response.
+    ResetChannelOutputResponseDelta {
         base: DocumentPatternSettings,
         channel_id: ChannelId,
+        output_layer_id: PatternOutputLayerId,
     },
     /// Adds one validated reusable authored structure with a fresh document-scoped ID.
     AddAuthoredStructure {
@@ -14653,8 +15251,8 @@ impl DocumentCommand {
             | Command::ResetChannelPatternRotationDelta { .. }
             | Command::SetChannelShapeRotationDelta { .. }
             | Command::ResetChannelShapeRotationDelta { .. }
-            | Command::SetChannelGeometryResponseDelta { .. }
-            | Command::ResetChannelGeometryResponseDelta { .. } => {
+            | Command::SetChannelOutputResponseDelta { .. }
+            | Command::ResetChannelOutputResponseDelta { .. } => {
                 DocumentCommandFieldClassification::NonField(
                     NonFieldCommandOperation::EffectivePatternAuthority,
                 )
@@ -14849,8 +15447,8 @@ impl DocumentCommand {
             | Self::ResetChannelPatternRotationDelta { channel_id, .. }
             | Self::SetChannelShapeRotationDelta { channel_id, .. }
             | Self::ResetChannelShapeRotationDelta { channel_id, .. }
-            | Self::SetChannelGeometryResponseDelta { channel_id, .. }
-            | Self::ResetChannelGeometryResponseDelta { channel_id, .. }
+            | Self::SetChannelOutputResponseDelta { channel_id, .. }
+            | Self::ResetChannelOutputResponseDelta { channel_id, .. }
             | Self::SetTranslationAxis { channel_id, .. }
             | Self::SetColorComponent { channel_id, .. }
             | Self::SetOpacity { channel_id, .. }
@@ -14929,12 +15527,7 @@ impl DocumentCommand {
                     settings.shape_rotation_degrees,
                     "document.pattern_settings.shape_rotation_degrees",
                 )?;
-                match &settings.geometry_response {
-                    PatternGeometryResponse::Marks(response) => validate_mark_response(response),
-                    PatternGeometryResponse::Connected(response) => {
-                        validate_connected_response(response)
-                    }
-                }
+                Ok(())
             }
             Self::ReplaceDocumentPatternDefinitionRecipe {
                 base,
@@ -14974,8 +15567,7 @@ impl DocumentCommand {
             Self::ResetChannelPatternDefinitionOverride { base, .. }
             | Self::ResetChannelDensityDelta { base, .. }
             | Self::ResetChannelPatternRotationDelta { base, .. }
-            | Self::ResetChannelShapeRotationDelta { base, .. }
-            | Self::ResetChannelGeometryResponseDelta { base, .. } => {
+            | Self::ResetChannelShapeRotationDelta { base, .. } => {
                 if &document.pattern_settings == base {
                     Ok(())
                 } else {
@@ -14984,6 +15576,23 @@ impl DocumentCommand {
                         "channel command base is stale",
                     ))
                 }
+            }
+            Self::ResetChannelOutputResponseDelta {
+                base, channel_id, ..
+            } => {
+                if &document.pattern_settings != base {
+                    return Err(ValidationError::new(
+                        "document.pattern_settings.base",
+                        "channel command base is stale",
+                    ));
+                }
+                document
+                    .channel_pattern_instance(*channel_id)
+                    .map(|_| ())
+                    .ok_or(ValidationError::new(
+                        "command.channel_id",
+                        "command targets a missing channel",
+                    ))
             }
             Self::ReplaceChannelPatternDefinitionOverrideRecipe {
                 base,
@@ -15036,9 +15645,11 @@ impl DocumentCommand {
                 }
                 validate_finite(*rotation_degrees, "channel.pattern.rotation_delta")
             }
-            Self::SetChannelGeometryResponseDelta {
+            Self::SetChannelOutputResponseDelta {
                 base,
-                geometry_response,
+                output_layer_id,
+                delta,
+                channel_id,
                 ..
             } => {
                 if &document.pattern_settings != base {
@@ -15047,7 +15658,22 @@ impl DocumentCommand {
                         "channel command base is stale",
                     ));
                 }
-                match geometry_response {
+                let definition_id = document
+                    .effective_channel_pattern(*channel_id)?
+                    .definition_id;
+                let bundle = document
+                    .bundle(definition_id)
+                    .expect("effective definition bundle");
+                let response = bundle
+                    .output_settings
+                    .iter()
+                    .find(|setting| setting.output_layer_id == *output_layer_id)
+                    .ok_or(ValidationError::new(
+                        "channel.pattern.output_layer_id",
+                        "response delta targets a missing output",
+                    ))?;
+                validate_response_delta_kind(&response.response, delta)?;
+                match delta {
                     ChannelGeometryResponseDelta::Marks(delta) => {
                         if let Some(value) = delta.minimum_fill_delta {
                             validate_finite(value, "channel.pattern.mark_delta.minimum_fill")?;
@@ -15285,10 +15911,12 @@ impl DocumentCommand {
                     })?;
                 let materialized =
                     document.allocate_definition_from_recipe(Some(channel_id), recipe)?;
-                let mut replacement = materialized.definition;
-                replacement.id = *definition_id;
-                validate_definition(&replacement)?;
-                if &replacement == base_definition && materialized.authored_structure.is_none() {
+                let mut replacement = materialized.bundle;
+                replacement.definition.id = *definition_id;
+                replacement.validate()?;
+                if replacement.definition == *base_definition
+                    && materialized.authored_structure.is_none()
+                {
                     return Err(ValidationError::new(
                         "pattern_definitions.recipe",
                         "shared replacement is a semantic no-op",
@@ -15333,7 +15961,7 @@ impl DocumentCommand {
             }
             Self::SetLegacyMappingField { .. } => Ok(()),
             Self::ReplaceChannelTopology { model, topology } => {
-                validate_topology(*model, topology, &document.pattern_definitions)
+                validate_topology(*model, topology, &document.pattern_definition_bundles)
             }
             Self::SetModeledMappingField { channel_id, edit } => {
                 let topology = document.channel_topology().ok_or(ValidationError::new(
@@ -15394,6 +16022,7 @@ impl DocumentCommand {
         match self {
             Self::SetDocumentPatternSettings { settings, .. } => {
                 document.pattern_settings = settings.clone();
+                document.prune_document_base_output_response_deltas();
                 return;
             }
             Self::ReplaceDocumentPatternDefinitionRecipe { recipe, .. } => {
@@ -15403,9 +16032,12 @@ impl DocumentCommand {
                 if let Some(structure) = materialized.authored_structure {
                     document.authored_structures.push(structure);
                 }
-                let definition_id = materialized.definition.id;
-                document.pattern_definitions.push(materialized.definition);
+                let definition_id = materialized.bundle.definition.id;
+                document
+                    .pattern_definition_bundles
+                    .push(materialized.bundle);
                 document.pattern_settings.definition_id = definition_id;
+                document.prune_document_base_output_response_deltas();
                 return;
             }
             Self::SetChannelPatternDefinitionOverride {
@@ -15417,6 +16049,7 @@ impl DocumentCommand {
                     .channel_pattern_instance_mut(*channel_id)
                     .expect("validated channel")
                     .definition_override = Some(*definition_id);
+                document.prune_incompatible_output_response_deltas(*channel_id);
                 return;
             }
             Self::ResetChannelPatternDefinitionOverride { channel_id, .. } => {
@@ -15424,6 +16057,7 @@ impl DocumentCommand {
                     .channel_pattern_instance_mut(*channel_id)
                     .expect("validated channel")
                     .definition_override = None;
+                document.prune_incompatible_output_response_deltas(*channel_id);
                 return;
             }
             Self::ReplaceChannelPatternDefinitionOverrideRecipe {
@@ -15435,12 +16069,15 @@ impl DocumentCommand {
                 if let Some(structure) = materialized.authored_structure {
                     document.authored_structures.push(structure);
                 }
-                let definition_id = materialized.definition.id;
-                document.pattern_definitions.push(materialized.definition);
+                let definition_id = materialized.bundle.definition.id;
+                document
+                    .pattern_definition_bundles
+                    .push(materialized.bundle);
                 document
                     .channel_pattern_instance_mut(*channel_id)
                     .expect("validated channel")
                     .definition_override = Some(definition_id);
+                document.prune_incompatible_output_response_deltas(*channel_id);
                 return;
             }
             Self::SetChannelDensityDelta {
@@ -15501,22 +16138,45 @@ impl DocumentCommand {
                     .shape_rotation_delta_degrees = None;
                 return;
             }
-            Self::SetChannelGeometryResponseDelta {
+            Self::SetChannelOutputResponseDelta {
                 channel_id,
-                geometry_response,
+                output_layer_id,
+                delta,
+                ..
+            } => {
+                let definition_id = document
+                    .effective_channel_pattern(*channel_id)
+                    .expect("validated channel definition")
+                    .definition_id;
+                let bundle = document
+                    .bundle(definition_id)
+                    .expect("validated channel definition bundle")
+                    .clone();
+                let deltas = &mut document
+                    .channel_pattern_instance_mut(*channel_id)
+                    .expect("validated channel")
+                    .output_response_deltas;
+                upsert_pattern_output_delta_in_order(
+                    &bundle,
+                    deltas,
+                    PatternOutputResponseDelta {
+                        output_layer_id: *output_layer_id,
+                        delta: delta.clone(),
+                    },
+                )
+                .expect("validated response delta insertion");
+                return;
+            }
+            Self::ResetChannelOutputResponseDelta {
+                channel_id,
+                output_layer_id,
                 ..
             } => {
                 document
                     .channel_pattern_instance_mut(*channel_id)
                     .expect("validated channel")
-                    .geometry_response_delta = Some(geometry_response.clone());
-                return;
-            }
-            Self::ResetChannelGeometryResponseDelta { channel_id, .. } => {
-                document
-                    .channel_pattern_instance_mut(*channel_id)
-                    .expect("validated channel")
-                    .geometry_response_delta = None;
+                    .output_response_deltas
+                    .retain(|entry| entry.output_layer_id != *output_layer_id);
                 return;
             }
             Self::AddAuthoredStructure { draft } => {
@@ -15565,11 +16225,15 @@ impl DocumentCommand {
                 let definition = document
                     .allocate_definition_from_draft(definition)
                     .expect("command validation allocated a definition");
-                document.pattern_definitions.push(definition);
+                document
+                    .pattern_definition_bundles
+                    .push(bundle_from_definition(definition));
                 return;
             }
             Self::AddTypedPatternDefinition { definition } => {
-                document.pattern_definitions.push(definition.clone());
+                document
+                    .pattern_definition_bundles
+                    .push(bundle_from_definition(definition.clone()));
                 return;
             }
             Self::ReplaceSelectedChannelDefinitionTopology {
@@ -15577,7 +16241,9 @@ impl DocumentCommand {
                 definition,
                 ..
             } => {
-                document.pattern_definitions.push(definition.clone());
+                document
+                    .pattern_definition_bundles
+                    .push(bundle_from_definition(definition.clone()));
                 document.retarget_channel(*channel_id, definition.id);
                 return;
             }
@@ -15589,12 +16255,14 @@ impl DocumentCommand {
                 let definition = document
                     .duplicate_definition(&source)
                     .expect("validated duplicate allocation");
-                document.pattern_definitions.push(definition);
+                document
+                    .pattern_definition_bundles
+                    .push(bundle_from_definition(definition));
                 return;
             }
             Self::RemoveUnreferencedPatternDefinition { definition_id } => {
                 document
-                    .pattern_definitions
+                    .pattern_definition_bundles
                     .retain(|definition| definition.id != *definition_id);
                 return;
             }
@@ -15605,20 +16273,25 @@ impl DocumentCommand {
             } => {
                 if document.linked_channels(base_definition.id).len() > 1 {
                     let source = document
-                        .definition(base_definition.id)
+                        .bundle(base_definition.id)
                         .expect("validated definition")
                         .clone();
                     let mut clone = document
-                        .duplicate_definition(&source)
+                        .duplicate_definition(&source.definition)
                         .expect("validated clone allocation");
-                    let remapped_edit = remap_definition_edit_for_duplicate(&source, &clone, edit);
+                    let remapped_edit =
+                        remap_definition_edit_for_duplicate(&source.definition, &clone, edit);
                     apply_definition_edit(&mut clone, &remapped_edit);
-                    let clone_id = clone.id;
-                    document.pattern_definitions.push(clone);
+                    let clone = document
+                        .bundle_for_duplicate(&source, clone)
+                        .expect("validated output correspondence");
+                    let clone_id = clone.definition.id;
+                    document.pattern_definition_bundles.push(clone.clone());
                     document.retarget_channel(*channel_id, clone_id);
+                    document.remap_channel_output_response_deltas(*channel_id, &source, &clone);
                 } else {
                     let definition = document
-                        .pattern_definitions
+                        .pattern_definition_bundles
                         .iter_mut()
                         .find(|definition| definition.id == base_definition.id)
                         .expect("validated definition");
@@ -15632,7 +16305,7 @@ impl DocumentCommand {
                 ..
             } => {
                 let definition = document
-                    .pattern_definitions
+                    .pattern_definition_bundles
                     .iter_mut()
                     .find(|definition| definition.id == *definition_id)
                     .expect("validated definition");
@@ -15644,11 +16317,11 @@ impl DocumentCommand {
                 recipe,
                 ..
             } => {
+                let linked_channels = document.linked_channels(*definition_id);
                 let materialized = document
                     .allocate_definition_from_recipe(
                         Some(
-                            *document
-                                .linked_channels(*definition_id)
+                            *linked_channels
                                 .first()
                                 .expect("validated shared definition link"),
                         ),
@@ -15658,14 +16331,17 @@ impl DocumentCommand {
                 if let Some(structure) = materialized.authored_structure {
                     document.authored_structures.push(structure);
                 }
-                let mut replacement = materialized.definition;
-                replacement.id = *definition_id;
+                let mut replacement = materialized.bundle;
+                replacement.definition.id = *definition_id;
                 let definition = document
-                    .pattern_definitions
+                    .pattern_definition_bundles
                     .iter_mut()
                     .find(|definition| definition.id == *definition_id)
                     .expect("validated definition");
                 *definition = replacement;
+                for channel_id in linked_channels {
+                    document.prune_incompatible_output_response_deltas(channel_id);
+                }
                 return;
             }
             _ => {}
@@ -15764,8 +16440,8 @@ impl DocumentCommand {
                 | Self::ResetChannelPatternRotationDelta { .. }
                 | Self::SetChannelShapeRotationDelta { .. }
                 | Self::ResetChannelShapeRotationDelta { .. }
-                | Self::SetChannelGeometryResponseDelta { .. }
-                | Self::ResetChannelGeometryResponseDelta { .. }
+                | Self::SetChannelOutputResponseDelta { .. }
+                | Self::ResetChannelOutputResponseDelta { .. }
         ) {
             let mut level = None;
             let affected_channels = after
@@ -15902,8 +16578,8 @@ impl DocumentCommand {
                     | Self::ResetChannelPatternRotationDelta { .. }
                     | Self::SetChannelShapeRotationDelta { .. }
                     | Self::ResetChannelShapeRotationDelta { .. }
-                    | Self::SetChannelGeometryResponseDelta { .. }
-                    | Self::ResetChannelGeometryResponseDelta { .. }
+                    | Self::SetChannelOutputResponseDelta { .. }
+                    | Self::ResetChannelOutputResponseDelta { .. }
             ) && before.channel_ids().iter().all(|channel_id| {
                 before.effective_channel_pattern(*channel_id).ok()
                     == after.effective_channel_pattern(*channel_id).ok()
@@ -16617,9 +17293,9 @@ fn squash_result(before: &Document, after: &Document) -> DraftSquashResult {
         })
         .collect::<HashSet<_>>();
     let changed_definitions = before
-        .pattern_definitions
+        .pattern_definition_bundles
         .iter()
-        .chain(after.pattern_definitions.iter())
+        .chain(after.pattern_definition_bundles.iter())
         .filter_map(|definition| {
             (before.definition(definition.id) != after.definition(definition.id))
                 .then_some(definition.id)
@@ -16818,7 +17494,16 @@ mod history_tests {
                 width: 10.0,
                 height: 10.0,
             },
-            vec![definition],
+            vec![PatternDefinitionBundle {
+                output_settings: vec![PatternOutputSettings {
+                    output_layer_id: PatternOutputLayerId(1),
+                    response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+                        minimum_fill: 0.0,
+                        maximum_fill: 1.0,
+                    }),
+                }],
+                definition,
+            }],
             DocumentPatternSettings {
                 definition_id: PatternDefinitionId(1),
                 density: DensityMetric2D {
@@ -16828,10 +17513,6 @@ mod history_tests {
                 },
                 pattern_rotation_degrees: 0.0,
                 shape_rotation_degrees: 0.0,
-                geometry_response: PatternGeometryResponse::Marks(MarkGeometryResponse {
-                    minimum_fill: 0.0,
-                    maximum_fill: 1.0,
-                }),
             },
             vec![ChannelState {
                 id: ChannelId(1),
@@ -16844,7 +17525,7 @@ mod history_tests {
                         translation_y: 0.0,
                     },
                     shape_rotation_delta_degrees: None,
-                    geometry_response_delta: None,
+                    output_response_deltas: Vec::new(),
                 },
                 appearance: ChannelAppearance {
                     visible: true,
@@ -16922,7 +17603,16 @@ mod history_tests {
                 width: 80.0,
                 height: 60.0,
             },
-            vec![definition],
+            vec![PatternDefinitionBundle {
+                output_settings: vec![PatternOutputSettings {
+                    output_layer_id: PatternOutputLayerId(43),
+                    response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+                        minimum_fill: 0.0,
+                        maximum_fill: 1.0,
+                    }),
+                }],
+                definition,
+            }],
             DocumentPatternSettings {
                 definition_id: PatternDefinitionId(40),
                 density: DensityMetric2D {
@@ -16932,10 +17622,6 @@ mod history_tests {
                 },
                 pattern_rotation_degrees: 0.0,
                 shape_rotation_degrees: 0.0,
-                geometry_response: PatternGeometryResponse::Marks(MarkGeometryResponse {
-                    minimum_fill: 0.0,
-                    maximum_fill: 1.0,
-                }),
             },
             vec![first, second],
         )
@@ -16981,7 +17667,16 @@ mod history_tests {
                 width: 80.0,
                 height: 60.0,
             },
-            vec![definition],
+            vec![PatternDefinitionBundle {
+                output_settings: vec![PatternOutputSettings {
+                    output_layer_id: output_id,
+                    response: PatternGeometryResponse::Connected(ConnectedGeometryResponse {
+                        minimum_thickness: 0.1,
+                        maximum_thickness: 1.0,
+                    }),
+                }],
+                definition,
+            }],
             DocumentPatternSettings {
                 definition_id,
                 density: DensityMetric2D {
@@ -16991,10 +17686,6 @@ mod history_tests {
                 },
                 pattern_rotation_degrees: 0.0,
                 shape_rotation_degrees: 0.0,
-                geometry_response: PatternGeometryResponse::Connected(ConnectedGeometryResponse {
-                    minimum_thickness: 0.1,
-                    maximum_thickness: 1.0,
-                }),
             },
             vec![first, second],
         )
@@ -17239,7 +17930,7 @@ mod history_tests {
             .expect("shared parametric definition");
         let duplicate = history
             .document()
-            .pattern_definitions()
+            .pattern_definition_bundles()
             .iter()
             .find(|definition| {
                 definition.id != PatternDefinitionId(40)
@@ -17534,7 +18225,7 @@ mod history_tests {
                 .document()
                 .clone();
         maze_document
-            .pattern_definitions
+            .pattern_definition_bundles
             .iter_mut()
             .find(|definition| definition.id == PatternDefinitionId(60))
             .expect("connection fixture definition exists")
@@ -17723,7 +18414,7 @@ mod history_tests {
         history
             .session
             .document
-            .pattern_definitions
+            .pattern_definition_bundles
             .iter_mut()
             .find(|definition| definition.id == PatternDefinitionId(60))
             .expect("connection definition exists")
@@ -17788,8 +18479,8 @@ mod history_tests {
             algorithm: GridSpanningTreeAlgorithm::RandomizedPrim,
             seed: 7,
         };
-        let recipe = PatternDefinitionRecipe::ConnectionPaths {
-            definition: Box::new(PatternDefinitionRecipe::StraightGrid(
+        let recipe = PatternDefinitionRecipe::connected(PatternStructureRecipe::ConnectionPaths {
+            definition: Box::new(PatternStructureRecipe::StraightGrid(
                 PatternDefinitionDraft {
                     name: "maze grid".into(),
                     coverage: CoveragePolicy {
@@ -17800,7 +18491,7 @@ mod history_tests {
             )),
             program: program.clone(),
             style: PathStrokeStyle::default(),
-        };
+        });
         let base = history.document().pattern_settings().clone();
         let base_definition = history
             .document()
@@ -17846,8 +18537,8 @@ mod history_tests {
             .definition(base.definition_id)
             .expect("materialized base definition")
             .clone();
-        let invalid = PatternDefinitionRecipe::ConnectionPaths {
-            definition: Box::new(PatternDefinitionRecipe::RandomSites {
+        let invalid = PatternDefinitionRecipe::connected(PatternStructureRecipe::ConnectionPaths {
+            definition: Box::new(PatternStructureRecipe::RandomSites {
                 name: "invalid maze dispersion".into(),
                 coverage: CoveragePolicy {
                     guard_steps: 1,
@@ -17862,7 +18553,7 @@ mod history_tests {
             }),
             program,
             style: PathStrokeStyle::default(),
-        };
+        });
         assert!(
             history
                 .apply(&DocumentCommand::ReplaceDocumentPatternDefinitionRecipe {
@@ -17916,5 +18607,128 @@ mod history_tests {
             .path(),
             "connection.minimum_degree"
         );
+    }
+
+    /// Proves keyed delta insertion and replacement follow structural output order without lifting the public gate.
+    #[test]
+    fn keyed_delta_helpers_order_insertions_and_prune_only_incompatible_entries() {
+        let mut definition = PatternDefinition::supported_straight_grid(
+            PatternDefinitionId(1),
+            "two output helper",
+            PatternMechanismId(1),
+            PatternMechanismId(2),
+            PatternOutputLayerId(10),
+            CoveragePolicy {
+                guard_steps: 1,
+                additional_margin: 0.0,
+            },
+        );
+        definition
+            .output_layers
+            .push(PatternOutputLayer::CircularMarks {
+                id: PatternOutputLayerId(11),
+                site_mechanism_id: PatternMechanismId(2),
+            });
+        let bundle = PatternDefinitionBundle {
+            definition,
+            output_settings: vec![
+                PatternOutputSettings {
+                    output_layer_id: PatternOutputLayerId(10),
+                    response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+                        minimum_fill: 0.0,
+                        maximum_fill: 1.0,
+                    }),
+                },
+                PatternOutputSettings {
+                    output_layer_id: PatternOutputLayerId(11),
+                    response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+                        minimum_fill: 0.0,
+                        maximum_fill: 1.0,
+                    }),
+                },
+            ],
+        };
+        let delta = |output_layer_id, minimum_fill_delta| PatternOutputResponseDelta {
+            output_layer_id,
+            delta: ChannelGeometryResponseDelta::Marks(MarkGeometryResponseDelta {
+                minimum_fill_delta: Some(minimum_fill_delta),
+                maximum_fill_delta: None,
+            }),
+        };
+        let mut deltas = Vec::new();
+        upsert_pattern_output_delta_in_order(
+            &bundle,
+            &mut deltas,
+            delta(PatternOutputLayerId(11), 0.2),
+        )
+        .expect("later output inserts");
+        upsert_pattern_output_delta_in_order(
+            &bundle,
+            &mut deltas,
+            delta(PatternOutputLayerId(10), 0.1),
+        )
+        .expect("earlier output inserts before later output");
+        assert_eq!(
+            deltas
+                .iter()
+                .map(|entry| entry.output_layer_id)
+                .collect::<Vec<_>>(),
+            vec![PatternOutputLayerId(10), PatternOutputLayerId(11)]
+        );
+        upsert_pattern_output_delta_in_order(
+            &bundle,
+            &mut deltas,
+            delta(PatternOutputLayerId(10), 0.3),
+        )
+        .expect("existing output replaces in place");
+        assert_eq!(
+            deltas[0].delta,
+            ChannelGeometryResponseDelta::Marks(MarkGeometryResponseDelta {
+                minimum_fill_delta: Some(0.3),
+                maximum_fill_delta: None,
+            })
+        );
+        assert_eq!(
+            upsert_pattern_output_delta_in_order(
+                &bundle,
+                &mut deltas,
+                delta(PatternOutputLayerId(12), 0.4),
+            )
+            .expect_err("foreign output rejects")
+            .path(),
+            "channel.pattern.output_layer_id"
+        );
+        assert_eq!(
+            upsert_pattern_output_delta_in_order(
+                &bundle,
+                &mut deltas,
+                PatternOutputResponseDelta {
+                    output_layer_id: PatternOutputLayerId(10),
+                    delta: ChannelGeometryResponseDelta::Connected(
+                        ConnectedGeometryResponseDelta {
+                            minimum_thickness_delta: Some(0.1),
+                            maximum_thickness_delta: None,
+                        },
+                    ),
+                },
+            )
+            .expect_err("kind mismatch rejects")
+            .path(),
+            "channel.pattern.output_deltas.kind"
+        );
+        let retained = prune_output_response_deltas_for_bundle(
+            &bundle,
+            &[
+                delta(PatternOutputLayerId(11), 0.2),
+                PatternOutputResponseDelta {
+                    output_layer_id: PatternOutputLayerId(12),
+                    delta: ChannelGeometryResponseDelta::Marks(MarkGeometryResponseDelta {
+                        minimum_fill_delta: Some(0.4),
+                        maximum_fill_delta: None,
+                    }),
+                },
+            ],
+        );
+        assert_eq!(retained, vec![delta(PatternOutputLayerId(11), 0.2)]);
     }
 }

@@ -10,8 +10,9 @@ use toniator_domain::{
     CoveragePolicy, Document, DocumentId, GeneralizedSiteProduct, GeneralizedSiteProductDraft,
     GridMazeAlgorithm, GridSpanningTreeAlgorithm, GuideDimensionDraft, GuideDimensionId,
     MarkOrientation, MarkOrientationDraft, MazeProgram, PathStrokeStyle, PatternDefinition,
-    PatternDefinitionDraft, PatternDefinitionId, PatternDefinitionRecipe, PatternGeometryResponse,
-    PatternMechanism, PatternMechanismId, PatternOutputLayer, PatternOutputLayerId, PresetMetadata,
+    PatternDefinitionBundle, PatternDefinitionDraft, PatternDefinitionId, PatternDefinitionRecipe,
+    PatternGeometryResponse, PatternMechanism, PatternMechanismId, PatternOutputLayer,
+    PatternOutputLayerId, PatternOutputSettings, PatternStructureRecipe, PresetMetadata,
     PresetRecord, RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy, SourceReference,
     SourceReferenceId, StraightGuideDimension, StraightGuideRepetition,
 };
@@ -131,15 +132,21 @@ fn connection_document_for(
     settings.definition_id = definition.id;
     settings.density.across_x = 8.0;
     settings.density.across_y = settings.density.across_x * height / width;
-    settings.geometry_response = PatternGeometryResponse::Connected(ConnectedGeometryResponse {
-        minimum_thickness: 0.1,
-        maximum_thickness: 0.25,
-    });
+    let bundle = PatternDefinitionBundle {
+        output_settings: vec![PatternOutputSettings {
+            output_layer_id: PatternOutputLayerId(803),
+            response: PatternGeometryResponse::Connected(ConnectedGeometryResponse {
+                minimum_thickness: 0.1,
+                maximum_thickness: 0.25,
+            }),
+        }],
+        definition,
+    };
     Document::with_source_topology_and_authored_structures(
         DocumentId(800),
         base.canvas().clone(),
         base.source().clone(),
-        vec![definition],
+        vec![bundle],
         settings,
         base.channel_model().expect("model").to_owned(),
         base.channel_topology().expect("topology").clone(),
@@ -169,7 +176,8 @@ fn maze_document_for(
             },
         },
     );
-    let mut definition = connection.pattern_definitions()[0].clone();
+    let mut bundle = connection.pattern_definition_bundles()[0].clone();
+    let definition = &mut bundle.definition;
     definition.output_layers = vec![PatternOutputLayer::MazeWalls {
         id: PatternOutputLayerId(803),
         site_mechanism_id: PatternMechanismId(802),
@@ -186,7 +194,7 @@ fn maze_document_for(
         connection.id(),
         connection.canvas().clone(),
         connection.source().clone(),
-        vec![definition],
+        vec![bundle],
         settings,
         connection
             .channel_model()
@@ -246,15 +254,21 @@ fn dispersion_document_for(source_id: SourceReferenceId, width: f64, height: f64
     settings.definition_id = definition.id;
     settings.density.across_x = 8.0;
     settings.density.across_y = 8.0;
-    settings.geometry_response = PatternGeometryResponse::Connected(ConnectedGeometryResponse {
-        minimum_thickness: 0.1,
-        maximum_thickness: 0.25,
-    });
+    let bundle = PatternDefinitionBundle {
+        output_settings: vec![PatternOutputSettings {
+            output_layer_id: PatternOutputLayerId(825),
+            response: PatternGeometryResponse::Connected(ConnectedGeometryResponse {
+                minimum_thickness: 0.1,
+                maximum_thickness: 0.25,
+            }),
+        }],
+        definition,
+    };
     Document::with_source_topology_and_authored_structures(
         DocumentId(820),
         base.canvas().clone(),
         base.source().clone(),
-        vec![definition],
+        vec![bundle],
         settings,
         base.channel_model().expect("model").to_owned(),
         base.channel_topology().expect("topology").clone(),
@@ -276,7 +290,7 @@ fn preset_metadata(id: &str) -> PresetMetadata {
 
 /// Builds a legal generalized guide recipe with the supplied site-product contract.
 fn generalized_recipe(product: GeneralizedSiteProductDraft) -> PatternDefinitionRecipe {
-    PatternDefinitionRecipe::GeneralizedStraightGuides {
+    PatternDefinitionRecipe::marks(PatternStructureRecipe::GeneralizedStraightGuides {
         name: "Connection guides".into(),
         coverage: CoveragePolicy {
             guard_steps: 1,
@@ -296,12 +310,12 @@ fn generalized_recipe(product: GeneralizedSiteProductDraft) -> PatternDefinition
         ],
         product,
         orientation: MarkOrientationDraft::Fixed,
-    }
+    })
 }
 
 /// Builds a legal random-site recipe for random-link preset coverage.
 fn random_recipe() -> PatternDefinitionRecipe {
-    PatternDefinitionRecipe::RandomSites {
+    PatternDefinitionRecipe::marks(PatternStructureRecipe::RandomSites {
         name: "Connection dispersion".into(),
         coverage: CoveragePolicy {
             guard_steps: 1,
@@ -315,7 +329,7 @@ fn random_recipe() -> PatternDefinitionRecipe {
         exclusion: SiteExclusionPolicy::None,
         maximum_attempts: 128,
         maximum_neighbor_checks: 256,
-    }
+    })
 }
 
 /// Wraps one eligible site-family recipe with fully authored connection intent.
@@ -326,11 +340,11 @@ fn connection_preset(
 ) -> PresetRecord {
     PresetRecord {
         metadata: preset_metadata(id),
-        recipe: PatternDefinitionRecipe::ConnectionPaths {
-            definition: Box::new(definition),
+        recipe: PatternDefinitionRecipe::connected(PatternStructureRecipe::ConnectionPaths {
+            definition: Box::new(definition.structure),
             program,
             style: PathStrokeStyle::default(),
-        },
+        }),
     }
 }
 
@@ -338,20 +352,20 @@ fn connection_preset(
 fn maze_preset(id: &str, definition: PatternDefinitionRecipe, seed: u32) -> PresetRecord {
     PresetRecord {
         metadata: preset_metadata(id),
-        recipe: PatternDefinitionRecipe::MazeWalls {
-            definition: Box::new(definition),
+        recipe: PatternDefinitionRecipe::connected(PatternStructureRecipe::MazeWalls {
+            definition: Box::new(definition.structure),
             program: MazeProgram {
                 algorithm: GridMazeAlgorithm::RecursiveBacktracker,
                 seed,
             },
             style: PathStrokeStyle::default(),
-        },
+        }),
     }
 }
 
-/// Proves all current-v4 connection programs retain authored intent and omit derived state.
+/// Proves all current-v5 connection programs retain authored intent and omit derived state.
 #[test]
-fn connection_v4_round_trips_all_programs_without_derived_state() {
+fn connection_v5_round_trips_all_programs_without_derived_state() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../");
     let source_id = SourceReferenceId::new("stage20m-io").expect("id");
     let sources = SourceBundle::new([EmbeddedSource::new(
@@ -445,9 +459,9 @@ fn connection_v4_round_trips_all_programs_without_derived_state() {
     assert_eq!(load(&first).expect("maze reload").document(), &maze);
 }
 
-/// Round-trips every legal connection program/family preset without allocating derived graph state.
+/// Round-trips every legal connection program/family preset in the current ID-free v3 format.
 #[test]
-fn preset_v2_round_trips_connection_programs_and_eligible_families() {
+fn preset_v3_round_trips_connection_programs_and_eligible_families() {
     let temporary = TemporaryDirectory::new("preset-round-trip");
     let adjacency = ConnectionAdjacencyIntent {
         maximum_degree: 3,
@@ -456,13 +470,15 @@ fn preset_v2_round_trips_connection_programs_and_eligible_families() {
     let presets = [
         connection_preset(
             "nearest-grid",
-            PatternDefinitionRecipe::StraightGrid(PatternDefinitionDraft {
-                name: "Connection grid".into(),
-                coverage: CoveragePolicy {
-                    guard_steps: 1,
-                    additional_margin: 0.0,
+            PatternDefinitionRecipe::marks(PatternStructureRecipe::StraightGrid(
+                PatternDefinitionDraft {
+                    name: "Connection grid".into(),
+                    coverage: CoveragePolicy {
+                        guard_steps: 1,
+                        additional_margin: 0.0,
+                    },
                 },
-            }),
+            )),
             ConnectionProgram::NearestLinks { adjacency },
         ),
         connection_preset(
@@ -536,56 +552,44 @@ fn preset_v2_round_trips_connection_programs_and_eligible_families() {
     }
 }
 
-/// Keeps an existing non-connection preset-v2 byte witness unchanged by the new wrapper variant.
+/// Keeps a current-v3 ordinary mark preset deterministic while recording complete output settings.
 #[test]
-fn preset_v2_existing_straight_grid_serialization_is_stable() {
+fn preset_v3_straight_grid_serialization_is_deterministic() {
     let temporary = TemporaryDirectory::new("preset-witness");
     let preset = PresetRecord {
         metadata: PresetMetadata {
             id: "stable-grid".into(),
             name: "Stable Grid".into(),
             category: "Test".into(),
-            description: "Existing v2 serialization witness.".into(),
+            description: "Current v3 serialization witness.".into(),
             thumbnail: None,
         },
-        recipe: PatternDefinitionRecipe::StraightGrid(PatternDefinitionDraft {
-            name: "Stable grid recipe".into(),
-            coverage: CoveragePolicy {
-                guard_steps: 2,
-                additional_margin: 1.25,
+        recipe: PatternDefinitionRecipe::marks(PatternStructureRecipe::StraightGrid(
+            PatternDefinitionDraft {
+                name: "Stable grid recipe".into(),
+                coverage: CoveragePolicy {
+                    guard_steps: 2,
+                    additional_margin: 1.25,
+                },
             },
-        }),
+        )),
     };
     let path = temporary.path("stable-grid.preset.json");
     save_preset(&path, &preset).expect("preset saves");
+    let first = fs::read_to_string(&path).expect("preset reads");
+    save_preset(&path, &preset).expect("repeat preset saves");
     assert_eq!(
-        fs::read_to_string(path).expect("preset reads"),
-        concat!(
-            "{\n",
-            "  \"preset_format_version\": 2,\n",
-            "  \"metadata\": {\n",
-            "    \"id\": \"stable-grid\",\n",
-            "    \"name\": \"Stable Grid\",\n",
-            "    \"category\": \"Test\",\n",
-            "    \"description\": \"Existing v2 serialization witness.\",\n",
-            "    \"thumbnail\": null\n",
-            "  },\n",
-            "  \"recipe\": {\n",
-            "    \"kind\": \"straight_grid\",\n",
-            "    \"name\": \"Stable grid recipe\",\n",
-            "    \"coverage\": {\n",
-            "      \"guard_steps\": 2,\n",
-            "      \"additional_margin\": 1.25\n",
-            "    }\n",
-            "  }\n",
-            "}"
-        )
+        first,
+        fs::read_to_string(path).expect("repeat preset reads")
     );
+    assert!(first.contains("\"preset_format_version\": 3"));
+    assert!(first.contains("\"output_settings\""));
+    assert!(first.contains("\"response\""));
 }
 
-/// Keeps a current-v4 document without connection intent byte-stable after the connection DTO addition.
+/// Keeps a current-v5 document with keyed output settings byte-stable after the connection DTO addition.
 #[test]
-fn document_v4_existing_mark_serialization_is_stable() {
+fn document_v5_existing_mark_serialization_is_stable() {
     let temporary = TemporaryDirectory::new("document-witness");
     let source_id = SourceReferenceId::new("stable-source").expect("source ID");
     let document = Document::new_default_document(
@@ -612,7 +616,7 @@ fn document_v4_existing_mark_serialization_is_stable() {
     assert_eq!(bytes, fs::read(&second).expect("second bytes"));
     assert_eq!(
         format!("{:x}", Sha256::digest(bytes)),
-        "d8ade2814e110b1d30700c0d4a8cdb0d1e286f660f1be16a10492a98b21a9af7"
+        "ade2db546dac21f483180f5861f959c407fc019e3179aeaed45cb3c97cbb9f3d"
     );
 }
 
@@ -636,8 +640,8 @@ fn grid_connection_fixture_configuration_preserves_triangular_lattice_inputs() {
             seed: 29,
         },
     );
-    let maze2_definition = &maze2.pattern_definitions()[0];
-    let maze3_definition = &maze3.pattern_definitions()[0];
+    let maze2_definition = &maze2.pattern_definition_bundles()[0].definition;
+    let maze3_definition = &maze3.pattern_definition_bundles()[0].definition;
     let PatternMechanism::StraightGuideDimensions { dimensions, .. } =
         &maze3_definition.mechanisms[0]
     else {
@@ -674,9 +678,11 @@ fn grid_connection_fixture_configuration_preserves_triangular_lattice_inputs() {
         assert_eq!(program.algorithm, GridMazeAlgorithm::RecursiveBacktracker);
         assert_eq!(program.seed, expected_seed);
     }
-    let [PatternOutputLayer::ConnectionPaths { program, .. }] =
-        prim3.pattern_definitions()[0].output_layers.as_slice()
-    else {
+    let [PatternOutputLayer::ConnectionPaths { program, .. }] = prim3.pattern_definition_bundles()
+        [0]
+    .definition
+    .output_layers
+    .as_slice() else {
         panic!("prim fixture retains its positive tree output")
     };
     assert_eq!(program.adjacency().maximum_degree, 6);

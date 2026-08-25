@@ -7,6 +7,7 @@ use std::{collections::BTreeSet, error::Error, fmt};
 use serde::{Serialize, Serializer, ser::SerializeStruct};
 use toniator_domain::{GuideDimensionId, PatternMechanismId};
 
+mod canonical_regions;
 mod connection_paths;
 mod curves;
 mod guides;
@@ -15,6 +16,13 @@ mod outlines;
 mod path_offsets;
 mod site_adjacency;
 
+pub use canonical_regions::{
+    CANONICAL_REGION_CONTRACT_ID, CanonicalRegion, CanonicalRegionDiagnostics,
+    CanonicalRegionError, CanonicalRegionId, CanonicalRegionLimits, CanonicalRegionProposal,
+    CanonicalRegionSet, CanonicalRegionSourceGroup, CanonicalRegionSourceId,
+    DEFAULT_MAX_REGION_INSPECTIONS, DEFAULT_MAX_REGION_SEGMENTS, DEFAULT_MAX_REGION_SOURCE_GROUPS,
+    DEFAULT_MAX_REGIONS, build_canonical_regions, build_canonical_regions_cancellable,
+};
 pub use connection_paths::{
     CONNECTION_NEAREST_SELECTION_CONTRACT_ID, CONNECTION_PATH_CONTRACT_ID,
     CONNECTION_PRIM_SELECTION_CONTRACT_ID, CONNECTION_RANDOM_SELECTION_CONTRACT_ID,

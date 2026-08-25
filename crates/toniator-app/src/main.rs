@@ -1470,6 +1470,7 @@ fn selected_property_values(
         .filter(|value| match value.descriptor.target {
             PropertyTarget::Document => true,
             PropertyTarget::Channel(id) => id == channel_id,
+            PropertyTarget::ChannelOutput(id, _) => id == channel_id,
             PropertyTarget::Definition(id)
             | PropertyTarget::Mechanism(id, _)
             | PropertyTarget::OutputLayer(id, _)
@@ -1776,6 +1777,7 @@ fn inspector_field_label(field: PropertyFieldId) -> String {
         PropertyFieldId::OutputAuthoredClosedShape => "Closed shape reference".into(),
         PropertyFieldId::OutputOrientation => "Mark orientation".into(),
         PropertyFieldId::OutputOrientationDimension => "Orientation guide dimension".into(),
+        _ => "Advanced pattern setting".into(),
     }
 }
 
@@ -1854,6 +1856,7 @@ fn enum_choice_label(choice: PropertyEnumChoice) -> &'static str {
         PropertyEnumChoice::OffsetCleanup(toniator_domain::OffsetCleanup::DissolveCrossings) => {
             "Dissolve crossings"
         }
+        _ => "Advanced pattern choice",
     }
 }
 
@@ -5493,7 +5496,7 @@ fn reference_choices(
             vec![PropertyReferenceValue::Source(document.source().clone())]
         }
         PropertyFieldId::DefinitionSelection => document
-            .pattern_definitions()
+            .pattern_definition_bundles()
             .iter()
             .map(|definition| PropertyReferenceValue::Definition(definition.id))
             .collect(),
@@ -5675,12 +5678,15 @@ fn definition_for_target(
         | PropertyTarget::Mechanism(id, _)
         | PropertyTarget::OutputLayer(id, _)
         | PropertyTarget::GuideDimension(id, _, _) => id,
-        PropertyTarget::Document | PropertyTarget::Channel(_) => return None,
+        PropertyTarget::Document
+        | PropertyTarget::Channel(_)
+        | PropertyTarget::ChannelOutput(_, _) => return None,
     };
     document
-        .pattern_definitions()
+        .pattern_definition_bundles()
         .iter()
         .find(|definition| definition.id == definition_id)
+        .map(|bundle| &bundle.definition)
 }
 
 fn guide_dimensions_for_target(
@@ -5708,7 +5714,9 @@ fn target_definition_id(target: PropertyTarget) -> Option<PatternDefinitionId> {
         | PropertyTarget::Mechanism(id, _)
         | PropertyTarget::OutputLayer(id, _)
         | PropertyTarget::GuideDimension(id, _, _) => Some(id),
-        PropertyTarget::Document | PropertyTarget::Channel(_) => None,
+        PropertyTarget::Document
+        | PropertyTarget::Channel(_)
+        | PropertyTarget::ChannelOutput(_, _) => None,
     }
 }
 
@@ -5871,26 +5879,12 @@ fn command_for_inspector_input(
                 MarkGeometryFieldEdit::MaximumFill(value)
             };
             match descriptor.target {
-                PropertyTarget::Document => {
-                    let mut settings = document.pattern_settings().clone();
-                    let PatternGeometryResponse::Marks(response) = &mut settings.geometry_response
-                    else {
-                        return Err(
-                            "Mark controls are inapplicable to the connected response branch."
-                                .to_owned(),
-                        );
-                    };
-                    match edit {
-                        MarkGeometryFieldEdit::MinimumFill(value) => response.minimum_fill = value,
-                        MarkGeometryFieldEdit::MaximumFill(value) => response.maximum_fill = value,
-                    }
-                    Ok(DocumentCommand::SetDocumentPatternSettings {
-                        base: document.pattern_settings().clone(),
-                        settings,
-                    })
-                }
-                PropertyTarget::Channel(channel_id) => document
-                    .set_channel_mark_response_field_for_effective(channel_id, edit)
+                PropertyTarget::ChannelOutput(channel_id, output_layer_id) => document
+                    .set_channel_mark_response_field_for_effective(
+                        channel_id,
+                        output_layer_id,
+                        edit,
+                    )
                     .map_err(|error| error.to_string()),
                 _ => Err("Mark response requires document or channel authority.".to_owned()),
             }
@@ -5898,36 +5892,17 @@ fn command_for_inspector_input(
         PropertyFieldId::ConnectedMinimumThickness | PropertyFieldId::ConnectedMaximumThickness => {
             let value = f64_value(input)?;
             match descriptor.target {
-                PropertyTarget::Document => {
-                    let mut settings = document.pattern_settings().clone();
-                    let PatternGeometryResponse::Connected(response) =
-                        &mut settings.geometry_response
-                    else {
-                        return Err(
-                            "Path controls are inapplicable to the mark response branch."
-                                .to_owned(),
-                        );
-                    };
-                    match descriptor.field {
-                        PropertyFieldId::ConnectedMinimumThickness => {
-                            response.minimum_thickness = value;
-                        }
-                        PropertyFieldId::ConnectedMaximumThickness => {
-                            response.maximum_thickness = value;
-                        }
-                        _ => unreachable!("connected response arm owns only connected fields"),
-                    }
-                    Ok(DocumentCommand::SetDocumentPatternSettings {
-                        base: document.pattern_settings().clone(),
-                        settings,
-                    })
-                }
-                PropertyTarget::Channel(channel_id) => {
+                PropertyTarget::ChannelOutput(channel_id, output_layer_id) => {
                     let effective = document
                         .effective_channel_pattern(channel_id)
                         .map_err(|error| error.to_string())?;
-                    let PatternGeometryResponse::Connected(mut response) =
-                        effective.geometry_response
+                    let PatternGeometryResponse::Connected(mut response) = effective
+                        .output_settings
+                        .iter()
+                        .find(|setting| setting.output_layer_id == output_layer_id)
+                        .ok_or_else(|| "The active output is missing.".to_owned())?
+                        .response
+                        .clone()
                     else {
                         return Err(
                             "Path controls are inapplicable to the mark response branch."
@@ -5944,8 +5919,9 @@ fn command_for_inspector_input(
                         _ => unreachable!("connected response arm owns only connected fields"),
                     }
                     document
-                        .set_channel_geometry_response_for_effective(
+                        .set_channel_output_response_for_effective(
                             channel_id,
+                            output_layer_id,
                             PatternGeometryResponse::Connected(response),
                         )
                         .map_err(|error| error.to_string())
@@ -6395,10 +6371,10 @@ fn structural_command_for_input(
         _ => return Err("This active descriptor has no compatible Stage 18 route.".to_owned()),
     };
     let base_definition = document
-        .pattern_definitions()
+        .pattern_definition_bundles()
         .iter()
         .find(|definition| definition.id == definition_id)
-        .cloned()
+        .map(|bundle| bundle.definition.clone())
         .ok_or_else(|| "The active definition is missing.".to_owned())?;
     let _ = (scope, definition_id);
     Ok(DocumentCommand::EditSelectedChannelPatternDefinition {

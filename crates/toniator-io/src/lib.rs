@@ -27,20 +27,22 @@ use toniator_domain::{
     GuideDimensionId, GuidePrototype, GuideRepetition, HalftoneChannelModel, HalftoneChannelRole,
     MarkGeometryResponse, MarkGeometryResponseDelta, MarkOrientation, MarkOrientationDraft,
     MarkPrototype, MazeProgram, ModeledChannelState, ParametricCurve, PathStrokeStyle,
-    PatternDefinition, PatternDefinitionDraft, PatternDefinitionId, PatternDefinitionRecipe,
-    PatternGeometryResponse, PatternMechanismId, PatternOutputLayerId, PresetMetadata,
-    PresetRecord, RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy, SourceComponent,
-    SourceMapping, SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId,
-    SpiralCurve, SpiralShape, StraightGuideDimension, StraightGuideRepetition, ValidationError,
+    PatternDefinition, PatternDefinitionBundle, PatternDefinitionDraft, PatternDefinitionId,
+    PatternDefinitionRecipe, PatternGeometryResponse, PatternMechanismId, PatternOutputLayerId,
+    PatternOutputResponseDelta, PatternOutputSettings, PatternOutputSettingsRecipe,
+    PatternStructureRecipe, PresetMetadata, PresetRecord, RandomSiteCharacter,
+    SiteDensityModulation, SiteExclusionPolicy, SourceComponent, SourceMapping,
+    SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId, SpiralCurve,
+    SpiralShape, StraightGuideDimension, StraightGuideRepetition, ValidationError,
     VisibleMarkSizingPolicy,
 };
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 pub const CONTAINER_VERSION: u32 = 1;
-pub const DOCUMENT_SCHEMA_VERSION: u32 = 4;
+pub const DOCUMENT_SCHEMA_VERSION: u32 = 5;
 /// Standalone pure-schema preset JSON format version. It is deliberately
 /// independent from the `.toniator` container and document schema versions.
-pub const PRESET_FORMAT_VERSION: u32 = 2;
+pub const PRESET_FORMAT_VERSION: u32 = 3;
 pub const MAX_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_DOCUMENT_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_SOURCE_BYTES: u64 = 128 * 1024 * 1024;
@@ -825,8 +827,17 @@ struct PresetMetadataDto {
     thumbnail: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
+struct PresetRecipeDto {
+    structure: PresetStructureRecipeDto,
+    output_settings: Vec<PatternOutputSettingsRecipeDtoV3>,
+}
+#[derive(Serialize, Deserialize)]
+struct PatternOutputSettingsRecipeDtoV3 {
+    response: PatternGeometryResponseDto,
+}
+#[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum PresetRecipeDto {
+enum PresetStructureRecipeDto {
     StraightGrid {
         name: String,
         coverage: CoverageDtoV4,
@@ -849,17 +860,17 @@ enum PresetRecipeDto {
         maximum_neighbor_checks: u32,
     },
     ConnectionPaths {
-        definition: Box<PresetRecipeDto>,
+        definition: Box<PresetStructureRecipeDto>,
         program: ConnectionProgramDtoV4,
         style: PathStrokeStyle,
     },
     MazeWalls {
-        definition: Box<PresetRecipeDto>,
+        definition: Box<PresetStructureRecipeDto>,
         program: MazeProgramDtoV4,
         style: PathStrokeStyle,
     },
     AuthoredClosedShapeMarks {
-        definition: Box<PresetRecipeDto>,
+        definition: Box<PresetStructureRecipeDto>,
         segments: Vec<AuthoredCurveSegmentDtoV4>,
     },
 }
@@ -942,7 +953,7 @@ struct DocumentDtoV4 {
     id: u64,
     canvas: CanvasDto,
     source_reference_id: String,
-    pattern_definitions: Vec<PatternDefinitionDtoV4>,
+    pattern_definition_bundles: Vec<PatternDefinitionBundleDtoV5>,
     pattern_settings: DocumentPatternSettingsDto,
     channel_configuration: ChannelConfigurationDto,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1001,6 +1012,20 @@ struct PatternDefinitionDtoV4 {
     output_layers: Vec<PatternOutputLayerDtoV4>,
     modulation: PatternModulationDtoV4,
     coverage: CoverageDtoV4,
+}
+
+/// Current-v5 atomic structural definition and ordered response authority.
+#[derive(Serialize, Deserialize)]
+struct PatternDefinitionBundleDtoV5 {
+    definition: PatternDefinitionDtoV4,
+    output_settings: Vec<PatternOutputSettingsDtoV5>,
+}
+
+/// Current-v5 persisted base response keyed to one structural output layer.
+#[derive(Serialize, Deserialize)]
+struct PatternOutputSettingsDtoV5 {
+    output_layer_id: u64,
+    response: PatternGeometryResponseDto,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -1511,18 +1536,48 @@ impl PresetEnvelopeDto {
 }
 
 impl PresetRecipeDto {
-    /// Converts an ID-free recipe into its stable standalone representation.
+    /// Converts the complete v3 ID-free recipe, including ordered output responses.
     fn from_domain(value: &PatternDefinitionRecipe) -> Self {
+        Self {
+            structure: PresetStructureRecipeDto::from_domain(&value.structure),
+            output_settings: value
+                .output_settings
+                .iter()
+                .map(|setting| PatternOutputSettingsRecipeDtoV3 {
+                    response: PatternGeometryResponseDto::from_domain(&setting.response),
+                })
+                .collect(),
+        }
+    }
+
+    /// Rebuilds the complete v3 recipe without allocating document IDs.
+    fn into_domain(self) -> Result<PatternDefinitionRecipe, PresetIoError> {
+        Ok(PatternDefinitionRecipe {
+            structure: self.structure.into_domain()?,
+            output_settings: self
+                .output_settings
+                .into_iter()
+                .map(|setting| PatternOutputSettingsRecipe {
+                    response: setting.response.into_domain(),
+                })
+                .collect(),
+        })
+    }
+}
+
+impl PresetStructureRecipeDto {
+    /// Converts an ID-free recipe into its stable standalone representation.
+    fn from_domain(value: &PatternStructureRecipe) -> Self {
         let coverage = |coverage: &CoveragePolicy| CoverageDtoV4 {
             guard_steps: coverage.guard_steps,
             additional_margin: coverage.additional_margin,
         };
         match value {
-            PatternDefinitionRecipe::StraightGrid(draft) => Self::StraightGrid {
+            PatternStructureRecipe::StraightGrid(draft) => Self::StraightGrid {
                 name: draft.name.clone(),
                 coverage: coverage(&draft.coverage),
             },
-            PatternDefinitionRecipe::GeneralizedStraightGuides {
+            PatternStructureRecipe::GeneralizedStraightGuides {
                 name,
                 coverage: definition_coverage,
                 dimensions,
@@ -1542,7 +1597,7 @@ impl PresetRecipeDto {
                 product: GeneralizedSiteProductDraftDto::from_domain(product),
                 orientation: MarkOrientationDraftDto::from_domain(orientation),
             },
-            PatternDefinitionRecipe::RandomSites {
+            PatternStructureRecipe::RandomSites {
                 name,
                 coverage: definition_coverage,
                 character,
@@ -1561,7 +1616,7 @@ impl PresetRecipeDto {
                 maximum_attempts: *maximum_attempts,
                 maximum_neighbor_checks: *maximum_neighbor_checks,
             },
-            PatternDefinitionRecipe::ConnectionPaths {
+            PatternStructureRecipe::ConnectionPaths {
                 definition,
                 program,
                 style,
@@ -1570,7 +1625,7 @@ impl PresetRecipeDto {
                 program: ConnectionProgramDtoV4::from_domain(program),
                 style: *style,
             },
-            PatternDefinitionRecipe::MazeWalls {
+            PatternStructureRecipe::MazeWalls {
                 definition,
                 program,
                 style,
@@ -1579,7 +1634,7 @@ impl PresetRecipeDto {
                 program: MazeProgramDtoV4::from_domain(program),
                 style: *style,
             },
-            PatternDefinitionRecipe::AuthoredClosedShapeMarks { definition, shape } => {
+            PatternStructureRecipe::AuthoredClosedShapeMarks { definition, shape } => {
                 Self::AuthoredClosedShapeMarks {
                     definition: Box::new(Self::from_domain(definition)),
                     segments: shape
@@ -1597,13 +1652,13 @@ impl PresetRecipeDto {
     /// # Errors
     ///
     /// Returns stable preset validation context when an embedded authored shape is invalid.
-    fn into_domain(self) -> Result<PatternDefinitionRecipe, PresetIoError> {
+    fn into_domain(self) -> Result<PatternStructureRecipe, PresetIoError> {
         let coverage_from = |value: CoverageDtoV4| CoveragePolicy {
             guard_steps: value.guard_steps,
             additional_margin: value.additional_margin,
         };
         match self {
-            Self::StraightGrid { name, coverage } => Ok(PatternDefinitionRecipe::StraightGrid(
+            Self::StraightGrid { name, coverage } => Ok(PatternStructureRecipe::StraightGrid(
                 PatternDefinitionDraft {
                     name,
                     coverage: coverage_from(coverage),
@@ -1615,7 +1670,7 @@ impl PresetRecipeDto {
                 dimensions,
                 product,
                 orientation,
-            } => Ok(PatternDefinitionRecipe::GeneralizedStraightGuides {
+            } => Ok(PatternStructureRecipe::GeneralizedStraightGuides {
                 name,
                 coverage: coverage_from(stored_coverage),
                 dimensions: dimensions
@@ -1638,7 +1693,7 @@ impl PresetRecipeDto {
                 exclusion,
                 maximum_attempts,
                 maximum_neighbor_checks,
-            } => Ok(PatternDefinitionRecipe::RandomSites {
+            } => Ok(PatternStructureRecipe::RandomSites {
                 name,
                 coverage: coverage_from(stored_coverage),
                 character: character.into_domain(),
@@ -1652,7 +1707,7 @@ impl PresetRecipeDto {
                 definition,
                 program,
                 style,
-            } => Ok(PatternDefinitionRecipe::ConnectionPaths {
+            } => Ok(PatternStructureRecipe::ConnectionPaths {
                 definition: Box::new(definition.into_domain()?),
                 program: program.into_domain(),
                 style,
@@ -1661,7 +1716,7 @@ impl PresetRecipeDto {
                 definition,
                 program,
                 style,
-            } => Ok(PatternDefinitionRecipe::MazeWalls {
+            } => Ok(PatternStructureRecipe::MazeWalls {
                 definition: Box::new(definition.into_domain()?),
                 program: program.into_domain(),
                 style,
@@ -1680,7 +1735,7 @@ impl PresetRecipeDto {
                 .map_err(|error| PresetIoError {
                     context: error.to_string(),
                 })?;
-                Ok(PatternDefinitionRecipe::AuthoredClosedShapeMarks {
+                Ok(PatternStructureRecipe::AuthoredClosedShapeMarks {
                     definition: Box::new(definition.into_domain()?),
                     shape,
                 })
@@ -1796,7 +1851,6 @@ struct DocumentPatternSettingsDto {
     density: DensityDto,
     pattern_rotation_degrees: f64,
     shape_rotation_degrees: f64,
-    geometry_response: PatternGeometryResponseDto,
 }
 #[derive(Serialize, Deserialize)]
 struct ChannelPatternInstanceDto {
@@ -1805,8 +1859,15 @@ struct ChannelPatternInstanceDto {
     layout_delta: LayoutDeltaDto,
     #[serde(skip_serializing_if = "Option::is_none")]
     shape_rotation_delta_degrees: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    geometry_response_delta: Option<ChannelGeometryResponseDeltaDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    output_response_deltas: Vec<PatternOutputResponseDeltaDtoV5>,
+}
+
+/// Current-v5 optional channel response intent keyed to a structural output.
+#[derive(Serialize, Deserialize)]
+struct PatternOutputResponseDeltaDtoV5 {
+    output_layer_id: u64,
+    delta: ChannelGeometryResponseDeltaDto,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -1819,6 +1880,54 @@ enum PatternGeometryResponseDto {
 enum ChannelGeometryResponseDeltaDto {
     Marks { delta: MarkResponseDeltaDto },
     Connected { delta: ConnectedResponseDeltaDto },
+}
+
+impl PatternGeometryResponseDto {
+    /// Projects one typed base response without resolving channel deltas.
+    fn from_domain(value: &PatternGeometryResponse) -> Self {
+        match value {
+            PatternGeometryResponse::Marks(response) => Self::Marks {
+                response: MarkResponseDto::from_domain(response),
+            },
+            PatternGeometryResponse::Connected(response) => Self::Connected {
+                response: ConnectedResponseDto::from_domain(response),
+            },
+        }
+    }
+
+    /// Rebuilds one typed base response for domain-owned bundle validation.
+    fn into_domain(self) -> PatternGeometryResponse {
+        match self {
+            Self::Marks { response } => PatternGeometryResponse::Marks(response.into_domain()),
+            Self::Connected { response } => {
+                PatternGeometryResponse::Connected(response.into_domain())
+            }
+        }
+    }
+}
+
+impl ChannelGeometryResponseDeltaDto {
+    /// Projects one typed channel delta without materializing an effective response.
+    fn from_domain(value: &ChannelGeometryResponseDelta) -> Self {
+        match value {
+            ChannelGeometryResponseDelta::Marks(delta) => Self::Marks {
+                delta: MarkResponseDeltaDto::from_domain(delta),
+            },
+            ChannelGeometryResponseDelta::Connected(delta) => Self::Connected {
+                delta: ConnectedResponseDeltaDto::from_domain(delta),
+            },
+        }
+    }
+
+    /// Rebuilds one typed channel delta for domain-owned alignment validation.
+    fn into_domain(self) -> ChannelGeometryResponseDelta {
+        match self {
+            Self::Marks { delta } => ChannelGeometryResponseDelta::Marks(delta.into_domain()),
+            Self::Connected { delta } => {
+                ChannelGeometryResponseDelta::Connected(delta.into_domain())
+            }
+        }
+    }
 }
 #[derive(Serialize, Deserialize)]
 struct LayoutDeltaDto {
@@ -2007,10 +2116,10 @@ impl DocumentDtoV4 {
                 height: document.canvas().height,
             },
             source_reference_id,
-            pattern_definitions: document
-                .pattern_definitions()
+            pattern_definition_bundles: document
+                .pattern_definition_bundles()
                 .iter()
-                .map(PatternDefinitionDtoV4::from_domain)
+                .map(PatternDefinitionBundleDtoV5::from_domain)
                 .collect(),
             pattern_settings: DocumentPatternSettingsDto::from_domain(document.pattern_settings()),
             channel_configuration,
@@ -2030,10 +2139,10 @@ impl DocumentDtoV4 {
     fn into_domain(self) -> Result<Document, ValidationError> {
         let source = SourceReference::Assigned(dto_source_id(&self.source_reference_id)?);
         let definitions = self
-            .pattern_definitions
+            .pattern_definition_bundles
             .into_iter()
-            .map(PatternDefinitionDtoV4::into_domain)
-            .collect();
+            .map(PatternDefinitionBundleDtoV5::into_domain)
+            .collect::<Result<Vec<_>, _>>()?;
         let authored_structures = self
             .authored_structures
             .into_iter()
@@ -2236,6 +2345,38 @@ impl PatternDefinitionDtoV4 {
                 additional_margin: self.coverage.additional_margin,
             },
         }
+    }
+}
+
+impl PatternDefinitionBundleDtoV5 {
+    /// Projects one complete v5 structural-and-response bundle without derived state.
+    fn from_domain(value: &PatternDefinitionBundle) -> Self {
+        Self {
+            definition: PatternDefinitionDtoV4::from_domain(&value.definition),
+            output_settings: value
+                .output_settings
+                .iter()
+                .map(|setting| PatternOutputSettingsDtoV5 {
+                    output_layer_id: setting.output_layer_id.0,
+                    response: PatternGeometryResponseDto::from_domain(&setting.response),
+                })
+                .collect(),
+        }
+    }
+
+    /// Rebuilds one complete v5 bundle for domain-owned alignment validation.
+    fn into_domain(self) -> Result<PatternDefinitionBundle, ValidationError> {
+        Ok(PatternDefinitionBundle {
+            definition: self.definition.into_domain(),
+            output_settings: self
+                .output_settings
+                .into_iter()
+                .map(|setting| PatternOutputSettings {
+                    output_layer_id: PatternOutputLayerId(setting.output_layer_id),
+                    response: setting.response.into_domain(),
+                })
+                .collect(),
+        })
     }
 }
 impl PatternFamilyDtoV4 {
@@ -3138,16 +3279,8 @@ impl ConnectedResponseDeltaDto {
 }
 
 impl DocumentPatternSettingsDto {
-    /// Projects the sole document-base pattern authority into current-v4 fields.
+    /// Projects document-wide layout authority without output response state.
     fn from_domain(value: &DocumentPatternSettings) -> Self {
-        let geometry_response = match &value.geometry_response {
-            PatternGeometryResponse::Marks(response) => PatternGeometryResponseDto::Marks {
-                response: MarkResponseDto::from_domain(response),
-            },
-            PatternGeometryResponse::Connected(response) => PatternGeometryResponseDto::Connected {
-                response: ConnectedResponseDto::from_domain(response),
-            },
-        };
         Self {
             definition_id: value.definition_id.0,
             density: DensityDto {
@@ -3157,10 +3290,9 @@ impl DocumentPatternSettingsDto {
             },
             pattern_rotation_degrees: value.pattern_rotation_degrees,
             shape_rotation_degrees: value.shape_rotation_degrees,
-            geometry_response,
         }
     }
-    /// Rebuilds the sole document-base pattern authority for complete validation.
+    /// Rebuilds document-wide layout authority for complete validation.
     fn into_domain(self) -> DocumentPatternSettings {
         DocumentPatternSettings {
             definition_id: PatternDefinitionId(self.definition_id),
@@ -3171,14 +3303,6 @@ impl DocumentPatternSettingsDto {
             },
             pattern_rotation_degrees: self.pattern_rotation_degrees,
             shape_rotation_degrees: self.shape_rotation_degrees,
-            geometry_response: match self.geometry_response {
-                PatternGeometryResponseDto::Marks { response } => {
-                    PatternGeometryResponse::Marks(response.into_domain())
-                }
-                PatternGeometryResponseDto::Connected { response } => {
-                    PatternGeometryResponse::Connected(response.into_domain())
-                }
-            },
         }
     }
 }
@@ -3189,20 +3313,14 @@ impl ChannelPatternInstanceDto {
             definition_override: value.definition_override.map(|id| id.0),
             layout_delta: LayoutDeltaDto::from_domain(&value.layout_delta),
             shape_rotation_delta_degrees: value.shape_rotation_delta_degrees,
-            geometry_response_delta: value.geometry_response_delta.as_ref().map(
-                |value| match value {
-                    ChannelGeometryResponseDelta::Marks(delta) => {
-                        ChannelGeometryResponseDeltaDto::Marks {
-                            delta: MarkResponseDeltaDto::from_domain(delta),
-                        }
-                    }
-                    ChannelGeometryResponseDelta::Connected(delta) => {
-                        ChannelGeometryResponseDeltaDto::Connected {
-                            delta: ConnectedResponseDeltaDto::from_domain(delta),
-                        }
-                    }
-                },
-            ),
+            output_response_deltas: value
+                .output_response_deltas
+                .iter()
+                .map(|entry| PatternOutputResponseDeltaDtoV5 {
+                    output_layer_id: entry.output_layer_id.0,
+                    delta: ChannelGeometryResponseDeltaDto::from_domain(&entry.delta),
+                })
+                .collect(),
         }
     }
     /// Rebuilds optional replacement and additive intent without materializing inheritance.
@@ -3211,14 +3329,14 @@ impl ChannelPatternInstanceDto {
             definition_override: self.definition_override.map(PatternDefinitionId),
             layout_delta: self.layout_delta.into_domain(),
             shape_rotation_delta_degrees: self.shape_rotation_delta_degrees,
-            geometry_response_delta: self.geometry_response_delta.map(|delta| match delta {
-                ChannelGeometryResponseDeltaDto::Marks { delta } => {
-                    ChannelGeometryResponseDelta::Marks(delta.into_domain())
-                }
-                ChannelGeometryResponseDeltaDto::Connected { delta } => {
-                    ChannelGeometryResponseDelta::Connected(delta.into_domain())
-                }
-            }),
+            output_response_deltas: self
+                .output_response_deltas
+                .into_iter()
+                .map(|entry| PatternOutputResponseDelta {
+                    output_layer_id: PatternOutputLayerId(entry.output_layer_id),
+                    delta: entry.delta.into_domain(),
+                })
+                .collect(),
         }
     }
 }

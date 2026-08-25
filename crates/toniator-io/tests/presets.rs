@@ -3,7 +3,7 @@ use std::{fs, path::PathBuf};
 use toniator_domain::{
     AuthoredCurveSegment, AuthoredPoint2, AuthoredStructureDraft, AuthoredStructureKind,
     CoveragePolicy, GuideDimensionDraft, MarkOrientationDraft, PatternDefinitionDraft,
-    PatternDefinitionRecipe, PresetMetadata, PresetRecord,
+    PatternDefinitionRecipe, PatternStructureRecipe, PresetMetadata, PresetRecord,
 };
 use toniator_io::{PRESET_FORMAT_VERSION, load_preset, save_preset};
 
@@ -16,7 +16,7 @@ fn validation_directory() -> PathBuf {
     directory
 }
 
-/// Round-trips a preset-v2 ID-free self-intersecting shape recipe without allocating IDs.
+/// Round-trips a preset-v3 ID-free self-intersecting shape recipe without allocating IDs.
 #[test]
 fn authored_closed_shape_preset_round_trips_as_embedded_recipe_geometry() {
     let points = [
@@ -43,8 +43,8 @@ fn authored_closed_shape_preset_round_trips_as_embedded_recipe_geometry() {
             description: "ID-free authored-shape preset fixture.".into(),
             thumbnail: None,
         },
-        recipe: PatternDefinitionRecipe::AuthoredClosedShapeMarks {
-            definition: Box::new(PatternDefinitionRecipe::StraightGrid(
+        recipe: PatternDefinitionRecipe::marks(PatternStructureRecipe::AuthoredClosedShapeMarks {
+            definition: Box::new(PatternStructureRecipe::StraightGrid(
                 PatternDefinitionDraft {
                     name: "Bow-tie grid".into(),
                     coverage: CoveragePolicy {
@@ -54,7 +54,7 @@ fn authored_closed_shape_preset_round_trips_as_embedded_recipe_geometry() {
                 },
             )),
             shape,
-        },
+        }),
     };
     let path = validation_directory().join("shape-round-trip.preset.json");
     save_preset(&path, &preset).expect("the valid shape preset saves");
@@ -80,13 +80,15 @@ fn preset_round_trips_through_versioned_standalone_io() {
             description: "Standalone preset serialization fixture.".into(),
             thumbnail: Some("builtin:io-round-trip".into()),
         },
-        recipe: PatternDefinitionRecipe::StraightGrid(PatternDefinitionDraft {
-            name: "Round-trip grid".into(),
-            coverage: CoveragePolicy {
-                guard_steps: 2,
-                additional_margin: 4.5,
+        recipe: PatternDefinitionRecipe::marks(PatternStructureRecipe::StraightGrid(
+            PatternDefinitionDraft {
+                name: "Round-trip grid".into(),
+                coverage: CoveragePolicy {
+                    guard_steps: 2,
+                    additional_margin: 4.5,
+                },
             },
-        }),
+        )),
     };
     let path = directory.join("io-round-trip.preset.json");
     save_preset(&path, &preset).unwrap();
@@ -121,13 +123,15 @@ fn preset_io_rejects_invalid_serialized_and_save_inputs() {
             description: "Validation fixture.".into(),
             thumbnail: None,
         },
-        recipe: PatternDefinitionRecipe::StraightGrid(PatternDefinitionDraft {
-            name: "Grid".into(),
-            coverage: CoveragePolicy {
-                guard_steps: 2,
-                additional_margin: 4.5,
+        recipe: PatternDefinitionRecipe::marks(PatternStructureRecipe::StraightGrid(
+            PatternDefinitionDraft {
+                name: "Grid".into(),
+                coverage: CoveragePolicy {
+                    guard_steps: 2,
+                    additional_margin: 4.5,
+                },
             },
-        }),
+        )),
     };
     assert!(save_preset(&invalid_path, &invalid_metadata).is_err());
     assert!(!invalid_path.exists());
@@ -139,7 +143,7 @@ fn preset_io_rejects_invalid_serialized_and_save_inputs() {
             description: "Validation fixture.".into(),
             thumbnail: None,
         },
-        recipe: PatternDefinitionRecipe::GeneralizedStraightGuides {
+        recipe: PatternDefinitionRecipe::marks(PatternStructureRecipe::GeneralizedStraightGuides {
             name: "Bad index".into(),
             coverage: CoveragePolicy {
                 guard_steps: 2,
@@ -156,7 +160,7 @@ fn preset_io_rejects_invalid_serialized_and_save_inputs() {
                 phase: 0.0,
             },
             orientation: MarkOrientationDraft::GuideNormal { dimension_index: 1 },
-        },
+        }),
     };
     assert!(save_preset(&invalid_path, &invalid_recipe).is_err());
     assert!(!invalid_path.exists());

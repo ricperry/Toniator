@@ -5,11 +5,12 @@ use toniator_domain::{
     GeneralizedSiteProduct, GuideCapabilities, GuideDimension, GuideDimensionId, GuidePrototype,
     GuidePrototypeKind, GuideRepetition, GuideSiteProductCapability, MarkGeometryResponse,
     MarkOrientation, MarkOrientationKind, MarkOutputCapabilityProjection, MarkPrototype,
-    MarkPrototypeKind, PatternCapabilityScope, PatternDefinition, PatternDefinitionId,
-    PatternFamilyCapabilityProjection, PatternGeometryResponse, PatternMechanismId,
-    PatternOutputCapabilityProjection, PatternOutputLayer, PatternOutputLayerId,
-    RandomCharacterKind, RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy,
-    SourceMapping, SourceMappingComponent, SourcePlacement, SourceReference,
+    MarkPrototypeKind, PatternCapabilityScope, PatternDefinition, PatternDefinitionBundle,
+    PatternDefinitionId, PatternFamilyCapabilityProjection, PatternGeometryResponse,
+    PatternMechanismId, PatternOutputCapabilityProjection, PatternOutputLayer,
+    PatternOutputLayerId, PatternOutputSettings, RandomCharacterKind, RandomSiteCharacter,
+    SiteDensityModulation, SiteExclusionPolicy, SourceMapping, SourceMappingComponent,
+    SourcePlacement, SourceReference,
 };
 
 /// Builds the current modeled document used to verify base and effective authority scopes.
@@ -33,7 +34,20 @@ fn document_for(definition: PatternDefinition, structures: Vec<AuthoredStructure
         DocumentId(81),
         base.canvas().clone(),
         SourceReference::Unassigned,
-        vec![definition],
+        vec![PatternDefinitionBundle {
+            output_settings: definition
+                .output_layers
+                .iter()
+                .map(|output| PatternOutputSettings {
+                    output_layer_id: output.id(),
+                    response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+                        minimum_fill: 0.0,
+                        maximum_fill: 1.0,
+                    }),
+                })
+                .collect(),
+            definition,
+        }],
         settings,
         base.channel_model().expect("modeled fixture").to_owned(),
         base.channel_topology().expect("modeled fixture").clone(),
@@ -205,8 +219,9 @@ fn override_and_scalar_deltas_preserve_scope_and_structure_authority() {
         .apply_command(&shape_rotation)
         .expect("shape-rotation applies");
     let response = document
-        .set_channel_geometry_response_for_effective(
+        .set_channel_output_response_for_effective(
             ChannelId(2),
+            PatternOutputLayerId(45),
             PatternGeometryResponse::Marks(MarkGeometryResponse {
                 minimum_fill: 0.25,
                 maximum_fill: 1.5,

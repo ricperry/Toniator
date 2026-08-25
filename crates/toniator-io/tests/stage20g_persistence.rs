@@ -5,6 +5,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use toniator_domain::{
     CanvasSpec, ChannelGeometryResponseDelta, ChannelId, DensityMetricDelta2D, Document,
@@ -77,7 +78,7 @@ fn rewrite_schema_version(source: &Path, destination: &Path, version: u32) {
             let text = String::from_utf8(bytes).expect("document JSON is UTF-8");
             bytes = text
                 .replacen(
-                    "\"document_schema_version\":4",
+                    "\"document_schema_version\":5",
                     &format!("\"document_schema_version\":{version}"),
                     1,
                 )
@@ -97,10 +98,101 @@ fn rewrite_schema_version(source: &Path, destination: &Path, version: u32) {
     writer.finish().expect("derived container finishes");
 }
 
-/// Opens every tracked v4 fixture, resolves each effective channel, and
+/// Ports one tracked current-format fixture from the intentional v4 authority shape to v5.
+///
+/// This test-only one-shot port preserves embedded source bytes and structural definition order.
+/// Production IO deliberately has no v4 adapter; after the port, normal v5 loading validates the
+/// converted fixture through the current authoritative DTO boundary.
+#[test]
+#[ignore = "one-shot current-fixture port; run only before replacing tracked v4 fixtures"]
+fn port_tracked_v4_fixtures_to_v5() {
+    for fixture in [
+        "HolidayMugs_2024_2025.toniator",
+        "raster-sample.toniator",
+        "vector-sample.toniator",
+    ] {
+        port_v4_fixture_to_v5(
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../assets")
+                .join(fixture),
+        );
+    }
+}
+
+/// Rewrites a known v4 fixture archive as v5 keyed bundle authority without interpreting it as a document.
+fn port_v4_fixture_to_v5(path: &Path) {
+    let mut archive = ZipArchive::new(File::open(path).expect("v4 fixture archive opens"))
+        .expect("v4 fixture is a ZIP archive");
+    let mut entries = Vec::new();
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).expect("fixture entry opens");
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).expect("fixture entry reads");
+        if entry.name() == "document.json" {
+            let mut root: Value = serde_json::from_slice(&bytes).expect("fixture document is JSON");
+            root["document_schema_version"] = Value::from(5_u64);
+            let document = root["document"]
+                .as_object_mut()
+                .expect("fixture document object");
+            let response = document
+                .get("pattern_settings")
+                .and_then(Value::as_object)
+                .and_then(|settings| settings.get("geometry_response"))
+                .cloned()
+                .expect("v4 fixture carries base response");
+            let definitions = document
+                .remove("pattern_definitions")
+                .and_then(|value| value.as_array().cloned())
+                .expect("v4 fixture carries definitions");
+            let bundles = definitions
+                .into_iter()
+                .map(|definition| {
+                    let settings = definition["output_layers"]
+                        .as_array()
+                        .expect("fixture output layers")
+                        .iter()
+                        .map(|output| {
+                            serde_json::json!({
+                                "output_layer_id": output["id"].clone(),
+                                "response": response.clone(),
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    serde_json::json!({
+                        "definition": definition,
+                        "output_settings": settings,
+                    })
+                })
+                .collect::<Vec<_>>();
+            document.insert("pattern_definition_bundles".into(), Value::Array(bundles));
+            document
+                .get_mut("pattern_settings")
+                .and_then(Value::as_object_mut)
+                .expect("fixture settings object")
+                .remove("geometry_response");
+            bytes = serde_json::to_vec(&root).expect("v5 fixture JSON serializes");
+        }
+        entries.push((entry.name().to_owned(), bytes));
+    }
+    drop(archive);
+    let temporary = path.with_extension("toniator.stage20n-port");
+    let options = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Stored)
+        .last_modified_time(zip::DateTime::default())
+        .unix_permissions(0o100644);
+    let mut writer = ZipWriter::new(File::create(&temporary).expect("port archive creates"));
+    for (name, bytes) in entries {
+        writer.start_file(name, options).expect("port entry starts");
+        writer.write_all(&bytes).expect("port entry writes");
+    }
+    writer.finish().expect("port archive finishes");
+    fs::rename(temporary, path).expect("port atomically replaces fixture");
+}
+
+/// Opens every tracked v5 fixture, resolves each effective channel, and
 /// verifies that the persisted archive carries no runtime-only projection.
 #[test]
-fn v4_fixtures_reopen_with_base_and_delta_authority_only() {
+fn v5_fixtures_reopen_with_bundle_and_delta_authority_only() {
     for fixture in [
         "HolidayMugs_2024_2025.toniator",
         "raster-sample.toniator",
@@ -119,12 +211,12 @@ fn v4_fixtures_reopen_with_base_and_delta_authority_only() {
     }
 }
 
-/// Locks the diverging Holiday channel recipes and rotations after the one-time v4 authority port.
+/// Locks the diverging Holiday channel recipes and rotations after the one-time v5 authority port.
 #[test]
 fn holiday_fixture_preserves_diverging_effective_channel_settings() {
     let path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/HolidayMugs_2024_2025.toniator");
-    let loaded = load(&path).expect("Holiday v4 fixture opens");
+    let loaded = load(&path).expect("Holiday v5 fixture opens");
     let effective = [ChannelId(1), ChannelId(2), ChannelId(3)].map(|channel_id| {
         loaded
             .document()
@@ -160,9 +252,9 @@ fn holiday_fixture_preserves_diverging_effective_channel_settings() {
     );
 }
 
-/// Saves deterministically, preserves explicit zero deltas, and omits every effective projection.
+/// Saves deterministic v5 keyed deltas and omits every effective projection.
 #[test]
-fn v4_save_is_deterministic_and_serializes_only_base_plus_authored_deltas() {
+fn v5_save_is_deterministic_and_serializes_only_base_plus_authored_deltas() {
     let (document, sources) = source_backed_document();
     let document = document
         .apply_command(&DocumentCommand::SetChannelDensityDelta {
@@ -184,10 +276,14 @@ fn v4_save_is_deterministic_and_serializes_only_base_plus_authored_deltas() {
         .expect("explicit zero rotation applies")
         .0;
     let document = document
-        .apply_command(&DocumentCommand::SetChannelGeometryResponseDelta {
+        .apply_command(&DocumentCommand::SetChannelOutputResponseDelta {
             base: document.pattern_settings().clone(),
             channel_id: ChannelId(1),
-            geometry_response: ChannelGeometryResponseDelta::Marks(MarkGeometryResponseDelta {
+            output_layer_id: document.pattern_definition_bundles()[0]
+                .definition
+                .output_layers[0]
+                .id(),
+            delta: ChannelGeometryResponseDelta::Marks(MarkGeometryResponseDelta {
                 minimum_fill_delta: Some(0.0),
                 maximum_fill_delta: None,
             }),
@@ -203,12 +299,12 @@ fn v4_save_is_deterministic_and_serializes_only_base_plus_authored_deltas() {
         fs::read(&second).expect("second reads")
     );
     let text = document_json(&first);
-    assert!(text.contains("\"document_schema_version\":4"));
+    assert!(text.contains("\"document_schema_version\":5"));
     assert!(text.contains("\"pattern_settings\""));
     assert!(text.contains("\"pattern_instance\""));
     assert!(!text.contains("EffectiveChannelPatternInstance"));
     assert!(!text.contains("effective_channel_pattern"));
-    let loaded = load(&first).expect("v4 reloads");
+    let loaded = load(&first).expect("v5 reloads");
     assert_eq!(loaded.document(), &document);
     let instance = loaded
         .document()
@@ -224,10 +320,11 @@ fn v4_save_is_deterministic_and_serializes_only_base_plus_authored_deltas() {
         0.0
     );
     assert_eq!(instance.layout_delta.rotation_degrees, Some(0.0));
-    let ChannelGeometryResponseDelta::Marks(delta) = instance
-        .geometry_response_delta
-        .as_ref()
+    let ChannelGeometryResponseDelta::Marks(delta) = &instance
+        .output_response_deltas
+        .first()
         .expect("response delta")
+        .delta
     else {
         panic!("mark fixture reloads mark response delta");
     };
@@ -237,13 +334,13 @@ fn v4_save_is_deterministic_and_serializes_only_base_plus_authored_deltas() {
     fs::remove_file(second).expect("second temporary removes");
 }
 
-/// Rejects document schemas one through three without a migration or fallback decoder.
+/// Rejects document schemas one through four without a migration or fallback decoder.
 #[test]
-fn document_versions_one_through_three_are_rejected() {
+fn document_versions_one_through_four_are_rejected() {
     let (document, sources) = source_backed_document();
     let current = temporary("current.toniator");
     save(&current, &document, &sources).expect("current save succeeds");
-    for version in 1..=3 {
+    for version in 1..=4 {
         let stale = temporary(&format!("schema-{version}.toniator"));
         rewrite_schema_version(&current, &stale, version);
         let error = load(&stale).expect_err("obsolete schema rejects");
@@ -258,10 +355,10 @@ fn document_versions_one_through_three_are_rejected() {
     fs::remove_file(current).expect("current temporary removes");
 }
 
-/// Keeps preset v2 deterministic and materializes the same ID-free recipe at either authority scope.
+/// Keeps preset v3 deterministic and materializes the same ID-free recipe at either authority scope.
 #[test]
-fn preset_v2_bytes_reconstruct_document_base_or_channel_override() {
-    assert_eq!(PRESET_FORMAT_VERSION, 2);
+fn preset_v3_bytes_reconstruct_document_base_or_channel_override() {
+    assert_eq!(PRESET_FORMAT_VERSION, 3);
     let preset = PresetRecord {
         metadata: PresetMetadata {
             id: "stage20g-grid".into(),
@@ -270,13 +367,15 @@ fn preset_v2_bytes_reconstruct_document_base_or_channel_override() {
             description: "One ID-free recipe for both pattern scopes.".into(),
             thumbnail: None,
         },
-        recipe: PatternDefinitionRecipe::StraightGrid(PatternDefinitionDraft {
-            name: "Materialized grid".into(),
-            coverage: toniator_domain::CoveragePolicy {
-                guard_steps: 3,
-                additional_margin: 1.25,
-            },
-        }),
+        recipe: PatternDefinitionRecipe::marks(
+            toniator_domain::PatternStructureRecipe::StraightGrid(PatternDefinitionDraft {
+                name: "Materialized grid".into(),
+                coverage: toniator_domain::CoveragePolicy {
+                    guard_steps: 3,
+                    additional_margin: 1.25,
+                },
+            }),
+        ),
     };
     let first = temporary("preset-a.json");
     let second = temporary("preset-b.json");
@@ -287,11 +386,11 @@ fn preset_v2_bytes_reconstruct_document_base_or_channel_override() {
     assert_eq!(load_preset(&first).expect("preset reloads"), preset);
     assert_eq!(
         format!("{:x}", Sha256::digest(&bytes)),
-        "c0dd63d599e6a111c158448726fc5b3a93d922f66204cd769a44876dd43886de"
+        "cf928fcdf1694d267c7f63ef98e7cc41e22de58ca650fdd3f29978ab574fb526"
     );
 
     let (document, _) = source_backed_document();
-    let base_definition = document.pattern_definitions()[0].clone();
+    let base_definition = document.pattern_definition_bundles()[0].definition.clone();
     let mut base_history =
         DocumentHistory::new(DocumentSession::new(document.clone()).expect("valid base session"));
     base_history
