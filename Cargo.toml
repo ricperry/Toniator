@@ -26,3 +26,4 @@ image = { version = "0.25.10", default-features = false, features = ["png"] }
 resvg = { version = "0.48.1", default-features = false, features = ["text", "system-fonts"] }
 sha2 = "0.10.9"
 zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
+spade = { version = "=2.15.1", default-features = false, features = ["std"] }

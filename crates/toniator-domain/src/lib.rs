@@ -506,14 +506,22 @@ pub struct DocumentPatternSettings {
     pub shape_rotation_degrees: f64,
 }
 
-/// The presently supported normalized output-response branches. Mark fill and
-/// connected-path thickness remain in `0.0..=2.0` nominal-cell-diameter units;
-/// region responses intentionally do not exist in this current-format authority.
+/// The presently supported normalized output-response branches.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PatternGeometryResponse {
     Marks(MarkGeometryResponse),
     /// Defines normalized round-brush widths for a guide-path output.
     Connected(ConnectedGeometryResponse),
+    /// Stage 20O ordinary cells have one fixed treatment.
+    Regions(RegionGeometryResponse),
+}
+
+/// The fixed Stage 20O response for ordinary canonical region output.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RegionGeometryResponse {
+    /// Retains the complete untreated ordinary Voronoi cell.
+    #[default]
+    Full,
 }
 
 /// One structural-output response bound atomically to an output-layer identity.
@@ -628,6 +636,9 @@ fn bundle_from_definition(definition: PatternDefinition) -> PatternDefinitionBun
                         minimum_thickness: 0.0,
                         maximum_thickness: 1.0,
                     })
+                }
+                PatternOutputLayer::Regions { .. } => {
+                    PatternGeometryResponse::Regions(RegionGeometryResponse::Full)
                 }
             },
         })
@@ -824,9 +835,11 @@ fn validate_response_for_output(
             | PatternOutputLayer::ConnectionPaths { .. }
             | PatternOutputLayer::MazeWalls { .. }
     );
-    match (marks, connected, response) {
-        (true, false, PatternGeometryResponse::Marks(_))
-        | (false, true, PatternGeometryResponse::Connected(_)) => {
+    let regions = matches!(output, PatternOutputLayer::Regions { .. });
+    match (marks, connected, regions, response) {
+        (true, false, false, PatternGeometryResponse::Marks(_))
+        | (false, true, false, PatternGeometryResponse::Connected(_))
+        | (false, false, true, PatternGeometryResponse::Regions(_)) => {
             validate_pattern_geometry_response(response)
         }
         _ => Err(ValidationError::new(
@@ -891,6 +904,7 @@ fn validate_pattern_geometry_response(
     match response {
         PatternGeometryResponse::Marks(value) => validate_mark_response(value),
         PatternGeometryResponse::Connected(value) => validate_connected_response(value),
+        PatternGeometryResponse::Regions(RegionGeometryResponse::Full) => Ok(()),
     }
 }
 
@@ -979,7 +993,16 @@ pub enum PatternCapabilityScope {
 pub struct PatternCapabilityProjection {
     pub definition_id: PatternDefinitionId,
     pub family: PatternFamilyCapabilityProjection,
-    pub outputs: Vec<PatternOutputCapabilityProjection>,
+    /// Ordered structural output facts paired with their authoritative base or effective response.
+    pub outputs: Vec<PatternOutputCapabilityRecord>,
+}
+
+/// One definition-order output projection with no frontend-owned response interpretation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PatternOutputCapabilityRecord {
+    pub output_layer_id: PatternOutputLayerId,
+    pub structural: PatternOutputCapabilityProjection,
+    pub response: PatternGeometryResponse,
 }
 
 /// Identifies the active family branch without inferring a named preset or UI page.
@@ -1052,6 +1075,8 @@ pub enum PatternOutputCapabilityProjection {
     ConnectionPaths(ConnectionPathOutputCapabilityProjection),
     /// Reports authored conventional wall-maze controls without exposing derived arrangement state.
     MazeWalls(MazeWallOutputCapabilityProjection),
+    /// Reports ordinary full-cell region capability without exposing topology or treatments.
+    Regions(RegionOutputCapabilityProjection),
 }
 
 /// Describes the active current mark output without creating renderer authority.
@@ -1099,6 +1124,14 @@ pub struct MazeWallOutputCapabilityProjection {
     pub round_join: bool,
     pub round_cap: bool,
     pub thickness_range: bool,
+}
+
+/// Read-only Stage 20O ordinary-region capability facts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegionOutputCapabilityProjection {
+    pub ordinary_voronoi: bool,
+    pub full_treatment_only: bool,
+    pub sampled_paint: bool,
 }
 
 /// The only supported guide-path join policy in Stage 20I.
@@ -1838,6 +1871,29 @@ pub enum PatternOutputLayer {
         program: MazeProgram,
         style: PathStrokeStyle,
     },
+    /// Consumes one eligible reusable site product as ordinary canonical Voronoi regions.
+    Regions {
+        id: PatternOutputLayerId,
+        source: RegionSourceIntent,
+    },
+}
+
+/// Authored source identity for one ordinary Stage 20O region output.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RegionSourceIntent {
+    /// Builds ordinary cells from the complete family site product with this mechanism identity.
+    VoronoiSites {
+        site_mechanism_id: PatternMechanismId,
+    },
+}
+
+impl RegionSourceIntent {
+    /// Returns the sole site-product mechanism consumed by the region output.
+    pub const fn site_mechanism_id(&self) -> PatternMechanismId {
+        match self {
+            Self::VoronoiSites { site_mechanism_id } => *site_mechanism_id,
+        }
+    }
 }
 
 impl PatternOutputLayer {
@@ -1848,7 +1904,8 @@ impl PatternOutputLayer {
             | Self::GuidePaths { id, .. }
             | Self::ParametricPaths { id, .. }
             | Self::ConnectionPaths { id, .. }
-            | Self::MazeWalls { id, .. } => *id,
+            | Self::MazeWalls { id, .. }
+            | Self::Regions { id, .. } => *id,
         }
     }
 }
@@ -2593,17 +2650,32 @@ impl Document {
         &self,
         scope: PatternCapabilityScope,
     ) -> Result<PatternCapabilityProjection, ValidationError> {
-        let definition_id = match scope {
-            PatternCapabilityScope::DocumentBase => self.pattern_settings.definition_id,
+        let (definition_id, settings) = match scope {
+            PatternCapabilityScope::DocumentBase => (self.pattern_settings.definition_id, None),
             PatternCapabilityScope::Channel(channel_id) => {
-                self.effective_channel_pattern(channel_id)?.definition_id
+                let effective = self.effective_channel_pattern(channel_id)?;
+                (effective.definition_id, Some(effective.output_settings))
             }
         };
-        let definition = self.definition(definition_id).ok_or(ValidationError::new(
-            "document.pattern_settings.definition_id",
-            "capability scope resolves a missing pattern definition",
-        ))?;
-        validate_and_project_definition(definition)
+        let bundle = self
+            .pattern_definition_bundles
+            .iter()
+            .find(|bundle| bundle.definition.id == definition_id)
+            .ok_or(ValidationError::new(
+                "document.pattern_settings.definition_id",
+                "capability scope resolves a missing pattern definition",
+            ))?;
+        let settings = settings.unwrap_or_else(|| {
+            bundle
+                .output_settings
+                .iter()
+                .map(|value| EffectivePatternOutputSettings {
+                    output_layer_id: value.output_layer_id,
+                    response: value.response.clone(),
+                })
+                .collect()
+        });
+        project_validated_pattern_definition(&bundle.definition, &settings)
     }
 
     /// Builds a stale-aware density-delta command from desired effective
@@ -3100,23 +3172,24 @@ impl Document {
                 && let Some(definition) = self.definition(effective.definition_id)
             {
                 for output in &definition.output_layers {
-                    let fields = match output {
+                    let fields: &[PropertyFieldId] = match output {
                         PatternOutputLayer::CircularMarks { .. }
-                        | PatternOutputLayer::MarkPrototype { .. } => [
+                        | PatternOutputLayer::MarkPrototype { .. } => &[
                             PropertyFieldId::MarkMinimumFill,
                             PropertyFieldId::MarkMaximumFill,
                         ],
                         PatternOutputLayer::GuidePaths { .. }
                         | PatternOutputLayer::ParametricPaths { .. }
                         | PatternOutputLayer::ConnectionPaths { .. }
-                        | PatternOutputLayer::MazeWalls { .. } => [
+                        | PatternOutputLayer::MazeWalls { .. } => &[
                             PropertyFieldId::ConnectedMinimumThickness,
                             PropertyFieldId::ConnectedMaximumThickness,
                         ],
+                        PatternOutputLayer::Regions { .. } => &[],
                     };
                     for field in fields {
                         descriptors.push(descriptor_from_contract(
-                            field,
+                            *field,
                             PropertyTarget::ChannelOutput(channel_id, output.id()),
                         ));
                     }
@@ -3605,7 +3678,8 @@ impl Document {
                         PatternGeometryResponse::Marks(response) => {
                             PropertyCurrentValueKind::FiniteF64(response.minimum_fill)
                         }
-                        PatternGeometryResponse::Connected(_) => {
+                        PatternGeometryResponse::Connected(_)
+                        | PatternGeometryResponse::Regions(_) => {
                             unreachable!("inactive mark descriptor")
                         }
                     },
@@ -3618,7 +3692,8 @@ impl Document {
                         PatternGeometryResponse::Marks(response) => {
                             PropertyCurrentValueKind::FiniteF64(response.maximum_fill)
                         }
-                        PatternGeometryResponse::Connected(_) => {
+                        PatternGeometryResponse::Connected(_)
+                        | PatternGeometryResponse::Regions(_) => {
                             unreachable!("inactive mark descriptor")
                         }
                     },
@@ -3631,7 +3706,7 @@ impl Document {
                         PatternGeometryResponse::Connected(response) => {
                             PropertyCurrentValueKind::FiniteF64(response.minimum_thickness)
                         }
-                        PatternGeometryResponse::Marks(_) => {
+                        PatternGeometryResponse::Marks(_) | PatternGeometryResponse::Regions(_) => {
                             unreachable!("inactive connected descriptor")
                         }
                     },
@@ -3644,7 +3719,7 @@ impl Document {
                         PatternGeometryResponse::Connected(response) => {
                             PropertyCurrentValueKind::FiniteF64(response.maximum_thickness)
                         }
-                        PatternGeometryResponse::Marks(_) => {
+                        PatternGeometryResponse::Marks(_) | PatternGeometryResponse::Regions(_) => {
                             unreachable!("inactive connected descriptor")
                         }
                     },
@@ -4555,9 +4630,9 @@ impl Document {
         channel_id: Option<ChannelId>,
         recipe: &PatternDefinitionRecipe,
     ) -> Result<MaterializedPatternDefinitionRecipe, ValidationError> {
-        let (definition_recipe, shape_draft, connection, maze) = match &recipe.structure {
+        let (definition_recipe, shape_draft, connection, maze, voronoi) = match &recipe.structure {
             PatternStructureRecipe::AuthoredClosedShapeMarks { definition, shape } => {
-                (definition.as_ref(), Some(shape), None, None)
+                (definition.as_ref(), Some(shape), None, None, false)
             }
             PatternStructureRecipe::ConnectionPaths {
                 definition,
@@ -4565,7 +4640,13 @@ impl Document {
                 style,
             } => {
                 validate_connection_recipe(definition, program)?;
-                (definition.as_ref(), None, Some((program, *style)), None)
+                (
+                    definition.as_ref(),
+                    None,
+                    Some((program, *style)),
+                    None,
+                    false,
+                )
             }
             PatternStructureRecipe::MazeWalls {
                 definition,
@@ -4573,9 +4654,18 @@ impl Document {
                 style,
             } => {
                 validate_maze_recipe(definition, program)?;
-                (definition.as_ref(), None, None, Some((program, *style)))
+                (
+                    definition.as_ref(),
+                    None,
+                    None,
+                    Some((program, *style)),
+                    false,
+                )
             }
-            _ => (&recipe.structure, None, None, None),
+            PatternStructureRecipe::VoronoiRegions { definition } => {
+                (definition.as_ref(), None, None, None, true)
+            }
+            _ => (&recipe.structure, None, None, None, false),
         };
         let neutral = self.allocate_neutral_definition_from_recipe(definition_recipe)?;
         let mut candidate = self.clone();
@@ -4655,6 +4745,39 @@ impl Document {
                 site_mechanism_id,
                 program: program.clone(),
                 style,
+            }];
+            validate_definition(definition)?;
+        }
+        if voronoi {
+            let definition = candidate
+                .pattern_definition_bundles
+                .iter_mut()
+                .find(|definition| definition.id == neutral.id)
+                .expect("fresh recipe definition");
+            let (output_id, site_mechanism_id) = match definition.output_layers.as_slice() {
+                [
+                    PatternOutputLayer::CircularMarks {
+                        id,
+                        site_mechanism_id,
+                    },
+                ]
+                | [
+                    PatternOutputLayer::MarkPrototype {
+                        id,
+                        site_mechanism_id,
+                        ..
+                    },
+                ] => (*id, *site_mechanism_id),
+                _ => {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.recipe.voronoi",
+                        "Voronoi recipe materialized an incompatible output",
+                    ));
+                }
+            };
+            definition.output_layers = vec![PatternOutputLayer::Regions {
+                id: output_id,
+                source: RegionSourceIntent::VoronoiSites { site_mechanism_id },
             }];
             validate_definition(definition)?;
         }
@@ -4856,7 +4979,8 @@ impl Document {
             }
             PatternStructureRecipe::ConnectionPaths { .. }
             | PatternStructureRecipe::MazeWalls { .. }
-            | PatternStructureRecipe::AuthoredClosedShapeMarks { .. } => {
+            | PatternStructureRecipe::AuthoredClosedShapeMarks { .. }
+            | PatternStructureRecipe::VoronoiRegions { .. } => {
                 unreachable!("output recipe wrapper is removed before neutral allocation")
             }
         }
@@ -5131,7 +5255,8 @@ impl Document {
             }
             PatternStructureRecipe::ConnectionPaths { .. }
             | PatternStructureRecipe::MazeWalls { .. }
-            | PatternStructureRecipe::AuthoredClosedShapeMarks { .. } => {
+            | PatternStructureRecipe::AuthoredClosedShapeMarks { .. }
+            | PatternStructureRecipe::VoronoiRegions { .. } => {
                 unreachable!("output recipe wrapper is removed before control application")
             }
         }
@@ -7250,7 +7375,8 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
                     PatternOutputLayer::GuidePaths { .. }
                     | PatternOutputLayer::ParametricPaths { .. }
                     | PatternOutputLayer::ConnectionPaths { .. }
-                    | PatternOutputLayer::MazeWalls { .. } => {}
+                    | PatternOutputLayer::MazeWalls { .. }
+                    | PatternOutputLayer::Regions { .. } => {}
                 }
             }
         }
@@ -9233,6 +9359,10 @@ fn validate_mark_prototype_output_target(
             "pattern_definitions.output_layers",
             "command targets a maze-wall output without a mark-prototype configuration",
         )),
+        PatternOutputLayer::Regions { .. } => Err(ValidationError::new(
+            "pattern_definitions.output_layers",
+            "command targets a region output without a mark-prototype configuration",
+        )),
     }
 }
 
@@ -9361,7 +9491,15 @@ fn validate_and_project_definition(
     definition: &PatternDefinition,
 ) -> Result<PatternCapabilityProjection, ValidationError> {
     validate_definition_structure(definition)?;
-    project_validated_pattern_definition(definition)
+    let settings = bundle_from_definition(definition.clone())
+        .output_settings
+        .into_iter()
+        .map(|value| EffectivePatternOutputSettings {
+            output_layer_id: value.output_layer_id,
+            response: value.response,
+        })
+        .collect::<Vec<_>>();
+    project_validated_pattern_definition(definition, &settings)
 }
 
 /// Validates one complete typed pattern definition and its ordered family/output capability chain.
@@ -9511,6 +9649,7 @@ fn validate_definition_structure(definition: &PatternDefinition) -> Result<(), V
                 ..
             },
         ] => *site_mechanism_id == root_site_id && program.validate().is_ok(),
+        [PatternOutputLayer::Regions { source, .. }] => source.site_mechanism_id() == root_site_id,
         _ => false,
     };
     if !has_compatible_output {
@@ -9713,6 +9852,31 @@ fn validate_parametric_curve_definition(
                     phase,
                 },
             ],
+            [PatternOutputLayer::Regions { source, .. }],
+        ) if *id == site_id
+            && *curve_mechanism_id == curve_id
+            && source.site_mechanism_id() == site_id =>
+        {
+            validate_positive_finite(
+                *interval,
+                "pattern_definitions.mechanisms.along_parametric.interval",
+            )?;
+            validate_finite(
+                *phase,
+                "pattern_definitions.mechanisms.along_parametric.phase",
+            )
+        }
+        (
+            Some(site_id),
+            [
+                PatternMechanism::ParametricCurveSource { .. },
+                PatternMechanism::AlongParametricCurveSites {
+                    id,
+                    curve_mechanism_id,
+                    interval,
+                    phase,
+                },
+            ],
             [
                 PatternOutputLayer::MarkPrototype {
                     site_mechanism_id,
@@ -9771,11 +9935,34 @@ fn validate_parametric_curve(curve: &ParametricCurve) -> Result<(), ValidationEr
 /// Returns a stable internal-capability diagnostic only if a caller bypasses the shared validator.
 fn project_validated_pattern_definition(
     definition: &PatternDefinition,
+    settings: &[EffectivePatternOutputSettings],
 ) -> Result<PatternCapabilityProjection, ValidationError> {
+    if definition.output_layers.len() != settings.len()
+        || definition
+            .output_layers
+            .iter()
+            .zip(settings)
+            .any(|(output, setting)| {
+                output.id() != setting.output_layer_id
+                    || validate_response_for_output(output, &setting.response).is_err()
+            })
+    {
+        return Err(ValidationError::new(
+            "pattern.capability.outputs",
+            "capability output settings must match definition order and kind",
+        ));
+    }
     let outputs = definition
         .output_layers
         .iter()
-        .map(project_output_capability)
+        .zip(settings)
+        .map(|(output, setting)| {
+            Ok(PatternOutputCapabilityRecord {
+                output_layer_id: output.id(),
+                structural: project_output_capability(output)?,
+                response: setting.response.clone(),
+            })
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let family = match &definition.family {
         PatternFamily::GuideIntersections { .. } => {
@@ -9905,6 +10092,15 @@ fn project_validated_pattern_definition(
 fn project_output_capability(
     output: &PatternOutputLayer,
 ) -> Result<PatternOutputCapabilityProjection, ValidationError> {
+    if matches!(output, PatternOutputLayer::Regions { .. }) {
+        return Ok(PatternOutputCapabilityProjection::Regions(
+            RegionOutputCapabilityProjection {
+                ordinary_voronoi: true,
+                full_treatment_only: true,
+                sampled_paint: false,
+            },
+        ));
+    }
     if matches!(
         output,
         PatternOutputLayer::GuidePaths { .. } | PatternOutputLayer::ParametricPaths { .. }
@@ -9982,6 +10178,7 @@ fn project_output_capability(
         PatternOutputLayer::ConnectionPaths { .. } | PatternOutputLayer::MazeWalls { .. } => {
             unreachable!("handled above")
         }
+        PatternOutputLayer::Regions { .. } => unreachable!("regions have a dedicated capability"),
     };
     Ok(PatternOutputCapabilityProjection::Marks(
         MarkOutputCapabilityProjection {
@@ -10132,6 +10329,7 @@ fn validate_random_site_definition(
             program.validate()?;
             *site_mechanism_id
         }
+        PatternOutputLayer::Regions { source, .. } => source.site_mechanism_id(),
         _ => {
             return Err(ValidationError::new(
                 "pattern_definitions.output_layers",
@@ -10523,6 +10721,14 @@ fn validate_generalized_output_layers_ids(
                 "connection output must consume its declared site mechanism",
             ));
     }
+    if let [PatternOutputLayer::Regions { source, .. }] = layers {
+        return (source.site_mechanism_id() == site_id)
+            .then_some(())
+            .ok_or(ValidationError::new(
+                "pattern_definitions.output_layers.site_mechanism_id",
+                "region output must consume its declared site mechanism",
+            ));
+    }
     if let [
         PatternOutputLayer::GuidePaths {
             guide_mechanism_id, ..
@@ -10646,6 +10852,14 @@ fn validate_generalized_output_layers(
             .ok_or(ValidationError::new(
                 "pattern_definitions.output_layers.site_mechanism_id",
                 "connection output must consume its declared site mechanism",
+            ));
+    }
+    if let [PatternOutputLayer::Regions { source, .. }] = layers {
+        return (source.site_mechanism_id() == site_id)
+            .then_some(())
+            .ok_or(ValidationError::new(
+                "pattern_definitions.output_layers.site_mechanism_id",
+                "region output must consume its declared site mechanism",
             ));
     }
     if let [
@@ -13929,6 +14143,10 @@ pub enum PatternStructureRecipe {
         definition: Box<PatternStructureRecipe>,
         shape: AuthoredStructureDraft,
     },
+    /// Wraps one ID-free site family with ordinary Stage 20O Voronoi intent.
+    VoronoiRegions {
+        definition: Box<PatternStructureRecipe>,
+    },
 }
 
 /// One ordered ID-free base response authored alongside a structural output.
@@ -13972,6 +14190,18 @@ impl PatternDefinitionRecipe {
                     minimum_thickness: 0.0,
                     maximum_thickness: 1.0,
                 }),
+            }],
+        }
+    }
+
+    /// Builds the complete current one-region-output recipe without assigning document IDs.
+    pub fn regions(structure: PatternStructureRecipe) -> Self {
+        Self {
+            structure: PatternStructureRecipe::VoronoiRegions {
+                definition: Box::new(structure),
+            },
+            output_settings: vec![PatternOutputSettingsRecipe {
+                response: PatternGeometryResponse::Regions(RegionGeometryResponse::Full),
             }],
         }
     }
@@ -14222,6 +14452,21 @@ fn validate_pattern_structure_recipe(
             }
             validate_pattern_structure_recipe(definition)
         }
+        PatternStructureRecipe::VoronoiRegions { definition } => {
+            if matches!(
+                definition.as_ref(),
+                PatternStructureRecipe::ConnectionPaths { .. }
+                    | PatternStructureRecipe::MazeWalls { .. }
+                    | PatternStructureRecipe::AuthoredClosedShapeMarks { .. }
+                    | PatternStructureRecipe::VoronoiRegions { .. }
+            ) {
+                return Err(ValidationError::new(
+                    "preset.recipe.definition",
+                    "Voronoi recipes require an unwrapped site-family recipe",
+                ));
+            }
+            validate_pattern_structure_recipe(definition)
+        }
     }
 }
 
@@ -14245,9 +14490,14 @@ fn validate_recipe_output_settings(
         recipe.structure,
         PatternStructureRecipe::ConnectionPaths { .. } | PatternStructureRecipe::MazeWalls { .. }
     );
-    match (connected, response) {
-        (false, PatternGeometryResponse::Marks(_))
-        | (true, PatternGeometryResponse::Connected(_)) => {
+    let regions = matches!(
+        recipe.structure,
+        PatternStructureRecipe::VoronoiRegions { .. }
+    );
+    match (connected, regions, response) {
+        (false, false, PatternGeometryResponse::Marks(_))
+        | (true, false, PatternGeometryResponse::Connected(_))
+        | (false, true, PatternGeometryResponse::Regions(_)) => {
             validate_pattern_geometry_response(response)
         }
         _ => Err(ValidationError::new(
@@ -14289,7 +14539,8 @@ fn validate_connection_recipe(
         )),
         PatternStructureRecipe::ConnectionPaths { .. }
         | PatternStructureRecipe::MazeWalls { .. }
-        | PatternStructureRecipe::AuthoredClosedShapeMarks { .. } => Err(ValidationError::new(
+        | PatternStructureRecipe::AuthoredClosedShapeMarks { .. }
+        | PatternStructureRecipe::VoronoiRegions { .. } => Err(ValidationError::new(
             "preset.recipe.definition",
             "connection recipes cannot wrap another output recipe wrapper",
         )),
@@ -14320,7 +14571,8 @@ fn validate_maze_recipe(
         PatternStructureRecipe::RandomSites { .. }
         | PatternStructureRecipe::ConnectionPaths { .. }
         | PatternStructureRecipe::MazeWalls { .. }
-        | PatternStructureRecipe::AuthoredClosedShapeMarks { .. } => Err(ValidationError::new(
+        | PatternStructureRecipe::AuthoredClosedShapeMarks { .. }
+        | PatternStructureRecipe::VoronoiRegions { .. } => Err(ValidationError::new(
             "preset.recipe.maze.family",
             "maze recipes require an unwrapped straight guide intersection family",
         )),

@@ -7,9 +7,9 @@ use std::{
 use toniator_domain::{
     CanvasSpec, ChannelId, DensityModulationKind, DispersionCapabilityProjection, Document,
     DocumentHistory, DocumentSession, ExclusionKind, GeneratorCapabilities, MarkOrientationKind,
-    MarkOutputCapabilityProjection, MarkPrototypeKind, PatternCapabilityProjection,
-    PatternCapabilityScope, PatternFamilyCapabilityProjection, PatternOutputCapabilityProjection,
-    RandomCharacterKind, SourceReference, SourceReferenceId,
+    MarkOutputCapabilityProjection, MarkPrototypeKind, PatternCapabilityScope,
+    PatternFamilyCapabilityProjection, PatternOutputCapabilityProjection, RandomCharacterKind,
+    SourceReference, SourceReferenceId,
 };
 use toniator_engine::{
     CacheDisposition, EvaluationCompletion, EvaluationRequest, EvaluationScheduler, ResolvedSource,
@@ -159,9 +159,8 @@ fn holiday_v4_channels_project_independently_from_their_effective_definitions() 
         vec![4, 3, 2]
     );
     assert_eq!(effective_rotations, [0.0, 30.0, 60.0]);
-    let expected = PatternCapabilityProjection {
-        definition_id: projections[0].definition_id,
-        family: PatternFamilyCapabilityProjection::Dispersion(DispersionCapabilityProjection {
+    let expected_family =
+        PatternFamilyCapabilityProjection::Dispersion(DispersionCapabilityProjection {
             generator: GeneratorCapabilities {
                 density: true,
                 seed: true,
@@ -169,16 +168,16 @@ fn holiday_v4_channels_project_independently_from_their_effective_definitions() 
             character: RandomCharacterKind::Even,
             density_modulation: DensityModulationKind::Uniform,
             exclusion: ExclusionKind::None,
-        }),
-        outputs: vec![PatternOutputCapabilityProjection::Marks(
-            MarkOutputCapabilityProjection {
-                prototype: MarkPrototypeKind::Circle,
-                orientation: MarkOrientationKind::Fixed,
-                fill_range: true,
-            },
-        )],
-    };
+        });
+    let expected_output =
+        PatternOutputCapabilityProjection::Marks(MarkOutputCapabilityProjection {
+            prototype: MarkPrototypeKind::Circle,
+            orientation: MarkOrientationKind::Fixed,
+            fill_range: true,
+        });
     assert!(projections.iter().all(|projection| {
-        projection.family == expected.family && projection.outputs == expected.outputs
+        projection.family == expected_family
+            && projection.outputs.len() == 1
+            && projection.outputs[0].structural == expected_output
     }));
 }

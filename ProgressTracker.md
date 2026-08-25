@@ -565,7 +565,17 @@ source or region treatment. Schema v5 documents and preset v3 recipes persist
 authored keyed output settings and channel deltas; derived effective values,
 regions, diagnostics, limits, caches, and scheduler state remain absent.
 
-**Remaining Stage 20N+ — Stage 20O+ Planned.** The user accepted the revised remainder
+**Stage 20O — Accepted awaiting checkpoint.** The user accepted the bounded
+ordinary Voronoi implementation on 2026-08-25. It retains the Stage 20N
+one-output gate, schema-v5/preset-v3 persistence, and renderer-owned final
+clipping. It adds guard-inclusive site-set realization, duplicate co-ownership,
+bounded geometry/private Spade topology, and fixed solid full-region rendering.
+Independent re-review passed after bounded repairs; the parent visually
+inspected the final artifacts and the user confirmed the representative cells.
+The implementation checkpoint is pending; Stage 20P+ remains Planned and
+separately gated.
+
+**Remaining Stage 20N+ — Stage 20P+ Planned.** The user accepted the revised remainder
 roadmap on 2026-08-24 under
 [`STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md`](docs/STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md).
 The accepted order after completed 20N is 20O
@@ -573,7 +583,7 @@ ordinary Voronoi; 20P guide faces; 20Q filled-region realization; 20R
 composites and site-use filters; and 20S headless capability/gallery recipe
 completion. Stage 21 owns pattern-authoring GTK, Stage 22 owns all headless
 frame/media/sequence/simple-transition work, and Stage 23 owns temporal GTK
-with start/end pins. Stages 20O+ and 21–23 remain Planned and separately gated.
+with start/end pins. Stages 20P+ and 21–23 remain Planned and separately gated.
 
 ## Maintenance rules
 

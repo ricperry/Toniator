@@ -108,6 +108,8 @@ Use these statuses exactly:
 - **Planned** — scoped but not authorized or started.
 - **In progress** — parent has authorized the bounded stage.
 - **Implemented awaiting review** — writer finished; parent review remains.
+- **Ready for user acceptance** — parent review and required visual evidence
+  passed; user stage acceptance and checkpoint remain separate.
 - **Accepted awaiting checkpoint** — parent review and user acceptance are
   complete, but the checkpoint commit is pending.
 - **Complete at commit `<hash>`** — the accepted work is present at the named
@@ -1969,16 +1971,20 @@ so concrete region sources, treatments, heterogeneous composites, and GTK
 workflow remain outside this stage. Focused tests, intrinsic native artifacts,
 and independent correction re-review passed.
 
-**Remaining Stage 20N+ — Stage 20O+ Planned.** The user accepted the revised headless
+**Stage 20O — Accepted awaiting checkpoint.** The user accepted Ordinary
+Voronoi Regions on 2026-08-25 after independent re-review and final artifact
+inspection. The implementation checkpoint is pending; Stage 20P+ remains
+Planned and separately gated.
+
+**Remaining Stage 20N+ — Stage 20P+ Planned.** The user accepted the revised headless
 remainder roadmap on 2026-08-24 under
 [`STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md`](STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md).
-Stage 20O adds ordinary Voronoi regions; 20P adds guide-arrangement
-faces; 20Q realizes filled regions; 20R adds ordered composites and site-use
+Stage 20P adds guide-arrangement faces; 20Q realizes filled regions; 20R adds ordered composites and site-use
 filters; and 20S completes headless capability projection and ordinary gallery
 recipes. Stage 21 owns all remaining pattern-authoring GTK work, Stage 22 owns
 the complete headless frame/media/sequence/simple-transition pipeline, and
-Stage 23 owns temporal GTK with start/end pins only. Every row remains Planned
-and separately gated; this roadmap acceptance does not authorize Stage 20O+
+Stage 23 owns temporal GTK with start/end pins only. Every remaining row remains Planned
+and separately gated; this roadmap acceptance does not authorize Stage 20P+
 implementation.
 
 Every mechanism must enter through the Stage 14 typed schema, Stage 15 generic

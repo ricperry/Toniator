@@ -15,6 +15,7 @@ mod maze_walls;
 mod outlines;
 mod path_offsets;
 mod site_adjacency;
+mod voronoi_regions;
 
 pub use canonical_regions::{
     CANONICAL_REGION_CONTRACT_ID, CanonicalRegion, CanonicalRegionDiagnostics,
@@ -59,6 +60,10 @@ pub use site_adjacency::{
     SITE_ADJACENCY_CONTRACT_ID, SiteAdjacencyComponent, SiteAdjacencyEdge, SiteAdjacencyError,
     SiteAdjacencyGraph, SiteAdjacencyLimits, SiteAdjacencyNode, SiteAdjacencyPolicy,
     build_site_adjacency_cancellable,
+};
+pub use voronoi_regions::{
+    VORONOI_REGION_CONTRACT_ID, VoronoiRegionDiagnostics, VoronoiRegionError, VoronoiRegionLimits,
+    VoronoiRegionRequest, build_voronoi_regions_cancellable,
 };
 
 /// A finite document- or pattern-local point.

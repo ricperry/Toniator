@@ -31,10 +31,10 @@ use toniator_domain::{
     PatternDefinitionRecipe, PatternGeometryResponse, PatternMechanismId, PatternOutputLayerId,
     PatternOutputResponseDelta, PatternOutputSettings, PatternOutputSettingsRecipe,
     PatternStructureRecipe, PresetMetadata, PresetRecord, RandomSiteCharacter,
-    SiteDensityModulation, SiteExclusionPolicy, SourceComponent, SourceMapping,
-    SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId, SpiralCurve,
-    SpiralShape, StraightGuideDimension, StraightGuideRepetition, ValidationError,
-    VisibleMarkSizingPolicy,
+    RegionGeometryResponse, RegionSourceIntent, SiteDensityModulation, SiteExclusionPolicy,
+    SourceComponent, SourceMapping, SourceMappingComponent, SourcePlacement, SourceReference,
+    SourceReferenceId, SpiralCurve, SpiralShape, StraightGuideDimension, StraightGuideRepetition,
+    ValidationError, VisibleMarkSizingPolicy,
 };
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
@@ -873,6 +873,9 @@ enum PresetStructureRecipeDto {
         definition: Box<PresetStructureRecipeDto>,
         segments: Vec<AuthoredCurveSegmentDtoV4>,
     },
+    VoronoiRegions {
+        definition: Box<PresetStructureRecipeDto>,
+    },
 }
 #[derive(Serialize, Deserialize)]
 struct GuideDimensionDraftDto {
@@ -1413,6 +1416,16 @@ enum PatternOutputLayerDtoV4 {
         program: MazeProgramDtoV4,
         style: PathStrokeStyle,
     },
+    Regions {
+        id: u64,
+        source: RegionSourceIntentDtoV5,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum RegionSourceIntentDtoV5 {
+    VoronoiSites { site_mechanism_id: u64 },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1644,6 +1657,9 @@ impl PresetStructureRecipeDto {
                         .collect(),
                 }
             }
+            PatternStructureRecipe::VoronoiRegions { definition } => Self::VoronoiRegions {
+                definition: Box::new(Self::from_domain(definition)),
+            },
         }
     }
 
@@ -1740,6 +1756,9 @@ impl PresetStructureRecipeDto {
                     shape,
                 })
             }
+            Self::VoronoiRegions { definition } => Ok(PatternStructureRecipe::VoronoiRegions {
+                definition: Box::new(definition.into_domain()?),
+            }),
         }
     }
 }
@@ -1874,6 +1893,7 @@ struct PatternOutputResponseDeltaDtoV5 {
 enum PatternGeometryResponseDto {
     Marks { response: MarkResponseDto },
     Connected { response: ConnectedResponseDto },
+    Regions,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -1892,6 +1912,7 @@ impl PatternGeometryResponseDto {
             PatternGeometryResponse::Connected(response) => Self::Connected {
                 response: ConnectedResponseDto::from_domain(response),
             },
+            PatternGeometryResponse::Regions(RegionGeometryResponse::Full) => Self::Regions,
         }
     }
 
@@ -1902,6 +1923,7 @@ impl PatternGeometryResponseDto {
             Self::Connected { response } => {
                 PatternGeometryResponse::Connected(response.into_domain())
             }
+            Self::Regions => PatternGeometryResponse::Regions(RegionGeometryResponse::Full),
         }
     }
 }
@@ -2857,6 +2879,10 @@ impl PatternOutputLayerDtoV4 {
                 program: MazeProgramDtoV4::from_domain(program),
                 style: *style,
             },
+            toniator_domain::PatternOutputLayer::Regions { id, source } => Self::Regions {
+                id: id.0,
+                source: RegionSourceIntentDtoV5::from_domain(source),
+            },
         }
     }
     fn into_domain(self) -> toniator_domain::PatternOutputLayer {
@@ -2918,6 +2944,30 @@ impl PatternOutputLayerDtoV4 {
                 site_mechanism_id: PatternMechanismId(site_mechanism_id),
                 program: program.into_domain(),
                 style,
+            },
+            Self::Regions { id, source } => toniator_domain::PatternOutputLayer::Regions {
+                id: PatternOutputLayerId(id),
+                source: source.into_domain(),
+            },
+        }
+    }
+}
+
+impl RegionSourceIntentDtoV5 {
+    /// Serializes authored ordinary-region site intent without derived topology.
+    fn from_domain(value: &RegionSourceIntent) -> Self {
+        match value {
+            RegionSourceIntent::VoronoiSites { site_mechanism_id } => Self::VoronoiSites {
+                site_mechanism_id: site_mechanism_id.0,
+            },
+        }
+    }
+
+    /// Restores authored ordinary-region site intent without accepting derived cells.
+    fn into_domain(self) -> RegionSourceIntent {
+        match self {
+            Self::VoronoiSites { site_mechanism_id } => RegionSourceIntent::VoronoiSites {
+                site_mechanism_id: PatternMechanismId(site_mechanism_id),
             },
         }
     }

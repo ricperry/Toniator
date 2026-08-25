@@ -60,11 +60,17 @@ independent read-only review, user acceptance, and checkpoint gate.
 
 ## Stage 20O — Ordinary Voronoi regions
 
+Status: **Accepted awaiting checkpoint** (user acceptance recorded 2026-08-25;
+independent re-review and final artifact inspection passed; implementation
+checkpoint pending). Stage 20P+ remains Planned and separately gated.
+
 - Add `PatternOutputLayer::Regions` with
-  `RegionSourceIntent::VoronoiSites { site_mechanism_id }` for eligible grid and
-  dispersion/random `FamilySiteSet` products. Reject raw paths,
-  parametric-only products, and incompatible capabilities before topology
-  allocation.
+  `RegionSourceIntent::VoronoiSites { site_mechanism_id }` for eligible
+  `FamilySiteSet` products: grid/guide intersections, along-guide sites,
+  `AlongParametricCurveSites`, and dispersion/random sites. Reject direct raw
+  `ParametricPaths`, non-site products, and incompatible capabilities before
+  topology allocation. Eligibility follows the authoritative site set, not the
+  mechanism's source provenance.
 - Use exactly pinned Spade 2.15.1 behind a geometry-owned adapter. Spade types
   never cross a Toniator crate API. Toniator owns stable ordering, identity,
   duplicate policy, canonicalization, coverage, cancellation, resource limits,

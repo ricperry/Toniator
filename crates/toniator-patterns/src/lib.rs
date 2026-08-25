@@ -13,28 +13,29 @@ use toniator_domain::{
     MazeProgram, OffsetCleanup, OffsetSides, ParametricCurve, PatternDefinition,
     PatternDefinitionRecipe, PatternFamily, PatternGeometryResponse, PatternMechanism,
     PatternMechanismId, PatternModulation, PatternOutputLayer, PatternOutputLayerId,
-    PatternStructureRecipe, PresetMetadata, PresetRecord, RandomSiteCharacter,
+    PatternStructureRecipe, PresetMetadata, PresetRecord, RandomSiteCharacter, RegionSourceIntent,
     SiteDensityModulation, SiteExclusionPolicy, SourceMapping, StraightGuideDimension,
     VisibleMarkSizingPolicy,
 };
 pub use toniator_geometry::{
     AffineTransform2D, Bounds, CONNECTION_PATH_CONTRACT_ID, CONNECTION_TRAIL_CONTRACT_ID,
-    CanonicalCircleMark, CanonicalFillRule, CanonicalMark, CanonicalPathMark, CanonicalStroke,
-    CanonicalStrokeSourceId, ConnectionPathLimits, ConnectionPathSet, CubicBezierSegment,
-    CurveError, CurvePath, CurveSegment, FamilySite, FamilySiteError, FamilySiteId,
-    FamilySiteProvenance, FamilySiteSet, GuideInstanceId, GuideIntersectionProvenance,
-    IntersectionSite, MAZE_WALL_CONTRACT_ID, MazeGuideAxis, MazeLimits, MazeProgramResult,
-    NominalCellBasis, PATH_OFFSET_ALGORITHM_CONTRACT_ID, PathClosure, PathLocation,
-    PathOffsetCleanup, PathOffsetEndpointPolicy, PathOffsetLimits, PathOffsetRequest,
-    PathOffsetResult, Point2, SITE_ADJACENCY_CONTRACT_ID, SiteAdjacencyError, SiteAdjacencyGraph,
-    SiteAdjacencyLimits, SiteAdjacencyPolicy, SiteId, SiteScope, StraightGuide,
+    CanonicalCircleMark, CanonicalFillRule, CanonicalMark, CanonicalPathMark, CanonicalRegionSet,
+    CanonicalStroke, CanonicalStrokeSourceId, ConnectionPathLimits, ConnectionPathSet,
+    CubicBezierSegment, CurveError, CurvePath, CurveSegment, FamilySite, FamilySiteError,
+    FamilySiteId, FamilySiteProvenance, FamilySiteSet, GuideInstanceId,
+    GuideIntersectionProvenance, IntersectionSite, MAZE_WALL_CONTRACT_ID, MazeGuideAxis,
+    MazeLimits, MazeProgramResult, NominalCellBasis, PATH_OFFSET_ALGORITHM_CONTRACT_ID,
+    PathClosure, PathLocation, PathOffsetCleanup, PathOffsetEndpointPolicy, PathOffsetLimits,
+    PathOffsetRequest, PathOffsetResult, Point2, SITE_ADJACENCY_CONTRACT_ID, SiteAdjacencyError,
+    SiteAdjacencyGraph, SiteAdjacencyLimits, SiteAdjacencyPolicy, SiteId, SiteScope, StraightGuide,
     StrokeProfileSample, StructuralPathInstance, StructuralPathInstanceId,
     StructuralPathLocationProvenance, StructuralPathSet, StructuralPathSourceId,
-    VariableWidthOutlineLimits, VariableWidthPathSample, Vector2,
+    VORONOI_REGION_CONTRACT_ID, VariableWidthOutlineLimits, VariableWidthPathSample, Vector2,
+    VoronoiRegionDiagnostics, VoronoiRegionLimits, VoronoiRegionRequest,
     build_connection_paths_cancellable, build_maze_walls_from_sites_cancellable,
     build_site_adjacency_cancellable, build_variable_width_outline_cancellable,
-    connection_program_contract_id, offset_path_cancellable, projection_range,
-    resolve_guide_prototype,
+    build_voronoi_regions_cancellable, connection_program_contract_id, offset_path_cancellable,
+    projection_range, resolve_guide_prototype,
 };
 use toniator_sampling::{
     SampledSourcePaint, SamplingError, SourceComponent, SourceField, SourceMappingComponent,
@@ -571,6 +572,10 @@ pub enum OutputCapabilityPayload {
         program: MazeProgram,
         style: toniator_domain::PathStrokeStyle,
     },
+    /// Ordinary canonical regions consume one exact reusable site mechanism.
+    Regions {
+        site_mechanism_id: PatternMechanismId,
+    },
 }
 
 impl OutputCapability {
@@ -584,6 +589,7 @@ impl OutputCapability {
             OutputCapabilityPayload::GuidePaths { .. } => None,
             OutputCapabilityPayload::ConnectionPaths { .. } => None,
             OutputCapabilityPayload::MazeWalls { .. } => None,
+            OutputCapabilityPayload::Regions { .. } => None,
         }
     }
 
@@ -597,6 +603,7 @@ impl OutputCapability {
             } => Some((guide_mechanism_id, style)),
             OutputCapabilityPayload::ConnectionPaths { .. } => None,
             OutputCapabilityPayload::MazeWalls { .. } => None,
+            OutputCapabilityPayload::Regions { .. } => None,
         }
     }
 
@@ -632,6 +639,14 @@ impl OutputCapability {
                 program,
                 style,
             } => Some((*site_mechanism_id, program, *style)),
+            _ => None,
+        }
+    }
+
+    /// Returns ordinary-region source authority only when this output consumes one site product.
+    pub fn regions(&self) -> Option<PatternMechanismId> {
+        match self.payload {
+            OutputCapabilityPayload::Regions { site_mechanism_id } => Some(site_mechanism_id),
             _ => None,
         }
     }
@@ -833,6 +848,7 @@ pub fn validate_output_realization_binding(
         | (OutputCapabilityPayload::MazeWalls { .. }, PatternGeometryResponse::Connected(_)) => {
             Ok(())
         }
+        (OutputCapabilityPayload::Regions { .. }, PatternGeometryResponse::Regions(_)) => Ok(()),
         _ => Err(PatternPipelineError::new(
             "pattern.output_layers.setting",
             "effective output response kind is incompatible with its structural capability",
@@ -1087,6 +1103,21 @@ pub fn resolve_pattern_pipeline(
                     },
                 })
             }
+            PatternOutputLayer::Regions { id, source }
+                if matches!(source, RegionSourceIntent::VoronoiSites { site_mechanism_id: source_id } if *source_id == site_mechanism_id)
+                    && matches!(
+                        product,
+                        StructuralProductCapability::GuideIntersections
+                            | StructuralProductCapability::AlongGuideSites
+                            | StructuralProductCapability::RandomSites
+                    ) =>
+            {
+                ordered_outputs.push(OutputCapability {
+                    layer_id: *id,
+                    consumes: product,
+                    payload: OutputCapabilityPayload::Regions { site_mechanism_id },
+                });
+            }
             _ => {
                 return Err(PatternPipelineError::new(
                     "pattern.output_layers.capability",
@@ -1255,6 +1286,18 @@ fn resolve_parametric_curve_pipeline(
                 style: *style,
             },
         },
+        [PatternOutputLayer::Regions { id, source }]
+            if matches!(source, RegionSourceIntent::VoronoiSites { site_mechanism_id } if Some(*site_mechanism_id) == declared_site_mechanism_id)
+                && product == StructuralProductCapability::AlongGuideSites =>
+        {
+            OutputCapability {
+                layer_id: *id,
+                consumes: product,
+                payload: OutputCapabilityPayload::Regions {
+                    site_mechanism_id: declared_site_mechanism_id.expect("site product exists"),
+                },
+            }
+        }
         _ => {
             return Err(PatternPipelineError::new(
                 "pattern.output_layers.capability",
@@ -1456,10 +1499,22 @@ fn resolve_random_site_pipeline(
                 style: *style,
             },
         },
+        [
+            PatternOutputLayer::Regions {
+                id,
+                source: RegionSourceIntent::VoronoiSites { site_mechanism_id },
+            },
+        ] if *site_mechanism_id == site_product_id => OutputCapability {
+            layer_id: *id,
+            consumes: StructuralProductCapability::RandomSites,
+            payload: OutputCapabilityPayload::Regions {
+                site_mechanism_id: site_product_id,
+            },
+        },
         _ => {
             return Err(PatternPipelineError::new(
                 "pattern.output_layers.capability",
-                "random-site products require one fixed mark or connection output",
+                "random-site products require one fixed mark, connection, or region output",
             ));
         }
     };
@@ -1475,6 +1530,9 @@ fn resolve_random_site_pipeline(
             ] => *site_mechanism_id,
             _ => unreachable!("the output match retains one mark layer"),
         },
+        OutputCapabilityPayload::Regions {
+            site_mechanism_id, ..
+        } => *site_mechanism_id,
         _ => unreachable!("the random resolver creates only site outputs"),
     };
     if site_mechanism_id != site_product_id {
@@ -8200,6 +8258,11 @@ fn append_output_capability_identity(bytes: &mut Vec<u8>, output: &OutputCapabil
             bytes.push(match style.cap {
                 toniator_domain::StrokeCap::Round => 1,
             });
+        }
+        OutputCapabilityPayload::Regions { site_mechanism_id } => {
+            bytes.push(5);
+            bytes.extend(site_mechanism_id.0.to_le_bytes());
+            append_identity_text(bytes, toniator_geometry::VORONOI_REGION_CONTRACT_ID);
         }
         OutputCapabilityPayload::MazeWalls {
             site_mechanism_id,

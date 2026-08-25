@@ -32,11 +32,13 @@ use toniator_domain::{
     HalftoneChannelModel, HalftoneChannelRole, ModeledChannelState,
 };
 use toniator_patterns::{
-    CONNECTION_PATH_CONTRACT_ID, CONNECTION_TRAIL_CONTRACT_ID, CurvePath, CurveSegment,
-    FamilyCapability, GenericGuideCapability, GridFamilyOutput, MAZE_WALL_CONTRACT_ID,
-    MappedCircularMarkRealization, MazeLimits, PatternPipelineError, SITE_ADJACENCY_CONTRACT_ID,
-    SourceColorCircularMarkRealization, TypedFamilyOutput, TypedRealization,
-    build_connection_paths_cancellable, build_typed_site_adjacency_cancellable,
+    Bounds, CONNECTION_PATH_CONTRACT_ID, CONNECTION_TRAIL_CONTRACT_ID, CanonicalRegionSet,
+    CurvePath, CurveSegment, FamilyCapability, GenericGuideCapability, GridFamilyOutput,
+    MAZE_WALL_CONTRACT_ID, MappedCircularMarkRealization, MazeLimits, PatternPipelineError,
+    SITE_ADJACENCY_CONTRACT_ID, SourceColorCircularMarkRealization, TypedFamilyOutput,
+    TypedRealization, VORONOI_REGION_CONTRACT_ID, VoronoiRegionDiagnostics, VoronoiRegionLimits,
+    VoronoiRegionRequest, build_connection_paths_cancellable,
+    build_typed_site_adjacency_cancellable, build_voronoi_regions_cancellable,
     connection_program_contract_id, evaluate_straight_grid,
     evaluate_typed_connection_paths_with_source_cancellable,
     evaluate_typed_family_product_with_source_cancellable,
@@ -237,6 +239,7 @@ pub struct EvaluationLimits {
     site_adjacency: SiteAdjacencyLimits,
     connection_paths: ConnectionPathLimits,
     maze: MazeLimits,
+    voronoi: VoronoiRegionLimits,
 }
 
 impl EvaluationLimits {
@@ -264,6 +267,7 @@ impl EvaluationLimits {
             site_adjacency: SiteAdjacencyLimits::default(),
             connection_paths: ConnectionPathLimits::default(),
             maze: MazeLimits::default(),
+            voronoi: VoronoiRegionLimits::default(),
         })
     }
 
@@ -382,6 +386,32 @@ impl EvaluationLimits {
         self.maze
     }
 
+    /// Returns the geometry-owned bounded policy for ordinary Voronoi region realization.
+    pub const fn voronoi_region_limits(self) -> VoronoiRegionLimits {
+        self.voronoi
+    }
+
+    /// Replaces the complete nonzero ordinary-Voronoi work policy without changing document intent.
+    ///
+    /// # Errors
+    ///
+    /// Returns the geometry-owned zero-limit diagnostic before any cache key or realization builds.
+    pub fn with_voronoi_region_limits(
+        mut self,
+        limits: VoronoiRegionLimits,
+    ) -> Result<Self, EvaluationError> {
+        VoronoiRegionLimits::new(
+            limits.max_site_groups(),
+            limits.max_topology_edges(),
+            limits.max_regions(),
+            limits.max_boundary_points(),
+            limits.max_inspections(),
+        )
+        .map_err(|error| EvaluationError::new(error.path(), error.message()))?;
+        self.voronoi = limits;
+        Ok(self)
+    }
+
     /// Replaces maze work limits without changing authored document authority.
     ///
     /// # Errors
@@ -456,6 +486,7 @@ impl Default for EvaluationLimits {
             site_adjacency: SiteAdjacencyLimits::default(),
             connection_paths: ConnectionPathLimits::default(),
             maze: MazeLimits::default(),
+            voronoi: VoronoiRegionLimits::default(),
         }
     }
 }
@@ -1629,6 +1660,8 @@ pub struct ChannelEvaluationSummary {
 pub struct OutputCacheDiagnostics {
     pub output_layer_id: toniator_domain::PatternOutputLayerId,
     pub realization: CacheDisposition,
+    /// Geometry-owned ordinary-region work facts retained with a cached immutable output unit.
+    pub voronoi: Option<VoronoiRegionDiagnostics>,
 }
 
 /// Cache dispositions for one evaluated channel and its ordered output units.
@@ -2305,6 +2338,7 @@ fn evaluate_cached_document_impl(
                                 limits.site_adjacency_limits(),
                                 limits.connection_path_limits(),
                                 limits.maze_limits(),
+                                limits.voronoi_region_limits(),
                                 &|| cancellation.is_cancelled(),
                             )
                         }) {
@@ -2331,6 +2365,7 @@ fn evaluate_cached_document_impl(
             channel_output_dispositions.push(OutputCacheDiagnostics {
                 output_layer_id: output_setting.output_layer_id,
                 realization: realization_disposition,
+                voronoi: region_diagnostics(&realization.realization),
             });
             realizations.push((realization_key, Arc::clone(&realization)));
             channel_outputs.push(realization);
@@ -2551,6 +2586,11 @@ enum DocumentRealization {
     SourceColor(TypedRealization<SourceColorCircularMarkRealization>),
     Canonical(TypedRealization<CanonicalMarkRealization>),
     Strokes(TypedRealization<CanonicalStrokeRealization>),
+    Regions {
+        regions: CanonicalRegionSet,
+        fingerprint: String,
+        diagnostics: VoronoiRegionDiagnostics,
+    },
 }
 
 /// One independently cached channel-output realization assembled only after its explicit binding validates.
@@ -2609,6 +2649,15 @@ fn document_realization_identity(value: &DocumentRealization) -> &str {
         DocumentRealization::SourceColor(value) => &value.output.realization_fingerprint,
         DocumentRealization::Canonical(value) => &value.output.realization_fingerprint,
         DocumentRealization::Strokes(value) => &value.output.realization_fingerprint,
+        DocumentRealization::Regions { fingerprint, .. } => fingerprint,
+    }
+}
+
+/// Projects immutable geometry diagnostics from a completed ordinary-region output cache unit.
+fn region_diagnostics(value: &DocumentRealization) -> Option<VoronoiRegionDiagnostics> {
+    match value {
+        DocumentRealization::Regions { diagnostics, .. } => Some(*diagnostics),
+        _ => None,
     }
 }
 
@@ -2636,6 +2685,7 @@ fn evaluate_document_output(
     adjacency_limits: SiteAdjacencyLimits,
     connection_limits: ConnectionPathLimits,
     maze_limits: MazeLimits,
+    voronoi_limits: VoronoiRegionLimits,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<DocumentOutputRealization, EvaluationError> {
     let realization = evaluate_document_channel(
@@ -2655,6 +2705,7 @@ fn evaluate_document_output(
         adjacency_limits,
         connection_limits,
         maze_limits,
+        voronoi_limits,
         is_cancelled,
     )?;
     Ok(DocumentOutputRealization {
@@ -2708,6 +2759,9 @@ fn transformed_curve_segment_instances(
                     ))
             });
     }
+    if matches!(value, DocumentRealization::Regions { .. }) {
+        return Ok(0);
+    }
     let DocumentRealization::Canonical(value) = value else {
         return Ok(0);
     };
@@ -2750,10 +2804,61 @@ fn evaluate_document_channel(
     adjacency_limits: SiteAdjacencyLimits,
     connection_limits: ConnectionPathLimits,
     maze_limits: MazeLimits,
+    voronoi_limits: VoronoiRegionLimits,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<DocumentRealization, EvaluationError> {
     toniator_patterns::validate_output_realization_binding(plan, output_capability, output_setting)
         .map_err(EvaluationError::from_pipeline)?;
+    if let Some(site_mechanism_id) = output_capability.regions() {
+        let ChannelPaint::Solid(_) = channel.paint else {
+            return Err(EvaluationError::new(
+                "evaluation.region.paint",
+                "ordinary region output requires solid channel paint",
+            ));
+        };
+        if definition.coverage.guard_steps == 0 {
+            return Err(EvaluationError::new(
+                "region.voronoi.coverage.guard_steps",
+                "ordinary Voronoi regions require at least one configured guard step",
+            ));
+        }
+        if family.site_set().product_mechanism_id() != site_mechanism_id {
+            return Err(EvaluationError::new(
+                "region.voronoi.identity.site_mechanism",
+                "ordinary region output targets a foreign family site mechanism",
+            ));
+        }
+        let canvas = Bounds::new(
+            Point2::new(0.0, 0.0),
+            Point2::new(document.canvas().width, document.canvas().height),
+        )
+        .ok_or(EvaluationError::new(
+            "region.voronoi.geometry.canvas",
+            "ordinary Voronoi requires finite canvas bounds",
+        ))?;
+        let (regions, diagnostics) = build_voronoi_regions_cancellable(
+            family.site_set(),
+            VoronoiRegionRequest {
+                output_layer_id: output_capability.layer_id,
+                canvas,
+            },
+            voronoi_limits,
+            is_cancelled,
+        )
+        .map_err(|error| EvaluationError::new(error.path(), error.message()))?;
+        let fingerprint = format!(
+            "{}:{}:{}:{}",
+            VORONOI_REGION_CONTRACT_ID,
+            output_capability.layer_id.0,
+            site_mechanism_id.0,
+            regions.fingerprint()
+        );
+        return Ok(DocumentRealization::Regions {
+            regions,
+            fingerprint,
+            diagnostics,
+        });
+    }
     if let Some((_site_mechanism_id, program, _style)) = output_capability.maze_walls() {
         let ChannelPaint::Solid(_) = channel.paint else {
             return Err(EvaluationError::new(
@@ -3051,6 +3156,23 @@ fn document_render_output(
             }),
             ChannelPaint::SampledSource => unreachable!("stroke realization rejects sampled paint"),
         },
+        DocumentRealization::Regions {
+            regions,
+            diagnostics,
+            ..
+        } => {
+            let _ = diagnostics;
+            match channel.paint {
+                ChannelPaint::Solid(_) => Ok(toniator_render::RenderOutputLayer {
+                    output_layer_id,
+                    geometry: GeometryOutput::CanonicalRegions(regions),
+                    primitive_paints: None,
+                }),
+                ChannelPaint::SampledSource => {
+                    unreachable!("region realization rejects sampled paint")
+                }
+            }
+        }
     }
 }
 fn aggregate_document_identity<'a>(
@@ -3216,6 +3338,27 @@ fn required_support_radius_for_output(
                 + definition.coverage.additional_margin,
         );
     }
+    if output.regions().is_some() {
+        if definition.coverage.guard_steps == 0 {
+            return Err(EvaluationError::new(
+                "region.voronoi.coverage.guard_steps",
+                "ordinary Voronoi regions require at least one configured guard step",
+            ));
+        }
+        let parametric_guard = matches!(
+            family.product,
+            toniator_patterns::StructuralProductCapability::AlongGuideSites
+        ) && family.parametric_curve.is_some();
+        if parametric_guard {
+            return maximum_nominal_cell_diameter(family, canvas, &effective.density)
+                .map_err(EvaluationError::from_pipeline)
+                .map(|diameter| {
+                    definition.coverage.additional_margin
+                        + f64::from(definition.coverage.guard_steps) * diameter
+                });
+        }
+        return Ok(definition.coverage.additional_margin);
+    }
     required_support_radius_from_fill(
         canvas,
         &effective.density,
@@ -3334,6 +3477,12 @@ fn document_realization_cache_key(
                     )),
                 }
             }
+            toniator_domain::PatternGeometryResponse::Regions(_) => {
+                DocumentResponseIdentity::Regions {
+                    contract: VORONOI_REGION_CONTRACT_ID,
+                    limits: limits.voronoi_region_limits(),
+                }
+            }
         },
         sampled_paint: matches!(channel.paint, ChannelPaint::SampledSource),
         max_transformed_curve_segment_instances: remaining_transformed_curve_segment_instances,
@@ -3357,6 +3506,10 @@ enum DocumentResponseIdentity {
         outline_segment_limit: usize,
         connection_contracts: Box<Option<ConnectionCacheContracts>>,
         maze_contracts: Box<Option<MazeCacheContracts>>,
+    },
+    Regions {
+        contract: &'static str,
+        limits: VoronoiRegionLimits,
     },
 }
 
@@ -3443,8 +3596,9 @@ pub(crate) mod test_support {
         MarkGeometryResponse, MarkOrientation, MarkPrototype, OffsetCleanup, OffsetSides,
         PathStrokeStyle, PatternDefinition, PatternDefinitionBundle, PatternDefinitionEdit,
         PatternDefinitionId, PatternGeometryResponse, PatternMechanismId, PatternOutputLayer,
-        PatternOutputLayerId, PatternOutputSettings, SourceComponent, SourcePlacement,
-        SourceReference, SourceReferenceId, StraightGuideDimension, StraightGuideRepetition,
+        PatternOutputLayerId, PatternOutputSettings, RegionGeometryResponse, RegionSourceIntent,
+        SourceComponent, SourcePlacement, SourceReference, SourceReferenceId,
+        StraightGuideDimension, StraightGuideRepetition,
     };
 
     use super::*;
@@ -3475,6 +3629,9 @@ pub(crate) mod test_support {
                             minimum_thickness: 0.0,
                             maximum_thickness: 1.0,
                         })
+                    }
+                    PatternOutputLayer::Regions { .. } => {
+                        PatternGeometryResponse::Regions(RegionGeometryResponse::Full)
                     }
                 },
             })
@@ -3847,6 +4004,47 @@ pub(crate) mod test_support {
             .unwrap(),
         )
         .unwrap()
+    }
+
+    /// Builds a guarded triangular-intersection document whose sole output consumes the
+    /// authoritative `FamilySiteSet` as ordinary Voronoi regions.
+    ///
+    /// The fixture retains the connection fixture's complete family authority, changing only its
+    /// typed output contract. It therefore exercises Region scheduling without inventing a second
+    /// site source or a frontend-owned topology.
+    fn modeled_voronoi_session() -> DocumentSession {
+        let connection = modeled_connection_session(random_connection_program(19, 24.0));
+        let document = connection.document();
+        let mut definition = document.pattern_definition_bundles()[0].definition.clone();
+        definition.coverage.guard_steps = 32;
+        definition.output_layers = vec![PatternOutputLayer::Regions {
+            id: PatternOutputLayerId(122),
+            source: RegionSourceIntent::VoronoiSites {
+                site_mechanism_id: PatternMechanismId(121),
+            },
+        }];
+        DocumentSession::new(
+            Document::with_source_topology_and_authored_structures(
+                document.id(),
+                document.canvas().clone(),
+                document.source().clone(),
+                vec![bundle_with_sole_response(
+                    definition,
+                    PatternGeometryResponse::Regions(RegionGeometryResponse::Full),
+                )],
+                document.pattern_settings().clone(),
+                document
+                    .channel_model()
+                    .expect("modeled document has a channel model"),
+                document
+                    .channel_topology()
+                    .expect("modeled document has a channel topology")
+                    .clone(),
+                document.authored_structures().to_vec(),
+            )
+            .expect("typed Region fixture validates against triangular intersections"),
+        )
+        .expect("modeled Region document starts a session")
     }
 
     /// Builds a 24-across phase-aligned triangular family with a typed conventional wall-maze output.
@@ -4310,6 +4508,166 @@ pub(crate) mod test_support {
         );
         assert!(scheduler.accept_completion(&repeated, &session).unwrap());
         scheduler.shutdown().unwrap();
+    }
+
+    /// Proves a cancelled ordinary-region job publishes neither its candidate completion nor any
+    /// decoded-source, family, Region realization, scene, raster, or caller-visible SVG cache
+    /// authority before the newest job is explicitly accepted.
+    ///
+    /// SVG is serialized only by a caller from the completed immutable scene; the scheduler owns
+    /// no SVG cache. This witness proves that the sole scene from which SVG can be serialized is
+    /// the newest Region scene and that the cancelled candidate never reaches that boundary.
+    #[test]
+    fn voronoi_region_scheduler_cancellation_is_atomic_before_cache_publication() {
+        let (gate, entered) =
+            EvaluationStageGate::new(EvaluationStage::Realization, EvaluationCheckpoint::After);
+        let scheduler =
+            EvaluationScheduler::new_with_test_gate(EvaluationLimits::default(), Arc::clone(&gate))
+                .expect("Region scheduler starts");
+        let session = modeled_voronoi_session();
+        let bytes = valid_document_bytes();
+        let stale_ticket = scheduler
+            .submit(document_request(&session, Arc::clone(&bytes)))
+            .expect("stale Region job submits");
+        entered
+            .recv_timeout(GUARD)
+            .expect("stale Region job reaches realization gate");
+        let newest_ticket = scheduler
+            .submit(document_request(&session, Arc::clone(&bytes)))
+            .expect("newest Region job submits");
+        gate.release();
+
+        let newest = wait_for_document_completion(&scheduler);
+        assert_ne!(stale_ticket, newest_ticket);
+        assert_eq!(newest.ticket(), newest_ticket);
+        assert!(
+            newest.result().is_some(),
+            "newest Region job must complete: {:?}",
+            newest.error()
+        );
+        assert_eq!(
+            newest
+                .cache_diagnostics()
+                .expect("newest Region diagnostics")
+                .aggregate,
+            CacheDiagnostics {
+                decoded_source: CacheDisposition::Miss,
+                family: CacheDisposition::Miss,
+                realization: CacheDisposition::Miss,
+                scene: CacheDisposition::Miss,
+                raster: CacheDisposition::Miss,
+            },
+            "the cancelled candidate cannot commit any derived cache unit"
+        );
+        let result = newest.result().expect("newest Region result");
+        assert!(result.scene().layers().iter().all(|layer| {
+            matches!(
+                layer.outputs().first().map(|output| &output.geometry),
+                Some(GeometryOutput::CanonicalRegions(regions)) if !regions.regions().is_empty()
+            )
+        }));
+        assert_eq!(result.raster().width(), 64);
+        assert_eq!(result.raster().height(), 48);
+        assert!(
+            write_svg(result.scene()).contains("<path"),
+            "the accepted Region scene remains the only scheduler result a caller can serialize"
+        );
+        assert!(
+            scheduler
+                .accept_completion(&newest, &session)
+                .expect("newest Region completion accepts")
+        );
+
+        let repeated_ticket = scheduler
+            .submit(document_request(&session, bytes))
+            .expect("accepted Region repeat submits");
+        let repeated = wait_for_document_completion(&scheduler);
+        assert_eq!(repeated.ticket(), repeated_ticket);
+        assert_eq!(
+            repeated
+                .cache_diagnostics()
+                .expect("accepted Region repeat diagnostics")
+                .aggregate,
+            CacheDiagnostics {
+                decoded_source: CacheDisposition::Hit,
+                family: CacheDisposition::Hit,
+                realization: CacheDisposition::Hit,
+                scene: CacheDisposition::Hit,
+                raster: CacheDisposition::Hit,
+            }
+        );
+        assert!(
+            scheduler
+                .accept_completion(&repeated, &session)
+                .expect("accepted Region repeat publishes")
+        );
+        scheduler.shutdown().expect("Region scheduler shuts down");
+    }
+
+    /// Proves an already-completed ordinary-region candidate becomes stale when the authoritative
+    /// document token changes, so rejecting it leaves every cache unit unpublished for the next
+    /// current completion.
+    #[test]
+    fn voronoi_region_stale_completion_cannot_commit_candidate_cache() {
+        let scheduler =
+            EvaluationScheduler::new_with_limits(EvaluationLimits::default()).expect("scheduler");
+        let mut history = DocumentHistory::new(modeled_voronoi_session());
+        let bytes = valid_document_bytes();
+        let stale_ticket = scheduler
+            .submit(document_request(history.session(), Arc::clone(&bytes)))
+            .expect("Region candidate submits");
+        let stale = wait_for_document_completion(&scheduler);
+        assert_eq!(stale.ticket(), stale_ticket);
+        assert!(
+            stale.result().is_some(),
+            "Region candidate completes privately"
+        );
+
+        let base = history.document().pattern_settings().clone();
+        let mut replacement = base.clone();
+        replacement.pattern_rotation_degrees = 13.0;
+        history
+            .apply(&DocumentCommand::SetDocumentPatternSettings {
+                base,
+                settings: replacement,
+            })
+            .expect("authoritative Region document edit applies");
+        assert!(
+            !scheduler
+                .accept_completion(&stale, history.session())
+                .expect("stale Region candidate rejects"),
+            "a stale Region completion cannot publish pending cache units"
+        );
+
+        let current_ticket = scheduler
+            .submit(document_request(history.session(), bytes))
+            .expect("current Region job submits");
+        let current = wait_for_document_completion(&scheduler);
+        assert_eq!(current.ticket(), current_ticket);
+        assert_eq!(
+            current
+                .cache_diagnostics()
+                .expect("current Region diagnostics")
+                .aggregate,
+            CacheDiagnostics {
+                decoded_source: CacheDisposition::Miss,
+                family: CacheDisposition::Miss,
+                realization: CacheDisposition::Miss,
+                scene: CacheDisposition::Miss,
+                raster: CacheDisposition::Miss,
+            },
+            "rejecting the stale completion leaves no candidate, scene, raster, or Region cache state"
+        );
+        assert!(
+            current.result().is_some(),
+            "current Region completion evaluates"
+        );
+        assert!(
+            scheduler
+                .accept_completion(&current, history.session())
+                .expect("current Region completion accepts")
+        );
+        scheduler.shutdown().expect("Region scheduler shuts down");
     }
 
     /// Proves a Connected-only path edit reuses family work while rebuilding downstream cache products.

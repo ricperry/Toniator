@@ -4,9 +4,10 @@ use toniator_domain::{
     GeneralizedSiteProduct, GuideDimension, GuideDimensionId, GuidePrototype, GuidePrototypeKind,
     GuideRepetition, GuideSiteProductCapability, MarkOrientation, MarkOrientationKind,
     MarkPrototype, MarkPrototypeKind, PatternCapabilityScope, PatternDefinition,
-    PatternDefinitionId, PatternFamilyCapabilityProjection, PatternMechanismId,
-    PatternOutputCapabilityProjection, PatternOutputLayerId, RandomCharacterKind,
-    RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy, SourceReference,
+    PatternDefinitionBundle, PatternDefinitionId, PatternFamilyCapabilityProjection,
+    PatternGeometryResponse, PatternMechanismId, PatternOutputCapabilityProjection,
+    PatternOutputLayerId, PatternOutputSettings, RandomCharacterKind, RandomSiteCharacter,
+    RegionGeometryResponse, SiteDensityModulation, SiteExclusionPolicy, SourceReference,
     StraightGuideDimension, StraightGuideRepetition,
 };
 use toniator_patterns::{
@@ -29,7 +30,29 @@ fn document_for(definition: PatternDefinition, structures: Vec<AuthoredStructure
         DocumentId(91),
         base.canvas().clone(),
         SourceReference::Unassigned,
-        vec![definition],
+        vec![PatternDefinitionBundle {
+            output_settings: definition
+                .output_layers
+                .iter()
+                .map(|output| PatternOutputSettings {
+                    output_layer_id: output.id(),
+                    response: match output {
+                        toniator_domain::PatternOutputLayer::CircularMarks { .. }
+                        | toniator_domain::PatternOutputLayer::MarkPrototype { .. } => {
+                            PatternGeometryResponse::Marks(toniator_domain::MarkGeometryResponse {
+                                minimum_fill: 0.0,
+                                maximum_fill: 1.0,
+                            })
+                        }
+                        toniator_domain::PatternOutputLayer::Regions { .. } => {
+                            PatternGeometryResponse::Regions(RegionGeometryResponse::Full)
+                        }
+                        _ => panic!("Stage 20H fixture owns only mark outputs"),
+                    },
+                })
+                .collect(),
+            definition,
+        }],
         settings,
         base.channel_model().expect("modeled fixture").to_owned(),
         base.channel_topology().expect("modeled fixture").clone(),
@@ -134,7 +157,9 @@ fn definition_only_pipeline_products_match_domain_projection() {
             .pattern_capabilities(PatternCapabilityScope::DocumentBase)
             .expect("domain projection resolves");
         assert_eq!(projection.outputs.len(), plan.ordered_outputs.len());
-        let PatternOutputCapabilityProjection::Marks(projected_output) = projection.outputs[0]
+        let projected_record = &projection.outputs[0];
+        let PatternOutputCapabilityProjection::Marks(projected_output) =
+            &projected_record.structural
         else {
             panic!("mark-only fixture must project a mark output");
         };

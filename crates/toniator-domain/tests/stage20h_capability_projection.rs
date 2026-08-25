@@ -140,16 +140,18 @@ fn base_and_inherited_channel_project_the_same_legacy_structure() {
             site_product: GuideSiteProductCapability::Intersections,
         })
     );
-    assert_eq!(
-        base.outputs,
-        vec![PatternOutputCapabilityProjection::Marks(
-            MarkOutputCapabilityProjection {
+    assert!(matches!(
+        base.outputs.as_slice(),
+        [toniator_domain::PatternOutputCapabilityRecord {
+            structural: PatternOutputCapabilityProjection::Marks(MarkOutputCapabilityProjection {
                 prototype: MarkPrototypeKind::Circle,
                 orientation: MarkOrientationKind::Fixed,
-                fill_range: true,
-            }
-        )]
-    );
+                fill_range: true
+            }),
+            response: toniator_domain::PatternGeometryResponse::Marks(_),
+            ..
+        }]
+    ));
 }
 
 /// Proves channel replacement changes only that channel's active projection and scalar deltas do not.
@@ -231,11 +233,18 @@ fn override_and_scalar_deltas_preserve_scope_and_structure_authority() {
     let (document, _) = document
         .apply_command(&response)
         .expect("mark-response applies");
+    let after = document
+        .pattern_capabilities(PatternCapabilityScope::Channel(ChannelId(2)))
+        .expect("delta projection resolves");
+    assert_eq!(after.definition_id, before.definition_id);
+    assert_eq!(after.family, before.family);
     assert_eq!(
-        document
-            .pattern_capabilities(PatternCapabilityScope::Channel(ChannelId(2)))
-            .expect("delta projection resolves"),
-        before
+        after.outputs[0].output_layer_id,
+        before.outputs[0].output_layer_id
+    );
+    assert_eq!(after.outputs[0].structural, before.outputs[0].structural);
+    assert!(
+        matches!(after.outputs[0].response, toniator_domain::PatternGeometryResponse::Marks(MarkGeometryResponse { minimum_fill, maximum_fill }) if minimum_fill == 0.25 && maximum_fill == 1.5)
     );
 }
 
@@ -359,16 +368,18 @@ fn typed_and_generic_guides_project_counts_products_and_active_resources() {
             GuidePrototypeKind::CircularArc,
         ]
     );
-    assert_eq!(
-        generic_projection.outputs,
-        vec![PatternOutputCapabilityProjection::Marks(
-            MarkOutputCapabilityProjection {
+    assert!(matches!(
+        generic_projection.outputs.as_slice(),
+        [toniator_domain::PatternOutputCapabilityRecord {
+            structural: PatternOutputCapabilityProjection::Marks(MarkOutputCapabilityProjection {
                 prototype: MarkPrototypeKind::AuthoredClosedShape,
                 orientation: MarkOrientationKind::GuideNormal,
-                fill_range: true,
-            }
-        )]
-    );
+                fill_range: true
+            }),
+            response: toniator_domain::PatternGeometryResponse::Marks(_),
+            ..
+        }]
+    ));
 }
 
 /// Proves every accepted random discriminant projects without name dispatch or future branches.
