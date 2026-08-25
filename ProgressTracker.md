@@ -1,6 +1,6 @@
 # Toniator Progress Tracker
 
-Last updated: **2026-08-24**. The durable execution contract is
+Last updated: **2026-08-25**. The durable execution contract is
 [GREENFIELD_REWRITE_PLAN.md](docs/GREENFIELD_REWRITE_PLAN.md). Normative
 architecture remains in the five protected [Project Specification files](Project%20Specification/Addendum.md).
 
@@ -385,8 +385,10 @@ bounded contract in `docs/STAGE_20E1_NORMALIZED_MARK_FILL_PLAN.md` replaces the
 temporary absolute mark-size and 4.5 support-capability model with deterministic
 per-site nominal cell bases, normalized `0.0..=2.0` fill, derived conservative
 coverage, a breaking current-format transition, and synchronized existing
-GUI/CLI controls. Current documents use schema v3 only and presets use format
-v2 only; obsolete document-v1/v2 and preset-v1 decoders are not retained.
+GUI/CLI controls. At that checkpoint, documents used schema v3 only and
+presets used format v2 only; obsolete document-v1/v2 and preset-v1 decoders are
+not retained. Stage 20N later supersedes those formats with schema v5 and
+preset v3.
 Focused verification, native PNG/SVG validation, private control evidence, and
 the independent repair re-review all pass. The re-review specifically confirms
 family-aware support preflight, removal of the unit-diameter fallback, and
@@ -400,8 +402,9 @@ references, exact
 bounds-center normalization and Fixed/Tangent/Normal realization, truthful
 canonical closed paths, even-odd native/preview/SVG consumers, request-wide
 transformed-segment and flattened-edge limits, cooperative cancellation, and
-complete cache/scene identity. Current document-v3 and preset-v2 persistence
-remain additive with no obsolete decoder or migration. Focused headless tests,
+complete cache/scene identity. At that checkpoint, document-v3 and preset-v2
+persistence remained additive with no obsolete decoder or migration. Stage 20N
+later supersedes those formats with schema v5 and preset v3. Focused headless tests,
 strict affected-crate lint, architecture validation, both immutable intrinsic
 source-artwork PNG/SVG witnesses, and a private Sway app-consumption smoke check
 pass. The independent read-only review found three sampled-paint/identity gaps;
@@ -542,20 +545,35 @@ because canvas bounds do not create closure. Positive
 verification, artifact inspection, independent read-only review, bounded repair
 re-review, and the final centered-origin review found no material findings. The
 accepted headless scope retains the centered grid-prototype origin, positive
-nearest/random/tree paths, normalized `0.0..=2.0` response, intent-only
-current-v4/preset-v2 persistence, no GTK work, and no renderer topology repair.
+nearest/random/tree paths, normalized `0.0..=2.0` response, no GTK work, and no
+renderer topology repair. Its checkpoint-era current-v4/preset-v2 persistence
+is superseded by Stage 20N's schema-v5/preset-v3 boundary.
 The final boundary repair added square/triangular clip-aligned
 regressions and confirmed that all selected maze cells remain reachable in one
 dual spanning tree while disconnected candidate components are discarded before
 post-selection connectivity is required. A final requirement audit additionally made two-/three-guide geometry
 coverage direct and added public connection/maze capability-projection
-coverage without changing production behavior. Publication remains separate;
-Stage 20N remains Planned and separately gated.
+coverage without changing production behavior. Publication remains separate.
+**Stage 20N is Complete at implementation checkpoint
+`b8701686042a69fcd1ac68a4038adbad4c0ccdc9`;** the user accepted the
+multi-output authority and canonical-region foundation on 2026-08-25 under
+[`STAGE_20N_MULTI_OUTPUT_CANONICAL_REGIONS_PLAN.md`](docs/STAGE_20N_MULTI_OUTPUT_CANONICAL_REGIONS_PLAN.md).
+The accepted implementation retains the one-output authoring/validation gate;
+it adds ordered output settings, independently keyed realization/cache units,
+and canonical-region/render foundations without adding a concrete region
+source or region treatment. Schema v5 documents and preset v3 recipes persist
+authored keyed output settings and channel deltas; derived effective values,
+regions, diagnostics, limits, caches, and scheduler state remain absent.
 
-**Remaining Stage 20N+ — Planned.** The approved remaining order is 20N
-Voronoi; 20O guide faces; 20P region realization; 20Q composites; 20R gallery
-recipes; 20S Pattern Wizard; and 20T–20W temporal work. Each requires its own
-contract, implementation, review, and acceptance gate.
+**Remaining Stage 20N+ — Stage 20O+ Planned.** The user accepted the revised remainder
+roadmap on 2026-08-24 under
+[`STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md`](docs/STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md).
+The accepted order after completed 20N is 20O
+ordinary Voronoi; 20P guide faces; 20Q filled-region realization; 20R
+composites and site-use filters; and 20S headless capability/gallery recipe
+completion. Stage 21 owns pattern-authoring GTK, Stage 22 owns all headless
+frame/media/sequence/simple-transition work, and Stage 23 owns temporal GTK
+with start/end pins. Stages 20O+ and 21–23 remain Planned and separately gated.
 
 ## Maintenance rules
 

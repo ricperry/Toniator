@@ -1834,7 +1834,9 @@ defines authored closed structures as ordinary canonical site marks. The
 implementation adds document-owned typed shape references, exact normalized
 closed-path realization, shared canonical preview/PNG/SVG consumption,
 even-odd fill, bounded/cancellable path work, complete identity, and additive
-current document-v3/preset-v2 persistence. Focused verification and intrinsic
+current document-v3/preset-v2 persistence. At that checkpoint, those formats
+were current; Stage 20N later supersedes them with schema v5 and preset v3.
+Focused verification and intrinsic
 immutable-source artifacts pass. The independent review's sampled-paint and
 identity findings were repaired, and the focused repair re-review plus final
 zero-alpha engine-to-render review found no confirmed remaining issue. The user
@@ -1946,17 +1948,38 @@ Positive grid spanning trees remain a separate connection-path output. Focused
 verification, artifact inspection, independent read-only review, bounded repair
 re-review, and the final centered-origin review found no material findings. The
 accepted headless scope retains the centered grid-prototype origin, positive
-nearest/random/tree paths, normalized `0.0..=2.0` response, intent-only
-current-v4/preset-v2 persistence, no GTK work, and no renderer topology repair.
+nearest/random/tree paths, normalized `0.0..=2.0` response, no GTK work, and no
+renderer topology repair. The checkpoint-era current-v4/preset-v2 persistence
+is superseded by Stage 20N's current schema-v5/preset-v3 boundary.
 A final requirement audit
 also made two-/three-guide geometry coverage direct and added public
 connection/maze capability-projection coverage without changing production
-behavior. Publication remains separate; Stage 20N remains Planned and
-separately gated.
+behavior. Publication remains separate.
 
-**Remaining Stage 20N+ — Planned.** The approved remainder is 20N Voronoi; 20O
-guide faces; 20P region realization; 20Q composites; 20R gallery recipes; 20S
-Pattern Wizard; and 20T–20W temporal work. Every row remains separately gated.
+**Stage 20N — Complete at implementation checkpoint
+`b8701686042a69fcd1ac68a4038adbad4c0ccdc9`.** The accepted headless foundation
+adds atomic bundles with ordered keyed output settings and channel deltas,
+explicit per-output realization/cache units with maximum-support aggregation,
+canonical-region identity/normalization/validation, and ordered render-output
+layers with solid nonzero region fills and final canvas clipping. Schema v5
+documents and preset v3 recipes persist authored settings only; effective
+values, regions, diagnostics, limits, caches, and scheduler state remain
+derived. The one-output authoring/validation gate remains intentionally active,
+so concrete region sources, treatments, heterogeneous composites, and GTK
+workflow remain outside this stage. Focused tests, intrinsic native artifacts,
+and independent correction re-review passed.
+
+**Remaining Stage 20N+ — Stage 20O+ Planned.** The user accepted the revised headless
+remainder roadmap on 2026-08-24 under
+[`STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md`](STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md).
+Stage 20O adds ordinary Voronoi regions; 20P adds guide-arrangement
+faces; 20Q realizes filled regions; 20R adds ordered composites and site-use
+filters; and 20S completes headless capability projection and ordinary gallery
+recipes. Stage 21 owns all remaining pattern-authoring GTK work, Stage 22 owns
+the complete headless frame/media/sequence/simple-transition pipeline, and
+Stage 23 owns temporal GTK with start/end pins only. Every row remains Planned
+and separately gated; this roadmap acceptance does not authorize Stage 20O+
+implementation.
 
 Every mechanism must enter through the Stage 14 typed schema, Stage 15 generic
 pipeline, Stage 17 command/descriptor contract, canonical geometry, and

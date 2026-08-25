@@ -121,7 +121,8 @@ intent. Completion atomically adds the open resource and retargets only the
 selected channel to a fresh generic `GuideDimensions` plus `AlongGuideSites`
 definition that preserves coverage and supported mark-output semantics. This
 `GuideCustomAlongLayout` convenience remains for Stage 20F compatibility and
-is a planned Stage 20S migration: the Pattern Wizard will attach a guide only
+is a planned Stage 21 migration under the accepted 2026-08-24 remainder
+roadmap: the Pattern Wizard will attach a guide only
 to an artist-selected guide use. No
 construction, definition, or resource is published before successful
 completion, and any failure retains the local construction without an orphan.

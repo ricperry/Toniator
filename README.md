@@ -294,18 +294,21 @@ acceptance. Stage 20E1 is complete in the Stage 20E1 acceptance checkpoint.
 Stage 20E1 replaces the temporary absolute mark-size/support-capability model
 with per-site nominal cell bases, normalized `0.0..=2.0` fill, derived
 family-aware coverage, and synchronized existing GUI/CLI controls (`Minimum
-fill`, `Maximum fill`, and `Rotation offset`). Current documents use schema v3
-only and presets use format v2 only; obsolete schemas are rejected rather than
-migrated. The independent repair re-review is PASS.
+fill`, `Maximum fill`, and `Rotation offset`). At the Stage 20E1 checkpoint,
+documents used schema v3 only and presets used format v2 only; obsolete schemas
+were rejected rather than migrated. The independent repair re-review is PASS.
+The later accepted Stage 20N transition supersedes those checkpoint-era current
+formats with schema v5 and preset v3.
 
 Stage 20E2 is complete at implementation checkpoint
 `0c6b6a2e268f9306835038be747352a0cd64044c`. It realizes document-owned authored
 closed shapes as ordinary family-site marks with exact normalized line/cubic
 geometry, Fixed/Tangent/Normal orientation plus channel rotation, explicit
 even-odd fill, shared preview/PNG/SVG canonical consumers, bounded cancellable
-path work, and complete realization/cache/scene identity. Current document-v3
-and preset-v2 persistence remain additive without obsolete decoders or
-migration. Focused verification, both immutable intrinsic source-artwork
+path work, and complete realization/cache/scene identity. At that checkpoint,
+document-v3 and preset-v2 persistence remained additive without obsolete
+decoders or migration; Stage 20N later supersedes those formats with v5/v3.
+Focused verification, both immutable intrinsic source-artwork
 witnesses, private Sway app consumption, independent repair re-review, and the
 final zero-alpha engine-to-render review pass. Shape authoring and later Stage
 20F+ mechanisms remain separately gated.
@@ -354,12 +357,31 @@ Stage 20M is complete at implementation checkpoint
 `33f1bde3be9afdc3fb88f479c4ee7ec52b80114a`. It adds deterministic positive
 nearest/random/tree connection paths and conventional two-/three-guide wall
 mazes over the accepted adjacency and straight-grid face/dual authority. Grid
-prototypes use the geometric canvas center as local `(0, 0)`; current-v4 and
-preset-v2 persistence stores authored intent only, with normalized `0.0..=2.0`
-response. The accepted scope is headless: GTK and renderer-side topology repair
-remain out of scope, and Stage 20N remains Planned. The user accepted Stage 20M
-on 2026-08-24; publication remains separate. The Pattern Wizard remains
-separately gated and planned.
+prototypes use the geometric canvas center as local `(0, 0)`; its checkpoint-era
+current-v4 and preset-v2 persistence stored authored intent only, with normalized
+`0.0..=2.0` response. The accepted scope is headless: GTK and renderer-side
+topology repair remain out of scope. The user accepted Stage 20M on 2026-08-24;
+publication remains separate.
+
+Stage 20N is complete at implementation checkpoint
+`b8701686042a69fcd1ac68a4038adbad4c0ccdc9`. It establishes ordered keyed
+per-output settings and deltas, explicit output-bound realization/cache units,
+maximum-support family aggregation, canonical-region identity/normalization
+and validation, and ordered render-output layers with solid nonzero region
+fills and final canvas clipping. Schema v5 documents and preset v3 recipes
+persist authored bundles/settings only; derived effective values, regions,
+diagnostics, limits, caches, and scheduler state are absent. The deliberate
+one-output authoring/validation gate remains in force, so this foundation does
+not provide concrete Voronoi, guide-face, region-treatment, or heterogeneous
+composite output. Focused tests, strict checks, architecture validation, raw
+intrinsic PNG/SVG and canonical-region artifacts, and independent correction
+re-review passed; native evidence is recorded locally under
+`target/validation/stage20n/intrinsic/`.
+No GTK/Wayland run was required. The accepted
+[Stages 20N–20S headless completion roadmap](docs/STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md)
+moves all remaining pattern-authoring GTK work to Stage 21, all headless
+frame/media/sequence/simple-transition work to Stage 22, and temporal GTK to
+Stage 23. Every future stage remains separately gated.
 
 Low-resolution fixtures and outputs are supplementary only. Every future stage
 that exercises source loading, sampling, rendering, preview, or export must
