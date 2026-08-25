@@ -10,10 +10,12 @@ use toniator_domain::{GuideDimensionId, PatternMechanismId};
 mod canonical_regions;
 mod connection_paths;
 mod curves;
+mod guide_faces;
 mod guides;
 mod maze_walls;
 mod outlines;
 mod path_offsets;
+mod planar_arrangement;
 mod site_adjacency;
 mod voronoi_regions;
 
@@ -35,6 +37,10 @@ pub use curves::{
     CubicBezierSegment, CurveError, CurvePath, CurveSegment, IntersectionKind, LineSegment,
     PathArcLength, PathClosure, PathIntersection, PathLocation, SegmentIntersection,
     construct_parametric_curve_path_cancellable,
+};
+pub use guide_faces::{
+    GUIDE_FACE_CONTRACT_ID, GuideFaceDiagnostics, GuideFaceError, GuideFaceLimits,
+    GuideFaceRequest, GuideFaceResult, build_guide_faces_cancellable,
 };
 pub use guides::{
     GuideCoveragePlan, GuideDimensionCoverage, StructuralPathInstance, StructuralPathSet,

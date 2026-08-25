@@ -1126,10 +1126,24 @@ pub struct MazeWallOutputCapabilityProjection {
     pub thickness_range: bool,
 }
 
-/// Read-only Stage 20O ordinary-region capability facts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Read-only source kind for a fixed full canonical-region output.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RegionSourceCapabilityKind {
+    /// Builds ordinary cells from an eligible family-site product.
+    OrdinaryVoronoi {
+        site_mechanism_id: PatternMechanismId,
+    },
+    /// Builds complete bounded faces from selected ordered guide dimensions.
+    GuideFaces {
+        guide_mechanism_id: PatternMechanismId,
+        dimensions: Vec<GuideDimensionId>,
+    },
+}
+
+/// Read-only fixed-region capability facts.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegionOutputCapabilityProjection {
-    pub ordinary_voronoi: bool,
+    pub source: RegionSourceCapabilityKind,
     pub full_treatment_only: bool,
     pub sampled_paint: bool,
 }
@@ -1878,20 +1892,37 @@ pub enum PatternOutputLayer {
     },
 }
 
-/// Authored source identity for one ordinary Stage 20O region output.
+/// Authored source identity for one fixed full canonical-region output.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RegionSourceIntent {
     /// Builds ordinary cells from the complete family site product with this mechanism identity.
     VoronoiSites {
         site_mechanism_id: PatternMechanismId,
     },
+    /// Builds complete bounded arrangement faces from two or three selected guides.
+    GuideFaces {
+        guide_mechanism_id: PatternMechanismId,
+        dimensions: Vec<GuideDimensionId>,
+    },
 }
 
 impl RegionSourceIntent {
-    /// Returns the sole site-product mechanism consumed by the region output.
-    pub const fn site_mechanism_id(&self) -> PatternMechanismId {
+    /// Returns the consumed site-product mechanism only for ordinary Voronoi output.
+    pub const fn site_mechanism_id(&self) -> Option<PatternMechanismId> {
         match self {
-            Self::VoronoiSites { site_mechanism_id } => *site_mechanism_id,
+            Self::VoronoiSites { site_mechanism_id } => Some(*site_mechanism_id),
+            Self::GuideFaces { .. } => None,
+        }
+    }
+
+    /// Returns the consumed guide mechanism only for arrangement-face output.
+    pub fn guide_faces(&self) -> Option<(PatternMechanismId, &[GuideDimensionId])> {
+        match self {
+            Self::VoronoiSites { .. } => None,
+            Self::GuideFaces {
+                guide_mechanism_id,
+                dimensions,
+            } => Some((*guide_mechanism_id, dimensions)),
         }
     }
 }
@@ -4630,43 +4661,57 @@ impl Document {
         channel_id: Option<ChannelId>,
         recipe: &PatternDefinitionRecipe,
     ) -> Result<MaterializedPatternDefinitionRecipe, ValidationError> {
-        let (definition_recipe, shape_draft, connection, maze, voronoi) = match &recipe.structure {
-            PatternStructureRecipe::AuthoredClosedShapeMarks { definition, shape } => {
-                (definition.as_ref(), Some(shape), None, None, false)
-            }
-            PatternStructureRecipe::ConnectionPaths {
-                definition,
-                program,
-                style,
-            } => {
-                validate_connection_recipe(definition, program)?;
-                (
+        let (definition_recipe, shape_draft, connection, maze, voronoi, guide_faces) =
+            match &recipe.structure {
+                PatternStructureRecipe::AuthoredClosedShapeMarks { definition, shape } => {
+                    (definition.as_ref(), Some(shape), None, None, false, None)
+                }
+                PatternStructureRecipe::ConnectionPaths {
+                    definition,
+                    program,
+                    style,
+                } => {
+                    validate_connection_recipe(definition, program)?;
+                    (
+                        definition.as_ref(),
+                        None,
+                        Some((program, *style)),
+                        None,
+                        false,
+                        None,
+                    )
+                }
+                PatternStructureRecipe::MazeWalls {
+                    definition,
+                    program,
+                    style,
+                } => {
+                    validate_maze_recipe(definition, program)?;
+                    (
+                        definition.as_ref(),
+                        None,
+                        None,
+                        Some((program, *style)),
+                        false,
+                        None,
+                    )
+                }
+                PatternStructureRecipe::VoronoiRegions { definition } => {
+                    (definition.as_ref(), None, None, None, true, None)
+                }
+                PatternStructureRecipe::GuideFaceRegions {
+                    definition,
+                    dimension_indices,
+                } => (
                     definition.as_ref(),
                     None,
-                    Some((program, *style)),
+                    None,
                     None,
                     false,
-                )
-            }
-            PatternStructureRecipe::MazeWalls {
-                definition,
-                program,
-                style,
-            } => {
-                validate_maze_recipe(definition, program)?;
-                (
-                    definition.as_ref(),
-                    None,
-                    None,
-                    Some((program, *style)),
-                    false,
-                )
-            }
-            PatternStructureRecipe::VoronoiRegions { definition } => {
-                (definition.as_ref(), None, None, None, true)
-            }
-            _ => (&recipe.structure, None, None, None, false),
-        };
+                    Some(dimension_indices.as_slice()),
+                ),
+                _ => (&recipe.structure, None, None, None, false, None),
+            };
         let neutral = self.allocate_neutral_definition_from_recipe(definition_recipe)?;
         let mut candidate = self.clone();
         candidate
@@ -4778,6 +4823,53 @@ impl Document {
             definition.output_layers = vec![PatternOutputLayer::Regions {
                 id: output_id,
                 source: RegionSourceIntent::VoronoiSites { site_mechanism_id },
+            }];
+            validate_definition(definition)?;
+        }
+        if let Some(dimension_indices) = guide_faces {
+            let definition = candidate
+                .pattern_definition_bundles
+                .iter_mut()
+                .find(|definition| definition.id == neutral.id)
+                .expect("fresh recipe definition");
+            let (output_id, guide_mechanism_id, dimensions) = match (
+                definition.output_layers.as_slice(),
+                definition.mechanisms.as_slice(),
+            ) {
+                (
+                    [PatternOutputLayer::CircularMarks { id, .. }]
+                    | [PatternOutputLayer::MarkPrototype { id, .. }],
+                    [
+                        PatternMechanism::StraightGuideDimensions {
+                            id: guide_id,
+                            dimensions,
+                        },
+                        ..,
+                    ],
+                ) => (*id, *guide_id, dimensions),
+                _ => {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.recipe.guide_faces",
+                        "Guide Faces recipe materialized an incompatible straight-guide output",
+                    ));
+                }
+            };
+            let selected = dimension_indices
+                .iter()
+                .map(|index| dimensions.get(*index).map(|dimension| dimension.id))
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| {
+                    ValidationError::new(
+                        "pattern_definitions.recipe.guide_faces",
+                        "Guide Faces recipe dimension index is out of bounds",
+                    )
+                })?;
+            definition.output_layers = vec![PatternOutputLayer::Regions {
+                id: output_id,
+                source: RegionSourceIntent::GuideFaces {
+                    guide_mechanism_id,
+                    dimensions: selected,
+                },
             }];
             validate_definition(definition)?;
         }
@@ -4980,7 +5072,8 @@ impl Document {
             PatternStructureRecipe::ConnectionPaths { .. }
             | PatternStructureRecipe::MazeWalls { .. }
             | PatternStructureRecipe::AuthoredClosedShapeMarks { .. }
-            | PatternStructureRecipe::VoronoiRegions { .. } => {
+            | PatternStructureRecipe::VoronoiRegions { .. }
+            | PatternStructureRecipe::GuideFaceRegions { .. } => {
                 unreachable!("output recipe wrapper is removed before neutral allocation")
             }
         }
@@ -5256,7 +5349,8 @@ impl Document {
             PatternStructureRecipe::ConnectionPaths { .. }
             | PatternStructureRecipe::MazeWalls { .. }
             | PatternStructureRecipe::AuthoredClosedShapeMarks { .. }
-            | PatternStructureRecipe::VoronoiRegions { .. } => {
+            | PatternStructureRecipe::VoronoiRegions { .. }
+            | PatternStructureRecipe::GuideFaceRegions { .. } => {
                 unreachable!("output recipe wrapper is removed before control application")
             }
         }
@@ -5515,6 +5609,37 @@ impl Document {
                 }];
                 return Ok(duplicate);
             }
+            if let [
+                PatternOutputLayer::Regions {
+                    source:
+                        RegionSourceIntent::GuideFaces {
+                            dimensions: selected,
+                            ..
+                        },
+                    ..
+                },
+            ] = source.output_layers.as_slice()
+            {
+                let mut duplicate = PatternDefinition::generalized_guides(
+                    id,
+                    source.name.clone(),
+                    guide_id,
+                    site_id,
+                    output_id,
+                    remapped.iter().map(|(_, value)| value.clone()).collect(),
+                    product,
+                    MarkOrientation::Fixed,
+                    source.coverage.clone(),
+                );
+                duplicate.output_layers = vec![PatternOutputLayer::Regions {
+                    id: output_id,
+                    source: RegionSourceIntent::GuideFaces {
+                        guide_mechanism_id: guide_id,
+                        dimensions: selected.iter().copied().map(remap).collect(),
+                    },
+                }];
+                return Ok(duplicate);
+            }
             let orientation = match source.output_layers.as_slice() {
                 [
                     PatternOutputLayer::MarkPrototype {
@@ -5646,6 +5771,37 @@ impl Document {
                     site_mechanism_id: site_id,
                     program: program.clone(),
                     style: *style,
+                }];
+                return Ok(duplicate);
+            }
+            if let [
+                PatternOutputLayer::Regions {
+                    source:
+                        RegionSourceIntent::GuideFaces {
+                            dimensions: selected,
+                            ..
+                        },
+                    ..
+                },
+            ] = source.output_layers.as_slice()
+            {
+                let mut duplicate = PatternDefinition::generalized_straight_guides(
+                    id,
+                    source.name.clone(),
+                    guide_id,
+                    site_id,
+                    output_id,
+                    remapped.iter().map(|(_, value)| value.clone()).collect(),
+                    product,
+                    MarkOrientation::Fixed,
+                    source.coverage.clone(),
+                );
+                duplicate.output_layers = vec![PatternOutputLayer::Regions {
+                    id: output_id,
+                    source: RegionSourceIntent::GuideFaces {
+                        guide_mechanism_id: guide_id,
+                        dimensions: selected.iter().copied().map(remap).collect(),
+                    },
                 }];
                 return Ok(duplicate);
             }
@@ -7483,6 +7639,25 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
             output_layer_id,
             seed,
         } => apply_maze_program(definition, *output_layer_id, |current| current.seed = *seed),
+        PatternDefinitionEdit::SetGuideFaceDimensions {
+            output_layer_id,
+            dimensions,
+        } => {
+            if let Some(PatternOutputLayer::Regions {
+                source:
+                    RegionSourceIntent::GuideFaces {
+                        dimensions: current,
+                        ..
+                    },
+                ..
+            }) = definition
+                .output_layers
+                .iter_mut()
+                .find(|layer| layer.id() == *output_layer_id)
+            {
+                *current = dimensions.clone();
+            }
+        }
     }
 }
 
@@ -8177,6 +8352,16 @@ fn remap_definition_edit_for_duplicate(
             output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
             seed: *seed,
         },
+        PatternDefinitionEdit::SetGuideFaceDimensions {
+            output_layer_id,
+            dimensions,
+        } => PatternDefinitionEdit::SetGuideFaceDimensions {
+            output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
+            dimensions: dimensions
+                .iter()
+                .map(|dimension_id| remap_dimension_id(source, duplicate, *dimension_id))
+                .collect(),
+        },
     }
 }
 
@@ -8289,7 +8474,9 @@ fn validate_definition_edit(
     definition: &PatternDefinition,
     edit: &PatternDefinitionEdit,
 ) -> Result<(), ValidationError> {
-    validate_property_field_projection(edit.field_projection())?;
+    if !matches!(edit, PatternDefinitionEdit::SetGuideFaceDimensions { .. }) {
+        validate_property_field_projection(edit.field_projection())?;
+    }
     match edit {
         PatternDefinitionEdit::SetParametricShape { mechanism_id, .. }
         | PatternDefinitionEdit::SetParametricWinding { mechanism_id, .. } => {
@@ -8941,6 +9128,65 @@ fn validate_definition_edit(
             candidate.seed = *seed;
             candidate.validate()
         }
+        PatternDefinitionEdit::SetGuideFaceDimensions {
+            output_layer_id,
+            dimensions,
+        } => {
+            let PatternOutputLayer::Regions {
+                source:
+                    RegionSourceIntent::GuideFaces {
+                        guide_mechanism_id, ..
+                    },
+                ..
+            } = validate_output_layer_target(definition, *output_layer_id)?
+            else {
+                return Err(ValidationError::new(
+                    "pattern_definitions.output_layers.guide_faces",
+                    "command targets an output without Guide Faces configuration",
+                ));
+            };
+            let selected_dimensions = definition
+                .mechanisms
+                .iter()
+                .find_map(|mechanism| match mechanism {
+                    PatternMechanism::StraightGuideDimensions { id, dimensions }
+                        if *id == *guide_mechanism_id =>
+                    {
+                        Some(
+                            dimensions
+                                .iter()
+                                .map(|dimension| dimension.id)
+                                .collect::<Vec<_>>(),
+                        )
+                    }
+                    PatternMechanism::GuideDimensions { id, dimensions }
+                        if *id == *guide_mechanism_id =>
+                    {
+                        Some(
+                            dimensions
+                                .iter()
+                                .map(|dimension| dimension.id)
+                                .collect::<Vec<_>>(),
+                        )
+                    }
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    ValidationError::new(
+                        "pattern_definitions.output_layers.guide_faces.mechanism",
+                        "Guide Faces output references a missing guide mechanism",
+                    )
+                })?;
+            validate_region_source_ids(
+                &RegionSourceIntent::GuideFaces {
+                    guide_mechanism_id: *guide_mechanism_id,
+                    dimensions: dimensions.clone(),
+                },
+                *guide_mechanism_id,
+                PatternMechanismId(u64::MAX),
+                &selected_dimensions,
+            )
+        }
     }
 }
 
@@ -9433,7 +9679,11 @@ fn validate_output_orientation(
 }
 
 fn definition_edit_invalidation(edit: &PatternDefinitionEdit) -> InvalidationLevel {
-    property_field_contract(edit.field_projection().field).invalidation
+    if matches!(edit, PatternDefinitionEdit::SetGuideFaceDimensions { .. }) {
+        InvalidationLevel::Family
+    } else {
+        property_field_contract(edit.field_projection().field).invalidation
+    }
 }
 
 fn affected_topology_channels(
@@ -9605,6 +9855,28 @@ fn validate_definition_structure(definition: &PatternDefinition) -> Result<(), V
         let ids: Vec<_> = dimensions.iter().map(|dimension| dimension.id).collect();
         validate_site_mechanism_ids(site, *id, root_site_id, &ids)?;
         validate_generalized_output_layers_ids(&definition.output_layers, *id, root_site_id, &ids)?;
+        if let [
+            PatternOutputLayer::Regions {
+                source:
+                    RegionSourceIntent::GuideFaces {
+                        dimensions: selected,
+                        ..
+                    },
+                ..
+            },
+        ] = definition.output_layers.as_slice()
+            && selected.iter().any(|selected_id| {
+                !dimensions.iter().any(|dimension| {
+                    dimension.id == *selected_id
+                        && matches!(dimension.prototype, GuidePrototype::AuthoredOpenPath { .. })
+                })
+            })
+        {
+            return Err(ValidationError::new(
+                "pattern_definitions.output_layers.guide_faces.prototype",
+                "guide-face regions require selected authored open-path guides",
+            ));
+        }
         return Ok(());
     }
     if !matches!(definition.mechanisms.first(), Some(PatternMechanism::StraightGuides { id }) if *id == guide_mechanism_id)
@@ -9649,7 +9921,9 @@ fn validate_definition_structure(definition: &PatternDefinition) -> Result<(), V
                 ..
             },
         ] => *site_mechanism_id == root_site_id && program.validate().is_ok(),
-        [PatternOutputLayer::Regions { source, .. }] => source.site_mechanism_id() == root_site_id,
+        [PatternOutputLayer::Regions { source, .. }] => {
+            source.site_mechanism_id() == Some(root_site_id)
+        }
         _ => false,
     };
     if !has_compatible_output {
@@ -9855,7 +10129,7 @@ fn validate_parametric_curve_definition(
             [PatternOutputLayer::Regions { source, .. }],
         ) if *id == site_id
             && *curve_mechanism_id == curve_id
-            && source.site_mechanism_id() == site_id =>
+            && source.site_mechanism_id() == Some(site_id) =>
         {
             validate_positive_finite(
                 *interval,
@@ -10092,10 +10366,23 @@ fn project_validated_pattern_definition(
 fn project_output_capability(
     output: &PatternOutputLayer,
 ) -> Result<PatternOutputCapabilityProjection, ValidationError> {
-    if matches!(output, PatternOutputLayer::Regions { .. }) {
+    if let PatternOutputLayer::Regions { source, .. } = output {
         return Ok(PatternOutputCapabilityProjection::Regions(
             RegionOutputCapabilityProjection {
-                ordinary_voronoi: true,
+                source: match source {
+                    RegionSourceIntent::VoronoiSites { site_mechanism_id } => {
+                        RegionSourceCapabilityKind::OrdinaryVoronoi {
+                            site_mechanism_id: *site_mechanism_id,
+                        }
+                    }
+                    RegionSourceIntent::GuideFaces {
+                        guide_mechanism_id,
+                        dimensions,
+                    } => RegionSourceCapabilityKind::GuideFaces {
+                        guide_mechanism_id: *guide_mechanism_id,
+                        dimensions: dimensions.clone(),
+                    },
+                },
                 full_treatment_only: true,
                 sampled_paint: false,
             },
@@ -10329,7 +10616,14 @@ fn validate_random_site_definition(
             program.validate()?;
             *site_mechanism_id
         }
-        PatternOutputLayer::Regions { source, .. } => source.site_mechanism_id(),
+        PatternOutputLayer::Regions { source, .. } => {
+            source.site_mechanism_id().ok_or_else(|| {
+                ValidationError::new(
+                    "pattern.output_layers.region_source",
+                    "this output shape requires a site-backed region source",
+                )
+            })?
+        }
         _ => {
             return Err(ValidationError::new(
                 "pattern_definitions.output_layers",
@@ -10722,12 +11016,7 @@ fn validate_generalized_output_layers_ids(
             ));
     }
     if let [PatternOutputLayer::Regions { source, .. }] = layers {
-        return (source.site_mechanism_id() == site_id)
-            .then_some(())
-            .ok_or(ValidationError::new(
-                "pattern_definitions.output_layers.site_mechanism_id",
-                "region output must consume its declared site mechanism",
-            ));
+        return validate_region_source_ids(source, guide_id, site_id, dimensions);
     }
     if let [
         PatternOutputLayer::GuidePaths {
@@ -10772,6 +11061,67 @@ fn validate_generalized_output_layers_ids(
         _ => Err(ValidationError::new(
             "pattern_definitions.output_layers.orientation",
             "orientation references a missing guide dimension",
+        )),
+    }
+}
+
+/// Validates the typed source binding for one fixed full region output.
+///
+/// Guide-face selections are ordered in the owning guide mechanism's stored
+/// order so a renderer or evaluator never needs to infer a second selection.
+///
+/// # Errors
+///
+/// Returns a stable source, mechanism, cardinality, ordering, or foreign-ID
+/// diagnostic without changing the structural definition.
+fn validate_region_source_ids(
+    source: &RegionSourceIntent,
+    guide_id: PatternMechanismId,
+    site_id: PatternMechanismId,
+    dimensions: &[GuideDimensionId],
+) -> Result<(), ValidationError> {
+    match source {
+        RegionSourceIntent::VoronoiSites { site_mechanism_id } if *site_mechanism_id == site_id => {
+            Ok(())
+        }
+        RegionSourceIntent::GuideFaces {
+            guide_mechanism_id,
+            dimensions: selected,
+        } if *guide_mechanism_id == guide_id => {
+            if !(2..=3).contains(&selected.len()) {
+                return Err(ValidationError::new(
+                    "pattern_definitions.output_layers.guide_faces.dimensions",
+                    "guide-face regions require two or three dimensions",
+                ));
+            }
+            let mut previous = None;
+            for dimension in selected {
+                let Some(index) = dimensions
+                    .iter()
+                    .position(|candidate| candidate == dimension)
+                else {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.output_layers.guide_faces.dimensions",
+                        "guide-face regions require owned guide dimensions",
+                    ));
+                };
+                if previous.is_some_and(|previous| index <= previous) {
+                    return Err(ValidationError::new(
+                        "pattern_definitions.output_layers.guide_faces.dimensions",
+                        "guide-face dimensions must be unique in stored guide order",
+                    ));
+                }
+                previous = Some(index);
+            }
+            Ok(())
+        }
+        RegionSourceIntent::VoronoiSites { .. } => Err(ValidationError::new(
+            "pattern_definitions.output_layers.site_mechanism_id",
+            "region output must consume its declared site mechanism",
+        )),
+        RegionSourceIntent::GuideFaces { .. } => Err(ValidationError::new(
+            "pattern_definitions.output_layers.guide_faces.mechanism",
+            "guide-face regions must consume their declared guide mechanism",
         )),
     }
 }
@@ -10855,12 +11205,11 @@ fn validate_generalized_output_layers(
             ));
     }
     if let [PatternOutputLayer::Regions { source, .. }] = layers {
-        return (source.site_mechanism_id() == site_id)
-            .then_some(())
-            .ok_or(ValidationError::new(
-                "pattern_definitions.output_layers.site_mechanism_id",
-                "region output must consume its declared site mechanism",
-            ));
+        let ids = dimensions
+            .iter()
+            .map(|dimension| dimension.id)
+            .collect::<Vec<_>>();
+        return validate_region_source_ids(source, guide_id, site_id, &ids);
     }
     if let [
         PatternOutputLayer::GuidePaths {
@@ -14147,6 +14496,13 @@ pub enum PatternStructureRecipe {
     VoronoiRegions {
         definition: Box<PatternStructureRecipe>,
     },
+    /// Wraps a two- or three-dimension straight-guide recipe with Stage
+    /// 20P arrangement-face region intent. Indices retain the authored recipe
+    /// order and materialize atomically into stable guide-dimension IDs.
+    GuideFaceRegions {
+        definition: Box<PatternStructureRecipe>,
+        dimension_indices: Vec<usize>,
+    },
 }
 
 /// One ordered ID-free base response authored alongside a structural output.
@@ -14199,6 +14555,19 @@ impl PatternDefinitionRecipe {
         Self {
             structure: PatternStructureRecipe::VoronoiRegions {
                 definition: Box::new(structure),
+            },
+            output_settings: vec![PatternOutputSettingsRecipe {
+                response: PatternGeometryResponse::Regions(RegionGeometryResponse::Full),
+            }],
+        }
+    }
+
+    /// Builds the complete current Guide Faces region recipe without assigning document IDs.
+    pub fn guide_faces(structure: PatternStructureRecipe, dimension_indices: Vec<usize>) -> Self {
+        Self {
+            structure: PatternStructureRecipe::GuideFaceRegions {
+                definition: Box::new(structure),
+                dimension_indices,
             },
             output_settings: vec![PatternOutputSettingsRecipe {
                 response: PatternGeometryResponse::Regions(RegionGeometryResponse::Full),
@@ -14444,6 +14813,7 @@ fn validate_pattern_structure_recipe(
                 PatternStructureRecipe::AuthoredClosedShapeMarks { .. }
                     | PatternStructureRecipe::ConnectionPaths { .. }
                     | PatternStructureRecipe::MazeWalls { .. }
+                    | PatternStructureRecipe::GuideFaceRegions { .. }
             ) {
                 return Err(ValidationError::new(
                     "preset.recipe.definition",
@@ -14459,11 +14829,42 @@ fn validate_pattern_structure_recipe(
                     | PatternStructureRecipe::MazeWalls { .. }
                     | PatternStructureRecipe::AuthoredClosedShapeMarks { .. }
                     | PatternStructureRecipe::VoronoiRegions { .. }
+                    | PatternStructureRecipe::GuideFaceRegions { .. }
             ) {
                 return Err(ValidationError::new(
                     "preset.recipe.definition",
                     "Voronoi recipes require an unwrapped site-family recipe",
                 ));
+            }
+            validate_pattern_structure_recipe(definition)
+        }
+        PatternStructureRecipe::GuideFaceRegions {
+            definition,
+            dimension_indices,
+        } => {
+            let PatternStructureRecipe::GeneralizedStraightGuides { dimensions, .. } =
+                definition.as_ref()
+            else {
+                return Err(ValidationError::new(
+                    "preset.recipe.guide_faces.family",
+                    "Guide Faces recipes require an unwrapped straight-guide recipe",
+                ));
+            };
+            if !(2..=3).contains(&dimension_indices.len()) {
+                return Err(ValidationError::new(
+                    "preset.recipe.guide_faces.dimension_indices",
+                    "must contain two or three selected dimensions",
+                ));
+            }
+            let mut prior = None;
+            for index in dimension_indices {
+                if *index >= dimensions.len() || prior.is_some_and(|value| value >= *index) {
+                    return Err(ValidationError::new(
+                        "preset.recipe.guide_faces.dimension_indices",
+                        "must be unique increasing in-bounds indices",
+                    ));
+                }
+                prior = Some(*index);
             }
             validate_pattern_structure_recipe(definition)
         }
@@ -14493,6 +14894,7 @@ fn validate_recipe_output_settings(
     let regions = matches!(
         recipe.structure,
         PatternStructureRecipe::VoronoiRegions { .. }
+            | PatternStructureRecipe::GuideFaceRegions { .. }
     );
     match (connected, regions, response) {
         (false, false, PatternGeometryResponse::Marks(_))
@@ -14540,7 +14942,8 @@ fn validate_connection_recipe(
         PatternStructureRecipe::ConnectionPaths { .. }
         | PatternStructureRecipe::MazeWalls { .. }
         | PatternStructureRecipe::AuthoredClosedShapeMarks { .. }
-        | PatternStructureRecipe::VoronoiRegions { .. } => Err(ValidationError::new(
+        | PatternStructureRecipe::VoronoiRegions { .. }
+        | PatternStructureRecipe::GuideFaceRegions { .. } => Err(ValidationError::new(
             "preset.recipe.definition",
             "connection recipes cannot wrap another output recipe wrapper",
         )),
@@ -14572,7 +14975,8 @@ fn validate_maze_recipe(
         | PatternStructureRecipe::ConnectionPaths { .. }
         | PatternStructureRecipe::MazeWalls { .. }
         | PatternStructureRecipe::AuthoredClosedShapeMarks { .. }
-        | PatternStructureRecipe::VoronoiRegions { .. } => Err(ValidationError::new(
+        | PatternStructureRecipe::VoronoiRegions { .. }
+        | PatternStructureRecipe::GuideFaceRegions { .. } => Err(ValidationError::new(
             "preset.recipe.maze.family",
             "maze recipes require an unwrapped straight guide intersection family",
         )),
@@ -14867,6 +15271,12 @@ pub enum PatternDefinitionEdit {
         output_layer_id: PatternOutputLayerId,
         seed: u32,
     },
+    /// Replaces the ordered two-or-three Guide Faces source dimensions of one region output.
+    /// This typed structural operation deliberately has no property descriptor.
+    SetGuideFaceDimensions {
+        output_layer_id: PatternOutputLayerId,
+        dimensions: Vec<GuideDimensionId>,
+    },
 }
 
 /// The authoritative document command surface for channel edits and
@@ -15102,6 +15512,7 @@ pub enum NonFieldCommandOperation {
     DuplicatePatternDefinition,
     RemoveUnreferencedPatternDefinition,
     ReplaceChannelTopology,
+    GuideFaceDimensions,
 }
 
 /// Exhaustive command classification at the descriptor boundary. A command is
@@ -15475,6 +15886,12 @@ impl PatternDefinitionEdit {
             Edit::SetMazeSeed { seed, .. } => {
                 (PropertyFieldId::MazeSeed, PropertyFieldValue::U32(*seed))
             }
+            Edit::SetGuideFaceDimensions { .. } => (
+                // This projection is intentionally unreachable from command classification;
+                // it retains a total public method for generic callers.
+                PropertyFieldId::OutputSiteProduct,
+                PropertyFieldValue::StableIdReference,
+            ),
         };
         PropertyCommandFieldProjection { field, value }
     }
@@ -15638,6 +16055,16 @@ impl DocumentCommand {
                     ChannelPaint::Solid(_) => PaintKind::Solid,
                     ChannelPaint::SampledSource => PaintKind::SampledSource,
                 })),
+            ),
+            Command::EditSelectedChannelPatternDefinition {
+                edit: PatternDefinitionEdit::SetGuideFaceDimensions { .. },
+                ..
+            }
+            | Command::EditSharedPatternDefinition {
+                edit: PatternDefinitionEdit::SetGuideFaceDimensions { .. },
+                ..
+            } => DocumentCommandFieldClassification::NonField(
+                NonFieldCommandOperation::GuideFaceDimensions,
             ),
             Command::EditSelectedChannelPatternDefinition { edit, .. }
             | Command::EditSharedPatternDefinition { edit, .. } => {
@@ -16749,6 +17176,7 @@ impl DocumentCommand {
                 | NonFieldCommandOperation::RemoveUnreferencedPatternDefinition => {
                     InvalidationLevel::Family
                 }
+                NonFieldCommandOperation::GuideFaceDimensions => InvalidationLevel::Family,
                 NonFieldCommandOperation::ReplaceChannelTopology => {
                     InvalidationLevel::ChannelTopology
                 }
@@ -17945,6 +18373,275 @@ mod history_tests {
         DocumentHistory::new(DocumentSession::new(document).expect("connection session validates"))
     }
 
+    /// Builds two channels sharing one selected two-guide Guide Faces definition for copy-on-edit history checks.
+    fn guide_face_history() -> DocumentHistory {
+        let definition_id = PatternDefinitionId(210);
+        let guide_id = PatternMechanismId(211);
+        let site_id = PatternMechanismId(212);
+        let output_id = PatternOutputLayerId(213);
+        let first_dimension = GuideDimensionId(214);
+        let second_dimension = GuideDimensionId(215);
+        let third_dimension = GuideDimensionId(216);
+        let mut definition = PatternDefinition::generalized_straight_guides(
+            definition_id,
+            "guide-face history",
+            guide_id,
+            site_id,
+            output_id,
+            vec![
+                StraightGuideDimension {
+                    id: first_dimension,
+                    baseline_angle_degrees: 0.0,
+                    phase: 0.0,
+                    repetition: StraightGuideRepetition {
+                        spacing_multiplier: 1.0,
+                    },
+                },
+                StraightGuideDimension {
+                    id: second_dimension,
+                    baseline_angle_degrees: 90.0,
+                    phase: 0.0,
+                    repetition: StraightGuideRepetition {
+                        spacing_multiplier: 1.0,
+                    },
+                },
+                StraightGuideDimension {
+                    id: third_dimension,
+                    baseline_angle_degrees: 45.0,
+                    phase: 0.0,
+                    repetition: StraightGuideRepetition {
+                        spacing_multiplier: 1.0,
+                    },
+                },
+            ],
+            GeneralizedSiteProduct::Intersections {
+                dimensions: vec![first_dimension, second_dimension],
+                merge_epsilon: 0.0,
+            },
+            MarkOrientation::Fixed,
+            CoveragePolicy {
+                guard_steps: 1,
+                additional_margin: 0.0,
+            },
+        );
+        definition.output_layers = vec![PatternOutputLayer::Regions {
+            id: output_id,
+            source: RegionSourceIntent::GuideFaces {
+                guide_mechanism_id: guide_id,
+                dimensions: vec![first_dimension, second_dimension],
+            },
+        }];
+        let mut first = history().document().channels().expect("history channel")[0].clone();
+        let mut second = first.clone();
+        second.id = ChannelId(2);
+        first.pattern_instance.definition_override = None;
+        second.pattern_instance.definition_override = None;
+        let document = Document::new(
+            DocumentId(210),
+            CanvasSpec {
+                width: 80.0,
+                height: 60.0,
+            },
+            vec![PatternDefinitionBundle {
+                output_settings: vec![PatternOutputSettings {
+                    output_layer_id: output_id,
+                    response: PatternGeometryResponse::Regions(RegionGeometryResponse::Full),
+                }],
+                definition,
+            }],
+            DocumentPatternSettings {
+                definition_id,
+                density: DensityMetric2D {
+                    across_x: 8.0,
+                    across_y: 6.0,
+                    aspect_locked: false,
+                },
+                pattern_rotation_degrees: 0.0,
+                shape_rotation_degrees: 0.0,
+            },
+            vec![first, second],
+        )
+        .expect("guide-face history document validates");
+        DocumentHistory::new(
+            DocumentSession::new(document).expect("guide-face history session validates"),
+        )
+    }
+
+    /// Returns the output, guide mechanism, all owned dimensions, and selected dimensions for one Guide Faces definition.
+    fn guide_face_binding(
+        definition: &PatternDefinition,
+    ) -> (
+        PatternOutputLayerId,
+        PatternMechanismId,
+        Vec<GuideDimensionId>,
+        Vec<GuideDimensionId>,
+    ) {
+        let (output_layer_id, guide_mechanism_id, selected) = definition
+            .output_layers
+            .iter()
+            .find_map(|output| match output {
+                PatternOutputLayer::Regions {
+                    id,
+                    source:
+                        RegionSourceIntent::GuideFaces {
+                            guide_mechanism_id,
+                            dimensions,
+                        },
+                } => Some((*id, *guide_mechanism_id, dimensions.clone())),
+                _ => None,
+            })
+            .expect("Guide Faces output exists");
+        let dimensions = definition
+            .mechanisms
+            .iter()
+            .find_map(|mechanism| match mechanism {
+                PatternMechanism::StraightGuideDimensions { id, dimensions }
+                    if *id == guide_mechanism_id =>
+                {
+                    Some(dimensions.iter().map(|dimension| dimension.id).collect())
+                }
+                _ => None,
+            })
+            .expect("Guide Faces guide mechanism exists");
+        (output_layer_id, guide_mechanism_id, dimensions, selected)
+    }
+
+    /// Proves Guide Faces dimensions copy/remap on selected-channel edit and history restores exact shared authority.
+    #[test]
+    fn guide_face_dimension_edit_copies_remaps_and_undoes_exactly() {
+        let mut history = guide_face_history();
+        let before = history.document().clone();
+        let base = before
+            .definition(PatternDefinitionId(210))
+            .expect("shared definition")
+            .clone();
+        let result = history
+            .apply(&DocumentCommand::EditSelectedChannelPatternDefinition {
+                channel_id: ChannelId(1),
+                base_definition: base.clone(),
+                edit: PatternDefinitionEdit::SetGuideFaceDimensions {
+                    output_layer_id: PatternOutputLayerId(213),
+                    dimensions: vec![GuideDimensionId(214), GuideDimensionId(216)],
+                },
+            })
+            .expect("selected Guide Faces edit applies");
+        assert_eq!(result.invalidation, Some(InvalidationLevel::Family));
+        assert_ne!(
+            history.document().pattern_definition_id_for(ChannelId(1)),
+            history.document().pattern_definition_id_for(ChannelId(2)),
+        );
+        let copied = history
+            .document()
+            .definition(
+                history
+                    .document()
+                    .pattern_definition_id_for(ChannelId(1))
+                    .expect("selected definition resolves"),
+            )
+            .expect("copied definition resolves");
+        let shared = history
+            .document()
+            .definition(PatternDefinitionId(210))
+            .expect("shared definition remains");
+        let base_binding = guide_face_binding(&base);
+        let copied_binding = guide_face_binding(copied);
+        assert_ne!(copied_binding.0, base_binding.0, "output ID remaps");
+        assert_ne!(copied_binding.1, base_binding.1, "guide ID remaps");
+        assert_eq!(copied_binding.2.len(), base_binding.2.len());
+        assert!(
+            copied_binding
+                .2
+                .iter()
+                .zip(&base_binding.2)
+                .all(|(copied, original)| copied != original),
+            "each owned guide dimension remaps",
+        );
+        assert_eq!(
+            copied_binding.3,
+            vec![copied_binding.2[0], copied_binding.2[2]],
+            "edited dimensions use the exact old-to-new correspondence",
+        );
+        assert_eq!(
+            guide_face_binding(shared),
+            base_binding,
+            "the shared base remains unchanged after selected copy-on-edit",
+        );
+        let after = history.document().clone();
+        history
+            .undo()
+            .expect("undo applies")
+            .expect("inverse exists");
+        assert_eq!(history.document(), &before);
+        history.redo().expect("redo applies").expect("redo exists");
+        assert_eq!(history.document(), &after);
+    }
+
+    /// Proves shared Guide Faces edits retain IDs, affect linked channels, reject stale bases, and undo exactly.
+    #[test]
+    fn guide_face_dimension_edit_shared_keeps_ids_and_history_exact() {
+        let mut history = guide_face_history();
+        let before = history.document().clone();
+        let base = before
+            .definition(PatternDefinitionId(210))
+            .expect("shared definition")
+            .clone();
+        let binding_before = guide_face_binding(&base);
+        let result = history
+            .apply(&DocumentCommand::EditSharedPatternDefinition {
+                definition_id: PatternDefinitionId(210),
+                base_definition: base.clone(),
+                edit: PatternDefinitionEdit::SetGuideFaceDimensions {
+                    output_layer_id: PatternOutputLayerId(213),
+                    dimensions: vec![GuideDimensionId(214), GuideDimensionId(216)],
+                },
+            })
+            .expect("shared Guide Faces edit applies");
+        assert_eq!(result.invalidation, Some(InvalidationLevel::Family));
+        assert_eq!(result.affected_channels, vec![ChannelId(1), ChannelId(2)]);
+        assert_eq!(
+            history.document().pattern_definition_id_for(ChannelId(1)),
+            Some(PatternDefinitionId(210)),
+        );
+        assert_eq!(
+            history.document().pattern_definition_id_for(ChannelId(2)),
+            Some(PatternDefinitionId(210)),
+        );
+        let edited = history
+            .document()
+            .definition(PatternDefinitionId(210))
+            .expect("shared definition remains");
+        let binding_after = guide_face_binding(edited);
+        assert_eq!(binding_after.0, binding_before.0, "output ID stays shared");
+        assert_eq!(binding_after.1, binding_before.1, "guide ID stays shared");
+        assert_eq!(
+            binding_after.2, binding_before.2,
+            "dimension IDs stay shared"
+        );
+        assert_eq!(
+            binding_after.3,
+            vec![GuideDimensionId(214), GuideDimensionId(216)],
+        );
+        assert!(matches!(
+            history.apply(&DocumentCommand::EditSharedPatternDefinition {
+                definition_id: PatternDefinitionId(210),
+                base_definition: base,
+                edit: PatternDefinitionEdit::SetGuideFaceDimensions {
+                    output_layer_id: PatternOutputLayerId(213),
+                    dimensions: vec![GuideDimensionId(214), GuideDimensionId(215)],
+                },
+            }),
+            Err(DocumentSessionError::Validation(error)) if error.path() == "pattern_definitions.base"
+        ));
+        let after = history.document().clone();
+        history
+            .undo()
+            .expect("undo applies")
+            .expect("inverse exists");
+        assert_eq!(history.document(), &before);
+        history.redo().expect("redo applies").expect("redo exists");
+        assert_eq!(history.document(), &after);
+    }
+
     /// Returns one valid connection program for each descriptor applicability witness.
     fn connection_program(kind: ConnectionProgramKind) -> ConnectionProgram {
         let adjacency = ConnectionAdjacencyIntent {
@@ -18457,8 +19154,12 @@ mod history_tests {
             let projection = document
                 .pattern_capabilities(PatternCapabilityScope::DocumentBase)
                 .expect("validated connection definition projects through the public authority");
-            let [PatternOutputCapabilityProjection::ConnectionPaths(connection)] =
-                projection.outputs.as_slice()
+            let [
+                PatternOutputCapabilityRecord {
+                    structural: PatternOutputCapabilityProjection::ConnectionPaths(connection),
+                    ..
+                },
+            ] = projection.outputs.as_slice()
             else {
                 panic!("connection definition projects exactly one connection output")
             };
@@ -18493,7 +19194,12 @@ mod history_tests {
         let projection = maze_document
             .pattern_capabilities(PatternCapabilityScope::DocumentBase)
             .expect("validated maze definition projects through the public authority");
-        let [PatternOutputCapabilityProjection::MazeWalls(maze)] = projection.outputs.as_slice()
+        let [
+            PatternOutputCapabilityRecord {
+                structural: PatternOutputCapabilityProjection::MazeWalls(maze),
+                ..
+            },
+        ] = projection.outputs.as_slice()
         else {
             panic!("maze definition projects exactly one maze-wall output")
         };

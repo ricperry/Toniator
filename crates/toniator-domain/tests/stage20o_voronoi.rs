@@ -3,8 +3,9 @@ use toniator_domain::{
     DocumentHistory, DocumentSession, MarkGeometryResponse, MarkGeometryResponseDelta,
     PatternCapabilityScope, PatternDefinitionBundle, PatternDefinitionDraft,
     PatternDefinitionRecipe, PatternGeometryResponse, PatternOutputCapabilityProjection,
-    PatternOutputResponseDelta, PatternStructureRecipe, RegionGeometryResponse, SourceReference,
-    SourceReferenceId, validate_pattern_output_deltas, validate_preset_record,
+    PatternOutputResponseDelta, PatternStructureRecipe, RegionGeometryResponse,
+    RegionSourceCapabilityKind, SourceReference, SourceReferenceId, validate_pattern_output_deltas,
+    validate_preset_record,
 };
 
 /// Builds a current document whose selected definition can atomically materialize a region recipe.
@@ -127,7 +128,10 @@ fn recipe_materialization_binds_regions_and_projects_fixed_capability() {
             structural: PatternOutputCapabilityProjection::Regions(region),
             response: PatternGeometryResponse::Regions(RegionGeometryResponse::Full),
             ..
-        }] if region.ordinary_voronoi && region.full_treatment_only && !region.sampled_paint
+        }] if matches!(
+            &region.source,
+            RegionSourceCapabilityKind::OrdinaryVoronoi { .. }
+        ) && region.full_treatment_only && !region.sampled_paint
     ));
 }
 

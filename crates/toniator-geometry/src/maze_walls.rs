@@ -805,7 +805,10 @@ fn bounded_faces(
                     .iter()
                     .position(|value| *value == current.0)
                     .ok_or(MazeError::new("maze.faces", "half-edge reverse is missing"))?;
-                let next = neighbors[(reverse + neighbors.len() - 1) % neighbors.len()];
+                let next = neighbors[crate::planar_arrangement::predecessor_of_reverse_index(
+                    reverse,
+                    neighbors.len(),
+                )];
                 current = (current.1, next);
             }
             if cycle.len() >= 3 && polygon_area(&cycle, positions) > 1e-10 {

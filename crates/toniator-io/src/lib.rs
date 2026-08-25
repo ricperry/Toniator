@@ -876,6 +876,10 @@ enum PresetStructureRecipeDto {
     VoronoiRegions {
         definition: Box<PresetStructureRecipeDto>,
     },
+    GuideFaceRegions {
+        definition: Box<PresetStructureRecipeDto>,
+        dimension_indices: Vec<usize>,
+    },
 }
 #[derive(Serialize, Deserialize)]
 struct GuideDimensionDraftDto {
@@ -1425,7 +1429,13 @@ enum PatternOutputLayerDtoV4 {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum RegionSourceIntentDtoV5 {
-    VoronoiSites { site_mechanism_id: u64 },
+    VoronoiSites {
+        site_mechanism_id: u64,
+    },
+    GuideFaces {
+        guide_mechanism_id: u64,
+        dimensions: Vec<u64>,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1660,6 +1670,13 @@ impl PresetStructureRecipeDto {
             PatternStructureRecipe::VoronoiRegions { definition } => Self::VoronoiRegions {
                 definition: Box::new(Self::from_domain(definition)),
             },
+            PatternStructureRecipe::GuideFaceRegions {
+                definition,
+                dimension_indices,
+            } => Self::GuideFaceRegions {
+                definition: Box::new(Self::from_domain(definition)),
+                dimension_indices: dimension_indices.clone(),
+            },
         }
     }
 
@@ -1758,6 +1775,13 @@ impl PresetStructureRecipeDto {
             }
             Self::VoronoiRegions { definition } => Ok(PatternStructureRecipe::VoronoiRegions {
                 definition: Box::new(definition.into_domain()?),
+            }),
+            Self::GuideFaceRegions {
+                definition,
+                dimension_indices,
+            } => Ok(PatternStructureRecipe::GuideFaceRegions {
+                definition: Box::new(definition.into_domain()?),
+                dimension_indices,
             }),
         }
     }
@@ -2954,20 +2978,34 @@ impl PatternOutputLayerDtoV4 {
 }
 
 impl RegionSourceIntentDtoV5 {
-    /// Serializes authored ordinary-region site intent without derived topology.
+    /// Serializes authored region intent without derived topology.
     fn from_domain(value: &RegionSourceIntent) -> Self {
         match value {
             RegionSourceIntent::VoronoiSites { site_mechanism_id } => Self::VoronoiSites {
                 site_mechanism_id: site_mechanism_id.0,
             },
+            RegionSourceIntent::GuideFaces {
+                guide_mechanism_id,
+                dimensions,
+            } => Self::GuideFaces {
+                guide_mechanism_id: guide_mechanism_id.0,
+                dimensions: dimensions.iter().map(|dimension| dimension.0).collect(),
+            },
         }
     }
 
-    /// Restores authored ordinary-region site intent without accepting derived cells.
+    /// Restores authored region intent without accepting derived cells.
     fn into_domain(self) -> RegionSourceIntent {
         match self {
             Self::VoronoiSites { site_mechanism_id } => RegionSourceIntent::VoronoiSites {
                 site_mechanism_id: PatternMechanismId(site_mechanism_id),
+            },
+            Self::GuideFaces {
+                guide_mechanism_id,
+                dimensions,
+            } => RegionSourceIntent::GuideFaces {
+                guide_mechanism_id: PatternMechanismId(guide_mechanism_id),
+                dimensions: dimensions.into_iter().map(GuideDimensionId).collect(),
             },
         }
     }
@@ -3508,5 +3546,22 @@ impl PaintDto {
             Self::Solid { color } => ChannelPaint::Solid(color.into_domain()),
             Self::SampledSource => ChannelPaint::SampledSource,
         }
+    }
+}
+
+#[cfg(test)]
+mod stage20p_tests {
+    use super::*;
+
+    /// Proves v5 persists only keyed guide-face authoring intent and no derived arrangement state.
+    #[test]
+    fn guide_face_source_round_trips_without_derived_regions() {
+        let source = RegionSourceIntent::GuideFaces {
+            guide_mechanism_id: PatternMechanismId(41),
+            dimensions: vec![GuideDimensionId(5), GuideDimensionId(9)],
+        };
+        let dto = RegionSourceIntentDtoV5::from_domain(&source);
+        assert!(matches!(&dto, RegionSourceIntentDtoV5::GuideFaces { .. }));
+        assert_eq!(dto.into_domain(), source);
     }
 }

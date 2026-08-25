@@ -1981,15 +1981,24 @@ Spade adapter, persists authored v5/v3 intent only, and renders fixed solid
 Full regions with final clipping only. Stage 20P+ remains Planned and
 separately gated.
 
-**Remaining Stage 20N+ — Stage 20P+ Planned.** The user accepted the revised headless
+**Stage 20P — Accepted awaiting checkpoint.** The user accepted Guide
+Arrangement Faces on 2026-08-25 after independent read-only review and final
+artifact inspection. Its headless authority derives deterministic complete
+bounded faces from two or three selected straight or authored-open guide
+dimensions, preserves the shared centered grid origin and Stage 20M maze
+identities, persists authored v5/v3 intent only, and renders canonical Full
+regions with final clipping only. The implementation checkpoint is pending;
+Stage 20Q+ remains Planned and separately gated.
+
+**Remaining Stage 20N+ — Stage 20Q+ Planned.** The user accepted the revised headless
 remainder roadmap on 2026-08-24 under
 [`STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md`](STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md).
-Stage 20P adds guide-arrangement faces; 20Q realizes filled regions; 20R adds ordered composites and site-use
+Stage 20Q realizes filled regions; 20R adds ordered composites and site-use
 filters; and 20S completes headless capability projection and ordinary gallery
 recipes. Stage 21 owns all remaining pattern-authoring GTK work, Stage 22 owns
 the complete headless frame/media/sequence/simple-transition pipeline, and
 Stage 23 owns temporal GTK with start/end pins only. Every remaining row remains Planned
-and separately gated; this roadmap acceptance does not authorize Stage 20P+
+and separately gated; this roadmap acceptance does not authorize Stage 20Q+
 implementation.
 
 Every mechanism must enter through the Stage 14 typed schema, Stage 15 generic

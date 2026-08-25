@@ -20,22 +20,24 @@ use toniator_domain::{
 pub use toniator_geometry::{
     AffineTransform2D, Bounds, CONNECTION_PATH_CONTRACT_ID, CONNECTION_TRAIL_CONTRACT_ID,
     CanonicalCircleMark, CanonicalFillRule, CanonicalMark, CanonicalPathMark, CanonicalRegionSet,
-    CanonicalStroke, CanonicalStrokeSourceId, ConnectionPathLimits, ConnectionPathSet,
-    CubicBezierSegment, CurveError, CurvePath, CurveSegment, FamilySite, FamilySiteError,
-    FamilySiteId, FamilySiteProvenance, FamilySiteSet, GuideInstanceId,
-    GuideIntersectionProvenance, IntersectionSite, MAZE_WALL_CONTRACT_ID, MazeGuideAxis,
-    MazeLimits, MazeProgramResult, NominalCellBasis, PATH_OFFSET_ALGORITHM_CONTRACT_ID,
-    PathClosure, PathLocation, PathOffsetCleanup, PathOffsetEndpointPolicy, PathOffsetLimits,
-    PathOffsetRequest, PathOffsetResult, Point2, SITE_ADJACENCY_CONTRACT_ID, SiteAdjacencyError,
-    SiteAdjacencyGraph, SiteAdjacencyLimits, SiteAdjacencyPolicy, SiteId, SiteScope, StraightGuide,
+    CanonicalRegionSourceId, CanonicalStroke, CanonicalStrokeSourceId, ConnectionPathLimits,
+    ConnectionPathSet, CubicBezierSegment, CurveError, CurvePath, CurveSegment, FamilySite,
+    FamilySiteError, FamilySiteId, FamilySiteProvenance, FamilySiteSet, GUIDE_FACE_CONTRACT_ID,
+    GuideFaceLimits, GuideFaceRequest, GuideInstanceId, GuideIntersectionProvenance,
+    IntersectionSite, MAZE_WALL_CONTRACT_ID, MazeGuideAxis, MazeLimits, MazeProgramResult,
+    NominalCellBasis, PATH_OFFSET_ALGORITHM_CONTRACT_ID, PathClosure, PathLocation,
+    PathOffsetCleanup, PathOffsetEndpointPolicy, PathOffsetLimits, PathOffsetRequest,
+    PathOffsetResult, Point2, SITE_ADJACENCY_CONTRACT_ID, SiteAdjacencyError, SiteAdjacencyGraph,
+    SiteAdjacencyLimits, SiteAdjacencyPolicy, SiteId, SiteScope, StraightGuide,
     StrokeProfileSample, StructuralPathInstance, StructuralPathInstanceId,
     StructuralPathLocationProvenance, StructuralPathSet, StructuralPathSourceId,
     VORONOI_REGION_CONTRACT_ID, VariableWidthOutlineLimits, VariableWidthPathSample, Vector2,
     VoronoiRegionDiagnostics, VoronoiRegionLimits, VoronoiRegionRequest,
-    build_connection_paths_cancellable, build_maze_walls_from_sites_cancellable,
-    build_site_adjacency_cancellable, build_variable_width_outline_cancellable,
-    build_voronoi_regions_cancellable, connection_program_contract_id, offset_path_cancellable,
-    projection_range, resolve_guide_prototype,
+    build_connection_paths_cancellable, build_guide_faces_cancellable,
+    build_maze_walls_from_sites_cancellable, build_site_adjacency_cancellable,
+    build_variable_width_outline_cancellable, build_voronoi_regions_cancellable,
+    connection_program_contract_id, offset_path_cancellable, projection_range,
+    resolve_guide_prototype,
 };
 use toniator_sampling::{
     SampledSourcePaint, SamplingError, SourceComponent, SourceField, SourceMappingComponent,
@@ -572,10 +574,8 @@ pub enum OutputCapabilityPayload {
         program: MazeProgram,
         style: toniator_domain::PathStrokeStyle,
     },
-    /// Ordinary canonical regions consume one exact reusable site mechanism.
-    Regions {
-        site_mechanism_id: PatternMechanismId,
-    },
+    /// Fixed canonical regions retain their typed source rather than inferring it from sites.
+    Regions { source: RegionSourceIntent },
 }
 
 impl OutputCapability {
@@ -643,10 +643,10 @@ impl OutputCapability {
         }
     }
 
-    /// Returns ordinary-region source authority only when this output consumes one site product.
-    pub fn regions(&self) -> Option<PatternMechanismId> {
-        match self.payload {
-            OutputCapabilityPayload::Regions { site_mechanism_id } => Some(site_mechanism_id),
+    /// Returns fixed-region source authority only when this output is a region layer.
+    pub fn regions(&self) -> Option<&RegionSourceIntent> {
+        match &self.payload {
+            OutputCapabilityPayload::Regions { source } => Some(source),
             _ => None,
         }
     }
@@ -1115,7 +1115,28 @@ pub fn resolve_pattern_pipeline(
                 ordered_outputs.push(OutputCapability {
                     layer_id: *id,
                     consumes: product,
-                    payload: OutputCapabilityPayload::Regions { site_mechanism_id },
+                    payload: OutputCapabilityPayload::Regions {
+                        source: source.clone(),
+                    },
+                });
+            }
+            PatternOutputLayer::Regions {
+                id,
+                source:
+                    RegionSourceIntent::GuideFaces {
+                        guide_mechanism_id: source_id,
+                        dimensions,
+                    },
+            } if *source_id == guide_mechanism_id => {
+                ordered_outputs.push(OutputCapability {
+                    layer_id: *id,
+                    consumes: product,
+                    payload: OutputCapabilityPayload::Regions {
+                        source: RegionSourceIntent::GuideFaces {
+                            guide_mechanism_id: *source_id,
+                            dimensions: dimensions.clone(),
+                        },
+                    },
                 });
             }
             _ => {
@@ -1294,7 +1315,7 @@ fn resolve_parametric_curve_pipeline(
                 layer_id: *id,
                 consumes: product,
                 payload: OutputCapabilityPayload::Regions {
-                    site_mechanism_id: declared_site_mechanism_id.expect("site product exists"),
+                    source: source.clone(),
                 },
             }
         }
@@ -1357,6 +1378,33 @@ pub fn resolve_document_pattern_pipeline(
     };
     let mut surrogate = definition.clone();
     let generic_dimensions = dimensions.to_vec();
+    if let Some((source_id, selected)) = definition.output_layers.iter().find_map(|output| {
+        let PatternOutputLayer::Regions {
+            source:
+                RegionSourceIntent::GuideFaces {
+                    guide_mechanism_id,
+                    dimensions,
+                },
+            ..
+        } = output
+        else {
+            return None;
+        };
+        Some((*guide_mechanism_id, dimensions))
+    }) && (source_id != guide_id
+        || !(2..=3).contains(&selected.len())
+        || selected.iter().any(|selected_id| {
+            !generic_dimensions.iter().any(|dimension| {
+                dimension.id == *selected_id
+                    && matches!(dimension.prototype, GuidePrototype::AuthoredOpenPath { .. })
+            })
+        }))
+    {
+        return Err(PatternPipelineError::new(
+            "pattern.output_layers.guide_faces",
+            "Guide Faces requires two or three selected authored open guide paths",
+        ));
+    }
     let replacement = PatternMechanism::StraightGuideDimensions {
         id: guide_id,
         dimensions: generic_dimensions
@@ -1508,7 +1556,9 @@ fn resolve_random_site_pipeline(
             layer_id: *id,
             consumes: StructuralProductCapability::RandomSites,
             payload: OutputCapabilityPayload::Regions {
-                site_mechanism_id: site_product_id,
+                source: RegionSourceIntent::VoronoiSites {
+                    site_mechanism_id: site_product_id,
+                },
             },
         },
         _ => {
@@ -1531,7 +1581,7 @@ fn resolve_random_site_pipeline(
             _ => unreachable!("the output match retains one mark layer"),
         },
         OutputCapabilityPayload::Regions {
-            site_mechanism_id, ..
+            source: RegionSourceIntent::VoronoiSites { site_mechanism_id },
         } => *site_mechanism_id,
         _ => unreachable!("the random resolver creates only site outputs"),
     };
@@ -8259,11 +8309,24 @@ fn append_output_capability_identity(bytes: &mut Vec<u8>, output: &OutputCapabil
                 toniator_domain::StrokeCap::Round => 1,
             });
         }
-        OutputCapabilityPayload::Regions { site_mechanism_id } => {
-            bytes.push(5);
-            bytes.extend(site_mechanism_id.0.to_le_bytes());
-            append_identity_text(bytes, toniator_geometry::VORONOI_REGION_CONTRACT_ID);
-        }
+        OutputCapabilityPayload::Regions { source } => match source {
+            RegionSourceIntent::VoronoiSites { site_mechanism_id } => {
+                bytes.push(5);
+                bytes.extend(site_mechanism_id.0.to_le_bytes());
+                append_identity_text(bytes, toniator_geometry::VORONOI_REGION_CONTRACT_ID);
+            }
+            RegionSourceIntent::GuideFaces {
+                guide_mechanism_id,
+                dimensions,
+            } => {
+                bytes.push(6);
+                bytes.extend(guide_mechanism_id.0.to_le_bytes());
+                for dimension in dimensions {
+                    bytes.extend(dimension.0.to_le_bytes());
+                }
+                append_identity_text(bytes, toniator_geometry::GUIDE_FACE_CONTRACT_ID);
+            }
+        },
         OutputCapabilityPayload::MazeWalls {
             site_mechanism_id,
             program,
@@ -10590,6 +10653,69 @@ mod generalized_straight_guide_tests {
         assert!(output.sites.iter().any(|site| {
             (site.position.x - origin.x).abs() < 1.0e-12
                 && (site.position.y - origin.y).abs() < 1.0e-12
+        }));
+    }
+
+    /// Proves phase-zero 0/60/120 production guides share one centered document origin and spacing.
+    ///
+    /// # Panics
+    ///
+    /// Panics when any generalized guide family anchors independently, changes its phase-zero
+    /// origin, or resolves unequal physical spacing under an equal document-space density.
+    #[test]
+    fn phase_zero_triangular_guides_share_the_centered_document_origin() {
+        let definition = intersections(
+            vec![dimension(1, 0.0), dimension(2, 60.0), dimension(3, 120.0)],
+            vec![
+                GuideDimensionId(1),
+                GuideDimensionId(2),
+                GuideDimensionId(3),
+            ],
+        );
+        let plan = resolve_pattern_pipeline(&definition).expect("triangular plan resolves");
+        let mut request = request();
+        request.canvas = CanvasSpec {
+            width: 900.0,
+            height: 620.0,
+        };
+        request.density = DensityMetric2D {
+            across_x: 5.0,
+            across_y: 5.0 * request.canvas.height / request.canvas.width,
+            aspect_locked: false,
+        };
+        request.rotation_degrees = 0.0;
+        request.translation_x = 0.0;
+        request.translation_y = 0.0;
+        let output =
+            evaluate_generalized_straight_guides_cancellable(&plan.family, &request, &|| false)
+                .expect("triangular family evaluates");
+        let center = Point2::new(request.canvas.width * 0.5, request.canvas.height * 0.5);
+        for dimension_id in [
+            GuideDimensionId(1),
+            GuideDimensionId(2),
+            GuideDimensionId(3),
+        ] {
+            let guide = output
+                .guides
+                .iter()
+                .find(|guide| guide.id == GuideInstanceId::new(dimension_id, 0))
+                .expect("zero-index triangular guide remains covered");
+            assert!((guide.anchor.x - center.x).hypot(guide.anchor.y - center.y) <= 1.0e-10);
+        }
+        assert!(
+            output
+                .coverage
+                .windows(2)
+                .all(|pair| (pair[0].spacing - pair[1].spacing).abs() <= 1.0e-10)
+        );
+        assert!(output.sites.iter().any(|site| {
+            (site.position.x - center.x).abs() <= 1.0e-10
+                && (site.position.y - center.y).abs() <= 1.0e-10
+                && matches!(
+                    &site.provenance,
+                    GeneralizedSiteProvenance::Intersection { contributors }
+                        if contributors.len() == 3
+                )
         }));
     }
 

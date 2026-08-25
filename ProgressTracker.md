@@ -576,7 +576,28 @@ geometry-private Spade topology, and fixed solid Full regions without a
 channel-specific region treatment. Independent re-review and final artifact
 inspection passed. Stage 20P+ remains Planned and separately gated.
 
-**Remaining Stage 20N+ — Stage 20P+ Planned.** The user accepted the revised remainder
+**Stage 20P — Accepted awaiting checkpoint.** The user accepted the bounded
+headless
+guide-arrangement-face implementation under
+[`STAGE_20P_GUIDE_ARRANGEMENT_FACES_PLAN.md`](docs/STAGE_20P_GUIDE_ARRANGEMENT_FACES_PLAN.md).
+It adds typed `GuideFaces` region intent for two or three selected dimensions,
+deterministic complete bounded guide arrangements, canonical regions,
+persistence, and the existing final-clip renderer path. Existing generic
+one-through-four guide support remains unchanged; Stage 20P adds no four-guide
+Guide Faces behavior or evidence. Region treatments, sampling, composites,
+GTK controls, raw-parametric face sources, and Stage 20Q remain out of scope.
+The final 0°/60°/120° witness runs the normal production family evaluator from
+the shared centered document origin at equal spacing; each retained pre-clip
+face is asserted to be a three-line equilateral triangle with all three guide
+sources. The prior canvas-relative renderer-only proof was removed. The
+shared Stage 20M grid transform and maze fingerprints remain unchanged; a
+Guide Faces relevance correction rejects disjoint off-canvas faces before
+corner containment classification. Writer verification, focused replay gates,
+intrinsic native/SVG artifact generation, visual inspection, independent
+read-only review, and parent verification are complete. The implementation
+checkpoint is pending; do not push, publish, or begin Stage 20Q.
+
+**Remaining Stage 20N+ — Stage 20P Accepted awaiting checkpoint; Stage 20Q+ Planned.** The user accepted the revised remainder
 roadmap on 2026-08-24 under
 [`STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md`](docs/STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md).
 The accepted order after completed 20N is 20O
@@ -584,7 +605,8 @@ ordinary Voronoi; 20P guide faces; 20Q filled-region realization; 20R
 composites and site-use filters; and 20S headless capability/gallery recipe
 completion. Stage 21 owns pattern-authoring GTK, Stage 22 owns all headless
 frame/media/sequence/simple-transition work, and Stage 23 owns temporal GTK
-with start/end pins. Stages 20P+ and 21–23 remain Planned and separately gated.
+with start/end pins. Stage 20P is accepted awaiting checkpoint; Stage 20Q+ and
+Stages 21–23 remain Planned and separately gated.
 
 ## Maintenance rules
 

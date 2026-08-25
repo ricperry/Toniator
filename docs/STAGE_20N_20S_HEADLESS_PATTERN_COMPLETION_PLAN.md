@@ -1,8 +1,9 @@
 # Stages 20N–20S — Headless Pattern Completion Plan
 
-Status: **Accepted roadmap; Stages 20N and 20O are complete and Stages 20P–20S
-remain Planned and separately gated** (Stage 20O checkpoint
-`7ab97f01ec372ab1e6201b3913742476a1511c02`).
+Status: **Accepted roadmap; Stages 20N and 20O are complete, Stage 20P is
+Accepted awaiting checkpoint, and Stages 20Q–20S remain Planned and separately
+gated** (Stage 20O checkpoint
+`7ab97f01ec372ab1e6201b3913742476a1511c02`; Stage 20P checkpoint pending).
 
 ## Summary and stage boundary
 
@@ -25,7 +26,7 @@ one-output authoring/validation gate while providing ordered keyed output
 authority, schema-v5/preset-v3 persistence, independently keyed realization and
 cache units, and canonical-region/render foundations. It does not add a
 concrete region source or treatment. This roadmap does not authorize Stage
-20P+ implementation, a tracker status advance for those stages, a commit,
+20Q+ implementation, a tracker status advance for those stages, a commit,
 publication, Stage 21+, or a protected-specification revision. Every remaining
 row retains its own decision-complete plan, one-writer implementation,
 independent read-only review, user acceptance, and checkpoint gate.
@@ -97,6 +98,11 @@ Stage 20P+ remains Planned and separately gated.
   license and notice material, and keep Toniator GPL-3.0-only.
 
 ## Stage 20P — Guide-arrangement faces
+
+Status: **Accepted awaiting checkpoint** (user acceptance recorded 2026-08-25;
+independent read-only review, parent verification, and final artifact
+inspection passed; implementation checkpoint pending). Stage 20Q+ remains
+Planned and separately gated.
 
 - Add `RegionSourceIntent::GuideFaces { guide_mechanism_id, dimensions }` for
   typed grid structural guides with at least two selected dimensions, including

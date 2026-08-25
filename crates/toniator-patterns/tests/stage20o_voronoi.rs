@@ -56,7 +56,9 @@ fn parametric_sites_resolve_as_ordinary_region_capability() {
     assert!(matches!(
         plan.ordered_outputs[0].payload,
         OutputCapabilityPayload::Regions {
-            site_mechanism_id: PatternMechanismId(903)
+            source: RegionSourceIntent::VoronoiSites {
+                site_mechanism_id: PatternMechanismId(903)
+            }
         }
     ));
 }
@@ -147,7 +149,9 @@ fn along_guide_sites_resolve_as_ordinary_region_capability() {
     assert!(matches!(
         plan.ordered_outputs[0].payload,
         OutputCapabilityPayload::Regions {
-            site_mechanism_id: PatternMechanismId(922)
+            source: RegionSourceIntent::VoronoiSites {
+                site_mechanism_id: PatternMechanismId(922)
+            }
         }
     ));
 }

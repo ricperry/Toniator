@@ -33,11 +33,12 @@ use toniator_domain::{
 };
 use toniator_patterns::{
     Bounds, CONNECTION_PATH_CONTRACT_ID, CONNECTION_TRAIL_CONTRACT_ID, CanonicalRegionSet,
-    CurvePath, CurveSegment, FamilyCapability, GenericGuideCapability, GridFamilyOutput,
-    MAZE_WALL_CONTRACT_ID, MappedCircularMarkRealization, MazeLimits, PatternPipelineError,
-    SITE_ADJACENCY_CONTRACT_ID, SourceColorCircularMarkRealization, TypedFamilyOutput,
-    TypedRealization, VORONOI_REGION_CONTRACT_ID, VoronoiRegionDiagnostics, VoronoiRegionLimits,
-    VoronoiRegionRequest, build_connection_paths_cancellable,
+    CurvePath, CurveSegment, FamilyCapability, GUIDE_FACE_CONTRACT_ID, GenericGuideCapability,
+    GridFamilyOutput, GuideFaceLimits, GuideFaceRequest, MAZE_WALL_CONTRACT_ID,
+    MappedCircularMarkRealization, MazeLimits, PatternPipelineError, SITE_ADJACENCY_CONTRACT_ID,
+    SourceColorCircularMarkRealization, TypedFamilyOutput, TypedRealization,
+    VORONOI_REGION_CONTRACT_ID, VoronoiRegionDiagnostics, VoronoiRegionLimits,
+    VoronoiRegionRequest, build_connection_paths_cancellable, build_guide_faces_cancellable,
     build_typed_site_adjacency_cancellable, build_voronoi_regions_cancellable,
     connection_program_contract_id, evaluate_straight_grid,
     evaluate_typed_connection_paths_with_source_cancellable,
@@ -240,6 +241,7 @@ pub struct EvaluationLimits {
     connection_paths: ConnectionPathLimits,
     maze: MazeLimits,
     voronoi: VoronoiRegionLimits,
+    guide_faces: GuideFaceLimits,
 }
 
 impl EvaluationLimits {
@@ -268,6 +270,7 @@ impl EvaluationLimits {
             connection_paths: ConnectionPathLimits::default(),
             maze: MazeLimits::default(),
             voronoi: VoronoiRegionLimits::default(),
+            guide_faces: GuideFaceLimits::default(),
         })
     }
 
@@ -391,6 +394,44 @@ impl EvaluationLimits {
         self.voronoi
     }
 
+    /// Returns the geometry-owned bounded policy for guide-arrangement face realization.
+    pub const fn guide_face_limits(self) -> GuideFaceLimits {
+        self.guide_faces
+    }
+
+    /// Replaces nonzero guide-face work bounds without changing document authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns the geometry-owned zero-limit diagnostic before a cache key or
+    /// candidate arrangement can be allocated.
+    pub fn with_guide_face_limits(
+        mut self,
+        limits: GuideFaceLimits,
+    ) -> Result<Self, EvaluationError> {
+        if [
+            limits.max_source_paths,
+            limits.max_source_segments,
+            limits.max_intersection_contacts,
+            limits.max_split_segments,
+            limits.max_vertices,
+            limits.max_half_edges,
+            limits.max_faces,
+            limits.max_ring_segments,
+            limits.max_inspections,
+        ]
+        .into_iter()
+        .any(|limit| limit == 0)
+        {
+            return Err(EvaluationError::new(
+                "region.guide_faces.limits.zero",
+                "guide-face limits must be nonzero",
+            ));
+        }
+        self.guide_faces = limits;
+        Ok(self)
+    }
+
     /// Replaces the complete nonzero ordinary-Voronoi work policy without changing document intent.
     ///
     /// # Errors
@@ -487,6 +528,7 @@ impl Default for EvaluationLimits {
             connection_paths: ConnectionPathLimits::default(),
             maze: MazeLimits::default(),
             voronoi: VoronoiRegionLimits::default(),
+            guide_faces: GuideFaceLimits::default(),
         }
     }
 }
@@ -2339,6 +2381,7 @@ fn evaluate_cached_document_impl(
                                 limits.connection_path_limits(),
                                 limits.maze_limits(),
                                 limits.voronoi_region_limits(),
+                                limits.guide_face_limits(),
                                 &|| cancellation.is_cancelled(),
                             )
                         }) {
@@ -2589,8 +2632,15 @@ enum DocumentRealization {
     Regions {
         regions: CanonicalRegionSet,
         fingerprint: String,
-        diagnostics: VoronoiRegionDiagnostics,
+        diagnostics: RegionRealizationDiagnostics,
     },
+}
+
+/// Producer-owned region diagnostics retained beside, but outside, canonical geometry identity.
+#[derive(Clone, Copy)]
+enum RegionRealizationDiagnostics {
+    Voronoi(VoronoiRegionDiagnostics),
+    GuideFaces,
 }
 
 /// One independently cached channel-output realization assembled only after its explicit binding validates.
@@ -2656,7 +2706,10 @@ fn document_realization_identity(value: &DocumentRealization) -> &str {
 /// Projects immutable geometry diagnostics from a completed ordinary-region output cache unit.
 fn region_diagnostics(value: &DocumentRealization) -> Option<VoronoiRegionDiagnostics> {
     match value {
-        DocumentRealization::Regions { diagnostics, .. } => Some(*diagnostics),
+        DocumentRealization::Regions {
+            diagnostics: RegionRealizationDiagnostics::Voronoi(diagnostics),
+            ..
+        } => Some(*diagnostics),
         _ => None,
     }
 }
@@ -2686,6 +2739,7 @@ fn evaluate_document_output(
     connection_limits: ConnectionPathLimits,
     maze_limits: MazeLimits,
     voronoi_limits: VoronoiRegionLimits,
+    guide_face_limits: GuideFaceLimits,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<DocumentOutputRealization, EvaluationError> {
     let realization = evaluate_document_channel(
@@ -2706,6 +2760,7 @@ fn evaluate_document_output(
         connection_limits,
         maze_limits,
         voronoi_limits,
+        guide_face_limits,
         is_cancelled,
     )?;
     Ok(DocumentOutputRealization {
@@ -2805,29 +2860,18 @@ fn evaluate_document_channel(
     connection_limits: ConnectionPathLimits,
     maze_limits: MazeLimits,
     voronoi_limits: VoronoiRegionLimits,
+    guide_face_limits: GuideFaceLimits,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<DocumentRealization, EvaluationError> {
     toniator_patterns::validate_output_realization_binding(plan, output_capability, output_setting)
         .map_err(EvaluationError::from_pipeline)?;
-    if let Some(site_mechanism_id) = output_capability.regions() {
+    if let Some(region_source) = output_capability.regions() {
         let ChannelPaint::Solid(_) = channel.paint else {
             return Err(EvaluationError::new(
                 "evaluation.region.paint",
                 "ordinary region output requires solid channel paint",
             ));
         };
-        if definition.coverage.guard_steps == 0 {
-            return Err(EvaluationError::new(
-                "region.voronoi.coverage.guard_steps",
-                "ordinary Voronoi regions require at least one configured guard step",
-            ));
-        }
-        if family.site_set().product_mechanism_id() != site_mechanism_id {
-            return Err(EvaluationError::new(
-                "region.voronoi.identity.site_mechanism",
-                "ordinary region output targets a foreign family site mechanism",
-            ));
-        }
         let canvas = Bounds::new(
             Point2::new(0.0, 0.0),
             Point2::new(document.canvas().width, document.canvas().height),
@@ -2836,28 +2880,84 @@ fn evaluate_document_channel(
             "region.voronoi.geometry.canvas",
             "ordinary Voronoi requires finite canvas bounds",
         ))?;
-        let (regions, diagnostics) = build_voronoi_regions_cancellable(
-            family.site_set(),
-            VoronoiRegionRequest {
-                output_layer_id: output_capability.layer_id,
-                canvas,
-            },
-            voronoi_limits,
-            is_cancelled,
-        )
-        .map_err(|error| EvaluationError::new(error.path(), error.message()))?;
-        let fingerprint = format!(
-            "{}:{}:{}:{}",
-            VORONOI_REGION_CONTRACT_ID,
-            output_capability.layer_id.0,
-            site_mechanism_id.0,
-            regions.fingerprint()
-        );
-        return Ok(DocumentRealization::Regions {
-            regions,
-            fingerprint,
-            diagnostics,
-        });
+        match region_source {
+            toniator_domain::RegionSourceIntent::VoronoiSites { site_mechanism_id } => {
+                if definition.coverage.guard_steps == 0 {
+                    return Err(EvaluationError::new(
+                        "region.voronoi.coverage.guard_steps",
+                        "ordinary Voronoi regions require at least one configured guard step",
+                    ));
+                }
+                if family.site_set().product_mechanism_id() != *site_mechanism_id {
+                    return Err(EvaluationError::new(
+                        "region.voronoi.identity.site_mechanism",
+                        "ordinary region output targets a foreign family site mechanism",
+                    ));
+                }
+                let (regions, diagnostics) = build_voronoi_regions_cancellable(
+                    family.site_set(),
+                    VoronoiRegionRequest {
+                        output_layer_id: output_capability.layer_id,
+                        canvas,
+                    },
+                    voronoi_limits,
+                    is_cancelled,
+                )
+                .map_err(|error| EvaluationError::new(error.path(), error.message()))?;
+                return Ok(DocumentRealization::Regions {
+                    fingerprint: format!(
+                        "{}:{}:{}:{}",
+                        VORONOI_REGION_CONTRACT_ID,
+                        output_capability.layer_id.0,
+                        site_mechanism_id.0,
+                        regions.fingerprint()
+                    ),
+                    regions,
+                    diagnostics: RegionRealizationDiagnostics::Voronoi(diagnostics),
+                });
+            }
+            toniator_domain::RegionSourceIntent::GuideFaces {
+                guide_mechanism_id,
+                dimensions,
+            } => {
+                if definition.coverage.guard_steps == 0 {
+                    return Err(EvaluationError::new(
+                        "region.guide_faces.coverage.guard_steps",
+                        "guide-face regions require at least one configured guard step",
+                    ));
+                }
+                let paths = family
+                    .structural_path_set()
+                    .cloned()
+                    .ok_or(EvaluationError::new(
+                        "region.guide_faces.identity.paths",
+                        "guide-face output requires complete structural guide paths",
+                    ))?;
+                let result = build_guide_faces_cancellable(
+                    GuideFaceRequest {
+                        output_layer_id: output_capability.layer_id,
+                        guide_mechanism_id: *guide_mechanism_id,
+                        dimensions: dimensions.clone(),
+                        paths,
+                        canvas,
+                    },
+                    guide_face_limits,
+                    is_cancelled,
+                )
+                .map_err(|error| EvaluationError::new(error.path(), error.message()))?;
+                return Ok(DocumentRealization::Regions {
+                    fingerprint: format!(
+                        "{}:{}:{}:{}",
+                        GUIDE_FACE_CONTRACT_ID,
+                        output_capability.layer_id.0,
+                        guide_mechanism_id.0,
+                        result.regions.fingerprint()
+                    ),
+                    regions: result.regions,
+                    diagnostics: RegionRealizationDiagnostics::GuideFaces,
+                });
+            }
+        }
     }
     if let Some((_site_mechanism_id, program, _style)) = output_capability.maze_walls() {
         let ChannelPaint::Solid(_) = channel.paint else {
@@ -3338,12 +3438,20 @@ fn required_support_radius_for_output(
                 + definition.coverage.additional_margin,
         );
     }
-    if output.regions().is_some() {
+    if let Some(region_source) = output.regions() {
         if definition.coverage.guard_steps == 0 {
             return Err(EvaluationError::new(
                 "region.voronoi.coverage.guard_steps",
                 "ordinary Voronoi regions require at least one configured guard step",
             ));
+        }
+        if matches!(
+            region_source,
+            toniator_domain::RegionSourceIntent::GuideFaces { .. }
+        ) {
+            return maximum_emitted_guide_spacing(family, canvas, &effective.density)
+                .map_err(EvaluationError::from_pipeline)
+                .map(|spacing| definition.coverage.additional_margin + spacing);
         }
         let parametric_guard = matches!(
             family.product,
@@ -3477,12 +3585,23 @@ fn document_realization_cache_key(
                     )),
                 }
             }
-            toniator_domain::PatternGeometryResponse::Regions(_) => {
-                DocumentResponseIdentity::Regions {
+            toniator_domain::PatternGeometryResponse::Regions(_) => match definition
+                .output_layers
+                .iter()
+                .find(|output| output.id() == output_setting.output_layer_id)
+            {
+                Some(PatternOutputLayer::Regions {
+                    source: toniator_domain::RegionSourceIntent::GuideFaces { .. },
+                    ..
+                }) => DocumentResponseIdentity::GuideFaces {
+                    contract: GUIDE_FACE_CONTRACT_ID,
+                    limits: limits.guide_face_limits(),
+                },
+                _ => DocumentResponseIdentity::Regions {
                     contract: VORONOI_REGION_CONTRACT_ID,
                     limits: limits.voronoi_region_limits(),
-                }
-            }
+                },
+            },
         },
         sampled_paint: matches!(channel.paint, ChannelPaint::SampledSource),
         max_transformed_curve_segment_instances: remaining_transformed_curve_segment_instances,
@@ -3510,6 +3629,10 @@ enum DocumentResponseIdentity {
     Regions {
         contract: &'static str,
         limits: VoronoiRegionLimits,
+    },
+    GuideFaces {
+        contract: &'static str,
+        limits: GuideFaceLimits,
     },
 }
 
@@ -3602,6 +3725,7 @@ pub(crate) mod test_support {
     };
 
     use super::*;
+    use toniator_patterns::CurveSegment;
 
     const GUARD: Duration = Duration::from_secs(15);
     const CHANNEL_ID: ChannelId = ChannelId(1);
@@ -3915,15 +4039,28 @@ pub(crate) mod test_support {
     /// Builds one valid three-direction intersection document whose channels all realize the
     /// supplied connection program with solid paint and an active coverage guard.
     fn modeled_connection_session(program: ConnectionProgram) -> DocumentSession {
-        let source_id = SourceReferenceId::new("cancellation-test-source").unwrap();
-        let base = Document::new_default_document(
+        modeled_connection_session_for_canvas(
+            program,
             CanvasSpec {
                 width: 64.0,
                 height: 48.0,
             },
-            SourceReference::Assigned(source_id),
         )
-        .unwrap();
+    }
+
+    /// Builds the production three-direction fixture at a supplied intrinsic canvas size.
+    ///
+    /// The fixture keeps a shared document-space zero-phase origin and chooses equal physical
+    /// directional spacing, so it is suitable for checking the normal evaluator rather than a
+    /// hand-authored arrangement.
+    fn modeled_connection_session_for_canvas(
+        program: ConnectionProgram,
+        canvas: CanvasSpec,
+    ) -> DocumentSession {
+        let source_id = SourceReferenceId::new("cancellation-test-source").unwrap();
+        let base =
+            Document::new_default_document(canvas.clone(), SourceReference::Assigned(source_id))
+                .unwrap();
         let guide_mechanism_id = PatternMechanismId(120);
         let site_mechanism_id = PatternMechanismId(121);
         let output_layer_id = PatternOutputLayerId(122);
@@ -3982,7 +4119,7 @@ pub(crate) mod test_support {
         let mut settings = base.pattern_settings().clone();
         settings.definition_id = definition.id;
         settings.density.across_x = 5.0;
-        settings.density.across_y = settings.density.across_x * 48.0 / 64.0;
+        settings.density.across_y = settings.density.across_x * canvas.height / canvas.width;
         let bundle = bundle_with_sole_response(
             definition,
             PatternGeometryResponse::Connected(ConnectedGeometryResponse {
@@ -4045,6 +4182,268 @@ pub(crate) mod test_support {
             .expect("typed Region fixture validates against triangular intersections"),
         )
         .expect("modeled Region document starts a session")
+    }
+
+    /// Builds a phase-aligned three-guide document whose sole region output consumes guide faces.
+    fn modeled_guide_face_session() -> DocumentSession {
+        modeled_guide_face_session_for_canvas(
+            vec![
+                GuideDimensionId(123),
+                GuideDimensionId(124),
+                GuideDimensionId(125),
+            ],
+            CanvasSpec {
+                width: 64.0,
+                height: 48.0,
+            },
+        )
+    }
+
+    /// Builds a selected two-to-three guide-face document from the existing typed family fixture.
+    fn modeled_guide_face_session_with_dimensions(
+        dimensions: Vec<GuideDimensionId>,
+    ) -> DocumentSession {
+        modeled_guide_face_session_for_canvas(
+            dimensions,
+            CanvasSpec {
+                width: 64.0,
+                height: 48.0,
+            },
+        )
+    }
+
+    /// Builds a selected two-to-three guide-face document at the requested native output size.
+    fn modeled_guide_face_session_for_canvas(
+        dimensions: Vec<GuideDimensionId>,
+        canvas: CanvasSpec,
+    ) -> DocumentSession {
+        let connection =
+            modeled_connection_session_for_canvas(random_connection_program(19, 24.0), canvas);
+        let document = connection.document();
+        let mut definition = document.pattern_definition_bundles()[0].definition.clone();
+        definition.coverage.guard_steps = 2;
+        definition.output_layers = vec![PatternOutputLayer::Regions {
+            id: PatternOutputLayerId(122),
+            source: RegionSourceIntent::GuideFaces {
+                guide_mechanism_id: PatternMechanismId(120),
+                dimensions,
+            },
+        }];
+        DocumentSession::new(
+            Document::with_source_topology_and_authored_structures(
+                document.id(),
+                document.canvas().clone(),
+                document.source().clone(),
+                vec![bundle_with_sole_response(
+                    definition,
+                    PatternGeometryResponse::Regions(RegionGeometryResponse::Full),
+                )],
+                document.pattern_settings().clone(),
+                document
+                    .channel_model()
+                    .expect("modeled document has a channel model"),
+                document
+                    .channel_topology()
+                    .expect("modeled document has a channel topology")
+                    .clone(),
+                document.authored_structures().to_vec(),
+            )
+            .expect("typed guide-face fixture validates against selected guides"),
+        )
+        .expect("guide-face document starts a session")
+    }
+
+    /// Verifies that the production straight-guide evaluator emits only equilateral three-edge faces for the phase-zero triangular family.
+    fn assert_production_equilateral_triangles(scene: &RenderScene) {
+        const TOLERANCE: f64 = 1.0e-8;
+        let mut count = 0usize;
+        for layer in scene.layers() {
+            for output in layer.outputs() {
+                let GeometryOutput::CanonicalRegions(regions) = &output.geometry else {
+                    continue;
+                };
+                for region in regions.regions() {
+                    count += 1;
+                    assert_eq!(
+                        region.ring.segments().len(),
+                        3,
+                        "face has three edges: {:?}",
+                        region.ring.segments()
+                    );
+                    assert!(
+                        region
+                            .ring
+                            .segments()
+                            .iter()
+                            .all(|segment| { matches!(segment, CurveSegment::Line(_)) })
+                    );
+                    let lengths = region
+                        .ring
+                        .segments()
+                        .iter()
+                        .map(|segment| {
+                            let start = segment.start();
+                            let end = segment.end();
+                            ((end.x - start.x).powi(2) + (end.y - start.y).powi(2)).sqrt()
+                        })
+                        .collect::<Vec<_>>();
+                    assert!(
+                        lengths
+                            .iter()
+                            .all(|length| (*length - lengths[0]).abs() <= TOLERANCE),
+                        "triangle sides are equilateral within {TOLERANCE}",
+                    );
+                    let toniator_patterns::CanonicalRegionSourceId::GuideBoundary(sources) =
+                        &region.id.source_id
+                    else {
+                        panic!("Guide Faces retain guide-boundary provenance");
+                    };
+                    let dimensions = sources
+                        .iter()
+                        .filter_map(|source| match source.path.source {
+                            toniator_patterns::StructuralPathSourceId::GuideDimension(id) => {
+                                Some(id)
+                            }
+                            _ => None,
+                        })
+                        .collect::<std::collections::BTreeSet<_>>();
+                    assert_eq!(
+                        dimensions.len(),
+                        3,
+                        "each triangular face uses all directions"
+                    );
+                }
+            }
+        }
+        assert!(count > 0, "production triangular family emits faces");
+    }
+
+    /// Proves the phase-aligned three-guide authoritative pipeline reaches canonical regions and SVG.
+    #[test]
+    fn guide_face_document_reaches_canonical_regions_and_svg() {
+        let session = modeled_guide_face_session();
+        let scheduler = EvaluationScheduler::new().expect("scheduler starts");
+        let ticket = scheduler
+            .submit(document_request_for_format(
+                &session,
+                "cancellation-test-source",
+                valid_vector_document_bytes(),
+                SourceFormatHint::Svg,
+            ))
+            .expect("guide-face request submits");
+        let completion = wait_for_document_completion(&scheduler);
+        assert_eq!(completion.ticket(), ticket);
+        let result = completion
+            .result()
+            .expect("guide-face realization completes");
+        assert!(result.scene().layers().iter().all(|layer| matches!(layer.outputs().first().map(|output| &output.geometry), Some(GeometryOutput::CanonicalRegions(regions)) if !regions.regions().is_empty())));
+        assert_production_equilateral_triangles(result.scene());
+        assert!(write_svg(result.scene()).contains("<path"));
+        assert!(
+            scheduler
+                .accept_completion(&completion, &session)
+                .expect("completion validates")
+        );
+        scheduler.shutdown().expect("scheduler shuts down");
+    }
+
+    /// Generates the intrinsic three-guide SVG and PNG evidence from the production evaluator.
+    ///
+    /// This test is ignored during ordinary verification because it writes derived validation
+    /// artifacts and invokes Inkscape. It never invents guide paths: the persisted document
+    /// definition, shared centered grid transform, family evaluation, region builder, and
+    /// renderer all participate before serialization.
+    #[test]
+    #[ignore = "validation artifact generator"]
+    fn generate_intrinsic_production_three_guide_face_artifact() {
+        let session = modeled_guide_face_session_for_canvas(
+            vec![
+                GuideDimensionId(123),
+                GuideDimensionId(124),
+                GuideDimensionId(125),
+            ],
+            CanvasSpec {
+                width: 900.0,
+                height: 620.0,
+            },
+        );
+        let scheduler = EvaluationScheduler::new().expect("scheduler starts");
+        let completion = {
+            scheduler
+                .submit(document_request_for_format(
+                    &session,
+                    "cancellation-test-source",
+                    valid_vector_document_bytes(),
+                    SourceFormatHint::Svg,
+                ))
+                .expect("production guide-face request submits");
+            wait_for_document_completion(&scheduler)
+        };
+        let result = completion
+            .result()
+            .expect("production guide-face realization completes");
+        assert_production_equilateral_triangles(result.scene());
+        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/validation/stage20p");
+        std::fs::create_dir_all(&output).expect("validation directory exists");
+        let name = "three-guide-vector-900x620";
+        let region_output = result
+            .scene()
+            .layers()
+            .first()
+            .expect("production scene has a layer")
+            .outputs()
+            .first()
+            .expect("production layer has one output");
+        let GeometryOutput::CanonicalRegions(regions) = &region_output.geometry else {
+            panic!("production guide faces remain canonical regions");
+        };
+        let mut identity_record = format!("fingerprint={}\n", regions.fingerprint());
+        for region in regions.regions() {
+            identity_record.push_str(&format!("{:?}\n", region.id));
+        }
+        std::fs::write(output.join(format!("{name}-regions.txt")), identity_record)
+            .expect("region identity record writes");
+        let raster = rasterize(result.scene(), RasterBackground::Transparent)
+            .expect("production scene rasterizes");
+        std::fs::write(
+            output.join(format!("{name}.png")),
+            encode_png(&raster).expect("production PNG encodes"),
+        )
+        .expect("production PNG writes");
+        let svg_path = output.join(format!("{name}.svg"));
+        std::fs::write(&svg_path, write_svg(result.scene())).expect("production SVG writes");
+        let status = std::process::Command::new("inkscape")
+            .arg(&svg_path)
+            .arg("--export-type=png")
+            .arg(format!(
+                "--export-filename={}",
+                output.join(format!("{name}-svg-rasterized.png")).display()
+            ))
+            .status()
+            .expect("Inkscape is available for production SVG evidence");
+        assert!(status.success(), "production SVG rasterization succeeds");
+        scheduler.shutdown().expect("scheduler shuts down");
+    }
+
+    /// Proves a selected two-guide rectangular arrangement reaches the canonical renderer boundary.
+    #[test]
+    fn two_guide_face_document_reaches_canonical_regions() {
+        let session = modeled_guide_face_session_with_dimensions(vec![
+            GuideDimensionId(123),
+            GuideDimensionId(124),
+        ]);
+        let scheduler = EvaluationScheduler::new().expect("scheduler starts");
+        let ticket = scheduler
+            .submit(document_request(&session, valid_document_bytes()))
+            .expect("guide-face request submits");
+        let completion = wait_for_document_completion(&scheduler);
+        assert_eq!(completion.ticket(), ticket);
+        let result = completion
+            .result()
+            .expect("two-guide realization completes");
+        assert!(result.scene().layers().iter().all(|layer| matches!(layer.outputs().first().map(|output| &output.geometry), Some(GeometryOutput::CanonicalRegions(regions)) if !regions.regions().is_empty())));
+        scheduler.shutdown().expect("scheduler shuts down");
     }
 
     /// Builds a 24-across phase-aligned triangular family with a typed conventional wall-maze output.
@@ -4234,6 +4633,140 @@ pub(crate) mod test_support {
         .unwrap()
     }
 
+    /// Builds a generic authored-cubic Guide Faces document whose two repeated source dimensions form closed regions.
+    fn modeled_authored_cubic_guide_face_session() -> DocumentSession {
+        let source_id = SourceReferenceId::new("cancellation-test-source").expect("source ID");
+        let base = Document::new_default_document(
+            CanvasSpec {
+                width: 64.0,
+                height: 48.0,
+            },
+            SourceReference::Assigned(source_id),
+        )
+        .expect("base document");
+        let guide_id = PatternMechanismId(196);
+        let horizontal = GuideDimensionId(197);
+        let vertical = GuideDimensionId(198);
+        let mut definition = PatternDefinition::generalized_guides(
+            PatternDefinitionId(195),
+            "authored cubic guide faces",
+            guide_id,
+            PatternMechanismId(199),
+            PatternOutputLayerId(200),
+            vec![
+                GuideDimension {
+                    id: horizontal,
+                    baseline_angle_degrees: 0.0,
+                    phase: 0.0,
+                    prototype: GuidePrototype::AuthoredOpenPath {
+                        structure_id: AuthoredStructureId(201),
+                    },
+                    repetition: GuideRepetition::NormalOffset {
+                        spacing: 20.0,
+                        sides: OffsetSides::Both,
+                        cleanup: OffsetCleanup::DissolveCrossings,
+                    },
+                },
+                GuideDimension {
+                    id: vertical,
+                    baseline_angle_degrees: 90.0,
+                    phase: 0.0,
+                    prototype: GuidePrototype::AuthoredOpenPath {
+                        structure_id: AuthoredStructureId(202),
+                    },
+                    repetition: GuideRepetition::NormalOffset {
+                        spacing: 24.0,
+                        sides: OffsetSides::Both,
+                        cleanup: OffsetCleanup::DissolveCrossings,
+                    },
+                },
+            ],
+            GeneralizedSiteProduct::Intersections {
+                dimensions: vec![horizontal, vertical],
+                merge_epsilon: 0.0,
+            },
+            MarkOrientation::Fixed,
+            CoveragePolicy {
+                guard_steps: 1,
+                additional_margin: 0.0,
+            },
+        );
+        definition.output_layers = vec![PatternOutputLayer::Regions {
+            id: PatternOutputLayerId(200),
+            source: RegionSourceIntent::GuideFaces {
+                guide_mechanism_id: guide_id,
+                dimensions: vec![horizontal, vertical],
+            },
+        }];
+        let cubic = AuthoredStructure::new(
+            AuthoredStructureId(201),
+            AuthoredStructureKind::OpenPath,
+            vec![AuthoredCurveSegment::CubicBezier {
+                start: AuthoredPoint2 { x: 0.0, y: 18.0 },
+                control_1: AuthoredPoint2 { x: 18.0, y: 8.0 },
+                control_2: AuthoredPoint2 { x: 46.0, y: 8.0 },
+                end: AuthoredPoint2 { x: 64.0, y: 18.0 },
+            }],
+        )
+        .expect("cubic authored guide");
+        let vertical_line = AuthoredStructure::new(
+            AuthoredStructureId(202),
+            AuthoredStructureKind::OpenPath,
+            vec![AuthoredCurveSegment::Line {
+                start: AuthoredPoint2 { x: 20.0, y: 0.0 },
+                end: AuthoredPoint2 { x: 20.0, y: 48.0 },
+            }],
+        )
+        .expect("vertical authored guide");
+        let mut settings = base.pattern_settings().clone();
+        settings.definition_id = definition.id;
+        settings.density.across_x = 2.0;
+        settings.density.across_y = 2.0;
+        DocumentSession::new(
+            Document::with_source_topology_and_authored_structures(
+                base.id(),
+                base.canvas().clone(),
+                base.source().clone(),
+                vec![bundle_with_sole_response(
+                    definition,
+                    PatternGeometryResponse::Regions(RegionGeometryResponse::Full),
+                )],
+                settings,
+                base.channel_model().expect("model"),
+                base.channel_topology().expect("topology").clone(),
+                vec![cubic, vertical_line],
+            )
+            .expect("authored cubic Guide Faces document"),
+        )
+        .expect("authored cubic session")
+    }
+
+    /// Proves a genuinely authored non-straight cubic guide reaches canonical Guide Faces through the engine.
+    #[test]
+    fn authored_cubic_guide_face_document_reaches_canonical_regions() {
+        let session = modeled_authored_cubic_guide_face_session();
+        let scheduler = EvaluationScheduler::new().expect("scheduler starts");
+        scheduler
+            .submit(document_request(&session, valid_document_bytes()))
+            .expect("cubic request submits");
+        let completion = wait_for_document_completion(&scheduler);
+        let result = completion.result().expect("cubic realization");
+        let contains_cubic_region = result.scene().layers().iter().any(|layer| {
+            matches!(
+                layer.outputs().first().map(|output| &output.geometry),
+                Some(GeometryOutput::CanonicalRegions(regions))
+                    if regions.regions().iter().any(|region| region.ring.segments().iter().any(
+                        |segment| matches!(segment, CurveSegment::CubicBezier(_))
+                    ))
+            )
+        });
+        assert!(
+            contains_cubic_region,
+            "authored cubic guide remains a canonical face boundary"
+        );
+        scheduler.shutdown().expect("scheduler shuts down");
+    }
+
     fn document_request(session: &DocumentSession, bytes: Arc<[u8]>) -> EvaluationRequest {
         document_request_for_source(session, "cancellation-test-source", bytes)
     }
@@ -4243,14 +4776,19 @@ pub(crate) mod test_support {
         source_id: &str,
         bytes: Arc<[u8]>,
     ) -> EvaluationRequest {
+        document_request_for_format(session, source_id, bytes, SourceFormatHint::Png)
+    }
+
+    /// Builds a test evaluation request with an explicit immutable source format.
+    fn document_request_for_format(
+        session: &DocumentSession,
+        source_id: &str,
+        bytes: Arc<[u8]>,
+        format: SourceFormatHint,
+    ) -> EvaluationRequest {
         EvaluationRequest::new(
             session.document_evaluation_snapshot(),
-            ResolvedSource::new(
-                SourceReferenceId::new(source_id).unwrap(),
-                bytes,
-                SourceFormatHint::Png,
-            )
-            .unwrap(),
+            ResolvedSource::new(SourceReferenceId::new(source_id).unwrap(), bytes, format).unwrap(),
         )
     }
 
@@ -4259,6 +4797,17 @@ pub(crate) mod test_support {
             std::fs::read(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/../../assets/raster-sample.png"
+            ))
+            .unwrap(),
+        )
+    }
+
+    /// Loads the immutable project-wide SVG fixture for source-aware Stage 20P witnesses.
+    fn valid_vector_document_bytes() -> Arc<[u8]> {
+        Arc::<[u8]>::from(
+            std::fs::read(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/vector-sample.svg"
             ))
             .unwrap(),
         )
