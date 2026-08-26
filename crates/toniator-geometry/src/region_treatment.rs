@@ -9,7 +9,7 @@ use crate::{
     CubicBezierSegment, CurvePath, CurveSegment, LineSegment, PathClosure, PathOffsetCleanup,
     PathOffsetEndpointPolicy, PathOffsetRequest, PathOffsetResult, PathOffsetWork, Point2,
     build_canonical_regions_cancellable, build_tagged_canonical_regions_cancellable,
-    offset_path_cancellable, offset_path_with_work_cancellable,
+    offset_path_with_work_region_round_cancellable,
 };
 
 /// Versioned private treatment contract used by pattern/engine cache identities.
@@ -488,8 +488,12 @@ fn offset_region_path(
     if inward_distance == 0.0 {
         return Ok(vec![path.clone()]);
     }
+    let mut work = PathOffsetWork::new(limits).map_err(|error| RegionTreatmentError {
+        path: "region.treatment.limits.offset",
+        message: error.message(),
+    })?;
     // Canonical rings are counter-clockwise, so their left normal points into the filled region.
-    match offset_path_cancellable(
+    match offset_path_with_work_region_round_cancellable(
         PathOffsetRequest {
             path,
             signed_distance: inward_distance,
@@ -498,6 +502,7 @@ fn offset_region_path(
             crossing_barriers: &[],
             limits,
         },
+        &mut work,
         cancelled,
     ) {
         Ok(PathOffsetResult::Paths(components)) => Ok(components
@@ -511,6 +516,7 @@ fn offset_region_path(
             path: match error.path() {
                 "evaluation.cancelled" => "evaluation.cancelled",
                 path if path.contains("limit") => "region.treatment.limits.offset",
+                path if path.contains("allocation") => "region.treatment.allocation.offset",
                 _ => "region.treatment.geometry.gap",
             },
             message: error.message(),
@@ -538,7 +544,7 @@ fn offset_region_path_with_work(
     if inward_distance == 0.0 {
         return Ok(vec![path.clone()]);
     }
-    match offset_path_with_work_cancellable(
+    match offset_path_with_work_region_round_cancellable(
         PathOffsetRequest {
             path,
             signed_distance: inward_distance,
@@ -561,6 +567,7 @@ fn offset_region_path_with_work(
             path: match error.path() {
                 "evaluation.cancelled" => "evaluation.cancelled",
                 path if path.contains("limit") => "region.treatment.limits.offset",
+                path if path.contains("allocation") => "region.treatment.allocation.offset",
                 _ => "region.treatment.geometry.gap",
             },
             message: error.message(),

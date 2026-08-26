@@ -58,6 +58,7 @@ pub use outlines::{
     CanonicalFilledOutline, CanonicalOutlineContour, VariableWidthOutlineLimits,
     VariableWidthPathSample, build_variable_width_outline_cancellable,
 };
+pub(crate) use path_offsets::offset_path_with_work_region_round_cancellable;
 pub use path_offsets::{
     MAX_PATH_OFFSET_CLEANUP_PAIRS, MAX_PATH_OFFSET_COMPONENTS, MAX_PATH_OFFSET_CUSP_ISOLATION_WORK,
     MAX_PATH_OFFSET_SEGMENTS, MAX_PATH_OFFSET_SUBDIVISION_DEPTH, OffsetPathComponent,

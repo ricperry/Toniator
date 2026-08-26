@@ -280,6 +280,56 @@ pub fn offset_path_with_work_cancellable(
     work: &mut PathOffsetWork,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<PathOffsetResult, CurveError> {
+    offset_path_with_work_join_policy_cancellable(
+        request,
+        work,
+        is_cancelled,
+        OffsetJoinPolicy::CompactRound,
+    )
+}
+
+/// Builds a closed-region offset with subdivided circular joins at finite outward corners.
+///
+/// This crate-private seam is geometry authority for filled regions only; the public Stage 20J
+/// path-offset request retains its accepted compact-round outer-join behavior.
+///
+/// # Errors
+///
+/// Returns the same atomic cancellation, bounded-work, and geometry diagnostics as the public
+/// offset primitive without publishing a partial component list.
+pub(crate) fn offset_path_with_work_region_round_cancellable(
+    request: PathOffsetRequest<'_>,
+    work: &mut PathOffsetWork,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<PathOffsetResult, CurveError> {
+    offset_path_with_work_join_policy_cancellable(
+        request,
+        work,
+        is_cancelled,
+        OffsetJoinPolicy::RegionRound,
+    )
+}
+
+/// Selects the geometry-owned construction policy for source-adjacent offset corners.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OffsetJoinPolicy {
+    /// Retains accepted compact round and deterministic bevel behavior for path products.
+    CompactRound,
+    /// Retains inward tangent intersections and splits outward circular joins for filled regions.
+    RegionRound,
+}
+
+/// Builds one offset through the shared bounded implementation with an explicit private join policy.
+///
+/// # Errors
+///
+/// Returns existing stable offset diagnostics and never publishes partial geometry.
+fn offset_path_with_work_join_policy_cancellable(
+    request: PathOffsetRequest<'_>,
+    work: &mut PathOffsetWork,
+    is_cancelled: &dyn Fn() -> bool,
+    join_policy: OffsetJoinPolicy,
+) -> Result<PathOffsetResult, CurveError> {
     if !request.signed_distance.is_finite() {
         return Err(CurveError::new(
             "curve.offset.distance",
@@ -353,6 +403,7 @@ pub fn offset_path_with_work_cancellable(
                 offsets,
                 segment,
                 request.signed_distance,
+                join_policy,
                 limits.maximum_segments,
                 &mut emitted_segments,
             )?;
@@ -369,6 +420,8 @@ pub fn offset_path_with_work_cancellable(
             close_unbroken_offset_run(
                 &mut runs[0],
                 authored_end,
+                request.signed_distance,
+                join_policy,
                 limits.maximum_segments,
                 &mut emitted_segments,
             )?;
@@ -378,6 +431,7 @@ pub fn offset_path_with_work_cancellable(
                 &mut runs,
                 authored_end,
                 request.signed_distance,
+                join_policy,
                 limits.maximum_segments,
                 &mut emitted_segments,
             )?;
@@ -424,6 +478,7 @@ pub fn offset_path_with_work_cancellable(
                 &mut cleanup_budget,
                 limits.maximum_components,
                 limits.tolerance,
+                join_policy == OffsetJoinPolicy::RegionRound && request.signed_distance > 0.0,
                 is_cancelled,
             )?,
         };
@@ -779,6 +834,7 @@ fn append_ordered_offset_run(
     mut offsets: Vec<TracedOffsetSegment>,
     source_segment: CurveSegment,
     distance: f64,
+    join_policy: OffsetJoinPolicy,
     maximum_segments: usize,
     emitted_segments: &mut usize,
 ) -> Result<(), CurveError> {
@@ -812,6 +868,7 @@ fn append_ordered_offset_run(
             source_segment,
             source_boundary,
             distance,
+            join_policy,
         )?;
         previous.segments.extend(offsets);
         previous.last_source_segment = source_segment;
@@ -850,6 +907,7 @@ fn connect_adjacent_offset_segments(
     next_source: CurveSegment,
     source_boundary: PathLocation,
     distance: f64,
+    join_policy: OffsetJoinPolicy,
 ) -> Result<(), CurveError> {
     let end = derived
         .last()
@@ -871,6 +929,7 @@ fn connect_adjacent_offset_segments(
         next_source,
         source_boundary,
         distance,
+        join_policy,
     )? {
         derived.push(TracedOffsetSegment {
             segment: CurveSegment::Line(LineSegment::new(end, offset_start)?),
@@ -897,6 +956,8 @@ fn source_locations_are_adjacent(end: PathLocation, start: PathLocation) -> bool
 fn close_unbroken_offset_run(
     run: &mut OrderedOffsetRun,
     authored_end: PathLocation,
+    distance: f64,
+    join_policy: OffsetJoinPolicy,
     maximum_segments: usize,
     emitted_segments: &mut usize,
 ) -> Result<(), CurveError> {
@@ -912,6 +973,57 @@ fn close_unbroken_offset_run(
         .expect("unbroken closed offset run is nonempty")
         .segment
         .start();
+    if (end.x - start.x).hypot(end.y - start.y) <= 1.0e-6 {
+        let last = run.segments.len() - 1;
+        run.segments[last].segment =
+            replace_segment_end_preserving_tangent(run.segments[last].segment, start)?;
+        return Ok(());
+    }
+    if join_policy == OffsetJoinPolicy::RegionRound {
+        let last = run.segments.len() - 1;
+        let previous_direction = run.last_source_segment.unit_tangent_at(1.0)?;
+        let next_direction = run.first_source_segment.unit_tangent_at(0.0)?;
+        let turn =
+            previous_direction.x * next_direction.y - previous_direction.y * next_direction.x;
+        if turn > 1.0e-12 && distance < 0.0 {
+            let joins = region_round_join_segments(
+                run.first_source_segment.start(),
+                run.segments[last].segment.end(),
+                run.segments[0].segment.start(),
+                turn > 0.0,
+            )?;
+            let added = joins.len();
+            run.segments
+                .extend(joins.into_iter().map(|join| TracedOffsetSegment {
+                    segment: CurveSegment::CubicBezier(join),
+                    source_start: authored_end,
+                    source_end: authored_end,
+                }));
+            *emitted_segments = emitted_segments.checked_add(added).ok_or(CurveError::new(
+                "curve.offset.segment_limit",
+                "path offset segment limit exceeded",
+            ))?;
+            if *emitted_segments > maximum_segments {
+                return Err(CurveError::new(
+                    "curve.offset.segment_limit",
+                    "path offset segment limit exceeded",
+                ));
+            }
+            return Ok(());
+        }
+        if let Some(intersection) = offset_tangent_intersection(
+            run.segments[last].segment,
+            run.segments[0].segment,
+            run.last_source_segment,
+            run.first_source_segment,
+        )? {
+            run.segments[last].segment =
+                replace_segment_end_preserving_tangent(run.segments[last].segment, intersection)?;
+            run.segments[0].segment =
+                replace_segment_start_preserving_tangent(run.segments[0].segment, intersection)?;
+            return Ok(());
+        }
+    }
     if end != start {
         run.segments.push(TracedOffsetSegment {
             segment: CurveSegment::Line(LineSegment::new(end, start)?),
@@ -943,6 +1055,7 @@ fn merge_closed_seam_runs(
     runs: &mut Vec<OrderedOffsetRun>,
     authored_end: PathLocation,
     distance: f64,
+    join_policy: OffsetJoinPolicy,
     maximum_segments: usize,
     emitted_segments: &mut usize,
 ) -> Result<(), CurveError> {
@@ -973,6 +1086,7 @@ fn merge_closed_seam_runs(
         first.first_source_segment,
         authored_end,
         distance,
+        join_policy,
     )?;
     let first_segment_count = first.segments.len();
     last.segments.extend(first.segments);
@@ -998,6 +1112,7 @@ fn merge_closed_seam_runs(
 ///
 /// Returns canonical intersection, component-limit, cancellation, or finite path diagnostics without
 /// publishing a partial cleanup.
+#[allow(clippy::too_many_arguments)]
 fn dissolve_crossings_with_budget(
     segments: Vec<TracedOffsetSegment>,
     closure: PathClosure,
@@ -1005,6 +1120,7 @@ fn dissolve_crossings_with_budget(
     budget: &mut CleanupBudget,
     maximum_components: usize,
     tolerance: f64,
+    dissolve_coincident_overlaps: bool,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<CleanedOffsetPath>, CurveError> {
     let mut pending = vec![(segments, closure)];
@@ -1017,7 +1133,12 @@ fn dissolve_crossings_with_budget(
             .iter()
             .map(|segment| segment.segment)
             .collect::<Vec<_>>();
-        let Some(crossing) = first_transverse_crossing_with_budget(&plain, budget, is_cancelled)?
+        let Some(crossing) = first_transverse_crossing_with_budget(
+            &plain,
+            budget,
+            dissolve_coincident_overlaps,
+            is_cancelled,
+        )?
         else {
             if segments.is_empty() {
                 continue;
@@ -1093,6 +1214,7 @@ fn dissolve_crossings(
         },
         maximum_components,
         tolerance,
+        false,
         is_cancelled,
     )
 }
@@ -1155,6 +1277,7 @@ fn first_transverse_crossing(
             examined_pairs: 0,
             maximum_pairs,
         },
+        false,
         is_cancelled,
     )
 }
@@ -1167,6 +1290,7 @@ fn first_transverse_crossing(
 fn first_transverse_crossing_with_budget(
     segments: &[CurveSegment],
     budget: &mut CleanupBudget,
+    dissolve_coincident_overlaps: bool,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<Option<TransverseCrossing>, CurveError> {
     for (first_index, first) in segments.iter().enumerate() {
@@ -1181,7 +1305,34 @@ fn first_transverse_crossing_with_budget(
                     "path offset cleanup pair limit exceeded",
                 ));
             }
-            for intersection in first.intersections(second)? {
+            let intersections = match first.intersections(second) {
+                Ok(intersections) => intersections,
+                Err(error)
+                    if dissolve_coincident_overlaps
+                        && error.path() == "curve.path.intersections.overlap" =>
+                {
+                    if !matches!(
+                        (first, second),
+                        (CurveSegment::Line(_), CurveSegment::Line(_))
+                    ) {
+                        return Err(error);
+                    }
+                    if let Some((first_parameter, second_parameter, point)) =
+                        coincident_line_overlap_split(*first, *second)?
+                    {
+                        return Ok(Some((
+                            first_index,
+                            second_index,
+                            first_parameter,
+                            second_parameter,
+                            point,
+                        )));
+                    }
+                    return Err(error);
+                }
+                Err(error) => return Err(error),
+            };
+            for intersection in intersections {
                 if intersection.kind() == crate::IntersectionKind::Crossing
                     && strictly_interior(intersection.first_parameter())
                     && strictly_interior(intersection.second_parameter())
@@ -1198,6 +1349,62 @@ fn first_transverse_crossing_with_budget(
         }
     }
     Ok(None)
+}
+
+/// Selects the midpoint of one positive-length coincident line overlap as a deterministic split.
+///
+/// This RegionRound-only recovery turns a collapsed inward neck into two source-ordered cleanup
+/// candidates instead of exposing the generic discrete-intersection rejection.
+///
+/// # Errors
+///
+/// Returns finite-coordinate diagnostics when a candidate line cannot support stable projection.
+fn coincident_line_overlap_split(
+    first: CurveSegment,
+    second: CurveSegment,
+) -> Result<Option<(f64, f64, Point2)>, CurveError> {
+    let (CurveSegment::Line(first), CurveSegment::Line(second)) = (first, second) else {
+        return Ok(None);
+    };
+    let delta = Vector2::new(
+        first.end().x - first.start().x,
+        first.end().y - first.start().y,
+    );
+    let denominator = delta.x * delta.x + delta.y * delta.y;
+    if !denominator.is_finite() || denominator == 0.0 {
+        return Ok(None);
+    }
+    let second_start = ((second.start().x - first.start().x) * delta.x
+        + (second.start().y - first.start().y) * delta.y)
+        / denominator;
+    let second_end = ((second.end().x - first.start().x) * delta.x
+        + (second.end().y - first.start().y) * delta.y)
+        / denominator;
+    let lower = second_start.min(second_end).max(0.0);
+    let upper = second_start.max(second_end).min(1.0);
+    let first_parameter = (lower + upper) * 0.5;
+    if !strictly_interior(first_parameter) {
+        return Ok(None);
+    }
+    let point = Point2::new(
+        first.start().x + delta.x * first_parameter,
+        first.start().y + delta.y * first_parameter,
+    );
+    let second_delta = Vector2::new(
+        second.end().x - second.start().x,
+        second.end().y - second.start().y,
+    );
+    let second_denominator = second_delta.x * second_delta.x + second_delta.y * second_delta.y;
+    if !second_denominator.is_finite() || second_denominator == 0.0 {
+        return Ok(None);
+    }
+    let second_parameter = ((point.x - second.start().x) * second_delta.x
+        + (point.y - second.start().y) * second_delta.y)
+        / second_denominator;
+    if !strictly_interior(second_parameter) || !point.is_finite() {
+        return Ok(None);
+    }
+    Ok(Some((first_parameter, second_parameter, point)))
 }
 
 /// Splits one traced segment at an exact crossing point and interpolates its source parameter.
@@ -1322,6 +1529,7 @@ fn join_offset_segments(
     next_source: CurveSegment,
     next_source_start: PathLocation,
     distance: f64,
+    join_policy: OffsetJoinPolicy,
 ) -> Result<bool, CurveError> {
     let Some(previous_derived) = derived.last().copied() else {
         return Ok(false);
@@ -1335,36 +1543,43 @@ fn join_offset_segments(
     if turn.abs() <= 1.0e-12 {
         return Ok(false);
     }
-    if turn * distance < 0.0 {
-        let join = match compact_round_join(
-            previous_source.end(),
-            previous_derived.segment.end(),
-            next_derived.segment.start(),
-            turn > 0.0,
-        ) {
-            Ok(join) => join,
-            Err(error) if error.path() == "curve.offset.join" => return Ok(false),
-            Err(error) => return Err(error),
+    let uses_outer_join = match join_policy {
+        OffsetJoinPolicy::CompactRound => turn * distance < 0.0,
+        OffsetJoinPolicy::RegionRound => turn > 0.0 && distance < 0.0,
+    };
+    if uses_outer_join {
+        let joins = match join_policy {
+            OffsetJoinPolicy::CompactRound => match compact_round_join(
+                previous_source.end(),
+                previous_derived.segment.end(),
+                next_derived.segment.start(),
+                turn > 0.0,
+            ) {
+                Ok(join) => vec![join],
+                Err(error) if error.path() == "curve.offset.join" => return Ok(false),
+                Err(error) => return Err(error),
+            },
+            OffsetJoinPolicy::RegionRound => region_round_join_segments(
+                previous_source.end(),
+                previous_derived.segment.end(),
+                next_derived.segment.start(),
+                turn > 0.0,
+            )?,
         };
-        derived.push(TracedOffsetSegment {
+        derived.extend(joins.into_iter().map(|join| TracedOffsetSegment {
             segment: CurveSegment::CubicBezier(join),
             source_start: next_source_start,
             source_end: next_source_start,
-        });
+        }));
         return Ok(true);
     }
-    let Some(intersection) = line_intersection(
-        previous_derived.segment.end(),
-        Point2::new(
-            previous_derived.segment.end().x + previous_direction.x,
-            previous_derived.segment.end().y + previous_direction.y,
-        ),
-        next_derived.segment.start(),
-        Point2::new(
-            next_derived.segment.start().x + next_direction.x,
-            next_derived.segment.start().y + next_direction.y,
-        ),
-    ) else {
+    let Some(intersection) = offset_tangent_intersection(
+        previous_derived.segment,
+        next_derived.segment,
+        previous_source,
+        next_source,
+    )?
+    else {
         return Ok(false);
     };
     let last = derived.len() - 1;
@@ -1372,6 +1587,34 @@ fn join_offset_segments(
         replace_segment_end_preserving_tangent(derived[last].segment, intersection)?;
     next[0].segment = replace_segment_start_preserving_tangent(next[0].segment, intersection)?;
     Ok(true)
+}
+
+/// Finds the finite intersection of adjacent derived tangent lines without fabricating a corner.
+///
+/// # Errors
+///
+/// Propagates source tangent failures; parallel or nonfinite intersections deliberately return
+/// `None` so the caller retains its existing deterministic fallback connector.
+fn offset_tangent_intersection(
+    previous_derived: CurveSegment,
+    next_derived: CurveSegment,
+    previous_source: CurveSegment,
+    next_source: CurveSegment,
+) -> Result<Option<Point2>, CurveError> {
+    let previous_direction = previous_source.unit_tangent_at(1.0)?;
+    let next_direction = next_source.unit_tangent_at(0.0)?;
+    Ok(line_intersection(
+        previous_derived.end(),
+        Point2::new(
+            previous_derived.end().x + previous_direction.x,
+            previous_derived.end().y + previous_direction.y,
+        ),
+        next_derived.start(),
+        Point2::new(
+            next_derived.start().x + next_direction.x,
+            next_derived.start().y + next_direction.y,
+        ),
+    ))
 }
 
 /// Intersects two finite-direction lines without accepting a parallel numerical fallback.
@@ -1440,6 +1683,86 @@ fn compact_round_join(
         ),
         end,
     )
+}
+
+/// Splits a finite outer circular corner into deterministic cubic arcs no wider than ninety degrees.
+///
+/// This filled-region-only helper preserves exact offset endpoints and tangent continuity for
+/// convex outward corners that exceed the single compact Stage 20J arc sweep.
+///
+/// # Errors
+///
+/// Returns the existing finite-circle diagnostic when the two offset endpoints cannot define one
+/// stable circular join; callers retain their atomic bounded-work error boundary.
+fn region_round_join_segments(
+    center: Point2,
+    start: Point2,
+    end: Point2,
+    counter_clockwise: bool,
+) -> Result<Vec<crate::CubicBezierSegment>, CurveError> {
+    if (start.x - end.x).hypot(start.y - end.y) <= 1.0e-6 {
+        return Ok(Vec::new());
+    }
+    let start_vector = Vector2::new(start.x - center.x, start.y - center.y);
+    let end_vector = Vector2::new(end.x - center.x, end.y - center.y);
+    let radius = start_vector.x.hypot(start_vector.y);
+    if radius == 0.0 || (end_vector.x.hypot(end_vector.y) - radius).abs() > 1.0e-6 {
+        return Err(CurveError::new(
+            "curve.offset.join",
+            "outer offset join is not circular",
+        ));
+    }
+    let start_angle = start_vector.y.atan2(start_vector.x);
+    let mut sweep = end_vector.y.atan2(end_vector.x) - start_angle;
+    if counter_clockwise && sweep < 0.0 {
+        sweep += std::f64::consts::TAU;
+    } else if !counter_clockwise && sweep > 0.0 {
+        sweep -= std::f64::consts::TAU;
+    }
+    let count = (sweep.abs() / std::f64::consts::FRAC_PI_2).ceil() as usize;
+    let count = count.max(1);
+    let step = sweep / count as f64;
+    let mut joins = Vec::new();
+    joins.try_reserve(count).map_err(|_| {
+        CurveError::new(
+            "curve.offset.allocation",
+            "subdivided region round-join allocation failed",
+        )
+    })?;
+    for ordinal in 0..count {
+        let angle = start_angle + step * ordinal as f64;
+        let next_angle = angle + step;
+        let arc_start = if ordinal == 0 {
+            start
+        } else {
+            Point2::new(
+                center.x + radius * angle.cos(),
+                center.y + radius * angle.sin(),
+            )
+        };
+        let arc_end = if ordinal + 1 == count {
+            end
+        } else {
+            Point2::new(
+                center.x + radius * next_angle.cos(),
+                center.y + radius * next_angle.sin(),
+            )
+        };
+        let handle = 4.0 / 3.0 * (step * 0.25).tan() * radius;
+        joins.push(crate::CubicBezierSegment::new(
+            arc_start,
+            Point2::new(
+                arc_start.x - angle.sin() * handle,
+                arc_start.y + angle.cos() * handle,
+            ),
+            Point2::new(
+                arc_end.x + next_angle.sin() * handle,
+                arc_end.y - next_angle.cos() * handle,
+            ),
+            arc_end,
+        )?);
+    }
+    Ok(joins)
 }
 
 /// Moves one derived endpoint and its adjacent cubic control together to preserve join tangency.
@@ -2337,6 +2660,69 @@ fn cancelled() -> CurveError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verifies the private RegionRound contract splits one canonical 120-degree convex outward
+    /// corner into two tangent-continuous positive CCW cubic arcs with bounded radial fitting
+    /// error and never represents that corner with a straight bevel segment.
+    ///
+    /// # Panics
+    ///
+    /// Panics only when this fixed finite unit-radius fixture cannot construct or evaluate a
+    /// cubic, which would violate the geometry primitive's finite-coordinate contract.
+    #[test]
+    fn stage20q_region_round_join_splits_120_degree_corner_without_bevel() {
+        let center = Point2::new(0.0, 0.0);
+        let start = Point2::new(1.0, 0.0);
+        let end = Point2::new(-0.5, 3.0_f64.sqrt() * 0.5);
+        let arcs = region_round_join_segments(center, start, end, true)
+            .expect("finite 120-degree circular corner splits");
+        assert_eq!(arcs.len(), 2, "120 degrees divides into two 60-degree arcs");
+        assert_eq!(arcs[0].start(), start);
+        assert_eq!(arcs[0].end(), arcs[1].start());
+        assert_eq!(arcs[1].end(), end);
+        let ccw_sweep = |from: Point2, to: Point2| {
+            let mut sweep = to.y.atan2(to.x) - from.y.atan2(from.x);
+            if sweep < 0.0 {
+                sweep += std::f64::consts::TAU;
+            }
+            sweep
+        };
+        let sweeps: Vec<_> = arcs
+            .iter()
+            .map(|arc| ccw_sweep(arc.start(), arc.end()))
+            .collect();
+        assert!(
+            sweeps
+                .iter()
+                .all(|sweep| { *sweep > 0.0 && *sweep <= std::f64::consts::FRAC_PI_2 + 1.0e-12 })
+        );
+        assert!((sweeps.iter().sum::<f64>() - 2.0 * std::f64::consts::FRAC_PI_3).abs() < 1.0e-12);
+        for arc in &arcs {
+            for parameter in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                let point = CurveSegment::CubicBezier(*arc)
+                    .point_at(parameter)
+                    .expect("finite cubic sample");
+                assert!(
+                    (point.x.hypot(point.y) - 1.0).abs() <= 1.0 / 64.0,
+                    "cubic radial fit stays within the approved tolerance"
+                );
+            }
+        }
+        let start_tangent = CurveSegment::CubicBezier(arcs[0])
+            .unit_tangent_at(0.0)
+            .expect("finite first arc tangent");
+        let join_left = CurveSegment::CubicBezier(arcs[0])
+            .unit_tangent_at(1.0)
+            .expect("finite left join tangent");
+        let join_right = CurveSegment::CubicBezier(arcs[1])
+            .unit_tangent_at(0.0)
+            .expect("finite right join tangent");
+        let end_tangent = CurveSegment::CubicBezier(arcs[1])
+            .unit_tangent_at(1.0)
+            .expect("finite final arc tangent");
+        assert!(start_tangent.y > 0.999_999 && end_tangent.x < -0.8);
+        assert!(join_left.x * join_right.x + join_left.y * join_right.y > 0.999_999);
+    }
 
     /// Verifies one mutable work budget accumulates path work while the legacy wrapper replays bytes.
     #[test]

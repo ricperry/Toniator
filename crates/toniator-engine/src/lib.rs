@@ -5228,6 +5228,35 @@ pub(crate) mod test_support {
         assert!(count > 0, "production triangular family emits faces");
     }
 
+    /// Detects one closed cubic segment that is tangent-continuous with both adjacent segments.
+    fn stage20q_has_tangent_continuous_cubic_join(path: &CurvePath) -> bool {
+        let segments = path.segments();
+        if segments.len() < 3 {
+            return false;
+        }
+        segments.iter().enumerate().any(|(index, segment)| {
+            let CurveSegment::CubicBezier(_) = segment else {
+                return false;
+            };
+            let previous = segments[(index + segments.len() - 1) % segments.len()];
+            let next = segments[(index + 1) % segments.len()];
+            let joins_previous = previous.end() == segment.start();
+            let joins_next = segment.end() == next.start();
+            let tangent_before = previous.unit_tangent_at(1.0);
+            let tangent_start = segment.unit_tangent_at(0.0);
+            let tangent_end = segment.unit_tangent_at(1.0);
+            let tangent_after = next.unit_tangent_at(0.0);
+            joins_previous
+                && joins_next
+                && matches!(
+                    (tangent_before, tangent_start, tangent_end, tangent_after),
+                    (Ok(before), Ok(start), Ok(end), Ok(after))
+                        if before.x * start.x + before.y * start.y > 0.999_999
+                            && end.x * after.x + end.y * after.y > 0.999_999
+                )
+        })
+    }
+
     /// Verifies one untreated triangular Guide Face set retains equilateral positive line faces.
     fn assert_production_equilateral_untreated_faces(regions: &CanonicalRegionSet) {
         const TOLERANCE: f64 = 1.0e-8;
@@ -6609,21 +6638,40 @@ pub(crate) mod test_support {
             ),
             RegionGeometryResponse::ConstantGap {
                 sampling: toniator_domain::RegionSamplingStrategy::AreaAverage,
-                minimum_gap: -18.0,
-                maximum_gap: -18.0,
+                minimum_gap: 18.0,
+                maximum_gap: 18.0,
             },
         );
         let three_guide = stage20q_sampled_region_session(three_base.document().clone(), 0.58);
         let (three_result, three_evidence) = stage20q_write_guide_face_case(
             &output,
-            "three-guide-vector-outward-gap-area-average-sampled-opacity",
+            "three-guide-vector-inward-gap-area-average-sampled-opacity",
             three_guide,
             &vector_input,
             EmbeddedSourceFormat::Svg,
             SourceFormatHint::Svg,
-            "production 0/60/120 three-guide outward ConstantGap / AreaAverage / sampled paint / opacity",
+            "production 0/60/120 three-guide inward ConstantGap / AreaAverage / sampled paint / opacity",
         );
         assert_production_equilateral_untreated_faces(&three_evidence.untreated_regions);
+        let treated_line_faces: Vec<_> = three_evidence
+            .treated_regions
+            .regions()
+            .iter()
+            .filter(|region| {
+                region
+                    .ring
+                    .segments()
+                    .iter()
+                    .all(|segment| matches!(segment, CurveSegment::Line(_)))
+            })
+            .collect();
+        assert!(
+            !treated_line_faces.is_empty()
+                && treated_line_faces
+                    .iter()
+                    .all(|region| region.ring.segments().len() == 3),
+            "inward-shrunk three-guide line faces retain separated triangular rings"
+        );
         assert_eq!(
             three_evidence.sampling,
             toniator_domain::RegionSamplingStrategy::AreaAverage
@@ -6649,7 +6697,7 @@ pub(crate) mod test_support {
         assert_eq!(three_result.raster().width(), 900);
         assert_eq!(three_result.raster().height(), 620);
         manifest.push_str(
-            "- `three-guide-vector-outward-gap-area-average-sampled-opacity`: production 0/60/120 equilateral untreated faces, negative outward gap, complete AreaAverage sampling, sampled paint, and opacity 0.58 at 900×620.\n",
+            "- `three-guide-vector-inward-gap-area-average-sampled-opacity`: production 0/60/120 equilateral untreated faces, positive inward gap, complete AreaAverage sampling, sampled paint, and opacity 0.58 at 900×620.\n",
         );
 
         let cubic_base = stage20q_region_response_session(
@@ -6686,6 +6734,30 @@ pub(crate) mod test_support {
                         .any(|segment| matches!(segment, CurveSegment::CubicBezier(_)))
                 }),
             "authored cubic Guide Face reaches the untouched producer snapshot"
+        );
+        assert!(
+            cubic_evidence
+                .treated_regions
+                .regions()
+                .iter()
+                .any(|region| stage20q_has_tangent_continuous_cubic_join(&region.ring)),
+            "outward authored-cubic faces retain a tangent-continuous cubic corner join instead of a straight bevel"
+        );
+        assert!(
+            cubic_evidence
+                .treated_regions
+                .regions()
+                .iter()
+                .flat_map(|region| region.ring.segments())
+                .filter_map(|segment| match segment {
+                    CurveSegment::CubicBezier(cubic) => Some(cubic),
+                    CurveSegment::Line(_) => None,
+                })
+                .all(|cubic| {
+                    (cubic.start().x - cubic.end().x).hypot(cubic.start().y - cubic.end().y)
+                        > 1.0e-6
+                }),
+            "authored-cubic outward evidence contains no zero-length cubic seam"
         );
         assert!(
             cubic_result
