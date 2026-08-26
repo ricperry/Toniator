@@ -402,7 +402,24 @@ fixed solid Full regions and final canvas clipping. Existing generic
 one-through-four guide support remains unchanged; Stage 20P adds no four-guide
 Guide Faces behavior or evidence. Direct raw `ParametricPaths` remain
 Guide-Faces-ineligible, while typed parametric site/Voronoi mechanisms remain
-valid. Stage 20Q+ remains Planned and separately gated.
+valid. Stage 20R+ remains Planned and separately gated.
+
+Stage 20Q is complete at implementation checkpoint
+`071f3604098c0660a876fbe30050a64223fe41b3`. It adds headless fill-only
+`Full`, `Scale`, and `ConstantGap` realization for accepted ordinary Voronoi
+and Guide Face regions, ReferencePoint and AreaAverage source sampling,
+sampled per-region paint, bounded geometry/cache orchestration, and canonical
+PNG/SVG rendering with final clipping only. Positive ConstantGap shrinks and
+negative ConstantGap grows; convex outward growth uses subdivided smooth cubic
+round joins, while inward shrink uses tangent intersection and
+crossing/coincident-branch dissolution. Schema-v5/preset-v3 persistence stores
+authored intent only, and the one-output authoring gate and headless-only
+boundary remain in force. The three-guide evidence uses positive inward gap and
+triangular line rings; the authored-cubic outward witness uses fixed `-40` gap
+for 20-unit outward edge growth and 40-unit neighbor overlap with smooth joins.
+Collapse evidence is intentionally transparent. Sparse authored-cubic coverage
+reflects six complete bounded faces, not raster resolution. The user reaccepted
+Stage 20Q on 2026-08-26; publication and Stage 20R+ remain separately gated.
 
 Low-resolution fixtures and outputs are supplementary only. Every future stage
 that exercises source loading, sampling, rendering, preview, or export must

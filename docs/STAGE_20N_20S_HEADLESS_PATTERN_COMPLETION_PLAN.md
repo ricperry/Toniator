@@ -1,9 +1,10 @@
 # Stages 20N–20S — Headless Pattern Completion Plan
 
-Status: **Accepted roadmap; Stages 20N, 20O, and 20P are complete, while
-Stages 20Q–20S remain Planned and separately gated** (Stage 20O checkpoint
+Status: **Accepted roadmap; Stages 20N, 20O, 20P, and 20Q are complete, while
+Stages 20R–20S remain Planned and separately gated** (Stage 20O checkpoint
 `7ab97f01ec372ab1e6201b3913742476a1511c02`; Stage 20P checkpoint
-`cd531eb65dd2e161e62f355905ad936b8c1ca3c4`).
+`cd531eb65dd2e161e62f355905ad936b8c1ca3c4`; Stage 20Q checkpoint
+`071f3604098c0660a876fbe30050a64223fe41b3`).
 
 ## Summary and stage boundary
 
@@ -26,7 +27,7 @@ one-output authoring/validation gate while providing ordered keyed output
 authority, schema-v5/preset-v3 persistence, independently keyed realization and
 cache units, and canonical-region/render foundations. It does not add a
 concrete region source or treatment. This roadmap does not authorize Stage
-20Q+ implementation, a tracker status advance for those stages, a commit,
+20R+ implementation, a tracker status advance for those stages, a commit,
 publication, Stage 21+, or a protected-specification revision. Every remaining
 row retains its own decision-complete plan, one-writer implementation,
 independent read-only review, user acceptance, and checkpoint gate.
@@ -65,7 +66,7 @@ independent read-only review, user acceptance, and checkpoint gate.
 Status: **Complete at implementation checkpoint
 `7ab97f01ec372ab1e6201b3913742476a1511c02`** (user acceptance recorded
 2026-08-25; independent re-review and final artifact inspection passed).
-Stage 20Q+ remains Planned and separately gated.
+Stage 20R+ remains Planned and separately gated.
 
 - Add `PatternOutputLayer::Regions` with
   `RegionSourceIntent::VoronoiSites { site_mechanism_id }` for eligible
@@ -102,7 +103,7 @@ Stage 20Q+ remains Planned and separately gated.
 Status: **Complete at implementation checkpoint
 `cd531eb65dd2e161e62f355905ad936b8c1ca3c4`** (user acceptance recorded
 2026-08-25; independent read-only review, parent verification, and final
-artifact inspection passed). Stage 20Q+ remains Planned and separately gated.
+artifact inspection passed). Stage 20R+ remains Planned and separately gated.
 
 The accepted implementation derives complete deterministic bounded faces from
 two or three selected straight or authored-open guide dimensions through the
@@ -133,31 +134,43 @@ valid.
 
 ## Stage 20Q — Filled-region realization
 
-- Add fill-only region treatments `Full`, `Scale`, and `ConstantGap`. Do not add
+Status: **Complete at implementation checkpoint
+`071f3604098c0660a876fbe30050a64223fe41b3`** (user reaccepted 2026-08-26;
+independent re-review, parent verification, and intrinsic artifact inspection
+passed). Positive ConstantGap shrinks and negative ConstantGap grows. Convex
+outward growth uses subdivided smooth cubic round joins; inward shrink uses
+tangent intersection and crossing/coincident-branch dissolution. The
+three-guide evidence uses positive inward gap and triangular line rings. The
+authored-cubic outward witness uses fixed `-40` gap, giving 20-unit outward
+edge growth and 40-unit neighbor overlap with smooth joins. Collapse evidence
+is intentionally transparent; sparse authored-cubic coverage reflects six
+complete bounded faces, not raster resolution.
+
+- Provides fill-only region treatments `Full`, `Scale`, and `ConstantGap`. It adds no
   outlines, outline-only rendering, wall complements, or subtractive region
   geometry.
-- Scale a Voronoi cell about its source site and a guide face about its area
+- Scales a Voronoi cell about its source site and a guide face about its area
   centroid. Scale ranges are finite, ordered, and nonnegative. Zero removes the
   component; values above one may overlap neighboring regions.
-- Define Constant Gap in finite absolute canvas units. Positive `g` offsets
+- Defines Constant Gap in finite absolute canvas units. Positive `g` offsets
   each adjacent region inward by `g / 2`; zero is neutral; negative values grow
   regions and may overlap. Maximum outward expansion participates in required
   support.
-- Keep reusable closed-region scaling and offset cleanup in geometry, including
+- Uses reusable closed-region scaling and offset cleanup in geometry, including
   crossing dissolution, winding normalization, deterministic splitting, and
   collapse. The initial collapse policy is `Remove`; do not invent a fallback
   mark.
-- Add a matching typed region geometry response and per-output/channel deltas.
+- Adds a matching typed region geometry response and per-output/channel deltas.
   Region source/treatment edits invalidate `Family`; numeric response changes
   invalidate `Realization`; paint and opacity retain their existing downstream
   invalidation.
-- Support `ReferencePoint` sampling at the Voronoi site or guide-face centroid
+- Supports `ReferencePoint` sampling at the Voronoi site or guide-face centroid
   and deterministic `AreaAverage` sampling over the untreated base region in
   the decoded source domain. Area averaging uses bounded deterministic
   flattening and sampling-owned piecewise-bilinear integration, follows the
   existing alpha-association contract, and never samples already-modulated
   geometry.
-- Add a configurable default limit of 33,554,432 source-pixel cell
+- Enforces a configurable default limit of 33,554,432 source-pixel cell
   intersections. Allocation, work-limit, cancellation, identity, coverage, and
   geometry failures publish no partial region set.
 
@@ -223,7 +236,7 @@ valid.
   `scripts/validate_architecture.sh`, protected-path review, immutable-asset
   hashes, and semantic-map reconciliation. No GTK/Wayland run is required;
   compile-check only any unavoidable mechanical app adapter.
-- For Stages 20Q–20S, stop each stage at **Implemented awaiting review** and
+- For Stages 20R–20S, stop each stage at **Implemented awaiting review** and
   again at **Ready for user acceptance**. Do not commit, push, publish, or
   begin the next stage without explicit authorization.
 

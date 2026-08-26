@@ -1,6 +1,6 @@
 # Toniator Progress Tracker
 
-Last updated: **2026-08-25**. The durable execution contract is
+Last updated: **2026-08-26**. The durable execution contract is
 [GREENFIELD_REWRITE_PLAN.md](docs/GREENFIELD_REWRITE_PLAN.md). Normative
 architecture remains in the five protected [Project Specification files](Project%20Specification/Addendum.md).
 
@@ -574,7 +574,7 @@ final clipping. Eligible `FamilySiteSet` products include along-guide and
 It adds guard-inclusive realization, exact-duplicate co-ownership, bounded
 geometry-private Spade topology, and fixed solid Full regions without a
 channel-specific region treatment. Independent re-review and final artifact
-inspection passed. Stage 20Q+ remains Planned and separately gated.
+inspection passed. Stage 20R+ remains Planned and separately gated.
 
 **Stage 20P — Complete at implementation checkpoint
 `cd531eb65dd2e161e62f355905ad936b8c1ca3c4`.** The user accepted the bounded
@@ -596,11 +596,12 @@ intrinsic native/SVG artifact generation, visual inspection, independent
 read-only review, and parent verification are complete. Direct raw
 `ParametricPaths` remain Guide-Faces-ineligible, while typed parametric
 site/Voronoi mechanisms remain valid. Do not push, publish, or begin Stage
-20Q.
+20R.
 
-**Stage 20Q — Accepted awaiting checkpoint (2026-08-26).** The user reaccepted the
-bounded headless filled-region realization after independent review and parent verification
-confirmed the focused
+**Stage 20Q — Complete at implementation checkpoint
+`071f3604098c0660a876fbe30050a64223fe41b3`.** The user reaccepted the bounded
+headless filled-region realization on 2026-08-26 after the repaired
+implementation passed independent review and parent verification confirmed the focused
 tests, current foundations, strict checks, architecture and protected-input gates,
 semantic-map freshness, artifact hashes, RGB/alpha statistics, and intrinsic native/SVG
 raster inspections under
@@ -610,21 +611,23 @@ ordinary Voronoi and Guide Face regions, with domain-owned reference/area-averag
 sampling, typed cache-aware realization, sampled region paint, and final-consumer
 PNG/SVG rendering. The one-output gate, schema-v5/preset-v3 authored persistence,
 canonical untreated-region identity, final canvas clip, and headless-only boundary
-remain in force. The 2026-08-26 acceptance correction uses subdivided smooth round joins
-for convex outward growth, tangent-intersection/crossing/coincident-branch dissolution for
-inward shrink, positive-inward triangular three-guide evidence, and intentionally transparent
-collapse evidence. The repaired local implementation checkpoint remains pending; no
-documentation closeout or commit is authorized. Stage 20R+ remains separately gated.
+remain in force. Positive ConstantGap shrinks and negative ConstantGap grows; convex
+outward growth uses subdivided smooth cubic round joins, while inward shrink uses tangent
+intersection plus crossing/coincident-branch dissolution. The three-guide evidence uses
+positive inward gap and triangular line rings. The authored-cubic outward witness uses a
+fixed -40 gap (20-unit outward edge growth and 40-unit neighbor overlap) with smooth joins.
+Collapse evidence is intentionally transparent; sparse authored-cubic coverage reflects
+six complete bounded faces, not raster resolution. Publication remains separate, and Stage
+20R+ remains separately gated.
 
 **Remaining Stage 20N+ — Stage 20R+ Planned.** The user accepted the revised remainder
 roadmap on 2026-08-24 under
 [`STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md`](docs/STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md).
-The accepted order after completed 20N is 20O
-ordinary Voronoi; 20P guide faces; 20Q filled-region realization; 20R
-composites and site-use filters; and 20S headless capability/gallery recipe
+The accepted order after completed 20Q is 20R composites and site-use filters;
+then 20S headless capability/gallery recipe
 completion. Stage 21 owns pattern-authoring GTK, Stage 22 owns all headless
 frame/media/sequence/simple-transition work, and Stage 23 owns temporal GTK
-with start/end pins. Stage 20Q+ and Stages 21–23 remain Planned and separately
+with start/end pins. Stage 20R+ and Stages 21–23 remain Planned and separately
 gated.
 
 ## Maintenance rules
