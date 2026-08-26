@@ -5,8 +5,9 @@ use toniator_domain::{
     AuthoredStructureKind, CanvasSpec, ConnectedGeometryResponse, CoveragePolicy, Document,
     DocumentId, GeneralizedSiteProduct, GuideDimension, GuideDimensionId, GuidePrototype,
     GuideRepetition, MarkOrientation, OffsetCleanup, OffsetSides, PathStrokeStyle,
-    PatternDefinition, PatternDefinitionId, PatternGeometryResponse, PatternMechanismId,
-    PatternOutputLayer, PatternOutputLayerId, SourceReference, SourceReferenceId,
+    PatternDefinition, PatternDefinitionBundle, PatternDefinitionId, PatternGeometryResponse,
+    PatternMechanismId, PatternOutputLayer, PatternOutputLayerId, PatternOutputSettings,
+    SourceReference, SourceReferenceId,
 };
 use toniator_io::{EmbeddedSource, EmbeddedSourceFormat, SourceBundle, load, save};
 
@@ -61,15 +62,21 @@ fn normal_offset_document(
     }];
     let mut settings = base.pattern_settings().clone();
     settings.definition_id = definition.id;
-    settings.geometry_response = PatternGeometryResponse::Connected(ConnectedGeometryResponse {
-        minimum_thickness: 0.02,
-        maximum_thickness: 0.05,
-    });
+    let bundle = PatternDefinitionBundle {
+        output_settings: vec![PatternOutputSettings {
+            output_layer_id: PatternOutputLayerId(94),
+            response: PatternGeometryResponse::Connected(ConnectedGeometryResponse {
+                minimum_thickness: 0.02,
+                maximum_thickness: 0.05,
+            }),
+        }],
+        definition,
+    };
     Document::with_source_topology_and_authored_structures(
         DocumentId(91),
         base.canvas().clone(),
         base.source().clone(),
-        vec![definition],
+        vec![bundle],
         settings,
         base.channel_model().expect("modeled document").to_owned(),
         base.channel_topology().expect("modeled document").clone(),
@@ -148,7 +155,7 @@ fn normal_offset_v4_round_trip_is_deterministic_and_derived_state_free() {
         fs::read(&second).expect("second bytes")
     );
     assert!(matches!(
-        reopened.document().pattern_definitions()[0].mechanisms[0],
+        reopened.document().pattern_definition_bundles()[0].definition.mechanisms[0],
         toniator_domain::PatternMechanism::GuideDimensions { ref dimensions, .. }
             if matches!(dimensions[0].repetition,
                 GuideRepetition::NormalOffset {
@@ -237,7 +244,7 @@ fn writes_cubic_offset_diagnostic_document() {
     let original = fs::read(&path).expect("cubic diagnostic bytes");
     let reopened = load(&path).expect("cubic diagnostic reopens");
     assert!(matches!(
-        reopened.document().pattern_definitions()[0].mechanisms[0],
+        reopened.document().pattern_definition_bundles()[0].definition.mechanisms[0],
         toniator_domain::PatternMechanism::GuideDimensions { ref dimensions, .. }
             if matches!(dimensions[0].repetition,
                 GuideRepetition::NormalOffset {

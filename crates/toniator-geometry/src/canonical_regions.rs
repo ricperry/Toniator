@@ -69,6 +69,18 @@ pub struct CanonicalRegionSourceGroup {
     pub components: Vec<CurvePath>,
 }
 
+/// One canonical source identity with opaque caller-owned component tags.
+///
+/// Tags never affect canonical geometry, ordering, IDs, or fingerprints. They let a geometry
+/// caller recover ownership after several independently treated bases share one source identity.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TaggedCanonicalRegionSourceGroup {
+    /// Supplies the unique producer-owned source identity for this aggregate canonical group.
+    pub source_id: CanonicalRegionSourceId,
+    /// Supplies candidate rings paired with opaque ownership tags.
+    pub components: Vec<(CurvePath, u64)>,
+}
+
 /// Input for one atomic canonical-region build.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CanonicalRegionProposal {
@@ -196,6 +208,18 @@ impl fmt::Display for CanonicalRegionError {
 impl Error for CanonicalRegionError {}
 
 impl CanonicalRegionSet {
+    /// Builds the valid empty result used only after a treatment removes every base component.
+    ///
+    /// This constructor deliberately cannot be used by source-region producers, whose canonical
+    /// proposal boundary remains nonempty. Its stable identity is independent of limits and
+    /// diagnostics because no source geometry survived treatment.
+    pub fn empty() -> Self {
+        Self {
+            regions: Vec::new(),
+            fingerprint: "canonical-regions-empty-v1".to_owned(),
+        }
+    }
+
     /// Returns the complete ordered canonical regions; no partial result is ever exposed.
     pub fn regions(&self) -> &[CanonicalRegion] {
         &self.regions
@@ -307,6 +331,120 @@ pub fn build_canonical_regions_cancellable(
             fingerprint,
         },
         diagnostics,
+    ))
+}
+
+/// Builds one atomic canonical set and returns caller-owned tags in retained canonical order.
+///
+/// This is the only tagged construction seam: tags follow their component through validation and
+/// canonical ordering, but cannot influence any returned region ID or fingerprint.
+///
+/// # Errors
+///
+/// Returns the same stable cancellation, identity, geometry, allocation, and limit failures as
+/// [`build_canonical_regions_cancellable`] without exposing partial geometry or tags.
+pub fn build_tagged_canonical_regions_cancellable(
+    output_layer_id: PatternOutputLayerId,
+    source_groups: Vec<TaggedCanonicalRegionSourceGroup>,
+    limits: CanonicalRegionLimits,
+    cancelled: impl Fn() -> bool,
+) -> Result<(CanonicalRegionSet, CanonicalRegionDiagnostics, Vec<u64>), CanonicalRegionError> {
+    let mut work = RegionWork::new(limits, &cancelled);
+    if output_layer_id.0 == 0 {
+        return Err(CanonicalRegionError::new(
+            "region.identity.output",
+            "canonical regions require a nonzero output-layer ID",
+        ));
+    }
+    if source_groups.is_empty() {
+        return Err(CanonicalRegionError::new(
+            "region.identity.groups",
+            "canonical regions require at least one source group",
+        ));
+    }
+    if source_groups.len() > limits.max_source_groups {
+        return Err(CanonicalRegionError::new(
+            "region.limits.source_groups",
+            "canonical-region source-group limit exceeded",
+        ));
+    }
+    let source_group_count = source_groups.len();
+    let mut groups = source_groups;
+    for group in &groups {
+        validate_source_id(&group.source_id)?;
+        work.poll()?;
+    }
+    groups.sort_by(|left, right| left.source_id.cmp(&right.source_id));
+    if groups
+        .windows(2)
+        .any(|pair| pair[0].source_id == pair[1].source_id)
+    {
+        return Err(CanonicalRegionError::new(
+            "region.identity.duplicate",
+            "canonical-region source identities must be unique",
+        ));
+    }
+    let mut regions = Vec::new();
+    let mut tags = Vec::new();
+    for group in groups {
+        if group.components.is_empty() {
+            return Err(CanonicalRegionError::new(
+                "region.geometry.components",
+                "canonical-region source groups require at least one component",
+            ));
+        }
+        let mut components = Vec::new();
+        for (component, tag) in group.components {
+            let (ring, area, bounds) = canonicalize_ring(component, &mut work)?;
+            components.push((ring, area, bounds, tag));
+        }
+        components.sort_by(|left, right| {
+            canonical_component_order(
+                &(left.0.clone(), left.1, left.2),
+                &(right.0.clone(), right.1, right.2),
+            )
+        });
+        for (ordinal, (ring, area, bounds, tag)) in components.into_iter().enumerate() {
+            if ordinal > u32::MAX as usize {
+                return Err(CanonicalRegionError::new(
+                    "region.allocation.ordinal",
+                    "canonical-region component ordinal exceeds u32",
+                ));
+            }
+            if regions.len() >= limits.max_regions {
+                return Err(CanonicalRegionError::new(
+                    "region.limits.regions",
+                    "canonical-region retained-region limit exceeded",
+                ));
+            }
+            regions.push(CanonicalRegion {
+                id: CanonicalRegionId {
+                    output_layer_id,
+                    source_id: group.source_id.clone(),
+                    component_ordinal: ordinal as u32,
+                },
+                ring,
+                area,
+                bounds,
+            });
+            tags.push(tag);
+        }
+    }
+    regions.sort_by(|left, right| left.id.cmp(&right.id));
+    work.poll()?;
+    let fingerprint = region_fingerprint(&regions, &mut work)?;
+    Ok((
+        CanonicalRegionSet {
+            regions,
+            fingerprint,
+        },
+        CanonicalRegionDiagnostics {
+            source_groups: source_group_count,
+            regions: tags.len(),
+            segments: work.segments,
+            inspections: work.inspections,
+        },
+        tags,
     ))
 }
 

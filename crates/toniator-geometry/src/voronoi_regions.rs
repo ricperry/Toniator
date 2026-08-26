@@ -405,6 +405,49 @@ pub fn build_voronoi_regions_cancellable(
     Ok((regions, diagnostics))
 }
 
+/// Returns normalized source-site references keyed one-to-one with ordinary canonical regions.
+///
+/// Duplicate co-owners intentionally share the same normalized coordinate. References are
+/// producer metadata and never participate in the accepted canonical-region fingerprint.
+///
+/// # Errors
+///
+/// Returns a stable identity failure if a retained region is not owned by the supplied site set.
+pub fn voronoi_region_references(
+    family: &FamilySiteSet,
+    regions: &CanonicalRegionSet,
+) -> Result<Vec<(crate::CanonicalRegionId, Point2)>, VoronoiRegionError> {
+    regions
+        .regions()
+        .iter()
+        .map(|region| {
+            let CanonicalRegionSourceId::SiteOwners(owners) = &region.id.source_id else {
+                return Err(VoronoiRegionError::new(
+                    "region.treatment.identity.reference",
+                    "ordinary region has a non-site source identity",
+                ));
+            };
+            let owner = owners.first().ok_or(VoronoiRegionError::new(
+                "region.treatment.identity.reference",
+                "ordinary region has no site owner",
+            ))?;
+            let site = family.sites().iter().find(|site| site.id == *owner).ok_or(
+                VoronoiRegionError::new(
+                    "region.treatment.identity.reference",
+                    "ordinary region owner is absent from the family",
+                ),
+            )?;
+            Ok((
+                region.id.clone(),
+                Point2::new(
+                    normalize_zero(site.position.x),
+                    normalize_zero(site.position.y),
+                ),
+            ))
+        })
+        .collect()
+}
+
 /// Groups exact normalized coordinates without changing source-site identities.
 fn group_sites(
     family: &FamilySiteSet,

@@ -164,7 +164,7 @@ fn guide_face_document_v5_round_trips_without_derived_state() {
     ));
     assert!(matches!(
         bundle.output_settings[0].response,
-        PatternGeometryResponse::Regions(RegionGeometryResponse::Full)
+        PatternGeometryResponse::Regions(RegionGeometryResponse::Full { .. })
     ));
     let file = fs::File::open(&path).expect("archive opens");
     let mut archive = zip::ZipArchive::new(file).expect("current archive");

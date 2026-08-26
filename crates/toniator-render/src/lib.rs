@@ -100,7 +100,7 @@ pub struct RenderOutputLayer {
     pub output_layer_id: toniator_domain::PatternOutputLayerId,
     /// Canonical geometry consumed only by raster and SVG final consumers.
     pub geometry: GeometryOutput,
-    /// Optional sampled paint, valid only for mark primitives and cardinally aligned to them.
+    /// Optional sampled paint, cardinally aligned to canonical marks or canonical regions.
     pub primitive_paints: Option<Vec<ColorValue>>,
 }
 
@@ -650,24 +650,22 @@ fn validate_output_geometry(output: &RenderOutputLayer) -> Result<(), RenderErro
         }
     }
     if let Some(paints) = &output.primitive_paints {
-        if matches!(
-            output.geometry,
-            GeometryOutput::CanonicalStrokes(_) | GeometryOutput::CanonicalRegions(_)
-        ) {
+        if matches!(output.geometry, GeometryOutput::CanonicalStrokes(_)) {
             return Err(RenderError::new(
                 "scene.layer.source_color",
-                "strokes and regions require solid channel paint",
+                "canonical strokes require solid channel paint",
             ));
         }
-        let marks = match &output.geometry {
+        let primitives = match &output.geometry {
             GeometryOutput::CircularMarks(marks) => marks.len(),
             GeometryOutput::CanonicalMarks(marks) => marks.len(),
-            GeometryOutput::CanonicalStrokes(_) | GeometryOutput::CanonicalRegions(_) => 0,
+            GeometryOutput::CanonicalRegions(regions) => regions.regions().len(),
+            GeometryOutput::CanonicalStrokes(_) => 0,
         };
-        if paints.len() != marks {
+        if paints.len() != primitives {
             return Err(RenderError::new(
                 "scene.layer.source_color",
-                "source-colored paint count must match canonical mark count",
+                "source-colored paint count must match canonical primitive count",
             ));
         }
         for paint in paints {
@@ -679,7 +677,8 @@ fn validate_output_geometry(output: &RenderOutputLayer) -> Result<(), RenderErro
                     ));
                 }
             }
-            if paint.alpha != 1.0 {
+            if !matches!(output.geometry, GeometryOutput::CanonicalRegions(_)) && paint.alpha != 1.0
+            {
                 return Err(RenderError::new(
                     "scene.layer.source_color",
                     "sampled per-mark paint alpha must be exactly 1.0",
@@ -1682,13 +1681,13 @@ fn rasterize_stage5(
                     }
                 }
                 GeometryOutput::CanonicalRegions(regions) => {
-                    for region in regions.regions() {
+                    for (index, region) in regions.regions().iter().enumerate() {
                         composite_canonical_region(
                             &mut linear_pixels,
                             width,
                             height,
                             region,
-                            &layer.color,
+                            output_primitive_paint(layer, Some(output), index),
                             layer.opacity,
                             CanonicalRasterTransform::native(),
                             work,
@@ -1800,13 +1799,13 @@ fn rasterize_layer(
                 }
             }
             GeometryOutput::CanonicalRegions(regions) => {
-                for region in regions.regions() {
+                for (index, region) in regions.regions().iter().enumerate() {
                     composite_canonical_region(
                         &mut pixels,
                         width,
                         height,
                         region,
-                        &layer.color,
+                        output_primitive_paint(layer, Some(output), index),
                         layer.opacity,
                         CanonicalRasterTransform::native(),
                         work,
@@ -1888,13 +1887,13 @@ fn rasterize_layer_with_transform(
                 }
             }
             GeometryOutput::CanonicalRegions(regions) => {
-                for region in regions.regions() {
+                for (index, region) in regions.regions().iter().enumerate() {
                     composite_canonical_region(
                         &mut pixels,
                         width,
                         height,
                         region,
-                        &layer.color,
+                        output_primitive_paint(layer, Some(output), index),
                         layer.opacity,
                         CanonicalRasterTransform::preview(transform),
                         work,
@@ -2046,13 +2045,13 @@ fn rasterize_layer_for_output(
                 }
             }
             GeometryOutput::CanonicalRegions(regions) => {
-                for region in regions.regions() {
+                for (index, region) in regions.regions().iter().enumerate() {
                     composite_canonical_region(
                         &mut pixels,
                         target.width,
                         target.height,
                         region,
-                        &layer.color,
+                        output_primitive_paint(layer, Some(output), index),
                         layer.opacity,
                         CanonicalRasterTransform::output(transform),
                         work,
@@ -3081,7 +3080,7 @@ fn write_svg_geometry(
                 let paint = layer.map_or_else(String::new, |layer| {
                     format!(
                         " fill=\"{}\"",
-                        color_hex(svg_mark_paint(layer, output, index))
+                        color_hex(output_primitive_paint(layer, output, index))
                     )
                 });
                 let opacity = layer.map_or_else(
@@ -3090,7 +3089,7 @@ fn write_svg_geometry(
                         format!(
                             " fill-opacity=\"{}\"",
                             compact_number(
-                                svg_mark_paint(layer, output, index).alpha * layer.opacity
+                                output_primitive_paint(layer, output, index).alpha * layer.opacity
                             )
                         )
                     },
@@ -3111,7 +3110,7 @@ fn write_svg_geometry(
                 let paint = layer.map_or_else(String::new, |layer| {
                     format!(
                         " fill=\"{}\"",
-                        color_hex(svg_mark_paint(layer, output, index))
+                        color_hex(output_primitive_paint(layer, output, index))
                     )
                 });
                 let opacity = layer.map_or_else(
@@ -3120,7 +3119,7 @@ fn write_svg_geometry(
                         format!(
                             " fill-opacity=\"{}\"",
                             compact_number(
-                                svg_mark_paint(layer, output, index).alpha * layer.opacity
+                                output_primitive_paint(layer, output, index).alpha * layer.opacity
                             )
                         )
                     },
@@ -3214,10 +3213,11 @@ fn write_svg_geometry(
                 }
                 let data = svg_curve_path_data(&region.ring);
                 let paint = layer.map_or_else(String::new, |value| {
+                    let paint = output_primitive_paint(value, output, index);
                     format!(
                         " fill=\"{}\" fill-opacity=\"{}\"",
-                        color_hex(&value.color),
-                        compact_number(value.color.alpha * value.opacity)
+                        color_hex(paint),
+                        compact_number(paint.alpha * value.opacity)
                     )
                 });
                 document.push_str(&format!("<path id=\"channel-{channel_id}-region-{index}\" d=\"{data}\" fill-rule=\"nonzero\"{paint}/>\n"));
@@ -3227,7 +3227,10 @@ fn write_svg_geometry(
 }
 
 /// Resolves one output-local sampled paint while preserving channel-owned solid-paint fallback.
-fn svg_mark_paint<'a>(
+///
+/// Region and mark consumers share this lookup only after validation has established exact
+/// primitive cardinality; it never synthesizes, associates, or repairs paint data.
+fn output_primitive_paint<'a>(
     layer: &'a RenderLayer,
     output: Option<&'a RenderOutputLayer>,
     index: usize,

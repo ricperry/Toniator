@@ -34,7 +34,7 @@ fn one_preset_recipe_targets_document_base_or_selected_channel() {
     );
     let base_id = base.document().pattern_settings().definition_id;
     assert_ne!(base_id.0, 1);
-    assert_eq!(base.document().pattern_definitions().len(), 2);
+    assert_eq!(base.document().pattern_definition_bundles().len(), 2);
 
     let mut selected = history();
     let selected_result = registry
@@ -49,18 +49,20 @@ fn one_preset_recipe_targets_document_base_or_selected_channel() {
         .expect("selected override is explicit");
     assert_ne!(override_id.0, 1);
     assert_eq!(selected.document().pattern_settings().definition_id.0, 1);
-    assert_eq!(selected.document().pattern_definitions().len(), 2);
+    assert_eq!(selected.document().pattern_definition_bundles().len(), 2);
     assert_eq!(
         base.document()
-            .pattern_definitions()
+            .pattern_definition_bundles()
             .iter()
+            .map(|bundle| &bundle.definition)
             .find(|definition| definition.id == base_id)
             .expect("base definition")
             .name,
         selected
             .document()
-            .pattern_definitions()
+            .pattern_definition_bundles()
             .iter()
+            .map(|bundle| &bundle.definition)
             .find(|definition| definition.id == override_id)
             .expect("override definition")
             .name

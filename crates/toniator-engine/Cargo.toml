@@ -15,3 +15,8 @@ sha2.workspace = true
 
 [lib]
 path = "src/lib.rs"
+
+[dev-dependencies]
+# Enables the patterns-side test evidence record only while compiling this crate's tests.
+toniator-patterns = { path = "../toniator-patterns", features = ["test-evidence"] }
+image.workspace = true

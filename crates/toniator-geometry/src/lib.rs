@@ -16,6 +16,7 @@ mod maze_walls;
 mod outlines;
 mod path_offsets;
 mod planar_arrangement;
+mod region_treatment;
 mod site_adjacency;
 mod voronoi_regions;
 
@@ -24,7 +25,8 @@ pub use canonical_regions::{
     CanonicalRegionError, CanonicalRegionId, CanonicalRegionLimits, CanonicalRegionProposal,
     CanonicalRegionSet, CanonicalRegionSourceGroup, CanonicalRegionSourceId,
     DEFAULT_MAX_REGION_INSPECTIONS, DEFAULT_MAX_REGION_SEGMENTS, DEFAULT_MAX_REGION_SOURCE_GROUPS,
-    DEFAULT_MAX_REGIONS, build_canonical_regions, build_canonical_regions_cancellable,
+    DEFAULT_MAX_REGIONS, TaggedCanonicalRegionSourceGroup, build_canonical_regions,
+    build_canonical_regions_cancellable, build_tagged_canonical_regions_cancellable,
 };
 pub use connection_paths::{
     CONNECTION_NEAREST_SELECTION_CONTRACT_ID, CONNECTION_PATH_CONTRACT_ID,
@@ -60,7 +62,13 @@ pub use path_offsets::{
     MAX_PATH_OFFSET_CLEANUP_PAIRS, MAX_PATH_OFFSET_COMPONENTS, MAX_PATH_OFFSET_CUSP_ISOLATION_WORK,
     MAX_PATH_OFFSET_SEGMENTS, MAX_PATH_OFFSET_SUBDIVISION_DEPTH, OffsetPathComponent,
     PATH_OFFSET_ALGORITHM_CONTRACT_ID, PathOffsetCleanup, PathOffsetEndpointPolicy,
-    PathOffsetLimits, PathOffsetRequest, PathOffsetResult, offset_path_cancellable,
+    PathOffsetLimits, PathOffsetRequest, PathOffsetResult, PathOffsetWork, offset_path_cancellable,
+    offset_path_with_work_cancellable,
+};
+pub use region_treatment::{
+    REGION_TREATMENT_CONTRACT_ID, RegionReference, RegionTreatment, RegionTreatmentError,
+    RegionTreatmentLimits, RegionTreatmentProvenance, RegionTreatmentRequest,
+    RegionTreatmentResult, treat_region_requests_cancellable, treat_regions_cancellable,
 };
 pub use site_adjacency::{
     SITE_ADJACENCY_CONTRACT_ID, SiteAdjacencyComponent, SiteAdjacencyEdge, SiteAdjacencyError,
@@ -69,7 +77,7 @@ pub use site_adjacency::{
 };
 pub use voronoi_regions::{
     VORONOI_REGION_CONTRACT_ID, VoronoiRegionDiagnostics, VoronoiRegionError, VoronoiRegionLimits,
-    VoronoiRegionRequest, build_voronoi_regions_cancellable,
+    VoronoiRegionRequest, build_voronoi_regions_cancellable, voronoi_region_references,
 };
 
 /// A finite document- or pattern-local point.

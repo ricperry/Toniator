@@ -31,10 +31,11 @@ use toniator_domain::{
     PatternDefinitionRecipe, PatternGeometryResponse, PatternMechanismId, PatternOutputLayerId,
     PatternOutputResponseDelta, PatternOutputSettings, PatternOutputSettingsRecipe,
     PatternStructureRecipe, PresetMetadata, PresetRecord, RandomSiteCharacter,
-    RegionGeometryResponse, RegionSourceIntent, SiteDensityModulation, SiteExclusionPolicy,
-    SourceComponent, SourceMapping, SourceMappingComponent, SourcePlacement, SourceReference,
-    SourceReferenceId, SpiralCurve, SpiralShape, StraightGuideDimension, StraightGuideRepetition,
-    ValidationError, VisibleMarkSizingPolicy,
+    RegionGeometryResponse, RegionGeometryResponseDelta, RegionSamplingStrategy,
+    RegionSourceIntent, SiteDensityModulation, SiteExclusionPolicy, SourceComponent, SourceMapping,
+    SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId, SpiralCurve,
+    SpiralShape, StraightGuideDimension, StraightGuideRepetition, ValidationError,
+    VisibleMarkSizingPolicy,
 };
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
@@ -1908,22 +1909,65 @@ struct ChannelPatternInstanceDto {
 
 /// Current-v5 optional channel response intent keyed to a structural output.
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PatternOutputResponseDeltaDtoV5 {
     output_layer_id: u64,
     delta: ChannelGeometryResponseDeltaDto,
 }
 #[derive(Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum PatternGeometryResponseDto {
     Marks { response: MarkResponseDto },
     Connected { response: ConnectedResponseDto },
-    Regions,
+    Regions { response: RegionResponseDtoV5 },
+}
+
+/// Current v5 tagged authored treatment for a region output.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "treatment", rename_all = "snake_case", deny_unknown_fields)]
+enum RegionResponseDtoV5 {
+    Full {
+        sampling: RegionSamplingStrategyDtoV5,
+    },
+    Scale {
+        sampling: RegionSamplingStrategyDtoV5,
+        minimum_scale: f64,
+        maximum_scale: f64,
+    },
+    ConstantGap {
+        sampling: RegionSamplingStrategyDtoV5,
+        minimum_gap: f64,
+        maximum_gap: f64,
+    },
+}
+
+/// Current v5 sampling selector; absence is intentionally rejected by serde.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RegionSamplingStrategyDtoV5 {
+    ReferencePoint,
+    AreaAverage,
 }
 #[derive(Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum ChannelGeometryResponseDeltaDto {
     Marks { delta: MarkResponseDeltaDto },
     Connected { delta: ConnectedResponseDeltaDto },
+    Regions { delta: RegionResponseDeltaDtoV5 },
+}
+
+/// Current v5 tagged region endpoint delta record.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "treatment", rename_all = "snake_case", deny_unknown_fields)]
+enum RegionResponseDeltaDtoV5 {
+    Scale {
+        minimum_scale_delta: Option<f64>,
+        maximum_scale_delta: Option<f64>,
+    },
+    ConstantGap {
+        minimum_gap_delta: Option<f64>,
+        maximum_gap_delta: Option<f64>,
+    },
 }
 
 impl PatternGeometryResponseDto {
@@ -1936,7 +1980,9 @@ impl PatternGeometryResponseDto {
             PatternGeometryResponse::Connected(response) => Self::Connected {
                 response: ConnectedResponseDto::from_domain(response),
             },
-            PatternGeometryResponse::Regions(RegionGeometryResponse::Full) => Self::Regions,
+            PatternGeometryResponse::Regions(response) => Self::Regions {
+                response: RegionResponseDtoV5::from_domain(response),
+            },
         }
     }
 
@@ -1947,7 +1993,7 @@ impl PatternGeometryResponseDto {
             Self::Connected { response } => {
                 PatternGeometryResponse::Connected(response.into_domain())
             }
-            Self::Regions => PatternGeometryResponse::Regions(RegionGeometryResponse::Full),
+            Self::Regions { response } => PatternGeometryResponse::Regions(response.into_domain()),
         }
     }
 }
@@ -1962,6 +2008,9 @@ impl ChannelGeometryResponseDeltaDto {
             ChannelGeometryResponseDelta::Connected(delta) => Self::Connected {
                 delta: ConnectedResponseDeltaDto::from_domain(delta),
             },
+            ChannelGeometryResponseDelta::Regions(delta) => Self::Regions {
+                delta: RegionResponseDeltaDtoV5::from_domain(delta),
+            },
         }
     }
 
@@ -1972,6 +2021,121 @@ impl ChannelGeometryResponseDeltaDto {
             Self::Connected { delta } => {
                 ChannelGeometryResponseDelta::Connected(delta.into_domain())
             }
+            Self::Regions { delta } => ChannelGeometryResponseDelta::Regions(delta.into_domain()),
+        }
+    }
+}
+
+impl RegionResponseDtoV5 {
+    /// Projects current authored region treatment without resolving effective channel values.
+    fn from_domain(value: &RegionGeometryResponse) -> Self {
+        match value {
+            RegionGeometryResponse::Full { sampling } => Self::Full {
+                sampling: RegionSamplingStrategyDtoV5::from_domain(*sampling),
+            },
+            RegionGeometryResponse::Scale {
+                sampling,
+                minimum_scale,
+                maximum_scale,
+            } => Self::Scale {
+                sampling: RegionSamplingStrategyDtoV5::from_domain(*sampling),
+                minimum_scale: *minimum_scale,
+                maximum_scale: *maximum_scale,
+            },
+            RegionGeometryResponse::ConstantGap {
+                sampling,
+                minimum_gap,
+                maximum_gap,
+            } => Self::ConstantGap {
+                sampling: RegionSamplingStrategyDtoV5::from_domain(*sampling),
+                minimum_gap: *minimum_gap,
+                maximum_gap: *maximum_gap,
+            },
+        }
+    }
+
+    /// Rebuilds one current authored region treatment for domain validation.
+    fn into_domain(self) -> RegionGeometryResponse {
+        match self {
+            Self::Full { sampling } => RegionGeometryResponse::Full {
+                sampling: sampling.into_domain(),
+            },
+            Self::Scale {
+                sampling,
+                minimum_scale,
+                maximum_scale,
+            } => RegionGeometryResponse::Scale {
+                sampling: sampling.into_domain(),
+                minimum_scale,
+                maximum_scale,
+            },
+            Self::ConstantGap {
+                sampling,
+                minimum_gap,
+                maximum_gap,
+            } => RegionGeometryResponse::ConstantGap {
+                sampling: sampling.into_domain(),
+                minimum_gap,
+                maximum_gap,
+            },
+        }
+    }
+}
+
+impl RegionSamplingStrategyDtoV5 {
+    /// Projects the stable sampling tag without deriving a sample.
+    fn from_domain(value: RegionSamplingStrategy) -> Self {
+        match value {
+            RegionSamplingStrategy::ReferencePoint => Self::ReferencePoint,
+            RegionSamplingStrategy::AreaAverage => Self::AreaAverage,
+        }
+    }
+    /// Rebuilds the stable sampling tag without deriving a sample.
+    fn into_domain(self) -> RegionSamplingStrategy {
+        match self {
+            Self::ReferencePoint => RegionSamplingStrategy::ReferencePoint,
+            Self::AreaAverage => RegionSamplingStrategy::AreaAverage,
+        }
+    }
+}
+
+impl RegionResponseDeltaDtoV5 {
+    /// Projects treatment-compatible endpoint delta intent without materialization.
+    fn from_domain(value: &RegionGeometryResponseDelta) -> Self {
+        match value {
+            RegionGeometryResponseDelta::Scale {
+                minimum_scale_delta,
+                maximum_scale_delta,
+            } => Self::Scale {
+                minimum_scale_delta: *minimum_scale_delta,
+                maximum_scale_delta: *maximum_scale_delta,
+            },
+            RegionGeometryResponseDelta::ConstantGap {
+                minimum_gap_delta,
+                maximum_gap_delta,
+            } => Self::ConstantGap {
+                minimum_gap_delta: *minimum_gap_delta,
+                maximum_gap_delta: *maximum_gap_delta,
+            },
+        }
+    }
+    /// Rebuilds treatment-compatible endpoint delta intent without materialization.
+    fn into_domain(self) -> RegionGeometryResponseDelta {
+        match self {
+            Self::Scale {
+                minimum_scale_delta,
+                maximum_scale_delta,
+            } => RegionGeometryResponseDelta::Scale {
+                minimum_scale_delta,
+                maximum_scale_delta,
+            },
+            Self::ConstantGap {
+                minimum_gap_delta,
+                maximum_gap_delta,
+            } => RegionGeometryResponseDelta::ConstantGap {
+                minimum_gap_delta,
+                maximum_gap_delta,
+            },
         }
     }
 }

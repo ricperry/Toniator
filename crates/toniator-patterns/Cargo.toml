@@ -14,6 +14,11 @@ toniator-sampling = { path = "../toniator-sampling" }
 [lib]
 path = "src/lib.rs"
 
+[features]
+# Compiles test-only observation records for engine-owned validation evidence. This feature is
+# deliberately opt-in so production pattern consumers receive no observation API or ABI surface.
+test-evidence = []
+
 [dev-dependencies]
 image.workspace = true
 serde_json.workspace = true

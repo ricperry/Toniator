@@ -598,7 +598,21 @@ read-only review, and parent verification are complete. Direct raw
 site/Voronoi mechanisms remain valid. Do not push, publish, or begin Stage
 20Q.
 
-**Remaining Stage 20N+ — Stage 20Q+ Planned.** The user accepted the revised remainder
+**Stage 20Q — Accepted awaiting checkpoint.** The user accepted the bounded headless
+filled-region realization review findings; parent verification confirmed the focused
+tests, current foundations, strict checks, architecture and protected-input gates,
+semantic-map freshness, artifact hashes, RGB/alpha statistics, and intrinsic native/SVG
+raster inspections under
+[`STAGE_20Q_FILLED_REGION_REALIZATION_PLAN.md`](docs/STAGE_20Q_FILLED_REGION_REALIZATION_PLAN.md).
+It realizes only fill-only `Full`, `Scale`, and `ConstantGap` treatments for accepted
+ordinary Voronoi and Guide Face regions, with domain-owned reference/area-average
+sampling, typed cache-aware realization, sampled region paint, and final-consumer
+PNG/SVG rendering. The one-output gate, schema-v5/preset-v3 authored persistence,
+canonical untreated-region identity, final canvas clip, and headless-only boundary
+remain in force. Independent review and parent artifact inspection are complete;
+the local implementation checkpoint is pending and Stage 20R+ remains separately gated.
+
+**Remaining Stage 20N+ — Stage 20R+ Planned.** The user accepted the revised remainder
 roadmap on 2026-08-24 under
 [`STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md`](docs/STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md).
 The accepted order after completed 20N is 20O

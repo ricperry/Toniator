@@ -7,9 +7,9 @@ use std::{
 use toniator_domain::{
     CanvasSpec, ConnectedGeometryResponse, CoveragePolicy, Document, DocumentId,
     GeneralizedSiteProduct, GuideDimensionId, MarkOrientation, PathStrokeStyle, PatternDefinition,
-    PatternDefinitionId, PatternGeometryResponse, PatternMechanismId, PatternOutputLayer,
-    PatternOutputLayerId, SourceReference, SourceReferenceId, StraightGuideDimension,
-    StraightGuideRepetition,
+    PatternDefinitionBundle, PatternDefinitionId, PatternGeometryResponse, PatternMechanismId,
+    PatternOutputLayer, PatternOutputLayerId, PatternOutputSettings, SourceReference,
+    SourceReferenceId, StraightGuideDimension, StraightGuideRepetition,
 };
 use toniator_io::{EmbeddedSource, EmbeddedSourceFormat, SourceBundle, load, save};
 
@@ -61,15 +61,21 @@ fn stroke_document(
     settings.definition_id = definition.id;
     settings.density.across_x = resolution;
     settings.density.across_y = resolution;
-    settings.geometry_response = PatternGeometryResponse::Connected(ConnectedGeometryResponse {
-        minimum_thickness: 0.05,
-        maximum_thickness: 0.8,
-    });
+    let bundle = PatternDefinitionBundle {
+        output_settings: vec![PatternOutputSettings {
+            output_layer_id: PatternOutputLayerId(83),
+            response: PatternGeometryResponse::Connected(ConnectedGeometryResponse {
+                minimum_thickness: 0.05,
+                maximum_thickness: 0.8,
+            }),
+        }],
+        definition,
+    };
     Document::with_source_topology_and_authored_structures(
         DocumentId(820),
         base.canvas().clone(),
         base.source().clone(),
-        vec![definition],
+        vec![bundle],
         settings,
         base.channel_model().expect("modeled").to_owned(),
         base.channel_topology().expect("modeled").clone(),
@@ -110,11 +116,12 @@ fn save_reopen_connected_path_documents_for_immutable_sources() {
         save(&path, &document, &bundle).expect("v4 save succeeds");
         let reopened = load(&path).expect("v4 reopen succeeds");
         assert!(matches!(
-            reopened.document().pattern_settings().geometry_response,
+            reopened.document().pattern_definition_bundles()[0].output_settings[0].response,
             PatternGeometryResponse::Connected(_)
         ));
         assert!(matches!(
-            reopened.document().pattern_definitions()[0]
+            reopened.document().pattern_definition_bundles()[0]
+                .definition
                 .output_layers
                 .as_slice(),
             [PatternOutputLayer::GuidePaths { .. }]
@@ -183,7 +190,7 @@ fn connected_path_v4_save_is_deterministic_and_never_serializes_derived_strokes(
     );
     let reopened = load(&first).expect("reopen");
     assert!(
-        matches!(reopened.document().pattern_definitions()[0].output_layers.as_slice(), [PatternOutputLayer::GuidePaths { style, .. }] if *style == PathStrokeStyle::default())
+        matches!(reopened.document().pattern_definition_bundles()[0].definition.output_layers.as_slice(), [PatternOutputLayer::GuidePaths { style, .. }] if *style == PathStrokeStyle::default())
     );
     let archive = fs::read(&first).expect("container bytes");
     assert!(!String::from_utf8_lossy(&archive).contains("canonical_stroke"));

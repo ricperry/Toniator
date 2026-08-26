@@ -106,7 +106,7 @@ fn random_voronoi_document(width: f64, height: f64, source_id: SourceReferenceId
             definition,
             output_settings: vec![PatternOutputSettings {
                 output_layer_id: output_id,
-                response: PatternGeometryResponse::Regions(RegionGeometryResponse::Full),
+                response: PatternGeometryResponse::Regions(RegionGeometryResponse::default()),
             }],
         }],
         settings,
@@ -176,7 +176,7 @@ fn parametric_voronoi_document(width: f64, height: f64, source_id: SourceReferen
             definition,
             output_settings: vec![PatternOutputSettings {
                 output_layer_id: output_id,
-                response: PatternGeometryResponse::Regions(RegionGeometryResponse::Full),
+                response: PatternGeometryResponse::Regions(RegionGeometryResponse::default()),
             }],
         }],
         settings,
@@ -409,6 +409,52 @@ fn parametric_site_regions_evaluate_and_cache() {
             .is_some()
     );
     scheduler.shutdown().expect("shutdown");
+}
+
+/// Proves Full plus solid regions reuse their output realization when only decoded source identity changes.
+///
+/// The source cache must miss because the immutable raster and vector inputs differ, while the
+/// source-independent Full region cache unit and its family remain reusable.
+#[test]
+fn full_solid_region_cache_omits_source_and_mapping_identity() {
+    let source_id = SourceReferenceId::new("stage20q-full-solid-cache").expect("source ID");
+    let session =
+        DocumentSession::new(voronoi_document(180.0, 120.0, source_id.clone())).expect("session");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let raster = fs::read(root.join("assets/raster-sample.png")).expect("raster source reads");
+    let vector = fs::read(root.join("assets/vector-sample.svg")).expect("vector source reads");
+    let scheduler =
+        EvaluationScheduler::new_with_limits(EvaluationLimits::new(1_048_576).expect("limits"))
+            .expect("scheduler");
+    let request = |bytes: Vec<u8>, format| {
+        EvaluationRequest::new(
+            session.document_evaluation_snapshot(),
+            ResolvedSource::new(source_id.clone(), bytes, format).expect("resolved source"),
+        )
+    };
+    let first_ticket = scheduler
+        .submit(request(raster, SourceFormatHint::Png))
+        .expect("raster submit");
+    let first = wait_for_completion(&scheduler);
+    assert_eq!(first.ticket(), first_ticket);
+    assert!(
+        scheduler
+            .accept_completion(&first, &session)
+            .expect("raster completion accepts")
+    );
+    let second_ticket = scheduler
+        .submit(request(vector, SourceFormatHint::Svg))
+        .expect("vector submit");
+    let second = wait_for_completion(&scheduler);
+    assert_eq!(second.ticket(), second_ticket);
+    let diagnostics = second.cache_diagnostics().expect("second diagnostics");
+    assert_eq!(diagnostics.aggregate.decoded_source, CacheDisposition::Miss);
+    assert_eq!(diagnostics.channels[0].family, CacheDisposition::Hit);
+    assert_eq!(
+        diagnostics.channels[0].outputs[0].realization,
+        CacheDisposition::Hit
+    );
+    scheduler.shutdown().expect("scheduler shutdown");
 }
 
 /// Proves per-output region diagnostics and configured Voronoi limits replay from immutable cache units.

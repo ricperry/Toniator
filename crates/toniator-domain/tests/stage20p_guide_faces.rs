@@ -56,7 +56,7 @@ fn guide_face_recipe_requires_ordered_straight_dimensions() {
     validate_preset_record(&record).expect("valid Guide Faces recipe");
     assert!(matches!(
         recipe.output_settings[0].response,
-        PatternGeometryResponse::Regions(RegionGeometryResponse::Full)
+        PatternGeometryResponse::Regions(RegionGeometryResponse::Full { .. })
     ));
     let invalid = PatternDefinitionRecipe::guide_faces(three_guide_structure(), vec![1, 0]);
     assert!(

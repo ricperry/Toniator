@@ -12,7 +12,7 @@ use toniator_domain::CanvasSpec;
 pub use toniator_domain::{
     SourceComponent, SourceMapping, SourceMappingComponent, SourcePlacement,
 };
-use toniator_geometry::Point2;
+use toniator_geometry::{CurvePath, CurveSegment, Point2};
 
 const MAX_SOURCE_PIXELS: u64 = 64 * 1024 * 1024;
 
@@ -67,6 +67,37 @@ pub struct SourceColorSample {
     pub response: f64,
     /// Straight linear source paint for a positive sampled alpha, or `None`
     /// for an exact-zero alpha sample.
+    pub paint: Option<SampledSourcePaint>,
+}
+
+/// Bounded work configuration for deterministic region sampling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegionSamplingLimits {
+    /// Caps decoded-source cell intersection work for a complete request.
+    pub max_cell_intersections: usize,
+    /// Caps flattened boundary segments for a complete request.
+    pub max_flattened_segments: usize,
+    /// Caps deterministic cubic subdivision depth.
+    pub max_subdivision_depth: usize,
+}
+
+impl Default for RegionSamplingLimits {
+    /// Supplies the approved Stage 20Q request-wide sampling limits.
+    fn default() -> Self {
+        Self {
+            max_cell_intersections: 33_554_432,
+            max_flattened_segments: 8_388_608,
+            max_subdivision_depth: 48,
+        }
+    }
+}
+
+/// One scalar response and optional associated source paint for a base region.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RegionSourceSample {
+    /// Supplies the mapped scalar that interpolates a treatment response.
+    pub response: f64,
+    /// Supplies sampled paint only for positive alpha, suppressing hidden RGB at exact zero.
     pub paint: Option<SampledSourcePaint>,
 }
 
@@ -289,6 +320,732 @@ impl SourceField {
                 "sampled value must be finite",
             ))
         }
+    }
+}
+
+/// Samples one producer-owned reference point through the existing mapped and associated-color authority.
+///
+/// # Errors
+///
+/// Propagates only source/canvas/mapping failures and never derives geometry or caches at this boundary.
+pub fn sample_region_reference(
+    field: &SourceField,
+    reference: Point2,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+) -> Result<RegionSourceSample, SamplingError> {
+    let source = field.sample_source_color(reference, canvas, mapping)?;
+    Ok(RegionSourceSample {
+        response: source.response,
+        paint: source.paint,
+    })
+}
+
+/// Deterministically averages one untreated closed region through the complete edge-clamped field.
+///
+/// This convenience boundary owns one request-wide budget for the single region. Callers that
+/// sample multiple base regions must use [`sample_region_area_average_batch`] so their work shares
+/// the same limits.
+///
+/// # Errors
+///
+/// Returns stable geometry, limit, sampling, or cancellation failures without a partial sample.
+pub fn sample_region_area_average(
+    field: &SourceField,
+    region: &CurvePath,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    limits: RegionSamplingLimits,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<RegionSourceSample, SamplingError> {
+    validate_canvas(canvas)?;
+    validate_mapping(mapping)?;
+    let mut work = RegionSamplingWork::new(limits, cancelled)?;
+    sample_region_area_average_with_work(field, region, canvas, mapping, &mut work)
+}
+
+/// Deterministically averages every supplied untreated base region with one shared work budget.
+///
+/// Results retain input order and are returned only if every region completes, so failures and
+/// cancellation never leak a partially aligned paint/sample table.
+///
+/// # Errors
+///
+/// Returns the first stable sampling, geometry, allocation, limit, or cancellation failure.
+pub fn sample_region_area_average_batch(
+    field: &SourceField,
+    regions: &[CurvePath],
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    limits: RegionSamplingLimits,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<RegionSourceSample>, SamplingError> {
+    validate_canvas(canvas)?;
+    validate_mapping(mapping)?;
+    let mut work = RegionSamplingWork::new(limits, cancelled)?;
+    let mut samples = Vec::new();
+    samples.try_reserve(regions.len()).map_err(|_| {
+        SamplingError::new(
+            "sampling.region_average.allocation.samples",
+            "region sample allocation failed",
+        )
+    })?;
+    for region in regions {
+        work.poll()?;
+        samples.push(sample_region_area_average_with_work(
+            field, region, canvas, mapping, &mut work,
+        )?);
+    }
+    Ok(samples)
+}
+
+/// Integrates one flattened region over all intersected source cells and exterior clamp bands.
+///
+/// The caller owns `work`, which makes every flattening and cell charge request-wide. Scalar
+/// response and associated RGB/alpha are integrated against the same exact polygon moments.
+///
+/// # Errors
+///
+/// Returns stable sampling failures and never exposes a partially accumulated sample.
+fn sample_region_area_average_with_work(
+    field: &SourceField,
+    region: &CurvePath,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    work: &mut RegionSamplingWork<'_>,
+) -> Result<RegionSourceSample, SamplingError> {
+    let polygon = flatten_region_source_space_with_work(
+        region,
+        canvas,
+        field.identity.width,
+        field.identity.height,
+        work,
+    )?;
+    let complete = polygon_moments(&polygon);
+    if !complete.area.is_finite() || complete.area.abs() <= f64::EPSILON {
+        return Err(SamplingError::new(
+            "sampling.region_average.geometry",
+            "region average requires nonzero finite area",
+        ));
+    }
+    let (minimum, maximum) = polygon_bounds(&polygon)?;
+    let xs = source_axis_intervals(minimum.x, maximum.x, field.identity.width)?;
+    let ys = source_axis_intervals(minimum.y, maximum.y, field.identity.height)?;
+    let mut totals = [0.0; 5];
+    for y in ys {
+        for x in &xs {
+            work.poll()?;
+            work.charge_cell()?;
+            let clipped = clip_polygon_to_rect_cancellable(
+                &polygon,
+                x.start,
+                x.end,
+                y.start,
+                y.end,
+                work.cancelled,
+            )?;
+            if clipped.is_empty() {
+                continue;
+            }
+            let moments = translate_polygon_moments(
+                polygon_moments(&clipped),
+                Point2::new(f64::from(x.cell), f64::from(y.cell)),
+            );
+            let values = region_cell_values(field, mapping, *x, y);
+            for (total, coefficients) in totals.iter_mut().zip(values) {
+                *total += coefficients[0] * moments.area
+                    + coefficients[1] * moments.mx
+                    + coefficients[2] * moments.my
+                    + coefficients[3] * moments.mxy;
+            }
+        }
+    }
+    let orientation = complete.area.signum();
+    let area = complete.area.abs();
+    let response = (totals[0] * orientation / area).clamp(0.0, 1.0);
+    let alpha = (totals[4] * orientation / area).clamp(0.0, 1.0);
+    let paint = (alpha > 0.0).then(|| SampledSourcePaint {
+        red: (totals[1] * orientation / area / alpha).clamp(0.0, 1.0),
+        green: (totals[2] * orientation / area / alpha).clamp(0.0, 1.0),
+        blue: (totals[3] * orientation / area / alpha).clamp(0.0, 1.0),
+        alpha: 1.0,
+    });
+    Ok(RegionSourceSample { response, paint })
+}
+
+/// Flattens one closed region into unclamped decoded-source coordinates.
+///
+/// The transform intentionally preserves off-source geometry for later exterior clamp-band
+/// integration. Cubics use ordered `t = 0.5` De Casteljau subdivision with a `1/64` pixel
+/// chord tolerance and never append a duplicate closure point.
+///
+/// # Errors
+///
+/// Returns stable geometry, allocation, flattening-limit, or cancellation diagnostics without
+/// exposing a partially flattened candidate.
+#[allow(dead_code)]
+fn flatten_region_source_space(
+    region: &CurvePath,
+    canvas: &CanvasSpec,
+    source_width: u32,
+    source_height: u32,
+    limits: RegionSamplingLimits,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<Point2>, SamplingError> {
+    let mut work = RegionSamplingWork::new(limits, cancelled)?;
+    flatten_region_source_space_with_work(region, canvas, source_width, source_height, &mut work)
+}
+
+/// Flattens one closed boundary into source space while charging the caller-owned request budget.
+///
+/// Source dimensions determine the transform; no pixel data is read before exact cell
+/// integration. Off-canvas coordinates remain unclamped so the exterior clamp bands retain area.
+///
+/// # Errors
+///
+/// Returns geometry, allocation, cancellation, or request-wide flattening-limit diagnostics.
+fn flatten_region_source_space_with_work(
+    region: &CurvePath,
+    canvas: &CanvasSpec,
+    source_width: u32,
+    source_height: u32,
+    work: &mut RegionSamplingWork<'_>,
+) -> Result<Vec<Point2>, SamplingError> {
+    if region.closure() != toniator_geometry::PathClosure::Closed {
+        return Err(SamplingError::new(
+            "sampling.region_average.geometry",
+            "area averaging requires a closed region",
+        ));
+    }
+    validate_canvas(canvas)?;
+    let map = |point: Point2| {
+        Point2::new(
+            point.x * f64::from(source_width.saturating_sub(1)) / canvas.width,
+            point.y * f64::from(source_height.saturating_sub(1)) / canvas.height,
+        )
+    };
+    let mut output = Vec::new();
+    output.try_reserve(region.segments().len()).map_err(|_| {
+        SamplingError::new(
+            "sampling.region_average.allocation.flattening",
+            "source-space flattening allocation failed",
+        )
+    })?;
+    for segment in region.segments() {
+        work.poll()?;
+        match segment {
+            CurveSegment::Line(line) => push_flattened_point(&mut output, map(line.start()), work)?,
+            CurveSegment::CubicBezier(cubic) => flatten_cubic_source_space(
+                map(cubic.start()),
+                map(cubic.control_1()),
+                map(cubic.control_2()),
+                map(cubic.end()),
+                0,
+                work,
+                &mut output,
+            )?,
+        }
+    }
+    if output.len() < 3 {
+        return Err(SamplingError::new(
+            "sampling.region_average.geometry",
+            "flattened region requires at least three vertices",
+        ));
+    }
+    Ok(output)
+}
+
+/// Emits one cubic's ordered source-space chords through deterministic De Casteljau bisection.
+///
+/// # Errors
+///
+/// Returns stable cancellation, depth, or flattened-segment limit diagnostics.
+#[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
+fn flatten_cubic_source_space(
+    start: Point2,
+    control_1: Point2,
+    control_2: Point2,
+    end: Point2,
+    depth: usize,
+    work: &mut RegionSamplingWork<'_>,
+    output: &mut Vec<Point2>,
+) -> Result<(), SamplingError> {
+    work.poll()?;
+    if cubic_source_flat_enough(start, control_1, control_2, end) {
+        return push_flattened_point(output, start, work);
+    }
+    if depth >= work.limits.max_subdivision_depth {
+        return Err(SamplingError::new(
+            "sampling.region_average.limits.flattening",
+            "cubic subdivision depth limit exceeded",
+        ));
+    }
+    let midpoint = |left: Point2, right: Point2| {
+        Point2::new((left.x + right.x) / 2.0, (left.y + right.y) / 2.0)
+    };
+    let a = midpoint(start, control_1);
+    let b = midpoint(control_1, control_2);
+    let c = midpoint(control_2, end);
+    let d = midpoint(a, b);
+    let e = midpoint(b, c);
+    let middle = midpoint(d, e);
+    flatten_cubic_source_space(start, a, d, middle, depth + 1, work, output)?;
+    flatten_cubic_source_space(middle, e, c, end, depth + 1, work, output)
+}
+
+/// Tests cubic controls against the source-space endpoint chord at the fixed `1/64` tolerance.
+#[allow(dead_code)]
+fn cubic_source_flat_enough(
+    start: Point2,
+    control_1: Point2,
+    control_2: Point2,
+    end: Point2,
+) -> bool {
+    let dx = end.x - start.x;
+    let dy = end.y - start.y;
+    let length = dx.hypot(dy);
+    if length == 0.0 {
+        return (control_1.x - start.x)
+            .hypot(control_1.y - start.y)
+            .max((control_2.x - start.x).hypot(control_2.y - start.y))
+            <= 1.0 / 64.0;
+    }
+    let distance =
+        |point: Point2| ((point.x - start.x) * dy - (point.y - start.y) * dx).abs() / length;
+    distance(control_1).max(distance(control_2)) <= 1.0 / 64.0
+}
+
+/// Appends one source-space vertex while enforcing the request-wide chord limit and join uniqueness.
+#[allow(dead_code)]
+fn push_flattened_point(
+    output: &mut Vec<Point2>,
+    point: Point2,
+    work: &mut RegionSamplingWork<'_>,
+) -> Result<(), SamplingError> {
+    if !point.is_finite() {
+        return Err(SamplingError::new(
+            "sampling.region_average.geometry",
+            "source-space flattening produced nonfinite geometry",
+        ));
+    }
+    if output.last().copied() == Some(point) {
+        return Ok(());
+    }
+    work.charge_flattened()?;
+    output.try_reserve(1).map_err(|_| {
+        SamplingError::new(
+            "sampling.region_average.allocation.flattening",
+            "source-space flattening allocation failed",
+        )
+    })?;
+    output.push(point);
+    Ok(())
+}
+
+/// Stores exact signed polygon area and raw first/mixed moments in source coordinates.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(dead_code)]
+struct PolygonMoments {
+    area: f64,
+    mx: f64,
+    my: f64,
+    mxy: f64,
+}
+
+/// Tracks request-wide flattened-segment and cell-intersection work without publishing samples.
+#[allow(dead_code)]
+struct RegionSamplingWork<'a> {
+    limits: RegionSamplingLimits,
+    cancelled: &'a dyn Fn() -> bool,
+    flattened_segments: usize,
+    cell_intersections: usize,
+}
+
+#[allow(dead_code)]
+impl<'a> RegionSamplingWork<'a> {
+    /// Builds a shared nonzero work budget for a complete region-sampling request.
+    fn new(
+        limits: RegionSamplingLimits,
+        cancelled: &'a dyn Fn() -> bool,
+    ) -> Result<Self, SamplingError> {
+        if limits.max_flattened_segments == 0
+            || limits.max_cell_intersections == 0
+            || limits.max_subdivision_depth == 0
+        {
+            return Err(SamplingError::new(
+                "sampling.region_average.limits.flattening",
+                "region sampling limits must be nonzero",
+            ));
+        }
+        Ok(Self {
+            limits,
+            cancelled,
+            flattened_segments: 0,
+            cell_intersections: 0,
+        })
+    }
+    /// Polls cancellation using the canonical evaluation failure path.
+    fn poll(&self) -> Result<(), SamplingError> {
+        poll_region(self.cancelled)
+    }
+    /// Charges one emitted flattened chord across every region using this request.
+    fn charge_flattened(&mut self) -> Result<(), SamplingError> {
+        self.flattened_segments =
+            self.flattened_segments
+                .checked_add(1)
+                .ok_or(SamplingError::new(
+                    "sampling.region_average.limits.flattening",
+                    "flattened segment counter overflowed",
+                ))?;
+        if self.flattened_segments > self.limits.max_flattened_segments {
+            return Err(SamplingError::new(
+                "sampling.region_average.limits.flattening",
+                "flattened segment limit exceeded",
+            ));
+        }
+        Ok(())
+    }
+    /// Charges one candidate cell intersection across every region using this request.
+    fn charge_cell(&mut self) -> Result<(), SamplingError> {
+        self.cell_intersections =
+            self.cell_intersections
+                .checked_add(1)
+                .ok_or(SamplingError::new(
+                    "sampling.region_average.limits.cell_intersections",
+                    "cell intersection counter overflowed",
+                ))?;
+        if self.cell_intersections > self.limits.max_cell_intersections {
+            return Err(SamplingError::new(
+                "sampling.region_average.limits.cell_intersections",
+                "cell intersection limit exceeded",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// One finite source-space interval paired with its edge-clamped bilinear-cell index.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(dead_code)]
+struct SourceAxisInterval {
+    start: f64,
+    end: f64,
+    cell: u32,
+}
+
+/// Enumerates low exterior, ordered interior cells, then high exterior for one source axis.
+///
+/// # Errors
+///
+/// Returns stable geometry diagnostics for nonfinite/inverted ranges or a zero source extent.
+#[allow(dead_code)]
+fn source_axis_intervals(
+    minimum: f64,
+    maximum: f64,
+    extent: u32,
+) -> Result<Vec<SourceAxisInterval>, SamplingError> {
+    if !minimum.is_finite() || !maximum.is_finite() || maximum < minimum || extent == 0 {
+        return Err(SamplingError::new(
+            "sampling.region_average.geometry",
+            "source interval bounds must be finite and ordered",
+        ));
+    }
+    let mut result = Vec::new();
+    result.try_reserve(3).map_err(|_| {
+        SamplingError::new(
+            "sampling.region_average.allocation.partition",
+            "source interval allocation failed",
+        )
+    })?;
+    if extent == 1 {
+        result.push(SourceAxisInterval {
+            start: minimum,
+            end: maximum,
+            cell: 0,
+        });
+        return Ok(result);
+    }
+    let last = f64::from(extent - 1);
+    if minimum < 0.0 {
+        result.push(SourceAxisInterval {
+            start: minimum,
+            end: maximum.min(0.0),
+            cell: 0,
+        });
+    }
+    let first = minimum.max(0.0).floor() as u32;
+    let end = maximum.min(last).ceil() as u32;
+    for cell in first..end.min(extent - 1) {
+        let start = minimum.max(f64::from(cell));
+        let finish = maximum.min(f64::from(cell) + 1.0);
+        if finish > start {
+            result.push(SourceAxisInterval {
+                start,
+                end: finish,
+                cell,
+            });
+        }
+    }
+    if maximum > last {
+        result.push(SourceAxisInterval {
+            start: minimum.max(last),
+            end: maximum,
+            cell: extent - 2,
+        });
+    }
+    Ok(result)
+}
+
+/// Computes finite source-space bounds for one already flattened polygon.
+///
+/// # Errors
+///
+/// Returns the stable geometry diagnostic when a flattened point is nonfinite.
+fn polygon_bounds(points: &[Point2]) -> Result<(Point2, Point2), SamplingError> {
+    let mut minimum = Point2::new(f64::INFINITY, f64::INFINITY);
+    let mut maximum = Point2::new(f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for point in points {
+        if !point.is_finite() {
+            return Err(SamplingError::new(
+                "sampling.region_average.geometry",
+                "flattened region bounds must be finite",
+            ));
+        }
+        minimum.x = minimum.x.min(point.x);
+        minimum.y = minimum.y.min(point.y);
+        maximum.x = maximum.x.max(point.x);
+        maximum.y = maximum.y.max(point.y);
+    }
+    Ok((minimum, maximum))
+}
+
+/// Computes scalar and associated RGBA bilinear coefficients for one partition rectangle.
+///
+/// Coefficients operate on local coordinates relative to the selected source cell. Exterior
+/// bands collapse the corresponding coordinate to the required edge-clamped zero or one value.
+fn region_cell_values(
+    field: &SourceField,
+    mapping: SourceMapping,
+    x: SourceAxisInterval,
+    y: SourceAxisInterval,
+) -> [[f64; 4]; 5] {
+    let x1 = (x.cell + 1).min(field.identity.width - 1);
+    let y1 = (y.cell + 1).min(field.identity.height - 1);
+    let pixels = [
+        field.pixel(x.cell, y.cell).expect("validated source pixel"),
+        field.pixel(x1, y.cell).expect("validated source pixel"),
+        field.pixel(x.cell, y1).expect("validated source pixel"),
+        field.pixel(x1, y1).expect("validated source pixel"),
+    ];
+    let mut result = [[0.0; 4]; 5];
+    let scalar = pixels.map(|pixel| mapped_response(pixel, mapping));
+    result[0] = bilinear_coefficients(scalar, x, y, field.identity.width, field.identity.height);
+    for channel in 0..4 {
+        result[channel + 1] = bilinear_coefficients(
+            pixels.map(|pixel| associated_linear(pixel)[channel]),
+            x,
+            y,
+            field.identity.width,
+            field.identity.height,
+        );
+    }
+    result
+}
+
+/// Converts four grid-corner values into local bilinear coefficients with edge-clamp collapse.
+fn bilinear_coefficients(
+    values: [f64; 4],
+    x: SourceAxisInterval,
+    y: SourceAxisInterval,
+    width: u32,
+    height: u32,
+) -> [f64; 4] {
+    let x_mode = interval_axis_mode(x, width);
+    let y_mode = interval_axis_mode(y, height);
+    match (x_mode, y_mode) {
+        (AxisMode::Variable, AxisMode::Variable) => [
+            values[0],
+            values[1] - values[0],
+            values[2] - values[0],
+            values[3] - values[1] - values[2] + values[0],
+        ],
+        (AxisMode::Zero, AxisMode::Variable) => [values[0], 0.0, values[2] - values[0], 0.0],
+        (AxisMode::One, AxisMode::Variable) => [values[1], 0.0, values[3] - values[1], 0.0],
+        (AxisMode::Variable, AxisMode::Zero) => [values[0], values[1] - values[0], 0.0, 0.0],
+        (AxisMode::Variable, AxisMode::One) => [values[2], values[3] - values[2], 0.0, 0.0],
+        (AxisMode::Zero, AxisMode::Zero) => [values[0], 0.0, 0.0, 0.0],
+        (AxisMode::One, AxisMode::Zero) => [values[1], 0.0, 0.0, 0.0],
+        (AxisMode::Zero, AxisMode::One) => [values[2], 0.0, 0.0, 0.0],
+        (AxisMode::One, AxisMode::One) => [values[3], 0.0, 0.0, 0.0],
+    }
+}
+
+/// Distinguishes a variable interior source coordinate from a clamped exterior coordinate.
+fn interval_axis_mode(interval: SourceAxisInterval, extent: u32) -> AxisMode {
+    if extent <= 1 || interval.end <= 0.0 {
+        AxisMode::Zero
+    } else if interval.start >= f64::from(extent - 1) {
+        AxisMode::One
+    } else {
+        AxisMode::Variable
+    }
+}
+
+/// Names the coordinate behavior for one source partition interval.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AxisMode {
+    Zero,
+    Variable,
+    One,
+}
+
+/// Polls the shared cancellation callback and uses the canonical evaluation diagnostic.
+#[allow(dead_code)]
+fn poll_region(cancelled: &dyn Fn() -> bool) -> Result<(), SamplingError> {
+    (!cancelled()).then_some(()).ok_or(SamplingError::new(
+        "evaluation.cancelled",
+        "evaluation cancelled",
+    ))
+}
+
+/// Clips one finite polygon to a rectangle in fixed left/right/bottom/top order.
+///
+/// Adjacent duplicate vertices and zero-area output are discarded so callers never integrate a
+/// boundary-touch sliver. Cancellation is polled at each clip edge and source edge.
+///
+/// # Errors
+///
+/// Returns `evaluation.cancelled` without exposing a partially clipped polygon.
+#[allow(dead_code)]
+fn clip_polygon_to_rect_cancellable(
+    polygon: &[Point2],
+    left: f64,
+    right: f64,
+    bottom: f64,
+    top: f64,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<Point2>, SamplingError> {
+    let mut output = polygon.to_vec();
+    for edge in [
+        ClipEdge::Left(left),
+        ClipEdge::Right(right),
+        ClipEdge::Bottom(bottom),
+        ClipEdge::Top(top),
+    ] {
+        poll_region(cancelled)?;
+        let input = std::mem::take(&mut output);
+        if input.is_empty() {
+            return Ok(Vec::new());
+        }
+        for (start, end) in input
+            .iter()
+            .zip(input.iter().cycle().skip(1))
+            .take(input.len())
+        {
+            poll_region(cancelled)?;
+            let start_inside = edge.contains(*start);
+            let end_inside = edge.contains(*end);
+            if start_inside {
+                push_distinct(&mut output, *start);
+            }
+            if start_inside != end_inside {
+                push_distinct(&mut output, edge.intersection(*start, *end));
+            }
+        }
+        if output.len() > 1 && output.first() == output.last() {
+            output.pop();
+        }
+    }
+    if output.len() < 3 || polygon_moments(&output).area.abs() <= f64::EPSILON {
+        Ok(Vec::new())
+    } else {
+        Ok(output)
+    }
+}
+
+/// Names one Sutherland-Hodgman rectangle half-plane in deterministic processing order.
+#[derive(Clone, Copy, Debug)]
+#[allow(dead_code)]
+enum ClipEdge {
+    Left(f64),
+    Right(f64),
+    Bottom(f64),
+    Top(f64),
+}
+
+#[allow(dead_code)]
+impl ClipEdge {
+    /// Reports whether a point is retained by this inclusive rectangle half-plane.
+    fn contains(self, point: Point2) -> bool {
+        match self {
+            Self::Left(value) => point.x >= value,
+            Self::Right(value) => point.x <= value,
+            Self::Bottom(value) => point.y >= value,
+            Self::Top(value) => point.y <= value,
+        }
+    }
+
+    /// Computes the stable finite boundary crossing of one segment known to straddle this edge.
+    fn intersection(self, start: Point2, end: Point2) -> Point2 {
+        let (start_value, end_value, boundary, vertical) = match self {
+            Self::Left(value) | Self::Right(value) => (start.x, end.x, value, true),
+            Self::Bottom(value) | Self::Top(value) => (start.y, end.y, value, false),
+        };
+        let t = (boundary - start_value) / (end_value - start_value);
+        if vertical {
+            Point2::new(boundary, start.y + (end.y - start.y) * t)
+        } else {
+            Point2::new(start.x + (end.x - start.x) * t, boundary)
+        }
+    }
+}
+
+/// Appends a point only when it is not the exact adjacent duplicate of the prior point.
+#[allow(dead_code)]
+fn push_distinct(points: &mut Vec<Point2>, point: Point2) {
+    if points.last().copied() != Some(point) {
+        points.push(point);
+    }
+}
+
+/// Computes signed area plus raw first and mixed moments from ordered polygon edges.
+#[allow(dead_code)]
+fn polygon_moments(points: &[Point2]) -> PolygonMoments {
+    let mut doubled_area = 0.0;
+    let mut mx = 0.0;
+    let mut my = 0.0;
+    let mut mxy = 0.0;
+    for (left, right) in points
+        .iter()
+        .zip(points.iter().cycle().skip(1))
+        .take(points.len())
+    {
+        let cross = left.x * right.y - right.x * left.y;
+        doubled_area += cross;
+        mx += (left.x + right.x) * cross;
+        my += (left.y + right.y) * cross;
+        mxy +=
+            (left.x * right.y + 2.0 * left.x * left.y + 2.0 * right.x * right.y + right.x * left.y)
+                * cross;
+    }
+    PolygonMoments {
+        area: doubled_area / 2.0,
+        mx: mx / 6.0,
+        my: my / 6.0,
+        mxy: mxy / 24.0,
+    }
+}
+
+/// Translates raw polygon moments to a bilinear source cell-local origin.
+#[allow(dead_code)]
+fn translate_polygon_moments(moments: PolygonMoments, origin: Point2) -> PolygonMoments {
+    PolygonMoments {
+        area: moments.area,
+        mx: moments.mx - origin.x * moments.area,
+        my: moments.my - origin.y * moments.area,
+        mxy: moments.mxy - origin.x * moments.my - origin.y * moments.mx
+            + origin.x * origin.y * moments.area,
     }
 }
 
@@ -1360,6 +2117,727 @@ mod tests {
         assert_eq!(hidden.paint, None);
     }
 
+    /// Verifies exact rectangle area and first/mixed moments.
+    #[test]
+    fn stage20q_rectangle_polygon_moments_are_exact() {
+        let moments = polygon_moments(&[
+            Point2::new(0.0, 0.0),
+            Point2::new(2.0, 0.0),
+            Point2::new(2.0, 3.0),
+            Point2::new(0.0, 3.0),
+        ]);
+        assert_eq!(moments.area, 6.0);
+        assert_eq!(moments.mx, 6.0);
+        assert_eq!(moments.my, 9.0);
+        assert_eq!(moments.mxy, 9.0);
+    }
+
+    /// Verifies winding reverses every signed polygon moment.
+    #[test]
+    fn stage20q_clockwise_polygon_moments_reverse_sign() {
+        let ccw = polygon_moments(&[
+            Point2::new(0.0, 0.0),
+            Point2::new(2.0, 0.0),
+            Point2::new(0.0, 2.0),
+        ]);
+        let cw = polygon_moments(&[
+            Point2::new(0.0, 2.0),
+            Point2::new(2.0, 0.0),
+            Point2::new(0.0, 0.0),
+        ]);
+        assert_eq!(cw.area, -ccw.area);
+        assert_eq!(cw.mx, -ccw.mx);
+        assert_eq!(cw.my, -ccw.my);
+        assert_eq!(cw.mxy, -ccw.mxy);
+    }
+
+    /// Verifies cell-local translation preserves exact local rectangle moments.
+    #[test]
+    fn stage20q_translated_polygon_moments_are_cell_local() {
+        let global = polygon_moments(&[
+            Point2::new(4.0, 7.0),
+            Point2::new(6.0, 7.0),
+            Point2::new(6.0, 10.0),
+            Point2::new(4.0, 10.0),
+        ]);
+        let local = translate_polygon_moments(global, Point2::new(4.0, 7.0));
+        assert_eq!(local.area, 6.0);
+        assert_eq!(local.mx, 6.0);
+        assert_eq!(local.my, 9.0);
+        assert_eq!(local.mxy, 9.0);
+    }
+
+    /// Verifies clipping a multi-edge polygon retains only the requested rectangle area.
+    #[test]
+    fn stage20q_rectangle_clipping_is_deterministic_and_rejects_boundary_slivers() {
+        let polygon = [
+            Point2::new(-1.0, 0.5),
+            Point2::new(0.5, -1.0),
+            Point2::new(2.0, 0.5),
+            Point2::new(0.5, 2.0),
+        ];
+        let clipped =
+            clip_polygon_to_rect_cancellable(&polygon, 0.0, 1.0, 0.0, 1.0, &|| false).unwrap();
+        assert!(!clipped.is_empty());
+        assert!(polygon_moments(&clipped).area > 0.0);
+        let touch = clip_polygon_to_rect_cancellable(
+            &[
+                Point2::new(-1.0, 0.0),
+                Point2::new(0.0, 0.0),
+                Point2::new(-1.0, 1.0),
+            ],
+            0.0,
+            1.0,
+            0.0,
+            1.0,
+            &|| false,
+        )
+        .unwrap();
+        assert!(touch.is_empty());
+    }
+
+    /// Verifies rectangle clipping reports the canonical cancellation diagnostic before output.
+    #[test]
+    fn stage20q_rectangle_clipping_cancellation_is_atomic() {
+        let error = clip_polygon_to_rect_cancellable(
+            &[
+                Point2::new(0.0, 0.0),
+                Point2::new(1.0, 0.0),
+                Point2::new(0.0, 1.0),
+            ],
+            0.0,
+            1.0,
+            0.0,
+            1.0,
+            &|| true,
+        )
+        .unwrap_err();
+        assert_eq!(error.path(), "evaluation.cancelled");
+    }
+
+    /// Builds a closed source-space ring for flattening tests.
+    fn stage20q_flattening_ring(segments: Vec<CurveSegment>) -> CurvePath {
+        CurvePath::new(segments, toniator_geometry::PathClosure::Closed).unwrap()
+    }
+
+    /// Verifies the inverse StretchToCanvas transform remains deliberately unclamped.
+    #[test]
+    fn stage20q_source_space_flattening_preserves_off_canvas_coordinates() {
+        let ring = CurvePath::polyline(
+            vec![
+                Point2::new(-5.0, 0.0),
+                Point2::new(15.0, 0.0),
+                Point2::new(15.0, 10.0),
+                Point2::new(-5.0, 10.0),
+            ],
+            toniator_geometry::PathClosure::Closed,
+        )
+        .unwrap();
+        let points = flatten_region_source_space(
+            &ring,
+            &CanvasSpec {
+                width: 10.0,
+                height: 10.0,
+            },
+            11,
+            11,
+            RegionSamplingLimits::default(),
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(points[0], Point2::new(-5.0, 0.0));
+        assert_eq!(points[1], Point2::new(15.0, 0.0));
+    }
+
+    /// Verifies a straight cubic emits one stable chord and does not duplicate joins.
+    #[test]
+    fn stage20q_straight_cubic_source_flattening_is_stable() {
+        let cubic = toniator_geometry::CubicBezierSegment::new(
+            Point2::new(0.0, 0.0),
+            Point2::new(2.0, 0.0),
+            Point2::new(4.0, 0.0),
+            Point2::new(6.0, 0.0),
+        )
+        .unwrap();
+        let ring = stage20q_flattening_ring(vec![
+            CurveSegment::CubicBezier(cubic),
+            CurveSegment::Line(
+                toniator_geometry::LineSegment::new(Point2::new(6.0, 0.0), Point2::new(0.0, 6.0))
+                    .unwrap(),
+            ),
+            CurveSegment::Line(
+                toniator_geometry::LineSegment::new(Point2::new(0.0, 6.0), Point2::new(0.0, 0.0))
+                    .unwrap(),
+            ),
+        ]);
+        let first = flatten_region_source_space(
+            &ring,
+            &CanvasSpec {
+                width: 6.0,
+                height: 6.0,
+            },
+            7,
+            7,
+            RegionSamplingLimits::default(),
+            &|| false,
+        )
+        .unwrap();
+        let second = flatten_region_source_space(
+            &ring,
+            &CanvasSpec {
+                width: 6.0,
+                height: 6.0,
+            },
+            7,
+            7,
+            RegionSamplingLimits::default(),
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first[0], Point2::new(0.0, 0.0));
+    }
+
+    /// Verifies a genuine cubic flattens deterministically and honors the global segment limit.
+    #[test]
+    fn stage20q_genuine_cubic_flattening_is_deterministic_and_bounded() {
+        let cubic = toniator_geometry::CubicBezierSegment::new(
+            Point2::new(0.0, 0.0),
+            Point2::new(0.0, 8.0),
+            Point2::new(8.0, 8.0),
+            Point2::new(8.0, 0.0),
+        )
+        .unwrap();
+        let ring = stage20q_flattening_ring(vec![
+            CurveSegment::CubicBezier(cubic),
+            CurveSegment::Line(
+                toniator_geometry::LineSegment::new(Point2::new(8.0, 0.0), Point2::new(0.0, 0.0))
+                    .unwrap(),
+            ),
+        ]);
+        let points = flatten_region_source_space(
+            &ring,
+            &CanvasSpec {
+                width: 8.0,
+                height: 8.0,
+            },
+            9,
+            9,
+            RegionSamplingLimits::default(),
+            &|| false,
+        )
+        .unwrap();
+        assert!(points.len() > 3);
+        let error = flatten_region_source_space(
+            &ring,
+            &CanvasSpec {
+                width: 8.0,
+                height: 8.0,
+            },
+            9,
+            9,
+            RegionSamplingLimits {
+                max_flattened_segments: 1,
+                ..RegionSamplingLimits::default()
+            },
+            &|| false,
+        )
+        .unwrap_err();
+        assert_eq!(error.path(), "sampling.region_average.limits.flattening");
+    }
+
+    /// Verifies cancellation prevents any source-space flattening candidate from escaping.
+    #[test]
+    fn stage20q_source_space_flattening_cancellation_is_exact() {
+        let ring = CurvePath::polyline(
+            vec![
+                Point2::new(0.0, 0.0),
+                Point2::new(1.0, 0.0),
+                Point2::new(0.0, 1.0),
+            ],
+            toniator_geometry::PathClosure::Closed,
+        )
+        .unwrap();
+        let error = flatten_region_source_space(
+            &ring,
+            &CanvasSpec {
+                width: 1.0,
+                height: 1.0,
+            },
+            2,
+            2,
+            RegionSamplingLimits::default(),
+            &|| true,
+        )
+        .unwrap_err();
+        assert_eq!(error.path(), "evaluation.cancelled");
+    }
+
+    /// Verifies source interval enumeration orders low exterior, cells, and high exterior.
+    #[test]
+    fn stage20q_source_intervals_cover_all_clamp_bands_in_order() {
+        let intervals = source_axis_intervals(-2.0, 4.0, 4).unwrap();
+        assert_eq!(
+            intervals,
+            vec![
+                SourceAxisInterval {
+                    start: -2.0,
+                    end: 0.0,
+                    cell: 0
+                },
+                SourceAxisInterval {
+                    start: 0.0,
+                    end: 1.0,
+                    cell: 0
+                },
+                SourceAxisInterval {
+                    start: 1.0,
+                    end: 2.0,
+                    cell: 1
+                },
+                SourceAxisInterval {
+                    start: 2.0,
+                    end: 3.0,
+                    cell: 2
+                },
+                SourceAxisInterval {
+                    start: 3.0,
+                    end: 4.0,
+                    cell: 2
+                }
+            ]
+        );
+    }
+
+    /// Verifies one-pixel source axes retain one finite constant clamp interval.
+    #[test]
+    fn stage20q_one_pixel_source_axis_has_one_clamp_interval() {
+        assert_eq!(
+            source_axis_intervals(-3.0, 7.0, 1).unwrap(),
+            vec![SourceAxisInterval {
+                start: -3.0,
+                end: 7.0,
+                cell: 0
+            }]
+        );
+    }
+
+    /// Verifies shared request counters aggregate limits and canonical cancellation failures.
+    #[test]
+    fn stage20q_sampling_work_is_request_wide_and_bounded() {
+        let mut work = RegionSamplingWork::new(
+            RegionSamplingLimits {
+                max_flattened_segments: 2,
+                max_cell_intersections: 1,
+                max_subdivision_depth: 48,
+            },
+            &|| false,
+        )
+        .unwrap();
+        work.charge_flattened().unwrap();
+        work.charge_flattened().unwrap();
+        assert_eq!(
+            work.charge_flattened().unwrap_err().path(),
+            "sampling.region_average.limits.flattening"
+        );
+        work.charge_cell().unwrap();
+        assert_eq!(
+            work.charge_cell().unwrap_err().path(),
+            "sampling.region_average.limits.cell_intersections"
+        );
+        assert_eq!(
+            RegionSamplingWork::new(RegionSamplingLimits::default(), &|| true)
+                .unwrap()
+                .poll()
+                .unwrap_err()
+                .path(),
+            "evaluation.cancelled"
+        );
+    }
+
+    /// Builds a finite two-dimensional decoded field for exact Stage 20Q integration witnesses.
+    fn stage20q_field(width: u32, height: u32, pixels: Vec<SourcePixel>) -> SourceField {
+        assert_eq!(pixels.len(), (width * height) as usize);
+        SourceField {
+            identity: SourceIdentity {
+                format: SourceFormat::Png,
+                width,
+                height,
+                content_hash: "sha256:stage20q".to_owned(),
+                decoded_pixel_hash: "sha256:stage20q-pixels".to_owned(),
+                svg_text: None,
+            },
+            pixels,
+        }
+    }
+
+    /// Builds a closed source-aligned rectangle in canvas coordinates for exact averaging tests.
+    fn stage20q_rectangle(left: f64, right: f64, bottom: f64, top: f64) -> CurvePath {
+        CurvePath::polyline(
+            vec![
+                Point2::new(left, bottom),
+                Point2::new(right, bottom),
+                Point2::new(right, top),
+                Point2::new(left, top),
+            ],
+            toniator_geometry::PathClosure::Closed,
+        )
+        .unwrap()
+    }
+
+    /// Verifies constant fields make ReferencePoint and exact AreaAverage sampling identical.
+    #[test]
+    fn stage20q_area_average_matches_constant_reference_point() {
+        let pixel = SourcePixel {
+            red: 0.5,
+            green: 0.25,
+            blue: 0.75,
+            alpha: 0.4,
+        };
+        let field = stage20q_field(2, 2, vec![pixel; 4]);
+        let canvas = CanvasSpec {
+            width: 1.0,
+            height: 1.0,
+        };
+        let mapping = SourceMapping::canonical(SourceMappingComponent::Alpha);
+        let reference =
+            sample_region_reference(&field, Point2::new(0.25, 0.75), &canvas, mapping).unwrap();
+        let average = sample_region_area_average(
+            &field,
+            &stage20q_rectangle(0.0, 1.0, 0.0, 1.0),
+            &canvas,
+            mapping,
+            RegionSamplingLimits::default(),
+            &|| false,
+        )
+        .unwrap();
+        assert!((average.response - reference.response).abs() < 1e-12);
+        assert_eq!(average.paint, reference.paint);
+    }
+
+    /// Verifies exact moments integrate a unit-cell bilinear alpha field without point sampling.
+    #[test]
+    fn stage20q_area_average_integrates_bilinear_scalar_exactly() {
+        let field = stage20q_field(
+            2,
+            2,
+            vec![
+                SourcePixel {
+                    red: 0.0,
+                    green: 0.0,
+                    blue: 0.0,
+                    alpha: 0.0,
+                },
+                SourcePixel {
+                    red: 0.0,
+                    green: 0.0,
+                    blue: 0.0,
+                    alpha: 1.0,
+                },
+                SourcePixel {
+                    red: 0.0,
+                    green: 0.0,
+                    blue: 0.0,
+                    alpha: 1.0,
+                },
+                SourcePixel {
+                    red: 0.0,
+                    green: 0.0,
+                    blue: 0.0,
+                    alpha: 0.0,
+                },
+            ],
+        );
+        let sample = sample_region_area_average(
+            &field,
+            &stage20q_rectangle(0.0, 1.0, 0.0, 1.0),
+            &CanvasSpec {
+                width: 1.0,
+                height: 1.0,
+            },
+            SourceMapping::canonical(SourceMappingComponent::Alpha),
+            RegionSamplingLimits::default(),
+            &|| false,
+        )
+        .unwrap();
+        assert!((sample.response - 0.5).abs() < 1e-12);
+    }
+
+    /// Verifies associated RGB is averaged before positive-alpha unassociation.
+    #[test]
+    fn stage20q_area_average_associates_then_unassociates_paint() {
+        let opaque_red = SourcePixel {
+            red: 1.0,
+            green: 0.0,
+            blue: 0.0,
+            alpha: 1.0,
+        };
+        let transparent_hidden = SourcePixel {
+            red: 0.0,
+            green: 1.0,
+            blue: 1.0,
+            alpha: 0.0,
+        };
+        let field = stage20q_field(
+            2,
+            2,
+            vec![
+                opaque_red,
+                transparent_hidden,
+                transparent_hidden,
+                transparent_hidden,
+            ],
+        );
+        let sample = sample_region_area_average(
+            &field,
+            &stage20q_rectangle(0.0, 1.0, 0.0, 1.0),
+            &CanvasSpec {
+                width: 1.0,
+                height: 1.0,
+            },
+            SourceMapping::canonical(SourceMappingComponent::Alpha),
+            RegionSamplingLimits::default(),
+            &|| false,
+        )
+        .unwrap();
+        assert!((sample.response - 0.25).abs() < 1e-12);
+        assert_eq!(
+            sample.paint,
+            Some(SampledSourcePaint {
+                red: 1.0,
+                green: 0.0,
+                blue: 0.0,
+                alpha: 1.0
+            })
+        );
+    }
+
+    /// Verifies exact-zero average alpha suppresses hidden RGB instead of publishing transparent paint.
+    #[test]
+    fn stage20q_area_average_suppresses_all_zero_alpha() {
+        let field = stage20q_field(
+            2,
+            2,
+            vec![
+                SourcePixel {
+                    red: 1.0,
+                    green: 0.5,
+                    blue: 0.25,
+                    alpha: 0.0
+                };
+                4
+            ],
+        );
+        let sample = sample_region_area_average(
+            &field,
+            &stage20q_rectangle(0.0, 1.0, 0.0, 1.0),
+            &CanvasSpec {
+                width: 1.0,
+                height: 1.0,
+            },
+            SourceMapping::canonical(SourceMappingComponent::Red),
+            RegionSamplingLimits::default(),
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(sample.response, 0.0);
+        assert_eq!(sample.paint, None);
+    }
+
+    /// Verifies complete off-canvas area is included through the finite exterior clamp bands.
+    #[test]
+    fn stage20q_area_average_integrates_complete_off_canvas_clamp_bands() {
+        let pixel = SourcePixel {
+            red: 0.0,
+            green: 0.0,
+            blue: 0.0,
+            alpha: 0.75,
+        };
+        let field = stage20q_field(2, 2, vec![pixel; 4]);
+        let sample = sample_region_area_average(
+            &field,
+            &stage20q_rectangle(-1.0, 2.0, -1.0, 2.0),
+            &CanvasSpec {
+                width: 1.0,
+                height: 1.0,
+            },
+            SourceMapping::canonical(SourceMappingComponent::Alpha),
+            RegionSamplingLimits::default(),
+            &|| false,
+        )
+        .unwrap();
+        assert!((sample.response - 0.75).abs() < 1e-12);
+    }
+
+    /// Verifies clockwise and counter-clockwise rings normalize their signed moment results equally.
+    #[test]
+    fn stage20q_area_average_is_winding_independent() {
+        let field = stage20q_field(
+            2,
+            2,
+            vec![
+                SourcePixel {
+                    red: 0.0,
+                    green: 0.0,
+                    blue: 0.0,
+                    alpha: 0.0,
+                },
+                SourcePixel {
+                    red: 0.0,
+                    green: 0.0,
+                    blue: 0.0,
+                    alpha: 1.0,
+                },
+                SourcePixel {
+                    red: 0.0,
+                    green: 0.0,
+                    blue: 0.0,
+                    alpha: 1.0,
+                },
+                SourcePixel {
+                    red: 0.0,
+                    green: 0.0,
+                    blue: 0.0,
+                    alpha: 0.0,
+                },
+            ],
+        );
+        let counter_clockwise = stage20q_rectangle(0.0, 1.0, 0.0, 1.0);
+        let clockwise = CurvePath::polyline(
+            vec![
+                Point2::new(0.0, 0.0),
+                Point2::new(0.0, 1.0),
+                Point2::new(1.0, 1.0),
+                Point2::new(1.0, 0.0),
+            ],
+            toniator_geometry::PathClosure::Closed,
+        )
+        .unwrap();
+        let canvas = CanvasSpec {
+            width: 1.0,
+            height: 1.0,
+        };
+        let mapping = SourceMapping::canonical(SourceMappingComponent::Alpha);
+        let first = sample_region_area_average(
+            &field,
+            &counter_clockwise,
+            &canvas,
+            mapping,
+            RegionSamplingLimits::default(),
+            &|| false,
+        )
+        .unwrap();
+        let second = sample_region_area_average(
+            &field,
+            &clockwise,
+            &canvas,
+            mapping,
+            RegionSamplingLimits::default(),
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(first, second);
+    }
+
+    /// Verifies each partition rectangle contributes once and preserves the complete polygon area.
+    #[test]
+    fn stage20q_partition_area_conserves_without_double_counting() {
+        let polygon = vec![
+            Point2::new(-1.0, -1.0),
+            Point2::new(2.0, -1.0),
+            Point2::new(2.0, 2.0),
+            Point2::new(-1.0, 2.0),
+        ];
+        let xs = source_axis_intervals(-1.0, 2.0, 2).unwrap();
+        let ys = source_axis_intervals(-1.0, 2.0, 2).unwrap();
+        let mut partitioned = 0.0;
+        for y in ys {
+            for x in &xs {
+                let clipped = clip_polygon_to_rect_cancellable(
+                    &polygon,
+                    x.start,
+                    x.end,
+                    y.start,
+                    y.end,
+                    &|| false,
+                )
+                .unwrap();
+                partitioned += polygon_moments(&clipped).area;
+            }
+        }
+        assert!((partitioned - polygon_moments(&polygon).area).abs() < 1e-12);
+    }
+
+    /// Verifies batch sampling charges cell work across regions and returns no partial table.
+    #[test]
+    fn stage20q_area_average_batch_exhausts_aggregate_cell_budget() {
+        let field = stage20q_field(
+            2,
+            2,
+            vec![
+                SourcePixel {
+                    red: 0.0,
+                    green: 0.0,
+                    blue: 0.0,
+                    alpha: 1.0
+                };
+                4
+            ],
+        );
+        let regions = vec![stage20q_rectangle(0.0, 1.0, 0.0, 1.0); 2];
+        let error = sample_region_area_average_batch(
+            &field,
+            &regions,
+            &CanvasSpec {
+                width: 1.0,
+                height: 1.0,
+            },
+            SourceMapping::canonical(SourceMappingComponent::Alpha),
+            RegionSamplingLimits {
+                max_cell_intersections: 1,
+                ..RegionSamplingLimits::default()
+            },
+            &|| false,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.path(),
+            "sampling.region_average.limits.cell_intersections"
+        );
+    }
+
+    /// Verifies cancellation is reported before any area-average candidate can publish.
+    #[test]
+    fn stage20q_area_average_cancellation_is_exact() {
+        let field = stage20q_field(
+            2,
+            2,
+            vec![
+                SourcePixel {
+                    red: 0.0,
+                    green: 0.0,
+                    blue: 0.0,
+                    alpha: 1.0
+                };
+                4
+            ],
+        );
+        let error = sample_region_area_average(
+            &field,
+            &stage20q_rectangle(0.0, 1.0, 0.0, 1.0),
+            &CanvasSpec {
+                width: 1.0,
+                height: 1.0,
+            },
+            SourceMapping::canonical(SourceMappingComponent::Alpha),
+            RegionSamplingLimits::default(),
+            &|| true,
+        )
+        .unwrap_err();
+        assert_eq!(error.path(), "evaluation.cancelled");
+    }
+
+    /// Computes the ZIP CRC32 value required by small synthetic PNG builders.
     fn crc32(bytes: &[u8]) -> u32 {
         let mut crc = 0xffff_ffff_u32;
         for byte in bytes {

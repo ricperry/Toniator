@@ -6,11 +6,11 @@ use std::{collections::BTreeMap, error::Error, fmt};
 
 use serde::Serialize;
 use toniator_domain::{
-    ArtworkWeightResponse, AuthoredStructureId, CanvasSpec, ChannelId, ConnectionProgram,
-    DensityMetric2D, Document, DocumentCommand, DocumentHistory, DocumentSessionError,
-    EffectivePatternOutputSettings, GuideDimension, GuideDimensionDraft, GuideDimensionId,
-    GuidePrototype, GuideRepetition, MarkOrientation, MarkOrientationDraft, MarkPrototype,
-    MazeProgram, OffsetCleanup, OffsetSides, ParametricCurve, PatternDefinition,
+    ArtworkWeightResponse, AuthoredStructureId, CanvasSpec, ChannelId, ChannelPaint,
+    ConnectionProgram, DensityMetric2D, Document, DocumentCommand, DocumentHistory,
+    DocumentSessionError, EffectivePatternOutputSettings, GuideDimension, GuideDimensionDraft,
+    GuideDimensionId, GuidePrototype, GuideRepetition, MarkOrientation, MarkOrientationDraft,
+    MarkPrototype, MazeProgram, OffsetCleanup, OffsetSides, ParametricCurve, PatternDefinition,
     PatternDefinitionRecipe, PatternFamily, PatternGeometryResponse, PatternMechanism,
     PatternMechanismId, PatternModulation, PatternOutputLayer, PatternOutputLayerId,
     PatternStructureRecipe, PresetMetadata, PresetRecord, RandomSiteCharacter, RegionSourceIntent,
@@ -19,7 +19,8 @@ use toniator_domain::{
 };
 pub use toniator_geometry::{
     AffineTransform2D, Bounds, CONNECTION_PATH_CONTRACT_ID, CONNECTION_TRAIL_CONTRACT_ID,
-    CanonicalCircleMark, CanonicalFillRule, CanonicalMark, CanonicalPathMark, CanonicalRegionSet,
+    CanonicalCircleMark, CanonicalFillRule, CanonicalMark, CanonicalPathMark,
+    CanonicalRegionLimits, CanonicalRegionProposal, CanonicalRegionSet, CanonicalRegionSourceGroup,
     CanonicalRegionSourceId, CanonicalStroke, CanonicalStrokeSourceId, ConnectionPathLimits,
     ConnectionPathSet, CubicBezierSegment, CurveError, CurvePath, CurveSegment, FamilySite,
     FamilySiteError, FamilySiteId, FamilySiteProvenance, FamilySiteSet, GUIDE_FACE_CONTRACT_ID,
@@ -27,21 +28,25 @@ pub use toniator_geometry::{
     IntersectionSite, MAZE_WALL_CONTRACT_ID, MazeGuideAxis, MazeLimits, MazeProgramResult,
     NominalCellBasis, PATH_OFFSET_ALGORITHM_CONTRACT_ID, PathClosure, PathLocation,
     PathOffsetCleanup, PathOffsetEndpointPolicy, PathOffsetLimits, PathOffsetRequest,
-    PathOffsetResult, Point2, SITE_ADJACENCY_CONTRACT_ID, SiteAdjacencyError, SiteAdjacencyGraph,
+    PathOffsetResult, Point2, REGION_TREATMENT_CONTRACT_ID, RegionReference, RegionTreatment,
+    RegionTreatmentError, RegionTreatmentLimits, RegionTreatmentProvenance, RegionTreatmentRequest,
+    RegionTreatmentResult, SITE_ADJACENCY_CONTRACT_ID, SiteAdjacencyError, SiteAdjacencyGraph,
     SiteAdjacencyLimits, SiteAdjacencyPolicy, SiteId, SiteScope, StraightGuide,
     StrokeProfileSample, StructuralPathInstance, StructuralPathInstanceId,
     StructuralPathLocationProvenance, StructuralPathSet, StructuralPathSourceId,
     VORONOI_REGION_CONTRACT_ID, VariableWidthOutlineLimits, VariableWidthPathSample, Vector2,
     VoronoiRegionDiagnostics, VoronoiRegionLimits, VoronoiRegionRequest,
-    build_connection_paths_cancellable, build_guide_faces_cancellable,
-    build_maze_walls_from_sites_cancellable, build_site_adjacency_cancellable,
-    build_variable_width_outline_cancellable, build_voronoi_regions_cancellable,
-    connection_program_contract_id, offset_path_cancellable, projection_range,
-    resolve_guide_prototype,
+    build_canonical_regions_cancellable, build_connection_paths_cancellable,
+    build_guide_faces_cancellable, build_maze_walls_from_sites_cancellable,
+    build_site_adjacency_cancellable, build_variable_width_outline_cancellable,
+    build_voronoi_regions_cancellable, connection_program_contract_id, offset_path_cancellable,
+    projection_range, resolve_guide_prototype, treat_region_requests_cancellable,
+    treat_regions_cancellable, voronoi_region_references,
 };
 use toniator_sampling::{
-    SampledSourcePaint, SamplingError, SourceComponent, SourceField, SourceMappingComponent,
-    SourcePlacement,
+    RegionSamplingLimits, RegionSourceSample, SampledSourcePaint, SamplingError, SourceComponent,
+    SourceField, SourceMappingComponent, SourcePlacement, sample_region_area_average_batch,
+    sample_region_reference,
 };
 
 /// The finite antialiasing envelope included in every Stage 3 generation plan.
@@ -853,6 +858,839 @@ pub fn validate_output_realization_binding(
             "pattern.output_layers.setting",
             "effective output response kind is incompatible with its structural capability",
         )),
+    }
+}
+
+/// Complete region realization emitted by the sole typed region-output authority.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TypedRegionOutputRealization {
+    /// Stores treated canonical fill geometry, which may be empty after collapse or alpha suppression.
+    pub regions: CanonicalRegionSet,
+    /// Stores sampled paint in the exact canonical treated-region order when requested.
+    pub paints: Option<Vec<SampledSourcePaint>>,
+    /// Stores the cacheable realization identity; diagnostics and limits remain excluded.
+    pub fingerprint: String,
+    /// Stores local bounded-work facts without admitting them into geometry identity.
+    pub diagnostics: RegionOutputRealizationDiagnostics,
+}
+
+/// Local typed region-realization facts retained with a cache unit but excluded from its fingerprint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegionOutputRealizationDiagnostics {
+    /// Counts untreated bases sampled exactly once during this realization.
+    pub sampled_bases: usize,
+    /// Counts retained treated canonical fill components.
+    pub retained_regions: usize,
+}
+
+/// Records one already-completed typed region realization for engine test evidence only.
+///
+/// This record exists solely behind the opt-in `test-evidence` feature. It is not serialized,
+/// cached, included in a public production build, or used by capability projection; it observes
+/// the same sampling and treatment invocation that produced `TypedRegionOutputRealization`.
+#[cfg(feature = "test-evidence")]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegionEvaluationEvidence {
+    /// Preserves the complete untreated canonical geometry from the actual producer invocation.
+    pub untreated_regions: CanonicalRegionSet,
+    /// Preserves untreated canonical IDs in their accepted producer order.
+    pub untreated_region_ids: Vec<toniator_geometry::CanonicalRegionId>,
+    /// Preserves the producer-owned reference table in the same accepted order.
+    pub references: Vec<RegionReference>,
+    /// Records the response-selected sampling strategy.
+    pub sampling: toniator_domain::RegionSamplingStrategy,
+    /// Preserves exactly one source sample per untreated base when sampling is required.
+    pub samples: Vec<RegionSourceSample>,
+    /// Preserves the resolved per-base treatment request, including alpha suppression omissions.
+    pub treatments: Vec<RegionTreatmentRequest>,
+    /// Preserves treated canonical geometry in the normal output order for validation records only.
+    pub treated_regions: CanonicalRegionSet,
+    /// Preserves treated-to-base ownership and deterministic component ordinals in output order.
+    pub provenance: Vec<RegionTreatmentProvenance>,
+    /// Records the accepted untreated canonical fingerprint.
+    pub untreated_fingerprint: String,
+    /// Records the treated canonical fingerprint, including a valid empty result.
+    pub treated_fingerprint: String,
+    /// Records the normal realization fingerprint returned to the engine.
+    pub realization_fingerprint: String,
+    /// Records ordinary local diagnostics without adding them to the realization identity.
+    pub diagnostics: RegionOutputRealizationDiagnostics,
+}
+
+/// Stable failure from the typed region output boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RegionOutputRealizationError {
+    path: &'static str,
+    message: &'static str,
+}
+
+impl RegionOutputRealizationError {
+    /// Returns the stable region-output failure path.
+    pub const fn path(&self) -> &'static str {
+        self.path
+    }
+
+    /// Returns the stable region-output failure message.
+    pub const fn message(&self) -> &'static str {
+        self.message
+    }
+}
+
+impl fmt::Display for RegionOutputRealizationError {
+    /// Formats a stable typed-region failure without exposing partial geometry or paint.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}: {}", self.path, self.message)
+    }
+}
+
+impl Error for RegionOutputRealizationError {}
+
+/// Realizes exactly one accepted untreated region output with one typed effective response.
+///
+/// Full plus solid paint bypasses source sampling and returns the accepted canonical-region
+/// fingerprint unchanged. Every other path samples each complete untreated base exactly once,
+/// interpolates Scale/Gap endpoints from that base scalar, omits exact-zero-alpha sampled bases,
+/// delegates topology to geometry, and aligns sampled paint through treated-to-base provenance.
+/// Renderers receive only closed canonical rings and never construct topology.
+///
+/// # Errors
+///
+/// Returns a stable binding, identity, sampling, treatment, allocation, or cancellation failure
+/// without publishing a partial sample table, paint table, or treated region candidate.
+#[allow(clippy::too_many_arguments)]
+pub fn realize_region_output_cancellable(
+    capability: &OutputCapability,
+    setting: &EffectivePatternOutputSettings,
+    untreated: &CanonicalRegionSet,
+    references: &[RegionReference],
+    source: Option<&SourceField>,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    paint: &ChannelPaint,
+    sampling_limits: RegionSamplingLimits,
+    treatment_limits: RegionTreatmentLimits,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<TypedRegionOutputRealization, RegionOutputRealizationError> {
+    realize_region_output_cancellable_impl(
+        capability,
+        setting,
+        untreated,
+        references,
+        source,
+        canvas,
+        mapping,
+        paint,
+        sampling_limits,
+        treatment_limits,
+        cancelled,
+        #[cfg(feature = "test-evidence")]
+        None,
+    )
+}
+
+/// Realizes one Region output while retaining a test-only record from that exact invocation.
+///
+/// The opt-in feature is used only by engine validation tests. It never repeats sampling or
+/// treatment and is absent from ordinary production pattern builds.
+///
+/// # Errors
+///
+/// Returns the normal realization error and never returns an evidence record for a failed call.
+#[cfg(feature = "test-evidence")]
+#[allow(clippy::too_many_arguments)]
+pub fn realize_region_output_with_evidence_cancellable(
+    capability: &OutputCapability,
+    setting: &EffectivePatternOutputSettings,
+    untreated: &CanonicalRegionSet,
+    references: &[RegionReference],
+    source: Option<&SourceField>,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    paint: &ChannelPaint,
+    sampling_limits: RegionSamplingLimits,
+    treatment_limits: RegionTreatmentLimits,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(TypedRegionOutputRealization, RegionEvaluationEvidence), RegionOutputRealizationError>
+{
+    let mut evidence = None;
+    let realization = realize_region_output_cancellable_impl(
+        capability,
+        setting,
+        untreated,
+        references,
+        source,
+        canvas,
+        mapping,
+        paint,
+        sampling_limits,
+        treatment_limits,
+        cancelled,
+        Some(&mut evidence),
+    )?;
+    let evidence = evidence.expect("successful test evidence realization records one snapshot");
+    Ok((realization, evidence))
+}
+
+/// Implements the sole Region output realization and optionally records test-only evidence.
+///
+/// The optional sink is feature-gated from production builds and is filled only after all source
+/// sampling, treatment, paint alignment, and fingerprint construction complete successfully.
+///
+/// # Errors
+///
+/// Returns normal stable realization failures without filling the optional test evidence sink.
+#[allow(clippy::too_many_arguments)]
+fn realize_region_output_cancellable_impl(
+    capability: &OutputCapability,
+    setting: &EffectivePatternOutputSettings,
+    untreated: &CanonicalRegionSet,
+    references: &[RegionReference],
+    source: Option<&SourceField>,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    paint: &ChannelPaint,
+    sampling_limits: RegionSamplingLimits,
+    treatment_limits: RegionTreatmentLimits,
+    cancelled: &dyn Fn() -> bool,
+    #[cfg(feature = "test-evidence")] evidence: Option<&mut Option<RegionEvaluationEvidence>>,
+) -> Result<TypedRegionOutputRealization, RegionOutputRealizationError> {
+    validate_region_output_binding(capability, setting)?;
+    poll_region_realizer(cancelled)?;
+    let toniator_domain::PatternGeometryResponse::Regions(response) = &setting.response else {
+        return Err(region_realization_error(
+            "region.treatment.identity.response",
+            "region output requires a region response",
+        ));
+    };
+    let references_by_id = region_reference_table(untreated, references)?;
+    let full_solid = matches!(
+        response,
+        toniator_domain::RegionGeometryResponse::Full { .. }
+    ) && matches!(paint, ChannelPaint::Solid(_));
+    if full_solid {
+        let realization = TypedRegionOutputRealization {
+            regions: untreated.clone(),
+            paints: None,
+            fingerprint: untreated.fingerprint().to_owned(),
+            diagnostics: RegionOutputRealizationDiagnostics {
+                sampled_bases: 0,
+                retained_regions: untreated.regions().len(),
+            },
+        };
+        #[cfg(feature = "test-evidence")]
+        {
+            let identity_requests: Vec<_> = untreated
+                .regions()
+                .iter()
+                .map(|region| RegionTreatmentRequest {
+                    base_region_id: region.id.clone(),
+                    reference: references_by_id.get(&region.id).copied(),
+                    treatment: Some(RegionTreatment::Full),
+                })
+                .collect();
+            let identity_treated = RegionTreatmentResult {
+                regions: untreated.clone(),
+                provenance: untreated
+                    .regions()
+                    .iter()
+                    .map(|region| RegionTreatmentProvenance {
+                        treated_region_id: region.id.clone(),
+                        base_region_id: region.id.clone(),
+                    })
+                    .collect(),
+            };
+            record_region_evaluation_evidence(
+                evidence,
+                untreated,
+                references,
+                response,
+                &[],
+                &identity_requests,
+                &identity_treated,
+                &realization.fingerprint,
+                realization.diagnostics,
+            );
+        }
+        return Ok(realization);
+    }
+    let source = source.ok_or(region_realization_error(
+        "sampling.region.source",
+        "region sampling requires a decoded source field",
+    ))?;
+    let samples = sample_untreated_regions(
+        source,
+        untreated,
+        &references_by_id,
+        canvas,
+        mapping,
+        response,
+        sampling_limits,
+        cancelled,
+    )?;
+    let mut requests = Vec::new();
+    requests
+        .try_reserve(untreated.regions().len())
+        .map_err(|_| {
+            region_realization_error(
+                "region.treatment.allocation.requests",
+                "region treatment request allocation failed",
+            )
+        })?;
+    for (region, sample) in untreated.regions().iter().zip(&samples) {
+        poll_region_realizer(cancelled)?;
+        let treatment = if matches!(paint, ChannelPaint::SampledSource) && sample.paint.is_none() {
+            None
+        } else {
+            Some(interpolated_region_treatment(response, sample.response)?)
+        };
+        requests.push(RegionTreatmentRequest {
+            base_region_id: region.id.clone(),
+            reference: references_by_id.get(&region.id).copied(),
+            treatment,
+        });
+    }
+    let treated = treat_region_requests_cancellable(
+        capability.layer_id,
+        untreated,
+        &requests,
+        treatment_limits,
+        cancelled,
+    )
+    .map_err(|error| region_realization_error(error.path(), error.message()))?;
+    let paints = matches!(paint, ChannelPaint::SampledSource)
+        .then(|| align_treated_region_paints(&treated, untreated, &samples))
+        .transpose()?;
+    let fingerprint = region_realization_fingerprint(
+        untreated,
+        &references_by_id,
+        &samples,
+        &treated,
+        paints.as_deref(),
+    );
+    let diagnostics = RegionOutputRealizationDiagnostics {
+        sampled_bases: samples.len(),
+        retained_regions: treated.regions.regions().len(),
+    };
+    #[cfg(feature = "test-evidence")]
+    record_region_evaluation_evidence(
+        evidence,
+        untreated,
+        references,
+        response,
+        &samples,
+        &requests,
+        &treated,
+        &fingerprint,
+        diagnostics,
+    );
+    Ok(TypedRegionOutputRealization {
+        diagnostics,
+        regions: treated.regions,
+        paints,
+        fingerprint,
+    })
+}
+
+/// Publishes a test-only snapshot only after the ordinary region realization has fully succeeded.
+#[cfg(feature = "test-evidence")]
+#[allow(clippy::too_many_arguments)]
+fn record_region_evaluation_evidence(
+    sink: Option<&mut Option<RegionEvaluationEvidence>>,
+    untreated: &CanonicalRegionSet,
+    references: &[RegionReference],
+    response: &toniator_domain::RegionGeometryResponse,
+    samples: &[RegionSourceSample],
+    treatments: &[RegionTreatmentRequest],
+    treated: &RegionTreatmentResult,
+    realization_fingerprint: &str,
+    diagnostics: RegionOutputRealizationDiagnostics,
+) {
+    let Some(sink) = sink else {
+        return;
+    };
+    let sampling = match response {
+        toniator_domain::RegionGeometryResponse::Full { sampling }
+        | toniator_domain::RegionGeometryResponse::Scale { sampling, .. }
+        | toniator_domain::RegionGeometryResponse::ConstantGap { sampling, .. } => *sampling,
+    };
+    *sink = Some(RegionEvaluationEvidence {
+        untreated_regions: untreated.clone(),
+        untreated_region_ids: untreated
+            .regions()
+            .iter()
+            .map(|region| region.id.clone())
+            .collect(),
+        references: references.to_vec(),
+        sampling,
+        samples: samples.to_vec(),
+        treatments: treatments.to_vec(),
+        treated_regions: treated.regions.clone(),
+        provenance: treated.provenance.clone(),
+        untreated_fingerprint: untreated.fingerprint().to_owned(),
+        treated_fingerprint: treated.regions.fingerprint().to_owned(),
+        realization_fingerprint: realization_fingerprint.to_owned(),
+        diagnostics,
+    });
+}
+
+/// Validates a direct capability/setting pair without admitting an unrelated pipeline plan.
+///
+/// # Errors
+///
+/// Returns only stable output-ID or response-kind diagnostics before sampling or geometry work.
+fn validate_region_output_binding(
+    capability: &OutputCapability,
+    setting: &EffectivePatternOutputSettings,
+) -> Result<(), RegionOutputRealizationError> {
+    if capability.layer_id != setting.output_layer_id {
+        return Err(region_realization_error(
+            "pattern.output_layers.setting",
+            "effective output setting must address the realized output layer",
+        ));
+    }
+    matches!(
+        (&capability.payload, &setting.response),
+        (
+            OutputCapabilityPayload::Regions { .. },
+            PatternGeometryResponse::Regions(_)
+        )
+    )
+    .then_some(())
+    .ok_or(region_realization_error(
+        "pattern.output_layers.setting",
+        "typed region realizer requires a Region capability and response",
+    ))
+}
+
+/// Builds a complete producer-reference table keyed one-to-one with untreated canonical IDs.
+///
+/// # Errors
+///
+/// Returns identity failures before any source sampling can create a misaligned table.
+fn region_reference_table(
+    untreated: &CanonicalRegionSet,
+    references: &[RegionReference],
+) -> Result<BTreeMap<toniator_geometry::CanonicalRegionId, Point2>, RegionOutputRealizationError> {
+    if references.len() != untreated.regions().len() {
+        return Err(region_realization_error(
+            "region.treatment.identity.reference",
+            "every untreated region requires one producer reference",
+        ));
+    }
+    let mut table = BTreeMap::new();
+    for reference in references {
+        if !reference.point.is_finite()
+            || !untreated
+                .regions()
+                .iter()
+                .any(|region| region.id == reference.region_id)
+            || table
+                .insert(reference.region_id.clone(), reference.point)
+                .is_some()
+        {
+            return Err(region_realization_error(
+                "region.treatment.identity.reference",
+                "producer references must be finite and keyed one-to-one with untreated regions",
+            ));
+        }
+    }
+    Ok(table)
+}
+
+/// Samples every complete untreated base once under the response-selected sampling strategy.
+///
+/// # Errors
+///
+/// Propagates stable source sampling, allocation, and cancellation diagnostics atomically.
+#[allow(clippy::too_many_arguments)]
+fn sample_untreated_regions(
+    source: &SourceField,
+    untreated: &CanonicalRegionSet,
+    references: &BTreeMap<toniator_geometry::CanonicalRegionId, Point2>,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: &toniator_domain::RegionGeometryResponse,
+    limits: RegionSamplingLimits,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<RegionSourceSample>, RegionOutputRealizationError> {
+    let sampling = match response {
+        toniator_domain::RegionGeometryResponse::Full { sampling }
+        | toniator_domain::RegionGeometryResponse::Scale { sampling, .. }
+        | toniator_domain::RegionGeometryResponse::ConstantGap { sampling, .. } => *sampling,
+    };
+    match sampling {
+        toniator_domain::RegionSamplingStrategy::ReferencePoint => untreated
+            .regions()
+            .iter()
+            .map(|region| {
+                poll_region_realizer(cancelled)?;
+                sample_region_reference(source, references[&region.id], canvas, mapping)
+                    .map_err(|error| region_realization_error(error.path(), error.message()))
+            })
+            .collect(),
+        toniator_domain::RegionSamplingStrategy::AreaAverage => {
+            let rings: Vec<_> = untreated
+                .regions()
+                .iter()
+                .map(|region| region.ring.clone())
+                .collect();
+            sample_region_area_average_batch(source, &rings, canvas, mapping, limits, cancelled)
+                .map_err(|error| region_realization_error(error.path(), error.message()))
+        }
+    }
+}
+
+/// Interpolates one sampled scalar into the typed response range without midpoint authority.
+///
+/// # Errors
+///
+/// Returns only a stable response-kind error when a non-region setting reaches this boundary.
+fn interpolated_region_treatment(
+    response: &toniator_domain::RegionGeometryResponse,
+    sample: f64,
+) -> Result<RegionTreatment, RegionOutputRealizationError> {
+    let interpolate = |minimum: f64, maximum: f64| minimum + sample * (maximum - minimum);
+    match response {
+        toniator_domain::RegionGeometryResponse::Full { .. } => Ok(RegionTreatment::Full),
+        toniator_domain::RegionGeometryResponse::Scale {
+            minimum_scale,
+            maximum_scale,
+            ..
+        } => Ok(RegionTreatment::Scale(interpolate(
+            *minimum_scale,
+            *maximum_scale,
+        ))),
+        toniator_domain::RegionGeometryResponse::ConstantGap {
+            minimum_gap,
+            maximum_gap,
+            ..
+        } => Ok(RegionTreatment::ConstantGap(interpolate(
+            *minimum_gap,
+            *maximum_gap,
+        ))),
+    }
+}
+
+/// Aligns sampled base paint with every retained treated component through explicit geometry provenance.
+///
+/// # Errors
+///
+/// Returns an identity failure if geometry omission or provenance would create a partial paint table.
+fn align_treated_region_paints(
+    treated: &RegionTreatmentResult,
+    untreated: &CanonicalRegionSet,
+    samples: &[RegionSourceSample],
+) -> Result<Vec<SampledSourcePaint>, RegionOutputRealizationError> {
+    let paints_by_base: BTreeMap<_, _> = untreated
+        .regions()
+        .iter()
+        .zip(samples)
+        .filter_map(|(region, sample)| sample.paint.map(|paint| (region.id.clone(), paint)))
+        .collect();
+    treated
+        .provenance
+        .iter()
+        .map(|item| {
+            paints_by_base
+                .get(&item.base_region_id)
+                .copied()
+                .ok_or(region_realization_error(
+                    "region.treatment.identity.paint",
+                    "every retained treated region requires positive-alpha base paint",
+                ))
+        })
+        .collect()
+}
+
+/// Builds the cacheable region-realization identity from ordered base inputs and final public products.
+fn region_realization_fingerprint(
+    untreated: &CanonicalRegionSet,
+    references: &BTreeMap<toniator_geometry::CanonicalRegionId, Point2>,
+    samples: &[RegionSourceSample],
+    treated: &RegionTreatmentResult,
+    paints: Option<&[SampledSourcePaint]>,
+) -> String {
+    let mut fingerprint = format!("toniator.region-realizer.v1:{}", untreated.fingerprint());
+    for (base, sample) in untreated.regions().iter().zip(samples) {
+        let reference = references[&base.id];
+        fingerprint.push_str(&format!(
+            ":{:?}:{:016x}:{:016x}:{:016x}",
+            base.id,
+            reference.x.to_bits(),
+            reference.y.to_bits(),
+            sample.response.to_bits(),
+        ));
+        if let Some(paint) = sample.paint {
+            fingerprint.push_str(&format!(
+                ":{:016x}:{:016x}:{:016x}:{:016x}",
+                paint.red.to_bits(),
+                paint.green.to_bits(),
+                paint.blue.to_bits(),
+                paint.alpha.to_bits()
+            ));
+        } else {
+            fingerprint.push_str(":transparent");
+        }
+    }
+    fingerprint.push_str(&format!(":{}", treated.regions.fingerprint()));
+    if let Some(paints) = paints {
+        for paint in paints {
+            fingerprint.push_str(&format!(
+                ":{:016x}:{:016x}:{:016x}:{:016x}",
+                paint.red.to_bits(),
+                paint.green.to_bits(),
+                paint.blue.to_bits(),
+                paint.alpha.to_bits()
+            ));
+        }
+    }
+    fingerprint
+}
+
+/// Polls cancellation at the typed output boundary before allocating or publishing a candidate.
+///
+/// # Errors
+///
+/// Returns exactly `evaluation.cancelled` when the caller invalidates this realization.
+fn poll_region_realizer(cancelled: &dyn Fn() -> bool) -> Result<(), RegionOutputRealizationError> {
+    (!cancelled()).then_some(()).ok_or(region_realization_error(
+        "evaluation.cancelled",
+        "evaluation cancelled",
+    ))
+}
+
+/// Constructs one stable region-output error without exposing internal partial state.
+fn region_realization_error(
+    path: &'static str,
+    message: &'static str,
+) -> RegionOutputRealizationError {
+    RegionOutputRealizationError { path, message }
+}
+
+#[cfg(test)]
+mod stage20q_region_realizer_tests {
+    use super::*;
+
+    /// Builds a single typed Region capability for direct realizer authority tests.
+    fn stage20q_capability() -> OutputCapability {
+        OutputCapability {
+            layer_id: PatternOutputLayerId(81),
+            consumes: StructuralProductCapability::RandomSites,
+            payload: OutputCapabilityPayload::Regions {
+                source: RegionSourceIntent::VoronoiSites {
+                    site_mechanism_id: PatternMechanismId(7),
+                },
+            },
+        }
+    }
+
+    /// Builds the matching effective Full response without requiring document-level inheritance setup.
+    fn stage20q_full_setting(
+        output_layer_id: PatternOutputLayerId,
+    ) -> EffectivePatternOutputSettings {
+        EffectivePatternOutputSettings {
+            output_layer_id,
+            response: PatternGeometryResponse::Regions(
+                toniator_domain::RegionGeometryResponse::Full {
+                    sampling: toniator_domain::RegionSamplingStrategy::ReferencePoint,
+                },
+            ),
+        }
+    }
+
+    /// Builds one accepted untreated triangle and its producer reference.
+    fn stage20q_untreated() -> (CanonicalRegionSet, Vec<RegionReference>) {
+        let regions = toniator_geometry::build_canonical_regions_cancellable(
+            toniator_geometry::CanonicalRegionProposal {
+                output_layer_id: PatternOutputLayerId(81),
+                source_groups: vec![toniator_geometry::CanonicalRegionSourceGroup {
+                    source_id: toniator_geometry::CanonicalRegionSourceId::SiteOwners(vec![
+                        toniator_geometry::FamilySiteId {
+                            mechanism_id: PatternMechanismId(7),
+                            ordinal: 0,
+                        },
+                    ]),
+                    components: vec![
+                        CurvePath::polyline(
+                            vec![
+                                Point2::new(0.0, 0.0),
+                                Point2::new(2.0, 0.0),
+                                Point2::new(0.0, 2.0),
+                            ],
+                            PathClosure::Closed,
+                        )
+                        .unwrap(),
+                    ],
+                }],
+            },
+            toniator_geometry::CanonicalRegionLimits::default(),
+            || false,
+        )
+        .unwrap()
+        .0;
+        let references = vec![RegionReference {
+            region_id: regions.regions()[0].id.clone(),
+            point: Point2::new(0.0, 0.0),
+        }];
+        (regions, references)
+    }
+
+    /// Verifies Full plus solid paint bypasses source sampling and preserves accepted region identity.
+    #[test]
+    fn stage20q_full_solid_replays_untreated_fingerprint_without_source() {
+        let capability = stage20q_capability();
+        let setting = stage20q_full_setting(capability.layer_id);
+        let (untreated, references) = stage20q_untreated();
+        let result = realize_region_output_cancellable(
+            &capability,
+            &setting,
+            &untreated,
+            &references,
+            None,
+            &CanvasSpec {
+                width: 2.0,
+                height: 2.0,
+            },
+            SourceMapping::canonical(SourceMappingComponent::Alpha),
+            &ChannelPaint::Solid(toniator_domain::ColorValue {
+                red: 0.0,
+                green: 0.0,
+                blue: 0.0,
+                alpha: 1.0,
+            }),
+            RegionSamplingLimits::default(),
+            RegionTreatmentLimits::default(),
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(result.fingerprint, untreated.fingerprint());
+        assert_eq!(result.regions, untreated);
+        assert_eq!(result.diagnostics.sampled_bases, 0);
+    }
+
+    /// Verifies an effective response targeting a different output is rejected before sampling.
+    #[test]
+    fn stage20q_region_realizer_rejects_output_binding_mismatch() {
+        let capability = stage20q_capability();
+        let (untreated, references) = stage20q_untreated();
+        let error = realize_region_output_cancellable(
+            &capability,
+            &stage20q_full_setting(PatternOutputLayerId(82)),
+            &untreated,
+            &references,
+            None,
+            &CanvasSpec {
+                width: 2.0,
+                height: 2.0,
+            },
+            SourceMapping::canonical(SourceMappingComponent::Alpha),
+            &ChannelPaint::Solid(toniator_domain::ColorValue {
+                red: 0.0,
+                green: 0.0,
+                blue: 0.0,
+                alpha: 1.0,
+            }),
+            RegionSamplingLimits::default(),
+            RegionTreatmentLimits::default(),
+            &|| false,
+        )
+        .unwrap_err();
+        assert_eq!(error.path(), "pattern.output_layers.setting");
+    }
+
+    /// Verifies canonical components from shared-source bases select paint by base provenance,
+    /// never by their common source identity or newly assigned treated ordinal.
+    #[test]
+    fn stage20q_shared_source_treated_components_do_not_leak_sampled_paint() {
+        let untreated = toniator_geometry::build_canonical_regions(
+            toniator_geometry::CanonicalRegionProposal {
+                output_layer_id: PatternOutputLayerId(81),
+                source_groups: vec![toniator_geometry::CanonicalRegionSourceGroup {
+                    source_id: toniator_geometry::CanonicalRegionSourceId::SiteOwners(vec![
+                        toniator_geometry::FamilySiteId {
+                            mechanism_id: PatternMechanismId(7),
+                            ordinal: 9,
+                        },
+                    ]),
+                    components: vec![
+                        CurvePath::polyline(
+                            vec![
+                                Point2::new(0.0, 0.0),
+                                Point2::new(2.0, 0.0),
+                                Point2::new(0.0, 2.0),
+                            ],
+                            PathClosure::Closed,
+                        )
+                        .unwrap(),
+                        CurvePath::polyline(
+                            vec![
+                                Point2::new(8.0, 0.0),
+                                Point2::new(10.0, 0.0),
+                                Point2::new(8.0, 2.0),
+                            ],
+                            PathClosure::Closed,
+                        )
+                        .unwrap(),
+                    ],
+                }],
+            },
+        )
+        .unwrap();
+        let treated = treat_region_requests_cancellable(
+            PatternOutputLayerId(81),
+            &untreated,
+            &[
+                RegionTreatmentRequest {
+                    base_region_id: untreated.regions()[0].id.clone(),
+                    reference: Some(Point2::new(0.0, 0.0)),
+                    treatment: Some(RegionTreatment::Scale(0.5)),
+                },
+                RegionTreatmentRequest {
+                    base_region_id: untreated.regions()[1].id.clone(),
+                    reference: None,
+                    treatment: Some(RegionTreatment::ConstantGap(0.0)),
+                },
+            ],
+            RegionTreatmentLimits::default(),
+            || false,
+        )
+        .unwrap();
+        let paints = align_treated_region_paints(
+            &treated,
+            &untreated,
+            &[
+                RegionSourceSample {
+                    response: 0.0,
+                    paint: Some(SampledSourcePaint {
+                        red: 1.0,
+                        green: 0.0,
+                        blue: 0.0,
+                        alpha: 1.0,
+                    }),
+                },
+                RegionSourceSample {
+                    response: 1.0,
+                    paint: Some(SampledSourcePaint {
+                        red: 0.0,
+                        green: 0.0,
+                        blue: 1.0,
+                        alpha: 1.0,
+                    }),
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(paints.len(), 2);
+        assert!(
+            paints
+                .iter()
+                .any(|paint| paint.red == 1.0 && paint.blue == 0.0)
+        );
+        assert!(
+            paints
+                .iter()
+                .any(|paint| paint.red == 0.0 && paint.blue == 1.0)
+        );
     }
 }
 

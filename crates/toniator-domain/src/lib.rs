@@ -516,12 +516,57 @@ pub enum PatternGeometryResponse {
     Regions(RegionGeometryResponse),
 }
 
-/// The fixed Stage 20O response for ordinary canonical region output.
+/// Selects how a closed region obtains its mapped source response and sampled paint.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum RegionGeometryResponse {
-    /// Retains the complete untreated ordinary Voronoi cell.
+pub enum RegionSamplingStrategy {
+    /// Samples the geometry-owned site or analytic-centroid reference point.
     #[default]
-    Full,
+    ReferencePoint,
+    /// Integrates the complete untreated region against the edge-clamped source field.
+    AreaAverage,
+}
+
+/// The fill-only response for one canonical region output.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RegionGeometryResponse {
+    /// Retains the complete untreated canonical region.
+    Full { sampling: RegionSamplingStrategy },
+    /// Scales the complete region around its producer-owned source reference.
+    Scale {
+        sampling: RegionSamplingStrategy,
+        minimum_scale: f64,
+        maximum_scale: f64,
+    },
+    /// Offsets the complete region by half the signed authored gap value.
+    ConstantGap {
+        sampling: RegionSamplingStrategy,
+        minimum_gap: f64,
+        maximum_gap: f64,
+    },
+}
+
+impl Default for RegionGeometryResponse {
+    /// Supplies the explicit current-format identity treatment.
+    fn default() -> Self {
+        Self::Full {
+            sampling: RegionSamplingStrategy::ReferencePoint,
+        }
+    }
+}
+
+/// Optional additive endpoint intent for a non-identity region treatment.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RegionGeometryResponseDelta {
+    /// Retains absent scale endpoints as inheritance rather than materialized effective values.
+    Scale {
+        minimum_scale_delta: Option<f64>,
+        maximum_scale_delta: Option<f64>,
+    },
+    /// Retains absent gap endpoints as inheritance rather than materialized effective values.
+    ConstantGap {
+        minimum_gap_delta: Option<f64>,
+        maximum_gap_delta: Option<f64>,
+    },
 }
 
 /// One structural-output response bound atomically to an output-layer identity.
@@ -638,7 +683,7 @@ fn bundle_from_definition(definition: PatternDefinition) -> PatternDefinitionBun
                     })
                 }
                 PatternOutputLayer::Regions { .. } => {
-                    PatternGeometryResponse::Regions(RegionGeometryResponse::Full)
+                    PatternGeometryResponse::Regions(RegionGeometryResponse::default())
                 }
             },
         })
@@ -856,14 +901,47 @@ fn validate_response_delta_kind(
 ) -> Result<(), ValidationError> {
     match (base, delta) {
         (PatternGeometryResponse::Marks(_), ChannelGeometryResponseDelta::Marks(_))
-        | (PatternGeometryResponse::Connected(_), ChannelGeometryResponseDelta::Connected(_)) => {
-            Ok(())
-        }
+        | (PatternGeometryResponse::Connected(_), ChannelGeometryResponseDelta::Connected(_))
+        | (
+            PatternGeometryResponse::Regions(RegionGeometryResponse::Scale { .. }),
+            ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::Scale { .. }),
+        )
+        | (
+            PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap { .. }),
+            ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::ConstantGap {
+                ..
+            }),
+        ) => validate_region_response_delta(delta),
         _ => Err(ValidationError::new(
             "channel.pattern.output_deltas.kind",
             "channel output response delta must match its base response kind",
         )),
     }
+}
+
+/// Validates only the finite optional endpoint intent permitted by a matching region treatment.
+///
+/// # Errors
+///
+/// Returns stable delta diagnostics before effective arithmetic can overflow or publish a value.
+fn validate_region_response_delta(
+    delta: &ChannelGeometryResponseDelta,
+) -> Result<(), ValidationError> {
+    let values: &[Option<f64>] = match delta {
+        ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::Scale {
+            minimum_scale_delta,
+            maximum_scale_delta,
+        }) => &[*minimum_scale_delta, *maximum_scale_delta],
+        ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::ConstantGap {
+            minimum_gap_delta,
+            maximum_gap_delta,
+        }) => &[*minimum_gap_delta, *maximum_gap_delta],
+        _ => return Ok(()),
+    };
+    for value in values.iter().flatten() {
+        validate_finite(*value, "channel.pattern.output_deltas.region")?;
+    }
+    Ok(())
 }
 
 /// Applies one typed response delta without clamping and retains finite domain validation.
@@ -887,6 +965,36 @@ fn apply_response_delta(
             maximum_thickness: base.maximum_thickness
                 + delta.maximum_thickness_delta.unwrap_or(0.0),
         }),
+        (
+            PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
+                sampling,
+                minimum_scale,
+                maximum_scale,
+            }),
+            ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::Scale {
+                minimum_scale_delta,
+                maximum_scale_delta,
+            }),
+        ) => PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
+            sampling: *sampling,
+            minimum_scale: minimum_scale + minimum_scale_delta.unwrap_or(0.0),
+            maximum_scale: maximum_scale + maximum_scale_delta.unwrap_or(0.0),
+        }),
+        (
+            PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap {
+                sampling,
+                minimum_gap,
+                maximum_gap,
+            }),
+            ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::ConstantGap {
+                minimum_gap_delta,
+                maximum_gap_delta,
+            }),
+        ) => PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap {
+            sampling: *sampling,
+            minimum_gap: minimum_gap + minimum_gap_delta.unwrap_or(0.0),
+            maximum_gap: maximum_gap + maximum_gap_delta.unwrap_or(0.0),
+        }),
         _ => {
             return Err(ValidationError::new(
                 "channel.pattern.output_deltas.kind",
@@ -904,7 +1012,17 @@ fn validate_pattern_geometry_response(
     match response {
         PatternGeometryResponse::Marks(value) => validate_mark_response(value),
         PatternGeometryResponse::Connected(value) => validate_connected_response(value),
-        PatternGeometryResponse::Regions(RegionGeometryResponse::Full) => Ok(()),
+        PatternGeometryResponse::Regions(RegionGeometryResponse::Full { .. }) => Ok(()),
+        PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
+            minimum_scale,
+            maximum_scale,
+            ..
+        }) => validate_region_scale_response(*minimum_scale, *maximum_scale),
+        PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap {
+            minimum_gap,
+            maximum_gap,
+            ..
+        }) => validate_region_gap_response(*minimum_gap, *maximum_gap),
     }
 }
 
@@ -953,6 +1071,34 @@ pub struct ConnectedGeometryResponseDelta {
 pub enum ChannelGeometryResponseDelta {
     Marks(MarkGeometryResponseDelta),
     Connected(ConnectedGeometryResponseDelta),
+    /// Carries treatment-compatible additive endpoint intent for a region output.
+    Regions(RegionGeometryResponseDelta),
+}
+
+/// Validates the finite ordered, nonnegative Scale treatment endpoints.
+fn validate_region_scale_response(minimum: f64, maximum: f64) -> Result<(), ValidationError> {
+    validate_finite(minimum, "pattern.region.scale.minimum")?;
+    validate_finite(maximum, "pattern.region.scale.maximum")?;
+    if minimum < 0.0 || maximum < minimum {
+        return Err(ValidationError::new(
+            "pattern.region.scale.range",
+            "region Scale endpoints must be nonnegative and ordered",
+        ));
+    }
+    Ok(())
+}
+
+/// Validates finite ordered signed ConstantGap treatment endpoints.
+fn validate_region_gap_response(minimum: f64, maximum: f64) -> Result<(), ValidationError> {
+    validate_finite(minimum, "pattern.region.gap.minimum")?;
+    validate_finite(maximum, "pattern.region.gap.maximum")?;
+    if maximum < minimum {
+        return Err(ValidationError::new(
+            "pattern.region.gap.range",
+            "region ConstantGap endpoints must be ordered",
+        ));
+    }
+    Ok(())
 }
 
 /// The persisted pattern intent owned by one channel.  It never contains a
@@ -1144,8 +1290,19 @@ pub enum RegionSourceCapabilityKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegionOutputCapabilityProjection {
     pub source: RegionSourceCapabilityKind,
-    pub full_treatment_only: bool,
+    /// Lists all currently supported fill-only treatment tags in domain order.
+    pub supported_treatments: Vec<RegionTreatmentCapability>,
+    /// Lists source-sampling strategies available to every supported treatment.
+    pub sampling_strategies: Vec<RegionSamplingStrategy>,
     pub sampled_paint: bool,
+}
+
+/// Payload-free region treatment tag exposed through capability projection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RegionTreatmentCapability {
+    Full,
+    Scale,
+    ConstantGap,
 }
 
 /// The only supported guide-path join policy in Stage 20I.
@@ -1362,6 +1519,151 @@ pub struct MarkGeometryResponse {
 pub enum MarkGeometryFieldEdit {
     MinimumFill(f64),
     MaximumFill(f64),
+}
+
+/// Selects one numeric effective endpoint of a compatible region treatment.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RegionGeometryFieldEdit {
+    /// Edits only the Scale lower endpoint while preserving an absent upper delta.
+    MinimumScale(f64),
+    /// Edits only the Scale upper endpoint while preserving an absent lower delta.
+    MaximumScale(f64),
+    /// Edits only the ConstantGap lower endpoint while preserving an absent upper delta.
+    MinimumGap(f64),
+    /// Edits only the ConstantGap upper endpoint while preserving an absent lower delta.
+    MaximumGap(f64),
+}
+
+/// Atomically replaces the persisted region response owned by one structural output.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PatternOutputSettingsEdit {
+    /// Replaces a region treatment, sampling strategy, and its typed endpoints together.
+    SetRegionResponse {
+        output_layer_id: PatternOutputLayerId,
+        response: RegionGeometryResponse,
+    },
+}
+
+impl PatternOutputSettingsEdit {
+    /// Returns the sole structural output addressed by this atomic bundle edit.
+    pub const fn output_layer_id(&self) -> PatternOutputLayerId {
+        match self {
+            Self::SetRegionResponse {
+                output_layer_id, ..
+            } => *output_layer_id,
+        }
+    }
+
+    /// Validates and applies this edit to one exact bundle without changing structural IDs.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable output, kind, response, or no-op diagnostic. The caller owns candidate
+    /// publication, so an error never changes persisted document state.
+    fn apply_to_bundle(&self, bundle: &mut PatternDefinitionBundle) -> Result<(), ValidationError> {
+        let output_layer_id = self.output_layer_id();
+        let Some(index) = bundle
+            .definition
+            .output_layers
+            .iter()
+            .position(|output| output.id() == output_layer_id)
+        else {
+            return Err(ValidationError::new(
+                "pattern.bundle.output_settings.output_layer_id",
+                "region response edit targets a missing output",
+            ));
+        };
+        let output = &bundle.definition.output_layers[index];
+        let setting = &mut bundle.output_settings[index];
+        match self {
+            Self::SetRegionResponse { response, .. } => {
+                validate_response_for_output(
+                    output,
+                    &PatternGeometryResponse::Regions(response.clone()),
+                )?;
+                let replacement = PatternGeometryResponse::Regions(response.clone());
+                if setting.response == replacement {
+                    return Err(ValidationError::new(
+                        "pattern.bundle.output_settings.edit",
+                        "region response edit is a semantic no-op",
+                    ));
+                }
+                setting.response = replacement;
+            }
+        }
+        bundle.validate()
+    }
+
+    /// Classifies the exact cache boundary changed by this edit relative to its stale bundle base.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same stable target/kind diagnostics as bundle application without publishing
+    /// an edit candidate.
+    fn invalidation_for(
+        &self,
+        base: &PatternDefinitionBundle,
+    ) -> Result<InvalidationLevel, ValidationError> {
+        let output_layer_id = self.output_layer_id();
+        let current = base
+            .output_settings
+            .iter()
+            .find(|setting| setting.output_layer_id == output_layer_id)
+            .ok_or(ValidationError::new(
+                "pattern.bundle.output_settings.output_layer_id",
+                "region response edit targets a missing output",
+            ))?;
+        match (&current.response, self) {
+            (
+                PatternGeometryResponse::Regions(before),
+                Self::SetRegionResponse {
+                    response: after, ..
+                },
+            ) => {
+                let family = matches!(
+                    (before, after),
+                    (
+                        RegionGeometryResponse::Full { .. },
+                        RegionGeometryResponse::Scale { .. }
+                    ) | (
+                        RegionGeometryResponse::Full { .. },
+                        RegionGeometryResponse::ConstantGap { .. }
+                    ) | (
+                        RegionGeometryResponse::Scale { .. },
+                        RegionGeometryResponse::Full { .. }
+                    ) | (
+                        RegionGeometryResponse::Scale { .. },
+                        RegionGeometryResponse::ConstantGap { .. }
+                    ) | (
+                        RegionGeometryResponse::ConstantGap { .. },
+                        RegionGeometryResponse::Full { .. }
+                    ) | (
+                        RegionGeometryResponse::ConstantGap { .. },
+                        RegionGeometryResponse::Scale { .. }
+                    )
+                ) || region_response_sampling(before)
+                    != region_response_sampling(after);
+                Ok(if family {
+                    InvalidationLevel::Family
+                } else {
+                    InvalidationLevel::Realization
+                })
+            }
+            _ => Err(ValidationError::new(
+                "pattern.bundle.output_settings.kind",
+                "region response edit requires a region output",
+            )),
+        }
+    }
+}
+
+/// Returns the persisted sampling tag without exposing any treatment endpoint payload.
+const fn region_response_sampling(response: &RegionGeometryResponse) -> RegionSamplingStrategy {
+    match response {
+        RegionGeometryResponse::Full { sampling }
+        | RegionGeometryResponse::Scale { sampling, .. }
+        | RegionGeometryResponse::ConstantGap { sampling, .. } => *sampling,
+    }
 }
 
 /// The source component selected by a channel's authoritative source mapping.
@@ -2968,6 +3270,12 @@ impl Document {
                     "mark response editing requires a matching mark delta",
                 ));
             }
+            Some(ChannelGeometryResponseDelta::Regions(_)) => {
+                return Err(ValidationError::new(
+                    "channel.pattern.geometry_response_delta",
+                    "mark response editing requires a matching mark delta",
+                ));
+            }
             None => MarkGeometryResponseDelta {
                 minimum_fill_delta: None,
                 maximum_fill_delta: None,
@@ -2989,6 +3297,319 @@ impl Document {
             channel_id,
             output_layer_id,
             delta: ChannelGeometryResponseDelta::Marks(delta),
+        })
+    }
+
+    /// Builds one stale-aware region endpoint delta while preserving the companion optional delta.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable branch, channel, or finite/range failure without changing persisted intent.
+    #[allow(unused_assignments, unused_mut, unused_variables)]
+    pub fn set_channel_region_response_field_for_effective(
+        &self,
+        channel_id: ChannelId,
+        output_layer_id: PatternOutputLayerId,
+        edit: RegionGeometryFieldEdit,
+    ) -> Result<DocumentCommand, ValidationError> {
+        let effective = self.effective_channel_pattern(channel_id)?;
+        let desired = effective
+            .output_settings
+            .iter()
+            .find(|setting| setting.output_layer_id == output_layer_id)
+            .map(|setting| setting.response.clone())
+            .ok_or(ValidationError::new(
+                "channel.pattern.geometry_response",
+                "region response output is missing",
+            ))?;
+        let base = self
+            .bundle(effective.definition_id)
+            .and_then(|bundle| {
+                bundle
+                    .output_settings
+                    .iter()
+                    .find(|setting| setting.output_layer_id == output_layer_id)
+            })
+            .map(|setting| setting.response.clone())
+            .ok_or(ValidationError::new(
+                "channel.pattern.geometry_response",
+                "region response base is missing",
+            ))?;
+        let instance = self
+            .channel_pattern_instance(channel_id)
+            .ok_or(ValidationError::new(
+                "channel.id",
+                "command targets a missing channel",
+            ))?;
+        let existing = instance
+            .output_response_deltas
+            .iter()
+            .find(|delta| delta.output_layer_id == output_layer_id)
+            .map(|entry| entry.delta.clone());
+        let delta = match (desired, base, existing, edit) {
+            (
+                PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
+                    mut minimum_scale,
+                    mut maximum_scale,
+                    ..
+                }),
+                PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
+                    minimum_scale: base_minimum,
+                    maximum_scale: base_maximum,
+                    ..
+                }),
+                Some(ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::Scale {
+                    mut minimum_scale_delta,
+                    mut maximum_scale_delta,
+                })),
+                RegionGeometryFieldEdit::MinimumScale(value),
+            ) => {
+                minimum_scale = value;
+                minimum_scale_delta = Some(value - base_minimum);
+                validate_region_scale_response(minimum_scale, maximum_scale)?;
+                ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::Scale {
+                    minimum_scale_delta,
+                    maximum_scale_delta,
+                })
+            }
+            (
+                PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
+                    minimum_scale,
+                    mut maximum_scale,
+                    ..
+                }),
+                PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
+                    minimum_scale: base_minimum,
+                    maximum_scale: base_maximum,
+                    ..
+                }),
+                Some(ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::Scale {
+                    minimum_scale_delta,
+                    mut maximum_scale_delta,
+                })),
+                RegionGeometryFieldEdit::MaximumScale(value),
+            ) => {
+                maximum_scale = value;
+                maximum_scale_delta = Some(value - base_maximum);
+                validate_region_scale_response(minimum_scale, maximum_scale)?;
+                ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::Scale {
+                    minimum_scale_delta,
+                    maximum_scale_delta,
+                })
+            }
+            (
+                PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
+                    mut minimum_scale,
+                    maximum_scale,
+                    ..
+                }),
+                PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
+                    minimum_scale: base_minimum,
+                    maximum_scale: _,
+                    ..
+                }),
+                None,
+                RegionGeometryFieldEdit::MinimumScale(value),
+            ) => {
+                minimum_scale = value;
+                validate_region_scale_response(minimum_scale, maximum_scale)?;
+                ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::Scale {
+                    minimum_scale_delta: Some(value - base_minimum),
+                    maximum_scale_delta: None,
+                })
+            }
+            (
+                PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
+                    minimum_scale,
+                    mut maximum_scale,
+                    ..
+                }),
+                PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
+                    minimum_scale: _,
+                    maximum_scale: base_maximum,
+                    ..
+                }),
+                None,
+                RegionGeometryFieldEdit::MaximumScale(value),
+            ) => {
+                maximum_scale = value;
+                validate_region_scale_response(minimum_scale, maximum_scale)?;
+                ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::Scale {
+                    minimum_scale_delta: None,
+                    maximum_scale_delta: Some(value - base_maximum),
+                })
+            }
+            (
+                PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap {
+                    mut minimum_gap,
+                    mut maximum_gap,
+                    ..
+                }),
+                PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap {
+                    minimum_gap: base_minimum,
+                    maximum_gap: base_maximum,
+                    ..
+                }),
+                Some(ChannelGeometryResponseDelta::Regions(
+                    RegionGeometryResponseDelta::ConstantGap {
+                        mut minimum_gap_delta,
+                        mut maximum_gap_delta,
+                    },
+                )),
+                RegionGeometryFieldEdit::MinimumGap(value),
+            ) => {
+                minimum_gap = value;
+                minimum_gap_delta = Some(value - base_minimum);
+                validate_region_gap_response(minimum_gap, maximum_gap)?;
+                ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::ConstantGap {
+                    minimum_gap_delta,
+                    maximum_gap_delta,
+                })
+            }
+            (
+                PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap {
+                    minimum_gap,
+                    mut maximum_gap,
+                    ..
+                }),
+                PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap {
+                    minimum_gap: _,
+                    maximum_gap: base_maximum,
+                    ..
+                }),
+                Some(ChannelGeometryResponseDelta::Regions(
+                    RegionGeometryResponseDelta::ConstantGap {
+                        minimum_gap_delta,
+                        mut maximum_gap_delta,
+                    },
+                )),
+                RegionGeometryFieldEdit::MaximumGap(value),
+            ) => {
+                maximum_gap = value;
+                maximum_gap_delta = Some(value - base_maximum);
+                validate_region_gap_response(minimum_gap, maximum_gap)?;
+                ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::ConstantGap {
+                    minimum_gap_delta,
+                    maximum_gap_delta,
+                })
+            }
+            (
+                PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap {
+                    mut minimum_gap,
+                    maximum_gap,
+                    ..
+                }),
+                PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap {
+                    minimum_gap: base_minimum,
+                    maximum_gap: _,
+                    ..
+                }),
+                None,
+                RegionGeometryFieldEdit::MinimumGap(value),
+            ) => {
+                minimum_gap = value;
+                validate_region_gap_response(minimum_gap, maximum_gap)?;
+                ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::ConstantGap {
+                    minimum_gap_delta: Some(value - base_minimum),
+                    maximum_gap_delta: None,
+                })
+            }
+            (
+                PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap {
+                    minimum_gap,
+                    mut maximum_gap,
+                    ..
+                }),
+                PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap {
+                    minimum_gap: _,
+                    maximum_gap: base_maximum,
+                    ..
+                }),
+                None,
+                RegionGeometryFieldEdit::MaximumGap(value),
+            ) => {
+                maximum_gap = value;
+                validate_region_gap_response(minimum_gap, maximum_gap)?;
+                ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::ConstantGap {
+                    minimum_gap_delta: None,
+                    maximum_gap_delta: Some(value - base_maximum),
+                })
+            }
+            _ => {
+                return Err(ValidationError::new(
+                    "channel.pattern.geometry_response",
+                    "region field edit requires a matching non-identity treatment and delta",
+                ));
+            }
+        };
+        Ok(DocumentCommand::SetChannelOutputResponseDelta {
+            base: self.pattern_settings.clone(),
+            channel_id,
+            output_layer_id,
+            delta,
+        })
+    }
+
+    /// Builds the selected-channel structural command behind treatment and sampling descriptors.
+    ///
+    /// Numeric endpoint widgets keep using `set_channel_region_response_field_for_effective` so
+    /// they preserve channel-local additive intent; this helper is only the atomic base-response
+    /// authority for treatment or sampling edits.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable channel/output/response diagnostic without changing the document.
+    pub fn set_selected_channel_region_response_for_effective(
+        &self,
+        channel_id: ChannelId,
+        output_layer_id: PatternOutputLayerId,
+        response: RegionGeometryResponse,
+    ) -> Result<DocumentCommand, ValidationError> {
+        let effective = self.effective_channel_pattern(channel_id)?;
+        let base_bundle =
+            self.bundle(effective.definition_id)
+                .cloned()
+                .ok_or(ValidationError::new(
+                    "pattern.bundle",
+                    "selected channel resolves a missing response bundle",
+                ))?;
+        Ok(
+            DocumentCommand::EditSelectedChannelPatternDefinitionBundle {
+                channel_id,
+                base_bundle,
+                edit: PatternOutputSettingsEdit::SetRegionResponse {
+                    output_layer_id,
+                    response,
+                },
+            },
+        )
+    }
+
+    /// Builds the deliberate shared structural command behind a disclosed linked-output edit.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable missing-definition diagnostic without changing the document.
+    pub fn set_shared_region_response_for_definition(
+        &self,
+        definition_id: PatternDefinitionId,
+        output_layer_id: PatternOutputLayerId,
+        response: RegionGeometryResponse,
+    ) -> Result<DocumentCommand, ValidationError> {
+        let base_bundle = self
+            .bundle(definition_id)
+            .cloned()
+            .ok_or(ValidationError::new(
+                "pattern.bundle",
+                "shared region response targets a missing bundle",
+            ))?;
+        Ok(DocumentCommand::EditSharedPatternDefinitionBundle {
+            definition_id,
+            base_bundle,
+            edit: PatternOutputSettingsEdit::SetRegionResponse {
+                output_layer_id,
+                response,
+            },
         })
     }
 
@@ -3216,7 +3837,36 @@ impl Document {
                             PropertyFieldId::ConnectedMinimumThickness,
                             PropertyFieldId::ConnectedMaximumThickness,
                         ],
-                        PatternOutputLayer::Regions { .. } => &[],
+                        PatternOutputLayer::Regions { .. } => match effective
+                            .output_settings
+                            .iter()
+                            .find(|setting| setting.output_layer_id == output.id())
+                            .map(|setting| &setting.response)
+                        {
+                            Some(PatternGeometryResponse::Regions(
+                                RegionGeometryResponse::Full { .. },
+                            )) => &[
+                                PropertyFieldId::RegionTreatment,
+                                PropertyFieldId::RegionSampling,
+                            ],
+                            Some(PatternGeometryResponse::Regions(
+                                RegionGeometryResponse::Scale { .. },
+                            )) => &[
+                                PropertyFieldId::RegionTreatment,
+                                PropertyFieldId::RegionSampling,
+                                PropertyFieldId::RegionMinimumScale,
+                                PropertyFieldId::RegionMaximumScale,
+                            ],
+                            Some(PatternGeometryResponse::Regions(
+                                RegionGeometryResponse::ConstantGap { .. },
+                            )) => &[
+                                PropertyFieldId::RegionTreatment,
+                                PropertyFieldId::RegionSampling,
+                                PropertyFieldId::RegionMinimumGap,
+                                PropertyFieldId::RegionMaximumGap,
+                            ],
+                            _ => &[],
+                        },
                     };
                     for field in fields {
                         descriptors.push(descriptor_from_contract(
@@ -3879,6 +4529,64 @@ impl Document {
                         | PatternOutputLayer::MazeWalls { .. },
                         PatternGeometryResponse::Connected(response),
                     ) => PropertyCurrentValueKind::FiniteF64(response.maximum_thickness),
+                    (
+                        PropertyFieldId::RegionTreatment,
+                        PatternOutputLayer::Regions { .. },
+                        PatternGeometryResponse::Regions(response),
+                    ) => PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::RegionTreatment(
+                        match response {
+                            RegionGeometryResponse::Full { .. } => RegionTreatmentCapability::Full,
+                            RegionGeometryResponse::Scale { .. } => {
+                                RegionTreatmentCapability::Scale
+                            }
+                            RegionGeometryResponse::ConstantGap { .. } => {
+                                RegionTreatmentCapability::ConstantGap
+                            }
+                        },
+                    )),
+                    (
+                        PropertyFieldId::RegionSampling,
+                        PatternOutputLayer::Regions { .. },
+                        PatternGeometryResponse::Regions(response),
+                    ) => PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::RegionSampling(
+                        match response {
+                            RegionGeometryResponse::Full { sampling }
+                            | RegionGeometryResponse::Scale { sampling, .. }
+                            | RegionGeometryResponse::ConstantGap { sampling, .. } => *sampling,
+                        },
+                    )),
+                    (
+                        PropertyFieldId::RegionMinimumScale,
+                        PatternOutputLayer::Regions { .. },
+                        PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
+                            minimum_scale,
+                            ..
+                        }),
+                    ) => PropertyCurrentValueKind::FiniteF64(*minimum_scale),
+                    (
+                        PropertyFieldId::RegionMaximumScale,
+                        PatternOutputLayer::Regions { .. },
+                        PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
+                            maximum_scale,
+                            ..
+                        }),
+                    ) => PropertyCurrentValueKind::FiniteF64(*maximum_scale),
+                    (
+                        PropertyFieldId::RegionMinimumGap,
+                        PatternOutputLayer::Regions { .. },
+                        PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap {
+                            minimum_gap,
+                            ..
+                        }),
+                    ) => PropertyCurrentValueKind::FiniteF64(*minimum_gap),
+                    (
+                        PropertyFieldId::RegionMaximumGap,
+                        PatternOutputLayer::Regions { .. },
+                        PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap {
+                            maximum_gap,
+                            ..
+                        }),
+                    ) => PropertyCurrentValueKind::FiniteF64(*maximum_gap),
                     _ => {
                         unreachable!("output response descriptor must match structural output kind")
                     }
@@ -4263,6 +4971,42 @@ impl Document {
                 }
                 _ => PropertyInheritance::Inherited,
             },
+            PropertyFieldId::RegionMinimumScale => match output_delta {
+                Some(ChannelGeometryResponseDelta::Regions(
+                    RegionGeometryResponseDelta::Scale {
+                        minimum_scale_delta: Some(_),
+                        ..
+                    },
+                )) => PropertyInheritance::Explicit,
+                _ => PropertyInheritance::Inherited,
+            },
+            PropertyFieldId::RegionMaximumScale => match output_delta {
+                Some(ChannelGeometryResponseDelta::Regions(
+                    RegionGeometryResponseDelta::Scale {
+                        maximum_scale_delta: Some(_),
+                        ..
+                    },
+                )) => PropertyInheritance::Explicit,
+                _ => PropertyInheritance::Inherited,
+            },
+            PropertyFieldId::RegionMinimumGap => match output_delta {
+                Some(ChannelGeometryResponseDelta::Regions(
+                    RegionGeometryResponseDelta::ConstantGap {
+                        minimum_gap_delta: Some(_),
+                        ..
+                    },
+                )) => PropertyInheritance::Explicit,
+                _ => PropertyInheritance::Inherited,
+            },
+            PropertyFieldId::RegionMaximumGap => match output_delta {
+                Some(ChannelGeometryResponseDelta::Regions(
+                    RegionGeometryResponseDelta::ConstantGap {
+                        maximum_gap_delta: Some(_),
+                        ..
+                    },
+                )) => PropertyInheritance::Explicit,
+                _ => PropertyInheritance::Inherited,
+            },
             PropertyFieldId::DefinitionSelection => {
                 if instance.definition_override.is_some() {
                     PropertyInheritance::Explicit
@@ -4351,6 +5095,53 @@ impl Document {
                             _ => None,
                         }
                     }
+                    _ => None,
+                }
+            }
+            PropertyTarget::ChannelOutput(channel_id, output_layer_id) => {
+                let instance = self.channel_pattern_instance(channel_id)?;
+                let delta = instance
+                    .output_response_deltas
+                    .iter()
+                    .find(|entry| entry.output_layer_id == output_layer_id)
+                    .map(|entry| &entry.delta);
+                match (descriptor.field, delta) {
+                    (
+                        PropertyFieldId::RegionMinimumScale,
+                        Some(ChannelGeometryResponseDelta::Regions(
+                            RegionGeometryResponseDelta::Scale {
+                                minimum_scale_delta: Some(value),
+                                ..
+                            },
+                        )),
+                    ) => Some(PropertyCurrentValueKind::FiniteF64(*value)),
+                    (
+                        PropertyFieldId::RegionMaximumScale,
+                        Some(ChannelGeometryResponseDelta::Regions(
+                            RegionGeometryResponseDelta::Scale {
+                                maximum_scale_delta: Some(value),
+                                ..
+                            },
+                        )),
+                    ) => Some(PropertyCurrentValueKind::FiniteF64(*value)),
+                    (
+                        PropertyFieldId::RegionMinimumGap,
+                        Some(ChannelGeometryResponseDelta::Regions(
+                            RegionGeometryResponseDelta::ConstantGap {
+                                minimum_gap_delta: Some(value),
+                                ..
+                            },
+                        )),
+                    ) => Some(PropertyCurrentValueKind::FiniteF64(*value)),
+                    (
+                        PropertyFieldId::RegionMaximumGap,
+                        Some(ChannelGeometryResponseDelta::Regions(
+                            RegionGeometryResponseDelta::ConstantGap {
+                                maximum_gap_delta: Some(value),
+                                ..
+                            },
+                        )),
+                    ) => Some(PropertyCurrentValueKind::FiniteF64(*value)),
                     _ => None,
                 }
             }
@@ -5435,6 +6226,49 @@ impl Document {
         &self,
         source: &PatternDefinition,
     ) -> Result<PatternDefinition, ValidationError> {
+        if let (
+            [
+                PatternMechanism::StraightGuides { .. },
+                PatternMechanism::GuideIntersections { .. },
+            ],
+            [
+                PatternOutputLayer::Regions {
+                    source:
+                        RegionSourceIntent::VoronoiSites {
+                            site_mechanism_id: _,
+                        },
+                    ..
+                },
+            ],
+        ) = (
+            source.mechanisms.as_slice(),
+            source.output_layers.as_slice(),
+        ) {
+            let id = self.allocate_definition_id()?;
+            let guide_id = self.allocate_mechanism_id()?;
+            let site_id = PatternMechanismId(guide_id.0.checked_add(1).ok_or_else(|| {
+                ValidationError::new(
+                    "pattern_definitions.mechanisms.id",
+                    "document mechanism ID space is exhausted",
+                )
+            })?);
+            let output_id = self.allocate_output_layer_id()?;
+            let mut duplicate = PatternDefinition::supported_straight_grid(
+                id,
+                source.name.clone(),
+                guide_id,
+                site_id,
+                output_id,
+                source.coverage.clone(),
+            );
+            duplicate.output_layers = vec![PatternOutputLayer::Regions {
+                id: output_id,
+                source: RegionSourceIntent::VoronoiSites {
+                    site_mechanism_id: site_id,
+                },
+            }];
+            return Ok(duplicate);
+        }
         if let (
             [
                 PatternMechanism::StraightGuides { .. },
@@ -10383,8 +11217,16 @@ fn project_output_capability(
                         dimensions: dimensions.clone(),
                     },
                 },
-                full_treatment_only: true,
-                sampled_paint: false,
+                supported_treatments: vec![
+                    RegionTreatmentCapability::Full,
+                    RegionTreatmentCapability::Scale,
+                    RegionTreatmentCapability::ConstantGap,
+                ],
+                sampling_strategies: vec![
+                    RegionSamplingStrategy::ReferencePoint,
+                    RegionSamplingStrategy::AreaAverage,
+                ],
+                sampled_paint: true,
             },
         ));
     }
@@ -11357,6 +12199,14 @@ fn validate_channel_pattern_instance(
             ChannelGeometryResponseDelta::Connected(value) => {
                 (value.minimum_thickness_delta, value.maximum_thickness_delta)
             }
+            ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::Scale {
+                minimum_scale_delta,
+                maximum_scale_delta,
+            }) => (*minimum_scale_delta, *maximum_scale_delta),
+            ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::ConstantGap {
+                minimum_gap_delta,
+                maximum_gap_delta,
+            }) => (*minimum_gap_delta, *maximum_gap_delta),
         };
         if let Some(value) = minimum {
             validate_finite(
@@ -11777,6 +12627,12 @@ pub enum PropertyFieldId {
     ParametricStackSpacingMultiplier,
     AlongParametricInterval,
     AlongParametricPhase,
+    RegionTreatment,
+    RegionSampling,
+    RegionMinimumScale,
+    RegionMaximumScale,
+    RegionMinimumGap,
+    RegionMaximumGap,
 }
 
 /// The authoritative descriptor order.  Keeping this list beside the field
@@ -11877,6 +12733,12 @@ pub const PROPERTY_FIELD_IDS: &[PropertyFieldId] = &[
     PropertyFieldId::ParametricStackSpacingMultiplier,
     PropertyFieldId::AlongParametricInterval,
     PropertyFieldId::AlongParametricPhase,
+    PropertyFieldId::RegionTreatment,
+    PropertyFieldId::RegionSampling,
+    PropertyFieldId::RegionMinimumScale,
+    PropertyFieldId::RegionMaximumScale,
+    PropertyFieldId::RegionMinimumGap,
+    PropertyFieldId::RegionMaximumGap,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -11920,6 +12782,8 @@ pub enum PropertyEnumChoice {
     SpiralShape(SpiralShape),
     CurveWinding(CurveWinding),
     CurveRepetition(GuideRepetitionKind),
+    RegionTreatment(RegionTreatmentCapability),
+    RegionSampling(RegionSamplingStrategy),
     OffsetSides(OffsetSides),
     OffsetCleanup(OffsetCleanup),
 }
@@ -12090,6 +12954,7 @@ pub enum PropertyCommandKind {
     SetChannelShapeRotationDelta,
     SetTranslationAxis,
     SetChannelGeometryResponseDelta,
+    SetRegionResponse,
     SetLegacyMappingField,
     SetModeledMappingField,
     SetPaint,
@@ -13575,8 +14440,15 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::MarkMinimumFill
             | PropertyFieldId::MarkMaximumFill
             | PropertyFieldId::ConnectedMinimumThickness
-            | PropertyFieldId::ConnectedMaximumThickness => {
+            | PropertyFieldId::ConnectedMaximumThickness
+            | PropertyFieldId::RegionMinimumScale
+            | PropertyFieldId::RegionMaximumScale
+            | PropertyFieldId::RegionMinimumGap
+            | PropertyFieldId::RegionMaximumGap => {
                 PropertyCommandKind::SetChannelGeometryResponseDelta
+            }
+            PropertyFieldId::RegionTreatment | PropertyFieldId::RegionSampling => {
+                PropertyCommandKind::SetRegionResponse
             }
             PropertyFieldId::ShapeRotationDegrees => {
                 PropertyCommandKind::SetChannelShapeRotationDelta
@@ -13743,6 +14615,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::ParametricRepetition
             | PropertyFieldId::ParametricOffsetSides
             | PropertyFieldId::ParametricOffsetCleanup => PropertyValueKind::EnumChoice,
+            PropertyFieldId::RegionTreatment | PropertyFieldId::RegionSampling => {
+                PropertyValueKind::EnumChoice
+            }
             _ => PropertyValueKind::FiniteF64,
         },
         choices: match field {
@@ -13769,6 +14644,8 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::ParametricOffsetSides => OFFSET_SIDES_CHOICES,
             PropertyFieldId::ParametricOffsetCleanup => OFFSET_CLEANUP_CHOICES,
             PropertyFieldId::ConnectionProgram => CONNECTION_PROGRAM_CHOICES,
+            PropertyFieldId::RegionTreatment => REGION_TREATMENT_CHOICES,
+            PropertyFieldId::RegionSampling => REGION_SAMPLING_CHOICES,
             _ => &[],
         },
         bounds: match field {
@@ -13802,6 +14679,14 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::MarkMaximumFill
             | PropertyFieldId::ConnectedMinimumThickness
             | PropertyFieldId::ConnectedMaximumThickness => fill_bounds(),
+            PropertyFieldId::RegionMinimumScale | PropertyFieldId::RegionMaximumScale => {
+                Some(PropertyBounds {
+                    minimum: Some(0.0),
+                    minimum_inclusive: true,
+                    maximum: None,
+                    maximum_inclusive: false,
+                })
+            }
             PropertyFieldId::CoverageAdditionalMargin
             | PropertyFieldId::ModeledMappingGain
             | PropertyFieldId::ArtworkWeightMappingGain
@@ -13838,6 +14723,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::ExclusionMinimumCenterDistance
             | PropertyFieldId::VisibleMarkMargin => PropertyUnit::DocumentDistance,
             PropertyFieldId::ConnectionMaximumDistance => PropertyUnit::DocumentDistance,
+            PropertyFieldId::RegionMinimumGap | PropertyFieldId::RegionMaximumGap => {
+                PropertyUnit::DocumentDistance
+            }
             PropertyFieldId::GuideArcCenterX
             | PropertyFieldId::GuideArcCenterY
             | PropertyFieldId::GuideArcRadius
@@ -13968,6 +14856,13 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::OutputAuthoredClosedShape
             | PropertyFieldId::OutputOrientation
             | PropertyFieldId::OutputOrientationDimension => InvalidationLevel::Realization,
+            PropertyFieldId::RegionTreatment | PropertyFieldId::RegionSampling => {
+                InvalidationLevel::Family
+            }
+            PropertyFieldId::RegionMinimumScale
+            | PropertyFieldId::RegionMaximumScale
+            | PropertyFieldId::RegionMinimumGap
+            | PropertyFieldId::RegionMaximumGap => InvalidationLevel::Realization,
             PropertyFieldId::Paint
             | PropertyFieldId::ColorRed
             | PropertyFieldId::ColorGreen
@@ -14173,6 +15068,15 @@ const OFFSET_SIDES_CHOICES: &[PropertyEnumChoice] = &[
 const OFFSET_CLEANUP_CHOICES: &[PropertyEnumChoice] = &[PropertyEnumChoice::OffsetCleanup(
     OffsetCleanup::DissolveCrossings,
 )];
+const REGION_TREATMENT_CHOICES: &[PropertyEnumChoice] = &[
+    PropertyEnumChoice::RegionTreatment(RegionTreatmentCapability::Full),
+    PropertyEnumChoice::RegionTreatment(RegionTreatmentCapability::Scale),
+    PropertyEnumChoice::RegionTreatment(RegionTreatmentCapability::ConstantGap),
+];
+const REGION_SAMPLING_CHOICES: &[PropertyEnumChoice] = &[
+    PropertyEnumChoice::RegionSampling(RegionSamplingStrategy::ReferencePoint),
+    PropertyEnumChoice::RegionSampling(RegionSamplingStrategy::AreaAverage),
+];
 
 const fn dependency_for_contract(
     applicability: PropertyApplicability,
@@ -14317,6 +15221,10 @@ const fn property_authority(field: PropertyFieldId, target: PropertyTarget) -> P
             | PropertyFieldId::ShapeRotationDegrees
             | PropertyFieldId::MarkMinimumFill
             | PropertyFieldId::MarkMaximumFill
+            | PropertyFieldId::RegionMinimumScale
+            | PropertyFieldId::RegionMaximumScale
+            | PropertyFieldId::RegionMinimumGap
+            | PropertyFieldId::RegionMaximumGap
             | PropertyFieldId::DefinitionSelection => PropertyAuthority::ChannelDelta,
             PropertyFieldId::TranslationX
             | PropertyFieldId::TranslationY
@@ -14354,6 +15262,10 @@ const fn property_reset_capable(field: PropertyFieldId, target: PropertyTarget) 
             | PropertyFieldId::ShapeRotationDegrees
             | PropertyFieldId::MarkMinimumFill
             | PropertyFieldId::MarkMaximumFill
+            | PropertyFieldId::RegionMinimumScale
+            | PropertyFieldId::RegionMaximumScale
+            | PropertyFieldId::RegionMinimumGap
+            | PropertyFieldId::RegionMaximumGap
             | PropertyFieldId::DefinitionSelection
     )
 }
@@ -14557,7 +15469,7 @@ impl PatternDefinitionRecipe {
                 definition: Box::new(structure),
             },
             output_settings: vec![PatternOutputSettingsRecipe {
-                response: PatternGeometryResponse::Regions(RegionGeometryResponse::Full),
+                response: PatternGeometryResponse::Regions(RegionGeometryResponse::default()),
             }],
         }
     }
@@ -14570,7 +15482,7 @@ impl PatternDefinitionRecipe {
                 dimension_indices,
             },
             output_settings: vec![PatternOutputSettingsRecipe {
-                response: PatternGeometryResponse::Regions(RegionGeometryResponse::Full),
+                response: PatternGeometryResponse::Regions(RegionGeometryResponse::default()),
             }],
         }
     }
@@ -15366,6 +16278,21 @@ pub enum DocumentCommand {
         channel_id: ChannelId,
         output_layer_id: PatternOutputLayerId,
     },
+    /// Edits one selected channel's exact response bundle. Shared selected bundles clone with
+    /// fresh structural/output IDs; unshared bundles retain their IDs.
+    EditSelectedChannelPatternDefinitionBundle {
+        channel_id: ChannelId,
+        /// Immutable complete base, including response records, used for stale detection.
+        base_bundle: PatternDefinitionBundle,
+        edit: PatternOutputSettingsEdit,
+    },
+    /// Edits one shared response bundle in place for every linked channel in document order.
+    EditSharedPatternDefinitionBundle {
+        definition_id: PatternDefinitionId,
+        /// Immutable complete base, including response records, used for stale detection.
+        base_bundle: PatternDefinitionBundle,
+        edit: PatternOutputSettingsEdit,
+    },
     /// Adds one validated reusable authored structure with a fresh document-scoped ID.
     AddAuthoredStructure {
         draft: AuthoredStructureDraft,
@@ -15921,7 +16848,9 @@ impl DocumentCommand {
             | Command::SetChannelShapeRotationDelta { .. }
             | Command::ResetChannelShapeRotationDelta { .. }
             | Command::SetChannelOutputResponseDelta { .. }
-            | Command::ResetChannelOutputResponseDelta { .. } => {
+            | Command::ResetChannelOutputResponseDelta { .. }
+            | Command::EditSelectedChannelPatternDefinitionBundle { .. }
+            | Command::EditSharedPatternDefinitionBundle { .. } => {
                 DocumentCommandFieldClassification::NonField(
                     NonFieldCommandOperation::EffectivePatternAuthority,
                 )
@@ -16106,6 +17035,8 @@ impl DocumentCommand {
                 | Self::RemoveUnreferencedPatternDefinition { .. }
                 | Self::EditSelectedChannelPatternDefinition { .. }
                 | Self::EditSharedPatternDefinition { .. }
+                | Self::EditSelectedChannelPatternDefinitionBundle { .. }
+                | Self::EditSharedPatternDefinitionBundle { .. }
                 | Self::ReplaceSharedPatternDefinitionRecipe { .. }
         )
     }
@@ -16135,7 +17066,8 @@ impl DocumentCommand {
             | Self::SetLegacyMappingField { channel_id, .. }
             | Self::SetModeledMappingField { channel_id, .. }
             | Self::SetChannelPaint { channel_id, .. }
-            | Self::EditSelectedChannelPatternDefinition { channel_id, .. } => *channel_id,
+            | Self::EditSelectedChannelPatternDefinition { channel_id, .. }
+            | Self::EditSelectedChannelPatternDefinitionBundle { channel_id, .. } => *channel_id,
             Self::SetSourceReference { .. }
             | Self::SetDocumentPatternSettings { .. }
             | Self::ReplaceDocumentPatternDefinitionRecipe { .. }
@@ -16149,6 +17081,7 @@ impl DocumentCommand {
             | Self::DuplicatePatternDefinition { .. }
             | Self::RemoveUnreferencedPatternDefinition { .. }
             | Self::EditSharedPatternDefinition { .. }
+            | Self::EditSharedPatternDefinitionBundle { .. }
             | Self::ReplaceSharedPatternDefinitionRecipe { .. } => ChannelId(0),
         }
     }
@@ -16175,6 +17108,7 @@ impl DocumentCommand {
                 | Self::DuplicatePatternDefinition { .. }
                 | Self::RemoveUnreferencedPatternDefinition { .. }
                 | Self::EditSharedPatternDefinition { .. }
+                | Self::EditSharedPatternDefinitionBundle { .. }
                 | Self::ReplaceSharedPatternDefinitionRecipe { .. }
         ) && !document.has_channel(self.channel_id())
         {
@@ -16377,6 +17311,32 @@ impl DocumentCommand {
                         }
                         Ok(())
                     }
+                    ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::Scale {
+                        minimum_scale_delta,
+                        maximum_scale_delta,
+                    }) => {
+                        if let Some(value) = minimum_scale_delta {
+                            validate_finite(*value, "channel.pattern.region_delta.minimum_scale")?;
+                        }
+                        if let Some(value) = maximum_scale_delta {
+                            validate_finite(*value, "channel.pattern.region_delta.maximum_scale")?;
+                        }
+                        Ok(())
+                    }
+                    ChannelGeometryResponseDelta::Regions(
+                        RegionGeometryResponseDelta::ConstantGap {
+                            minimum_gap_delta,
+                            maximum_gap_delta,
+                        },
+                    ) => {
+                        if let Some(value) = minimum_gap_delta {
+                            validate_finite(*value, "channel.pattern.region_delta.minimum_gap")?;
+                        }
+                        if let Some(value) = maximum_gap_delta {
+                            validate_finite(*value, "channel.pattern.region_delta.maximum_gap")?;
+                        }
+                        Ok(())
+                    }
                 }
             }
             Self::AddAuthoredStructure { draft } => {
@@ -16496,6 +17456,53 @@ impl DocumentCommand {
                     ));
                 }
                 Ok(())
+            }
+            Self::EditSelectedChannelPatternDefinitionBundle {
+                channel_id,
+                base_bundle,
+                edit,
+            } => {
+                if document.pattern_definition_id_for(*channel_id)
+                    != Some(base_bundle.definition.id)
+                    || document.bundle(base_bundle.definition.id) != Some(base_bundle)
+                {
+                    return Err(ValidationError::new(
+                        "pattern.bundle.base",
+                        "selected response bundle base is stale",
+                    ));
+                }
+                base_bundle.validate()?;
+                let mut edited = base_bundle.clone();
+                edit.apply_to_bundle(&mut edited)?;
+                if document.linked_channels(base_bundle.definition.id).len() > 1 {
+                    let duplicate = document.duplicate_definition(&base_bundle.definition)?;
+                    let duplicate = document.bundle_for_duplicate(&edited, duplicate)?;
+                    duplicate.validate()?;
+                }
+                Ok(())
+            }
+            Self::EditSharedPatternDefinitionBundle {
+                definition_id,
+                base_bundle,
+                edit,
+            } => {
+                if *definition_id != base_bundle.definition.id
+                    || document.bundle(*definition_id) != Some(base_bundle)
+                {
+                    return Err(ValidationError::new(
+                        "pattern.bundle.base",
+                        "shared response bundle base is stale",
+                    ));
+                }
+                if document.linked_channels(*definition_id).is_empty() {
+                    return Err(ValidationError::new(
+                        "pattern.bundle.definition_id",
+                        "shared response bundle targets an unlinked definition",
+                    ));
+                }
+                base_bundle.validate()?;
+                let mut edited = base_bundle.clone();
+                edit.apply_to_bundle(&mut edited)
             }
             Self::EditSelectedChannelPatternDefinition {
                 channel_id,
@@ -16858,6 +17865,61 @@ impl DocumentCommand {
                     .retain(|entry| entry.output_layer_id != *output_layer_id);
                 return;
             }
+            Self::EditSelectedChannelPatternDefinitionBundle {
+                channel_id,
+                base_bundle,
+                edit,
+            } => {
+                let linked = document.linked_channels(base_bundle.definition.id);
+                if linked.len() > 1 {
+                    let source = document
+                        .bundle(base_bundle.definition.id)
+                        .expect("validated selected response bundle")
+                        .clone();
+                    let mut edited = source.clone();
+                    edit.apply_to_bundle(&mut edited)
+                        .expect("validated selected response bundle edit");
+                    let duplicate = document
+                        .duplicate_definition(&source.definition)
+                        .expect("validated selected response clone allocation");
+                    let clone = document
+                        .bundle_for_duplicate(&edited, duplicate)
+                        .expect("validated selected response clone binding");
+                    let clone_id = clone.definition.id;
+                    document.pattern_definition_bundles.push(clone.clone());
+                    document.retarget_channel(*channel_id, clone_id);
+                    document.remap_channel_output_response_deltas(*channel_id, &source, &clone);
+                    document.prune_incompatible_output_response_deltas(*channel_id);
+                } else {
+                    let bundle = document
+                        .pattern_definition_bundles
+                        .iter_mut()
+                        .find(|bundle| bundle.definition.id == base_bundle.definition.id)
+                        .expect("validated selected response bundle");
+                    edit.apply_to_bundle(bundle)
+                        .expect("validated selected response bundle edit");
+                    document.prune_incompatible_output_response_deltas(*channel_id);
+                }
+                return;
+            }
+            Self::EditSharedPatternDefinitionBundle {
+                definition_id,
+                edit,
+                ..
+            } => {
+                let linked = document.linked_channels(*definition_id);
+                let bundle = document
+                    .pattern_definition_bundles
+                    .iter_mut()
+                    .find(|bundle| bundle.definition.id == *definition_id)
+                    .expect("validated shared response bundle");
+                edit.apply_to_bundle(bundle)
+                    .expect("validated shared response bundle edit");
+                for channel_id in linked {
+                    document.prune_incompatible_output_response_deltas(channel_id);
+                }
+                return;
+            }
             Self::AddAuthoredStructure { draft } => {
                 let id = next_authored_structure_id(&document.authored_structures)
                     .expect("command validation allocated an authored structure ID");
@@ -17106,6 +18168,40 @@ impl DocumentCommand {
     /// Authored resource replacements enumerate every current generic-guide consumer in channel
     /// order, while unreferenced resource operations retain the established empty result.
     fn result_for_transition(&self, before: &Document, after: &Document) -> CommandResult {
+        match self {
+            Self::EditSelectedChannelPatternDefinitionBundle {
+                channel_id,
+                base_bundle,
+                edit,
+            } => {
+                let invalidation = if before.linked_channels(base_bundle.definition.id).len() > 1 {
+                    InvalidationLevel::Family
+                } else {
+                    edit.invalidation_for(base_bundle)
+                        .expect("validated selected response bundle edit")
+                };
+                return CommandResult {
+                    affected_channels: vec![*channel_id],
+                    invalidation: Some(invalidation),
+                    created_authored_structure_id: None,
+                };
+            }
+            Self::EditSharedPatternDefinitionBundle {
+                definition_id,
+                base_bundle,
+                edit,
+            } => {
+                return CommandResult {
+                    affected_channels: before.linked_channels(*definition_id),
+                    invalidation: Some(
+                        edit.invalidation_for(base_bundle)
+                            .expect("validated shared response bundle edit"),
+                    ),
+                    created_authored_structure_id: None,
+                };
+            }
+            _ => {}
+        }
         if matches!(
             self,
             Self::SetDocumentPatternSettings { .. }
@@ -18445,7 +19541,7 @@ mod history_tests {
             vec![PatternDefinitionBundle {
                 output_settings: vec![PatternOutputSettings {
                     output_layer_id: output_id,
-                    response: PatternGeometryResponse::Regions(RegionGeometryResponse::Full),
+                    response: PatternGeometryResponse::Regions(RegionGeometryResponse::default()),
                 }],
                 definition,
             }],

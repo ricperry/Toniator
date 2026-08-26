@@ -154,10 +154,13 @@ fn shape_and_fill_changes_are_selected_channel_realization_only() {
             .all(|channel| channel.realization == CacheDisposition::Hit)
     );
 
+    let output_layer_id =
+        history.document().pattern_definition_bundles()[0].output_settings[0].output_layer_id;
     let fill = history
         .document()
-        .set_channel_geometry_response_for_effective(
+        .set_channel_output_response_for_effective(
             ChannelId(2),
+            output_layer_id,
             PatternGeometryResponse::Marks(toniator_domain::MarkGeometryResponse {
                 minimum_fill: 0.1,
                 maximum_fill: 1.2,
@@ -240,7 +243,7 @@ fn stale_publication_rejects_and_legacy_diagnostic_uses_effective_authority() {
         DocumentId(20),
         modeled.canvas().clone(),
         modeled.source().clone(),
-        vec![modeled.pattern_definitions()[0].clone()],
+        vec![modeled.pattern_definition_bundles()[0].clone()],
         modeled.pattern_settings().clone(),
         vec![ChannelState {
             id: ChannelId(71),
@@ -253,7 +256,7 @@ fn stale_publication_rejects_and_legacy_diagnostic_uses_effective_authority() {
                     translation_y: 0.0,
                 },
                 shape_rotation_delta_degrees: Some(3.0),
-                geometry_response_delta: None,
+                output_response_deltas: Vec::new(),
             },
             appearance: ChannelAppearance {
                 visible: true,

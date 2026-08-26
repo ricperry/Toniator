@@ -3,7 +3,10 @@
 //! The shared mutable-document boundary for headless Toniator frontends.
 
 #[cfg(test)]
-use std::sync::atomic::AtomicUsize;
+use std::{
+    cell::{Cell, RefCell},
+    sync::atomic::AtomicUsize,
+};
 use std::{
     error::Error,
     fmt,
@@ -24,8 +27,8 @@ pub use scheduler::{
 
 use toniator_domain::{
     CanvasSpec, ChannelId, EvaluationSnapshot, EvaluationToken, PatternDefinition,
-    PatternMechanism, PatternOutputLayer, SourceComponent, SourcePlacement, SourceReference,
-    SourceReferenceId,
+    PatternMechanism, PatternOutputLayer, RegionGeometryResponse, SourceComponent, SourcePlacement,
+    SourceReference, SourceReferenceId,
 };
 use toniator_domain::{
     ChannelPaint, DocumentEvaluationSnapshot, DocumentEvaluationToken, DocumentSession,
@@ -35,7 +38,8 @@ use toniator_patterns::{
     Bounds, CONNECTION_PATH_CONTRACT_ID, CONNECTION_TRAIL_CONTRACT_ID, CanonicalRegionSet,
     CurvePath, CurveSegment, FamilyCapability, GUIDE_FACE_CONTRACT_ID, GenericGuideCapability,
     GridFamilyOutput, GuideFaceLimits, GuideFaceRequest, MAZE_WALL_CONTRACT_ID,
-    MappedCircularMarkRealization, MazeLimits, PatternPipelineError, SITE_ADJACENCY_CONTRACT_ID,
+    MappedCircularMarkRealization, MazeLimits, PatternPipelineError, REGION_TREATMENT_CONTRACT_ID,
+    RegionReference, RegionTreatmentLimits, SITE_ADJACENCY_CONTRACT_ID,
     SourceColorCircularMarkRealization, TypedFamilyOutput, TypedRealization,
     VORONOI_REGION_CONTRACT_ID, VoronoiRegionDiagnostics, VoronoiRegionLimits,
     VoronoiRegionRequest, build_connection_paths_cancellable, build_guide_faces_cancellable,
@@ -45,6 +49,7 @@ use toniator_patterns::{
     evaluate_typed_family_product_with_source_cancellable,
     evaluate_typed_maze_walls_from_family_cancellable, family_requires_decoded_source,
     maximum_emitted_guide_spacing, maximum_nominal_cell_diameter, realize_circular_marks,
+    realize_region_output_cancellable, voronoi_region_references,
 };
 pub use toniator_patterns::{
     CanonicalCircleMark, CanonicalMark, CanonicalMarkRealization, CanonicalStrokeRealization,
@@ -52,17 +57,21 @@ pub use toniator_patterns::{
     MarkResponse, MazeProgramResult, Point2, RealizationError, SiteAdjacencyGraph,
     SiteAdjacencyLimits, SiteAdjacencyPolicy, SiteId, SiteScope,
 };
+#[cfg(test)]
+use toniator_patterns::{
+    RegionEvaluationEvidence, realize_region_output_with_evidence_cancellable,
+};
 pub use toniator_render::{
     GeometryOutput, OutputRasterTarget, PreviewRasterTarget, RasterAntialiasing, RasterBackground,
     RasterSurface, RenderError, RenderLayer, RenderScene, SceneIdentity, encode_png,
     linear_to_srgb, raster_output_identity, rasterize, rasterize_cancellable, rasterize_output,
     rasterize_preview, rasterize_preview_cancellable, srgb_to_linear, write_svg,
 };
-use toniator_sampling::decode_source;
 pub use toniator_sampling::{
     DECODER_CONTRACT_ID, SourceField, SourceFormat, SourceFormatHint, SourceIdentity,
     SvgTextDiagnostic,
 };
+use toniator_sampling::{RegionSamplingLimits, decode_source};
 
 pub use toniator_patterns::{GridError, GridInspectRequest};
 
@@ -230,7 +239,7 @@ pub struct ChannelDiagnosticRequest {
 }
 
 /// Immutable resource policy for one evaluation or scheduler.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EvaluationLimits {
     max_family_candidates: usize,
     max_flattened_raster_edges: usize,
@@ -242,7 +251,11 @@ pub struct EvaluationLimits {
     maze: MazeLimits,
     voronoi: VoronoiRegionLimits,
     guide_faces: GuideFaceLimits,
+    region_sampling: RegionSamplingLimits,
+    region_treatment: RegionTreatmentLimits,
 }
+
+impl Eq for EvaluationLimits {}
 
 impl EvaluationLimits {
     pub const DEFAULT_MAX_FAMILY_CANDIDATES: usize = 1_048_576;
@@ -271,6 +284,8 @@ impl EvaluationLimits {
             maze: MazeLimits::default(),
             voronoi: VoronoiRegionLimits::default(),
             guide_faces: GuideFaceLimits::default(),
+            region_sampling: RegionSamplingLimits::default(),
+            region_treatment: RegionTreatmentLimits::default(),
         })
     }
 
@@ -397,6 +412,75 @@ impl EvaluationLimits {
     /// Returns the geometry-owned bounded policy for guide-arrangement face realization.
     pub const fn guide_face_limits(self) -> GuideFaceLimits {
         self.guide_faces
+    }
+
+    /// Returns the request-wide sampling bounds for one typed filled-region output.
+    ///
+    /// These bounds remain evaluator policy rather than document intent and therefore participate
+    /// in only the independently cached region realization that consumes them.
+    pub const fn region_sampling_limits(self) -> RegionSamplingLimits {
+        self.region_sampling
+    }
+
+    /// Returns the request-wide treatment bounds for one typed filled-region output.
+    ///
+    /// These bounds remain evaluator policy rather than document intent and are never persisted.
+    pub const fn region_treatment_limits(self) -> RegionTreatmentLimits {
+        self.region_treatment
+    }
+
+    /// Replaces nonzero bounded work policy for deterministic region-source sampling.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sampling.region_average.limits.zero` before a cache candidate or partial sample
+    /// table can be allocated when any mandatory work bound is disabled.
+    pub fn with_region_sampling_limits(
+        mut self,
+        limits: RegionSamplingLimits,
+    ) -> Result<Self, EvaluationError> {
+        if limits.max_cell_intersections == 0
+            || limits.max_flattened_segments == 0
+            || limits.max_subdivision_depth == 0
+        {
+            return Err(EvaluationError::new(
+                "sampling.region_average.limits.zero",
+                "region sampling limits must be nonzero",
+            ));
+        }
+        self.region_sampling = limits;
+        Ok(self)
+    }
+
+    /// Replaces filled-region treatment policy without altering document-owned response intent.
+    ///
+    /// # Errors
+    ///
+    /// Returns the treatment boundary's stable limit error before evaluation if a canonical or
+    /// path-offset limit is invalid; the geometry authority retains ownership of detailed checks.
+    pub fn with_region_treatment_limits(
+        mut self,
+        limits: RegionTreatmentLimits,
+    ) -> Result<Self, EvaluationError> {
+        if limits.canonical.max_source_groups() == 0
+            || limits.canonical.max_regions() == 0
+            || limits.canonical.max_segments() == 0
+            || limits.canonical.max_inspections() == 0
+            || limits.path_offset.maximum_subdivision_depth == 0
+            || limits.path_offset.maximum_segments == 0
+            || limits.path_offset.maximum_components == 0
+            || limits.path_offset.maximum_cleanup_pairs == 0
+            || limits.path_offset.maximum_cusp_isolation_work == 0
+            || !limits.path_offset.tolerance.is_finite()
+            || limits.path_offset.tolerance <= 0.0
+        {
+            return Err(EvaluationError::new(
+                "region.treatment.limits.zero",
+                "region treatment limits must be finite and nonzero",
+            ));
+        }
+        self.region_treatment = limits;
+        Ok(self)
     }
 
     /// Replaces nonzero guide-face work bounds without changing document authority.
@@ -529,6 +613,8 @@ impl Default for EvaluationLimits {
             maze: MazeLimits::default(),
             voronoi: VoronoiRegionLimits::default(),
             guide_faces: GuideFaceLimits::default(),
+            region_sampling: RegionSamplingLimits::default(),
+            region_treatment: RegionTreatmentLimits::default(),
         }
     }
 }
@@ -589,6 +675,154 @@ mod stage20e2_limit_tests {
                 .path(),
             "realization.stroke.outline_limit"
         );
+    }
+
+    /// Proves Stage 20Q sampling policy is explicit evaluator state and rejects a disabled budget.
+    #[test]
+    fn region_sampling_limits_are_configurable_and_reject_disabled_values() {
+        let configured = RegionSamplingLimits {
+            max_cell_intersections: 17,
+            max_flattened_segments: 19,
+            max_subdivision_depth: 23,
+        };
+        assert_eq!(
+            EvaluationLimits::default()
+                .with_region_sampling_limits(configured)
+                .expect("nonzero sampling limits")
+                .region_sampling_limits(),
+            configured
+        );
+        assert_eq!(
+            EvaluationLimits::default()
+                .with_region_sampling_limits(RegionSamplingLimits {
+                    max_cell_intersections: 0,
+                    ..configured
+                })
+                .expect_err("disabled intersection budget rejects")
+                .path(),
+            "sampling.region_average.limits.zero"
+        );
+    }
+
+    /// Proves Stage 20Q treatment policy enters evaluation limits and rejects invalid offset work.
+    #[test]
+    fn region_treatment_limits_are_configurable_and_reject_invalid_offset_policy() {
+        let accepted = RegionTreatmentLimits::default();
+        assert_eq!(
+            EvaluationLimits::default()
+                .with_region_treatment_limits(accepted)
+                .expect("default treatment limits")
+                .region_treatment_limits(),
+            accepted
+        );
+        let mut invalid = accepted;
+        invalid.path_offset.maximum_segments = 0;
+        assert_eq!(
+            EvaluationLimits::default()
+                .with_region_treatment_limits(invalid)
+                .expect_err("disabled offset work rejects")
+                .path(),
+            "region.treatment.limits.zero"
+        );
+    }
+}
+
+#[cfg(test)]
+mod stage20q_region_cache_tests {
+    use super::*;
+
+    /// Builds a finite solid paint fixture without creating a frontend-owned color authority.
+    fn solid_paint() -> ChannelPaint {
+        ChannelPaint::Solid(toniator_domain::ColorValue {
+            red: 0.25,
+            green: 0.5,
+            blue: 0.75,
+            alpha: 1.0,
+        })
+    }
+
+    /// Proves treatment envelopes use the typed Scale and signed ConstantGap extrema only.
+    #[test]
+    fn region_support_uses_outward_scale_and_gap_extrema() {
+        let scale = RegionGeometryResponse::Scale {
+            sampling: toniator_domain::RegionSamplingStrategy::ReferencePoint,
+            minimum_scale: 0.0,
+            maximum_scale: 1.75,
+        };
+        let inward_gap = RegionGeometryResponse::ConstantGap {
+            sampling: toniator_domain::RegionSamplingStrategy::ReferencePoint,
+            minimum_gap: 2.0,
+            maximum_gap: 4.0,
+        };
+        let outward_gap = RegionGeometryResponse::ConstantGap {
+            sampling: toniator_domain::RegionSamplingStrategy::AreaAverage,
+            minimum_gap: -8.0,
+            maximum_gap: 3.0,
+        };
+        assert_eq!(
+            region_treatment_outward_support(&scale, 10.0).expect("finite scale support"),
+            7.5
+        );
+        assert_eq!(
+            region_treatment_outward_support(&inward_gap, 10.0).expect("inward gap has no growth"),
+            0.0
+        );
+        assert_eq!(
+            region_treatment_outward_support(&outward_gap, 10.0).expect("outward gap growth"),
+            4.0
+        );
+    }
+
+    /// Proves invalid support arithmetic fails before a family evaluator can allocate candidates.
+    #[test]
+    fn region_support_rejects_nonfinite_and_overflowing_inputs() {
+        let nonfinite = RegionGeometryResponse::Scale {
+            sampling: toniator_domain::RegionSamplingStrategy::ReferencePoint,
+            minimum_scale: 0.0,
+            maximum_scale: f64::INFINITY,
+        };
+        assert_eq!(
+            region_treatment_outward_support(&nonfinite, 1.0)
+                .expect_err("nonfinite scale rejects")
+                .path(),
+            "region.treatment.coverage.maximum_scale"
+        );
+        assert_eq!(
+            checked_region_support_add(f64::MAX, f64::MAX)
+                .expect_err("overflow rejects")
+                .path(),
+            "region.treatment.coverage.support"
+        );
+    }
+
+    /// Proves Full plus solid preserves the accepted source-independent realization cache behavior.
+    #[test]
+    fn full_solid_region_output_omits_sampling_identity() {
+        let full =
+            toniator_domain::PatternGeometryResponse::Regions(RegionGeometryResponse::Full {
+                sampling: toniator_domain::RegionSamplingStrategy::AreaAverage,
+            });
+        assert!(!output_sampling_required(&full, &solid_paint()));
+        assert!(output_sampling_required(
+            &full,
+            &ChannelPaint::SampledSource
+        ));
+    }
+
+    /// Proves numeric treatment and sampled-paint paths remain source-sensitive cache consumers.
+    #[test]
+    fn sampled_or_treated_region_output_requires_sampling_identity() {
+        let scale =
+            toniator_domain::PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
+                sampling: toniator_domain::RegionSamplingStrategy::ReferencePoint,
+                minimum_scale: 0.5,
+                maximum_scale: 1.5,
+            });
+        assert!(output_sampling_required(&scale, &solid_paint()));
+        assert!(output_sampling_required(
+            &scale,
+            &ChannelPaint::SampledSource
+        ));
     }
 }
 
@@ -1697,13 +1931,66 @@ pub struct ChannelEvaluationSummary {
     realization_identity: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 /// One independent output realization cache disposition within a channel.
 pub struct OutputCacheDiagnostics {
     pub output_layer_id: toniator_domain::PatternOutputLayerId,
     pub realization: CacheDisposition,
     /// Geometry-owned ordinary-region work facts retained with a cached immutable output unit.
     pub voronoi: Option<VoronoiRegionDiagnostics>,
+    /// Complete producer, source, sampling, and treatment facts replayed from a Region cache unit.
+    pub region: Option<RegionOutputCacheDiagnostics>,
+}
+
+/// Producer diagnostics retained with one independently cached filled-region output.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RegionProducerCacheDiagnostics {
+    /// Stores ordinary Voronoi bounded-work facts from the canonical region producer.
+    Voronoi(VoronoiRegionDiagnostics),
+    /// Records the analytic Guide-Face producer, whose detailed facts remain geometry-owned.
+    GuideFaces,
+}
+
+/// Requested source sampling facts replayed with one filled-region output cache hit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegionSamplingCacheDiagnostics {
+    /// Stores the response-selected strategy even when Full plus solid performs no sample.
+    pub strategy: toniator_domain::RegionSamplingStrategy,
+    /// Counts complete untreated bases sampled by the typed patterns realizer.
+    pub sampled_bases: usize,
+}
+
+/// Typed treatment classification retained with bounded retained-region facts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RegionTreatmentCacheKind {
+    /// Replays untreated canonical geometry.
+    Full,
+    /// Applies a per-base affine scale.
+    Scale,
+    /// Applies a per-base signed normal gap.
+    ConstantGap,
+}
+
+/// Treatment facts replayed from one independently cached filled-region output unit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegionTreatmentCacheDiagnostics {
+    /// Identifies the typed treatment without storing an effective derived response table.
+    pub kind: RegionTreatmentCacheKind,
+    /// Counts canonical treated components retained after collapse and alpha suppression.
+    pub retained_regions: usize,
+}
+
+/// Complete non-fingerprint diagnostics stored beside one immutable filled-region cache unit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RegionOutputCacheDiagnostics {
+    /// Stores the decoded source identity only when the output actually sampled it.
+    pub source_identity: Option<SourceIdentity>,
+    /// Stores producer bounded-work facts without deriving renderer topology.
+    pub producer: RegionProducerCacheDiagnostics,
+    /// Stores the response-selected sampling strategy and completed base count.
+    pub sampling: RegionSamplingCacheDiagnostics,
+    /// Stores treatment classification and retained canonical component count.
+    pub treatment: RegionTreatmentCacheDiagnostics,
 }
 
 /// Cache dispositions for one evaluated channel and its ordered output units.
@@ -2148,6 +2435,54 @@ pub fn evaluate_with_limits(
     })
 }
 
+// Holds an engine-test-only Region snapshot for the current synchronous evaluation thread. This
+// storage is never serialized, cached, projected as capability data, or present in production.
+#[cfg(test)]
+thread_local! {
+    static REGION_EVALUATION_EVIDENCE_ENABLED: Cell<bool> = const { Cell::new(false) };
+    static REGION_EVALUATION_EVIDENCE: RefCell<Option<RegionEvaluationEvidence>> = const { RefCell::new(None) };
+}
+
+/// Evaluates one document while atomically collecting a Region snapshot from its actual realization.
+///
+/// A failing or cancelled invocation clears the thread-local slot, so callers never receive a
+/// partial snapshot. Callers provide a fresh cache when they require a cache-miss observation.
+#[cfg(test)]
+fn evaluate_cached_document_with_region_evidence(
+    request: EvaluationRequest,
+    limits: EvaluationLimits,
+    accepted: &DocumentDerivedCache,
+    cancellation: &dyn CancellationProbe,
+) -> (
+    Result<CachedDocumentEvaluation, EvaluationRunError>,
+    Option<RegionEvaluationEvidence>,
+) {
+    REGION_EVALUATION_EVIDENCE.with(|slot| *slot.borrow_mut() = None);
+    REGION_EVALUATION_EVIDENCE_ENABLED.with(|enabled| enabled.set(true));
+    let outcome = evaluate_cached_document(request, limits, accepted, cancellation);
+    REGION_EVALUATION_EVIDENCE_ENABLED.with(|enabled| enabled.set(false));
+    let evidence = outcome
+        .is_ok()
+        .then(|| REGION_EVALUATION_EVIDENCE.with(|slot| slot.borrow_mut().take()))
+        .flatten();
+    if outcome.is_err() {
+        REGION_EVALUATION_EVIDENCE.with(|slot| *slot.borrow_mut() = None);
+    }
+    (outcome, evidence)
+}
+
+/// Returns whether the current engine test requests one Region realization observation.
+#[cfg(test)]
+fn region_evaluation_evidence_enabled() -> bool {
+    REGION_EVALUATION_EVIDENCE_ENABLED.with(Cell::get)
+}
+
+/// Stores one completed test-only Region snapshot after the typed realizer has succeeded.
+#[cfg(test)]
+fn record_region_evaluation_evidence(evidence: RegionEvaluationEvidence) {
+    REGION_EVALUATION_EVIDENCE.with(|slot| *slot.borrow_mut() = Some(evidence));
+}
+
 fn evaluate_cached_document(
     request: EvaluationRequest,
     limits: EvaluationLimits,
@@ -2349,6 +2684,7 @@ fn evaluate_cached_document_impl(
                 channel,
                 effective,
                 &key,
+                &family,
                 &source,
                 output_setting,
                 limits,
@@ -2382,6 +2718,8 @@ fn evaluate_cached_document_impl(
                                 limits.maze_limits(),
                                 limits.voronoi_region_limits(),
                                 limits.guide_face_limits(),
+                                limits.region_sampling_limits(),
+                                limits.region_treatment_limits(),
                                 &|| cancellation.is_cancelled(),
                             )
                         }) {
@@ -2409,6 +2747,7 @@ fn evaluate_cached_document_impl(
                 output_layer_id: output_setting.output_layer_id,
                 realization: realization_disposition,
                 voronoi: region_diagnostics(&realization.realization),
+                region: region_output_diagnostics(&realization.realization),
             });
             realizations.push((realization_key, Arc::clone(&realization)));
             channel_outputs.push(realization);
@@ -2631,16 +2970,22 @@ enum DocumentRealization {
     Strokes(TypedRealization<CanonicalStrokeRealization>),
     Regions {
         regions: CanonicalRegionSet,
+        paints: Option<Vec<toniator_sampling::SampledSourcePaint>>,
         fingerprint: String,
         diagnostics: RegionRealizationDiagnostics,
     },
 }
 
-/// Producer-owned region diagnostics retained beside, but outside, canonical geometry identity.
-#[derive(Clone, Copy)]
-enum RegionRealizationDiagnostics {
-    Voronoi(VoronoiRegionDiagnostics),
-    GuideFaces,
+/// Producer/source/sampling/treatment facts retained beside canonical region geometry identity.
+///
+/// This private cache-unit record is cloned into public output diagnostics on every miss and hit.
+/// It never contributes to a region geometry fingerprint or persistence payload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RegionRealizationDiagnostics {
+    source_identity: Option<SourceIdentity>,
+    producer: RegionProducerCacheDiagnostics,
+    sampling: RegionSamplingCacheDiagnostics,
+    treatment: RegionTreatmentCacheDiagnostics,
 }
 
 /// One independently cached channel-output realization assembled only after its explicit binding validates.
@@ -2707,10 +3052,60 @@ fn document_realization_identity(value: &DocumentRealization) -> &str {
 fn region_diagnostics(value: &DocumentRealization) -> Option<VoronoiRegionDiagnostics> {
     match value {
         DocumentRealization::Regions {
-            diagnostics: RegionRealizationDiagnostics::Voronoi(diagnostics),
+            diagnostics:
+                RegionRealizationDiagnostics {
+                    producer: RegionProducerCacheDiagnostics::Voronoi(diagnostics),
+                    ..
+                },
             ..
         } => Some(*diagnostics),
         _ => None,
+    }
+}
+
+/// Clones complete Region output diagnostics from a cache unit without altering geometry identity.
+fn region_output_diagnostics(value: &DocumentRealization) -> Option<RegionOutputCacheDiagnostics> {
+    let DocumentRealization::Regions { diagnostics, .. } = value else {
+        return None;
+    };
+    Some(RegionOutputCacheDiagnostics {
+        source_identity: diagnostics.source_identity.clone(),
+        producer: diagnostics.producer.clone(),
+        sampling: diagnostics.sampling,
+        treatment: diagnostics.treatment,
+    })
+}
+
+/// Builds cache-unit diagnostics from the completed typed region realizer and one producer result.
+///
+/// Source identity is retained only when an actual base sample occurred. The response-selected
+/// strategy and treatment kind remain diagnostic facts, never a replacement effective model.
+fn completed_region_diagnostics(
+    response: &RegionGeometryResponse,
+    source: &SourceField,
+    realization: toniator_patterns::RegionOutputRealizationDiagnostics,
+    producer: RegionProducerCacheDiagnostics,
+) -> RegionRealizationDiagnostics {
+    let (strategy, kind) = match response {
+        RegionGeometryResponse::Full { sampling } => (*sampling, RegionTreatmentCacheKind::Full),
+        RegionGeometryResponse::Scale { sampling, .. } => {
+            (*sampling, RegionTreatmentCacheKind::Scale)
+        }
+        RegionGeometryResponse::ConstantGap { sampling, .. } => {
+            (*sampling, RegionTreatmentCacheKind::ConstantGap)
+        }
+    };
+    RegionRealizationDiagnostics {
+        source_identity: (realization.sampled_bases > 0).then(|| source.identity().clone()),
+        producer,
+        sampling: RegionSamplingCacheDiagnostics {
+            strategy,
+            sampled_bases: realization.sampled_bases,
+        },
+        treatment: RegionTreatmentCacheDiagnostics {
+            kind,
+            retained_regions: realization.retained_regions,
+        },
     }
 }
 
@@ -2740,6 +3135,8 @@ fn evaluate_document_output(
     maze_limits: MazeLimits,
     voronoi_limits: VoronoiRegionLimits,
     guide_face_limits: GuideFaceLimits,
+    region_sampling_limits: RegionSamplingLimits,
+    region_treatment_limits: RegionTreatmentLimits,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<DocumentOutputRealization, EvaluationError> {
     let realization = evaluate_document_channel(
@@ -2761,6 +3158,8 @@ fn evaluate_document_output(
         maze_limits,
         voronoi_limits,
         guide_face_limits,
+        region_sampling_limits,
+        region_treatment_limits,
         is_cancelled,
     )?;
     Ok(DocumentOutputRealization {
@@ -2831,12 +3230,69 @@ fn transformed_curve_segment_instances(
         ))
     })
 }
-/// Realizes one document channel through either the retained legacy circle adapter or truthful marks.
+
+/// Invokes the sole patterns Region realizer and optionally records its test-only completed state.
 ///
-/// Mark-prototype layers always publish generalized canonical geometry, while legacy
-/// `CircularMarks` remain on their diagnostic compatibility path. The caller has completed
-/// document-level reference validation, but this boundary still returns a stable error before
-/// cache transaction publication when the typed family or source cannot realize the layer.
+/// Production calls the ordinary patterns authority unchanged. Test builds select the evidence
+/// variant only while the thread-local observer is enabled, preserving a single sampling and
+/// treatment invocation and mapping failures through the normal engine error boundary.
+///
+/// # Errors
+///
+/// Returns the normal typed-region error as an evaluation error without recording a snapshot.
+#[allow(clippy::too_many_arguments)]
+fn realize_document_region_output(
+    capability: &toniator_patterns::OutputCapability,
+    setting: &toniator_domain::EffectivePatternOutputSettings,
+    untreated: &CanonicalRegionSet,
+    references: &[RegionReference],
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: toniator_domain::SourceMapping,
+    paint: &ChannelPaint,
+    sampling_limits: RegionSamplingLimits,
+    treatment_limits: RegionTreatmentLimits,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<toniator_patterns::TypedRegionOutputRealization, EvaluationError> {
+    #[cfg(test)]
+    if region_evaluation_evidence_enabled() {
+        let (realization, evidence) = realize_region_output_with_evidence_cancellable(
+            capability,
+            setting,
+            untreated,
+            references,
+            Some(source),
+            canvas,
+            mapping,
+            paint,
+            sampling_limits,
+            treatment_limits,
+            is_cancelled,
+        )
+        .map_err(|error| EvaluationError::new(error.path(), error.message()))?;
+        record_region_evaluation_evidence(evidence);
+        return Ok(realization);
+    }
+    realize_region_output_cancellable(
+        capability,
+        setting,
+        untreated,
+        references,
+        Some(source),
+        canvas,
+        mapping,
+        paint,
+        sampling_limits,
+        treatment_limits,
+        is_cancelled,
+    )
+    .map_err(|error| EvaluationError::new(error.path(), error.message()))
+}
+
+/// Realizes one document channel through typed family, region, mark, or stroke authority.
+///
+/// The caller has completed document reference validation. This boundary publishes no partial
+/// cache candidate and preserves renderer ownership of final clipping.
 ///
 /// # Errors
 ///
@@ -2861,17 +3317,13 @@ fn evaluate_document_channel(
     maze_limits: MazeLimits,
     voronoi_limits: VoronoiRegionLimits,
     guide_face_limits: GuideFaceLimits,
+    region_sampling_limits: RegionSamplingLimits,
+    region_treatment_limits: RegionTreatmentLimits,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<DocumentRealization, EvaluationError> {
     toniator_patterns::validate_output_realization_binding(plan, output_capability, output_setting)
         .map_err(EvaluationError::from_pipeline)?;
     if let Some(region_source) = output_capability.regions() {
-        let ChannelPaint::Solid(_) = channel.paint else {
-            return Err(EvaluationError::new(
-                "evaluation.region.paint",
-                "ordinary region output requires solid channel paint",
-            ));
-        };
         let canvas = Bounds::new(
             Point2::new(0.0, 0.0),
             Point2::new(document.canvas().width, document.canvas().height),
@@ -2904,16 +3356,49 @@ fn evaluate_document_channel(
                     is_cancelled,
                 )
                 .map_err(|error| EvaluationError::new(error.path(), error.message()))?;
+                let references: Vec<RegionReference> =
+                    voronoi_region_references(family.site_set(), &regions)
+                        .map_err(|error| EvaluationError::new(error.path(), error.message()))?
+                        .into_iter()
+                        .map(|(region_id, point)| RegionReference { region_id, point })
+                        .collect();
+                let realized = realize_document_region_output(
+                    output_capability,
+                    output_setting,
+                    &regions,
+                    &references,
+                    source,
+                    document.canvas(),
+                    channel.mapping,
+                    &channel.paint,
+                    region_sampling_limits,
+                    region_treatment_limits,
+                    is_cancelled,
+                )?;
+                let toniator_domain::PatternGeometryResponse::Regions(response) =
+                    &output_setting.response
+                else {
+                    return Err(EvaluationError::new(
+                        "region.treatment.identity.response",
+                        "ordinary region output requires a region response",
+                    ));
+                };
                 return Ok(DocumentRealization::Regions {
                     fingerprint: format!(
                         "{}:{}:{}:{}",
                         VORONOI_REGION_CONTRACT_ID,
                         output_capability.layer_id.0,
                         site_mechanism_id.0,
-                        regions.fingerprint()
+                        realized.fingerprint
                     ),
-                    regions,
-                    diagnostics: RegionRealizationDiagnostics::Voronoi(diagnostics),
+                    regions: realized.regions,
+                    paints: realized.paints,
+                    diagnostics: completed_region_diagnostics(
+                        response,
+                        source,
+                        realized.diagnostics,
+                        RegionProducerCacheDiagnostics::Voronoi(diagnostics),
+                    ),
                 });
             }
             toniator_domain::RegionSourceIntent::GuideFaces {
@@ -2945,16 +3430,49 @@ fn evaluate_document_channel(
                     is_cancelled,
                 )
                 .map_err(|error| EvaluationError::new(error.path(), error.message()))?;
+                let references: Vec<RegionReference> = result
+                    .centroids
+                    .iter()
+                    .cloned()
+                    .map(|(region_id, point)| RegionReference { region_id, point })
+                    .collect();
+                let realized = realize_document_region_output(
+                    output_capability,
+                    output_setting,
+                    &result.regions,
+                    &references,
+                    source,
+                    document.canvas(),
+                    channel.mapping,
+                    &channel.paint,
+                    region_sampling_limits,
+                    region_treatment_limits,
+                    is_cancelled,
+                )?;
+                let toniator_domain::PatternGeometryResponse::Regions(response) =
+                    &output_setting.response
+                else {
+                    return Err(EvaluationError::new(
+                        "region.treatment.identity.response",
+                        "guide-face output requires a region response",
+                    ));
+                };
                 return Ok(DocumentRealization::Regions {
                     fingerprint: format!(
                         "{}:{}:{}:{}",
                         GUIDE_FACE_CONTRACT_ID,
                         output_capability.layer_id.0,
                         guide_mechanism_id.0,
-                        result.regions.fingerprint()
+                        realized.fingerprint
                     ),
-                    regions: result.regions,
-                    diagnostics: RegionRealizationDiagnostics::GuideFaces,
+                    regions: realized.regions,
+                    paints: realized.paints,
+                    diagnostics: completed_region_diagnostics(
+                        response,
+                        source,
+                        realized.diagnostics,
+                        RegionProducerCacheDiagnostics::GuideFaces,
+                    ),
                 });
             }
         }
@@ -3258,19 +3776,38 @@ fn document_render_output(
         },
         DocumentRealization::Regions {
             regions,
+            paints,
             diagnostics,
             ..
         } => {
             let _ = diagnostics;
-            match channel.paint {
-                ChannelPaint::Solid(_) => Ok(toniator_render::RenderOutputLayer {
+            match (&channel.paint, paints) {
+                (ChannelPaint::Solid(_), None) => Ok(toniator_render::RenderOutputLayer {
                     output_layer_id,
                     geometry: GeometryOutput::CanonicalRegions(regions),
                     primitive_paints: None,
                 }),
-                ChannelPaint::SampledSource => {
-                    unreachable!("region realization rejects sampled paint")
+                (ChannelPaint::SampledSource, Some(paints)) => {
+                    Ok(toniator_render::RenderOutputLayer {
+                        output_layer_id,
+                        geometry: GeometryOutput::CanonicalRegions(regions),
+                        primitive_paints: Some(
+                            paints
+                                .into_iter()
+                                .map(|paint| toniator_domain::ColorValue {
+                                    red: paint.red,
+                                    green: paint.green,
+                                    blue: paint.blue,
+                                    alpha: paint.alpha,
+                                })
+                                .collect(),
+                        ),
+                    })
                 }
+                _ => Err(EvaluationError::new(
+                    "evaluation.region.paint",
+                    "region paint and realization payload disagree",
+                )),
             }
         }
     }
@@ -3445,27 +3982,40 @@ fn required_support_radius_for_output(
                 "ordinary Voronoi regions require at least one configured guard step",
             ));
         }
-        if matches!(
-            region_source,
-            toniator_domain::RegionSourceIntent::GuideFaces { .. }
-        ) {
-            return maximum_emitted_guide_spacing(family, canvas, &effective.density)
-                .map_err(EvaluationError::from_pipeline)
-                .map(|spacing| definition.coverage.additional_margin + spacing);
-        }
-        let parametric_guard = matches!(
-            family.product,
-            toniator_patterns::StructuralProductCapability::AlongGuideSites
-        ) && family.parametric_curve.is_some();
-        if parametric_guard {
-            return maximum_nominal_cell_diameter(family, canvas, &effective.density)
-                .map_err(EvaluationError::from_pipeline)
-                .map(|diameter| {
-                    definition.coverage.additional_margin
-                        + f64::from(definition.coverage.guard_steps) * diameter
-                });
-        }
-        return Ok(definition.coverage.additional_margin);
+        let response = region_response_for_output(effective, output.layer_id)?;
+        let nominal_extent = match region_source {
+            toniator_domain::RegionSourceIntent::GuideFaces { .. } => {
+                maximum_emitted_guide_spacing(family, canvas, &effective.density)
+                    .map_err(EvaluationError::from_pipeline)?
+            }
+            toniator_domain::RegionSourceIntent::VoronoiSites { .. } => {
+                maximum_nominal_cell_diameter(family, canvas, &effective.density)
+                    .map_err(EvaluationError::from_pipeline)?
+            }
+        };
+        let base_support = match region_source {
+            toniator_domain::RegionSourceIntent::GuideFaces { .. } => {
+                checked_region_support_add(definition.coverage.additional_margin, nominal_extent)?
+            }
+            toniator_domain::RegionSourceIntent::VoronoiSites { .. } => {
+                let parametric_guard = matches!(
+                    family.product,
+                    toniator_patterns::StructuralProductCapability::AlongGuideSites
+                ) && family.parametric_curve.is_some();
+                if parametric_guard {
+                    checked_region_support_add(
+                        definition.coverage.additional_margin,
+                        f64::from(definition.coverage.guard_steps) * nominal_extent,
+                    )?
+                } else {
+                    checked_region_support_add(definition.coverage.additional_margin, 0.0)?
+                }
+            }
+        };
+        return checked_region_support_add(
+            base_support,
+            region_treatment_outward_support(response, nominal_extent)?,
+        );
     }
     required_support_radius_from_fill(
         canvas,
@@ -3474,6 +4024,104 @@ fn required_support_radius_for_output(
         definition.coverage.additional_margin,
         family,
     )
+}
+
+/// Resolves the one effective region response paired with an ordered structural output.
+///
+/// # Errors
+///
+/// Returns `region.treatment.coverage.response` before family allocation when an effective
+/// bundle is malformed or its setting is not a typed region response.
+fn region_response_for_output(
+    effective: &toniator_domain::EffectiveChannelPatternInstance,
+    output_layer_id: toniator_domain::PatternOutputLayerId,
+) -> Result<&RegionGeometryResponse, EvaluationError> {
+    let setting = effective
+        .output_settings
+        .iter()
+        .find(|setting| setting.output_layer_id == output_layer_id)
+        .ok_or(EvaluationError::new(
+            "region.treatment.coverage.response",
+            "region output has no matching effective response",
+        ))?;
+    match &setting.response {
+        toniator_domain::PatternGeometryResponse::Regions(response) => Ok(response),
+        _ => Err(EvaluationError::new(
+            "region.treatment.coverage.response",
+            "region output requires a typed region response",
+        )),
+    }
+}
+
+/// Computes the response-owned outward envelope extension without constructing region geometry.
+///
+/// Scale uses the producer's maximum nominal cell or guide spacing, while a negative constant
+/// gap grows its boundary by half the signed gap. Full does not broaden the accepted family.
+///
+/// # Errors
+///
+/// Returns a stable `region.treatment.coverage.*` diagnostic for invalid or overflowing numeric
+/// input before a family candidate or region can be allocated.
+fn region_treatment_outward_support(
+    response: &RegionGeometryResponse,
+    nominal_extent: f64,
+) -> Result<f64, EvaluationError> {
+    if !nominal_extent.is_finite() || nominal_extent <= 0.0 {
+        return Err(EvaluationError::new(
+            "region.treatment.coverage.nominal_extent",
+            "region treatment requires a finite positive producer extent",
+        ));
+    }
+    let outward = match response {
+        RegionGeometryResponse::Full { .. } => 0.0,
+        RegionGeometryResponse::Scale { maximum_scale, .. } => {
+            if !maximum_scale.is_finite() {
+                return Err(EvaluationError::new(
+                    "region.treatment.coverage.maximum_scale",
+                    "scale treatment maximum must be finite",
+                ));
+            }
+            (maximum_scale - 1.0).max(0.0) * nominal_extent
+        }
+        RegionGeometryResponse::ConstantGap { minimum_gap, .. } => {
+            if !minimum_gap.is_finite() {
+                return Err(EvaluationError::new(
+                    "region.treatment.coverage.minimum_gap",
+                    "constant-gap treatment minimum must be finite",
+                ));
+            }
+            (-minimum_gap).max(0.0) / 2.0
+        }
+    };
+    if !outward.is_finite() {
+        return Err(EvaluationError::new(
+            "region.treatment.coverage.support",
+            "region treatment support extension overflows",
+        ));
+    }
+    Ok(outward)
+}
+
+/// Adds finite family and treatment envelopes before any family allocation.
+///
+/// # Errors
+///
+/// Returns `region.treatment.coverage.support` when the combined support is negative, nonfinite,
+/// or overflows, preventing an invalid request from reaching the family evaluator.
+fn checked_region_support_add(base: f64, extension: f64) -> Result<f64, EvaluationError> {
+    let support = base + extension;
+    if !base.is_finite()
+        || base < 0.0
+        || !extension.is_finite()
+        || extension < 0.0
+        || !support.is_finite()
+    {
+        return Err(EvaluationError::new(
+            "region.treatment.coverage.support",
+            "region treatment requires finite nonnegative family support",
+        ));
+    }
+    Ok(support)
 }
 
 /// Returns the connected-stroke family envelope before topology guard expansion.
@@ -3517,8 +4165,9 @@ struct DocumentRealizationCacheKey {
     output_layer_id: toniator_domain::PatternOutputLayerId,
     contract: RealizationContractKey,
     resolved_shape_content: String,
-    source_identity: RealizationSourceIdentity,
-    mapping: String,
+    region_producer: Option<RegionProducerCacheIdentity>,
+    source_identity: Option<RealizationSourceIdentity>,
+    mapping: Option<String>,
     response: DocumentResponseIdentity,
     sampled_paint: bool,
     max_transformed_curve_segment_instances: usize,
@@ -3527,7 +4176,8 @@ struct DocumentRealizationCacheKey {
 /// Constructs the independent cache identity for one ordered output realization.
 ///
 /// The key excludes aggregate scene state while including every source, mapping, response,
-/// algorithm, and bounded-work input that can change this output's canonical geometry.
+/// algorithm, and bounded-work input that can change this output's canonical geometry. Full solid
+/// replay deliberately omits sampling and treatment policy because it cannot consume either.
 ///
 /// # Errors
 ///
@@ -3539,25 +4189,38 @@ fn document_realization_cache_key(
     channel: &ModeledChannelState,
     effective: &toniator_domain::EffectiveChannelPatternInstance,
     family_key: &DocumentFamilyCacheKey,
+    family: &TypedFamilyOutput,
     source: &SourceField,
     output_setting: &toniator_domain::EffectivePatternOutputSettings,
     limits: EvaluationLimits,
     remaining_transformed_curve_segment_instances: usize,
 ) -> Result<DocumentRealizationCacheKey, EvaluationError> {
+    let sampling_required = output_sampling_required(&output_setting.response, &channel.paint);
+    let region_sampling_limits = sampling_required.then(|| limits.region_sampling_limits());
+    let region_treatment_limits = matches!(
+        &output_setting.response,
+        toniator_domain::PatternGeometryResponse::Regions(
+            RegionGeometryResponse::Scale { .. } | RegionGeometryResponse::ConstantGap { .. }
+        )
+    )
+    .then(|| limits.region_treatment_limits());
     Ok(DocumentRealizationCacheKey {
         family_content: family_key.content.clone(),
         output_layer_id: output_setting.output_layer_id,
         contract: realization_contract_key(definition),
         resolved_shape_content: resolved_shape_content_identity(document, definition)?,
-        source_identity: realization_source_identity(source.identity()),
-        mapping: format!(
-            "{:?}:{:?}:{}:{}:{}",
-            channel.mapping.component,
-            channel.mapping.placement,
-            channel.mapping.inverted,
-            channel.mapping.gain.to_bits(),
-            channel.mapping.bias.to_bits()
-        ),
+        region_producer: region_producer_cache_identity(definition, family, output_setting),
+        source_identity: sampling_required.then(|| realization_source_identity(source.identity())),
+        mapping: sampling_required.then(|| {
+            format!(
+                "{:?}:{:?}:{}:{}:{}",
+                channel.mapping.component,
+                channel.mapping.placement,
+                channel.mapping.inverted,
+                channel.mapping.gain.to_bits(),
+                channel.mapping.bias.to_bits()
+            )
+        }),
         response: match &output_setting.response {
             toniator_domain::PatternGeometryResponse::Marks(response) => {
                 DocumentResponseIdentity::Marks {
@@ -3585,7 +4248,7 @@ fn document_realization_cache_key(
                     )),
                 }
             }
-            toniator_domain::PatternGeometryResponse::Regions(_) => match definition
+            toniator_domain::PatternGeometryResponse::Regions(response) => match definition
                 .output_layers
                 .iter()
                 .find(|output| output.id() == output_setting.output_layer_id)
@@ -3596,16 +4259,133 @@ fn document_realization_cache_key(
                 }) => DocumentResponseIdentity::GuideFaces {
                     contract: GUIDE_FACE_CONTRACT_ID,
                     limits: limits.guide_face_limits(),
+                    sampling_limits: region_sampling_limits,
+                    treatment_limits: region_treatment_limits,
+                    treatment_contract: region_treatment_limits
+                        .is_some()
+                        .then_some(REGION_TREATMENT_CONTRACT_ID),
+                    response: region_response_identity(response),
                 },
                 _ => DocumentResponseIdentity::Regions {
                     contract: VORONOI_REGION_CONTRACT_ID,
                     limits: limits.voronoi_region_limits(),
+                    sampling_limits: region_sampling_limits,
+                    treatment_limits: region_treatment_limits,
+                    treatment_contract: region_treatment_limits
+                        .is_some()
+                        .then_some(REGION_TREATMENT_CONTRACT_ID),
+                    response: region_response_identity(response),
                 },
             },
         },
         sampled_paint: matches!(channel.paint, ChannelPaint::SampledSource),
         max_transformed_curve_segment_instances: remaining_transformed_curve_segment_instances,
     })
+}
+
+/// Reports whether one output's realization consumes decoded source and mapping identity.
+///
+/// Full solid region output is an exact canonical replay, so it deliberately avoids source
+/// sampling and leaves source/mapping identity out of its cache key. Every other output either
+/// maps geometry or derives sampled paint and therefore remains source-sensitive.
+fn output_sampling_required(
+    response: &toniator_domain::PatternGeometryResponse,
+    paint: &ChannelPaint,
+) -> bool {
+    !matches!(
+        (response, paint),
+        (
+            toniator_domain::PatternGeometryResponse::Regions(RegionGeometryResponse::Full { .. }),
+            ChannelPaint::Solid(_)
+        )
+    )
+}
+
+/// Cache-only identity of the complete untreated region producer and its deterministic references.
+///
+/// This is constructed from the immutable family result after family-cache lookup. Voronoi stores
+/// each normalized site coordinate directly; Guide Faces store the complete ordered structural
+/// path authority from which their analytic centroids are uniquely derived. Neither value is
+/// persisted or treated as renderer geometry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RegionProducerCacheIdentity {
+    family_fingerprint: String,
+    reference_bits: String,
+}
+
+/// Builds cache-only untreated producer identity without sampling or constructing treated geometry.
+fn region_producer_cache_identity(
+    definition: &PatternDefinition,
+    family: &TypedFamilyOutput,
+    setting: &toniator_domain::EffectivePatternOutputSettings,
+) -> Option<RegionProducerCacheIdentity> {
+    let output = definition
+        .output_layers
+        .iter()
+        .find(|output| output.id() == setting.output_layer_id)?;
+    let PatternOutputLayer::Regions { source, .. } = output else {
+        return None;
+    };
+    let reference_bits = match source {
+        toniator_domain::RegionSourceIntent::VoronoiSites { .. } => family
+            .site_set()
+            .sites()
+            .iter()
+            .map(|site| {
+                format!(
+                    "{:?}:{:016x}:{:016x}",
+                    site.id,
+                    site.position.x.to_bits(),
+                    site.position.y.to_bits()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(":"),
+        toniator_domain::RegionSourceIntent::GuideFaces { .. } => family
+            .structural_path_set()
+            .map(guide_face_reference_bits)
+            .unwrap_or_default(),
+    };
+    Some(RegionProducerCacheIdentity {
+        family_fingerprint: family.family_fingerprint().to_owned(),
+        reference_bits,
+    })
+}
+
+/// Encodes ordered Guide-Face source construction points as exact IEEE reference bits.
+///
+/// The Guide-Face producer derives each analytic area centroid solely from these immutable path
+/// segments and IDs. Cache identity therefore avoids decimal debug formatting and changes when a
+/// centroid-producing boundary changes, without caching a derived face table.
+fn guide_face_reference_bits(paths: &toniator_patterns::StructuralPathSet) -> String {
+    let mut bits = String::new();
+    for path in paths.paths() {
+        bits.push_str(&format!("{:?}", path.id));
+        for segment in path.path.segments() {
+            match segment {
+                CurveSegment::Line(line) => {
+                    append_reference_point_bits(&mut bits, line.start());
+                    append_reference_point_bits(&mut bits, line.end());
+                }
+                CurveSegment::CubicBezier(cubic) => {
+                    append_reference_point_bits(&mut bits, cubic.start());
+                    append_reference_point_bits(&mut bits, cubic.control_1());
+                    append_reference_point_bits(&mut bits, cubic.control_2());
+                    append_reference_point_bits(&mut bits, cubic.end());
+                }
+            }
+        }
+    }
+    bits
+}
+
+/// Appends one finite producer point as exact coordinate bits to a cache-only identity buffer.
+fn append_reference_point_bits(buffer: &mut String, point: Point2) {
+    buffer.push_str(&format!(
+        ":{:016x}:{:016x}",
+        point.x.to_bits(),
+        point.y.to_bits()
+    ));
 }
 
 /// Tagged response identity prevents mark and connected-stroke realizations from colliding.
@@ -3629,11 +4409,64 @@ enum DocumentResponseIdentity {
     Regions {
         contract: &'static str,
         limits: VoronoiRegionLimits,
+        sampling_limits: Option<RegionSamplingLimits>,
+        treatment_limits: Option<RegionTreatmentLimits>,
+        treatment_contract: Option<&'static str>,
+        response: RegionResponseIdentity,
     },
     GuideFaces {
         contract: &'static str,
         limits: GuideFaceLimits,
+        sampling_limits: Option<RegionSamplingLimits>,
+        treatment_limits: Option<RegionTreatmentLimits>,
+        treatment_contract: Option<&'static str>,
+        response: RegionResponseIdentity,
     },
+}
+
+/// Cache-key-only authored/effective region treatment identity without a derived sample table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RegionResponseIdentity {
+    Full {
+        sampling: toniator_domain::RegionSamplingStrategy,
+    },
+    Scale {
+        sampling: toniator_domain::RegionSamplingStrategy,
+        minimum: u64,
+        maximum: u64,
+    },
+    ConstantGap {
+        sampling: toniator_domain::RegionSamplingStrategy,
+        minimum: u64,
+        maximum: u64,
+    },
+}
+
+/// Converts validated effective region response input into a cache-only typed identity.
+fn region_response_identity(response: &RegionGeometryResponse) -> RegionResponseIdentity {
+    match response {
+        RegionGeometryResponse::Full { sampling } => RegionResponseIdentity::Full {
+            sampling: *sampling,
+        },
+        RegionGeometryResponse::Scale {
+            sampling,
+            minimum_scale,
+            maximum_scale,
+        } => RegionResponseIdentity::Scale {
+            sampling: *sampling,
+            minimum: minimum_scale.to_bits(),
+            maximum: maximum_scale.to_bits(),
+        },
+        RegionGeometryResponse::ConstantGap {
+            sampling,
+            minimum_gap,
+            maximum_gap,
+        } => RegionResponseIdentity::ConstantGap {
+            sampling: *sampling,
+            minimum: minimum_gap.to_bits(),
+            maximum: maximum_gap.to_bits(),
+        },
+    }
 }
 
 /// Geometry-owned contracts that must invalidate only connection realization cache entries.
@@ -3703,6 +4536,9 @@ impl DocumentDerivedCache {
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::{
+        fs,
+        path::Path,
+        process::Command,
         sync::{Arc, atomic::AtomicBool, mpsc},
         thread,
         time::{Duration, Instant},
@@ -3713,19 +4549,27 @@ pub(crate) mod test_support {
         AuthoredStructureKind, CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternInstance,
         ChannelPatternLayoutDelta, ChannelSourceMapping, ChannelState, ChannelTopologyTemplate,
         ColorValue, ConnectedGeometryResponse, ConnectionAdjacencyIntent, ConnectionProgram,
-        CoveragePolicy, DensityMetric2D, Document, DocumentCommand, DocumentHistory, DocumentId,
-        DocumentPatternSettings, DocumentSession, GeneralizedSiteProduct, GuideDimension,
-        GuideDimensionId, GuidePrototype, GuideRepetition, HalftoneChannelModel,
-        MarkGeometryResponse, MarkOrientation, MarkPrototype, OffsetCleanup, OffsetSides,
-        PathStrokeStyle, PatternDefinition, PatternDefinitionBundle, PatternDefinitionEdit,
-        PatternDefinitionId, PatternGeometryResponse, PatternMechanismId, PatternOutputLayer,
-        PatternOutputLayerId, PatternOutputSettings, RegionGeometryResponse, RegionSourceIntent,
-        SourceComponent, SourcePlacement, SourceReference, SourceReferenceId,
-        StraightGuideDimension, StraightGuideRepetition,
+        CoveragePolicy, CurveRepetition, CurveWinding, DensityMetric2D, Document, DocumentCommand,
+        DocumentHistory, DocumentId, DocumentPatternSettings, DocumentSession,
+        GeneralizedSiteProduct, GuideDimension, GuideDimensionId, GuidePrototype, GuideRepetition,
+        HalftoneChannelModel, MarkGeometryResponse, MarkOrientation, MarkPrototype, OffsetCleanup,
+        OffsetSides, ParametricCurve, PathStrokeStyle, PatternDefinition, PatternDefinitionBundle,
+        PatternDefinitionEdit, PatternDefinitionId, PatternGeometryResponse, PatternMechanismId,
+        PatternOutputLayer, PatternOutputLayerId, PatternOutputSettings, RegionGeometryResponse,
+        RegionSourceIntent, SourceComponent, SourcePlacement, SourceReference, SourceReferenceId,
+        SpiralCurve, SpiralShape, StraightGuideDimension, StraightGuideRepetition,
     };
 
     use super::*;
-    use toniator_patterns::CurveSegment;
+    use sha2::{Digest, Sha256};
+    use toniator_io::{EmbeddedSource, EmbeddedSourceFormat, SourceBundle, load, save};
+    use toniator_patterns::{
+        CanonicalRegionLimits, CanonicalRegionProposal, CanonicalRegionSourceGroup,
+        CanonicalRegionSourceId, FamilySiteId, PathClosure, build_canonical_regions_cancellable,
+    };
+    use toniator_patterns::{
+        CurveSegment, RegionTreatment, RegionTreatmentRequest, treat_region_requests_cancellable,
+    };
 
     const GUARD: Duration = Duration::from_secs(15);
     const CHANNEL_ID: ChannelId = ChannelId(1);
@@ -3755,7 +4599,7 @@ pub(crate) mod test_support {
                         })
                     }
                     PatternOutputLayer::Regions { .. } => {
-                        PatternGeometryResponse::Regions(RegionGeometryResponse::Full)
+                        PatternGeometryResponse::Regions(RegionGeometryResponse::default())
                     }
                 },
             })
@@ -4167,7 +5011,7 @@ pub(crate) mod test_support {
                 document.source().clone(),
                 vec![bundle_with_sole_response(
                     definition,
-                    PatternGeometryResponse::Regions(RegionGeometryResponse::Full),
+                    PatternGeometryResponse::Regions(RegionGeometryResponse::default()),
                 )],
                 document.pattern_settings().clone(),
                 document
@@ -4182,6 +5026,72 @@ pub(crate) mod test_support {
             .expect("typed Region fixture validates against triangular intersections"),
         )
         .expect("modeled Region document starts a session")
+    }
+
+    /// Builds an ordinary Voronoi session whose Scale response samples every untreated base.
+    fn modeled_scaled_voronoi_session() -> DocumentSession {
+        modeled_scaled_voronoi_session_with_sampling(
+            toniator_domain::RegionSamplingStrategy::ReferencePoint,
+        )
+    }
+
+    /// Builds a source-sampled Scale Region session with one explicit sampling strategy.
+    fn modeled_scaled_voronoi_session_with_sampling(
+        sampling: toniator_domain::RegionSamplingStrategy,
+    ) -> DocumentSession {
+        let session = modeled_voronoi_session();
+        let document = session.document();
+        let mut bundle = document.pattern_definition_bundles()[0].clone();
+        bundle.output_settings[0].response =
+            PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
+                sampling,
+                minimum_scale: 0.75,
+                maximum_scale: 1.25,
+            });
+        DocumentSession::new(
+            Document::with_source_topology_and_authored_structures(
+                document.id(),
+                document.canvas().clone(),
+                document.source().clone(),
+                vec![bundle],
+                document.pattern_settings().clone(),
+                document
+                    .channel_model()
+                    .expect("modeled Region has a channel model"),
+                document
+                    .channel_topology()
+                    .expect("modeled Region has topology")
+                    .clone(),
+                document.authored_structures().to_vec(),
+            )
+            .expect("scaled Region document validates"),
+        )
+        .expect("scaled Region session starts")
+    }
+
+    /// Builds an ordinary Voronoi session whose SourceColorAlpha channel consumes sampled region paint.
+    fn modeled_sampled_voronoi_session() -> DocumentSession {
+        let mut session = modeled_voronoi_session();
+        let template = ChannelTopologyTemplate {
+            pattern_instance: session
+                .document()
+                .channel_topology()
+                .expect("modeled Region has topology")
+                .channels()[0]
+                .pattern_instance
+                .clone(),
+        };
+        session
+            .apply(&DocumentCommand::ReplaceChannelTopology {
+                model: HalftoneChannelModel::SourceColorAlpha,
+                topology: toniator_domain::ChannelTopology::canonical(
+                    HalftoneChannelModel::SourceColorAlpha,
+                    template,
+                )
+                .expect("source-color topology validates"),
+            })
+            .expect("sampled Region model validates");
+        session
     }
 
     /// Builds a phase-aligned three-guide document whose sole region output consumes guide faces.
@@ -4236,7 +5146,7 @@ pub(crate) mod test_support {
                 document.source().clone(),
                 vec![bundle_with_sole_response(
                     definition,
-                    PatternGeometryResponse::Regions(RegionGeometryResponse::Full),
+                    PatternGeometryResponse::Regions(RegionGeometryResponse::default()),
                 )],
                 document.pattern_settings().clone(),
                 document
@@ -4316,6 +5226,42 @@ pub(crate) mod test_support {
             }
         }
         assert!(count > 0, "production triangular family emits faces");
+    }
+
+    /// Verifies one untreated triangular Guide Face set retains equilateral positive line faces.
+    fn assert_production_equilateral_untreated_faces(regions: &CanonicalRegionSet) {
+        const TOLERANCE: f64 = 1.0e-8;
+        assert!(!regions.regions().is_empty(), "untreated Guide Faces exist");
+        for region in regions.regions() {
+            assert_eq!(region.ring.segments().len(), 3);
+            assert!(
+                region
+                    .ring
+                    .segments()
+                    .iter()
+                    .all(|segment| matches!(segment, CurveSegment::Line(_)))
+            );
+            assert!(
+                region.area > 0.0,
+                "canonical untreated face has positive winding"
+            );
+            let lengths = region
+                .ring
+                .segments()
+                .iter()
+                .map(|segment| {
+                    let start = segment.start();
+                    let end = segment.end();
+                    ((end.x - start.x).powi(2) + (end.y - start.y).powi(2)).sqrt()
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                lengths
+                    .iter()
+                    .all(|length| (*length - lengths[0]).abs() <= TOLERANCE),
+                "untreated triangular face remains equilateral"
+            );
+        }
     }
 
     /// Proves the phase-aligned three-guide authoritative pipeline reaches canonical regions and SVG.
@@ -4635,15 +5581,18 @@ pub(crate) mod test_support {
 
     /// Builds a generic authored-cubic Guide Faces document whose two repeated source dimensions form closed regions.
     fn modeled_authored_cubic_guide_face_session() -> DocumentSession {
+        modeled_authored_cubic_guide_face_session_for_canvas(CanvasSpec {
+            width: 64.0,
+            height: 48.0,
+        })
+    }
+
+    /// Builds authored cubic Guide Faces at one native evidence canvas without frontend geometry.
+    fn modeled_authored_cubic_guide_face_session_for_canvas(canvas: CanvasSpec) -> DocumentSession {
         let source_id = SourceReferenceId::new("cancellation-test-source").expect("source ID");
-        let base = Document::new_default_document(
-            CanvasSpec {
-                width: 64.0,
-                height: 48.0,
-            },
-            SourceReference::Assigned(source_id),
-        )
-        .expect("base document");
+        let base =
+            Document::new_default_document(canvas.clone(), SourceReference::Assigned(source_id))
+                .expect("base document");
         let guide_id = PatternMechanismId(196);
         let horizontal = GuideDimensionId(197);
         let vertical = GuideDimensionId(198);
@@ -4662,7 +5611,7 @@ pub(crate) mod test_support {
                         structure_id: AuthoredStructureId(201),
                     },
                     repetition: GuideRepetition::NormalOffset {
-                        spacing: 20.0,
+                        spacing: canvas.width * 0.3125,
                         sides: OffsetSides::Both,
                         cleanup: OffsetCleanup::DissolveCrossings,
                     },
@@ -4675,7 +5624,7 @@ pub(crate) mod test_support {
                         structure_id: AuthoredStructureId(202),
                     },
                     repetition: GuideRepetition::NormalOffset {
-                        spacing: 24.0,
+                        spacing: canvas.height * 0.5,
                         sides: OffsetSides::Both,
                         cleanup: OffsetCleanup::DissolveCrossings,
                     },
@@ -4702,10 +5651,22 @@ pub(crate) mod test_support {
             AuthoredStructureId(201),
             AuthoredStructureKind::OpenPath,
             vec![AuthoredCurveSegment::CubicBezier {
-                start: AuthoredPoint2 { x: 0.0, y: 18.0 },
-                control_1: AuthoredPoint2 { x: 18.0, y: 8.0 },
-                control_2: AuthoredPoint2 { x: 46.0, y: 8.0 },
-                end: AuthoredPoint2 { x: 64.0, y: 18.0 },
+                start: AuthoredPoint2 {
+                    x: canvas.width * 0.125,
+                    y: canvas.height * 0.5,
+                },
+                control_1: AuthoredPoint2 {
+                    x: canvas.width * 0.25,
+                    y: canvas.height / 6.0,
+                },
+                control_2: AuthoredPoint2 {
+                    x: canvas.width * 0.75,
+                    y: canvas.height / 6.0,
+                },
+                end: AuthoredPoint2 {
+                    x: canvas.width * 0.875,
+                    y: canvas.height * 0.5,
+                },
             }],
         )
         .expect("cubic authored guide");
@@ -4713,8 +5674,14 @@ pub(crate) mod test_support {
             AuthoredStructureId(202),
             AuthoredStructureKind::OpenPath,
             vec![AuthoredCurveSegment::Line {
-                start: AuthoredPoint2 { x: 20.0, y: 0.0 },
-                end: AuthoredPoint2 { x: 20.0, y: 48.0 },
+                start: AuthoredPoint2 {
+                    x: canvas.width * 0.37,
+                    y: canvas.height * 0.125,
+                },
+                end: AuthoredPoint2 {
+                    x: canvas.width * 0.37,
+                    y: canvas.height * 0.875,
+                },
             }],
         )
         .expect("vertical authored guide");
@@ -4729,7 +5696,7 @@ pub(crate) mod test_support {
                 base.source().clone(),
                 vec![bundle_with_sole_response(
                     definition,
-                    PatternGeometryResponse::Regions(RegionGeometryResponse::Full),
+                    PatternGeometryResponse::Regions(RegionGeometryResponse::default()),
                 )],
                 settings,
                 base.channel_model().expect("model"),
@@ -4750,7 +5717,9 @@ pub(crate) mod test_support {
             .submit(document_request(&session, valid_document_bytes()))
             .expect("cubic request submits");
         let completion = wait_for_document_completion(&scheduler);
-        let result = completion.result().expect("cubic realization");
+        let result = completion
+            .result()
+            .unwrap_or_else(|| panic!("cubic realization: {:?}", completion.error()));
         let contains_cubic_region = result.scene().layers().iter().any(|layer| {
             matches!(
                 layer.outputs().first().map(|output| &output.geometry),
@@ -4800,6 +5769,942 @@ pub(crate) mod test_support {
             ))
             .unwrap(),
         )
+    }
+
+    /// Builds one small typed-parametric-site Voronoi document at an intrinsic evidence canvas.
+    ///
+    /// The definition deliberately exposes only `AlongParametricCurveSites` to a Region layer;
+    /// raw `ParametricPaths` are not substituted as a Region producer.
+    fn stage20q_parametric_voronoi_document(
+        source_id: SourceReferenceId,
+        response: RegionGeometryResponse,
+    ) -> Document {
+        let base = Document::new_default_document(
+            CanvasSpec {
+                width: 1024.0,
+                height: 1024.0,
+            },
+            SourceReference::Assigned(source_id),
+        )
+        .expect("parametric evidence base document validates");
+        let definition_id = PatternDefinitionId(20_701);
+        let curve_id = PatternMechanismId(20_702);
+        let site_id = PatternMechanismId(20_703);
+        let output_id = PatternOutputLayerId(20_704);
+        let definition = PatternDefinition {
+            id: definition_id,
+            name: "Stage 20Q typed parametric Voronoi evidence".into(),
+            family: toniator_domain::PatternFamily::ParametricCurve {
+                curve_mechanism_id: curve_id,
+                site_mechanism_id: Some(site_id),
+            },
+            mechanisms: vec![
+                toniator_domain::PatternMechanism::ParametricCurveSource {
+                    id: curve_id,
+                    curve: ParametricCurve::Spiral(SpiralCurve {
+                        shape: SpiralShape::Round,
+                        turns: 12.0,
+                        radial_spacing: 100.0,
+                        phase_degrees: 0.0,
+                        winding: CurveWinding::CounterClockwise,
+                    }),
+                    repetition: CurveRepetition::Single,
+                },
+                toniator_domain::PatternMechanism::AlongParametricCurveSites {
+                    id: site_id,
+                    curve_mechanism_id: curve_id,
+                    interval: 96.0,
+                    phase: 0.0,
+                },
+            ],
+            output_layers: vec![PatternOutputLayer::Regions {
+                id: output_id,
+                source: RegionSourceIntent::VoronoiSites {
+                    site_mechanism_id: site_id,
+                },
+            }],
+            modulation: toniator_domain::PatternModulation,
+            coverage: CoveragePolicy {
+                guard_steps: 8,
+                additional_margin: 0.0,
+            },
+        };
+        let mut settings = base.pattern_settings().clone();
+        settings.definition_id = definition_id;
+        Document::with_source_topology_and_authored_structures(
+            DocumentId(20_701),
+            base.canvas().clone(),
+            base.source().clone(),
+            vec![PatternDefinitionBundle {
+                definition,
+                output_settings: vec![PatternOutputSettings {
+                    output_layer_id: output_id,
+                    response: PatternGeometryResponse::Regions(response),
+                }],
+            }],
+            settings,
+            base.channel_model().expect("evidence model exists"),
+            base.channel_topology()
+                .expect("evidence topology exists")
+                .clone(),
+            Vec::new(),
+        )
+        .expect("typed parametric evidence document validates")
+    }
+
+    /// Selects sampled Region paint and channel opacity without introducing a frontend model.
+    fn stage20q_sampled_region_session(document: Document, opacity: f64) -> DocumentSession {
+        let mut session = DocumentSession::new(document).expect("evidence session starts");
+        let channel = &session
+            .document()
+            .channel_topology()
+            .expect("evidence topology exists")
+            .channels()[0];
+        let template = ChannelTopologyTemplate {
+            pattern_instance: channel.pattern_instance.clone(),
+        };
+        session
+            .apply(&DocumentCommand::ReplaceChannelTopology {
+                model: HalftoneChannelModel::SourceColorAlpha,
+                topology: toniator_domain::ChannelTopology::canonical(
+                    HalftoneChannelModel::SourceColorAlpha,
+                    template,
+                )
+                .expect("sampled topology validates"),
+            })
+            .expect("sampled topology applies");
+        let sampled_channel_id = session
+            .document()
+            .channel_topology()
+            .expect("sampled topology exists")
+            .channels()[0]
+            .id;
+        session
+            .apply(&DocumentCommand::SetOpacity {
+                channel_id: sampled_channel_id,
+                opacity,
+            })
+            .expect("sampled opacity applies");
+        session
+    }
+
+    /// Replaces the sole Region response while preserving the persisted producer and channel model.
+    fn stage20q_region_response_session(
+        session: DocumentSession,
+        response: RegionGeometryResponse,
+    ) -> DocumentSession {
+        let document = session.document();
+        let mut bundle = document.pattern_definition_bundles()[0].clone();
+        bundle.output_settings[0].response = PatternGeometryResponse::Regions(response);
+        DocumentSession::new(
+            Document::with_source_topology_and_authored_structures(
+                document.id(),
+                document.canvas().clone(),
+                document.source().clone(),
+                vec![bundle],
+                document.pattern_settings().clone(),
+                document
+                    .channel_model()
+                    .expect("modeled Region has a model"),
+                document
+                    .channel_topology()
+                    .expect("modeled Region has topology")
+                    .clone(),
+                document.authored_structures().to_vec(),
+            )
+            .expect("typed Region response document validates"),
+        )
+        .expect("typed Region response session starts")
+    }
+
+    /// Replaces only typed family density for a compact treatment witness without changing outputs.
+    fn stage20q_density_session(session: DocumentSession, across_x: f64) -> DocumentSession {
+        let document = session.document();
+        let mut settings = document.pattern_settings().clone();
+        settings.density.across_x = across_x;
+        settings.density.across_y = across_x * document.canvas().height / document.canvas().width;
+        DocumentSession::new(
+            Document::with_source_topology_and_authored_structures(
+                document.id(),
+                document.canvas().clone(),
+                document.source().clone(),
+                document.pattern_definition_bundles().to_vec(),
+                settings,
+                document
+                    .channel_model()
+                    .expect("modeled Region has a model"),
+                document
+                    .channel_topology()
+                    .expect("modeled Region has topology")
+                    .clone(),
+                document.authored_structures().to_vec(),
+            )
+            .expect("compact Region density document validates"),
+        )
+        .expect("compact Region density session starts")
+    }
+
+    /// Computes deterministic raw RGBA statistics without flattening or compositing evidence.
+    fn stage20q_rgba_statistics(width: u32, height: u32, pixels: &[u8]) -> String {
+        let mut sums = [0_u64; 4];
+        let mut nonzero_alpha = 0_usize;
+        for pixel in pixels.chunks_exact(4) {
+            for (sum, value) in sums.iter_mut().zip(pixel) {
+                *sum += u64::from(*value);
+            }
+            nonzero_alpha += usize::from(pixel[3] != 0);
+        }
+        let count = width as u64 * height as u64;
+        format!(
+            "dimensions={width}x{height}\npixels={count}\nnonzero_alpha={nonzero_alpha}\nmean_rgba={:.6},{:.6},{:.6},{:.6}\n",
+            sums[0] as f64 / count as f64,
+            sums[1] as f64 / count as f64,
+            sums[2] as f64 / count as f64,
+            sums[3] as f64 / count as f64,
+        )
+    }
+
+    /// Returns the SHA-256 identity for one immutable raw validation artifact.
+    fn stage20q_sha256(bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
+    }
+
+    /// Saves, reloads, evaluates once, and exports one Guide Face evidence case with its snapshot.
+    ///
+    /// The returned result and snapshot are the exact normal engine invocation used for the
+    /// records and exports. The helper never rebuilds producer, sampling, or treatment state.
+    #[allow(clippy::too_many_arguments)]
+    fn stage20q_write_guide_face_case(
+        output: &Path,
+        stem: &str,
+        session: DocumentSession,
+        input: &Path,
+        format: EmbeddedSourceFormat,
+        hint: SourceFormatHint,
+        label: &str,
+    ) -> (EvaluationResult, RegionEvaluationEvidence) {
+        let SourceReference::Assigned(source_id) = session.document().source() else {
+            panic!("Guide Face evidence requires an assigned source");
+        };
+        let source_id = source_id.clone();
+        let source_bytes = fs::read(input).expect("immutable evidence source reads");
+        let source = EmbeddedSource::new(
+            source_id.clone(),
+            format,
+            source_bytes,
+            input
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned()),
+        )
+        .expect("Guide Face evidence source embeds");
+        let sources = SourceBundle::new([source]).expect("one Guide Face source validates");
+        let document_path = output.join(format!("{stem}.toniator"));
+        save(&document_path, session.document(), &sources).expect("current v5 Guide Face saves");
+        let loaded = load(&document_path).expect("current v5 Guide Face loads");
+        assert_eq!(loaded.versions().document(), 5);
+        let loaded_source = loaded
+            .sources()
+            .get(&source_id)
+            .expect("loaded Guide Face source exists");
+        let loaded_session =
+            DocumentSession::new(loaded.document().clone()).expect("loaded Guide Face starts");
+        let (evaluated, evidence) = evaluate_cached_document_with_region_evidence(
+            EvaluationRequest::new(
+                loaded_session.document_evaluation_snapshot(),
+                ResolvedSource::new(source_id, loaded_source.bytes().to_vec(), hint)
+                    .expect("loaded Guide Face source resolves"),
+            ),
+            EvaluationLimits::default(),
+            &DocumentDerivedCache::default(),
+            &NeverCancelled,
+        );
+        let evaluated = evaluated.unwrap_or_else(|error| {
+            panic!("normal Guide Face Region evaluation succeeds for {label}: {error:?}")
+        });
+        let evidence = evidence.expect("normal Guide Face invocation records evidence");
+        let png = encode_png(evaluated.result.raster()).expect("Guide Face native PNG encodes");
+        let svg = write_svg(evaluated.result.scene());
+        let png_path = output.join(format!("{stem}.png"));
+        let svg_path = output.join(format!("{stem}.svg"));
+        fs::write(&png_path, &png).expect("Guide Face native PNG writes");
+        fs::write(&svg_path, &svg).expect("Guide Face raw SVG writes");
+        let svg_raster_path = output.join(format!("{stem}-svg-rasterized.png"));
+        let status = Command::new("inkscape")
+            .arg(&svg_path)
+            .arg("--export-type=png")
+            .arg(format!("--export-filename={}", svg_raster_path.display()))
+            .status()
+            .expect("Inkscape is available for Guide Face evidence");
+        assert!(
+            status.success(),
+            "Guide Face raw SVG rasterizes with Inkscape"
+        );
+        let svg_raster = image::load_from_memory(
+            &fs::read(&svg_raster_path).expect("Guide Face SVG-rasterized PNG reads"),
+        )
+        .expect("Guide Face SVG-rasterized PNG decodes")
+        .to_rgba8();
+        fs::write(
+            output.join(format!("{stem}-native-rgba-stats.txt")),
+            stage20q_rgba_statistics(
+                evaluated.result.raster().width(),
+                evaluated.result.raster().height(),
+                evaluated.result.raster().pixels(),
+            ),
+        )
+        .expect("Guide Face native statistics write");
+        fs::write(
+            output.join(format!("{stem}-svg-raster-rgba-stats.txt")),
+            stage20q_rgba_statistics(svg_raster.width(), svg_raster.height(), svg_raster.as_raw()),
+        )
+        .expect("Guide Face SVG-raster statistics write");
+        fs::write(
+            output.join(format!("{stem}-identity.txt")),
+            format!(
+                "label={label}\nevaluation_fingerprint={}\ncache_diagnostics={:?}\n\
+                 untreated_regions={:#?}\nuntreated_ids={:#?}\nreferences={:#?}\n\
+                 sampling={:?}\nsamples={:#?}\ntreatments={:#?}\n\
+                 treated_regions={:#?}\ntreated_provenance={:#?}\nuntreated_fingerprint={}\n\
+                 treated_fingerprint={}\ntyped_realization_fingerprint={}\n\
+                 realizer_diagnostics={:?}\n",
+                evaluated.result.channels()[0].realization_identity(),
+                evaluated.diagnostics,
+                evidence.untreated_regions,
+                evidence.untreated_region_ids,
+                evidence.references,
+                evidence.sampling,
+                evidence.samples,
+                evidence.treatments,
+                evidence.treated_regions,
+                evidence.provenance,
+                evidence.untreated_fingerprint,
+                evidence.treated_fingerprint,
+                evidence.realization_fingerprint,
+                evidence.diagnostics,
+            ),
+        )
+        .expect("Guide Face identity record writes");
+        fs::write(
+            output.join(format!("{stem}-hashes.txt")),
+            format!(
+                "{}  {}\n{}  {}\n{}  {}\n{}  {}\n",
+                stage20q_sha256(&fs::read(&document_path).expect("Guide Face document reads")),
+                document_path.file_name().unwrap().to_string_lossy(),
+                stage20q_sha256(&png),
+                png_path.file_name().unwrap().to_string_lossy(),
+                stage20q_sha256(svg.as_bytes()),
+                svg_path.file_name().unwrap().to_string_lossy(),
+                stage20q_sha256(&fs::read(&svg_raster_path).expect("Guide Face raster reads")),
+                svg_raster_path.file_name().unwrap().to_string_lossy(),
+            ),
+        )
+        .expect("Guide Face hashes write");
+        (evaluated.result, evidence)
+    }
+
+    /// Writes a direct geometry-render split witness after production cubic Guide Faces retain one component per base.
+    ///
+    /// The witness deliberately bypasses document persistence only because the production authored-cubic
+    /// outward-gap case below has no safe split at the bounded native settings. It still consumes the
+    /// geometry-owned canonical treatment and the ordinary renderer without frontend topology work.
+    fn stage20q_write_direct_split_witness(output: &Path) {
+        let output_layer_id = PatternOutputLayerId(20_709);
+        let source = build_canonical_regions_cancellable(
+            CanonicalRegionProposal {
+                output_layer_id,
+                source_groups: vec![CanonicalRegionSourceGroup {
+                    source_id: CanonicalRegionSourceId::SiteOwners(vec![FamilySiteId {
+                        mechanism_id: PatternMechanismId(20_708),
+                        ordinal: 0,
+                    }]),
+                    components: vec![
+                        CurvePath::polyline(
+                            vec![
+                                Point2::new(60.0, 60.0),
+                                Point2::new(120.0, 60.0),
+                                Point2::new(120.0, 95.0),
+                                Point2::new(180.0, 95.0),
+                                Point2::new(180.0, 60.0),
+                                Point2::new(240.0, 60.0),
+                                Point2::new(240.0, 140.0),
+                                Point2::new(180.0, 140.0),
+                                Point2::new(180.0, 105.0),
+                                Point2::new(120.0, 105.0),
+                                Point2::new(120.0, 140.0),
+                                Point2::new(60.0, 140.0),
+                            ],
+                            PathClosure::Closed,
+                        )
+                        .expect("direct split witness path closes"),
+                    ],
+                }],
+            },
+            CanonicalRegionLimits::default(),
+            || false,
+        )
+        .expect("direct split source canonicalizes")
+        .0;
+        let base = source
+            .regions()
+            .first()
+            .expect("direct split source retains its base");
+        let request = RegionTreatmentRequest {
+            base_region_id: base.id.clone(),
+            reference: Some(Point2::new(150.0, 100.0)),
+            treatment: Some(RegionTreatment::ConstantGap(14.0)),
+        };
+        let treated = treat_region_requests_cancellable(
+            output_layer_id,
+            &source,
+            &[request.clone()],
+            RegionTreatmentLimits::default(),
+            || false,
+        )
+        .expect("direct split treatment succeeds");
+        let replayed = treat_region_requests_cancellable(
+            output_layer_id,
+            &source,
+            &[request.clone()],
+            RegionTreatmentLimits::default(),
+            || false,
+        )
+        .expect("direct split treatment replays");
+        assert_eq!(treated, replayed, "direct split treatment replays exactly");
+        assert!(
+            treated.provenance.len() > 1,
+            "narrow-neck inward offset splits one untreated base into multiple components"
+        );
+        assert!(
+            treated
+                .provenance
+                .iter()
+                .all(|provenance| provenance.base_region_id == base.id),
+            "every split component retains its untreated base provenance"
+        );
+        assert!(
+            treated
+                .regions
+                .regions()
+                .iter()
+                .enumerate()
+                .all(|(ordinal, region)| {
+                    region.id.source_id == base.id.source_id
+                        && region.id.component_ordinal == ordinal as u32
+                        && region.area.is_finite()
+                        && region.area > 0.0
+                }),
+            "canonical split components retain positive winding and contiguous source ordinals"
+        );
+        let scene = RenderScene::new(
+            CanvasSpec {
+                width: 300.0,
+                height: 200.0,
+            },
+            "stage20q-direct-split-family".into(),
+            treated.regions.fingerprint().to_owned(),
+            vec![
+                RenderLayer::new_for_output(
+                    ChannelId(1),
+                    true,
+                    ColorValue {
+                        red: 0.15,
+                        green: 0.55,
+                        blue: 0.85,
+                        alpha: 1.0,
+                    },
+                    1.0,
+                    output_layer_id,
+                    GeometryOutput::CanonicalRegions(treated.regions.clone()),
+                )
+                .expect("direct split renderer layer validates"),
+            ],
+        )
+        .expect("direct split renderer scene validates");
+        let raster = rasterize(&scene, RasterBackground::Transparent)
+            .expect("direct split renderer rasterizes");
+        let png = encode_png(&raster).expect("direct split PNG encodes");
+        let svg = write_svg(&scene);
+        let png_path = output.join("crossing-split-direct-geometry-render.png");
+        let svg_path = output.join("crossing-split-direct-geometry-render.svg");
+        fs::write(&png_path, &png).expect("direct split PNG writes");
+        fs::write(&svg_path, &svg).expect("direct split SVG writes");
+        let svg_raster_path =
+            output.join("crossing-split-direct-geometry-render-svg-rasterized.png");
+        let status = Command::new("inkscape")
+            .arg(&svg_path)
+            .arg("--export-type=png")
+            .arg(format!("--export-filename={}", svg_raster_path.display()))
+            .status()
+            .expect("Inkscape is available for direct split evidence");
+        assert!(
+            status.success(),
+            "direct split SVG rasterizes with Inkscape"
+        );
+        let svg_raster = image::load_from_memory(
+            &fs::read(&svg_raster_path).expect("direct split SVG raster reads"),
+        )
+        .expect("direct split SVG raster decodes")
+        .to_rgba8();
+        fs::write(
+            output.join("crossing-split-direct-geometry-render-native-rgba-stats.txt"),
+            stage20q_rgba_statistics(raster.width(), raster.height(), raster.pixels()),
+        )
+        .expect("direct split native statistics write");
+        fs::write(
+            output.join("crossing-split-direct-geometry-render-svg-raster-rgba-stats.txt"),
+            stage20q_rgba_statistics(svg_raster.width(), svg_raster.height(), svg_raster.as_raw()),
+        )
+        .expect("direct split SVG statistics write");
+        fs::write(
+            output.join("crossing-split-direct-geometry-render-identity.txt"),
+            format!(
+                "provenance=direct geometry-render witness; no document, source sampling, or persistence is claimed\n\
+                 untreated_regions={source:#?}\nrequest={request:#?}\ntreated_regions={:#?}\n\
+                 provenance={:#?}\nuntreated_fingerprint={}\ntreated_fingerprint={}\n",
+                treated.regions,
+                treated.provenance,
+                source.fingerprint(),
+                treated.regions.fingerprint(),
+            ),
+        )
+        .expect("direct split identity record writes");
+        fs::write(
+            output.join("crossing-split-direct-geometry-render-hashes.txt"),
+            format!(
+                "{}  {}\n{}  {}\n{}  {}\n",
+                stage20q_sha256(&png),
+                png_path.file_name().expect("PNG name").to_string_lossy(),
+                stage20q_sha256(svg.as_bytes()),
+                svg_path.file_name().expect("SVG name").to_string_lossy(),
+                stage20q_sha256(&fs::read(&svg_raster_path).expect("SVG raster reads")),
+                svg_raster_path
+                    .file_name()
+                    .expect("SVG raster name")
+                    .to_string_lossy(),
+            ),
+        )
+        .expect("direct split hashes write");
+    }
+
+    /// Generates typed-parametric ordinary Voronoi Stage 20Q evidence through save/load/evaluate/export.
+    ///
+    /// The ignored generator writes only derived validation files. Each record is collected from
+    /// the one normal engine evaluation that produced its native PNG and raw SVG; no diagnostic
+    /// path reconstructs sites, samples, or treatment geometry.
+    #[test]
+    #[ignore = "writes Stage 20Q typed-parametric Voronoi validation artifacts"]
+    fn generate_stage20q_parametric_voronoi_artifacts() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let output = root.join("target/validation/stage20q/voronoi-parametric");
+        fs::create_dir_all(&output).expect("Stage 20Q validation directory exists");
+        let input = root.join("assets/raster-sample.png");
+        let bytes = fs::read(&input).expect("immutable raster source reads");
+        let source_id = SourceReferenceId::new("stage20q-parametric-raster").expect("source ID");
+        let source = EmbeddedSource::new(
+            source_id.clone(),
+            EmbeddedSourceFormat::Png,
+            bytes.clone(),
+            Some("raster-sample.png".into()),
+        )
+        .expect("immutable raster source embeds");
+        let sources = SourceBundle::new([source]).expect("one embedded source validates");
+        let cases = [
+            (
+                "full-reference-solid",
+                RegionGeometryResponse::Full {
+                    sampling: toniator_domain::RegionSamplingStrategy::ReferencePoint,
+                },
+                false,
+                1.0,
+            ),
+            (
+                "scale-reference-sampled-opacity",
+                RegionGeometryResponse::Scale {
+                    sampling: toniator_domain::RegionSamplingStrategy::ReferencePoint,
+                    minimum_scale: 0.0,
+                    maximum_scale: 1.35,
+                },
+                true,
+                0.62,
+            ),
+            (
+                "scale-area-average-sampled",
+                RegionGeometryResponse::Scale {
+                    sampling: toniator_domain::RegionSamplingStrategy::AreaAverage,
+                    minimum_scale: 0.5,
+                    maximum_scale: 1.25,
+                },
+                true,
+                0.62,
+            ),
+            (
+                "scale-collapse-empty",
+                RegionGeometryResponse::Scale {
+                    sampling: toniator_domain::RegionSamplingStrategy::ReferencePoint,
+                    minimum_scale: 0.0,
+                    maximum_scale: 0.0,
+                },
+                false,
+                1.0,
+            ),
+        ];
+        let mut manifest = String::from(
+            "# Stage 20Q typed-parametric Voronoi fragment\n\n\
+             All cases use `assets/raster-sample.png` unchanged at 1024×1024 and a current v5 archive.\n\n",
+        );
+        for (stem, response, sampled, opacity) in cases {
+            let document =
+                stage20q_parametric_voronoi_document(source_id.clone(), response.clone());
+            let authored_session = if sampled {
+                stage20q_sampled_region_session(document, opacity)
+            } else {
+                DocumentSession::new(document).expect("solid evidence session starts")
+            };
+            let document_path = output.join(format!("{stem}.toniator"));
+            save(&document_path, authored_session.document(), &sources)
+                .expect("current v5 evidence document saves");
+            let loaded = load(&document_path).expect("current v5 evidence document loads");
+            assert_eq!(loaded.versions().document(), 5);
+            let loaded_source = loaded
+                .sources()
+                .get(&source_id)
+                .expect("loaded source exists");
+            let loaded_session = DocumentSession::new(loaded.document().clone())
+                .expect("loaded current document starts a session");
+            let (evaluated, evidence) = evaluate_cached_document_with_region_evidence(
+                EvaluationRequest::new(
+                    loaded_session.document_evaluation_snapshot(),
+                    ResolvedSource::new(
+                        source_id.clone(),
+                        loaded_source.bytes().to_vec(),
+                        SourceFormatHint::Png,
+                    )
+                    .expect("loaded source resolves"),
+                ),
+                EvaluationLimits::default(),
+                &DocumentDerivedCache::default(),
+                &NeverCancelled,
+            );
+            let evaluated = evaluated.expect("normal typed-parametric Region evaluation succeeds");
+            let evidence = evidence.expect("normal Region invocation records test evidence");
+            assert!(
+                !evidence.untreated_region_ids.is_empty(),
+                "typed AlongParametricCurveSites produces ordinary Voronoi bases"
+            );
+            if stem == "scale-collapse-empty" {
+                assert!(
+                    evidence.provenance.is_empty(),
+                    "zero Scale removes every treated component without a transparent fallback"
+                );
+            }
+            assert!(
+                matches!(
+                    loaded.document().pattern_definition_bundles()[0]
+                        .definition
+                        .output_layers[0],
+                    PatternOutputLayer::Regions {
+                        source: RegionSourceIntent::VoronoiSites { .. },
+                        ..
+                    }
+                ),
+                "raw ParametricPaths is never repurposed as a Region producer"
+            );
+            let mut raw_parametric_paths = loaded.document().pattern_definition_bundles()[0]
+                .definition
+                .clone();
+            raw_parametric_paths.output_layers = vec![PatternOutputLayer::ParametricPaths {
+                id: PatternOutputLayerId(20_705),
+                curve_mechanism_id: PatternMechanismId(20_702),
+                style: PathStrokeStyle::default(),
+            }];
+            assert_eq!(
+                toniator_patterns::resolve_pattern_pipeline(&raw_parametric_paths)
+                    .expect_err("raw ParametricPaths is not an eligible Region producer")
+                    .path(),
+                "pattern.output_layers.capability",
+                "a raw ParametricPaths output remains Guide-Faces-ineligible"
+            );
+            let png = encode_png(evaluated.result.raster()).expect("native PNG encodes");
+            let svg = write_svg(evaluated.result.scene());
+            let png_path = output.join(format!("{stem}.png"));
+            let svg_path = output.join(format!("{stem}.svg"));
+            fs::write(&png_path, &png).expect("native PNG writes");
+            fs::write(&svg_path, &svg).expect("raw SVG writes");
+            let svg_raster_path = output.join(format!("{stem}-svg-rasterized.png"));
+            let status = Command::new("inkscape")
+                .arg(&svg_path)
+                .arg("--export-type=png")
+                .arg(format!("--export-filename={}", svg_raster_path.display()))
+                .status()
+                .expect("Inkscape is available for Stage 20Q evidence");
+            assert!(status.success(), "raw SVG rasterizes with Inkscape");
+            let rasterized = image::load_from_memory(
+                &fs::read(&svg_raster_path).expect("SVG-rasterized PNG reads"),
+            )
+            .expect("SVG-rasterized PNG decodes")
+            .to_rgba8();
+            fs::write(
+                output.join(format!("{stem}-native-rgba-stats.txt")),
+                stage20q_rgba_statistics(
+                    evaluated.result.raster().width(),
+                    evaluated.result.raster().height(),
+                    evaluated.result.raster().pixels(),
+                ),
+            )
+            .expect("native RGBA statistics write");
+            fs::write(
+                output.join(format!("{stem}-svg-raster-rgba-stats.txt")),
+                stage20q_rgba_statistics(
+                    rasterized.width(),
+                    rasterized.height(),
+                    rasterized.as_raw(),
+                ),
+            )
+            .expect("SVG-rasterized RGBA statistics write");
+            fs::write(
+                output.join(format!("{stem}-identity.txt")),
+                format!(
+                    "case={stem}\nresponse={response:?}\nsampled_paint={sampled}\nopacity={opacity}\n\
+                     evaluation_fingerprint={}\ncache_diagnostics={:?}\n\
+                     untreated_ids={:#?}\nreferences={:#?}\nsamples={:#?}\n\
+                     treatments={:#?}\ntreated_provenance={:#?}\n\
+                     untreated_fingerprint={}\ntreated_fingerprint={}\n\
+                     typed_realization_fingerprint={}\nrealizer_diagnostics={:?}\n",
+                    evaluated.result.channels()[0].realization_identity(),
+                    evaluated.diagnostics,
+                    evidence.untreated_region_ids,
+                    evidence.references,
+                    evidence.samples,
+                    evidence.treatments,
+                    evidence.provenance,
+                    evidence.untreated_fingerprint,
+                    evidence.treated_fingerprint,
+                    evidence.realization_fingerprint,
+                    evidence.diagnostics,
+                ),
+            )
+            .expect("Region identity record writes");
+            fs::write(
+                output.join(format!("{stem}-hashes.txt")),
+                format!(
+                    "{}  {}\n{}  {}\n{}  {}\n",
+                    stage20q_sha256(&fs::read(&document_path).expect("document reads")),
+                    document_path.file_name().unwrap().to_string_lossy(),
+                    stage20q_sha256(&png),
+                    png_path.file_name().unwrap().to_string_lossy(),
+                    stage20q_sha256(&fs::read(&svg_raster_path).expect("raster reads")),
+                    svg_raster_path.file_name().unwrap().to_string_lossy(),
+                ),
+            )
+            .expect("artifact hashes write");
+            manifest.push_str(&format!(
+                "- `{stem}`: response `{response:?}`, sampled paint `{sampled}`, opacity `{opacity}`; \
+                 `{stem}.toniator`, `{stem}.png`, `{stem}.svg`, `{stem}-svg-rasterized.png`, \
+                 identity, hashes, and separate native/SVG-raster RGBA statistics.\n"
+            ));
+        }
+        fs::write(output.join("MANIFEST.fragment.md"), manifest).expect("manifest fragment writes");
+    }
+
+    /// Generates production Guide Face ConstantGap evidence from one observed engine invocation each.
+    ///
+    /// These witnesses preserve the current v5 document boundary, final-canvas-only rendering,
+    /// and test-only snapshot provenance. No four-guide or raw-parametric-path producer is used.
+    #[test]
+    #[ignore = "writes Stage 20Q Guide Face ConstantGap validation artifacts"]
+    fn generate_stage20q_guide_face_constant_gap_artifacts() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let output = root.join("target/validation/stage20q/guide-faces");
+        fs::create_dir_all(&output).expect("Guide Face validation directory exists");
+        let raster_input = root.join("assets/raster-sample.png");
+        let vector_input = root.join("assets/vector-sample.svg");
+        let mut manifest = String::from(
+            "# Stage 20Q Guide Face ConstantGap fragment\n\n\
+             Every case saves and reloads a current schema-v5 document, then exports the one normal \
+             engine evaluation to raw RGBA PNG and raw SVG plus an Inkscape SVG raster.\n\n",
+        );
+
+        let two_guide = stage20q_region_response_session(
+            modeled_guide_face_session_for_canvas(
+                vec![GuideDimensionId(123), GuideDimensionId(124)],
+                CanvasSpec {
+                    width: 1024.0,
+                    height: 1024.0,
+                },
+            ),
+            RegionGeometryResponse::ConstantGap {
+                sampling: toniator_domain::RegionSamplingStrategy::ReferencePoint,
+                minimum_gap: 24.0,
+                maximum_gap: 24.0,
+            },
+        );
+        let (two_result, two_evidence) = stage20q_write_guide_face_case(
+            &output,
+            "two-guide-raster-inward-gap-reference-solid",
+            two_guide,
+            &raster_input,
+            EmbeddedSourceFormat::Png,
+            SourceFormatHint::Png,
+            "production two-guide inward ConstantGap / ReferencePoint / solid",
+        );
+        assert!(
+            !two_evidence.provenance.is_empty(),
+            "moderate positive gap retains two-guide components"
+        );
+        assert_eq!(
+            two_result.raster().width(),
+            1024,
+            "renderer performs only final native canvas clipping"
+        );
+        manifest.push_str(
+            "- `two-guide-raster-inward-gap-reference-solid`: 1024×1024 raster source, positive inward gap, ReferencePoint and solid paint.\n",
+        );
+
+        let collapse = stage20q_region_response_session(
+            stage20q_density_session(
+                modeled_guide_face_session_for_canvas(
+                    vec![GuideDimensionId(123), GuideDimensionId(124)],
+                    CanvasSpec {
+                        width: 1024.0,
+                        height: 1024.0,
+                    },
+                ),
+                64.0,
+            ),
+            RegionGeometryResponse::ConstantGap {
+                sampling: toniator_domain::RegionSamplingStrategy::ReferencePoint,
+                minimum_gap: 16.0,
+                maximum_gap: 16.0,
+            },
+        );
+        let (collapse_result, collapse_evidence) = stage20q_write_guide_face_case(
+            &output,
+            "two-guide-raster-inward-gap-collapse",
+            collapse,
+            &raster_input,
+            EmbeddedSourceFormat::Png,
+            SourceFormatHint::Png,
+            "production two-guide collapsing inward ConstantGap",
+        );
+        assert!(
+            collapse_evidence.provenance.is_empty(),
+            "positive inward gap collapses every dense two-guide component"
+        );
+        assert_eq!(collapse_result.raster().width(), 1024);
+        manifest.push_str(
+            "- `two-guide-raster-inward-gap-collapse`: 1024×1024 raster source, positive inward gap collapse to empty treated geometry.\n",
+        );
+
+        let three_base = stage20q_region_response_session(
+            modeled_guide_face_session_for_canvas(
+                vec![
+                    GuideDimensionId(123),
+                    GuideDimensionId(124),
+                    GuideDimensionId(125),
+                ],
+                CanvasSpec {
+                    width: 900.0,
+                    height: 620.0,
+                },
+            ),
+            RegionGeometryResponse::ConstantGap {
+                sampling: toniator_domain::RegionSamplingStrategy::AreaAverage,
+                minimum_gap: -18.0,
+                maximum_gap: -18.0,
+            },
+        );
+        let three_guide = stage20q_sampled_region_session(three_base.document().clone(), 0.58);
+        let (three_result, three_evidence) = stage20q_write_guide_face_case(
+            &output,
+            "three-guide-vector-outward-gap-area-average-sampled-opacity",
+            three_guide,
+            &vector_input,
+            EmbeddedSourceFormat::Svg,
+            SourceFormatHint::Svg,
+            "production 0/60/120 three-guide outward ConstantGap / AreaAverage / sampled paint / opacity",
+        );
+        assert_production_equilateral_untreated_faces(&three_evidence.untreated_regions);
+        assert_eq!(
+            three_evidence.sampling,
+            toniator_domain::RegionSamplingStrategy::AreaAverage
+        );
+        assert_eq!(
+            three_evidence.samples.len(),
+            three_evidence.untreated_regions.regions().len(),
+            "AreaAverage samples every complete untreated base exactly once"
+        );
+        assert!(
+            three_evidence
+                .untreated_regions
+                .regions()
+                .iter()
+                .any(|region| {
+                    region.bounds.min.x < 0.0
+                        || region.bounds.min.y < 0.0
+                        || region.bounds.max.x > 900.0
+                        || region.bounds.max.y > 620.0
+                }),
+            "producer retains off-canvas untreated faces before final render clipping"
+        );
+        assert_eq!(three_result.raster().width(), 900);
+        assert_eq!(three_result.raster().height(), 620);
+        manifest.push_str(
+            "- `three-guide-vector-outward-gap-area-average-sampled-opacity`: production 0/60/120 equilateral untreated faces, negative outward gap, complete AreaAverage sampling, sampled paint, and opacity 0.58 at 900×620.\n",
+        );
+
+        let cubic_base = stage20q_region_response_session(
+            modeled_authored_cubic_guide_face_session_for_canvas(CanvasSpec {
+                width: 900.0,
+                height: 620.0,
+            }),
+            RegionGeometryResponse::ConstantGap {
+                sampling: toniator_domain::RegionSamplingStrategy::AreaAverage,
+                minimum_gap: -40.0,
+                maximum_gap: -40.0,
+            },
+        );
+        let cubic = stage20q_sampled_region_session(cubic_base.document().clone(), 0.71);
+        let (cubic_result, cubic_evidence) = stage20q_write_guide_face_case(
+            &output,
+            "authored-cubic-vector-outward-gap-area-average-sampled",
+            cubic,
+            &vector_input,
+            EmbeddedSourceFormat::Svg,
+            SourceFormatHint::Svg,
+            "production authored-cubic Guide Faces / outward ConstantGap / AreaAverage / sampled paint",
+        );
+        assert!(
+            cubic_evidence
+                .untreated_regions
+                .regions()
+                .iter()
+                .any(|region| {
+                    region
+                        .ring
+                        .segments()
+                        .iter()
+                        .any(|segment| matches!(segment, CurveSegment::CubicBezier(_)))
+                }),
+            "authored cubic Guide Face reaches the untouched producer snapshot"
+        );
+        assert!(
+            cubic_result
+                .raster()
+                .pixels()
+                .chunks_exact(4)
+                .any(|pixel| pixel[3] != 0)
+        );
+        manifest.push_str(
+            "- `authored-cubic-vector-outward-gap-area-average-sampled`: genuinely authored cubic Guide Faces at 900×620 with sampled AreaAverage outward ConstantGap treatment.\n",
+        );
+
+        stage20q_write_direct_split_witness(&output);
+        manifest.push_str(
+            "- `crossing-split-direct-geometry-render`: direct geometry/render narrow-neck inward-gap witness. The bounded production authored-cubic outward-gap case retained one component per base, so this explicitly labeled direct case proves deterministic split ordinals, positive winding, base provenance, replay identity, and final-canvas rendering without claiming document/source sampling evidence.\n",
+        );
+
+        fs::write(output.join("MANIFEST.fragment.md"), manifest)
+            .expect("Guide Face manifest fragment writes");
     }
 
     /// Loads the immutable project-wide SVG fixture for source-aware Stage 20P witnesses.
@@ -5151,6 +7056,361 @@ pub(crate) mod test_support {
                 .expect("accepted Region repeat publishes")
         );
         scheduler.shutdown().expect("Region scheduler shuts down");
+    }
+
+    /// Proves source-sampled Scale Region cache hits replay complete producer, sampling, and treatment facts.
+    #[test]
+    fn scaled_voronoi_region_cache_replays_complete_output_diagnostics() {
+        let scheduler =
+            EvaluationScheduler::new_with_limits(EvaluationLimits::default()).expect("scheduler");
+        let mut session = modeled_scaled_voronoi_session();
+        let bytes = valid_document_bytes();
+        let first_ticket = scheduler
+            .submit(document_request(&session, Arc::clone(&bytes)))
+            .expect("scaled Region submit");
+        let first = wait_for_document_completion(&scheduler);
+        assert_eq!(first.ticket(), first_ticket);
+        let first_diagnostics = first
+            .cache_diagnostics()
+            .unwrap_or_else(|| panic!("scaled Region evaluation fails: {:?}", first.error()));
+        let first_output = first_diagnostics.channels[0].outputs[0].clone();
+        assert_eq!(first_output.realization, CacheDisposition::Miss);
+        let region = first_output.region.as_ref().expect("Region cache facts");
+        assert!(region.source_identity.is_some());
+        assert_eq!(
+            region.sampling.strategy,
+            toniator_domain::RegionSamplingStrategy::ReferencePoint
+        );
+        assert!(region.sampling.sampled_bases > 0);
+        assert_eq!(region.treatment.kind, RegionTreatmentCacheKind::Scale);
+        assert!(region.treatment.retained_regions > 0);
+        assert!(matches!(
+            region.producer,
+            RegionProducerCacheDiagnostics::Voronoi(_)
+        ));
+        assert!(scheduler.accept_completion(&first, &session).unwrap());
+
+        let replay_ticket = scheduler
+            .submit(document_request(&session, Arc::clone(&bytes)))
+            .expect("scaled Region replay submits");
+        let replay = wait_for_document_completion(&scheduler);
+        assert_eq!(replay.ticket(), replay_ticket);
+        let replay_output = replay
+            .cache_diagnostics()
+            .expect("scaled Region replay diagnostics")
+            .channels[0]
+            .outputs[0]
+            .clone();
+        assert_eq!(replay_output.realization, CacheDisposition::Hit);
+        assert_eq!(replay_output.region, first_output.region);
+        assert_eq!(replay_output.voronoi, first_output.voronoi);
+        assert!(scheduler.accept_completion(&replay, &session).unwrap());
+
+        session
+            .apply(&DocumentCommand::SetModeledMappingField {
+                channel_id: ChannelId(1),
+                edit: toniator_domain::ModeledMappingFieldEdit::Gain(0.75),
+            })
+            .expect("mapping edit validates");
+        let remapped_ticket = scheduler
+            .submit(document_request(&session, bytes))
+            .expect("mapping-sensitive Region submit");
+        let remapped = wait_for_document_completion(&scheduler);
+        assert_eq!(remapped.ticket(), remapped_ticket);
+        let remapped_diagnostics = remapped.cache_diagnostics().expect("mapping diagnostics");
+        assert_eq!(
+            remapped_diagnostics.aggregate.decoded_source,
+            CacheDisposition::Hit
+        );
+        assert_eq!(
+            remapped_diagnostics.channels[0].family,
+            CacheDisposition::Hit
+        );
+        assert_eq!(
+            remapped_diagnostics.channels[0].outputs[0].realization,
+            CacheDisposition::Miss,
+            "sampled Region mapping changes must invalidate only output realization"
+        );
+        scheduler.shutdown().expect("scheduler shutdown");
+    }
+
+    /// Proves sampling-strategy and relevant sampling-limit changes miss only the Region output cache.
+    #[test]
+    fn region_cache_key_tracks_sampling_strategy_and_sampling_limits() {
+        let reference_session = modeled_scaled_voronoi_session();
+        let average_session = modeled_scaled_voronoi_session_with_sampling(
+            toniator_domain::RegionSamplingStrategy::AreaAverage,
+        );
+        let bytes = valid_document_bytes();
+        let mut cache = DocumentDerivedCache::default();
+        let baseline = evaluate_cached_document(
+            document_request(&reference_session, Arc::clone(&bytes)),
+            EvaluationLimits::default(),
+            &cache,
+            &NeverCancelled,
+        )
+        .expect("reference Region evaluates");
+        assert_eq!(
+            baseline.diagnostics.aggregate.realization,
+            CacheDisposition::Miss
+        );
+        cache.commit(baseline.transaction);
+
+        let changed_strategy = evaluate_cached_document(
+            document_request(&average_session, Arc::clone(&bytes)),
+            EvaluationLimits::default(),
+            &cache,
+            &NeverCancelled,
+        )
+        .expect("area-average Region evaluates");
+        assert_eq!(
+            changed_strategy.diagnostics.aggregate.decoded_source,
+            CacheDisposition::Hit
+        );
+        assert_eq!(
+            changed_strategy.diagnostics.aggregate.family,
+            CacheDisposition::Hit
+        );
+        assert_eq!(
+            changed_strategy.diagnostics.aggregate.realization,
+            CacheDisposition::Miss,
+            "sampling strategy is a per-output cache input"
+        );
+        cache.commit(changed_strategy.transaction);
+
+        let default_sampling = RegionSamplingLimits::default();
+        let changed_limits = EvaluationLimits::default()
+            .with_region_sampling_limits(RegionSamplingLimits {
+                max_cell_intersections: default_sampling.max_cell_intersections - 1,
+                ..default_sampling
+            })
+            .expect("nonzero changed sampling policy");
+        let changed_policy = evaluate_cached_document(
+            document_request(&reference_session, bytes),
+            changed_limits,
+            &cache,
+            &NeverCancelled,
+        )
+        .expect("changed-policy Region evaluates");
+        assert_eq!(
+            changed_policy.diagnostics.aggregate.decoded_source,
+            CacheDisposition::Hit
+        );
+        assert_eq!(
+            changed_policy.diagnostics.aggregate.family,
+            CacheDisposition::Hit
+        );
+        assert_eq!(
+            changed_policy.diagnostics.aggregate.realization,
+            CacheDisposition::Miss,
+            "relevant sampling policy is a cache input but not a family input"
+        );
+    }
+
+    /// Proves unused sampling policy stays outside the Full-plus-solid Region realization key.
+    #[test]
+    fn full_solid_region_cache_omits_unused_sampling_limits() {
+        let session = modeled_voronoi_session();
+        let bytes = valid_document_bytes();
+        let mut cache = DocumentDerivedCache::default();
+        let baseline = evaluate_cached_document(
+            document_request(&session, Arc::clone(&bytes)),
+            EvaluationLimits::default(),
+            &cache,
+            &NeverCancelled,
+        )
+        .expect("Full solid Region evaluates");
+        let baseline_fingerprint = baseline.result.channels()[0]
+            .realization_identity()
+            .to_owned();
+        cache.commit(baseline.transaction);
+
+        let default_sampling = RegionSamplingLimits::default();
+        let irrelevant_policy = EvaluationLimits::default()
+            .with_region_sampling_limits(RegionSamplingLimits {
+                max_flattened_segments: default_sampling.max_flattened_segments - 1,
+                ..default_sampling
+            })
+            .expect("nonzero unused sampling policy");
+        let replay = evaluate_cached_document(
+            document_request(&session, bytes),
+            irrelevant_policy,
+            &cache,
+            &NeverCancelled,
+        )
+        .expect("Full solid Region replay evaluates");
+        assert_eq!(
+            replay.diagnostics.aggregate.realization,
+            CacheDisposition::Hit
+        );
+        assert_eq!(replay.diagnostics.aggregate.scene, CacheDisposition::Hit);
+        assert_eq!(replay.diagnostics.aggregate.raster, CacheDisposition::Hit);
+        assert_eq!(
+            replay.result.channels()[0].realization_identity(),
+            baseline_fingerprint,
+            "evaluation policy remains outside accepted Full geometry identity"
+        );
+    }
+
+    /// Proves the engine carries sampled per-region paint through SourceColorAlpha scene and SVG assembly.
+    #[test]
+    fn sampled_voronoi_regions_build_source_colored_scene_and_svg() {
+        let session = modeled_sampled_voronoi_session();
+        let evaluated = evaluate_with_limits(
+            document_request(&session, valid_document_bytes()),
+            EvaluationLimits::default(),
+        )
+        .expect("sampled Region document evaluates");
+        let layer = &evaluated.scene().layers()[0];
+        let output = &layer.outputs()[0];
+        let GeometryOutput::CanonicalRegions(regions) = &output.geometry else {
+            panic!("sampled output retains canonical regions")
+        };
+        let paints = output
+            .primitive_paints
+            .as_ref()
+            .expect("sampled Region output carries per-region paint");
+        assert_eq!(paints.len(), regions.regions().len());
+        assert!(paints.iter().all(|paint| paint.alpha > 0.0));
+        let svg = write_svg(evaluated.scene());
+        assert!(svg.contains("channel-8-region-0"));
+        assert!(svg.contains("fill-rule=\"nonzero\""));
+        assert!(
+            evaluated
+                .raster()
+                .pixels()
+                .chunks_exact(4)
+                .any(|pixel| pixel[3] > 0),
+            "sampled Region raster retains visible source-alpha coverage"
+        );
+    }
+
+    /// Proves test-only Region evidence observes one normal realization without changing products.
+    #[test]
+    fn region_evaluation_evidence_is_observational_and_atomic() {
+        let session = modeled_sampled_voronoi_session();
+        let bytes = valid_document_bytes();
+        let baseline = evaluate_cached_document(
+            document_request(&session, Arc::clone(&bytes)),
+            EvaluationLimits::default(),
+            &DocumentDerivedCache::default(),
+            &NeverCancelled,
+        )
+        .expect("baseline sampled Region evaluation succeeds");
+        let (observed, evidence) = evaluate_cached_document_with_region_evidence(
+            document_request(&session, Arc::clone(&bytes)),
+            EvaluationLimits::default(),
+            &DocumentDerivedCache::default(),
+            &NeverCancelled,
+        );
+        let observed = observed.expect("observed sampled Region evaluation succeeds");
+        let evidence = evidence.expect("successful Region evaluation records evidence");
+        assert_eq!(observed.result, baseline.result);
+        assert_eq!(observed.diagnostics, baseline.diagnostics);
+        assert!(
+            observed.result.channels()[0]
+                .realization_identity()
+                .contains(&evidence.realization_fingerprint),
+            "the final typed fingerprint is retained inside the engine contract fingerprint"
+        );
+        assert_eq!(
+            evidence.untreated_region_ids.len(),
+            evidence.references.len()
+        );
+        assert_eq!(evidence.untreated_region_ids.len(), evidence.samples.len());
+        assert_eq!(evidence.treatments.len(), evidence.samples.len());
+        assert_eq!(
+            evidence.provenance.len(),
+            evidence.diagnostics.retained_regions
+        );
+
+        let cancelled = AtomicBool::new(true);
+        let (cancelled_outcome, cancelled_evidence) = evaluate_cached_document_with_region_evidence(
+            document_request(&session, Arc::clone(&bytes)),
+            EvaluationLimits::default(),
+            &DocumentDerivedCache::default(),
+            &AtomicCancellation(&cancelled),
+        );
+        assert!(matches!(
+            cancelled_outcome,
+            Err(EvaluationRunError::Cancelled)
+        ));
+        assert!(cancelled_evidence.is_none());
+
+        let constrained = EvaluationLimits::default()
+            .with_region_sampling_limits(RegionSamplingLimits {
+                max_cell_intersections: 1,
+                ..RegionSamplingLimits::default()
+            })
+            .expect("nonzero constrained sampling policy");
+        let area_average = modeled_scaled_voronoi_session_with_sampling(
+            toniator_domain::RegionSamplingStrategy::AreaAverage,
+        );
+        let (failure, failed_evidence) = evaluate_cached_document_with_region_evidence(
+            document_request(&area_average, bytes),
+            constrained,
+            &DocumentDerivedCache::default(),
+            &NeverCancelled,
+        );
+        assert!(failure.is_err());
+        assert!(failed_evidence.is_none());
+    }
+
+    /// Proves a late AreaAverage limit failure returns no cache transaction or partial scene products.
+    #[test]
+    fn area_average_region_failure_is_atomic_before_cache_publication() {
+        let session = modeled_scaled_voronoi_session_with_sampling(
+            toniator_domain::RegionSamplingStrategy::AreaAverage,
+        );
+        let bytes = valid_document_bytes();
+        let cache = DocumentDerivedCache::default();
+        let default_sampling = RegionSamplingLimits::default();
+        let failing_limits = EvaluationLimits::default()
+            .with_region_sampling_limits(RegionSamplingLimits {
+                max_cell_intersections: 1,
+                ..default_sampling
+            })
+            .expect("nonzero constrained policy");
+        let failure = evaluate_cached_document(
+            document_request(&session, Arc::clone(&bytes)),
+            failing_limits,
+            &cache,
+            &NeverCancelled,
+        );
+        let Err(failure) = failure else {
+            panic!("late AreaAverage budget must fail")
+        };
+        let EvaluationRunError::Evaluation(error) = failure else {
+            panic!("AreaAverage limit is an evaluation failure")
+        };
+        assert_eq!(
+            error.path(),
+            "sampling.region_average.limits.cell_intersections"
+        );
+        assert!(cache.decoded_source.is_none());
+        assert!(cache.families.is_empty());
+        assert!(cache.realizations.is_empty());
+        assert!(cache.scene.is_none());
+        assert!(cache.raster.is_none());
+
+        let succeeding = evaluate_cached_document(
+            document_request(&session, bytes),
+            EvaluationLimits::default(),
+            &cache,
+            &NeverCancelled,
+        )
+        .expect("unconstrained AreaAverage evaluates after failure");
+        assert_eq!(
+            succeeding.diagnostics.aggregate,
+            CacheDiagnostics {
+                decoded_source: CacheDisposition::Miss,
+                family: CacheDisposition::Miss,
+                realization: CacheDisposition::Miss,
+                scene: CacheDisposition::Miss,
+                raster: CacheDisposition::Miss,
+            },
+            "a failed Region run publishes neither source nor downstream candidate state"
+        );
     }
 
     /// Proves an already-completed ordinary-region candidate becomes stale when the authoritative

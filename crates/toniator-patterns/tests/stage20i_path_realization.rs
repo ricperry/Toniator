@@ -1,9 +1,9 @@
 use toniator_domain::{
     CanvasSpec, ConnectedGeometryResponse, CoveragePolicy, Document, DocumentId,
     GeneralizedSiteProduct, GuideDimensionId, MarkOrientation, PathStrokeStyle, PatternDefinition,
-    PatternDefinitionId, PatternGeometryResponse, PatternMechanismId, PatternOutputLayer,
-    PatternOutputLayerId, SourceMapping, SourceMappingComponent, SourceReference,
-    StraightGuideDimension, StraightGuideRepetition,
+    PatternDefinitionBundle, PatternDefinitionId, PatternGeometryResponse, PatternMechanismId,
+    PatternOutputLayer, PatternOutputLayerId, PatternOutputSettings, SourceMapping,
+    SourceMappingComponent, SourceReference, StraightGuideDimension, StraightGuideRepetition,
 };
 use toniator_patterns::{
     GridInspectRequest, RealizationStructuralInput, StrokeResponse,
@@ -57,15 +57,21 @@ fn path_document() -> Document {
     settings.definition_id = definition.id;
     settings.density.across_x = 3.0;
     settings.density.across_y = 3.0;
-    settings.geometry_response = PatternGeometryResponse::Connected(ConnectedGeometryResponse {
-        minimum_thickness: 0.2,
-        maximum_thickness: 1.0,
-    });
+    let bundle = PatternDefinitionBundle {
+        output_settings: vec![PatternOutputSettings {
+            output_layer_id: PatternOutputLayerId(903),
+            response: PatternGeometryResponse::Connected(ConnectedGeometryResponse {
+                minimum_thickness: 0.2,
+                maximum_thickness: 1.0,
+            }),
+        }],
+        definition,
+    };
     Document::with_source_topology_and_authored_structures(
         DocumentId(900),
         base.canvas().clone(),
         base.source().clone(),
-        vec![definition],
+        vec![bundle],
         settings,
         base.channel_model().expect("model").to_owned(),
         base.channel_topology().expect("topology").clone(),
@@ -82,7 +88,7 @@ fn path_family() -> (
     toniator_sampling::SourceField,
 ) {
     let document = path_document();
-    let definition = &document.pattern_definitions()[0];
+    let definition = &document.pattern_definition_bundles()[0].definition;
     let plan =
         resolve_document_pattern_pipeline(&document, definition).expect("guide plan resolves");
     let family = evaluate_document_typed_family_cancellable(
@@ -200,7 +206,7 @@ fn guide_path_realization_observes_limits_and_cancellation() {
 #[test]
 fn mixed_mark_and_guide_outputs_reject_before_realization() {
     let document = path_document();
-    let mut definition = document.pattern_definitions()[0].clone();
+    let mut definition = document.pattern_definition_bundles()[0].definition.clone();
     definition
         .output_layers
         .push(PatternOutputLayer::CircularMarks {

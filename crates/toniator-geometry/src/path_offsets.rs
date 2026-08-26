@@ -54,6 +54,43 @@ pub struct PathOffsetLimits {
     pub tolerance: f64,
 }
 
+/// Mutable request-wide offset accounting shared by one or more path constructions.
+///
+/// The budget owns the exact configured limits and cumulative candidate segments, retained
+/// components, cleanup-pair inspections, and cusp/reversal inspections. It never exposes a
+/// partial geometry result; callers publish only after every shared charge has succeeded.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PathOffsetWork {
+    limits: PathOffsetLimits,
+    emitted_segments: usize,
+    retained_components: usize,
+    cleanup_pairs: usize,
+    cusp_inspections: usize,
+}
+
+impl PathOffsetWork {
+    /// Creates an empty request-wide work budget with the accepted finite offset limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns `curve.offset.limit` when a configured bound or fitting tolerance is invalid.
+    pub fn new(limits: PathOffsetLimits) -> Result<Self, CurveError> {
+        validate_offset_limits(limits)?;
+        Ok(Self {
+            limits,
+            emitted_segments: 0,
+            retained_components: 0,
+            cleanup_pairs: 0,
+            cusp_inspections: 0,
+        })
+    }
+
+    /// Returns the immutable limits shared by every construction in this request.
+    pub const fn limits(&self) -> PathOffsetLimits {
+        self.limits
+    }
+}
+
 impl Default for PathOffsetLimits {
     /// Returns the fixed Stage 20J request-wide resource defaults.
     fn default() -> Self {
@@ -66,6 +103,28 @@ impl Default for PathOffsetLimits {
             tolerance: DEFAULT_PATH_OFFSET_TOLERANCE,
         }
     }
+}
+
+/// Validates fixed and additive path-offset bounds before one work budget can be created.
+///
+/// # Errors
+///
+/// Returns the existing stable offset-limit diagnostic for invalid caller limits.
+fn validate_offset_limits(limits: PathOffsetLimits) -> Result<(), CurveError> {
+    if limits.maximum_subdivision_depth == 0
+        || limits.maximum_segments == 0
+        || limits.maximum_components == 0
+        || limits.maximum_cleanup_pairs == 0
+        || limits.maximum_cusp_isolation_work == 0
+        || !limits.tolerance.is_finite()
+        || limits.tolerance <= 0.0
+    {
+        return Err(CurveError::new(
+            "curve.offset.limit",
+            "path offset limits must be positive",
+        ));
+    }
+    Ok(())
 }
 
 /// Immutable input for one cancellable signed normal-offset construction.
@@ -204,23 +263,34 @@ pub fn offset_path_cancellable(
     request: PathOffsetRequest<'_>,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<PathOffsetResult, CurveError> {
+    let mut work = PathOffsetWork::new(request.limits)?;
+    offset_path_with_work_cancellable(request, &mut work, is_cancelled)
+}
+
+/// Builds one offset while charging a caller-owned mutable request-wide work budget.
+///
+/// The request must use the budget's exact immutable limits, so independently invoked paths
+/// cannot reset candidate segment, component, cleanup, or cusp counters.
+///
+/// # Errors
+///
+/// Returns existing stable offset diagnostics and never publishes partial geometry.
+pub fn offset_path_with_work_cancellable(
+    request: PathOffsetRequest<'_>,
+    work: &mut PathOffsetWork,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<PathOffsetResult, CurveError> {
     if !request.signed_distance.is_finite() {
         return Err(CurveError::new(
             "curve.offset.distance",
             "path offset distance must be finite",
         ));
     }
-    if request.limits.maximum_subdivision_depth == 0
-        || request.limits.maximum_segments == 0
-        || request.limits.maximum_components == 0
-        || request.limits.maximum_cleanup_pairs == 0
-        || request.limits.maximum_cusp_isolation_work == 0
-        || !request.limits.tolerance.is_finite()
-        || request.limits.tolerance <= 0.0
-    {
+    validate_offset_limits(request.limits)?;
+    if request.limits != work.limits {
         return Err(CurveError::new(
             "curve.offset.limit",
-            "path offset limits must be positive",
+            "shared path offset work requires matching request limits",
         ));
     }
     if is_cancelled() {
@@ -241,9 +311,10 @@ pub fn offset_path_cancellable(
             path: source.path,
         }]));
     }
+    let limits = work.limits;
     let retained_winding = if request.path.closure() == PathClosure::Closed {
         Some(
-            path_winding(request.path, request.limits.tolerance)?.ok_or(CurveError::new(
+            path_winding(request.path, limits.tolerance)?.ok_or(CurveError::new(
                 "curve.offset.winding",
                 "closed path offset requires a nonzero authored winding",
             ))?,
@@ -252,10 +323,10 @@ pub fn offset_path_cancellable(
         None
     };
     let mut runs = Vec::with_capacity(source.path.segments().len().saturating_mul(2));
-    let mut emitted_segments = 0_usize;
+    let mut emitted_segments = work.emitted_segments;
     let mut cusp_budget = CuspIsolationBudget {
-        examined_intervals: 0,
-        maximum_intervals: request.limits.maximum_cusp_isolation_work,
+        examined_intervals: work.cusp_inspections,
+        maximum_intervals: limits.maximum_cusp_isolation_work,
     };
     for (index, segment) in source.path.segments().iter().copied().enumerate() {
         if is_cancelled() {
@@ -265,7 +336,7 @@ pub fn offset_path_cancellable(
             segment,
             index,
             request.signed_distance,
-            request.limits,
+            limits,
             &mut cusp_budget,
             is_cancelled,
         )?;
@@ -282,12 +353,14 @@ pub fn offset_path_cancellable(
                 offsets,
                 segment,
                 request.signed_distance,
-                request.limits.maximum_segments,
+                limits.maximum_segments,
                 &mut emitted_segments,
             )?;
         }
     }
     if runs.is_empty() {
+        work.emitted_segments = emitted_segments;
+        work.cusp_inspections = cusp_budget.examined_intervals;
         return Ok(PathOffsetResult::Collapsed);
     }
     let mut run_closure = PathClosure::Open;
@@ -296,7 +369,7 @@ pub fn offset_path_cancellable(
             close_unbroken_offset_run(
                 &mut runs[0],
                 authored_end,
-                request.limits.maximum_segments,
+                limits.maximum_segments,
                 &mut emitted_segments,
             )?;
             run_closure = PathClosure::Closed;
@@ -305,14 +378,14 @@ pub fn offset_path_cancellable(
                 &mut runs,
                 authored_end,
                 request.signed_distance,
-                request.limits.maximum_segments,
+                limits.maximum_segments,
                 &mut emitted_segments,
             )?;
         }
     }
     let mut cleanup_budget = CleanupBudget {
-        examined_pairs: 0,
-        maximum_pairs: request.limits.maximum_cleanup_pairs,
+        examined_pairs: work.cleanup_pairs,
+        maximum_pairs: limits.maximum_cleanup_pairs,
     };
     dissolve_cross_run_reversal_crossings(
         &mut runs,
@@ -349,13 +422,17 @@ pub fn offset_path_cancellable(
                     .then_some(retained_winding)
                     .flatten(),
                 &mut cleanup_budget,
-                request.limits.maximum_components,
-                request.limits.tolerance,
+                limits.maximum_components,
+                limits.tolerance,
                 is_cancelled,
             )?,
         };
         paths.append(&mut cleaned);
-        if paths.len() > request.limits.maximum_components {
+        if work
+            .retained_components
+            .checked_add(paths.len())
+            .is_none_or(|total| total > limits.maximum_components)
+        {
             return Err(CurveError::new(
                 "curve.offset.component_limit",
                 "path offset component limit exceeded",
@@ -363,11 +440,24 @@ pub fn offset_path_cancellable(
         }
     }
     if paths.is_empty() {
+        work.emitted_segments = emitted_segments;
+        work.cusp_inspections = cusp_budget.examined_intervals;
+        work.cleanup_pairs = cleanup_budget.examined_pairs;
         return Ok(PathOffsetResult::Collapsed);
     }
     paths.sort_by(|left, right| {
         source_location_key(left.earliest_source).cmp(&source_location_key(right.earliest_source))
     });
+    work.emitted_segments = emitted_segments;
+    work.cusp_inspections = cusp_budget.examined_intervals;
+    work.cleanup_pairs = cleanup_budget.examined_pairs;
+    work.retained_components =
+        work.retained_components
+            .checked_add(paths.len())
+            .ok_or(CurveError::new(
+                "curve.offset.component_limit",
+                "path offset component limit exceeded",
+            ))?;
     Ok(PathOffsetResult::Paths(
         paths
             .into_iter()
@@ -2247,6 +2337,31 @@ fn cancelled() -> CurveError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verifies one mutable work budget accumulates path work while the legacy wrapper replays bytes.
+    #[test]
+    fn stage20q_shared_offset_work_accumulates_without_reset() {
+        let path = CurvePath::line(Point2::new(0.0, 0.0), Point2::new(10.0, 0.0)).unwrap();
+        let limits = PathOffsetLimits {
+            maximum_segments: 2,
+            maximum_components: 1,
+            ..PathOffsetLimits::default()
+        };
+        let request = PathOffsetRequest {
+            path: &path,
+            signed_distance: 1.0,
+            endpoint_policy: PathOffsetEndpointPolicy::Preserve,
+            cleanup: PathOffsetCleanup::DissolveCrossings,
+            crossing_barriers: &[],
+            limits,
+        };
+        let legacy = offset_path_cancellable(request, &|| false).unwrap();
+        let mut work = PathOffsetWork::new(limits).unwrap();
+        let first = offset_path_with_work_cancellable(request, &mut work, &|| false).unwrap();
+        assert_eq!(first, legacy);
+        let error = offset_path_with_work_cancellable(request, &mut work, &|| false).unwrap_err();
+        assert_eq!(error.path(), "curve.offset.component_limit");
+    }
 
     /// Proves signed line offsets retain compact direct centerlines and exact zero identity.
     #[test]

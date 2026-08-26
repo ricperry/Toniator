@@ -45,7 +45,7 @@ fn document_for(definition: PatternDefinition, structures: Vec<AuthoredStructure
                             })
                         }
                         toniator_domain::PatternOutputLayer::Regions { .. } => {
-                            PatternGeometryResponse::Regions(RegionGeometryResponse::Full)
+                            PatternGeometryResponse::Regions(RegionGeometryResponse::default())
                         }
                         _ => panic!("Stage 20H fixture owns only mark outputs"),
                     },

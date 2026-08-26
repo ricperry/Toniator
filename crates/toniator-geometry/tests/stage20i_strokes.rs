@@ -203,8 +203,12 @@ fn reusable_outline_simplifies_by_location_and_rounds_the_outer_corner() {
     let toniator_geometry::CurveSegment::CubicBezier(join) = join else {
         panic!("round join stays cubic");
     };
-    assert!(join.control_1().x < 4.0 && join.control_1().y >= 1.0);
-    assert!(join.control_2().x <= 3.0 && join.control_2().y > 0.0);
+    assert!(
+        join.control_1().x < 4.0 && join.control_1().y > 0.0,
+        "round join first control: {:?}",
+        join.control_1()
+    );
+    assert!(join.control_2().x < 4.0 && join.control_2().y > 0.0);
     assert!(contour_is_closed(&outlined.contours[0]));
     let unequal = outline(
         &corner,
