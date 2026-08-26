@@ -1,6 +1,9 @@
 # Stage 20R — Ordered Composite Outputs and Site-Use Filters
 
-Status: **Accepted awaiting checkpoint**
+Status: **Complete at implementation checkpoint
+`458c9a981dd349999240a18052e055a71c7b6c3c`** (user accepted 2026-08-26;
+independent read-only review, parent verification, and final artifact
+inspection passed).
 
 ## Scope
 
@@ -133,6 +136,10 @@ agree in visible RGB and alpha coverage. The unchanged historical engine
 catch-all remains excluded because it already targets superseded APIs and is
 outside the current-stage test boundary.
 
-No commit, push, publication, accepted/complete transition, protected
-specification change, immutable-asset change, or `ToniatorLegacy/` work is
-authorized.
+The user accepted Stage 20R on 2026-08-26. The implementation checkpoint above
+contains the complete reviewed Stage 20R implementation and its fixture ports;
+the subsequent documentation closeout is tracked separately. No commit, push,
+publication, protected specification change, immutable-asset change, or
+`ToniatorLegacy/` work is authorized by this plan. Stage 20S remains a separate
+planned milestone with its own decision-complete contract, review, acceptance,
+and checkpoint gate.

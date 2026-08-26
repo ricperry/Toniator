@@ -1,10 +1,11 @@
 # Stages 20N–20S — Headless Pattern Completion Plan
 
-Status: **Accepted roadmap; Stages 20N, 20O, 20P, and 20Q are complete, while
-Stages 20R–20S remain Planned and separately gated** (Stage 20O checkpoint
+Status: **Accepted roadmap; Stages 20N, 20O, 20P, 20Q, and 20R are complete,
+while Stage 20S remains Planned and separately gated** (Stage 20O checkpoint
 `7ab97f01ec372ab1e6201b3913742476a1511c02`; Stage 20P checkpoint
 `cd531eb65dd2e161e62f355905ad936b8c1ca3c4`; Stage 20Q checkpoint
-`071f3604098c0660a876fbe30050a64223fe41b3`).
+`071f3604098c0660a876fbe30050a64223fe41b3`; Stage 20R checkpoint
+`458c9a981dd349999240a18052e055a71c7b6c3c`).
 
 ## Summary and stage boundary
 
@@ -26,11 +27,11 @@ Stage 20N is complete at implementation checkpoint
 one-output authoring/validation gate while providing ordered keyed output
 authority, schema-v5/preset-v3 persistence, independently keyed realization and
 cache units, and canonical-region/render foundations. It does not add a
-concrete region source or treatment. This roadmap does not authorize Stage
-20R+ implementation, a tracker status advance for those stages, a commit,
-publication, Stage 21+, or a protected-specification revision. Every remaining
-row retains its own decision-complete plan, one-writer implementation,
-independent read-only review, user acceptance, and checkpoint gate.
+concrete region source or treatment. This roadmap does not authorize Stage 20S
+implementation, a commit, publication, Stage 21+, or a protected-specification
+revision. Every remaining row retains its own decision-complete plan, one-writer
+implementation, independent read-only review, user acceptance, and checkpoint
+gate.
 
 ## Stage 20N — Multi-output and canonical-region foundation (complete)
 
@@ -66,7 +67,7 @@ independent read-only review, user acceptance, and checkpoint gate.
 Status: **Complete at implementation checkpoint
 `7ab97f01ec372ab1e6201b3913742476a1511c02`** (user acceptance recorded
 2026-08-25; independent re-review and final artifact inspection passed).
-Stage 20R+ remains Planned and separately gated.
+Stage 20R is complete; Stage 20S remains Planned and separately gated.
 
 - Add `PatternOutputLayer::Regions` with
   `RegionSourceIntent::VoronoiSites { site_mechanism_id }` for eligible
@@ -103,7 +104,8 @@ Stage 20R+ remains Planned and separately gated.
 Status: **Complete at implementation checkpoint
 `cd531eb65dd2e161e62f355905ad936b8c1ca3c4`** (user acceptance recorded
 2026-08-25; independent read-only review, parent verification, and final
-artifact inspection passed). Stage 20R+ remains Planned and separately gated.
+artifact inspection passed). Stage 20R is complete; Stage 20S remains Planned
+and separately gated.
 
 The accepted implementation derives complete deterministic bounded faces from
 two or three selected straight or authored-open guide dimensions through the
@@ -176,6 +178,11 @@ complete bounded faces, not raster resolution.
 
 ## Stage 20R — Composite outputs and site filters
 
+Status: **Complete at implementation checkpoint
+`458c9a981dd349999240a18052e055a71c7b6c3c`** (user acceptance recorded
+2026-08-26; independent read-only review, parent verification, and final
+artifact inspection passed).
+
 - Lift the single-output restriction and allow ordered heterogeneous marks,
   structural paths, connection paths, and filled regions over one family.
 - Add authored filters `All`, `SitesUsedBy { output_layer_id }`, and
@@ -196,6 +203,14 @@ complete bounded faces, not raster resolution.
 - Persist only authored layers, settings, painter order, and filter references.
   Sites, topology, usage sets, regions, diagnostics, limits, caches, cancelled
   candidates, and stale scheduler results remain derived and non-persisted.
+
+The implementation lifts the one-output restriction while retaining one
+family-wide paint and opacity. Connections, maze walls, and sampled regions
+are exercised in separate visual witnesses, and the cross-channel witness
+confirms that a connection in one channel and regions in another remain
+separate. Native and SVG raster evidence agree in visible RGB and alpha; the
+implementation remains headless and renderer consumers apply final clipping
+only. Stage 20S remains separately planned and gated.
 
 ## Stage 20S — Headless capability and recipe completion
 
@@ -236,9 +251,9 @@ complete bounded faces, not raster resolution.
   `scripts/validate_architecture.sh`, protected-path review, immutable-asset
   hashes, and semantic-map reconciliation. No GTK/Wayland run is required;
   compile-check only any unavoidable mechanical app adapter.
-- For Stages 20R–20S, stop each stage at **Implemented awaiting review** and
-  again at **Ready for user acceptance**. Do not commit, push, publish, or
-  begin the next stage without explicit authorization.
+- Stage 20S must stop at **Implemented awaiting review** and again at **Ready
+  for user acceptance**. Do not commit, push, publish, or begin Stage 20S
+  implementation until its decision-complete plan is separately approved.
 
 ## Later roadmap
 

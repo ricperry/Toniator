@@ -574,7 +574,8 @@ final clipping. Eligible `FamilySiteSet` products include along-guide and
 It adds guard-inclusive realization, exact-duplicate co-ownership, bounded
 geometry-private Spade topology, and fixed solid Full regions without a
 channel-specific region treatment. Independent re-review and final artifact
-inspection passed. Stage 20R+ remains Planned and separately gated.
+inspection passed. Stage 20R is now complete; Stage 20S remains Planned and
+separately gated.
 
 **Stage 20P — Complete at implementation checkpoint
 `cd531eb65dd2e161e62f355905ad936b8c1ca3c4`.** The user accepted the bounded
@@ -609,18 +610,20 @@ raster inspections under
 It realizes only fill-only `Full`, `Scale`, and `ConstantGap` treatments for accepted
 ordinary Voronoi and Guide Face regions, with domain-owned reference/area-average
 sampling, typed cache-aware realization, sampled region paint, and final-consumer
-PNG/SVG rendering. The one-output gate, schema-v5/preset-v3 authored persistence,
-canonical untreated-region identity, final canvas clip, and headless-only boundary
-remain in force. Positive ConstantGap shrinks and negative ConstantGap grows; convex
+PNG/SVG rendering. The schema-v5/preset-v3 authored persistence, canonical
+untreated-region identity, final canvas clip, and headless-only boundary were
+part of the Stage 20Q checkpoint contract; Stage 20R subsequently lifts the
+one-output gate. Positive ConstantGap shrinks and negative ConstantGap grows; convex
 outward growth uses subdivided smooth cubic round joins, while inward shrink uses tangent
 intersection plus crossing/coincident-branch dissolution. The three-guide evidence uses
 positive inward gap and triangular line rings. The authored-cubic outward witness uses a
 fixed -40 gap (20-unit outward edge growth and 40-unit neighbor overlap) with smooth joins.
 Collapse evidence is intentionally transparent; sparse authored-cubic coverage reflects
-six complete bounded faces, not raster resolution. Publication remains separate, and Stage
-20R+ remains separately gated.
+six complete bounded faces, not raster resolution. Publication remains separate; Stage 20R
+is complete and Stage 20S remains separately gated.
 
-**Stage 20R — Accepted awaiting checkpoint.** Authorized implementation began on 2026-08-26
+**Stage 20R — Complete at implementation checkpoint
+`458c9a981dd349999240a18052e055a71c7b6c3c`.** Authorized implementation began on 2026-08-26
 under
 [`STAGE_20R_COMPOSITE_OUTPUTS_AND_SITE_FILTERS_PLAN.md`](docs/STAGE_20R_COMPOSITE_OUTPUTS_AND_SITE_FILTERS_PLAN.md).
 The bounded headless stage lifts the one-output gate, normalizes ordered output
@@ -643,9 +646,11 @@ validation; both were repaired, and re-review found no remaining material
 issue. Parent verification then reran the complete authorized gate matrix and
 directly inspected representative native and SVG-rasterized evidence in RGB
 and alpha. The user accepted Stage 20R on 2026-08-26; its implementation
-checkpoint is pending.
+checkpoint is `458c9a981dd349999240a18052e055a71c7b6c3c`. The subsequent
+documentation closeout is tracked separately. Stage 20S remains Planned and
+separately gated.
 
-**Remaining Stage 20N+ — Stage 20R Accepted awaiting checkpoint; Stage 20S Planned.** The user accepted the revised remainder
+**Remaining Stage 20N+ — Stage 20R Complete; Stage 20S Planned.** The user accepted the revised remainder
 roadmap on 2026-08-24 under
 [`STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md`](docs/STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md).
 The accepted order after completed 20Q is 20R composites and site-use filters;

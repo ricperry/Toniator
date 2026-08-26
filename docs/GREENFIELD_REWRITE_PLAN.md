@@ -1978,8 +1978,8 @@ inspection. Its headless authority accepts eligible `FamilySiteSet` products,
 including along-guide and `AlongParametricCurveSites`, rejects direct raw
 `ParametricPaths`, preserves duplicate co-ownership through a geometry-private
 Spade adapter, persists authored v5/v3 intent only, and renders fixed solid
-Full regions with final clipping only. Stage 20R+ remains Planned and
-separately gated.
+Full regions with final clipping only. Stage 20R is now complete; Stage 20S
+remains Planned and separately gated.
 
 **Stage 20P — Complete at implementation checkpoint
 `cd531eb65dd2e161e62f355905ad936b8c1ca3c4`.** The user accepted Guide
@@ -1993,8 +1993,8 @@ final clipping only. The phase-aligned 0/60/120 witness proves equal physical
 spacing and three-line equilateral faces. Existing generic one-through-four
 guide support remains unchanged; Stage 20P adds no four-guide Guide Faces
 behavior or evidence. Direct raw `ParametricPaths` remain Guide-Faces-ineligible,
-while typed parametric site/Voronoi mechanisms remain valid. Stage 20R+
-remains Planned and separately gated.
+while typed parametric site/Voronoi mechanisms remain valid. Stage 20R is now
+complete; Stage 20S remains Planned and separately gated.
 
 **Stage 20Q — Complete at implementation checkpoint
 `071f3604098c0660a876fbe30050a64223fe41b3`.** The user reaccepted Filled-region
@@ -2009,20 +2009,38 @@ authored-cubic outward witness uses fixed `-40` gap, producing 20-unit outward
 edge growth and 40-unit neighbor overlap with smooth joins. Collapse evidence
 is intentionally transparent; sparse authored-cubic coverage reflects six
 complete bounded faces, not raster resolution. Schema-v5/preset-v3 persists
-authored intent only, and the one-output, headless, final-clip-only, and
-no-four-guide/raw-ParametricPaths boundaries remain in force. Publication and
-Stage 20R+ remain separately gated.
+authored intent only, and the headless, final-clip-only, and
+no-four-guide/raw-ParametricPaths boundaries remain in force. Publication
+remains separate; Stage 20S remains separately gated.
 
-**Remaining Stage 20N+ — Stage 20R+ Planned.** The user accepted the revised headless
+**Stage 20R — Complete at implementation checkpoint
+`458c9a981dd349999240a18052e055a71c7b6c3c`.** The user accepted the bounded
+ordered-composite and site-use-filter implementation on 2026-08-26 after
+independent read-only review, parent verification, and direct native PNG/SVG
+inspection. Stage 20R lifts the one-output gate, normalizes ordered typed
+output layers with `All`, `SitesUsedBy`, and `SitesUnusedBy` filters, derives
+site usage before final clipping, evaluates a deterministic dependency DAG
+separately from authored painter order, and persists only authored v5/v3
+intent. It also provides per-output cache identity, request-wide composite
+limits, atomic cancellation/stale-publication behavior, and canonical
+connection, maze, mark, path, and treated-region consumption. The focused
+evidence keeps connection, maze, and sampled-region visual witnesses isolated;
+the cross-channel witness verifies connections and regions remain separate
+when authored in different channels. The implementation remains headless and
+adds no GTK workflow, renderer topology repair, compatibility adapter,
+publication, or Stage 20S work. The implementation checkpoint is
+`458c9a981dd349999240a18052e055a71c7b6c3c`; the documentation closeout is
+tracked separately.
+
+**Remaining Stage 20N+ — Stage 20S Planned.** The user accepted the revised headless
 remainder roadmap on 2026-08-24 under
 [`STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md`](STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md).
-Stage 20Q is complete; 20R adds ordered composites and site-use filters; and
-20S completes headless capability projection and ordinary gallery
-recipes. Stage 21 owns all remaining pattern-authoring GTK work, Stage 22 owns
+Stage 20Q and 20R are complete; 20S completes headless capability projection
+and ordinary gallery recipes. Stage 21 owns all remaining pattern-authoring GTK work, Stage 22 owns
 the complete headless frame/media/sequence/simple-transition pipeline, and
 Stage 23 owns temporal GTK with start/end pins only. Every remaining row remains Planned
-and separately gated; this roadmap acceptance does not authorize Stage 20R+
-implementation.
+and separately gated; Stage 20S remains separately planned and is not
+authorized by this roadmap entry.
 
 Every mechanism must enter through the Stage 14 typed schema, Stage 15 generic
 pipeline, Stage 17 command/descriptor contract, canonical geometry, and

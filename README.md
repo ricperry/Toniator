@@ -402,7 +402,8 @@ fixed solid Full regions and final canvas clipping. Existing generic
 one-through-four guide support remains unchanged; Stage 20P adds no four-guide
 Guide Faces behavior or evidence. Direct raw `ParametricPaths` remain
 Guide-Faces-ineligible, while typed parametric site/Voronoi mechanisms remain
-valid. Stage 20R+ remains Planned and separately gated.
+valid. Stage 20R is now complete; Stage 20S remains Planned and separately
+gated.
 
 Stage 20Q is complete at implementation checkpoint
 `071f3604098c0660a876fbe30050a64223fe41b3`. It adds headless fill-only
@@ -413,13 +414,30 @@ PNG/SVG rendering with final clipping only. Positive ConstantGap shrinks and
 negative ConstantGap grows; convex outward growth uses subdivided smooth cubic
 round joins, while inward shrink uses tangent intersection and
 crossing/coincident-branch dissolution. Schema-v5/preset-v3 persistence stores
-authored intent only, and the one-output authoring gate and headless-only
-boundary remain in force. The three-guide evidence uses positive inward gap and
+authored intent only, and the headless-only boundary remains in force. The
+three-guide evidence uses positive inward gap and
 triangular line rings; the authored-cubic outward witness uses fixed `-40` gap
 for 20-unit outward edge growth and 40-unit neighbor overlap with smooth joins.
 Collapse evidence is intentionally transparent. Sparse authored-cubic coverage
 reflects six complete bounded faces, not raster resolution. The user reaccepted
-Stage 20Q on 2026-08-26; publication and Stage 20R+ remain separately gated.
+Stage 20Q on 2026-08-26; publication remains separate and Stage 20S remains
+planned and separately gated.
+
+Stage 20R is complete at implementation checkpoint
+`458c9a981dd349999240a18052e055a71c7b6c3c`. It lifts the one-output gate and
+adds ordered heterogeneous marks, paths, connections, maze walls, and treated
+regions over one family, with authored painter order separated from a
+deterministic site-use dependency DAG. `All`, `SitesUsedBy`, and `SitesUnusedBy`
+filters require compatible site mechanisms; derived usage is computed before
+final clipping, and structural paths/Guide Faces publish empty usage. Current
+schema v5/preset v3 persist authored layers, filters, settings, and deltas only.
+Per-output cache identity, request-wide composite limits, atomic cancellation
+and stale-publication handling, canonical PNG/SVG consumption, and channel-wide
+paint/opacity are headless authorities. Connections, maze walls, and sampled
+regions are kept in separate visual witnesses; a cross-channel witness covers
+connections in one channel and regions in another. No GTK workflow, renderer
+topology repair, compatibility adapter, or Stage 20S work is included. The
+user accepted Stage 20R on 2026-08-26; publication remains separate.
 
 Low-resolution fixtures and outputs are supplementary only. Every future stage
 that exercises source loading, sampling, rendering, preview, or export must
