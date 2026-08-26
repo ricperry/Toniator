@@ -2,8 +2,9 @@ use toniator_domain::{
     CoveragePolicy, CurveRepetition, CurveWinding, GeneralizedSiteProduct, GuideDimensionId,
     MarkOrientation, ParametricCurve, PatternDefinition, PatternDefinitionId, PatternFamily,
     PatternMechanism, PatternMechanismId, PatternModulation, PatternOutputLayer,
-    PatternOutputLayerId, RandomSiteCharacter, RegionSourceIntent, SiteDensityModulation,
-    SiteExclusionPolicy, SpiralCurve, SpiralShape, StraightGuideDimension, StraightGuideRepetition,
+    PatternOutputLayerId, PatternOutputRealization, RandomSiteCharacter, RegionSourceIntent,
+    SiteDensityModulation, SiteExclusionPolicy, SpiralCurve, SpiralShape, StraightGuideDimension,
+    StraightGuideRepetition,
 };
 use toniator_patterns::{OutputCapabilityPayload, resolve_pattern_pipeline};
 
@@ -35,12 +36,14 @@ fn parametric_region_definition() -> PatternDefinition {
                 phase: 0.0,
             },
         ],
-        output_layers: vec![PatternOutputLayer::Regions {
-            id: PatternOutputLayerId(904),
-            source: RegionSourceIntent::VoronoiSites {
-                site_mechanism_id: PatternMechanismId(903),
+        output_layers: vec![PatternOutputLayer::all(
+            PatternOutputLayerId(904),
+            PatternOutputRealization::Regions {
+                source: RegionSourceIntent::VoronoiSites {
+                    site_mechanism_id: PatternMechanismId(903),
+                },
             },
-        }],
+        )],
         modulation: PatternModulation,
         coverage: CoveragePolicy {
             guard_steps: 1,
@@ -98,12 +101,14 @@ fn random_site_set_resolves_as_ordinary_region_capability() {
             additional_margin: 0.0,
         },
     );
-    definition.output_layers = vec![PatternOutputLayer::Regions {
-        id: PatternOutputLayerId(915),
-        source: RegionSourceIntent::VoronoiSites {
-            site_mechanism_id: PatternMechanismId(914),
+    definition.output_layers = vec![PatternOutputLayer::all(
+        PatternOutputLayerId(915),
+        PatternOutputRealization::Regions {
+            source: RegionSourceIntent::VoronoiSites {
+                site_mechanism_id: PatternMechanismId(914),
+            },
         },
-    }];
+    )];
     let plan = resolve_pattern_pipeline(&definition).expect("random site pipeline");
     assert!(matches!(
         plan.ordered_outputs[0].payload,
@@ -139,12 +144,14 @@ fn along_guide_sites_resolve_as_ordinary_region_capability() {
             additional_margin: 0.0,
         },
     );
-    definition.output_layers = vec![PatternOutputLayer::Regions {
-        id: PatternOutputLayerId(923),
-        source: RegionSourceIntent::VoronoiSites {
-            site_mechanism_id: PatternMechanismId(922),
+    definition.output_layers = vec![PatternOutputLayer::all(
+        PatternOutputLayerId(923),
+        PatternOutputRealization::Regions {
+            source: RegionSourceIntent::VoronoiSites {
+                site_mechanism_id: PatternMechanismId(922),
+            },
         },
-    }];
+    )];
     let plan = resolve_pattern_pipeline(&definition).expect("along-guide site pipeline");
     assert!(matches!(
         plan.ordered_outputs[0].payload,

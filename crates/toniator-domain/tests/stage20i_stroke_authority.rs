@@ -3,8 +3,8 @@ use toniator_domain::{
     ConnectedGeometryResponseDelta, CoveragePolicy, Document, DocumentCommand, DocumentHistory,
     DocumentId, DocumentSession, GeneralizedSiteProduct, MarkOrientation, PathStrokeStyle,
     PatternDefinition, PatternDefinitionBundle, PatternDefinitionId, PatternGeometryResponse,
-    PatternMechanismId, PatternOutputLayer, PatternOutputLayerId, PatternOutputSettings,
-    SourceReference, StraightGuideDimension, StraightGuideRepetition,
+    PatternMechanismId, PatternOutputLayer, PatternOutputLayerId, PatternOutputRealization,
+    PatternOutputSettings, SourceReference, StraightGuideDimension, StraightGuideRepetition,
 };
 
 /// Builds a modeled document whose one homogeneous recipe is guide-path output.
@@ -43,11 +43,13 @@ fn stroke_document() -> Document {
             additional_margin: 0.0,
         },
     );
-    definition.output_layers = vec![PatternOutputLayer::GuidePaths {
-        id: PatternOutputLayerId(33),
-        guide_mechanism_id: guide_id,
-        style: PathStrokeStyle::default(),
-    }];
+    definition.output_layers = vec![PatternOutputLayer::all(
+        PatternOutputLayerId(33),
+        PatternOutputRealization::GuidePaths {
+            guide_mechanism_id: guide_id,
+            style: PathStrokeStyle::default(),
+        },
+    )];
     let mut settings = base.pattern_settings().clone();
     settings.definition_id = definition.id;
     let bundle = PatternDefinitionBundle {

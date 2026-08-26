@@ -2,12 +2,12 @@ use toniator_domain::{
     CanvasSpec, ChannelGeometryResponseDelta, ChannelId, CoveragePolicy, Document, DocumentCommand,
     DocumentHistory, DocumentSession, InvalidationLevel, MarkGeometryResponse,
     MarkGeometryResponseDelta, PatternCapabilityScope, PatternDefinitionBundle,
-    PatternDefinitionDraft, PatternDefinitionRecipe, PatternGeometryResponse,
-    PatternOutputCapabilityProjection, PatternOutputResponseDelta, PatternOutputSettingsEdit,
-    PatternStructureRecipe, PropertyEnumChoice, PropertyFieldId, PropertyTarget, PropertyUnit,
-    RegionGeometryResponse, RegionSamplingStrategy, RegionSourceCapabilityKind,
-    RegionTreatmentCapability, SourceReference, SourceReferenceId, validate_pattern_output_deltas,
-    validate_preset_record,
+    PatternDefinitionBundleEdit, PatternDefinitionDraft, PatternDefinitionRecipe,
+    PatternGeometryResponse, PatternOutputCapabilityProjection, PatternOutputRealization,
+    PatternOutputResponseDelta, PatternOutputSettingsEdit, PatternStructureRecipe,
+    PropertyEnumChoice, PropertyFieldId, PropertyTarget, PropertyUnit, RegionGeometryResponse,
+    RegionSamplingStrategy, RegionSourceCapabilityKind, RegionTreatmentCapability, SourceReference,
+    SourceReferenceId, validate_pattern_output_deltas, validate_preset_record,
 };
 
 /// Builds a current document whose selected definition can atomically materialize a region recipe.
@@ -159,7 +159,10 @@ fn recipe_materialization_binds_regions_and_projects_fixed_capability() {
         .expect("materialized bundle");
     assert!(matches!(
         bundle.definition.output_layers.as_slice(),
-        [toniator_domain::PatternOutputLayer::Regions { .. }]
+        [toniator_domain::PatternOutputLayer {
+            realization: PatternOutputRealization::Regions { .. },
+            ..
+        }]
     ));
     assert!(matches!(
         bundle.output_settings.as_slice(),
@@ -451,14 +454,16 @@ fn region_bundle_edits_are_stale_aware_history_owned_and_delta_safe() {
     let stale = DocumentCommand::EditSelectedChannelPatternDefinitionBundle {
         channel_id: ChannelId(1),
         base_bundle: selected_base.clone(),
-        edit: PatternOutputSettingsEdit::SetRegionResponse {
-            output_layer_id,
-            response: RegionGeometryResponse::Scale {
-                sampling: RegionSamplingStrategy::ReferencePoint,
-                minimum_scale: 0.4,
-                maximum_scale: 1.5,
+        edit: PatternDefinitionBundleEdit::OutputSettings(
+            PatternOutputSettingsEdit::SetRegionResponse {
+                output_layer_id,
+                response: RegionGeometryResponse::Scale {
+                    sampling: RegionSamplingStrategy::ReferencePoint,
+                    minimum_scale: 0.4,
+                    maximum_scale: 1.5,
+                },
             },
-        },
+        ),
     };
     assert_eq!(
         history
@@ -471,14 +476,16 @@ fn region_bundle_edits_are_stale_aware_history_owned_and_delta_safe() {
     let foreign = DocumentCommand::EditSelectedChannelPatternDefinitionBundle {
         channel_id: ChannelId(1),
         base_bundle: selected_bundle.clone(),
-        edit: PatternOutputSettingsEdit::SetRegionResponse {
-            output_layer_id: toniator_domain::PatternOutputLayerId(99_999),
-            response: RegionGeometryResponse::Scale {
-                sampling: RegionSamplingStrategy::ReferencePoint,
-                minimum_scale: 0.4,
-                maximum_scale: 1.5,
+        edit: PatternDefinitionBundleEdit::OutputSettings(
+            PatternOutputSettingsEdit::SetRegionResponse {
+                output_layer_id: toniator_domain::PatternOutputLayerId(99_999),
+                response: RegionGeometryResponse::Scale {
+                    sampling: RegionSamplingStrategy::ReferencePoint,
+                    minimum_scale: 0.4,
+                    maximum_scale: 1.5,
+                },
             },
-        },
+        ),
     };
     assert_eq!(
         history

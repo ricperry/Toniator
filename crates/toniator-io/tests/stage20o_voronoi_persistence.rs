@@ -497,7 +497,9 @@ fn stage20q_region_response_records_reject_malformed_and_incompatible_authority(
             .expect("bundles");
         let response = bundles
             .iter_mut()
-            .find(|bundle| bundle["definition"]["output_layers"][0]["kind"] == "regions")
+            .find(|bundle| {
+                bundle["definition"]["output_layers"][0]["realization"]["kind"] == "regions"
+            })
             .expect("region bundle")["output_settings"][0]["response"]["response"]
             .as_object_mut()
             .expect("region response");
@@ -517,7 +519,9 @@ fn stage20q_region_response_records_reject_malformed_and_incompatible_authority(
             .expect("bundles");
         let response = &mut bundles
             .iter_mut()
-            .find(|bundle| bundle["definition"]["output_layers"][0]["kind"] == "regions")
+            .find(|bundle| {
+                bundle["definition"]["output_layers"][0]["realization"]["kind"] == "regions"
+            })
             .expect("region bundle")["output_settings"][0]["response"]["response"];
         response["effective_response"] = Value::from(1.0);
     });
@@ -535,7 +539,9 @@ fn stage20q_region_response_records_reject_malformed_and_incompatible_authority(
             .expect("bundles");
         let response = &mut bundles
             .iter_mut()
-            .find(|bundle| bundle["definition"]["output_layers"][0]["kind"] == "regions")
+            .find(|bundle| {
+                bundle["definition"]["output_layers"][0]["realization"]["kind"] == "regions"
+            })
             .expect("region bundle")["output_settings"][0]["response"]["response"];
         response["minimum_scale"] = Value::from(2.0);
         response["maximum_scale"] = Value::from(1.0);
@@ -586,7 +592,9 @@ fn stage20q_region_response_records_reject_malformed_and_incompatible_authority(
             .expect("bundles");
         let response = &mut bundles
             .iter_mut()
-            .find(|bundle| bundle["definition"]["output_layers"][0]["kind"] == "regions")
+            .find(|bundle| {
+                bundle["definition"]["output_layers"][0]["realization"]["kind"] == "regions"
+            })
             .expect("region bundle")["output_settings"][0]["response"]["response"];
         response["treatment"] = Value::from("unknown_treatment");
     });

@@ -2,7 +2,11 @@
 
 //! Deterministic straight-guide family evaluation.
 
-use std::{collections::BTreeMap, error::Error, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+};
 
 use serde::Serialize;
 use toniator_domain::{
@@ -12,10 +16,10 @@ use toniator_domain::{
     GuideDimensionId, GuidePrototype, GuideRepetition, MarkOrientation, MarkOrientationDraft,
     MarkPrototype, MazeProgram, OffsetCleanup, OffsetSides, ParametricCurve, PatternDefinition,
     PatternDefinitionRecipe, PatternFamily, PatternGeometryResponse, PatternMechanism,
-    PatternMechanismId, PatternModulation, PatternOutputLayer, PatternOutputLayerId,
+    PatternMechanismId, PatternModulation, PatternOutputLayerId, PatternOutputRealization,
     PatternStructureRecipe, PresetMetadata, PresetRecord, RandomSiteCharacter, RegionSourceIntent,
-    SiteDensityModulation, SiteExclusionPolicy, SourceMapping, StraightGuideDimension,
-    VisibleMarkSizingPolicy,
+    SiteDensityModulation, SiteExclusionPolicy, SiteUseFilter, SourceMapping,
+    StraightGuideDimension, VisibleMarkSizingPolicy, pattern_output_evaluation_order,
 };
 pub use toniator_geometry::{
     AffineTransform2D, Bounds, CONNECTION_PATH_CONTRACT_ID, CONNECTION_TRAIL_CONTRACT_ID,
@@ -551,6 +555,8 @@ pub fn family_requires_decoded_source(family: &FamilyCapability) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OutputCapability {
     pub layer_id: PatternOutputLayerId,
+    /// Authored dependency intent applied to the complete guard-inclusive family.
+    pub source_filter: SiteUseFilter,
     pub consumes: StructuralProductCapability,
     /// The mutually exclusive output authority; guide paths never masquerade as marks.
     pub payload: OutputCapabilityPayload,
@@ -664,7 +670,92 @@ impl OutputCapability {
 pub struct PatternPipelinePlan {
     pub family: FamilyCapability,
     pub modulation: PatternModulation,
+    /// Authored painter order, retained independently from dependency evaluation.
     pub ordered_outputs: Vec<OutputCapability>,
+    /// Deterministic dependency order, with stable output IDs breaking ready-node ties.
+    pub evaluation_order: Vec<PatternOutputLayerId>,
+}
+
+/// Canonical derived membership published by one completed output realization.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SiteUsageSet {
+    site_mechanism_id: Option<PatternMechanismId>,
+    members: Vec<FamilySiteId>,
+    fingerprint: String,
+}
+
+impl SiteUsageSet {
+    /// Canonicalizes one site-backed usage set into sorted unique stable family-site identities.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable mechanism diagnostic when a site-backed set uses a zero mechanism ID or
+    /// contains an identity owned by another mechanism.
+    pub fn new(
+        site_mechanism_id: PatternMechanismId,
+        mut members: Vec<FamilySiteId>,
+    ) -> Result<Self, PatternPipelineError> {
+        if site_mechanism_id.0 == 0
+            || members
+                .iter()
+                .any(|member| member.mechanism_id != site_mechanism_id)
+        {
+            return Err(PatternPipelineError::new(
+                "realization.site_usage.mechanism",
+                "site usage members must share one exact nonzero site mechanism",
+            ));
+        }
+        members.sort_unstable();
+        members.dedup();
+        Ok(Self::from_canonical(Some(site_mechanism_id), members))
+    }
+
+    /// Publishes the canonical empty usage identity for a structural non-site output.
+    pub fn empty_non_site() -> Self {
+        Self::from_canonical(None, Vec::new())
+    }
+
+    /// Builds one fingerprint from already canonical membership without exposing mutable state.
+    fn from_canonical(
+        site_mechanism_id: Option<PatternMechanismId>,
+        members: Vec<FamilySiteId>,
+    ) -> Self {
+        let mut bytes = b"toniator-stage-20r-site-usage-v1".to_vec();
+        bytes.extend(site_mechanism_id.map_or(0, |id| id.0).to_le_bytes());
+        bytes.extend(
+            u64::try_from(members.len())
+                .expect("usize fits u64")
+                .to_le_bytes(),
+        );
+        for member in &members {
+            bytes.extend(member.mechanism_id.0.to_le_bytes());
+            bytes.extend(
+                u64::try_from(member.ordinal)
+                    .expect("usize fits u64")
+                    .to_le_bytes(),
+            );
+        }
+        Self {
+            site_mechanism_id,
+            members,
+            fingerprint: format!("toniator-stage-20r-site-usage-v1:{}", fnv1a64(bytes)),
+        }
+    }
+
+    /// Returns the exact site mechanism identity, or `None` for structural non-site output.
+    pub const fn site_mechanism_id(&self) -> Option<PatternMechanismId> {
+        self.site_mechanism_id
+    }
+
+    /// Returns sorted unique stable members.
+    pub fn members(&self) -> &[FamilySiteId] {
+        &self.members
+    }
+
+    /// Returns the stable cache and dependency fingerprint for this membership set.
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
 }
 
 /// A family result flowing into modulation and ordered realization. Renderers
@@ -756,6 +847,51 @@ impl TypedFamilyOutput {
     pub const fn guard_steps(&self) -> u32 {
         self.structure.guard_steps
     }
+
+    /// Applies one validated site-use filter to the complete guard-inclusive family.
+    ///
+    /// The returned view retains family order, stable site IDs, base-family identity, structural
+    /// paths, and diagnostics. It never clips to the canvas or mutates the cached complete family.
+    ///
+    /// # Errors
+    ///
+    /// Returns stable missing-usage or mechanism diagnostics for malformed dependency input.
+    pub fn filtered_for_output(
+        &self,
+        source_filter: SiteUseFilter,
+        referenced_usage: Option<&SiteUsageSet>,
+    ) -> Result<Self, PatternPipelineError> {
+        if source_filter == SiteUseFilter::All {
+            return Ok(self.clone());
+        }
+        let usage = referenced_usage.ok_or(PatternPipelineError::new(
+            "realization.site_filter.reference",
+            "dependent site filter requires completed referenced usage",
+        ))?;
+        if usage.site_mechanism_id() != Some(self.sites.product_mechanism_id()) {
+            return Err(PatternPipelineError::new(
+                "realization.site_filter.mechanism",
+                "dependent usage must use the complete family's exact site mechanism",
+            ));
+        }
+        let used = usage.members().iter().copied().collect::<BTreeSet<_>>();
+        let members = match source_filter {
+            SiteUseFilter::All => unreachable!("handled above"),
+            SiteUseFilter::SitesUsedBy { .. } => used,
+            SiteUseFilter::SitesUnusedBy { .. } => self
+                .sites
+                .iter()
+                .map(|site| site.id)
+                .filter(|id| !used.contains(id))
+                .collect(),
+        };
+        Ok(Self {
+            family: self.family.clone(),
+            sites: self.sites.filtered(&members),
+            diagnostics: self.diagnostics.clone(),
+            structure: self.structure.clone(),
+        })
+    }
 }
 
 /// Provenance that survives explicit modulation and ordered output realization.
@@ -793,9 +929,8 @@ pub struct TypedRealization<T> {
 /// One independently addressed output realization unit.
 ///
 /// The family remains shared across outputs, but this record binds exactly one
-/// structural capability to its matching domain-resolved response. Stage 20N
-/// keeps the authoring gate at one output; later orchestration must aggregate
-/// these units in capability order rather than recover a global response.
+/// structural capability to its matching domain-resolved response. Stage 20R orchestration
+/// evaluates units by dependency order and aggregates them by authored painter order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TypedOutputRealization<T> {
     pub output_layer_id: PatternOutputLayerId,
@@ -1475,6 +1610,7 @@ mod stage20q_region_realizer_tests {
     fn stage20q_capability() -> OutputCapability {
         OutputCapability {
             layer_id: PatternOutputLayerId(81),
+            source_filter: SiteUseFilter::All,
             consumes: StructuralProductCapability::RandomSites,
             payload: OutputCapabilityPayload::Regions {
                 source: RegionSourceIntent::VoronoiSites {
@@ -1872,50 +2008,50 @@ pub fn resolve_pattern_pipeline(
     };
     let mut ordered_outputs = Vec::with_capacity(definition.output_layers.len());
     for output in &definition.output_layers {
-        match output {
-            PatternOutputLayer::CircularMarks {
-                id,
+        match &output.realization {
+            PatternOutputRealization::CircularMarks {
                 site_mechanism_id: source_id,
             } if *source_id == site_mechanism_id => ordered_outputs.push(OutputCapability {
-                layer_id: *id,
+                layer_id: output.id,
+                source_filter: output.source_filter,
                 consumes: product,
                 payload: OutputCapabilityPayload::Marks {
                     prototype: MarkPrototype::Circle,
                     orientation: MarkOrientation::Fixed,
                 },
             }),
-            PatternOutputLayer::MarkPrototype {
-                id,
+            PatternOutputRealization::MarkPrototype {
                 site_mechanism_id: source_id,
                 prototype,
                 orientation,
             } if *source_id == site_mechanism_id => ordered_outputs.push(OutputCapability {
-                layer_id: *id,
+                layer_id: output.id,
+                source_filter: output.source_filter,
                 consumes: product,
                 payload: OutputCapabilityPayload::Marks {
                     prototype: prototype.clone(),
                     orientation: orientation.clone(),
                 },
             }),
-            PatternOutputLayer::GuidePaths {
-                id,
+            PatternOutputRealization::GuidePaths {
                 guide_mechanism_id: source_id,
                 style,
             } if *source_id == guide_mechanism_id => ordered_outputs.push(OutputCapability {
-                layer_id: *id,
+                layer_id: output.id,
+                source_filter: output.source_filter,
                 consumes: product,
                 payload: OutputCapabilityPayload::GuidePaths {
                     guide_mechanism_id: *source_id,
                     style: *style,
                 },
             }),
-            PatternOutputLayer::ConnectionPaths {
-                id,
+            PatternOutputRealization::ConnectionPaths {
                 site_mechanism_id: source_id,
                 program,
                 style,
             } if *source_id == site_mechanism_id => ordered_outputs.push(OutputCapability {
-                layer_id: *id,
+                layer_id: output.id,
+                source_filter: output.source_filter,
                 consumes: product,
                 payload: OutputCapabilityPayload::ConnectionPaths {
                     site_mechanism_id: *source_id,
@@ -1923,8 +2059,7 @@ pub fn resolve_pattern_pipeline(
                     style: *style,
                 },
             }),
-            PatternOutputLayer::MazeWalls {
-                id,
+            PatternOutputRealization::MazeWalls {
                 site_mechanism_id: source_id,
                 program,
                 style,
@@ -1932,7 +2067,8 @@ pub fn resolve_pattern_pipeline(
                 && product == StructuralProductCapability::GuideIntersections =>
             {
                 ordered_outputs.push(OutputCapability {
-                    layer_id: *id,
+                    layer_id: output.id,
+                    source_filter: output.source_filter,
                     consumes: product,
                     payload: OutputCapabilityPayload::MazeWalls {
                         site_mechanism_id: *source_id,
@@ -1941,7 +2077,7 @@ pub fn resolve_pattern_pipeline(
                     },
                 })
             }
-            PatternOutputLayer::Regions { id, source }
+            PatternOutputRealization::Regions { source }
                 if matches!(source, RegionSourceIntent::VoronoiSites { site_mechanism_id: source_id } if *source_id == site_mechanism_id)
                     && matches!(
                         product,
@@ -1951,15 +2087,15 @@ pub fn resolve_pattern_pipeline(
                     ) =>
             {
                 ordered_outputs.push(OutputCapability {
-                    layer_id: *id,
+                    layer_id: output.id,
+                    source_filter: output.source_filter,
                     consumes: product,
                     payload: OutputCapabilityPayload::Regions {
                         source: source.clone(),
                     },
                 });
             }
-            PatternOutputLayer::Regions {
-                id,
+            PatternOutputRealization::Regions {
                 source:
                     RegionSourceIntent::GuideFaces {
                         guide_mechanism_id: source_id,
@@ -1967,7 +2103,8 @@ pub fn resolve_pattern_pipeline(
                     },
             } if *source_id == guide_mechanism_id => {
                 ordered_outputs.push(OutputCapability {
-                    layer_id: *id,
+                    layer_id: output.id,
+                    source_filter: output.source_filter,
                     consumes: product,
                     payload: OutputCapabilityPayload::Regions {
                         source: RegionSourceIntent::GuideFaces {
@@ -1985,12 +2122,8 @@ pub fn resolve_pattern_pipeline(
             }
         }
     }
-    if ordered_outputs.len() != 1 {
-        return Err(PatternPipelineError::new(
-            "pattern.output_layers.capability",
-            "the current typed output contract requires exactly one ordered realization layer",
-        ));
-    }
+    let evaluation_order = pattern_output_evaluation_order(definition)
+        .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
     Ok(PatternPipelinePlan {
         family: FamilyCapability {
             product,
@@ -2010,6 +2143,7 @@ pub fn resolve_pattern_pipeline(
         },
         modulation: definition.modulation.clone(),
         ordered_outputs,
+        evaluation_order,
     })
 }
 
@@ -2082,88 +2216,84 @@ fn resolve_parametric_curve_pipeline(
                 ));
             }
         };
-    let output = match definition.output_layers.as_slice() {
-        [
-            PatternOutputLayer::ParametricPaths {
-                id,
+    let ordered_outputs = definition
+        .output_layers
+        .iter()
+        .map(|output| match &output.realization {
+            PatternOutputRealization::ParametricPaths {
                 curve_mechanism_id: source,
                 style,
-            },
-        ] if product == StructuralProductCapability::ParametricPaths
+            } if product == StructuralProductCapability::ParametricPaths
             && *source == curve_mechanism_id =>
         {
-            OutputCapability {
-                layer_id: *id,
+            Ok(OutputCapability {
+                layer_id: output.id,
+                source_filter: output.source_filter,
                 consumes: product,
                 payload: OutputCapabilityPayload::GuidePaths {
                     guide_mechanism_id: *source,
                     style: *style,
                 },
-            }
+            })
         }
-        [
-            PatternOutputLayer::CircularMarks {
-                id,
-                site_mechanism_id,
-            },
-        ] if Some(*site_mechanism_id) == declared_site_mechanism_id => OutputCapability {
-            layer_id: *id,
+        PatternOutputRealization::CircularMarks { site_mechanism_id }
+            if Some(*site_mechanism_id) == declared_site_mechanism_id => Ok(OutputCapability {
+            layer_id: output.id,
+            source_filter: output.source_filter,
             consumes: product,
             payload: OutputCapabilityPayload::Marks {
                 prototype: MarkPrototype::Circle,
                 orientation: MarkOrientation::Fixed,
             },
-        },
-        [
-            PatternOutputLayer::MarkPrototype {
-                id,
+        }),
+        PatternOutputRealization::MarkPrototype {
                 site_mechanism_id,
                 prototype,
                 orientation: MarkOrientation::Fixed,
-            },
-        ] if Some(*site_mechanism_id) == declared_site_mechanism_id => OutputCapability {
-            layer_id: *id,
+            } if Some(*site_mechanism_id) == declared_site_mechanism_id => Ok(OutputCapability {
+            layer_id: output.id,
+            source_filter: output.source_filter,
             consumes: product,
             payload: OutputCapabilityPayload::Marks {
                 prototype: prototype.clone(),
                 orientation: MarkOrientation::Fixed,
             },
-        },
-        [
-            PatternOutputLayer::ConnectionPaths {
-                id,
+        }),
+        PatternOutputRealization::ConnectionPaths {
                 site_mechanism_id,
                 program,
                 style,
-            },
-        ] if Some(*site_mechanism_id) == declared_site_mechanism_id => OutputCapability {
-            layer_id: *id,
+            } if Some(*site_mechanism_id) == declared_site_mechanism_id => Ok(OutputCapability {
+            layer_id: output.id,
+            source_filter: output.source_filter,
             consumes: product,
             payload: OutputCapabilityPayload::ConnectionPaths {
                 site_mechanism_id: *site_mechanism_id,
                 program: program.clone(),
                 style: *style,
             },
-        },
-        [PatternOutputLayer::Regions { id, source }]
+        }),
+        PatternOutputRealization::Regions { source }
             if matches!(source, RegionSourceIntent::VoronoiSites { site_mechanism_id } if Some(*site_mechanism_id) == declared_site_mechanism_id)
                 && product == StructuralProductCapability::AlongGuideSites =>
         {
-            OutputCapability {
-                layer_id: *id,
+            Ok(OutputCapability {
+                layer_id: output.id,
+                source_filter: output.source_filter,
                 consumes: product,
                 payload: OutputCapabilityPayload::Regions {
                     source: source.clone(),
                 },
-            }
+            })
         }
-        _ => {
-            return Err(PatternPipelineError::new(
+        _ => Err(PatternPipelineError::new(
                 "pattern.output_layers.capability",
                 "parametric output cannot consume the declared structural product",
-            ));
-        }
-    };
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let evaluation_order = pattern_output_evaluation_order(definition)
+        .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
     Ok(PatternPipelinePlan {
         family: FamilyCapability {
             product,
@@ -2190,7 +2320,8 @@ fn resolve_parametric_curve_pipeline(
             }),
         },
         modulation: definition.modulation.clone(),
-        ordered_outputs: vec![output],
+        ordered_outputs,
+        evaluation_order,
     })
 }
 
@@ -2217,14 +2348,14 @@ pub fn resolve_document_pattern_pipeline(
     let mut surrogate = definition.clone();
     let generic_dimensions = dimensions.to_vec();
     if let Some((source_id, selected)) = definition.output_layers.iter().find_map(|output| {
-        let PatternOutputLayer::Regions {
+        let PatternOutputRealization::Regions {
             source:
                 RegionSourceIntent::GuideFaces {
                     guide_mechanism_id,
                     dimensions,
                 },
             ..
-        } = output
+        } = &output.realization
         else {
             return None;
         };
@@ -2353,83 +2484,58 @@ fn resolve_random_site_pipeline(
             "random-site mechanism references do not match the family root",
         ));
     }
-    let output = match definition.output_layers.as_slice() {
-        [
-            PatternOutputLayer::MarkPrototype {
-                id,
-                site_mechanism_id: _,
+    let ordered_outputs = definition
+        .output_layers
+        .iter()
+        .map(|output| match &output.realization {
+            PatternOutputRealization::MarkPrototype {
+                site_mechanism_id,
                 prototype,
                 orientation: MarkOrientation::Fixed,
-            },
-        ] => OutputCapability {
-            layer_id: *id,
-            consumes: StructuralProductCapability::RandomSites,
-            payload: OutputCapabilityPayload::Marks {
-                prototype: prototype.clone(),
-                orientation: MarkOrientation::Fixed,
-            },
-        },
-        [
-            PatternOutputLayer::ConnectionPaths {
-                id,
+            } if *site_mechanism_id == site_product_id => Ok(OutputCapability {
+                layer_id: output.id,
+                source_filter: output.source_filter,
+                consumes: StructuralProductCapability::RandomSites,
+                payload: OutputCapabilityPayload::Marks {
+                    prototype: prototype.clone(),
+                    orientation: MarkOrientation::Fixed,
+                },
+            }),
+            PatternOutputRealization::ConnectionPaths {
                 site_mechanism_id,
                 program,
                 style,
-            },
-        ] => OutputCapability {
-            layer_id: *id,
-            consumes: StructuralProductCapability::RandomSites,
-            payload: OutputCapabilityPayload::ConnectionPaths {
-                site_mechanism_id: *site_mechanism_id,
-                program: program.clone(),
-                style: *style,
-            },
-        },
-        [
-            PatternOutputLayer::Regions {
-                id,
+            } if *site_mechanism_id == site_product_id => Ok(OutputCapability {
+                layer_id: output.id,
+                source_filter: output.source_filter,
+                consumes: StructuralProductCapability::RandomSites,
+                payload: OutputCapabilityPayload::ConnectionPaths {
+                    site_mechanism_id: *site_mechanism_id,
+                    program: program.clone(),
+                    style: *style,
+                },
+            }),
+            PatternOutputRealization::Regions {
                 source: RegionSourceIntent::VoronoiSites { site_mechanism_id },
-            },
-        ] if *site_mechanism_id == site_product_id => OutputCapability {
-            layer_id: *id,
-            consumes: StructuralProductCapability::RandomSites,
-            payload: OutputCapabilityPayload::Regions {
-                source: RegionSourceIntent::VoronoiSites {
-                    site_mechanism_id: site_product_id,
+            } if *site_mechanism_id == site_product_id => Ok(OutputCapability {
+                layer_id: output.id,
+                source_filter: output.source_filter,
+                consumes: StructuralProductCapability::RandomSites,
+                payload: OutputCapabilityPayload::Regions {
+                    source: RegionSourceIntent::VoronoiSites {
+                        site_mechanism_id: site_product_id,
+                    },
                 },
-            },
-        },
-        _ => {
-            return Err(PatternPipelineError::new(
+            }),
+            _ => Err(PatternPipelineError::new(
                 "pattern.output_layers.capability",
-                "random-site products require one fixed mark, connection, or region output",
-            ));
-        }
-    };
-    let site_mechanism_id = match &output.payload {
-        OutputCapabilityPayload::ConnectionPaths {
-            site_mechanism_id, ..
-        } => *site_mechanism_id,
-        OutputCapabilityPayload::Marks { .. } => match definition.output_layers.as_slice() {
-            [
-                PatternOutputLayer::MarkPrototype {
-                    site_mechanism_id, ..
-                },
-            ] => *site_mechanism_id,
-            _ => unreachable!("the output match retains one mark layer"),
-        },
-        OutputCapabilityPayload::Regions {
-            source: RegionSourceIntent::VoronoiSites { site_mechanism_id },
-        } => *site_mechanism_id,
-        _ => unreachable!("the random resolver creates only site outputs"),
-    };
-    if site_mechanism_id != site_product_id {
-        return Err(PatternPipelineError::new(
-            "pattern.output_layers.capability",
-            "random-site output must consume its declared site product",
-        ));
-    }
+                "random-site products require fixed marks, connections, or Voronoi regions",
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let product = StructuralProductCapability::RandomSites;
+    let evaluation_order = pattern_output_evaluation_order(definition)
+        .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
     Ok(PatternPipelinePlan {
         family: FamilyCapability {
             product,
@@ -2460,7 +2566,8 @@ fn resolve_random_site_pipeline(
             parametric_curve: None,
         },
         modulation: definition.modulation.clone(),
-        ordered_outputs: vec![output],
+        ordered_outputs,
+        evaluation_order,
     })
 }
 
@@ -11312,18 +11419,95 @@ mod typed_pipeline_tests {
         );
     }
 
+    /// Proves structural family evaluation remains shared when ordered compatible outputs are plural.
     #[test]
-    fn incompatible_output_is_a_stable_preflight_error_without_family_output() {
+    fn compatible_plural_outputs_share_one_family_product() {
         let mut definition = definition();
-        definition.output_layers.clear();
-        let error = evaluate_typed_family(&definition, &request()).unwrap_err();
-        assert_eq!(error.path(), "pattern.output_layers.capability");
+        let mut second = definition.output_layers[0].clone();
+        second.id = PatternOutputLayerId(14);
+        definition.output_layers.push(second);
+        let plan = resolve_pattern_pipeline(&definition).expect("plural outputs resolve");
+        assert_eq!(plan.ordered_outputs.len(), 2);
         assert_eq!(
-            error.message(),
-            "the current typed output contract requires exactly one ordered realization layer"
+            plan.evaluation_order,
+            vec![PatternOutputLayerId(13), PatternOutputLayerId(14)]
+        );
+        let family = evaluate_typed_family(&definition, &request()).expect("one family evaluates");
+        assert!(!family.site_set().is_empty());
+    }
+
+    /// Proves used, unused, and empty dependency semantics preserve complete-family order and IDs.
+    #[test]
+    fn site_use_filters_project_complete_family_membership_without_renumbering() {
+        let family = evaluate_typed_family(&definition(), &request()).expect("family evaluates");
+        let mechanism_id = family.site_set().product_mechanism_id();
+        let selected = family
+            .site_set()
+            .sites()
+            .iter()
+            .step_by(2)
+            .map(|site| site.id)
+            .collect::<Vec<_>>();
+        let usage = SiteUsageSet::new(mechanism_id, selected.clone()).expect("usage validates");
+        let used = family
+            .filtered_for_output(
+                SiteUseFilter::SitesUsedBy {
+                    output_layer_id: PatternOutputLayerId(99),
+                },
+                Some(&usage),
+            )
+            .expect("used filter projects");
+        assert_eq!(
+            used.site_set()
+                .sites()
+                .iter()
+                .map(|site| site.id)
+                .collect::<Vec<_>>(),
+            selected
+        );
+        let unused = family
+            .filtered_for_output(
+                SiteUseFilter::SitesUnusedBy {
+                    output_layer_id: PatternOutputLayerId(99),
+                },
+                Some(&usage),
+            )
+            .expect("unused filter projects");
+        assert_eq!(
+            used.site_set().len() + unused.site_set().len(),
+            family.site_set().len()
+        );
+        assert_eq!(used.family_fingerprint(), family.family_fingerprint());
+        assert_eq!(unused.family_fingerprint(), family.family_fingerprint());
+        let empty = SiteUsageSet::new(mechanism_id, Vec::new()).expect("empty usage validates");
+        assert!(
+            family
+                .filtered_for_output(
+                    SiteUseFilter::SitesUsedBy {
+                        output_layer_id: PatternOutputLayerId(99),
+                    },
+                    Some(&empty),
+                )
+                .expect("empty used filter is valid")
+                .site_set()
+                .is_empty()
+        );
+        assert_eq!(
+            family
+                .filtered_for_output(
+                    SiteUseFilter::SitesUnusedBy {
+                        output_layer_id: PatternOutputLayerId(99),
+                    },
+                    Some(&empty),
+                )
+                .expect("empty complement is valid")
+                .site_set()
+                .len(),
+            family.site_set().len()
         );
     }
 
+    /// Proves family construction polls cancellation before publishing a partial product.
     #[test]
     fn bounded_structural_planning_observes_cancellation_before_final_clipping() {
         let checks = Cell::new(0_u32);
@@ -11848,9 +12032,9 @@ mod generalized_straight_guide_tests {
         };
         *id = PatternMechanismId(72);
         *guide_mechanism_id = PatternMechanismId(71);
-        let PatternOutputLayer::MarkPrototype {
+        let PatternOutputRealization::MarkPrototype {
             site_mechanism_id, ..
-        } = &mut changed_mechanism_ids.output_layers[0]
+        } = &mut changed_mechanism_ids.output_layers[0].realization
         else {
             unreachable!()
         };
@@ -11899,7 +12083,8 @@ mod generalized_straight_guide_tests {
         )
         .unwrap();
         let mut fixed = definition.clone();
-        let PatternOutputLayer::MarkPrototype { orientation, .. } = &mut fixed.output_layers[0]
+        let PatternOutputRealization::MarkPrototype { orientation, .. } =
+            &mut fixed.output_layers[0].realization
         else {
             unreachable!()
         };
@@ -11937,11 +12122,7 @@ mod generalized_straight_guide_tests {
         )
         .unwrap();
         let mut different_layer = fixed.clone();
-        let PatternOutputLayer::MarkPrototype { id, .. } = &mut different_layer.output_layers[0]
-        else {
-            unreachable!()
-        };
-        *id = PatternOutputLayerId(99);
+        different_layer.output_layers[0].id = PatternOutputLayerId(99);
         let fixed = realize_typed_mapped_outputs(
             &family,
             &resolve_pattern_pipeline(&fixed).unwrap(),

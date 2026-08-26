@@ -620,14 +620,39 @@ Collapse evidence is intentionally transparent; sparse authored-cubic coverage r
 six complete bounded faces, not raster resolution. Publication remains separate, and Stage
 20R+ remains separately gated.
 
-**Remaining Stage 20N+ — Stage 20R+ Planned.** The user accepted the revised remainder
+**Stage 20R — Accepted awaiting checkpoint.** Authorized implementation began on 2026-08-26
+under
+[`STAGE_20R_COMPOSITE_OUTPUTS_AND_SITE_FILTERS_PLAN.md`](docs/STAGE_20R_COMPOSITE_OUTPUTS_AND_SITE_FILTERS_PLAN.md).
+The bounded headless stage lifts the one-output gate, normalizes ordered output
+records, adds compatible site-use filters and derived usage, separates painter
+order from dependency evaluation order, and extends current v5/v3 persistence,
+commands, per-output cache behavior, request-wide composite limits, and native
+PNG/SVG evidence. Writer verification passed focused Stage 20R and directly
+affected Stage 20G/I/M/N/O/P/Q targets, affected checks, strict library and
+compile-only frontend Clippy, formatting, architecture, protected-input, asset
+hash, and persistence gates. The regenerated evidence keeps connection paths,
+sampled regions, and maze walls in purpose-specific visual witnesses; filter
+DAG/painter-order evidence is recorded without an invalid same-channel
+connection/region overlay or site-location circle marks. The solid connection
+and maze witnesses retain all modeled RGB channels with distinct deterministic
+seeds per channel; only the canonical `SourceColorAlpha` sampled-region witness
+is intrinsically single-channel. It adds no GTK workflow, compatibility
+adapter, renderer topology repair, publication, or Stage 20S work. An independent read-only audit identified a
+missing cross-channel connection/region witness and incomplete sampled-paint
+validation; both were repaired, and re-review found no remaining material
+issue. Parent verification then reran the complete authorized gate matrix and
+directly inspected representative native and SVG-rasterized evidence in RGB
+and alpha. The user accepted Stage 20R on 2026-08-26; its implementation
+checkpoint is pending.
+
+**Remaining Stage 20N+ — Stage 20R Accepted awaiting checkpoint; Stage 20S Planned.** The user accepted the revised remainder
 roadmap on 2026-08-24 under
 [`STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md`](docs/STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md).
 The accepted order after completed 20Q is 20R composites and site-use filters;
 then 20S headless capability/gallery recipe
 completion. Stage 21 owns pattern-authoring GTK, Stage 22 owns all headless
 frame/media/sequence/simple-transition work, and Stage 23 owns temporal GTK
-with start/end pins. Stage 20R+ and Stages 21–23 remain Planned and separately
+with start/end pins. Stage 20S and Stages 21–23 remain Planned and separately
 gated.
 
 ## Maintenance rules

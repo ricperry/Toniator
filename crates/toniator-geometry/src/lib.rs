@@ -796,6 +796,24 @@ impl FamilySiteSet {
     pub fn is_empty(&self) -> bool {
         self.sites.is_empty()
     }
+
+    /// Projects an ordered subset without renumbering stable family-site identities.
+    ///
+    /// Membership is interpreted relative to this complete family, so unknown IDs are ignored and
+    /// retained sites remain in evaluator order. The base-family fingerprint and mechanism identity
+    /// remain unchanged because filtering is realization intent rather than a second family product.
+    pub fn filtered(&self, members: &BTreeSet<FamilySiteId>) -> Self {
+        Self {
+            family_fingerprint: self.family_fingerprint.clone(),
+            product_mechanism_id: self.product_mechanism_id,
+            sites: self
+                .sites
+                .iter()
+                .filter(|site| members.contains(&site.id))
+                .cloned()
+                .collect(),
+        }
+    }
 }
 
 /// A renderer-independent circular primitive realized from a family site.

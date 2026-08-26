@@ -9,10 +9,10 @@ use toniator_domain::{
     DocumentCommand, DocumentHistory, DocumentSession, ParametricCurve, PatternDefinition,
     PatternDefinitionBundle, PatternDefinitionDraft, PatternDefinitionId, PatternDefinitionRecipe,
     PatternFamily, PatternGeometryResponse, PatternMechanism, PatternMechanismId,
-    PatternModulation, PatternOutputLayer, PatternOutputLayerId, PatternOutputSettings,
-    PatternStructureRecipe, RandomSiteCharacter, RegionGeometryResponse, RegionSourceIntent,
-    SiteDensityModulation, SiteExclusionPolicy, SourceReference, SourceReferenceId, SpiralCurve,
-    SpiralShape,
+    PatternModulation, PatternOutputLayer, PatternOutputLayerId, PatternOutputRealization,
+    PatternOutputSettings, PatternStructureRecipe, RandomSiteCharacter, RegionGeometryResponse,
+    RegionSourceIntent, SiteDensityModulation, SiteExclusionPolicy, SourceReference,
+    SourceReferenceId, SpiralCurve, SpiralShape,
 };
 use toniator_engine::{
     CacheDisposition, EvaluationCompletion, EvaluationLimits, EvaluationRequest,
@@ -90,12 +90,14 @@ fn random_voronoi_document(width: f64, height: f64, source_id: SourceReferenceId
             additional_margin: 0.0,
         },
     );
-    definition.output_layers = vec![PatternOutputLayer::Regions {
-        id: output_id,
-        source: RegionSourceIntent::VoronoiSites {
-            site_mechanism_id: site_id,
+    definition.output_layers = vec![PatternOutputLayer::all(
+        output_id,
+        PatternOutputRealization::Regions {
+            source: RegionSourceIntent::VoronoiSites {
+                site_mechanism_id: site_id,
+            },
         },
-    }];
+    )];
     let mut settings = base.pattern_settings().clone();
     settings.definition_id = definition_id;
     Document::with_source_topology_and_authored_structures(
@@ -154,12 +156,14 @@ fn parametric_voronoi_document(width: f64, height: f64, source_id: SourceReferen
                 phase: 0.0,
             },
         ],
-        output_layers: vec![PatternOutputLayer::Regions {
-            id: output_id,
-            source: RegionSourceIntent::VoronoiSites {
-                site_mechanism_id: site_id,
+        output_layers: vec![PatternOutputLayer::all(
+            output_id,
+            PatternOutputRealization::Regions {
+                source: RegionSourceIntent::VoronoiSites {
+                    site_mechanism_id: site_id,
+                },
             },
-        }],
+        )],
         modulation: PatternModulation,
         coverage: CoveragePolicy {
             guard_steps: 1,

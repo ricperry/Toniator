@@ -119,6 +119,80 @@ fn port_tracked_v4_fixtures_to_v5() {
     }
 }
 
+/// Ports tracked current-v5 fixtures to normalized Stage 20R records with explicit `All`.
+#[test]
+#[ignore = "one-shot current-v5 normalized-output port"]
+fn port_tracked_v5_fixtures_to_explicit_all_filters() {
+    for fixture in [
+        "HolidayMugs_2024_2025.toniator",
+        "raster-sample.toniator",
+        "vector-sample.toniator",
+    ] {
+        port_v5_fixture_to_explicit_all_filter(
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../assets")
+                .join(fixture),
+        );
+    }
+}
+
+/// Rewrites only current output records that predate the normalized realization/filter fields.
+fn port_v5_fixture_to_explicit_all_filter(path: &Path) {
+    let mut archive = ZipArchive::new(File::open(path).expect("v5 fixture archive opens"))
+        .expect("v5 fixture is a ZIP archive");
+    let mut entries = Vec::new();
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).expect("fixture entry opens");
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).expect("fixture entry reads");
+        if entry.name() == "document.json" {
+            let mut root: Value = serde_json::from_slice(&bytes).expect("fixture document is JSON");
+            assert_eq!(root["document_schema_version"], Value::from(5_u64));
+            let bundles = root["document"]["pattern_definition_bundles"]
+                .as_array_mut()
+                .expect("v5 fixture carries definition bundles");
+            for bundle in bundles {
+                let outputs = bundle["definition"]["output_layers"]
+                    .as_array_mut()
+                    .expect("v5 fixture carries output layers");
+                for output in outputs {
+                    let object = output.as_object_mut().expect("output is an object");
+                    object
+                        .entry("source_filter")
+                        .or_insert_with(|| serde_json::json!({ "kind": "all" }));
+                    if !object.contains_key("realization") {
+                        let id = object.remove("id").expect("legacy output has an ID");
+                        let source_filter = object
+                            .remove("source_filter")
+                            .expect("port installed an explicit filter");
+                        let realization = Value::Object(std::mem::take(object));
+                        *output = serde_json::json!({
+                            "id": id,
+                            "source_filter": source_filter,
+                            "realization": realization,
+                        });
+                    }
+                }
+            }
+            bytes = serde_json::to_vec(&root).expect("explicit-filter fixture JSON serializes");
+        }
+        entries.push((entry.name().to_owned(), bytes));
+    }
+    drop(archive);
+    let temporary = path.with_extension("toniator.stage20r-filter-port");
+    let options = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Stored)
+        .last_modified_time(zip::DateTime::default())
+        .unix_permissions(0o100644);
+    let mut writer = ZipWriter::new(File::create(&temporary).expect("port archive creates"));
+    for (name, bytes) in entries {
+        writer.start_file(name, options).expect("entry starts");
+        writer.write_all(&bytes).expect("entry writes");
+    }
+    writer.finish().expect("port archive finishes");
+    fs::rename(temporary, path).expect("port atomically replaces fixture");
+}
+
 /// Rewrites a known v4 fixture archive as v5 keyed bundle authority without interpreting it as a document.
 fn port_v4_fixture_to_v5(path: &Path) {
     let mut archive = ZipArchive::new(File::open(path).expect("v4 fixture archive opens"))
@@ -386,7 +460,7 @@ fn preset_v3_bytes_reconstruct_document_base_or_channel_override() {
     assert_eq!(load_preset(&first).expect("preset reloads"), preset);
     assert_eq!(
         format!("{:x}", Sha256::digest(&bytes)),
-        "cf928fcdf1694d267c7f63ef98e7cc41e22de58ca650fdd3f29978ab574fb526"
+        "b6212326e0a2ef94edd16c60e84c73d3c5dad338402a977a3aedb7d38584e44d"
     );
 
     let (document, _) = source_backed_document();

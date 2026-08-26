@@ -5,8 +5,9 @@ use std::{fs, io::Read};
 use toniator_domain::{
     CanvasSpec, CoveragePolicy, Document, DocumentCommand, DocumentHistory, DocumentSession,
     GeneralizedSiteProductDraft, GuideDimensionDraft, MarkOrientationDraft,
-    PatternDefinitionRecipe, PatternGeometryResponse, PatternStructureRecipe, PresetMetadata,
-    PresetRecord, RegionGeometryResponse, RegionSourceIntent, SourceReference, SourceReferenceId,
+    PatternDefinitionRecipe, PatternGeometryResponse, PatternOutputRealization,
+    PatternStructureRecipe, PresetMetadata, PresetRecord, RegionGeometryResponse,
+    RegionSourceIntent, SourceReference, SourceReferenceId,
 };
 use toniator_io::{
     EmbeddedSource, EmbeddedSourceFormat, SourceBundle, load, load_preset, save, save_preset,
@@ -156,10 +157,9 @@ fn guide_face_document_v5_round_trips_without_derived_state() {
         .find(|bundle| bundle.definition.id == loaded.document().pattern_settings().definition_id)
         .expect("selected bundle");
     assert!(matches!(
-        &bundle.definition.output_layers[0],
-        toniator_domain::PatternOutputLayer::Regions {
+        &bundle.definition.output_layers[0].realization,
+        PatternOutputRealization::Regions {
             source: RegionSourceIntent::GuideFaces { dimensions, .. },
-            ..
         } if dimensions.len() == 3
     ));
     assert!(matches!(

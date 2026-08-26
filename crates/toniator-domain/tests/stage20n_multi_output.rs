@@ -8,7 +8,7 @@ use toniator_domain::{
     PatternDefinitionBundle, PatternDefinitionDraft, PatternDefinitionEdit, PatternDefinitionId,
     PatternDefinitionRecipe, PatternGeometryResponse, PatternMechanismId, PatternOutputLayerId,
     PatternOutputSettings, PatternOutputSettingsRecipe, PatternStructureRecipe, PropertyFieldId,
-    PropertyTarget, SourceReference, effective_pattern_output_settings,
+    PropertyTarget, SiteUseFilterRecipe, SourceReference, effective_pattern_output_settings,
 };
 
 /// Proves one bundle exposes the sole aligned typed response in structural output order.
@@ -147,6 +147,7 @@ fn recipe_materialization_binds_ordered_id_free_output_settings() {
             },
         }),
         output_settings: vec![PatternOutputSettingsRecipe {
+            source_filter: SiteUseFilterRecipe::All,
             response: PatternGeometryResponse::Marks(MarkGeometryResponse {
                 minimum_fill: 0.2,
                 maximum_fill: 0.7,

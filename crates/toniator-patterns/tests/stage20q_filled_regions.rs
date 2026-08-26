@@ -6,7 +6,7 @@
 use toniator_domain::{
     CanvasSpec, ChannelPaint, EffectivePatternOutputSettings, PatternGeometryResponse,
     PatternMechanismId, PatternOutputLayerId, RegionGeometryResponse, RegionSamplingStrategy,
-    RegionSourceIntent, SourceMapping, SourceMappingComponent,
+    RegionSourceIntent, SiteUseFilter, SourceMapping, SourceMappingComponent,
 };
 use toniator_geometry::{
     CanonicalRegionProposal, CanonicalRegionSourceGroup, CanonicalRegionSourceId, CurvePath,
@@ -46,6 +46,7 @@ fn stage20q_full_solid_realizer_replays_untreated_regions() {
     .expect("untreated canonical region builds");
     let capability = OutputCapability {
         layer_id: output,
+        source_filter: SiteUseFilter::All,
         consumes: StructuralProductCapability::RandomSites,
         payload: OutputCapabilityPayload::Regions {
             source: RegionSourceIntent::VoronoiSites {

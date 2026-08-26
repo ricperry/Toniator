@@ -8,8 +8,8 @@ use toniator_domain::{
     CanvasSpec, ConnectedGeometryResponse, CoveragePolicy, Document, DocumentId,
     GeneralizedSiteProduct, GuideDimensionId, MarkOrientation, PathStrokeStyle, PatternDefinition,
     PatternDefinitionBundle, PatternDefinitionId, PatternGeometryResponse, PatternMechanismId,
-    PatternOutputLayer, PatternOutputLayerId, PatternOutputSettings, SourceReference,
-    SourceReferenceId, StraightGuideDimension, StraightGuideRepetition,
+    PatternOutputLayer, PatternOutputLayerId, PatternOutputRealization, PatternOutputSettings,
+    SourceReference, SourceReferenceId, StraightGuideDimension, StraightGuideRepetition,
 };
 use toniator_io::{EmbeddedSource, EmbeddedSourceFormat, SourceBundle, load, save};
 
@@ -52,11 +52,13 @@ fn stroke_document(
             additional_margin: 0.0,
         },
     );
-    definition.output_layers = vec![PatternOutputLayer::GuidePaths {
-        id: PatternOutputLayerId(83),
-        guide_mechanism_id: guide,
-        style: PathStrokeStyle::default(),
-    }];
+    definition.output_layers = vec![PatternOutputLayer::all(
+        PatternOutputLayerId(83),
+        PatternOutputRealization::GuidePaths {
+            guide_mechanism_id: guide,
+            style: PathStrokeStyle::default(),
+        },
+    )];
     let mut settings = base.pattern_settings().clone();
     settings.definition_id = definition.id;
     settings.density.across_x = resolution;
@@ -124,7 +126,10 @@ fn save_reopen_connected_path_documents_for_immutable_sources() {
                 .definition
                 .output_layers
                 .as_slice(),
-            [PatternOutputLayer::GuidePaths { .. }]
+            [PatternOutputLayer {
+                realization: PatternOutputRealization::GuidePaths { .. },
+                ..
+            }]
         ));
     }
     let low_resolution = root.join("target/validation/stage-20i/lowres");
@@ -190,7 +195,7 @@ fn connected_path_v4_save_is_deterministic_and_never_serializes_derived_strokes(
     );
     let reopened = load(&first).expect("reopen");
     assert!(
-        matches!(reopened.document().pattern_definition_bundles()[0].definition.output_layers.as_slice(), [PatternOutputLayer::GuidePaths { style, .. }] if *style == PathStrokeStyle::default())
+        matches!(reopened.document().pattern_definition_bundles()[0].definition.output_layers.as_slice(), [PatternOutputLayer { realization: PatternOutputRealization::GuidePaths { style, .. }, .. }] if *style == PathStrokeStyle::default())
     );
     let archive = fs::read(&first).expect("container bytes");
     assert!(!String::from_utf8_lossy(&archive).contains("canonical_stroke"));

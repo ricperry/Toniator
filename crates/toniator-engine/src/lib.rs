@@ -8,6 +8,7 @@ use std::{
     sync::atomic::AtomicUsize,
 };
 use std::{
+    collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt,
     sync::{
@@ -27,8 +28,8 @@ pub use scheduler::{
 
 use toniator_domain::{
     CanvasSpec, ChannelId, EvaluationSnapshot, EvaluationToken, PatternDefinition,
-    PatternMechanism, PatternOutputLayer, RegionGeometryResponse, SourceComponent, SourcePlacement,
-    SourceReference, SourceReferenceId,
+    PatternMechanism, PatternOutputLayer, PatternOutputRealization, RegionGeometryResponse,
+    SourceComponent, SourcePlacement, SourceReference, SourceReferenceId,
 };
 use toniator_domain::{
     ChannelPaint, DocumentEvaluationSnapshot, DocumentEvaluationToken, DocumentSession,
@@ -39,7 +40,7 @@ use toniator_patterns::{
     CurvePath, CurveSegment, FamilyCapability, GUIDE_FACE_CONTRACT_ID, GenericGuideCapability,
     GridFamilyOutput, GuideFaceLimits, GuideFaceRequest, MAZE_WALL_CONTRACT_ID,
     MappedCircularMarkRealization, MazeLimits, PatternPipelineError, REGION_TREATMENT_CONTRACT_ID,
-    RegionReference, RegionTreatmentLimits, SITE_ADJACENCY_CONTRACT_ID,
+    RegionReference, RegionTreatmentLimits, SITE_ADJACENCY_CONTRACT_ID, SiteUsageSet,
     SourceColorCircularMarkRealization, TypedFamilyOutput, TypedRealization,
     VORONOI_REGION_CONTRACT_ID, VoronoiRegionDiagnostics, VoronoiRegionLimits,
     VoronoiRegionRequest, build_connection_paths_cancellable, build_guide_faces_cancellable,
@@ -238,6 +239,56 @@ pub struct ChannelDiagnosticRequest {
     source: ResolvedSource,
 }
 
+/// Request-wide bounds for ordered composite orchestration across every document channel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompositeOutputLimits {
+    pub maximum_output_units: usize,
+    pub maximum_usage_memberships: usize,
+    pub maximum_dependency_inspections: usize,
+}
+
+impl CompositeOutputLimits {
+    /// Builds one fully enabled composite policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns the stable composite-limit diagnostic when any required bound is zero.
+    pub fn new(
+        maximum_output_units: usize,
+        maximum_usage_memberships: usize,
+        maximum_dependency_inspections: usize,
+    ) -> Result<Self, EvaluationError> {
+        if [
+            maximum_output_units,
+            maximum_usage_memberships,
+            maximum_dependency_inspections,
+        ]
+        .contains(&0)
+        {
+            return Err(EvaluationError::new(
+                "realization.composite.limits.zero",
+                "all composite output limits must be nonzero",
+            ));
+        }
+        Ok(Self {
+            maximum_output_units,
+            maximum_usage_memberships,
+            maximum_dependency_inspections,
+        })
+    }
+}
+
+impl Default for CompositeOutputLimits {
+    /// Supplies the accepted Stage 20R request-wide composite bounds.
+    fn default() -> Self {
+        Self {
+            maximum_output_units: 4_096,
+            maximum_usage_memberships: 8_388_608,
+            maximum_dependency_inspections: 16_777_216,
+        }
+    }
+}
+
 /// Immutable resource policy for one evaluation or scheduler.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EvaluationLimits {
@@ -253,6 +304,7 @@ pub struct EvaluationLimits {
     guide_faces: GuideFaceLimits,
     region_sampling: RegionSamplingLimits,
     region_treatment: RegionTreatmentLimits,
+    composite_outputs: CompositeOutputLimits,
 }
 
 impl Eq for EvaluationLimits {}
@@ -286,6 +338,7 @@ impl EvaluationLimits {
             guide_faces: GuideFaceLimits::default(),
             region_sampling: RegionSamplingLimits::default(),
             region_treatment: RegionTreatmentLimits::default(),
+            composite_outputs: CompositeOutputLimits::default(),
         })
     }
 
@@ -427,6 +480,28 @@ impl EvaluationLimits {
     /// These bounds remain evaluator policy rather than document intent and are never persisted.
     pub const fn region_treatment_limits(self) -> RegionTreatmentLimits {
         self.region_treatment
+    }
+
+    /// Returns the request-wide output, usage, and dependency work policy.
+    pub const fn composite_output_limits(self) -> CompositeOutputLimits {
+        self.composite_outputs
+    }
+
+    /// Replaces the complete nonzero composite work policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns the stable zero-limit diagnostic before evaluation can allocate derived output.
+    pub fn with_composite_output_limits(
+        mut self,
+        limits: CompositeOutputLimits,
+    ) -> Result<Self, EvaluationError> {
+        self.composite_outputs = CompositeOutputLimits::new(
+            limits.maximum_output_units,
+            limits.maximum_usage_memberships,
+            limits.maximum_dependency_inspections,
+        )?;
+        Ok(self)
     }
 
     /// Replaces nonzero bounded work policy for deterministic region-source sampling.
@@ -615,6 +690,7 @@ impl Default for EvaluationLimits {
             guide_faces: GuideFaceLimits::default(),
             region_sampling: RegionSamplingLimits::default(),
             region_treatment: RegionTreatmentLimits::default(),
+            composite_outputs: CompositeOutputLimits::default(),
         }
     }
 }
@@ -1353,10 +1429,15 @@ fn evaluate_channel_diagnostic_cached_with_cancellation(
     // artifact into a last-successful cache.
     let plan = toniator_patterns::resolve_document_pattern_pipeline(document, definition)
         .map_err(EvaluationError::from_pipeline)?;
-    let output = ordered_output_bindings(&effective, &plan)?
-        .into_iter()
-        .next()
-        .expect("one-output gate retains one binding");
+    let outputs = ordered_output_bindings(&effective, &plan)?;
+    let [(capability, setting)] = outputs.as_slice() else {
+        return Err(EvaluationError::new(
+            "evaluation.single_channel.composite",
+            "diagnostic single-channel evaluation requires exactly one output; complete document evaluation owns composites",
+        )
+        .into());
+    };
+    let output = (*capability, *setting);
     let toniator_domain::PatternGeometryResponse::Marks(mark_response) = &output.1.response else {
         return Err(EvaluationError::new(
             "evaluation.stroke.single_channel",
@@ -1700,6 +1781,33 @@ fn realization_contract_key(value: &PatternDefinition) -> RealizationContractKey
     }
 }
 
+/// Captures exactly one output's authored realization contract for independent caching.
+///
+/// A one-output definition intentionally produces the same value as the accepted aggregate helper,
+/// preserving legacy `All` cache comparisons while composite painter moves stay presentation-only.
+///
+/// # Errors
+///
+/// Returns a stable missing-output diagnostic when the requested cache unit is not authored by
+/// the definition.
+fn realization_contract_key_for_output(
+    value: &PatternDefinition,
+    output_layer_id: toniator_domain::PatternOutputLayerId,
+) -> Result<RealizationContractKey, EvaluationError> {
+    let output = value
+        .output_layers
+        .iter()
+        .find(|output| output.id == output_layer_id)
+        .ok_or(EvaluationError::new(
+            "realization.site_filter.output",
+            "realization cache key targets a missing output",
+        ))?;
+    Ok(RealizationContractKey {
+        output_layers: vec![output.clone()],
+        modulation: value.modulation.clone(),
+    })
+}
+
 /// Hashes resolved authored closed-shape content so a resource replacement cannot reuse stale marks.
 ///
 /// The typed definition retains a stable resource ID, but cache reuse additionally depends on the
@@ -1712,10 +1820,14 @@ fn realization_contract_key(value: &PatternDefinition) -> RealizationContractKey
 fn resolved_shape_content_identity(
     document: &toniator_domain::Document,
     definition: &PatternDefinition,
+    output_layer_id: toniator_domain::PatternOutputLayerId,
 ) -> Result<String, EvaluationError> {
     let mut bytes = b"toniator-stage-20e2-resolved-shape-content-v1".to_vec();
     for output in &definition.output_layers {
-        let PatternOutputLayer::MarkPrototype { prototype, .. } = output else {
+        if output.id != output_layer_id {
+            continue;
+        }
+        let PatternOutputRealization::MarkPrototype { prototype, .. } = &output.realization else {
             continue;
         };
         let toniator_domain::MarkPrototype::AuthoredClosedShape { structure_id } = prototype else {
@@ -2577,6 +2689,24 @@ fn evaluate_cached_document_impl(
             Ok::<_, EvaluationRunError>((channel, effective, definition, plan))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let composite_limits = limits.composite_output_limits();
+    let output_units = resolved
+        .iter()
+        .try_fold(0_usize, |total, (_, _, _, plan)| {
+            total
+                .checked_add(plan.ordered_outputs.len())
+                .ok_or(EvaluationError::new(
+                    "realization.composite.allocation.output_units",
+                    "composite output unit count overflows",
+                ))
+        })?;
+    if output_units > composite_limits.maximum_output_units {
+        return Err(EvaluationError::new(
+            "realization.composite.limits.output_units",
+            "request-wide composite output unit limit exceeded",
+        )
+        .into());
+    }
     // Complete document preflight intentionally precedes decode: a later
     // invalid topology channel cannot produce an acceptable partial result.
     for (_channel, _, _, _) in &resolved {
@@ -2622,6 +2752,8 @@ fn evaluate_cached_document_impl(
     let mut output_realization_dispositions = Vec::with_capacity(topology.channels().len());
     let mut remaining_transformed_curve_segment_instances =
         limits.max_transformed_curve_segment_instances();
+    let mut remaining_usage_memberships = composite_limits.maximum_usage_memberships;
+    let mut remaining_dependency_inspections = composite_limits.maximum_dependency_inspections;
     for (channel, effective, definition, plan) in &resolved {
         if cancellation.is_cancelled() {
             return Err(EvaluationRunError::Cancelled);
@@ -2672,12 +2804,55 @@ fn evaluate_cached_document_impl(
                 CacheDisposition::Miss,
             ),
         };
-        let mut channel_outputs = Vec::with_capacity(output_bindings.len());
-        let mut channel_output_dispositions = Vec::with_capacity(output_bindings.len());
-        for (output_capability, output_setting) in output_bindings {
+        let mut bindings_by_id = BTreeMap::new();
+        for (capability, setting) in &output_bindings {
+            bindings_by_id.insert(capability.layer_id, (*capability, *setting));
+        }
+        let mut completed_outputs = BTreeMap::new();
+        let mut completed_dispositions = BTreeMap::new();
+        let mut completed_diagnostics = BTreeMap::new();
+        for output_layer_id in &plan.evaluation_order {
             if cancellation.is_cancelled() {
                 return Err(EvaluationRunError::Cancelled);
             }
+            let (output_capability, output_setting) = bindings_by_id
+                .get(output_layer_id)
+                .copied()
+                .ok_or(EvaluationError::new(
+                    "pattern.output_layers.dependency.binding",
+                    "dependency order references a missing output binding",
+                ))?;
+            let referenced_usage = output_capability
+                .source_filter
+                .referenced_output_layer_id()
+                .map(|referenced_id| {
+                    completed_outputs
+                        .get(&referenced_id)
+                        .map(|output: &Arc<DocumentOutputRealization>| &output.usage)
+                        .ok_or(EvaluationError::new(
+                            "realization.site_filter.reference",
+                            "dependent output requires completed referenced usage",
+                        ))
+                })
+                .transpose()?;
+            let inspection_count =
+                family
+                    .site_set()
+                    .len()
+                    .checked_add(1)
+                    .ok_or(EvaluationError::new(
+                        "realization.composite.allocation.dependency_inspections",
+                        "dependency inspection count overflows",
+                    ))?;
+            remaining_dependency_inspections = remaining_dependency_inspections
+                .checked_sub(inspection_count)
+                .ok_or(EvaluationError::new(
+                    "realization.composite.limits.dependency_inspections",
+                    "request-wide dependency and selection inspection limit exceeded",
+                ))?;
+            let filtered_family = family
+                .filtered_for_output(output_capability.source_filter, referenced_usage)
+                .map_err(EvaluationError::from_pipeline)?;
             let realization_key = document_realization_cache_key(
                 document,
                 definition,
@@ -2687,6 +2862,7 @@ fn evaluate_cached_document_impl(
                 &family,
                 &source,
                 output_setting,
+                referenced_usage,
                 limits,
                 remaining_transformed_curve_segment_instances,
             )?;
@@ -2705,7 +2881,7 @@ fn evaluate_cached_document_impl(
                                 channel,
                                 effective,
                                 &source,
-                                &family,
+                                &filtered_family,
                                 plan,
                                 output_capability,
                                 output_setting,
@@ -2743,15 +2919,43 @@ fn evaluate_cached_document_impl(
                         "realization.mark.segment_limit",
                         "transformed curve-segment instance limit exceeded",
                     ))?;
-            channel_output_dispositions.push(OutputCacheDiagnostics {
-                output_layer_id: output_setting.output_layer_id,
-                realization: realization_disposition,
-                voronoi: region_diagnostics(&realization.realization),
-                region: region_output_diagnostics(&realization.realization),
-            });
+            remaining_usage_memberships = remaining_usage_memberships
+                .checked_sub(realization.usage.members().len())
+                .ok_or(EvaluationError::new(
+                    "realization.composite.limits.usage_memberships",
+                    "request-wide site-usage membership limit exceeded",
+                ))?;
+            completed_diagnostics.insert(
+                output_setting.output_layer_id,
+                OutputCacheDiagnostics {
+                    output_layer_id: output_setting.output_layer_id,
+                    realization: realization_disposition,
+                    voronoi: region_diagnostics(&realization.realization),
+                    region: region_output_diagnostics(&realization.realization),
+                },
+            );
             realizations.push((realization_key, Arc::clone(&realization)));
-            channel_outputs.push(realization);
+            completed_dispositions.insert(output_setting.output_layer_id, realization_disposition);
+            completed_outputs.insert(output_setting.output_layer_id, realization);
         }
+        let channel_outputs = output_bindings
+            .iter()
+            .map(|(capability, _)| {
+                completed_outputs
+                    .get(&capability.layer_id)
+                    .cloned()
+                    .expect("validated dependency order completes every painter output")
+            })
+            .collect::<Vec<_>>();
+        let channel_output_dispositions = output_bindings
+            .iter()
+            .map(|(capability, _)| {
+                completed_diagnostics
+                    .get(&capability.layer_id)
+                    .cloned()
+                    .expect("completed output retains painter-order diagnostics")
+            })
+            .collect::<Vec<_>>();
         let realization_disposition = if channel_output_dispositions
             .iter()
             .all(|value| value.realization == CacheDisposition::Hit)
@@ -2931,8 +3135,10 @@ fn connection_cache_contracts(
     adjacency_limits: SiteAdjacencyLimits,
     connection_limits: ConnectionPathLimits,
 ) -> Option<ConnectionCacheContracts> {
-    let [PatternOutputLayer::ConnectionPaths { program, .. }] = definition.output_layers.as_slice()
-    else {
+    let [output] = definition.output_layers.as_slice() else {
+        return None;
+    };
+    let PatternOutputRealization::ConnectionPaths { program, .. } = &output.realization else {
         return None;
     };
     Some(ConnectionCacheContracts {
@@ -2950,8 +3156,10 @@ fn maze_cache_contracts(
     definition: &PatternDefinition,
     limits: MazeLimits,
 ) -> Option<MazeCacheContracts> {
-    let [PatternOutputLayer::MazeWalls { program, .. }] = definition.output_layers.as_slice()
-    else {
+    let [output] = definition.output_layers.as_slice() else {
+        return None;
+    };
+    let PatternOutputRealization::MazeWalls { program, .. } = &output.realization else {
         return None;
     };
     Some(MazeCacheContracts {
@@ -2995,15 +3203,15 @@ struct DocumentOutputRealization {
     capability: toniator_patterns::OutputCapability,
     setting: toniator_domain::EffectivePatternOutputSettings,
     realization: DocumentRealization,
+    usage: SiteUsageSet,
 }
 
-/// Validates the current authoring gate and pairs outputs in authoritative definition order.
+/// Pairs every effective output with its authored painter-order capability.
 ///
 /// # Errors
 ///
-/// Returns a stable pipeline diagnostic when a definition bypasses the current one-output gate
-/// or the effective settings cannot bind to the resolved output plan. The loop-consuming return
-/// type deliberately remains plural so Stage 20R can lift only the gate.
+/// Returns a stable pipeline diagnostic when effective settings cannot bind exactly to the
+/// resolved authored output plan.
 fn ordered_output_bindings<'a>(
     effective: &'a toniator_domain::EffectiveChannelPatternInstance,
     plan: &'a toniator_patterns::PatternPipelinePlan,
@@ -3014,10 +3222,10 @@ fn ordered_output_bindings<'a>(
     )>,
     EvaluationError,
 > {
-    if effective.output_settings.len() != 1 || plan.ordered_outputs.len() != 1 {
+    if effective.output_settings.len() != plan.ordered_outputs.len() {
         return Err(EvaluationError::new(
-            "evaluation.output_gate",
-            "current evaluation accepts exactly one compatible output",
+            "evaluation.output_binding",
+            "effective output settings must match the complete pipeline output collection",
         ));
     }
     effective
@@ -3109,7 +3317,7 @@ fn completed_region_diagnostics(
     }
 }
 
-/// Evaluates one explicit output unit while retaining the current one-output authoring gate outside this cache unit.
+/// Evaluates one explicit output unit after dependency filtering.
 ///
 /// # Errors
 ///
@@ -3139,14 +3347,17 @@ fn evaluate_document_output(
     region_treatment_limits: RegionTreatmentLimits,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<DocumentOutputRealization, EvaluationError> {
-    let realization = evaluate_document_channel(
+    let mut output_plan = plan.clone();
+    output_plan.ordered_outputs = vec![capability.clone()];
+    output_plan.evaluation_order = vec![capability.layer_id];
+    let (realization, usage) = evaluate_document_channel(
         document,
         definition,
         channel,
         effective,
         source,
         family,
-        plan,
+        &output_plan,
         capability,
         setting,
         max_family_candidates,
@@ -3167,14 +3378,14 @@ fn evaluate_document_output(
         capability: capability.clone(),
         setting: setting.clone(),
         realization,
+        usage,
     })
 }
 
 /// Aggregates ordered output fingerprints without rewriting existing one-output identities.
 ///
-/// Stage 20N keeps the one-output authoring gate, so the single-unit branch preserves all
-/// established fingerprint bytes. Future heterogeneous documents obtain an ordered, layer-ID
-/// qualified aggregate only above independently cached units.
+/// The single-unit branch preserves all established fingerprint bytes. Heterogeneous documents
+/// obtain an ordered, layer-ID-qualified aggregate only above independently cached units.
 fn aggregate_output_realization_identity(
     outputs: &[(toniator_domain::PatternOutputLayerId, &str)],
 ) -> String {
@@ -3320,7 +3531,7 @@ fn evaluate_document_channel(
     region_sampling_limits: RegionSamplingLimits,
     region_treatment_limits: RegionTreatmentLimits,
     is_cancelled: &dyn Fn() -> bool,
-) -> Result<DocumentRealization, EvaluationError> {
+) -> Result<(DocumentRealization, SiteUsageSet), EvaluationError> {
     toniator_patterns::validate_output_realization_binding(plan, output_capability, output_setting)
         .map_err(EvaluationError::from_pipeline)?;
     if let Some(region_source) = output_capability.regions() {
@@ -3383,23 +3594,27 @@ fn evaluate_document_channel(
                         "ordinary region output requires a region response",
                     ));
                 };
-                return Ok(DocumentRealization::Regions {
-                    fingerprint: format!(
-                        "{}:{}:{}:{}",
-                        VORONOI_REGION_CONTRACT_ID,
-                        output_capability.layer_id.0,
-                        site_mechanism_id.0,
-                        realized.fingerprint
-                    ),
-                    regions: realized.regions,
-                    paints: realized.paints,
-                    diagnostics: completed_region_diagnostics(
-                        response,
-                        source,
-                        realized.diagnostics,
-                        RegionProducerCacheDiagnostics::Voronoi(diagnostics),
-                    ),
-                });
+                let usage = voronoi_region_site_usage(*site_mechanism_id, &realized.regions)?;
+                return Ok((
+                    DocumentRealization::Regions {
+                        fingerprint: format!(
+                            "{}:{}:{}:{}",
+                            VORONOI_REGION_CONTRACT_ID,
+                            output_capability.layer_id.0,
+                            site_mechanism_id.0,
+                            realized.fingerprint
+                        ),
+                        regions: realized.regions,
+                        paints: realized.paints,
+                        diagnostics: completed_region_diagnostics(
+                            response,
+                            source,
+                            realized.diagnostics,
+                            RegionProducerCacheDiagnostics::Voronoi(diagnostics),
+                        ),
+                    },
+                    usage,
+                ));
             }
             toniator_domain::RegionSourceIntent::GuideFaces {
                 guide_mechanism_id,
@@ -3457,23 +3672,26 @@ fn evaluate_document_channel(
                         "guide-face output requires a region response",
                     ));
                 };
-                return Ok(DocumentRealization::Regions {
-                    fingerprint: format!(
-                        "{}:{}:{}:{}",
-                        GUIDE_FACE_CONTRACT_ID,
-                        output_capability.layer_id.0,
-                        guide_mechanism_id.0,
-                        realized.fingerprint
-                    ),
-                    regions: realized.regions,
-                    paints: realized.paints,
-                    diagnostics: completed_region_diagnostics(
-                        response,
-                        source,
-                        realized.diagnostics,
-                        RegionProducerCacheDiagnostics::GuideFaces,
-                    ),
-                });
+                return Ok((
+                    DocumentRealization::Regions {
+                        fingerprint: format!(
+                            "{}:{}:{}:{}",
+                            GUIDE_FACE_CONTRACT_ID,
+                            output_capability.layer_id.0,
+                            guide_mechanism_id.0,
+                            realized.fingerprint
+                        ),
+                        regions: realized.regions,
+                        paints: realized.paints,
+                        diagnostics: completed_region_diagnostics(
+                            response,
+                            source,
+                            realized.diagnostics,
+                            RegionProducerCacheDiagnostics::GuideFaces,
+                        ),
+                    },
+                    SiteUsageSet::empty_non_site(),
+                ));
             }
         }
     }
@@ -3509,22 +3727,39 @@ fn evaluate_document_channel(
             is_cancelled,
         )
         .map_err(EvaluationError::from_pipeline)?;
-        return Ok(DocumentRealization::Strokes(
-            toniator_patterns::realize_typed_maze_canonical_stroke_output_cancellable(
-                family,
-                plan,
-                output_capability,
-                output_setting,
-                &maze,
-                source,
-                document.canvas(),
-                channel.mapping,
-                max_stroke_profile_samples,
-                max_stroke_outline_segments,
-                is_cancelled,
-            )
-            .map_err(EvaluationError::from_pipeline)?
-            .realization,
+        let members_by_vertex = maze
+            .source_sites
+            .iter()
+            .map(|site| (site.id, site.source.id))
+            .collect::<BTreeMap<_, _>>();
+        let usage = SiteUsageSet::new(
+            family.site_set().product_mechanism_id(),
+            maze.retained_walls
+                .iter()
+                .flat_map(|wall| [wall.id.first, wall.id.second])
+                .filter_map(|vertex| members_by_vertex.get(&vertex).copied())
+                .collect(),
+        )
+        .map_err(EvaluationError::from_pipeline)?;
+        return Ok((
+            DocumentRealization::Strokes(
+                toniator_patterns::realize_typed_maze_canonical_stroke_output_cancellable(
+                    family,
+                    plan,
+                    output_capability,
+                    output_setting,
+                    &maze,
+                    source,
+                    document.canvas(),
+                    channel.mapping,
+                    max_stroke_profile_samples,
+                    max_stroke_outline_segments,
+                    is_cancelled,
+                )
+                .map_err(EvaluationError::from_pipeline)?
+                .realization,
+            ),
+            usage,
         ));
     }
     if let Some((_site_mechanism_id, program, _style)) = output_capability.connection_paths() {
@@ -3560,27 +3795,48 @@ fn evaluate_document_channel(
             is_cancelled,
         )
         .map_err(|error| EvaluationError::new(error.path(), error.message()))?;
-        return Ok(DocumentRealization::Strokes(
-            toniator_patterns::realize_typed_connection_canonical_stroke_output_cancellable(
-                family,
-                plan,
-                output_capability,
-                output_setting,
-                &paths,
-                source,
-                document.canvas(),
-                channel.mapping,
-                max_stroke_profile_samples,
-                max_stroke_outline_segments,
-                is_cancelled,
-            )
-            .map_err(EvaluationError::from_pipeline)?
-            .realization,
+        let usage = SiteUsageSet::new(
+            family.site_set().product_mechanism_id(),
+            paths
+                .selected_edges
+                .iter()
+                .flat_map(|edge| [edge.first, edge.second])
+                .collect(),
+        )
+        .map_err(EvaluationError::from_pipeline)?;
+        return Ok((
+            DocumentRealization::Strokes(
+                toniator_patterns::realize_typed_connection_canonical_stroke_output_cancellable(
+                    family,
+                    plan,
+                    output_capability,
+                    output_setting,
+                    &paths,
+                    source,
+                    document.canvas(),
+                    channel.mapping,
+                    max_stroke_profile_samples,
+                    max_stroke_outline_segments,
+                    is_cancelled,
+                )
+                .map_err(EvaluationError::from_pipeline)?
+                .realization,
+            ),
+            usage,
         ));
     }
+    let authored_output = definition
+        .output_layers
+        .iter()
+        .find(|output| output.id == output_capability.layer_id)
+        .ok_or(EvaluationError::new(
+            "evaluation.output_binding",
+            "realization capability targets a missing authored output",
+        ))?;
     if matches!(
-        definition.output_layers.as_slice(),
-        [PatternOutputLayer::GuidePaths { .. } | PatternOutputLayer::ParametricPaths { .. }]
+        authored_output.realization,
+        PatternOutputRealization::GuidePaths { .. }
+            | PatternOutputRealization::ParametricPaths { .. }
     ) {
         if !matches!(
             output_setting.response,
@@ -3597,26 +3853,29 @@ fn evaluate_document_channel(
                 "guide-path output requires solid channel paint",
             ));
         };
-        return Ok(DocumentRealization::Strokes(
-            toniator_patterns::realize_typed_canonical_stroke_output_cancellable(
-                family,
-                plan,
-                output_capability,
-                output_setting,
-                source,
-                document.canvas(),
-                channel.mapping,
-                max_stroke_profile_samples,
-                max_stroke_outline_segments,
-                is_cancelled,
-            )
-            .map_err(EvaluationError::from_pipeline)?
-            .realization,
+        return Ok((
+            DocumentRealization::Strokes(
+                toniator_patterns::realize_typed_canonical_stroke_output_cancellable(
+                    family,
+                    plan,
+                    output_capability,
+                    output_setting,
+                    source,
+                    document.canvas(),
+                    channel.mapping,
+                    max_stroke_profile_samples,
+                    max_stroke_outline_segments,
+                    is_cancelled,
+                )
+                .map_err(EvaluationError::from_pipeline)?
+                .realization,
+            ),
+            SiteUsageSet::empty_non_site(),
         ));
     }
     let realization = if matches!(
-        definition.output_layers.as_slice(),
-        [PatternOutputLayer::MarkPrototype { .. }]
+        authored_output.realization,
+        PatternOutputRealization::MarkPrototype { .. }
     ) {
         DocumentRealization::Canonical(
             toniator_patterns::realize_typed_canonical_mark_output_cancellable(
@@ -3668,8 +3927,103 @@ fn evaluate_document_channel(
             ),
         }
     };
-    Ok(realization)
+    let usage = mark_site_usage(family, &realization)?;
+    Ok((realization, usage))
 }
+
+/// Derives every unique Voronoi co-owner retained after treatment and alpha suppression.
+///
+/// The completed canonical set is still unclipped at this boundary. Empty treated output is a
+/// valid empty same-mechanism usage set, and shared co-owners are sorted and deduplicated by the
+/// domain-owned usage constructor.
+///
+/// # Errors
+///
+/// Returns a stable usage-identity diagnostic if a retained owner does not belong to the exact
+/// output site mechanism.
+fn voronoi_region_site_usage(
+    site_mechanism_id: toniator_domain::PatternMechanismId,
+    regions: &toniator_patterns::CanonicalRegionSet,
+) -> Result<SiteUsageSet, EvaluationError> {
+    SiteUsageSet::new(
+        site_mechanism_id,
+        regions
+            .regions()
+            .iter()
+            .flat_map(|region| match &region.id.source_id {
+                toniator_patterns::CanonicalRegionSourceId::SiteOwners(owners) => owners.clone(),
+                toniator_patterns::CanonicalRegionSourceId::GuideBoundary(_) => Vec::new(),
+            })
+            .collect(),
+    )
+    .map_err(EvaluationError::from_pipeline)
+}
+
+/// Derives positive mark membership from completed geometry before renderer clipping.
+///
+/// Generalized marks retain family IDs directly. The circular compatibility realizers retain the
+/// same exact center bits and family order, so this boundary recovers only positive-radius emitted
+/// sites without inventing a second family or using canvas visibility.
+///
+/// # Errors
+///
+/// Returns a stable site-usage mechanism diagnostic if completed mark provenance is inconsistent.
+fn mark_site_usage(
+    family: &TypedFamilyOutput,
+    realization: &DocumentRealization,
+) -> Result<SiteUsageSet, EvaluationError> {
+    let mut members = BTreeSet::new();
+    match realization {
+        DocumentRealization::Mapped(value) => {
+            for mark in &value.output.marks {
+                if mark.radius > 0.0
+                    && let Some(site) = family.site_set().iter().find(|site| {
+                        site.position.x.to_bits() == mark.center.x.to_bits()
+                            && site.position.y.to_bits() == mark.center.y.to_bits()
+                    })
+                {
+                    members.insert(site.id);
+                }
+            }
+        }
+        DocumentRealization::SourceColor(value) => {
+            for sampled in &value.output.marks {
+                if sampled.mark.radius > 0.0
+                    && let Some(site) = family.site_set().iter().find(|site| {
+                        site.position.x.to_bits() == sampled.mark.center.x.to_bits()
+                            && site.position.y.to_bits() == sampled.mark.center.y.to_bits()
+                    })
+                {
+                    members.insert(site.id);
+                }
+            }
+        }
+        DocumentRealization::Canonical(value) => {
+            for mark in &value.output.marks {
+                match mark {
+                    CanonicalMark::Circle {
+                        source_site_id,
+                        radius,
+                        ..
+                    } if *radius > 0.0 => {
+                        members.insert(*source_site_id);
+                    }
+                    CanonicalMark::ClosedPath(path) => {
+                        members.insert(path.source_site_id);
+                    }
+                    CanonicalMark::Circle { .. } => {}
+                }
+            }
+        }
+        DocumentRealization::Strokes(_) | DocumentRealization::Regions { .. } => {}
+    }
+    SiteUsageSet::new(
+        family.site_set().product_mechanism_id(),
+        members.into_iter().collect(),
+    )
+    .map_err(EvaluationError::from_pipeline)
+}
+
 /// Converts all completed channel-output units into one renderer-owned layer without resource lookup.
 ///
 /// # Errors
@@ -3920,8 +4274,8 @@ fn required_support_radius_legacy(
 
 /// Derives the maximum modeled family support request across every ordered output capability.
 ///
-/// A shared family must be broad enough for all of its independently realized outputs. The
-/// current authoring gate admits one output, so its result is byte-for-byte the former request.
+/// A shared family must be broad enough for all independently realized outputs. Taking a maximum
+/// is painter-order neutral, while the one-output result remains byte-for-byte the former request.
 ///
 /// # Errors
 ///
@@ -4164,6 +4518,7 @@ struct DocumentRealizationCacheKey {
     family_content: DocumentFamilyContentKey,
     output_layer_id: toniator_domain::PatternOutputLayerId,
     contract: RealizationContractKey,
+    referenced_usage_fingerprint: Option<String>,
     resolved_shape_content: String,
     region_producer: Option<RegionProducerCacheIdentity>,
     source_identity: Option<RealizationSourceIdentity>,
@@ -4192,6 +4547,7 @@ fn document_realization_cache_key(
     family: &TypedFamilyOutput,
     source: &SourceField,
     output_setting: &toniator_domain::EffectivePatternOutputSettings,
+    referenced_usage: Option<&SiteUsageSet>,
     limits: EvaluationLimits,
     remaining_transformed_curve_segment_instances: usize,
 ) -> Result<DocumentRealizationCacheKey, EvaluationError> {
@@ -4207,8 +4563,13 @@ fn document_realization_cache_key(
     Ok(DocumentRealizationCacheKey {
         family_content: family_key.content.clone(),
         output_layer_id: output_setting.output_layer_id,
-        contract: realization_contract_key(definition),
-        resolved_shape_content: resolved_shape_content_identity(document, definition)?,
+        contract: realization_contract_key_for_output(definition, output_setting.output_layer_id)?,
+        referenced_usage_fingerprint: referenced_usage.map(|usage| usage.fingerprint().to_owned()),
+        resolved_shape_content: resolved_shape_content_identity(
+            document,
+            definition,
+            output_setting.output_layer_id,
+        )?,
         region_producer: region_producer_cache_identity(definition, family, output_setting),
         source_identity: sampling_required.then(|| realization_source_identity(source.identity())),
         mapping: sampling_required.then(|| {
@@ -4253,8 +4614,11 @@ fn document_realization_cache_key(
                 .iter()
                 .find(|output| output.id() == output_setting.output_layer_id)
             {
-                Some(PatternOutputLayer::Regions {
-                    source: toniator_domain::RegionSourceIntent::GuideFaces { .. },
+                Some(PatternOutputLayer {
+                    realization:
+                        PatternOutputRealization::Regions {
+                            source: toniator_domain::RegionSourceIntent::GuideFaces { .. },
+                        },
                     ..
                 }) => DocumentResponseIdentity::GuideFaces {
                     contract: GUIDE_FACE_CONTRACT_ID,
@@ -4323,7 +4687,7 @@ fn region_producer_cache_identity(
         .output_layers
         .iter()
         .find(|output| output.id() == setting.output_layer_id)?;
-    let PatternOutputLayer::Regions { source, .. } = output else {
+    let PatternOutputRealization::Regions { source } = &output.realization else {
         return None;
     };
     let reference_bits = match source {
@@ -4556,8 +4920,9 @@ pub(crate) mod test_support {
         OffsetSides, ParametricCurve, PathStrokeStyle, PatternDefinition, PatternDefinitionBundle,
         PatternDefinitionEdit, PatternDefinitionId, PatternGeometryResponse, PatternMechanismId,
         PatternOutputLayer, PatternOutputLayerId, PatternOutputSettings, RegionGeometryResponse,
-        RegionSourceIntent, SourceComponent, SourcePlacement, SourceReference, SourceReferenceId,
-        SpiralCurve, SpiralShape, StraightGuideDimension, StraightGuideRepetition,
+        RegionSourceIntent, SiteUseFilter, SourceComponent, SourcePlacement, SourceReference,
+        SourceReferenceId, SpiralCurve, SpiralShape, StraightGuideDimension,
+        StraightGuideRepetition,
     };
 
     use super::*;
@@ -4581,24 +4946,24 @@ pub(crate) mod test_support {
             .iter()
             .map(|output| PatternOutputSettings {
                 output_layer_id: output.id(),
-                response: match output {
-                    PatternOutputLayer::CircularMarks { .. }
-                    | PatternOutputLayer::MarkPrototype { .. } => {
+                response: match &output.realization {
+                    PatternOutputRealization::CircularMarks { .. }
+                    | PatternOutputRealization::MarkPrototype { .. } => {
                         PatternGeometryResponse::Marks(MarkGeometryResponse {
                             minimum_fill: 0.0,
                             maximum_fill: 1.0,
                         })
                     }
-                    PatternOutputLayer::GuidePaths { .. }
-                    | PatternOutputLayer::ParametricPaths { .. }
-                    | PatternOutputLayer::ConnectionPaths { .. }
-                    | PatternOutputLayer::MazeWalls { .. } => {
+                    PatternOutputRealization::GuidePaths { .. }
+                    | PatternOutputRealization::ParametricPaths { .. }
+                    | PatternOutputRealization::ConnectionPaths { .. }
+                    | PatternOutputRealization::MazeWalls { .. } => {
                         PatternGeometryResponse::Connected(ConnectedGeometryResponse {
                             minimum_thickness: 0.0,
                             maximum_thickness: 1.0,
                         })
                     }
-                    PatternOutputLayer::Regions { .. } => {
+                    PatternOutputRealization::Regions { .. } => {
                         PatternGeometryResponse::Regions(RegionGeometryResponse::default())
                     }
                 },
@@ -4771,7 +5136,8 @@ pub(crate) mod test_support {
                 additional_margin: 0.0,
             },
         );
-        let PatternOutputLayer::MarkPrototype { prototype, .. } = &mut definition.output_layers[0]
+        let PatternOutputRealization::MarkPrototype { prototype, .. } =
+            &mut definition.output_layers[0].realization
         else {
             unreachable!("generalized straight guides own a typed mark output")
         };
@@ -4848,11 +5214,13 @@ pub(crate) mod test_support {
                 additional_margin: 0.0,
             },
         );
-        definition.output_layers = vec![PatternOutputLayer::GuidePaths {
-            id: PatternOutputLayerId(73),
-            guide_mechanism_id: guide,
-            style: toniator_domain::PathStrokeStyle::default(),
-        }];
+        definition.output_layers = vec![PatternOutputLayer::all(
+            PatternOutputLayerId(73),
+            PatternOutputRealization::GuidePaths {
+                guide_mechanism_id: guide,
+                style: toniator_domain::PathStrokeStyle::default(),
+            },
+        )];
         let mut settings = base.pattern_settings().clone();
         settings.definition_id = definition.id;
         settings.density.across_x = 2.0;
@@ -4954,12 +5322,14 @@ pub(crate) mod test_support {
                 additional_margin: 0.0,
             },
         );
-        definition.output_layers = vec![PatternOutputLayer::ConnectionPaths {
-            id: output_layer_id,
-            site_mechanism_id,
-            program,
-            style: PathStrokeStyle::default(),
-        }];
+        definition.output_layers = vec![PatternOutputLayer::all(
+            output_layer_id,
+            PatternOutputRealization::ConnectionPaths {
+                site_mechanism_id,
+                program,
+                style: PathStrokeStyle::default(),
+            },
+        )];
         let mut settings = base.pattern_settings().clone();
         settings.definition_id = definition.id;
         settings.density.across_x = 5.0;
@@ -4998,12 +5368,14 @@ pub(crate) mod test_support {
         let document = connection.document();
         let mut definition = document.pattern_definition_bundles()[0].definition.clone();
         definition.coverage.guard_steps = 32;
-        definition.output_layers = vec![PatternOutputLayer::Regions {
-            id: PatternOutputLayerId(122),
-            source: RegionSourceIntent::VoronoiSites {
-                site_mechanism_id: PatternMechanismId(121),
+        definition.output_layers = vec![PatternOutputLayer::all(
+            PatternOutputLayerId(122),
+            PatternOutputRealization::Regions {
+                source: RegionSourceIntent::VoronoiSites {
+                    site_mechanism_id: PatternMechanismId(121),
+                },
             },
-        }];
+        )];
         DocumentSession::new(
             Document::with_source_topology_and_authored_structures(
                 document.id(),
@@ -5132,13 +5504,15 @@ pub(crate) mod test_support {
         let document = connection.document();
         let mut definition = document.pattern_definition_bundles()[0].definition.clone();
         definition.coverage.guard_steps = 2;
-        definition.output_layers = vec![PatternOutputLayer::Regions {
-            id: PatternOutputLayerId(122),
-            source: RegionSourceIntent::GuideFaces {
-                guide_mechanism_id: PatternMechanismId(120),
-                dimensions,
+        definition.output_layers = vec![PatternOutputLayer::all(
+            PatternOutputLayerId(122),
+            PatternOutputRealization::Regions {
+                source: RegionSourceIntent::GuideFaces {
+                    guide_mechanism_id: PatternMechanismId(120),
+                    dimensions,
+                },
             },
-        }];
+        )];
         DocumentSession::new(
             Document::with_source_topology_and_authored_structures(
                 document.id(),
@@ -5426,15 +5800,17 @@ pub(crate) mod test_support {
         let connection = modeled_connection_session(random_connection_program(seed, 24.0));
         let document = connection.document();
         let mut definition = document.pattern_definition_bundles()[0].definition.clone();
-        definition.output_layers = vec![PatternOutputLayer::MazeWalls {
-            id: PatternOutputLayerId(122),
-            site_mechanism_id: PatternMechanismId(121),
-            program: toniator_domain::MazeProgram {
-                algorithm: toniator_domain::GridMazeAlgorithm::RecursiveBacktracker,
-                seed,
+        definition.output_layers = vec![PatternOutputLayer::all(
+            PatternOutputLayerId(122),
+            PatternOutputRealization::MazeWalls {
+                site_mechanism_id: PatternMechanismId(121),
+                program: toniator_domain::MazeProgram {
+                    algorithm: toniator_domain::GridMazeAlgorithm::RecursiveBacktracker,
+                    seed,
+                },
+                style: PathStrokeStyle::default(),
             },
-            style: PathStrokeStyle::default(),
-        }];
+        )];
         let mut settings = document.pattern_settings().clone();
         settings.density.across_x = 24.0;
         settings.density.across_y = settings.density.across_x * 48.0 / 64.0;
@@ -5457,6 +5833,70 @@ pub(crate) mod test_support {
             .expect("typed maze output validates against triangular intersections"),
         )
         .expect("modeled maze document starts a session")
+    }
+
+    /// Builds retained maze walls plus marks consuming exactly the retained wall endpoints.
+    fn modeled_stage20r_maze_endpoint_session(seed: u32) -> DocumentSession {
+        let base = modeled_maze_session(seed);
+        let document = base.document();
+        let mut definition = document.pattern_definition_bundles()[0].definition.clone();
+        let maze = definition.output_layers[0].clone();
+        let maze_id = maze.id;
+        let marks_id = PatternOutputLayerId(maze_id.0 + 1);
+        let marks = PatternOutputLayer::new(
+            marks_id,
+            SiteUseFilter::SitesUsedBy {
+                output_layer_id: maze_id,
+            },
+            PatternOutputRealization::MarkPrototype {
+                site_mechanism_id: PatternMechanismId(121),
+                prototype: MarkPrototype::Circle,
+                orientation: MarkOrientation::Fixed,
+            },
+        );
+        definition.output_layers = vec![marks, maze];
+        let output_settings = definition
+            .output_layers
+            .iter()
+            .map(|output| PatternOutputSettings {
+                output_layer_id: output.id,
+                response: match output.realization {
+                    PatternOutputRealization::MazeWalls { .. } => {
+                        PatternGeometryResponse::Connected(ConnectedGeometryResponse {
+                            minimum_thickness: 0.08,
+                            maximum_thickness: 0.18,
+                        })
+                    }
+                    PatternOutputRealization::MarkPrototype { .. } => {
+                        PatternGeometryResponse::Marks(MarkGeometryResponse {
+                            minimum_fill: 0.18,
+                            maximum_fill: 0.36,
+                        })
+                    }
+                    _ => unreachable!("maze endpoint fixture contains only walls and marks"),
+                },
+            })
+            .collect();
+        DocumentSession::new(
+            Document::with_source_topology_and_authored_structures(
+                document.id(),
+                document.canvas().clone(),
+                document.source().clone(),
+                vec![PatternDefinitionBundle {
+                    definition,
+                    output_settings,
+                }],
+                document.pattern_settings().clone(),
+                document.channel_model().expect("modeled document model"),
+                document
+                    .channel_topology()
+                    .expect("modeled document topology")
+                    .clone(),
+                document.authored_structures().to_vec(),
+            )
+            .expect("maze endpoint composite validates"),
+        )
+        .expect("maze endpoint session validates")
     }
 
     /// Returns a valid random-link intent whose seed and distance may exercise connection-only
@@ -5567,11 +6007,13 @@ pub(crate) mod test_support {
                 additional_margin: 0.0,
             },
         );
-        definition.output_layers = vec![PatternOutputLayer::GuidePaths {
-            id: PatternOutputLayerId(94),
-            guide_mechanism_id,
-            style: toniator_domain::PathStrokeStyle::default(),
-        }];
+        definition.output_layers = vec![PatternOutputLayer::all(
+            PatternOutputLayerId(94),
+            PatternOutputRealization::GuidePaths {
+                guide_mechanism_id,
+                style: toniator_domain::PathStrokeStyle::default(),
+            },
+        )];
         let guide = AuthoredStructure::new(
             AuthoredStructureId(96),
             AuthoredStructureKind::OpenPath,
@@ -5669,13 +6111,15 @@ pub(crate) mod test_support {
                 additional_margin: 0.0,
             },
         );
-        definition.output_layers = vec![PatternOutputLayer::Regions {
-            id: PatternOutputLayerId(200),
-            source: RegionSourceIntent::GuideFaces {
-                guide_mechanism_id: guide_id,
-                dimensions: vec![horizontal, vertical],
+        definition.output_layers = vec![PatternOutputLayer::all(
+            PatternOutputLayerId(200),
+            PatternOutputRealization::Regions {
+                source: RegionSourceIntent::GuideFaces {
+                    guide_mechanism_id: guide_id,
+                    dimensions: vec![horizontal, vertical],
+                },
             },
-        }];
+        )];
         let cubic = AuthoredStructure::new(
             AuthoredStructureId(201),
             AuthoredStructureKind::OpenPath,
@@ -5846,12 +6290,14 @@ pub(crate) mod test_support {
                     phase: 0.0,
                 },
             ],
-            output_layers: vec![PatternOutputLayer::Regions {
-                id: output_id,
-                source: RegionSourceIntent::VoronoiSites {
-                    site_mechanism_id: site_id,
+            output_layers: vec![PatternOutputLayer::all(
+                output_id,
+                PatternOutputRealization::Regions {
+                    source: RegionSourceIntent::VoronoiSites {
+                        site_mechanism_id: site_id,
+                    },
                 },
-            }],
+            )],
             modulation: toniator_domain::PatternModulation,
             coverage: CoveragePolicy {
                 guard_steps: 8,
@@ -6431,8 +6877,10 @@ pub(crate) mod test_support {
                     loaded.document().pattern_definition_bundles()[0]
                         .definition
                         .output_layers[0],
-                    PatternOutputLayer::Regions {
-                        source: RegionSourceIntent::VoronoiSites { .. },
+                    PatternOutputLayer {
+                        realization: PatternOutputRealization::Regions {
+                            source: RegionSourceIntent::VoronoiSites { .. },
+                        },
                         ..
                     }
                 ),
@@ -6441,11 +6889,13 @@ pub(crate) mod test_support {
             let mut raw_parametric_paths = loaded.document().pattern_definition_bundles()[0]
                 .definition
                 .clone();
-            raw_parametric_paths.output_layers = vec![PatternOutputLayer::ParametricPaths {
-                id: PatternOutputLayerId(20_705),
-                curve_mechanism_id: PatternMechanismId(20_702),
-                style: PathStrokeStyle::default(),
-            }];
+            raw_parametric_paths.output_layers = vec![PatternOutputLayer::all(
+                PatternOutputLayerId(20_705),
+                PatternOutputRealization::ParametricPaths {
+                    curve_mechanism_id: PatternMechanismId(20_702),
+                    style: PathStrokeStyle::default(),
+                },
+            )];
             assert_eq!(
                 toniator_patterns::resolve_pattern_pipeline(&raw_parametric_paths)
                     .expect_err("raw ParametricPaths is not an eligible Region producer")
@@ -7960,8 +8410,12 @@ pub(crate) mod test_support {
             .expect("modeled red channel resolves its shared connection definition");
         let plan = toniator_patterns::resolve_document_pattern_pipeline(document, definition)
             .expect("connection definition resolves a typed pipeline");
-        let [PatternOutputLayer::ConnectionPaths { program, .. }] =
-            definition.output_layers.as_slice()
+        let [
+            PatternOutputLayer {
+                realization: PatternOutputRealization::ConnectionPaths { program, .. },
+                ..
+            },
+        ] = definition.output_layers.as_slice()
         else {
             panic!("fixture retains exactly one connection output")
         };
@@ -8454,6 +8908,1040 @@ pub(crate) mod test_support {
         assert_eq!(cache.families.len(), accepted_family_count);
         assert_eq!(graph.nodes().len(), family.site_set().len());
     }
+
+    /// Builds a two-output connection/residual-mark fixture with painter order opposite dependency order.
+    fn modeled_stage20r_composite_session(mark_first: bool) -> DocumentSession {
+        modeled_stage20r_composite_session_for_canvas(
+            mark_first,
+            CanvasSpec {
+                width: 64.0,
+                height: 48.0,
+            },
+        )
+    }
+
+    /// Builds the connection/residual-mark fixture at one intrinsic artifact canvas.
+    fn modeled_stage20r_composite_session_for_canvas(
+        mark_first: bool,
+        canvas: CanvasSpec,
+    ) -> DocumentSession {
+        let maximum_distance = canvas.width.max(canvas.height) * 0.4;
+        let base = modeled_connection_session_for_canvas(
+            ConnectionProgram::RandomLinks {
+                adjacency: ConnectionAdjacencyIntent {
+                    maximum_degree: 2,
+                    maximum_distance,
+                },
+                minimum_degree: 0,
+                seed: 29,
+            },
+            canvas,
+        );
+        let document = base.document();
+        let original = &document.pattern_definition_bundles()[0];
+        let mut definition = original.definition.clone();
+        let connection = definition.output_layers[0].clone();
+        let connection_id = connection.id;
+        let mark_id = PatternOutputLayerId(connection_id.0 + 1);
+        let residual_marks = PatternOutputLayer::new(
+            mark_id,
+            SiteUseFilter::SitesUnusedBy {
+                output_layer_id: connection_id,
+            },
+            PatternOutputRealization::MarkPrototype {
+                site_mechanism_id: PatternMechanismId(121),
+                prototype: MarkPrototype::Circle,
+                orientation: MarkOrientation::Fixed,
+            },
+        );
+        definition.output_layers = if mark_first {
+            vec![residual_marks, connection]
+        } else {
+            vec![connection, residual_marks]
+        };
+        let output_settings = definition
+            .output_layers
+            .iter()
+            .map(|output| PatternOutputSettings {
+                output_layer_id: output.id,
+                response: match output.realization {
+                    PatternOutputRealization::MarkPrototype { .. } => {
+                        PatternGeometryResponse::Marks(MarkGeometryResponse {
+                            minimum_fill: 0.2,
+                            maximum_fill: 0.8,
+                        })
+                    }
+                    PatternOutputRealization::ConnectionPaths { .. } => {
+                        PatternGeometryResponse::Connected(ConnectedGeometryResponse {
+                            minimum_thickness: 0.1,
+                            maximum_thickness: 0.25,
+                        })
+                    }
+                    _ => unreachable!("fixture contains marks and connections only"),
+                },
+            })
+            .collect();
+        DocumentSession::new(
+            Document::with_source_topology_and_authored_structures(
+                document.id(),
+                document.canvas().clone(),
+                document.source().clone(),
+                vec![PatternDefinitionBundle {
+                    definition,
+                    output_settings,
+                }],
+                document.pattern_settings().clone(),
+                document.channel_model().expect("modeled document model"),
+                document
+                    .channel_topology()
+                    .expect("modeled document topology")
+                    .clone(),
+                Vec::new(),
+            )
+            .expect("composite document validates"),
+        )
+        .expect("composite session validates")
+    }
+
+    /// Builds the circle-free sampled inward Voronoi validation document.
+    fn modeled_stage20r_sampled_region_session(canvas: CanvasSpec) -> DocumentSession {
+        let base =
+            modeled_connection_session_for_canvas(random_connection_program(37, 36.0), canvas);
+        let document = base.document();
+        let mut definition = document.pattern_definition_bundles()[0].definition.clone();
+        definition.coverage.guard_steps = 8;
+        let region_id = PatternOutputLayerId(122);
+        let regions = PatternOutputLayer::all(
+            region_id,
+            PatternOutputRealization::Regions {
+                source: RegionSourceIntent::VoronoiSites {
+                    site_mechanism_id: PatternMechanismId(121),
+                },
+            },
+        );
+        definition.output_layers = vec![regions];
+        let document = Document::with_source_topology_and_authored_structures(
+            document.id(),
+            document.canvas().clone(),
+            document.source().clone(),
+            vec![PatternDefinitionBundle {
+                definition,
+                output_settings: vec![PatternOutputSettings {
+                    output_layer_id: region_id,
+                    response: PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
+                        sampling: toniator_domain::RegionSamplingStrategy::AreaAverage,
+                        minimum_scale: 0.62,
+                        maximum_scale: 0.9,
+                    }),
+                }],
+            }],
+            document.pattern_settings().clone(),
+            document.channel_model().expect("modeled document model"),
+            document
+                .channel_topology()
+                .expect("modeled document topology")
+                .clone(),
+            Vec::new(),
+        )
+        .expect("sampled composite document validates");
+        stage20q_sampled_region_session(document, 0.63)
+    }
+
+    /// Gives every modeled artifact channel an independently authored seed while retaining all
+    /// channels as visible renderer inputs.
+    ///
+    /// The selected-channel edit authority performs any required bundle clone and stable-ID
+    /// remapping; the fixture does not mutate definitions or channel overrides directly.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the fixture does not contain exactly one seed per channel, when a channel has
+    /// no selected definition or sole output, or when the authoritative selected edit fails.
+    fn stage20r_seeded_output_channels(
+        session: DocumentSession,
+        seeds: &[u32],
+        edit: impl Fn(PatternOutputLayerId, u32) -> PatternDefinitionEdit,
+    ) -> DocumentSession {
+        let mut history = DocumentHistory::new(session);
+        let channel_ids = history
+            .document()
+            .channel_topology()
+            .expect("modeled artifact topology exists")
+            .channels()
+            .iter()
+            .map(|channel| channel.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            channel_ids.len(),
+            seeds.len(),
+            "every modeled artifact channel receives one seed"
+        );
+        for (channel_id, seed) in channel_ids.into_iter().zip(seeds.iter().copied()) {
+            let base_definition = history
+                .document()
+                .pattern_definition_for(channel_id)
+                .expect("artifact channel selects one definition")
+                .clone();
+            let output_layer_id = base_definition
+                .output_layers
+                .first()
+                .expect("seeded artifact definition has one output")
+                .id;
+            history
+                .apply(&DocumentCommand::EditSelectedChannelPatternDefinition {
+                    channel_id,
+                    base_definition,
+                    edit: edit(output_layer_id, seed),
+                })
+                .expect("selected artifact seed applies");
+        }
+        history.session().clone()
+    }
+
+    /// Proves solid Stage 20R evidence retains every RGB channel and assigns distinct authored
+    /// seeds through selected copy-on-edit authority.
+    #[test]
+    fn stage20r_solid_artifact_channels_are_visible_and_independently_seeded() {
+        let connections = stage20r_seeded_output_channels(
+            modeled_connection_session(random_connection_program(11, 24.0)),
+            &[29, 43, 71],
+            |output_layer_id, seed| PatternDefinitionEdit::SetConnectionSeed {
+                output_layer_id,
+                seed,
+            },
+        );
+        let connection_channels = connections
+            .document()
+            .channel_topology()
+            .expect("connection artifact topology exists")
+            .channels();
+        assert!(connection_channels.iter().all(|channel| channel.visible));
+        assert_eq!(connection_channels.len(), 3);
+        let connection_seeds = connection_channels
+            .iter()
+            .map(|channel| {
+                let definition = connections
+                    .document()
+                    .pattern_definition_for(channel.id)
+                    .expect("connection channel definition resolves");
+                match &definition.output_layers[0].realization {
+                    PatternOutputRealization::ConnectionPaths {
+                        program: ConnectionProgram::RandomLinks { seed, .. },
+                        ..
+                    } => *seed,
+                    _ => panic!("connection artifact retains only random-link outputs"),
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(connection_seeds, vec![29, 43, 71]);
+
+        let mazes = stage20r_seeded_output_channels(
+            modeled_maze_session(11),
+            &[23, 47, 89],
+            |output_layer_id, seed| PatternDefinitionEdit::SetMazeSeed {
+                output_layer_id,
+                seed,
+            },
+        );
+        let maze_channels = mazes
+            .document()
+            .channel_topology()
+            .expect("maze artifact topology exists")
+            .channels();
+        assert!(maze_channels.iter().all(|channel| channel.visible));
+        assert_eq!(maze_channels.len(), 3);
+        let maze_seeds = maze_channels
+            .iter()
+            .map(|channel| {
+                let definition = mazes
+                    .document()
+                    .pattern_definition_for(channel.id)
+                    .expect("maze channel definition resolves");
+                match &definition.output_layers[0].realization {
+                    PatternOutputRealization::MazeWalls { program, .. } => program.seed,
+                    _ => panic!("maze artifact retains only wall outputs"),
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(maze_seeds, vec![23, 47, 89]);
+    }
+
+    /// Builds the product workflow with connections and regions selected by different channels.
+    fn modeled_stage20r_cross_channel_connection_region_session() -> DocumentSession {
+        let base = modeled_connection_session(random_connection_program(31, 24.0));
+        let document = base.document();
+        let connection_bundle = document.pattern_definition_bundles()[0].clone();
+        let mut region_definition = PatternDefinition::generalized_straight_guides(
+            PatternDefinitionId(219),
+            "Stage 20R cross-channel regions",
+            PatternMechanismId(220),
+            PatternMechanismId(221),
+            PatternOutputLayerId(222),
+            vec![
+                StraightGuideDimension {
+                    id: GuideDimensionId(223),
+                    baseline_angle_degrees: 0.0,
+                    phase: 0.0,
+                    repetition: StraightGuideRepetition {
+                        spacing_multiplier: 1.0,
+                    },
+                },
+                StraightGuideDimension {
+                    id: GuideDimensionId(224),
+                    baseline_angle_degrees: 60.0,
+                    phase: 0.0,
+                    repetition: StraightGuideRepetition {
+                        spacing_multiplier: 1.0,
+                    },
+                },
+                StraightGuideDimension {
+                    id: GuideDimensionId(225),
+                    baseline_angle_degrees: 120.0,
+                    phase: 0.0,
+                    repetition: StraightGuideRepetition {
+                        spacing_multiplier: 1.0,
+                    },
+                },
+            ],
+            GeneralizedSiteProduct::Intersections {
+                dimensions: vec![
+                    GuideDimensionId(223),
+                    GuideDimensionId(224),
+                    GuideDimensionId(225),
+                ],
+                merge_epsilon: 1.0e-8,
+            },
+            MarkOrientation::Fixed,
+            CoveragePolicy {
+                guard_steps: 32,
+                additional_margin: 0.0,
+            },
+        );
+        region_definition.output_layers = vec![PatternOutputLayer::all(
+            PatternOutputLayerId(222),
+            PatternOutputRealization::Regions {
+                source: RegionSourceIntent::VoronoiSites {
+                    site_mechanism_id: PatternMechanismId(221),
+                },
+            },
+        )];
+        let region_bundle = PatternDefinitionBundle {
+            definition: region_definition,
+            output_settings: vec![PatternOutputSettings {
+                output_layer_id: PatternOutputLayerId(222),
+                response: PatternGeometryResponse::Regions(RegionGeometryResponse::default()),
+            }],
+        };
+        let mut channels = document
+            .channel_topology()
+            .expect("modeled cross-channel topology exists")
+            .channels()
+            .to_vec();
+        channels[1].pattern_instance.definition_override = Some(PatternDefinitionId(219));
+        channels[1].pattern_instance.output_response_deltas.clear();
+        channels[2].visible = false;
+        DocumentSession::new(
+            Document::with_source_topology_and_authored_structures(
+                document.id(),
+                document.canvas().clone(),
+                document.source().clone(),
+                vec![connection_bundle, region_bundle],
+                document.pattern_settings().clone(),
+                document.channel_model().expect("modeled document model"),
+                toniator_domain::ChannelTopology::new(channels),
+                document.authored_structures().to_vec(),
+            )
+            .expect("cross-channel connection/region document validates"),
+        )
+        .expect("cross-channel connection/region session validates")
+    }
+
+    /// Proves distinct channels select connection and region realizations without same-channel mixing.
+    #[test]
+    fn stage20r_cross_channel_connection_and_region_outputs_remain_separate() {
+        let session = modeled_stage20r_cross_channel_connection_region_session();
+        let request = document_request(&session, valid_document_bytes());
+        let mut cache = DocumentDerivedCache::default();
+        let first = evaluate_cached_document(
+            request.clone(),
+            EvaluationLimits::default(),
+            &cache,
+            &NeverCancelled,
+        )
+        .expect("cross-channel document evaluates");
+        assert!(matches!(
+            first.result.scene().layers()[0].outputs(),
+            [toniator_render::RenderOutputLayer {
+                geometry: GeometryOutput::CanonicalStrokes(_),
+                ..
+            }]
+        ));
+        assert!(matches!(
+            first.result.scene().layers()[1].outputs(),
+            [toniator_render::RenderOutputLayer {
+                geometry: GeometryOutput::CanonicalRegions(_),
+                ..
+            }]
+        ));
+        assert_eq!(
+            first.diagnostics.channels[0].outputs[0].output_layer_id,
+            PatternOutputLayerId(122)
+        );
+        assert_eq!(
+            first.diagnostics.channels[1].outputs[0].output_layer_id,
+            PatternOutputLayerId(222)
+        );
+        cache.commit(first.transaction);
+        let replay = evaluate_cached_document(
+            request,
+            EvaluationLimits::default(),
+            &cache,
+            &NeverCancelled,
+        )
+        .expect("cross-channel document replays");
+        assert!(
+            replay.diagnostics.channels[..2]
+                .iter()
+                .all(|channel| channel.family == CacheDisposition::Hit
+                    && channel.outputs[0].realization == CacheDisposition::Hit)
+        );
+    }
+
+    /// Proves DAG evaluation supplies residual marks while renderer payload and diagnostics remain painter ordered.
+    #[test]
+    fn stage20r_dependency_order_is_independent_from_painter_order() {
+        let session = modeled_stage20r_composite_session(true);
+        let definition = &session.document().pattern_definition_bundles()[0].definition;
+        let plan =
+            toniator_patterns::resolve_document_pattern_pipeline(session.document(), definition)
+                .expect("composite plan resolves");
+        assert_eq!(
+            plan.ordered_outputs
+                .iter()
+                .map(|output| output.layer_id)
+                .collect::<Vec<_>>(),
+            vec![PatternOutputLayerId(123), PatternOutputLayerId(122)]
+        );
+        assert_eq!(
+            plan.evaluation_order,
+            vec![PatternOutputLayerId(122), PatternOutputLayerId(123)]
+        );
+        let evaluated = evaluate_cached_document(
+            document_request(&session, valid_document_bytes()),
+            EvaluationLimits::default(),
+            &DocumentDerivedCache::default(),
+            &NeverCancelled,
+        )
+        .expect("composite evaluates atomically");
+        assert_eq!(
+            evaluated.result.scene().layers()[0]
+                .outputs()
+                .iter()
+                .map(|output| output.output_layer_id)
+                .collect::<Vec<_>>(),
+            vec![PatternOutputLayerId(123), PatternOutputLayerId(122)]
+        );
+        assert_eq!(
+            evaluated.diagnostics.channels[0]
+                .outputs
+                .iter()
+                .map(|output| output.output_layer_id)
+                .collect::<Vec<_>>(),
+            vec![PatternOutputLayerId(123), PatternOutputLayerId(122)]
+        );
+        let connection_usage = &evaluated.transaction.realizations[0].1.usage;
+        let residual_usage = &evaluated.transaction.realizations[1].1.usage;
+        assert!(!connection_usage.members().is_empty());
+        assert!(!residual_usage.members().is_empty());
+        assert!(
+            connection_usage
+                .members()
+                .iter()
+                .all(|member| !residual_usage.members().contains(member))
+        );
+    }
+
+    /// Proves painter-only reordering reuses every independent output cache while rebuilding scene order.
+    #[test]
+    fn stage20r_painter_move_replays_output_caches_in_new_authored_order() {
+        let first_session = modeled_stage20r_composite_session(true);
+        let moved_session = modeled_stage20r_composite_session(false);
+        let bytes = valid_document_bytes();
+        let mut cache = DocumentDerivedCache::default();
+        let first = evaluate_cached_document(
+            document_request(&first_session, Arc::clone(&bytes)),
+            EvaluationLimits::default(),
+            &cache,
+            &NeverCancelled,
+        )
+        .expect("initial composite evaluates");
+        assert!(
+            first.diagnostics.channels[0]
+                .outputs
+                .iter()
+                .all(|output| output.realization == CacheDisposition::Miss)
+        );
+        cache.commit(first.transaction);
+        let moved = evaluate_cached_document(
+            document_request(&moved_session, bytes),
+            EvaluationLimits::default(),
+            &cache,
+            &NeverCancelled,
+        )
+        .expect("painter-moved composite evaluates");
+        assert_eq!(moved.diagnostics.channels[0].family, CacheDisposition::Hit);
+        assert_eq!(
+            moved.diagnostics.channels[0]
+                .outputs
+                .iter()
+                .map(|output| (output.output_layer_id, output.realization))
+                .collect::<Vec<_>>(),
+            vec![
+                (PatternOutputLayerId(122), CacheDisposition::Hit),
+                (PatternOutputLayerId(123), CacheDisposition::Hit),
+            ]
+        );
+        assert_eq!(moved.diagnostics.aggregate.scene, CacheDisposition::Miss);
+        assert_eq!(
+            moved.result.scene().layers()[0]
+                .outputs()
+                .iter()
+                .map(|output| output.output_layer_id)
+                .collect::<Vec<_>>(),
+            vec![PatternOutputLayerId(122), PatternOutputLayerId(123)]
+        );
+    }
+
+    /// Proves maze usage publishes retained wall endpoints and dependent marks consume that exact set.
+    #[test]
+    fn stage20r_maze_endpoint_usage_drives_dependent_marks() {
+        let session = modeled_stage20r_maze_endpoint_session(23);
+        let evaluated = evaluate_cached_document(
+            document_request(&session, valid_document_bytes()),
+            EvaluationLimits::default(),
+            &DocumentDerivedCache::default(),
+            &NeverCancelled,
+        )
+        .expect("maze endpoint composite evaluates");
+        let maze_usage = evaluated
+            .transaction
+            .realizations
+            .iter()
+            .find(|(_, output)| output.output_layer_id == PatternOutputLayerId(122))
+            .map(|(_, output)| output.usage.clone())
+            .expect("maze usage publishes");
+        let mark_usage = evaluated
+            .transaction
+            .realizations
+            .iter()
+            .find(|(_, output)| output.output_layer_id == PatternOutputLayerId(123))
+            .map(|(_, output)| output.usage.clone())
+            .expect("dependent mark usage publishes");
+        assert!(!maze_usage.members().is_empty());
+        assert_eq!(mark_usage, maze_usage);
+    }
+
+    /// Proves retained Voronoi co-owners are unique usage members and collapsed output is empty.
+    #[test]
+    fn stage20r_voronoi_usage_retains_all_coowners_and_accepts_empty_collapse() {
+        let mechanism_id = PatternMechanismId(77);
+        let owners = vec![
+            FamilySiteId {
+                mechanism_id,
+                ordinal: 4,
+            },
+            FamilySiteId {
+                mechanism_id,
+                ordinal: 9,
+            },
+        ];
+        let regions = build_canonical_regions_cancellable(
+            CanonicalRegionProposal {
+                output_layer_id: PatternOutputLayerId(88),
+                source_groups: vec![CanonicalRegionSourceGroup {
+                    source_id: CanonicalRegionSourceId::SiteOwners(owners.clone()),
+                    components: vec![
+                        CurvePath::polyline(
+                            vec![
+                                Point2::new(-8.0, -4.0),
+                                Point2::new(12.0, -4.0),
+                                Point2::new(2.0, 14.0),
+                            ],
+                            PathClosure::Closed,
+                        )
+                        .expect("co-owner region closes"),
+                    ],
+                }],
+            },
+            CanonicalRegionLimits::default(),
+            || false,
+        )
+        .expect("co-owner region canonicalizes")
+        .0;
+        assert_eq!(
+            voronoi_region_site_usage(mechanism_id, &regions)
+                .expect("co-owner usage derives")
+                .members(),
+            owners
+        );
+        assert!(
+            voronoi_region_site_usage(
+                mechanism_id,
+                &toniator_patterns::CanonicalRegionSet::empty()
+            )
+            .expect("empty treated output publishes empty usage")
+            .members()
+            .is_empty()
+        );
+    }
+
+    /// Proves composite output and dependency budgets fail before any cache transaction publishes.
+    #[test]
+    fn stage20r_request_wide_composite_limits_are_atomic() {
+        let session = modeled_stage20r_composite_session(true);
+        let output_limited = EvaluationLimits::default()
+            .with_composite_output_limits(
+                CompositeOutputLimits::new(1, 8_388_608, 16_777_216)
+                    .expect("nonzero output policy"),
+            )
+            .expect("composite policy installs");
+        let error = match evaluate_cached_document(
+            document_request(&session, valid_document_bytes()),
+            output_limited,
+            &DocumentDerivedCache::default(),
+            &NeverCancelled,
+        ) {
+            Err(EvaluationRunError::Evaluation(error)) => error,
+            Err(EvaluationRunError::Cancelled) => panic!("limit must not report cancellation"),
+            Ok(_) => panic!("two output units exceed the request-wide limit"),
+        };
+        assert_eq!(error.path(), "realization.composite.limits.output_units");
+        for (limits, expected_path) in [
+            (
+                CompositeOutputLimits::new(4_096, 1, 16_777_216)
+                    .expect("membership policy validates"),
+                "realization.composite.limits.usage_memberships",
+            ),
+            (
+                CompositeOutputLimits::new(4_096, 8_388_608, 1)
+                    .expect("inspection policy validates"),
+                "realization.composite.limits.dependency_inspections",
+            ),
+        ] {
+            let error = match evaluate_cached_document(
+                document_request(&session, valid_document_bytes()),
+                EvaluationLimits::default()
+                    .with_composite_output_limits(limits)
+                    .expect("composite policy installs"),
+                &DocumentDerivedCache::default(),
+                &NeverCancelled,
+            ) {
+                Err(EvaluationRunError::Evaluation(error)) => error,
+                Err(EvaluationRunError::Cancelled) => {
+                    panic!("limit exhaustion must not report cancellation")
+                }
+                Ok(_) => panic!("request-wide composite policy must reject the fixture"),
+            };
+            assert_eq!(error.path(), expected_path);
+        }
+    }
+
+    /// Generates native Stage 20R composite documents, PNG/SVG outputs, identities, and raw statistics.
+    #[test]
+    #[ignore = "writes Stage 20R composite validation artifacts"]
+    fn generate_stage20r_composite_artifacts() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let output = root.join("target/validation/stage20r");
+        fs::create_dir_all(&output).expect("Stage 20R validation directory exists");
+        let cases = [
+            (
+                "connection-paths-1024x1024",
+                stage20r_seeded_output_channels(
+                    modeled_connection_session_for_canvas(
+                        ConnectionProgram::RandomLinks {
+                            adjacency: ConnectionAdjacencyIntent {
+                                maximum_degree: 2,
+                                maximum_distance: 409.6,
+                            },
+                            minimum_degree: 0,
+                            seed: 11,
+                        },
+                        CanvasSpec {
+                            width: 1024.0,
+                            height: 1024.0,
+                        },
+                    ),
+                    &[29, 43, 71],
+                    |output_layer_id, seed| PatternDefinitionEdit::SetConnectionSeed {
+                        output_layer_id,
+                        seed,
+                    },
+                ),
+                root.join("assets/raster-sample.png"),
+                EmbeddedSourceFormat::Png,
+                SourceFormatHint::Png,
+            ),
+            (
+                "area-average-regions-900x620",
+                modeled_stage20r_sampled_region_session(CanvasSpec {
+                    width: 900.0,
+                    height: 620.0,
+                }),
+                root.join("assets/vector-sample.svg"),
+                EmbeddedSourceFormat::Svg,
+                SourceFormatHint::Svg,
+            ),
+            (
+                "maze-endpoint-usage-64x48",
+                stage20r_seeded_output_channels(
+                    modeled_maze_session(11),
+                    &[23, 47, 89],
+                    |output_layer_id, seed| PatternDefinitionEdit::SetMazeSeed {
+                        output_layer_id,
+                        seed,
+                    },
+                ),
+                root.join("assets/raster-sample.png"),
+                EmbeddedSourceFormat::Png,
+                SourceFormatHint::Png,
+            ),
+        ];
+        let mut manifest = String::from(
+            "# Stage 20R ordered composite validation\n\n\
+             Native RGBA is preserved. SVG rasterizations are comparison witnesses only.\n\
+             Solid RGB witnesses retain every channel, with distinct deterministic output seeds\n\
+             per channel and one realization kind per artifact.\n\n",
+        );
+        for (stem, session, source_path, embedded_format, source_format) in cases {
+            let source_bytes = fs::read(&source_path).expect("immutable source reads");
+            let source_id = SourceReferenceId::new("cancellation-test-source")
+                .expect("fixture source ID validates");
+            let sources = SourceBundle::new([EmbeddedSource::new(
+                source_id.clone(),
+                embedded_format,
+                source_bytes.clone(),
+                source_path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned()),
+            )
+            .expect("immutable source embeds")])
+            .expect("source bundle validates");
+            let document_path = output.join(format!("{stem}.toniator"));
+            save(&document_path, session.document(), &sources)
+                .expect("Stage 20R v5 document saves");
+            let loaded = load(&document_path).expect("Stage 20R v5 document reloads");
+            let loaded_session = DocumentSession::new(loaded.document().clone())
+                .expect("reloaded Stage 20R session validates");
+            let evaluated = evaluate_cached_document(
+                document_request_for_format(
+                    &loaded_session,
+                    "cancellation-test-source",
+                    Arc::<[u8]>::from(source_bytes),
+                    source_format,
+                ),
+                EvaluationLimits::default(),
+                &DocumentDerivedCache::default(),
+                &NeverCancelled,
+            )
+            .expect("Stage 20R composite evaluates");
+            let png = encode_png(evaluated.result.raster()).expect("native PNG encodes");
+            let svg = write_svg(evaluated.result.scene());
+            let png_path = output.join(format!("{stem}.png"));
+            let svg_path = output.join(format!("{stem}.svg"));
+            fs::write(&png_path, &png).expect("native PNG writes");
+            fs::write(&svg_path, &svg).expect("raw SVG writes");
+            let svg_raster_path = output.join(format!("{stem}-svg-rasterized.png"));
+            let status = Command::new("inkscape")
+                .arg(&svg_path)
+                .arg("--export-type=png")
+                .arg(format!("--export-filename={}", svg_raster_path.display()))
+                .status()
+                .expect("Inkscape launches for SVG rasterization");
+            assert!(status.success(), "raw SVG rasterizes");
+            let svg_raster =
+                image::load_from_memory(&fs::read(&svg_raster_path).expect("SVG raster reads"))
+                    .expect("SVG raster decodes")
+                    .to_rgba8();
+            fs::write(
+                output.join(format!("{stem}-native-rgba-stats.txt")),
+                stage20q_rgba_statistics(
+                    evaluated.result.raster().width(),
+                    evaluated.result.raster().height(),
+                    evaluated.result.raster().pixels(),
+                ),
+            )
+            .expect("native statistics write");
+            fs::write(
+                output.join(format!("{stem}-svg-raster-rgba-stats.txt")),
+                stage20q_rgba_statistics(
+                    svg_raster.width(),
+                    svg_raster.height(),
+                    svg_raster.as_raw(),
+                ),
+            )
+            .expect("SVG raster statistics write");
+            let channel_records = loaded
+                .document()
+                .channel_topology()
+                .expect("artifact topology exists")
+                .channels()
+                .iter()
+                .map(|channel| {
+                    let definition = loaded
+                        .document()
+                        .pattern_definition_for(channel.id)
+                        .expect("artifact channel definition resolves");
+                    let channel_plan = toniator_patterns::resolve_document_pattern_pipeline(
+                        loaded.document(),
+                        definition,
+                    )
+                    .expect("artifact channel plan resolves");
+                    let seeds = definition
+                        .output_layers
+                        .iter()
+                        .filter_map(|output| match &output.realization {
+                            PatternOutputRealization::ConnectionPaths {
+                                program: ConnectionProgram::RandomLinks { seed, .. },
+                                ..
+                            }
+                            | PatternOutputRealization::MazeWalls {
+                                program: toniator_domain::MazeProgram { seed, .. },
+                                ..
+                            } => Some(*seed),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    (
+                        channel.id,
+                        channel.visible,
+                        definition.id,
+                        seeds,
+                        channel_plan
+                            .ordered_outputs
+                            .iter()
+                            .map(|output| output.layer_id)
+                            .collect::<Vec<_>>(),
+                        channel_plan.evaluation_order,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let painter_order_differs_from_dependency = channel_records
+                .iter()
+                .any(|record| record.4.iter().copied().ne(record.5.iter().copied()));
+            let channel_seeds = channel_records
+                .iter()
+                .flat_map(|record| record.3.iter().copied())
+                .collect::<Vec<_>>();
+            let channel_seed_summary = if channel_seeds.is_empty() {
+                String::from("not-applicable")
+            } else {
+                format!("{channel_seeds:?}")
+            };
+            fs::write(
+                output.join(format!("{stem}-painter-dag-usage.txt")),
+                format!(
+                    "channels={channel_records:#?}\nusage={:#?}\nusage_scopes={:#?}\ncache_diagnostics={:#?}\nfinal_clip={{canvas:{}x{},svg_clip_path:{}}}\n",
+                    evaluated
+                        .transaction
+                        .realizations
+                        .iter()
+                        .map(|(_, output)| (
+                            output.output_layer_id,
+                            output.usage.site_mechanism_id(),
+                            output.usage.members().len(),
+                            output.usage.fingerprint(),
+                        ))
+                        .collect::<Vec<_>>(),
+                    evaluated
+                        .transaction
+                        .realizations
+                        .iter()
+                        .map(|(_, output)| {
+                            let scopes = output
+                                .usage
+                                .members()
+                                .iter()
+                                .filter_map(|member| {
+                                    evaluated
+                                        .transaction
+                                        .families
+                                        .iter()
+                                        .find_map(|(_, family)| {
+                                            family
+                                                .site_set()
+                                                .iter()
+                                                .find(|site| site.id == *member)
+                                                .map(|site| site.scope)
+                                        })
+                                })
+                                .collect::<Vec<_>>();
+                            (output.output_layer_id, scopes)
+                        })
+                        .collect::<Vec<_>>(),
+                    evaluated.diagnostics.channels,
+                    evaluated.result.raster().width(),
+                    evaluated.result.raster().height(),
+                    svg.contains("clipPath"),
+                ),
+            )
+            .expect("painter/DAG/usage record writes");
+            fs::write(
+                output.join(format!("{stem}-hashes.txt")),
+                format!(
+                    "{}  {}\n{}  {}\n{}  {}\n",
+                    stage20q_sha256(&png),
+                    png_path.file_name().expect("PNG name").to_string_lossy(),
+                    stage20q_sha256(svg.as_bytes()),
+                    svg_path.file_name().expect("SVG name").to_string_lossy(),
+                    stage20q_sha256(
+                        &fs::read(&svg_raster_path).expect("SVG raster hash input reads")
+                    ),
+                    svg_raster_path
+                        .file_name()
+                        .expect("SVG raster name")
+                        .to_string_lossy(),
+                ),
+            )
+            .expect("artifact hashes write");
+            manifest.push_str(&format!(
+                "- `{stem}`: canvas={}x{}, source={}, channel_seeds={channel_seed_summary}, painter_order_differs_from_dependency={}.\n",
+                evaluated.result.raster().width(),
+                evaluated.result.raster().height(),
+                source_path
+                    .strip_prefix(&root)
+                    .unwrap_or(&source_path)
+                    .display(),
+                painter_order_differs_from_dependency,
+            ));
+        }
+        let filter_session = modeled_stage20r_composite_session(true);
+        let filter_definition =
+            &filter_session.document().pattern_definition_bundles()[0].definition;
+        let filter_plan = toniator_patterns::resolve_document_pattern_pipeline(
+            filter_session.document(),
+            filter_definition,
+        )
+        .expect("filter evidence plan resolves");
+        let filter_evaluated = evaluate_cached_document(
+            document_request(&filter_session, valid_document_bytes()),
+            EvaluationLimits::default(),
+            &DocumentDerivedCache::default(),
+            &NeverCancelled,
+        )
+        .expect("filter evidence evaluates");
+        let connection_usage = filter_evaluated
+            .transaction
+            .realizations
+            .iter()
+            .find(|(_, output)| output.output_layer_id == PatternOutputLayerId(122))
+            .map(|(_, output)| output.usage.clone())
+            .expect("connection usage exists");
+        let residual_usage = filter_evaluated
+            .transaction
+            .realizations
+            .iter()
+            .find(|(_, output)| output.output_layer_id == PatternOutputLayerId(123))
+            .map(|(_, output)| output.usage.clone())
+            .expect("residual usage exists");
+        let swapped_session = modeled_stage20r_composite_session(false);
+        let swapped_definition =
+            &swapped_session.document().pattern_definition_bundles()[0].definition;
+        let swapped_plan = toniator_patterns::resolve_document_pattern_pipeline(
+            swapped_session.document(),
+            swapped_definition,
+        )
+        .expect("swapped filter evidence plan resolves");
+        fs::write(
+            output.join("ordered-filter-semantics-record.txt"),
+            format!(
+                "visualized=false\nreason=filter semantics are recorded without overpainting the connection witness\nfilter=SitesUnusedBy(PatternOutputLayerId(122))\npainter_order={:?}\nevaluation_order={:?}\nswapped_painter_order={:?}\nswapped_evaluation_order={:?}\nconnection_usage_count={}\nconnection_usage_fingerprint={}\nresidual_usage_count={}\nresidual_usage_fingerprint={}\ndisjoint={}\n",
+                filter_plan
+                    .ordered_outputs
+                    .iter()
+                    .map(|output| output.layer_id)
+                    .collect::<Vec<_>>(),
+                filter_plan.evaluation_order,
+                swapped_plan
+                    .ordered_outputs
+                    .iter()
+                    .map(|output| output.layer_id)
+                    .collect::<Vec<_>>(),
+                swapped_plan.evaluation_order,
+                connection_usage.members().len(),
+                connection_usage.fingerprint(),
+                residual_usage.members().len(),
+                residual_usage.fingerprint(),
+                connection_usage
+                    .members()
+                    .iter()
+                    .all(|member| !residual_usage.members().contains(member)),
+            ),
+        )
+        .expect("ordered filter semantics record writes");
+        manifest.push_str(
+            "- `ordered-filter-semantics-record.txt`: nonvisual `SitesUnusedBy`, painter-order swap, evaluation-DAG, usage-identity, and disjointness evidence.\n",
+        );
+        let mechanism_id = PatternMechanismId(20_701);
+        let coowners = vec![
+            FamilySiteId {
+                mechanism_id,
+                ordinal: 3,
+            },
+            FamilySiteId {
+                mechanism_id,
+                ordinal: 8,
+            },
+        ];
+        let coowned_regions = build_canonical_regions_cancellable(
+            CanonicalRegionProposal {
+                output_layer_id: PatternOutputLayerId(20_702),
+                source_groups: vec![CanonicalRegionSourceGroup {
+                    source_id: CanonicalRegionSourceId::SiteOwners(coowners.clone()),
+                    components: vec![
+                        CurvePath::polyline(
+                            vec![
+                                Point2::new(-12.0, -8.0),
+                                Point2::new(18.0, -8.0),
+                                Point2::new(3.0, 20.0),
+                            ],
+                            PathClosure::Closed,
+                        )
+                        .expect("supplemental co-owner region closes"),
+                    ],
+                }],
+            },
+            CanonicalRegionLimits::default(),
+            || false,
+        )
+        .expect("supplemental co-owner region canonicalizes")
+        .0;
+        let coowner_usage = voronoi_region_site_usage(mechanism_id, &coowned_regions)
+            .expect("supplemental co-owner usage derives");
+        let empty_usage = voronoi_region_site_usage(
+            mechanism_id,
+            &toniator_patterns::CanonicalRegionSet::empty(),
+        )
+        .expect("supplemental collapsed usage derives");
+        fs::write(
+            output.join("supplemental-region-and-clipping-record.txt"),
+            format!(
+                "duplicate_coowners={:?}\nunique_usage={:?}\nempty_or_collapsed_usage={:?}\ncoowned_region_bounds={:?}\noff_canvas_geometry_preserved_before_final_clip=true\nrenderer_topology_repair=false\n",
+                coowners,
+                coowner_usage.members(),
+                empty_usage.members(),
+                coowned_regions
+                    .regions()
+                    .iter()
+                    .map(|region| region.bounds)
+                    .collect::<Vec<_>>(),
+            ),
+        )
+        .expect("supplemental Stage 20R record writes");
+        manifest.push_str(
+            "- `supplemental-region-and-clipping-record.txt`: duplicate co-owner, empty/collapse, off-canvas canonical geometry, and final-clipping authority record.\n",
+        );
+        fs::write(output.join("MANIFEST.md"), manifest).expect("Stage 20R manifest writes");
+    }
 }
 
 #[cfg(test)]
@@ -8514,10 +10002,12 @@ mod cache_key_tests {
 
     fn contract(layer_id: u64) -> RealizationContractKey {
         RealizationContractKey {
-            output_layers: vec![PatternOutputLayer::CircularMarks {
-                id: toniator_domain::PatternOutputLayerId(layer_id),
-                site_mechanism_id: toniator_domain::PatternMechanismId(2),
-            }],
+            output_layers: vec![PatternOutputLayer::all(
+                toniator_domain::PatternOutputLayerId(layer_id),
+                PatternOutputRealization::CircularMarks {
+                    site_mechanism_id: toniator_domain::PatternMechanismId(2),
+                },
+            )],
             modulation: toniator_domain::PatternModulation,
         }
     }
@@ -8559,19 +10049,21 @@ mod cache_key_tests {
                 additional_margin: 0.0,
             },
         );
-        connection.output_layers = vec![PatternOutputLayer::ConnectionPaths {
-            id: toniator_domain::PatternOutputLayerId(11),
-            site_mechanism_id: toniator_domain::PatternMechanismId(10),
-            program: toniator_domain::ConnectionProgram::RandomLinks {
-                adjacency: toniator_domain::ConnectionAdjacencyIntent {
-                    maximum_degree: 2,
-                    maximum_distance: 12.0,
+        connection.output_layers = vec![PatternOutputLayer::all(
+            toniator_domain::PatternOutputLayerId(11),
+            PatternOutputRealization::ConnectionPaths {
+                site_mechanism_id: toniator_domain::PatternMechanismId(10),
+                program: toniator_domain::ConnectionProgram::RandomLinks {
+                    adjacency: toniator_domain::ConnectionAdjacencyIntent {
+                        maximum_degree: 2,
+                        maximum_distance: 12.0,
+                    },
+                    minimum_degree: 0,
+                    seed: 7,
                 },
-                minimum_degree: 0,
-                seed: 7,
+                style: toniator_domain::PathStrokeStyle::default(),
             },
-            style: toniator_domain::PathStrokeStyle::default(),
-        }];
+        )];
         let maze = connection_cache_contracts(
             &connection,
             SiteAdjacencyLimits::default(),
@@ -8579,8 +10071,12 @@ mod cache_key_tests {
         )
         .expect("connection contracts");
         let mut tree = connection.clone();
-        let [PatternOutputLayer::ConnectionPaths { program, .. }] =
-            tree.output_layers.as_mut_slice()
+        let [
+            PatternOutputLayer {
+                realization: PatternOutputRealization::ConnectionPaths { program, .. },
+                ..
+            },
+        ] = tree.output_layers.as_mut_slice()
         else {
             panic!("connection fixture retains output")
         };
@@ -8637,15 +10133,17 @@ mod cache_key_tests {
                 additional_margin: 0.0,
             },
         );
-        definition.output_layers = vec![PatternOutputLayer::MazeWalls {
-            id: toniator_domain::PatternOutputLayerId(24),
-            site_mechanism_id: toniator_domain::PatternMechanismId(23),
-            program: toniator_domain::MazeProgram {
-                algorithm: toniator_domain::GridMazeAlgorithm::RecursiveBacktracker,
-                seed: 7,
+        definition.output_layers = vec![PatternOutputLayer::all(
+            toniator_domain::PatternOutputLayerId(24),
+            PatternOutputRealization::MazeWalls {
+                site_mechanism_id: toniator_domain::PatternMechanismId(23),
+                program: toniator_domain::MazeProgram {
+                    algorithm: toniator_domain::GridMazeAlgorithm::RecursiveBacktracker,
+                    seed: 7,
+                },
+                style: toniator_domain::PathStrokeStyle::default(),
             },
-            style: toniator_domain::PathStrokeStyle::default(),
-        }];
+        )];
         let baseline_limits = MazeLimits::default();
         let baseline = maze_cache_contracts(&definition, baseline_limits).expect("maze contracts");
         assert_eq!(baseline.arrangement, MAZE_WALL_CONTRACT_ID);
@@ -8655,7 +10153,12 @@ mod cache_key_tests {
             "the only current algorithm still participates as an explicit contract field"
         );
         let mut seeded = definition.clone();
-        let [PatternOutputLayer::MazeWalls { program, .. }] = seeded.output_layers.as_mut_slice()
+        let [
+            PatternOutputLayer {
+                realization: PatternOutputRealization::MazeWalls { program, .. },
+                ..
+            },
+        ] = seeded.output_layers.as_mut_slice()
         else {
             panic!("maze fixture retains its maze output")
         };

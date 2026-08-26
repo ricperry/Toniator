@@ -2,8 +2,9 @@ use toniator_domain::{
     CanvasSpec, ConnectedGeometryResponse, CoveragePolicy, Document, DocumentId,
     GeneralizedSiteProduct, GuideDimensionId, MarkOrientation, PathStrokeStyle, PatternDefinition,
     PatternDefinitionBundle, PatternDefinitionId, PatternGeometryResponse, PatternMechanismId,
-    PatternOutputLayer, PatternOutputLayerId, PatternOutputSettings, SourceMapping,
-    SourceMappingComponent, SourceReference, StraightGuideDimension, StraightGuideRepetition,
+    PatternOutputLayer, PatternOutputLayerId, PatternOutputRealization, PatternOutputSettings,
+    SourceMapping, SourceMappingComponent, SourceReference, StraightGuideDimension,
+    StraightGuideRepetition,
 };
 use toniator_patterns::{
     GridInspectRequest, RealizationStructuralInput, StrokeResponse,
@@ -48,11 +49,13 @@ fn path_document() -> Document {
             additional_margin: 0.0,
         },
     );
-    definition.output_layers = vec![PatternOutputLayer::GuidePaths {
-        id: PatternOutputLayerId(903),
-        guide_mechanism_id: guide,
-        style: PathStrokeStyle::default(),
-    }];
+    definition.output_layers = vec![PatternOutputLayer::all(
+        PatternOutputLayerId(903),
+        PatternOutputRealization::GuidePaths {
+            guide_mechanism_id: guide,
+            style: PathStrokeStyle::default(),
+        },
+    )];
     let mut settings = base.pattern_settings().clone();
     settings.definition_id = definition.id;
     settings.density.across_x = 3.0;
@@ -202,16 +205,22 @@ fn guide_path_realization_observes_limits_and_cancellation() {
     assert_eq!(cancelled.path(), "evaluation.cancelled");
 }
 
-/// Proves a heterogeneous mark/path recipe remains invalid rather than acquiring ambiguous provenance.
+/// Proves heterogeneous mark/path capabilities remain explicit over one shared family.
 #[test]
-fn mixed_mark_and_guide_outputs_reject_before_realization() {
+fn mixed_mark_and_guide_outputs_resolve_in_authored_order() {
     let document = path_document();
     let mut definition = document.pattern_definition_bundles()[0].definition.clone();
-    definition
-        .output_layers
-        .push(PatternOutputLayer::CircularMarks {
-            id: PatternOutputLayerId(999),
+    definition.output_layers.push(PatternOutputLayer::all(
+        PatternOutputLayerId(999),
+        PatternOutputRealization::CircularMarks {
             site_mechanism_id: PatternMechanismId(902),
-        });
-    assert!(resolve_document_pattern_pipeline(&document, &definition).is_err());
+        },
+    ));
+    let plan = resolve_document_pattern_pipeline(&document, &definition)
+        .expect("heterogeneous path/mark plan resolves");
+    assert_eq!(plan.ordered_outputs.len(), 2);
+    assert_eq!(
+        plan.evaluation_order,
+        vec![PatternOutputLayerId(903), PatternOutputLayerId(999)]
+    );
 }

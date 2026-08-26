@@ -10,8 +10,8 @@ use toniator_domain::{
     GuideDimensionId, GuideRepetition, MarkOrientation, MarkPrototype, ParametricCurve,
     PathStrokeStyle, PatternDefinition, PatternDefinitionId, PatternFamily, PatternMechanism,
     PatternMechanismId, PatternModulation, PatternOutputLayer, PatternOutputLayerId,
-    RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy, SourceMapping,
-    SourceMappingComponent, SpiralCurve, SpiralShape, StraightGuideDimension,
+    PatternOutputRealization, RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy,
+    SourceMapping, SourceMappingComponent, SpiralCurve, SpiralShape, StraightGuideDimension,
     StraightGuideRepetition,
 };
 use toniator_patterns::{
@@ -238,18 +238,22 @@ fn parametric(sites: bool) -> PatternDefinition {
             }]
         },
         output_layers: if sites {
-            vec![PatternOutputLayer::MarkPrototype {
-                id: PatternOutputLayerId(33),
-                site_mechanism_id: site,
-                prototype: MarkPrototype::Circle,
-                orientation: MarkOrientation::Fixed,
-            }]
+            vec![PatternOutputLayer::all(
+                PatternOutputLayerId(33),
+                PatternOutputRealization::MarkPrototype {
+                    site_mechanism_id: site,
+                    prototype: MarkPrototype::Circle,
+                    orientation: MarkOrientation::Fixed,
+                },
+            )]
         } else {
-            vec![PatternOutputLayer::ParametricPaths {
-                id: PatternOutputLayerId(33),
-                curve_mechanism_id: curve,
-                style: PathStrokeStyle::default(),
-            }]
+            vec![PatternOutputLayer::all(
+                PatternOutputLayerId(33),
+                PatternOutputRealization::ParametricPaths {
+                    curve_mechanism_id: curve,
+                    style: PathStrokeStyle::default(),
+                },
+            )]
         },
         modulation: PatternModulation,
         coverage: CoveragePolicy {
@@ -469,12 +473,14 @@ fn mazes_reject_zero_or_mismatched_guard_policy_before_topology_work() {
 #[test]
 fn triangular_recursive_backtracker_derives_conventional_wall_maze() {
     let mut definition = triangular_grid();
-    definition.output_layers = vec![PatternOutputLayer::MazeWalls {
-        id: PatternOutputLayerId(53),
-        site_mechanism_id: PatternMechanismId(52),
-        program: triangular_maze_program(23),
-        style: PathStrokeStyle::default(),
-    }];
+    definition.output_layers = vec![PatternOutputLayer::all(
+        PatternOutputLayerId(53),
+        PatternOutputRealization::MazeWalls {
+            site_mechanism_id: PatternMechanismId(52),
+            program: triangular_maze_program(23),
+            style: PathStrokeStyle::default(),
+        },
+    )];
     let plan = resolve_pattern_pipeline(&definition).expect("triangular family resolves");
     assert_eq!(plan.family.dimensions.len(), 3);
     assert_eq!(

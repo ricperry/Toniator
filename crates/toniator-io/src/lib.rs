@@ -29,13 +29,13 @@ use toniator_domain::{
     MarkPrototype, MazeProgram, ModeledChannelState, ParametricCurve, PathStrokeStyle,
     PatternDefinition, PatternDefinitionBundle, PatternDefinitionDraft, PatternDefinitionId,
     PatternDefinitionRecipe, PatternGeometryResponse, PatternMechanismId, PatternOutputLayerId,
-    PatternOutputResponseDelta, PatternOutputSettings, PatternOutputSettingsRecipe,
-    PatternStructureRecipe, PresetMetadata, PresetRecord, RandomSiteCharacter,
-    RegionGeometryResponse, RegionGeometryResponseDelta, RegionSamplingStrategy,
-    RegionSourceIntent, SiteDensityModulation, SiteExclusionPolicy, SourceComponent, SourceMapping,
-    SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId, SpiralCurve,
-    SpiralShape, StraightGuideDimension, StraightGuideRepetition, ValidationError,
-    VisibleMarkSizingPolicy,
+    PatternOutputRealizationRecipe, PatternOutputResponseDelta, PatternOutputSettings,
+    PatternOutputSettingsRecipe, PatternStructureRecipe, PresetMetadata, PresetRecord,
+    RandomSiteCharacter, RegionGeometryResponse, RegionGeometryResponseDelta,
+    RegionSamplingStrategy, RegionSourceIntent, SiteDensityModulation, SiteExclusionPolicy,
+    SiteUseFilterRecipe, SourceComponent, SourceMapping, SourceMappingComponent, SourcePlacement,
+    SourceReference, SourceReferenceId, SpiralCurve, SpiralShape, StraightGuideDimension,
+    StraightGuideRepetition, ValidationError, VisibleMarkSizingPolicy,
 };
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
@@ -834,7 +834,16 @@ struct PresetRecipeDto {
 }
 #[derive(Serialize, Deserialize)]
 struct PatternOutputSettingsRecipeDtoV3 {
+    source_filter: SiteUseFilterRecipeDtoV3,
     response: PatternGeometryResponseDto,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum SiteUseFilterRecipeDtoV3 {
+    All,
+    SitesUsedBy { output_index: usize },
+    SitesUnusedBy { output_index: usize },
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -879,6 +888,31 @@ enum PresetStructureRecipeDto {
     },
     GuideFaceRegions {
         definition: Box<PresetStructureRecipeDto>,
+        dimension_indices: Vec<usize>,
+    },
+    OrderedOutputs {
+        definition: Box<PresetStructureRecipeDto>,
+        outputs: Vec<PatternOutputRealizationRecipeDtoV3>,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum PatternOutputRealizationRecipeDtoV3 {
+    Marks,
+    StructuralPaths {
+        style: PathStrokeStyle,
+    },
+    ConnectionPaths {
+        program: ConnectionProgramDtoV4,
+        style: PathStrokeStyle,
+    },
+    MazeWalls {
+        program: MazeProgramDtoV4,
+        style: PathStrokeStyle,
+    },
+    VoronoiRegions,
+    GuideFaceRegions {
         dimension_indices: Vec<usize>,
     },
 }
@@ -1387,42 +1421,50 @@ impl GuideRepetitionDtoV4 {
     }
 }
 #[derive(Serialize, Deserialize)]
+struct PatternOutputLayerDtoV4 {
+    id: u64,
+    source_filter: SiteUseFilterDtoV5,
+    realization: PatternOutputRealizationDtoV5,
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum PatternOutputLayerDtoV4 {
+enum SiteUseFilterDtoV5 {
+    All,
+    SitesUsedBy { output_layer_id: u64 },
+    SitesUnusedBy { output_layer_id: u64 },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum PatternOutputRealizationDtoV5 {
     CircularMarks {
-        id: u64,
         site_mechanism_id: u64,
     },
     MarkPrototype {
-        id: u64,
         site_mechanism_id: u64,
         prototype: MarkPrototypeDtoV4,
         orientation: MarkOrientationDtoV4,
     },
     GuidePaths {
-        id: u64,
         guide_mechanism_id: u64,
         style: PathStrokeStyle,
     },
     ParametricPaths {
-        id: u64,
         curve_mechanism_id: u64,
         style: PathStrokeStyle,
     },
     ConnectionPaths {
-        id: u64,
         site_mechanism_id: u64,
         program: ConnectionProgramDtoV4,
         style: PathStrokeStyle,
     },
     MazeWalls {
-        id: u64,
         site_mechanism_id: u64,
         program: MazeProgramDtoV4,
         style: PathStrokeStyle,
     },
     Regions {
-        id: u64,
         source: RegionSourceIntentDtoV5,
     },
 }
@@ -1568,6 +1610,15 @@ impl PresetRecipeDto {
                 .output_settings
                 .iter()
                 .map(|setting| PatternOutputSettingsRecipeDtoV3 {
+                    source_filter: match setting.source_filter {
+                        SiteUseFilterRecipe::All => SiteUseFilterRecipeDtoV3::All,
+                        SiteUseFilterRecipe::SitesUsedBy { output_index } => {
+                            SiteUseFilterRecipeDtoV3::SitesUsedBy { output_index }
+                        }
+                        SiteUseFilterRecipe::SitesUnusedBy { output_index } => {
+                            SiteUseFilterRecipeDtoV3::SitesUnusedBy { output_index }
+                        }
+                    },
                     response: PatternGeometryResponseDto::from_domain(&setting.response),
                 })
                 .collect(),
@@ -1582,6 +1633,15 @@ impl PresetRecipeDto {
                 .output_settings
                 .into_iter()
                 .map(|setting| PatternOutputSettingsRecipe {
+                    source_filter: match setting.source_filter {
+                        SiteUseFilterRecipeDtoV3::All => SiteUseFilterRecipe::All,
+                        SiteUseFilterRecipeDtoV3::SitesUsedBy { output_index } => {
+                            SiteUseFilterRecipe::SitesUsedBy { output_index }
+                        }
+                        SiteUseFilterRecipeDtoV3::SitesUnusedBy { output_index } => {
+                            SiteUseFilterRecipe::SitesUnusedBy { output_index }
+                        }
+                    },
                     response: setting.response.into_domain(),
                 })
                 .collect(),
@@ -1677,6 +1737,16 @@ impl PresetStructureRecipeDto {
             } => Self::GuideFaceRegions {
                 definition: Box::new(Self::from_domain(definition)),
                 dimension_indices: dimension_indices.clone(),
+            },
+            PatternStructureRecipe::OrderedOutputs {
+                definition,
+                outputs,
+            } => Self::OrderedOutputs {
+                definition: Box::new(Self::from_domain(definition)),
+                outputs: outputs
+                    .iter()
+                    .map(PatternOutputRealizationRecipeDtoV3::from_domain)
+                    .collect(),
             },
         }
     }
@@ -1784,6 +1854,68 @@ impl PresetStructureRecipeDto {
                 definition: Box::new(definition.into_domain()?),
                 dimension_indices,
             }),
+            Self::OrderedOutputs {
+                definition,
+                outputs,
+            } => Ok(PatternStructureRecipe::OrderedOutputs {
+                definition: Box::new(definition.into_domain()?),
+                outputs: outputs
+                    .into_iter()
+                    .map(PatternOutputRealizationRecipeDtoV3::into_domain)
+                    .collect(),
+            }),
+        }
+    }
+}
+
+impl PatternOutputRealizationRecipeDtoV3 {
+    /// Converts one ordered ID-free output recipe without allocating document references.
+    fn from_domain(value: &PatternOutputRealizationRecipe) -> Self {
+        match value {
+            PatternOutputRealizationRecipe::Marks => Self::Marks,
+            PatternOutputRealizationRecipe::StructuralPaths { style } => {
+                Self::StructuralPaths { style: *style }
+            }
+            PatternOutputRealizationRecipe::ConnectionPaths { program, style } => {
+                Self::ConnectionPaths {
+                    program: ConnectionProgramDtoV4::from_domain(program),
+                    style: *style,
+                }
+            }
+            PatternOutputRealizationRecipe::MazeWalls { program, style } => Self::MazeWalls {
+                program: MazeProgramDtoV4::from_domain(program),
+                style: *style,
+            },
+            PatternOutputRealizationRecipe::VoronoiRegions => Self::VoronoiRegions,
+            PatternOutputRealizationRecipe::GuideFaceRegions { dimension_indices } => {
+                Self::GuideFaceRegions {
+                    dimension_indices: dimension_indices.clone(),
+                }
+            }
+        }
+    }
+
+    /// Restores one ID-free output recipe without accepting derived output state.
+    fn into_domain(self) -> PatternOutputRealizationRecipe {
+        match self {
+            Self::Marks => PatternOutputRealizationRecipe::Marks,
+            Self::StructuralPaths { style } => {
+                PatternOutputRealizationRecipe::StructuralPaths { style }
+            }
+            Self::ConnectionPaths { program, style } => {
+                PatternOutputRealizationRecipe::ConnectionPaths {
+                    program: program.into_domain(),
+                    style,
+                }
+            }
+            Self::MazeWalls { program, style } => PatternOutputRealizationRecipe::MazeWalls {
+                program: program.into_domain(),
+                style,
+            },
+            Self::VoronoiRegions => PatternOutputRealizationRecipe::VoronoiRegions,
+            Self::GuideFaceRegions { dimension_indices } => {
+                PatternOutputRealizationRecipe::GuideFaceRegions { dimension_indices }
+            }
         }
     }
 }
@@ -3007,136 +3139,153 @@ impl VisibleMarkSizingPolicyDtoV4 {
     }
 }
 impl PatternOutputLayerDtoV4 {
+    /// Serializes one authored output layer, including its explicit site-use filter.
     fn from_domain(value: &toniator_domain::PatternOutputLayer) -> Self {
-        match value {
-            toniator_domain::PatternOutputLayer::CircularMarks {
-                id,
-                site_mechanism_id,
-            } => Self::CircularMarks {
-                id: id.0,
-                site_mechanism_id: site_mechanism_id.0,
-            },
-            toniator_domain::PatternOutputLayer::MarkPrototype {
-                id,
+        let source_filter = match value.source_filter {
+            toniator_domain::SiteUseFilter::All => SiteUseFilterDtoV5::All,
+            toniator_domain::SiteUseFilter::SitesUsedBy { output_layer_id } => {
+                SiteUseFilterDtoV5::SitesUsedBy {
+                    output_layer_id: output_layer_id.0,
+                }
+            }
+            toniator_domain::SiteUseFilter::SitesUnusedBy { output_layer_id } => {
+                SiteUseFilterDtoV5::SitesUnusedBy {
+                    output_layer_id: output_layer_id.0,
+                }
+            }
+        };
+        let realization = match &value.realization {
+            toniator_domain::PatternOutputRealization::CircularMarks { site_mechanism_id } => {
+                PatternOutputRealizationDtoV5::CircularMarks {
+                    site_mechanism_id: site_mechanism_id.0,
+                }
+            }
+            toniator_domain::PatternOutputRealization::MarkPrototype {
                 site_mechanism_id,
                 prototype,
                 orientation,
-            } => Self::MarkPrototype {
-                id: id.0,
+            } => PatternOutputRealizationDtoV5::MarkPrototype {
                 site_mechanism_id: site_mechanism_id.0,
                 prototype: MarkPrototypeDtoV4::from_domain(prototype),
                 orientation: MarkOrientationDtoV4::from_domain(orientation),
             },
-            toniator_domain::PatternOutputLayer::GuidePaths {
-                id,
+            toniator_domain::PatternOutputRealization::GuidePaths {
                 guide_mechanism_id,
                 style,
-            } => Self::GuidePaths {
-                id: id.0,
+            } => PatternOutputRealizationDtoV5::GuidePaths {
                 guide_mechanism_id: guide_mechanism_id.0,
                 style: *style,
             },
-            toniator_domain::PatternOutputLayer::ParametricPaths {
-                id,
+            toniator_domain::PatternOutputRealization::ParametricPaths {
                 curve_mechanism_id,
                 style,
-            } => Self::ParametricPaths {
-                id: id.0,
+            } => PatternOutputRealizationDtoV5::ParametricPaths {
                 curve_mechanism_id: curve_mechanism_id.0,
                 style: *style,
             },
-            toniator_domain::PatternOutputLayer::ConnectionPaths {
-                id,
+            toniator_domain::PatternOutputRealization::ConnectionPaths {
                 site_mechanism_id,
                 program,
                 style,
-            } => Self::ConnectionPaths {
-                id: id.0,
+            } => PatternOutputRealizationDtoV5::ConnectionPaths {
                 site_mechanism_id: site_mechanism_id.0,
                 program: ConnectionProgramDtoV4::from_domain(program),
                 style: *style,
             },
-            toniator_domain::PatternOutputLayer::MazeWalls {
-                id,
+            toniator_domain::PatternOutputRealization::MazeWalls {
                 site_mechanism_id,
                 program,
                 style,
-            } => Self::MazeWalls {
-                id: id.0,
+            } => PatternOutputRealizationDtoV5::MazeWalls {
                 site_mechanism_id: site_mechanism_id.0,
                 program: MazeProgramDtoV4::from_domain(program),
                 style: *style,
             },
-            toniator_domain::PatternOutputLayer::Regions { id, source } => Self::Regions {
-                id: id.0,
-                source: RegionSourceIntentDtoV5::from_domain(source),
-            },
+            toniator_domain::PatternOutputRealization::Regions { source } => {
+                PatternOutputRealizationDtoV5::Regions {
+                    source: RegionSourceIntentDtoV5::from_domain(source),
+                }
+            }
+        };
+        Self {
+            id: value.id.0,
+            source_filter,
+            realization,
         }
     }
+
+    /// Restores one authored output layer and rejects no derived realization state.
     fn into_domain(self) -> toniator_domain::PatternOutputLayer {
-        match self {
-            Self::CircularMarks {
-                id,
-                site_mechanism_id,
-            } => toniator_domain::PatternOutputLayer::CircularMarks {
-                id: PatternOutputLayerId(id),
-                site_mechanism_id: PatternMechanismId(site_mechanism_id),
-            },
-            Self::MarkPrototype {
-                id,
+        let source_filter = match self.source_filter {
+            SiteUseFilterDtoV5::All => toniator_domain::SiteUseFilter::All,
+            SiteUseFilterDtoV5::SitesUsedBy { output_layer_id } => {
+                toniator_domain::SiteUseFilter::SitesUsedBy {
+                    output_layer_id: PatternOutputLayerId(output_layer_id),
+                }
+            }
+            SiteUseFilterDtoV5::SitesUnusedBy { output_layer_id } => {
+                toniator_domain::SiteUseFilter::SitesUnusedBy {
+                    output_layer_id: PatternOutputLayerId(output_layer_id),
+                }
+            }
+        };
+        let realization = match self.realization {
+            PatternOutputRealizationDtoV5::CircularMarks { site_mechanism_id } => {
+                toniator_domain::PatternOutputRealization::CircularMarks {
+                    site_mechanism_id: PatternMechanismId(site_mechanism_id),
+                }
+            }
+            PatternOutputRealizationDtoV5::MarkPrototype {
                 site_mechanism_id,
                 prototype,
                 orientation,
-            } => toniator_domain::PatternOutputLayer::MarkPrototype {
-                id: PatternOutputLayerId(id),
+            } => toniator_domain::PatternOutputRealization::MarkPrototype {
                 site_mechanism_id: PatternMechanismId(site_mechanism_id),
                 prototype: prototype.into_domain(),
                 orientation: orientation.into_domain(),
             },
-            Self::GuidePaths {
-                id,
+            PatternOutputRealizationDtoV5::GuidePaths {
                 guide_mechanism_id,
                 style,
-            } => toniator_domain::PatternOutputLayer::GuidePaths {
-                id: PatternOutputLayerId(id),
+            } => toniator_domain::PatternOutputRealization::GuidePaths {
                 guide_mechanism_id: PatternMechanismId(guide_mechanism_id),
                 style,
             },
-            Self::ParametricPaths {
-                id,
+            PatternOutputRealizationDtoV5::ParametricPaths {
                 curve_mechanism_id,
                 style,
-            } => toniator_domain::PatternOutputLayer::ParametricPaths {
-                id: PatternOutputLayerId(id),
+            } => toniator_domain::PatternOutputRealization::ParametricPaths {
                 curve_mechanism_id: PatternMechanismId(curve_mechanism_id),
                 style,
             },
-            Self::ConnectionPaths {
-                id,
+            PatternOutputRealizationDtoV5::ConnectionPaths {
                 site_mechanism_id,
                 program,
                 style,
-            } => toniator_domain::PatternOutputLayer::ConnectionPaths {
-                id: PatternOutputLayerId(id),
+            } => toniator_domain::PatternOutputRealization::ConnectionPaths {
                 site_mechanism_id: PatternMechanismId(site_mechanism_id),
                 program: program.into_domain(),
                 style,
             },
-            Self::MazeWalls {
-                id,
+            PatternOutputRealizationDtoV5::MazeWalls {
                 site_mechanism_id,
                 program,
                 style,
-            } => toniator_domain::PatternOutputLayer::MazeWalls {
-                id: PatternOutputLayerId(id),
+            } => toniator_domain::PatternOutputRealization::MazeWalls {
                 site_mechanism_id: PatternMechanismId(site_mechanism_id),
                 program: program.into_domain(),
                 style,
             },
-            Self::Regions { id, source } => toniator_domain::PatternOutputLayer::Regions {
-                id: PatternOutputLayerId(id),
-                source: source.into_domain(),
-            },
+            PatternOutputRealizationDtoV5::Regions { source } => {
+                toniator_domain::PatternOutputRealization::Regions {
+                    source: source.into_domain(),
+                }
+            }
+        };
+        toniator_domain::PatternOutputLayer {
+            id: PatternOutputLayerId(self.id),
+            source_filter,
+            realization,
         }
     }
 }
@@ -3727,5 +3876,139 @@ mod stage20p_tests {
         let dto = RegionSourceIntentDtoV5::from_domain(&source);
         assert!(matches!(&dto, RegionSourceIntentDtoV5::GuideFaces { .. }));
         assert_eq!(dto.into_domain(), source);
+    }
+}
+
+#[cfg(test)]
+mod stage20r_tests {
+    use super::*;
+    use toniator_domain::{ConnectionAdjacencyIntent, ConnectionProgram};
+
+    /// Proves schema-v5 output records persist both reference-filter variants and stable IDs.
+    #[test]
+    fn output_filters_round_trip_as_authored_state() {
+        for source_filter in [
+            toniator_domain::SiteUseFilter::SitesUsedBy {
+                output_layer_id: PatternOutputLayerId(7),
+            },
+            toniator_domain::SiteUseFilter::SitesUnusedBy {
+                output_layer_id: PatternOutputLayerId(7),
+            },
+        ] {
+            let layer = toniator_domain::PatternOutputLayer::new(
+                PatternOutputLayerId(9),
+                source_filter,
+                toniator_domain::PatternOutputRealization::CircularMarks {
+                    site_mechanism_id: PatternMechanismId(4),
+                },
+            );
+            let dto = PatternOutputLayerDtoV4::from_domain(&layer);
+            let json = serde_json::to_string(&dto).expect("output DTO serializes");
+            assert!(json.contains("source_filter"));
+            let decoded: PatternOutputLayerDtoV4 =
+                serde_json::from_str(&json).expect("output DTO decodes");
+            assert_eq!(decoded.into_domain(), layer);
+        }
+    }
+
+    /// Proves current schema records reject an omitted filter instead of silently adapting it to All.
+    #[test]
+    fn output_record_rejects_missing_filter() {
+        let malformed = r#"{
+            "id": 9,
+            "realization": {"kind":"circular_marks","site_mechanism_id":4}
+        }"#;
+        assert!(serde_json::from_str::<PatternOutputLayerDtoV4>(malformed).is_err());
+    }
+
+    /// Proves preset-v3 filter references remain ID-free recipe-local indices.
+    #[test]
+    fn preset_filter_reference_round_trips_without_document_ids() {
+        let setting = PatternOutputSettingsRecipe {
+            source_filter: SiteUseFilterRecipe::SitesUnusedBy { output_index: 0 },
+            response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+                minimum_fill: 0.0,
+                maximum_fill: 1.0,
+            }),
+        };
+        let dto = PatternOutputSettingsRecipeDtoV3 {
+            source_filter: SiteUseFilterRecipeDtoV3::SitesUnusedBy { output_index: 0 },
+            response: PatternGeometryResponseDto::from_domain(&setting.response),
+        };
+        let json = serde_json::to_string(&dto).expect("preset output setting serializes");
+        assert!(json.contains("output_index"));
+        assert!(!json.contains("output_layer_id"));
+    }
+
+    /// Proves preset-v3 persists one family plus ordered heterogeneous realizations and local filters.
+    #[test]
+    fn ordered_composite_preset_round_trips_deterministically() {
+        let record = PresetRecord {
+            metadata: PresetMetadata {
+                id: "stage-20r-ordered".into(),
+                name: "Stage 20R ordered".into(),
+                category: "tests".into(),
+                description: "ID-free ordered composite".into(),
+                thumbnail: None,
+            },
+            recipe: PatternDefinitionRecipe {
+                structure: PatternStructureRecipe::OrderedOutputs {
+                    definition: Box::new(PatternStructureRecipe::StraightGrid(
+                        PatternDefinitionDraft {
+                            name: "ordered composite".into(),
+                            coverage: CoveragePolicy {
+                                guard_steps: 1,
+                                additional_margin: 0.0,
+                            },
+                        },
+                    )),
+                    outputs: vec![
+                        PatternOutputRealizationRecipe::Marks,
+                        PatternOutputRealizationRecipe::ConnectionPaths {
+                            program: ConnectionProgram::NearestLinks {
+                                adjacency: ConnectionAdjacencyIntent {
+                                    maximum_degree: 2,
+                                    maximum_distance: 12.0,
+                                },
+                            },
+                            style: PathStrokeStyle::default(),
+                        },
+                    ],
+                },
+                output_settings: vec![
+                    PatternOutputSettingsRecipe {
+                        source_filter: SiteUseFilterRecipe::SitesUnusedBy { output_index: 1 },
+                        response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+                            minimum_fill: 0.1,
+                            maximum_fill: 0.8,
+                        }),
+                    },
+                    PatternOutputSettingsRecipe {
+                        source_filter: SiteUseFilterRecipe::All,
+                        response: PatternGeometryResponse::Connected(ConnectedGeometryResponse {
+                            minimum_thickness: 0.05,
+                            maximum_thickness: 0.2,
+                        }),
+                    },
+                ],
+            },
+        };
+        toniator_domain::validate_preset_record(&record).expect("ordered preset validates");
+        let first = serde_json::to_vec_pretty(&PresetEnvelopeDto::from_domain(&record))
+            .expect("ordered preset serializes");
+        let envelope: PresetEnvelopeDto =
+            serde_json::from_slice(&first).expect("ordered preset parses");
+        let decoded = envelope.into_domain().expect("ordered preset decodes");
+        toniator_domain::validate_preset_record(&decoded).expect("decoded preset validates");
+        assert_eq!(decoded, record);
+        assert_eq!(
+            serde_json::to_vec_pretty(&PresetEnvelopeDto::from_domain(&decoded))
+                .expect("decoded preset reserializes"),
+            first
+        );
+        let text = String::from_utf8(first).expect("preset JSON is UTF-8");
+        assert!(text.contains("ordered_outputs"));
+        assert!(text.contains("output_index"));
+        assert!(!text.contains("output_layer_id"));
     }
 }

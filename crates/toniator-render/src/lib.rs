@@ -28,6 +28,246 @@ pub struct RasterizationLimits {
     max_flattened_edges: usize,
 }
 
+#[cfg(test)]
+mod stage20r_composite_tests {
+    use super::*;
+    use toniator_domain::PatternMechanismId;
+    use toniator_geometry::{
+        CanonicalRegionLimits, CanonicalRegionProposal, CanonicalRegionSourceGroup,
+        CanonicalRegionSourceId, CurvePath, FamilySiteId, FamilySiteProvenance, PathClosure,
+        SiteScope, build_canonical_regions_cancellable,
+    };
+
+    /// Builds an empty-geometry witness whose output IDs make painter ordering directly inspectable.
+    fn composite_scene(output_ids: [u64; 2]) -> RenderScene {
+        let outputs = output_ids
+            .into_iter()
+            .map(|id| RenderOutputLayer {
+                output_layer_id: toniator_domain::PatternOutputLayerId(id),
+                geometry: GeometryOutput::CanonicalMarks(vec![CanonicalMark::Circle {
+                    source_site_id: FamilySiteId {
+                        mechanism_id: PatternMechanismId(3),
+                        ordinal: usize::try_from(id).expect("small fixture ID"),
+                    },
+                    center: Point2::new(id as f64, 12.0),
+                    radius: 1.0,
+                    scope: SiteScope::Canvas,
+                    provenance: FamilySiteProvenance::Random {
+                        candidate_ordinal: usize::try_from(id).expect("small fixture ID"),
+                        accepted_ordinal: usize::try_from(id).expect("small fixture ID"),
+                        exclusion_neighbor_ordinal: None,
+                    },
+                    fill_rule: CanonicalFillRule::EvenOdd,
+                }]),
+                primitive_paints: None,
+            })
+            .collect();
+        RenderScene::new(
+            CanvasSpec {
+                width: 32.0,
+                height: 24.0,
+            },
+            "stage-20r-family".into(),
+            format!("stage-20r-realization-{output_ids:?}"),
+            vec![
+                RenderLayer::new_outputs(
+                    ChannelId(1),
+                    true,
+                    ColorValue {
+                        red: 0.1,
+                        green: 0.2,
+                        blue: 0.3,
+                        alpha: 1.0,
+                    },
+                    0.75,
+                    outputs,
+                )
+                .expect("composite layer validates"),
+            ],
+        )
+        .expect("composite scene validates")
+    }
+
+    /// Proves SVG consumes authored painter order and a swap changes presentation identity only.
+    #[test]
+    fn svg_and_scene_preserve_composite_painter_order() {
+        let first = composite_scene([9, 7]);
+        let swapped = composite_scene([7, 9]);
+        assert_eq!(
+            first.layers()[0]
+                .outputs()
+                .iter()
+                .map(|output| output.output_layer_id.0)
+                .collect::<Vec<_>>(),
+            vec![9, 7]
+        );
+        let svg = write_svg(&first);
+        let first_position = svg.find("cx=\"9\"").expect("first output geometry");
+        let second_position = svg.find("cx=\"7\"").expect("second output geometry");
+        assert!(first_position < second_position);
+        assert_ne!(first.identity(), swapped.identity());
+        assert_eq!(
+            rasterize(&first, RasterBackground::Transparent)
+                .expect("empty composite rasterizes")
+                .pixels(),
+            rasterize(&swapped, RasterBackground::Transparent)
+                .expect("swapped empty composite rasterizes")
+                .pixels()
+        );
+    }
+
+    /// Proves sampled channel authority rejects a partially solid ordered output collection.
+    #[test]
+    fn sampled_composite_requires_paint_for_every_output() {
+        let base = composite_scene([9, 7]);
+        let mut layer = base.layers()[0].clone();
+        layer.outputs[0].primitive_paints = Some(vec![ColorValue {
+            red: 1.0,
+            green: 0.0,
+            blue: 0.0,
+            alpha: 1.0,
+        }]);
+        let error = RenderScene::new_modeled(
+            CanvasSpec {
+                width: 32.0,
+                height: 24.0,
+            },
+            "stage-20r-sampled-family".into(),
+            "stage-20r-sampled-realization".into(),
+            HalftoneChannelModel::SourceColorAlpha,
+            vec![layer],
+        )
+        .expect_err("partially sampled composite rejects atomically");
+        assert_eq!(error.path(), "scene.layers");
+        assert_eq!(
+            error.message(),
+            "SourceColorAlpha requires sampled paint for every ordered output"
+        );
+    }
+
+    /// Proves heterogeneous sampled regions and marks preserve painter and paint alignment.
+    #[test]
+    fn heterogeneous_region_and_mark_outputs_composite_in_authored_order() {
+        let site_id = FamilySiteId {
+            mechanism_id: PatternMechanismId(3),
+            ordinal: 1,
+        };
+        let regions = build_canonical_regions_cancellable(
+            CanonicalRegionProposal {
+                output_layer_id: toniator_domain::PatternOutputLayerId(9),
+                source_groups: vec![CanonicalRegionSourceGroup {
+                    source_id: CanonicalRegionSourceId::SiteOwners(vec![site_id]),
+                    components: vec![
+                        CurvePath::polyline(
+                            vec![
+                                Point2::new(4.0, 4.0),
+                                Point2::new(28.0, 4.0),
+                                Point2::new(16.0, 21.0),
+                            ],
+                            PathClosure::Closed,
+                        )
+                        .expect("region closes"),
+                    ],
+                }],
+            },
+            CanonicalRegionLimits::default(),
+            || false,
+        )
+        .expect("region canonicalizes")
+        .0;
+        let region_output = RenderOutputLayer {
+            output_layer_id: toniator_domain::PatternOutputLayerId(9),
+            geometry: GeometryOutput::CanonicalRegions(regions),
+            primitive_paints: Some(vec![ColorValue {
+                red: 1.0,
+                green: 0.0,
+                blue: 0.0,
+                alpha: 1.0,
+            }]),
+        };
+        let mark_output = RenderOutputLayer {
+            output_layer_id: toniator_domain::PatternOutputLayerId(7),
+            geometry: GeometryOutput::CanonicalMarks(vec![CanonicalMark::Circle {
+                source_site_id: site_id,
+                center: Point2::new(16.0, 12.0),
+                radius: 6.0,
+                scope: SiteScope::Canvas,
+                provenance: FamilySiteProvenance::Random {
+                    candidate_ordinal: 1,
+                    accepted_ordinal: 1,
+                    exclusion_neighbor_ordinal: None,
+                },
+                fill_rule: CanonicalFillRule::EvenOdd,
+            }]),
+            primitive_paints: Some(vec![ColorValue {
+                red: 0.0,
+                green: 0.0,
+                blue: 1.0,
+                alpha: 1.0,
+            }]),
+        };
+        let empty_output = RenderOutputLayer {
+            output_layer_id: toniator_domain::PatternOutputLayerId(8),
+            geometry: GeometryOutput::CanonicalRegions(CanonicalRegionSet::empty()),
+            primitive_paints: Some(Vec::new()),
+        };
+        let build = |outputs| {
+            RenderScene::new_modeled(
+                CanvasSpec {
+                    width: 32.0,
+                    height: 24.0,
+                },
+                "stage-20r-heterogeneous-family".into(),
+                "stage-20r-heterogeneous-realization".into(),
+                HalftoneChannelModel::SourceColorAlpha,
+                vec![
+                    RenderLayer::new_outputs(
+                        ChannelId(1),
+                        true,
+                        ColorValue {
+                            red: 0.0,
+                            green: 0.0,
+                            blue: 1.0,
+                            alpha: 1.0,
+                        },
+                        0.6,
+                        outputs,
+                    )
+                    .expect("heterogeneous layer validates"),
+                ],
+            )
+            .expect("heterogeneous scene validates")
+        };
+        let region_then_mark = build(vec![
+            region_output.clone(),
+            empty_output.clone(),
+            mark_output.clone(),
+        ]);
+        let mark_then_region = build(vec![mark_output, empty_output, region_output]);
+        assert_eq!(
+            region_then_mark.layers()[0]
+                .outputs()
+                .iter()
+                .map(|output| output.output_layer_id.0)
+                .collect::<Vec<_>>(),
+            vec![9, 8, 7]
+        );
+        assert_ne!(
+            rasterize(&region_then_mark, RasterBackground::Transparent)
+                .expect("region-first scene rasterizes")
+                .pixels(),
+            rasterize(&mark_then_region, RasterBackground::Transparent)
+                .expect("mark-first scene rasterizes")
+                .pixels()
+        );
+        let svg = write_svg(&region_then_mark);
+        assert!(
+            svg.find("<path").expect("sampled region path emits")
+                < svg.find("<circle").expect("solid mark emits")
+        );
+    }
+}
+
 impl RasterizationLimits {
     /// Builds a nonzero flattened-edge limit without changing canonical scene identity.
     ///
@@ -87,9 +327,9 @@ pub struct RenderLayer {
     color: ColorValue,
     opacity: f64,
     outputs: Vec<RenderOutputLayer>,
-    /// Retained first-output projection while Stage 20N moves consumers to `outputs`.
+    /// Retained first-output projection for legacy read-only consumers of the normalized collection.
     geometry: GeometryOutput,
-    /// Retained first-output sampled paint projection while Stage 20N moves consumers to `outputs`.
+    /// Retained first-output sampled-paint projection for legacy read-only consumers.
     mark_paints: Option<Vec<ColorValue>>,
 }
 
@@ -248,14 +488,14 @@ impl RenderScene {
                     }
                 }
                 Some(HalftoneChannelModel::SourceColorAlpha) => {
-                    if !layer
+                    if layer
                         .outputs
                         .iter()
-                        .any(|output| output.primitive_paints.is_some())
+                        .any(|output| output.primitive_paints.is_none())
                     {
                         return Err(RenderError::new(
                             "scene.layers",
-                            "SourceColorAlpha requires sampled per-mark paint",
+                            "SourceColorAlpha requires sampled paint for every ordered output",
                         ));
                     }
                 }

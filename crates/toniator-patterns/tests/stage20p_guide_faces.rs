@@ -5,8 +5,8 @@ use toniator_domain::{
     AuthoredStructureKind, CanvasSpec, CoveragePolicy, CurveRepetition, Document,
     GeneralizedSiteProduct, GuideDimension, GuideDimensionId, GuidePrototype, MarkOrientation,
     PatternDefinition, PatternDefinitionId, PatternMechanism, PatternMechanismId,
-    PatternOutputLayer, PatternOutputLayerId, RegionSourceIntent, SourceReference,
-    StraightGuideDimension, StraightGuideRepetition,
+    PatternOutputLayer, PatternOutputLayerId, PatternOutputRealization, RegionSourceIntent,
+    SourceReference, StraightGuideDimension, StraightGuideRepetition,
 };
 use toniator_patterns::{resolve_document_pattern_pipeline, resolve_pattern_pipeline};
 
@@ -47,13 +47,15 @@ fn guide_face_output_resolves_with_its_selected_dimensions() {
             additional_margin: 0.0,
         },
     );
-    definition.output_layers = vec![PatternOutputLayer::Regions {
-        id: PatternOutputLayerId(23),
-        source: RegionSourceIntent::GuideFaces {
-            guide_mechanism_id: PatternMechanismId(21),
-            dimensions: vec![GuideDimensionId(24), GuideDimensionId(25)],
+    definition.output_layers = vec![PatternOutputLayer::all(
+        PatternOutputLayerId(23),
+        PatternOutputRealization::Regions {
+            source: RegionSourceIntent::GuideFaces {
+                guide_mechanism_id: PatternMechanismId(21),
+                dimensions: vec![GuideDimensionId(24), GuideDimensionId(25)],
+            },
         },
-    }];
+    )];
     let plan = resolve_pattern_pipeline(&definition).expect("Guide Faces plan");
     assert_eq!(plan.ordered_outputs.len(), 1);
     assert_eq!(plan.ordered_outputs[0].layer_id, PatternOutputLayerId(23));
@@ -77,7 +79,8 @@ fn guide_face_output_resolves_with_its_selected_dimensions() {
             spacing_multiplier: 1.0,
         },
     });
-    let PatternOutputLayer::Regions { source, .. } = &mut definition.output_layers[0] else {
+    let PatternOutputRealization::Regions { source } = &mut definition.output_layers[0].realization
+    else {
         panic!("straight fixture retains a Guide Faces output");
     };
     *source = RegionSourceIntent::GuideFaces {
@@ -184,13 +187,15 @@ fn authored_guide_face_definition(second_prototype: GuidePrototype) -> PatternDe
             additional_margin: 0.0,
         },
     );
-    definition.output_layers = vec![PatternOutputLayer::Regions {
-        id: PatternOutputLayerId(45),
-        source: RegionSourceIntent::GuideFaces {
-            guide_mechanism_id: guide_id,
-            dimensions: vec![first, second],
+    definition.output_layers = vec![PatternOutputLayer::all(
+        PatternOutputLayerId(45),
+        PatternOutputRealization::Regions {
+            source: RegionSourceIntent::GuideFaces {
+                guide_mechanism_id: guide_id,
+                dimensions: vec![first, second],
+            },
         },
-    }];
+    )];
     definition
 }
 
@@ -218,7 +223,8 @@ fn generic_authored_guide_faces_have_a_strict_capability_boundary() {
         "pattern.output_layers.guide_faces",
     );
     let mut foreign = definition.clone();
-    let PatternOutputLayer::Regions { source, .. } = &mut foreign.output_layers[0] else {
+    let PatternOutputRealization::Regions { source } = &mut foreign.output_layers[0].realization
+    else {
         panic!("fixture retains regions output");
     };
     *source = RegionSourceIntent::GuideFaces {
@@ -232,17 +238,20 @@ fn generic_authored_guide_faces_have_a_strict_capability_boundary() {
         "pattern.output_layers.guide_faces",
     );
     let mut multiple = definition;
-    multiple.output_layers.push(PatternOutputLayer::Regions {
-        id: PatternOutputLayerId(46),
-        source: RegionSourceIntent::GuideFaces {
-            guide_mechanism_id: PatternMechanismId(41),
-            dimensions: vec![GuideDimensionId(42), GuideDimensionId(43)],
+    multiple.output_layers.push(PatternOutputLayer::all(
+        PatternOutputLayerId(46),
+        PatternOutputRealization::Regions {
+            source: RegionSourceIntent::GuideFaces {
+                guide_mechanism_id: PatternMechanismId(41),
+                dimensions: vec![GuideDimensionId(42), GuideDimensionId(43)],
+            },
         },
-    });
+    ));
+    let plural = resolve_document_pattern_pipeline(&document, &multiple)
+        .expect("plural Guide Faces outputs share one structural family");
+    assert_eq!(plural.ordered_outputs.len(), 2);
     assert_eq!(
-        resolve_document_pattern_pipeline(&document, &multiple)
-            .expect_err("current one-output gate remains")
-            .path(),
-        "pattern.output_layers.capability",
+        plural.evaluation_order,
+        vec![PatternOutputLayerId(45), PatternOutputLayerId(46)],
     );
 }

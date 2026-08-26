@@ -12,9 +12,9 @@ use toniator_domain::{
     MarkOrientation, MarkOrientationDraft, MazeProgram, PathStrokeStyle, PatternDefinition,
     PatternDefinitionBundle, PatternDefinitionDraft, PatternDefinitionId, PatternDefinitionRecipe,
     PatternGeometryResponse, PatternMechanism, PatternMechanismId, PatternOutputLayer,
-    PatternOutputLayerId, PatternOutputSettings, PatternStructureRecipe, PresetMetadata,
-    PresetRecord, RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy, SourceReference,
-    SourceReferenceId, StraightGuideDimension, StraightGuideRepetition,
+    PatternOutputLayerId, PatternOutputRealization, PatternOutputSettings, PatternStructureRecipe,
+    PresetMetadata, PresetRecord, RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy,
+    SourceReference, SourceReferenceId, StraightGuideDimension, StraightGuideRepetition,
 };
 use toniator_io::{
     EmbeddedSource, EmbeddedSourceFormat, SourceBundle, load, load_preset, save, save_preset,
@@ -122,12 +122,14 @@ fn connection_document_for(
             additional_margin: 0.0,
         },
     );
-    definition.output_layers = vec![PatternOutputLayer::ConnectionPaths {
-        id: PatternOutputLayerId(803),
-        site_mechanism_id: PatternMechanismId(802),
-        program,
-        style: PathStrokeStyle::default(),
-    }];
+    definition.output_layers = vec![PatternOutputLayer::all(
+        PatternOutputLayerId(803),
+        PatternOutputRealization::ConnectionPaths {
+            site_mechanism_id: PatternMechanismId(802),
+            program,
+            style: PathStrokeStyle::default(),
+        },
+    )];
     let mut settings = base.pattern_settings().clone();
     settings.definition_id = definition.id;
     settings.density.across_x = 8.0;
@@ -178,15 +180,17 @@ fn maze_document_for(
     );
     let mut bundle = connection.pattern_definition_bundles()[0].clone();
     let definition = &mut bundle.definition;
-    definition.output_layers = vec![PatternOutputLayer::MazeWalls {
-        id: PatternOutputLayerId(803),
-        site_mechanism_id: PatternMechanismId(802),
-        program: MazeProgram {
-            algorithm: GridMazeAlgorithm::RecursiveBacktracker,
-            seed,
+    definition.output_layers = vec![PatternOutputLayer::all(
+        PatternOutputLayerId(803),
+        PatternOutputRealization::MazeWalls {
+            site_mechanism_id: PatternMechanismId(802),
+            program: MazeProgram {
+                algorithm: GridMazeAlgorithm::RecursiveBacktracker,
+                seed,
+            },
+            style: PathStrokeStyle::default(),
         },
-        style: PathStrokeStyle::default(),
-    }];
+    )];
     let mut settings = connection.pattern_settings().clone();
     settings.density.across_x = 24.0;
     settings.density.across_y = settings.density.across_x * height / width;
@@ -237,19 +241,21 @@ fn dispersion_document_for(source_id: SourceReferenceId, width: f64, height: f64
             additional_margin: 0.0,
         },
     );
-    definition.output_layers = vec![PatternOutputLayer::ConnectionPaths {
-        id: PatternOutputLayerId(825),
-        site_mechanism_id: PatternMechanismId(824),
-        program: ConnectionProgram::RandomLinks {
-            adjacency: ConnectionAdjacencyIntent {
-                maximum_degree: 3,
-                maximum_distance: 96.0,
+    definition.output_layers = vec![PatternOutputLayer::all(
+        PatternOutputLayerId(825),
+        PatternOutputRealization::ConnectionPaths {
+            site_mechanism_id: PatternMechanismId(824),
+            program: ConnectionProgram::RandomLinks {
+                adjacency: ConnectionAdjacencyIntent {
+                    maximum_degree: 3,
+                    maximum_distance: 96.0,
+                },
+                minimum_degree: 1,
+                seed: 37,
             },
-            minimum_degree: 1,
-            seed: 37,
+            style: PathStrokeStyle::default(),
         },
-        style: PathStrokeStyle::default(),
-    }];
+    )];
     let mut settings = base.pattern_settings().clone();
     settings.definition_id = definition.id;
     settings.density.across_x = 8.0;
@@ -587,7 +593,7 @@ fn preset_v3_straight_grid_serialization_is_deterministic() {
     assert!(first.contains("\"response\""));
 }
 
-/// Keeps a current-v5 document with keyed output settings byte-stable after the connection DTO addition.
+/// Keeps a current-v5 document with normalized output records byte-stable across repeated saves.
 #[test]
 fn document_v5_existing_mark_serialization_is_stable() {
     let temporary = TemporaryDirectory::new("document-witness");
@@ -616,7 +622,7 @@ fn document_v5_existing_mark_serialization_is_stable() {
     assert_eq!(bytes, fs::read(&second).expect("second bytes"));
     assert_eq!(
         format!("{:x}", Sha256::digest(bytes)),
-        "ade2db546dac21f483180f5861f959c407fc019e3179aeaed45cb3c97cbb9f3d"
+        "556912f85e28b5431d8d59dfa4986d61f3bc881eb4c16ccac116ccc3d6e8adc4"
     );
 }
 
@@ -671,18 +677,28 @@ fn grid_connection_fixture_configuration_preserves_triangular_lattice_inputs() {
         maze2.pattern_settings().density.across_x
     );
     for (definition, expected_seed) in [(maze2_definition, 17), (maze3_definition, 23)] {
-        let [PatternOutputLayer::MazeWalls { program, .. }] = definition.output_layers.as_slice()
+        let [
+            PatternOutputLayer {
+                realization: PatternOutputRealization::MazeWalls { program, .. },
+                ..
+            },
+        ] = definition.output_layers.as_slice()
         else {
             panic!("maze fixture retains exactly one typed wall-maze output")
         };
         assert_eq!(program.algorithm, GridMazeAlgorithm::RecursiveBacktracker);
         assert_eq!(program.seed, expected_seed);
     }
-    let [PatternOutputLayer::ConnectionPaths { program, .. }] = prim3.pattern_definition_bundles()
-        [0]
-    .definition
-    .output_layers
-    .as_slice() else {
+    let [
+        PatternOutputLayer {
+            realization: PatternOutputRealization::ConnectionPaths { program, .. },
+            ..
+        },
+    ] = prim3.pattern_definition_bundles()[0]
+        .definition
+        .output_layers
+        .as_slice()
+    else {
         panic!("prim fixture retains its positive tree output")
     };
     assert_eq!(program.adjacency().maximum_degree, 6);

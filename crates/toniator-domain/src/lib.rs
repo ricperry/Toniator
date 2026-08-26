@@ -3,7 +3,7 @@
 //! Authoritative, headless document concepts for Toniator.
 
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, BTreeSet, HashSet},
     error::Error,
     fmt,
     ops::{Deref, DerefMut},
@@ -665,24 +665,24 @@ fn bundle_from_definition(definition: PatternDefinition) -> PatternDefinitionBun
         .iter()
         .map(|output| PatternOutputSettings {
             output_layer_id: output.id(),
-            response: match output {
-                PatternOutputLayer::CircularMarks { .. }
-                | PatternOutputLayer::MarkPrototype { .. } => {
+            response: match &output.realization {
+                PatternOutputRealization::CircularMarks { .. }
+                | PatternOutputRealization::MarkPrototype { .. } => {
                     PatternGeometryResponse::Marks(MarkGeometryResponse {
                         minimum_fill: 0.0,
                         maximum_fill: 1.0,
                     })
                 }
-                PatternOutputLayer::GuidePaths { .. }
-                | PatternOutputLayer::ParametricPaths { .. }
-                | PatternOutputLayer::ConnectionPaths { .. }
-                | PatternOutputLayer::MazeWalls { .. } => {
+                PatternOutputRealization::GuidePaths { .. }
+                | PatternOutputRealization::ParametricPaths { .. }
+                | PatternOutputRealization::ConnectionPaths { .. }
+                | PatternOutputRealization::MazeWalls { .. } => {
                     PatternGeometryResponse::Connected(ConnectedGeometryResponse {
                         minimum_thickness: 0.0,
                         maximum_thickness: 1.0,
                     })
                 }
-                PatternOutputLayer::Regions { .. } => {
+                PatternOutputRealization::Regions { .. } => {
                     PatternGeometryResponse::Regions(RegionGeometryResponse::default())
                 }
             },
@@ -694,16 +694,15 @@ fn bundle_from_definition(definition: PatternDefinition) -> PatternDefinitionBun
     }
 }
 
-/// Binds ID-free ordered recipe responses to freshly allocated structural outputs.
+/// Binds ID-free ordered recipe responses and local filter references to freshly allocated
+/// structural outputs.
 ///
 /// # Errors
 ///
 /// Returns a stable cardinality or response-kind diagnostic when a complete
-/// recipe cannot bind one response to every output. Stage 20N retains the
-/// current single-output authoring gate but does not collapse the ordered
-/// representation.
+/// recipe cannot bind one response and filter to every ordered output.
 fn bind_recipe_output_settings(
-    definition: PatternDefinition,
+    mut definition: PatternDefinition,
     recipes: &[PatternOutputSettingsRecipe],
 ) -> Result<PatternDefinitionBundle, ValidationError> {
     if recipes.len() != definition.output_layers.len() {
@@ -711,6 +710,38 @@ fn bind_recipe_output_settings(
             "preset.recipe.output_settings.cardinality",
             "recipe output settings must cover every structural output",
         ));
+    }
+    let output_ids = definition
+        .output_layers
+        .iter()
+        .map(|output| output.id)
+        .collect::<Vec<_>>();
+    for (index, (output, recipe)) in definition.output_layers.iter_mut().zip(recipes).enumerate() {
+        output.source_filter = match recipe.source_filter {
+            SiteUseFilterRecipe::All => SiteUseFilter::All,
+            SiteUseFilterRecipe::SitesUsedBy { output_index } => SiteUseFilter::SitesUsedBy {
+                output_layer_id: *output_ids.get(output_index).ok_or(ValidationError::new(
+                    "preset.recipe.output_settings.source_filter.output_index",
+                    "site-use filter references an out-of-bounds recipe output index",
+                ))?,
+            },
+            SiteUseFilterRecipe::SitesUnusedBy { output_index } => SiteUseFilter::SitesUnusedBy {
+                output_layer_id: *output_ids.get(output_index).ok_or(ValidationError::new(
+                    "preset.recipe.output_settings.source_filter.output_index",
+                    "site-use filter references an out-of-bounds recipe output index",
+                ))?,
+            },
+        };
+        if output
+            .source_filter
+            .referenced_output_layer_id()
+            .is_some_and(|id| id == output_ids[index])
+        {
+            return Err(ValidationError::new(
+                "preset.recipe.output_settings.source_filter.self_reference",
+                "site-use filter cannot reference its own recipe output index",
+            ));
+        }
     }
     let bundle = PatternDefinitionBundle {
         output_settings: definition
@@ -870,17 +901,21 @@ fn validate_response_for_output(
     response: &PatternGeometryResponse,
 ) -> Result<(), ValidationError> {
     let marks = matches!(
-        output,
-        PatternOutputLayer::CircularMarks { .. } | PatternOutputLayer::MarkPrototype { .. }
+        &output.realization,
+        PatternOutputRealization::CircularMarks { .. }
+            | PatternOutputRealization::MarkPrototype { .. }
     );
     let connected = matches!(
-        output,
-        PatternOutputLayer::GuidePaths { .. }
-            | PatternOutputLayer::ParametricPaths { .. }
-            | PatternOutputLayer::ConnectionPaths { .. }
-            | PatternOutputLayer::MazeWalls { .. }
+        &output.realization,
+        PatternOutputRealization::GuidePaths { .. }
+            | PatternOutputRealization::ParametricPaths { .. }
+            | PatternOutputRealization::ConnectionPaths { .. }
+            | PatternOutputRealization::MazeWalls { .. }
     );
-    let regions = matches!(output, PatternOutputLayer::Regions { .. });
+    let regions = matches!(
+        &output.realization,
+        PatternOutputRealization::Regions { .. }
+    );
     match (marks, connected, regions, response) {
         (true, false, false, PatternGeometryResponse::Marks(_))
         | (false, true, false, PatternGeometryResponse::Connected(_))
@@ -1147,6 +1182,12 @@ pub struct PatternCapabilityProjection {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PatternOutputCapabilityRecord {
     pub output_layer_id: PatternOutputLayerId,
+    /// Zero-based authored vector position; renderers preserve this painter order.
+    pub painter_index: usize,
+    /// Authored site-selection dependency; this is intent rather than derived usage.
+    pub source_filter: SiteUseFilter,
+    /// Same-mechanism, site-backed outputs that are valid dependency targets.
+    pub compatible_filter_targets: Vec<PatternOutputLayerId>,
     pub structural: PatternOutputCapabilityProjection,
     pub response: PatternGeometryResponse,
 }
@@ -1657,6 +1698,689 @@ impl PatternOutputSettingsEdit {
     }
 }
 
+/// One atomic authored-bundle edit across output settings, dependencies, or painter order.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PatternDefinitionBundleEdit {
+    /// Applies an existing typed response edit to one output setting.
+    OutputSettings(PatternOutputSettingsEdit),
+    /// Replaces one output's authored site-use filter without changing its realization kind.
+    SetSiteUseFilter {
+        output_layer_id: PatternOutputLayerId,
+        source_filter: SiteUseFilter,
+    },
+    /// Moves one output and its matching setting to an authored painter position.
+    MoveOutputLayer {
+        output_layer_id: PatternOutputLayerId,
+        painter_index: usize,
+    },
+}
+
+impl PatternDefinitionBundleEdit {
+    /// Validates and applies one complete bundle edit while preserving output-setting alignment.
+    ///
+    /// # Errors
+    ///
+    /// Returns stable missing-target, range, dependency, kind, or no-op diagnostics without
+    /// publishing a partial bundle.
+    fn apply_to_bundle(&self, bundle: &mut PatternDefinitionBundle) -> Result<(), ValidationError> {
+        match self {
+            Self::OutputSettings(edit) => edit.apply_to_bundle(bundle),
+            Self::SetSiteUseFilter {
+                output_layer_id,
+                source_filter,
+            } => {
+                let output = bundle
+                    .definition
+                    .output_layers
+                    .iter_mut()
+                    .find(|output| output.id == *output_layer_id)
+                    .ok_or(ValidationError::new(
+                        "pattern.bundle.site_filter.output_layer_id",
+                        "site-use filter edit targets a missing output",
+                    ))?;
+                if output.source_filter == *source_filter {
+                    return Err(ValidationError::new(
+                        "pattern.bundle.site_filter.edit",
+                        "site-use filter edit is a semantic no-op",
+                    ));
+                }
+                output.source_filter = *source_filter;
+                bundle.validate()
+            }
+            Self::MoveOutputLayer {
+                output_layer_id,
+                painter_index,
+            } => {
+                if *painter_index >= bundle.definition.output_layers.len() {
+                    return Err(ValidationError::new(
+                        "pattern.bundle.output_order.painter_index",
+                        "painter index must address the existing output collection",
+                    ));
+                }
+                let current = bundle
+                    .definition
+                    .output_layers
+                    .iter()
+                    .position(|output| output.id == *output_layer_id)
+                    .ok_or(ValidationError::new(
+                        "pattern.bundle.output_order.output_layer_id",
+                        "painter-order edit targets a missing output",
+                    ))?;
+                if current == *painter_index {
+                    return Err(ValidationError::new(
+                        "pattern.bundle.output_order.edit",
+                        "painter-order edit is a semantic no-op",
+                    ));
+                }
+                let output = bundle.definition.output_layers.remove(current);
+                let setting = bundle.output_settings.remove(current);
+                bundle
+                    .definition
+                    .output_layers
+                    .insert(*painter_index, output);
+                bundle.output_settings.insert(*painter_index, setting);
+                bundle.validate()
+            }
+        }
+    }
+
+    /// Classifies the exact cache boundary owned by this atomic bundle edit.
+    ///
+    /// # Errors
+    ///
+    /// Returns the nested settings diagnostic for malformed response edits.
+    fn invalidation_for(
+        &self,
+        base: &PatternDefinitionBundle,
+    ) -> Result<InvalidationLevel, ValidationError> {
+        match self {
+            Self::OutputSettings(edit) => edit.invalidation_for(base),
+            Self::SetSiteUseFilter { .. } => Ok(InvalidationLevel::Realization),
+            Self::MoveOutputLayer { .. } => Ok(InvalidationLevel::Presentation),
+        }
+    }
+}
+
+#[cfg(test)]
+mod stage20r_domain_tests {
+    use super::*;
+
+    /// Builds a valid three-output straight-grid bundle with painter order opposite dependency order.
+    fn composite_bundle() -> PatternDefinitionBundle {
+        let mut definition = PatternDefinition::supported_straight_grid(
+            PatternDefinitionId(20),
+            "Stage 20R domain fixture",
+            PatternMechanismId(21),
+            PatternMechanismId(22),
+            PatternOutputLayerId(30),
+            CoveragePolicy {
+                guard_steps: 1,
+                additional_margin: 0.0,
+            },
+        );
+        let connection = PatternOutputLayer::all(
+            PatternOutputLayerId(30),
+            PatternOutputRealization::ConnectionPaths {
+                site_mechanism_id: PatternMechanismId(22),
+                program: ConnectionProgram::NearestLinks {
+                    adjacency: ConnectionAdjacencyIntent {
+                        maximum_degree: 2,
+                        maximum_distance: 12.0,
+                    },
+                },
+                style: PathStrokeStyle::default(),
+            },
+        );
+        let used = PatternOutputLayer::new(
+            PatternOutputLayerId(31),
+            SiteUseFilter::SitesUsedBy {
+                output_layer_id: PatternOutputLayerId(30),
+            },
+            PatternOutputRealization::CircularMarks {
+                site_mechanism_id: PatternMechanismId(22),
+            },
+        );
+        let unused = PatternOutputLayer::new(
+            PatternOutputLayerId(32),
+            SiteUseFilter::SitesUnusedBy {
+                output_layer_id: PatternOutputLayerId(31),
+            },
+            PatternOutputRealization::CircularMarks {
+                site_mechanism_id: PatternMechanismId(22),
+            },
+        );
+        definition.output_layers = vec![unused, connection, used];
+        let output_settings = definition
+            .output_layers
+            .iter()
+            .map(|output| PatternOutputSettings {
+                output_layer_id: output.id,
+                response: match output.realization {
+                    PatternOutputRealization::ConnectionPaths { .. } => {
+                        PatternGeometryResponse::Connected(ConnectedGeometryResponse {
+                            minimum_thickness: 0.0,
+                            maximum_thickness: 1.0,
+                        })
+                    }
+                    _ => PatternGeometryResponse::Marks(MarkGeometryResponse {
+                        minimum_fill: 0.0,
+                        maximum_fill: 1.0,
+                    }),
+                },
+            })
+            .collect();
+        PatternDefinitionBundle {
+            definition,
+            output_settings,
+        }
+    }
+
+    /// Builds a three-channel shared composite with two sparse keyed response deltas on channel one.
+    fn shared_composite_document_with_deltas() -> Document {
+        let mut document = Document::new_default_document(
+            CanvasSpec {
+                width: 64.0,
+                height: 48.0,
+            },
+            SourceReference::Unassigned,
+        )
+        .expect("default document validates");
+        document.pattern_definition_bundles = vec![composite_bundle()];
+        document.pattern_settings.definition_id = PatternDefinitionId(20);
+        let ChannelConfiguration::Topology { topology, .. } = &mut document.channel_configuration
+        else {
+            unreachable!("default document uses modeled topology")
+        };
+        topology.channels[0].pattern_instance.output_response_deltas = vec![
+            PatternOutputResponseDelta {
+                output_layer_id: PatternOutputLayerId(30),
+                delta: ChannelGeometryResponseDelta::Connected(ConnectedGeometryResponseDelta {
+                    minimum_thickness_delta: Some(0.05),
+                    maximum_thickness_delta: None,
+                }),
+            },
+            PatternOutputResponseDelta {
+                output_layer_id: PatternOutputLayerId(31),
+                delta: ChannelGeometryResponseDelta::Marks(MarkGeometryResponseDelta {
+                    minimum_fill_delta: Some(0.1),
+                    maximum_fill_delta: None,
+                }),
+            },
+        ];
+        document.validate().expect("shared composite validates");
+        document
+    }
+
+    /// Proves stable ID tie-breaking derives dependency order without changing painter order.
+    #[test]
+    fn composite_dependency_order_is_id_tiebroken_and_painter_neutral() {
+        let bundle = composite_bundle();
+        bundle
+            .validate()
+            .expect("heterogeneous composite validates");
+        assert_eq!(
+            bundle
+                .definition
+                .output_layers
+                .iter()
+                .map(|output| output.id)
+                .collect::<Vec<_>>(),
+            vec![
+                PatternOutputLayerId(32),
+                PatternOutputLayerId(30),
+                PatternOutputLayerId(31)
+            ]
+        );
+        assert_eq!(
+            pattern_output_evaluation_order(&bundle.definition).expect("DAG resolves"),
+            vec![
+                PatternOutputLayerId(30),
+                PatternOutputLayerId(31),
+                PatternOutputLayerId(32)
+            ]
+        );
+        let effective = bundle
+            .output_settings
+            .iter()
+            .map(|setting| EffectivePatternOutputSettings {
+                output_layer_id: setting.output_layer_id,
+                response: setting.response.clone(),
+            })
+            .collect::<Vec<_>>();
+        let projection = project_validated_pattern_definition(&bundle.definition, &effective)
+            .expect("composite capability projects");
+        assert_eq!(
+            projection
+                .outputs
+                .iter()
+                .map(|output| (output.output_layer_id, output.painter_index))
+                .collect::<Vec<_>>(),
+            vec![
+                (PatternOutputLayerId(32), 0),
+                (PatternOutputLayerId(30), 1),
+                (PatternOutputLayerId(31), 2)
+            ]
+        );
+        assert_eq!(
+            projection.outputs[0].compatible_filter_targets,
+            vec![PatternOutputLayerId(30), PatternOutputLayerId(31)]
+        );
+        assert_eq!(
+            property_field_contract(PropertyFieldId::OutputSiteUseFilterKind).value_kind,
+            PropertyValueKind::EnumChoice
+        );
+        assert_eq!(
+            property_field_contract(PropertyFieldId::OutputSiteUseFilterReference).value_kind,
+            PropertyValueKind::StableIdReference
+        );
+        let filter_command = DocumentCommand::EditSharedPatternDefinitionBundle {
+            definition_id: bundle.definition.id,
+            base_bundle: bundle.clone(),
+            edit: PatternDefinitionBundleEdit::SetSiteUseFilter {
+                output_layer_id: PatternOutputLayerId(32),
+                source_filter: SiteUseFilter::SitesUsedBy {
+                    output_layer_id: PatternOutputLayerId(30),
+                },
+            },
+        };
+        assert_eq!(
+            filter_command.field_classification(),
+            DocumentCommandFieldClassification::DescriptorBacked(vec![
+                PropertyCommandFieldProjection {
+                    field: PropertyFieldId::OutputSiteUseFilterKind,
+                    value: PropertyFieldValue::EnumChoice(PropertyEnumChoice::SiteUseFilter(
+                        SiteUseFilterKind::SitesUsedBy,
+                    )),
+                },
+                PropertyCommandFieldProjection {
+                    field: PropertyFieldId::OutputSiteUseFilterReference,
+                    value: PropertyFieldValue::StableIdReference,
+                },
+            ])
+        );
+    }
+
+    /// Proves missing, self, and cyclic filter references reject with stable dependency paths.
+    #[test]
+    fn composite_filter_references_reject_invalid_dependency_graphs() {
+        let mut missing = composite_bundle().definition;
+        missing.output_layers[0].source_filter = SiteUseFilter::SitesUsedBy {
+            output_layer_id: PatternOutputLayerId(99),
+        };
+        assert_eq!(
+            validate_definition_structure(&missing).unwrap_err().path(),
+            "pattern.output_layers.filter.missing_reference"
+        );
+        let mut self_reference = composite_bundle().definition;
+        self_reference.output_layers[0].source_filter = SiteUseFilter::SitesUsedBy {
+            output_layer_id: PatternOutputLayerId(32),
+        };
+        assert_eq!(
+            validate_definition_structure(&self_reference)
+                .unwrap_err()
+                .path(),
+            "pattern.output_layers.filter.self_reference"
+        );
+        let mut cyclic = composite_bundle().definition;
+        cyclic.output_layers[1].source_filter = SiteUseFilter::SitesUsedBy {
+            output_layer_id: PatternOutputLayerId(32),
+        };
+        assert_eq!(
+            validate_definition_structure(&cyclic).unwrap_err().path(),
+            "pattern.output_layers.dependency.cycle"
+        );
+        let mut non_site_source = composite_bundle().definition;
+        non_site_source.output_layers[0].realization = PatternOutputRealization::GuidePaths {
+            guide_mechanism_id: PatternMechanismId(21),
+            style: PathStrokeStyle::default(),
+        };
+        assert_eq!(
+            validate_definition_structure(&non_site_source)
+                .unwrap_err()
+                .path(),
+            "pattern.output_layers.filter.non_site_source"
+        );
+        let mut non_site_reference = composite_bundle().definition;
+        non_site_reference.output_layers[1].realization = PatternOutputRealization::GuidePaths {
+            guide_mechanism_id: PatternMechanismId(21),
+            style: PathStrokeStyle::default(),
+        };
+        assert_eq!(
+            validate_definition_structure(&non_site_reference)
+                .unwrap_err()
+                .path(),
+            "pattern.output_layers.filter.non_site_reference"
+        );
+        let mut incompatible = composite_bundle().definition;
+        incompatible.output_layers[2].realization = PatternOutputRealization::CircularMarks {
+            site_mechanism_id: PatternMechanismId(999),
+        };
+        assert_eq!(
+            validate_definition_structure(&incompatible)
+                .unwrap_err()
+                .path(),
+            "pattern.output_layers.filter.incompatible_mechanism"
+        );
+    }
+
+    /// Proves painter moves reorder output settings atomically without changing dependency intent.
+    #[test]
+    fn painter_move_keeps_settings_and_filters_in_lockstep() {
+        let mut bundle = composite_bundle();
+        PatternDefinitionBundleEdit::MoveOutputLayer {
+            output_layer_id: PatternOutputLayerId(30),
+            painter_index: 0,
+        }
+        .apply_to_bundle(&mut bundle)
+        .expect("painter move validates");
+        assert_eq!(
+            bundle
+                .definition
+                .output_layers
+                .iter()
+                .map(|output| output.id)
+                .collect::<Vec<_>>(),
+            vec![
+                PatternOutputLayerId(30),
+                PatternOutputLayerId(32),
+                PatternOutputLayerId(31)
+            ]
+        );
+        assert_eq!(
+            bundle
+                .output_settings
+                .iter()
+                .map(|setting| setting.output_layer_id)
+                .collect::<Vec<_>>(),
+            vec![
+                PatternOutputLayerId(30),
+                PatternOutputLayerId(32),
+                PatternOutputLayerId(31)
+            ]
+        );
+        assert_eq!(
+            PatternDefinitionBundleEdit::MoveOutputLayer {
+                output_layer_id: PatternOutputLayerId(30),
+                painter_index: 2,
+            }
+            .invalidation_for(&bundle)
+            .expect("move invalidation resolves"),
+            InvalidationLevel::Presentation
+        );
+        let command = DocumentCommand::EditSharedPatternDefinitionBundle {
+            definition_id: bundle.definition.id,
+            base_bundle: bundle,
+            edit: PatternDefinitionBundleEdit::MoveOutputLayer {
+                output_layer_id: PatternOutputLayerId(30),
+                painter_index: 1,
+            },
+        };
+        assert_eq!(
+            command.field_classification(),
+            DocumentCommandFieldClassification::NonField(NonFieldCommandOperation::MoveOutputLayer)
+        );
+    }
+
+    /// Proves selected copy-on-edit remaps moved outputs, filters, deltas, and exact history.
+    #[test]
+    fn selected_composite_move_clones_and_remaps_complete_bundle_history() {
+        let original = shared_composite_document_with_deltas();
+        let mut history = DocumentHistory::new(
+            DocumentSession::new(original.clone()).expect("composite session validates"),
+        );
+        let command = DocumentCommand::EditSelectedChannelPatternDefinitionBundle {
+            channel_id: ChannelId(1),
+            base_bundle: composite_bundle(),
+            edit: PatternDefinitionBundleEdit::MoveOutputLayer {
+                output_layer_id: PatternOutputLayerId(31),
+                painter_index: 0,
+            },
+        };
+        let result = history.apply(&command).expect("selected move applies");
+        assert_eq!(result.affected_channels, vec![ChannelId(1)]);
+        assert_eq!(result.invalidation, Some(InvalidationLevel::Family));
+        let moved = history.document().clone();
+        let clone_id = moved
+            .pattern_definition_id_for(ChannelId(1))
+            .expect("selected clone is assigned");
+        assert_ne!(clone_id, PatternDefinitionId(20));
+        assert_eq!(
+            moved.pattern_definition_id_for(ChannelId(2)),
+            Some(PatternDefinitionId(20))
+        );
+        let clone = moved.bundle(clone_id).expect("selected clone exists");
+        let clone_ids = clone
+            .definition
+            .output_layers
+            .iter()
+            .map(|output| output.id)
+            .collect::<Vec<_>>();
+        assert_eq!(clone_ids.len(), 3);
+        assert_eq!(
+            clone.definition.output_layers[0].source_filter,
+            SiteUseFilter::SitesUsedBy {
+                output_layer_id: clone_ids[2],
+            }
+        );
+        assert_eq!(
+            clone.definition.output_layers[1].source_filter,
+            SiteUseFilter::SitesUnusedBy {
+                output_layer_id: clone_ids[0],
+            }
+        );
+        let selected_deltas = &moved
+            .channel_pattern_instance(ChannelId(1))
+            .expect("selected channel exists")
+            .output_response_deltas;
+        assert_eq!(
+            selected_deltas
+                .iter()
+                .map(|delta| delta.output_layer_id)
+                .collect::<Vec<_>>(),
+            vec![clone_ids[0], clone_ids[2]]
+        );
+        history
+            .undo()
+            .expect("selected move undo applies")
+            .expect("selected move has inverse");
+        assert_eq!(history.document(), &original);
+        history
+            .redo()
+            .expect("selected move redo applies")
+            .expect("selected move has redo");
+        assert_eq!(history.document(), &moved);
+    }
+
+    /// Proves shared painter moves retain IDs and reorder every linked channel's keyed deltas.
+    #[test]
+    fn shared_composite_move_retains_ids_and_reorders_linked_deltas() {
+        let document = shared_composite_document_with_deltas();
+        document
+            .validate_property_descriptors()
+            .expect("composite filter descriptors are bidirectionally complete");
+        let filter_values = document
+            .property_values()
+            .into_iter()
+            .filter(|value| {
+                matches!(
+                    value.descriptor.field,
+                    PropertyFieldId::OutputSiteUseFilterKind
+                        | PropertyFieldId::OutputSiteUseFilterReference
+                ) && value.descriptor.target
+                    == PropertyTarget::OutputLayer(
+                        PatternDefinitionId(20),
+                        PatternOutputLayerId(31),
+                    )
+            })
+            .map(|value| (value.descriptor.field, value.value))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            filter_values,
+            vec![
+                (
+                    PropertyFieldId::OutputSiteUseFilterKind,
+                    PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::SiteUseFilter(
+                        SiteUseFilterKind::SitesUsedBy,
+                    )),
+                ),
+                (
+                    PropertyFieldId::OutputSiteUseFilterReference,
+                    PropertyCurrentValueKind::Reference(PropertyReferenceValue::OutputLayer(
+                        PatternOutputLayerId(30),
+                    )),
+                ),
+            ]
+        );
+        let mut history = DocumentHistory::new(
+            DocumentSession::new(document).expect("composite session validates"),
+        );
+        let command = DocumentCommand::EditSharedPatternDefinitionBundle {
+            definition_id: PatternDefinitionId(20),
+            base_bundle: composite_bundle(),
+            edit: PatternDefinitionBundleEdit::MoveOutputLayer {
+                output_layer_id: PatternOutputLayerId(31),
+                painter_index: 0,
+            },
+        };
+        let result = history.apply(&command).expect("shared move applies");
+        assert_eq!(
+            result.affected_channels,
+            vec![ChannelId(1), ChannelId(2), ChannelId(3)]
+        );
+        assert_eq!(result.invalidation, Some(InvalidationLevel::Presentation));
+        let bundle = history
+            .document()
+            .bundle(PatternDefinitionId(20))
+            .expect("shared bundle remains");
+        assert_eq!(
+            bundle
+                .definition
+                .output_layers
+                .iter()
+                .map(|output| output.id)
+                .collect::<Vec<_>>(),
+            vec![
+                PatternOutputLayerId(31),
+                PatternOutputLayerId(32),
+                PatternOutputLayerId(30),
+            ]
+        );
+        assert_eq!(
+            history
+                .document()
+                .channel_pattern_instance(ChannelId(1))
+                .expect("linked channel exists")
+                .output_response_deltas
+                .iter()
+                .map(|delta| delta.output_layer_id)
+                .collect::<Vec<_>>(),
+            vec![PatternOutputLayerId(31), PatternOutputLayerId(30)]
+        );
+    }
+
+    /// Proves ordered preset outputs remap recipe-local filter indices to fresh document IDs.
+    #[test]
+    fn ordered_recipe_materialization_remaps_filter_indices() {
+        let document = Document::new_default_document(
+            CanvasSpec {
+                width: 64.0,
+                height: 48.0,
+            },
+            SourceReference::Unassigned,
+        )
+        .expect("default document validates");
+        let recipe = PatternDefinitionRecipe {
+            structure: PatternStructureRecipe::OrderedOutputs {
+                definition: Box::new(PatternStructureRecipe::StraightGrid(
+                    PatternDefinitionDraft {
+                        name: "ordered recipe".into(),
+                        coverage: CoveragePolicy {
+                            guard_steps: 1,
+                            additional_margin: 0.0,
+                        },
+                    },
+                )),
+                outputs: vec![
+                    PatternOutputRealizationRecipe::Marks,
+                    PatternOutputRealizationRecipe::ConnectionPaths {
+                        program: ConnectionProgram::NearestLinks {
+                            adjacency: ConnectionAdjacencyIntent {
+                                maximum_degree: 2,
+                                maximum_distance: 12.0,
+                            },
+                        },
+                        style: PathStrokeStyle::default(),
+                    },
+                ],
+            },
+            output_settings: vec![
+                PatternOutputSettingsRecipe {
+                    source_filter: SiteUseFilterRecipe::SitesUnusedBy { output_index: 1 },
+                    response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+                        minimum_fill: 0.0,
+                        maximum_fill: 1.0,
+                    }),
+                },
+                PatternOutputSettingsRecipe {
+                    source_filter: SiteUseFilterRecipe::All,
+                    response: PatternGeometryResponse::Connected(ConnectedGeometryResponse {
+                        minimum_thickness: 0.0,
+                        maximum_thickness: 1.0,
+                    }),
+                },
+            ],
+        };
+        validate_recipe_output_settings(&recipe).expect("recipe-local references validate");
+        validate_pattern_structure_recipe(&recipe.structure).expect("ordered structure validates");
+        let materialized = document
+            .allocate_definition_from_recipe(None, &recipe)
+            .expect("ordered recipe materializes");
+        let ids = materialized
+            .bundle
+            .definition
+            .output_layers
+            .iter()
+            .map(|output| output.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            materialized.bundle.definition.output_layers[0].source_filter,
+            SiteUseFilter::SitesUnusedBy {
+                output_layer_id: ids[1]
+            }
+        );
+        assert_eq!(
+            pattern_output_evaluation_order(&materialized.bundle.definition)
+                .expect("materialized DAG validates"),
+            vec![ids[1], ids[0]]
+        );
+        let mut cyclic = recipe.clone();
+        cyclic.output_settings[1].source_filter =
+            SiteUseFilterRecipe::SitesUsedBy { output_index: 0 };
+        assert_eq!(
+            validate_recipe_output_settings(&cyclic).unwrap_err().path(),
+            "preset.recipe.output_settings.source_filter.cycle"
+        );
+        let mut non_site = recipe;
+        let PatternStructureRecipe::OrderedOutputs { outputs, .. } = &mut non_site.structure else {
+            unreachable!("fixture is ordered")
+        };
+        outputs[0] = PatternOutputRealizationRecipe::StructuralPaths {
+            style: PathStrokeStyle::default(),
+        };
+        non_site.output_settings[0].response =
+            PatternGeometryResponse::Connected(ConnectedGeometryResponse {
+                minimum_thickness: 0.0,
+                maximum_thickness: 1.0,
+            });
+        assert_eq!(
+            validate_recipe_output_settings(&non_site)
+                .unwrap_err()
+                .path(),
+            "preset.recipe.output_settings.source_filter.non_site_source"
+        );
+    }
+}
+
 /// Returns the persisted sampling tag without exposing any treatment endpoint payload.
 const fn region_response_sampling(response: &RegionGeometryResponse) -> RegionSamplingStrategy {
     match response {
@@ -1716,6 +2440,7 @@ pub enum HalftoneChannelRole {
 }
 
 impl HalftoneChannelModel {
+    /// Returns the fixed semantic channel roles owned by this modeled topology.
     fn canonical_roles(self) -> &'static [HalftoneChannelRole] {
         match self {
             Self::Rgb => &[
@@ -1769,6 +2494,7 @@ pub enum ModeledMappingFieldEdit {
 }
 
 impl SourceMapping {
+    /// Builds the identity source transform for one authoritative source component.
     pub const fn canonical(component: SourceMappingComponent) -> Self {
         Self {
             component,
@@ -1821,10 +2547,12 @@ pub struct ChannelTopology {
 }
 
 impl ChannelTopology {
+    /// Retains one caller-supplied modeled channel order for document validation.
     pub fn new(channels: Vec<ModeledChannelState>) -> Self {
         Self { channels }
     }
 
+    /// Returns modeled channels in their authoritative renderer and persistence order.
     pub fn channels(&self) -> &[ModeledChannelState] {
         &self.channels
     }
@@ -1850,6 +2578,7 @@ impl ChannelTopology {
 }
 
 impl ModeledChannelState {
+    /// Builds one fixed model role from the shared pattern-instance template.
     fn canonical(role: HalftoneChannelRole, template: &ChannelTopologyTemplate) -> Self {
         let (id, component, paint) = match role {
             HalftoneChannelRole::Red => (
@@ -2147,51 +2876,94 @@ impl PatternMechanism {
     }
 }
 
-/// One ordered typed output layer.  Additional layer variants are deferred;
-/// their absence is a capability failure, never a legacy fallback.
+/// One authored site-selection dependency for an ordered output layer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum SiteUseFilter {
+    /// Consumes the complete compatible guard-inclusive family site set.
+    #[default]
+    All,
+    /// Consumes only sites published as used by the referenced output.
+    SitesUsedBy {
+        output_layer_id: PatternOutputLayerId,
+    },
+    /// Consumes the complete compatible family except sites used by the referenced output.
+    SitesUnusedBy {
+        output_layer_id: PatternOutputLayerId,
+    },
+}
+
+/// Value-only filter selector exposed by output-target descriptors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SiteUseFilterKind {
+    All,
+    SitesUsedBy,
+    SitesUnusedBy,
+}
+
+impl SiteUseFilter {
+    /// Returns the value-only selector without exposing a positional or derived dependency.
+    pub const fn kind(self) -> SiteUseFilterKind {
+        match self {
+            Self::All => SiteUseFilterKind::All,
+            Self::SitesUsedBy { .. } => SiteUseFilterKind::SitesUsedBy,
+            Self::SitesUnusedBy { .. } => SiteUseFilterKind::SitesUnusedBy,
+        }
+    }
+
+    /// Returns the referenced output identity for dependent filters and `None` for `All`.
+    pub const fn referenced_output_layer_id(self) -> Option<PatternOutputLayerId> {
+        match self {
+            Self::All => None,
+            Self::SitesUsedBy { output_layer_id } | Self::SitesUnusedBy { output_layer_id } => {
+                Some(output_layer_id)
+            }
+        }
+    }
+}
+
+/// One typed output realization independent of its stable identity and site filter.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PatternOutputLayer {
+pub enum PatternOutputRealization {
     CircularMarks {
-        id: PatternOutputLayerId,
         site_mechanism_id: PatternMechanismId,
     },
     MarkPrototype {
-        id: PatternOutputLayerId,
         site_mechanism_id: PatternMechanismId,
         prototype: MarkPrototype,
         orientation: MarkOrientation,
     },
     /// Consumes one ordered guide-path mechanism as round-brush strokes.
     GuidePaths {
-        id: PatternOutputLayerId,
         guide_mechanism_id: PatternMechanismId,
         style: PathStrokeStyle,
     },
     /// Consumes one ordered parametric source as canonical connected paths.
     ParametricPaths {
-        id: PatternOutputLayerId,
         curve_mechanism_id: PatternMechanismId,
         style: PathStrokeStyle,
     },
     /// Consumes one typed site product as deterministic positive connection paths.
     ConnectionPaths {
-        id: PatternOutputLayerId,
         site_mechanism_id: PatternMechanismId,
         program: ConnectionProgram,
         style: PathStrokeStyle,
     },
     /// Consumes a straight-guide intersection site product as positive retained maze walls.
     MazeWalls {
-        id: PatternOutputLayerId,
         site_mechanism_id: PatternMechanismId,
         program: MazeProgram,
         style: PathStrokeStyle,
     },
     /// Consumes one eligible reusable site product as ordinary canonical Voronoi regions.
-    Regions {
-        id: PatternOutputLayerId,
-        source: RegionSourceIntent,
-    },
+    Regions { source: RegionSourceIntent },
+}
+
+/// One stable ordered output record. Stored vector order is authoritative painter order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PatternOutputLayer {
+    pub id: PatternOutputLayerId,
+    pub source_filter: SiteUseFilter,
+    pub realization: PatternOutputRealization,
 }
 
 /// Authored source identity for one fixed full canonical-region output.
@@ -2230,16 +3002,56 @@ impl RegionSourceIntent {
 }
 
 impl PatternOutputLayer {
-    pub const fn id(&self) -> PatternOutputLayerId {
-        match self {
-            Self::CircularMarks { id, .. }
-            | Self::MarkPrototype { id, .. }
-            | Self::GuidePaths { id, .. }
-            | Self::ParametricPaths { id, .. }
-            | Self::ConnectionPaths { id, .. }
-            | Self::MazeWalls { id, .. }
-            | Self::Regions { id, .. } => *id,
+    /// Builds an explicitly filtered ordered output record.
+    pub const fn new(
+        id: PatternOutputLayerId,
+        source_filter: SiteUseFilter,
+        realization: PatternOutputRealization,
+    ) -> Self {
+        Self {
+            id,
+            source_filter,
+            realization,
         }
+    }
+
+    /// Builds a current-format output that consumes the complete compatible family.
+    pub const fn all(id: PatternOutputLayerId, realization: PatternOutputRealization) -> Self {
+        Self::new(id, SiteUseFilter::All, realization)
+    }
+
+    /// Returns the stable authored output identity.
+    pub const fn id(&self) -> PatternOutputLayerId {
+        self.id
+    }
+
+    /// Returns the exact site-product mechanism consumed by site-backed realizations.
+    pub const fn site_mechanism_id(&self) -> Option<PatternMechanismId> {
+        match &self.realization {
+            PatternOutputRealization::CircularMarks { site_mechanism_id }
+            | PatternOutputRealization::MarkPrototype {
+                site_mechanism_id, ..
+            }
+            | PatternOutputRealization::ConnectionPaths {
+                site_mechanism_id, ..
+            }
+            | PatternOutputRealization::MazeWalls {
+                site_mechanism_id, ..
+            } => Some(*site_mechanism_id),
+            PatternOutputRealization::Regions {
+                source: RegionSourceIntent::VoronoiSites { site_mechanism_id },
+            } => Some(*site_mechanism_id),
+            PatternOutputRealization::GuidePaths { .. }
+            | PatternOutputRealization::ParametricPaths { .. }
+            | PatternOutputRealization::Regions {
+                source: RegionSourceIntent::GuideFaces { .. },
+            } => None,
+        }
+    }
+
+    /// Reports whether this output can publish site usage for another compatible layer.
+    pub const fn publishes_site_usage(&self) -> bool {
+        self.site_mechanism_id().is_some()
     }
 }
 
@@ -2294,10 +3106,12 @@ impl PatternDefinition {
                     guide_mechanism_id: guide_id,
                 },
             ],
-            output_layers: vec![PatternOutputLayer::CircularMarks {
-                id: output_id,
-                site_mechanism_id: intersections_id,
-            }],
+            output_layers: vec![PatternOutputLayer::all(
+                output_id,
+                PatternOutputRealization::CircularMarks {
+                    site_mechanism_id: intersections_id,
+                },
+            )],
             modulation: PatternModulation,
             coverage,
         }
@@ -2354,12 +3168,14 @@ impl PatternDefinition {
                 },
                 site,
             ],
-            output_layers: vec![PatternOutputLayer::MarkPrototype {
-                id: output_id,
-                site_mechanism_id: site_id,
-                prototype: MarkPrototype::Circle,
-                orientation,
-            }],
+            output_layers: vec![PatternOutputLayer::all(
+                output_id,
+                PatternOutputRealization::MarkPrototype {
+                    site_mechanism_id: site_id,
+                    prototype: MarkPrototype::Circle,
+                    orientation,
+                },
+            )],
             modulation: PatternModulation,
             coverage,
         }
@@ -2415,12 +3231,14 @@ impl PatternDefinition {
                 },
                 site,
             ],
-            output_layers: vec![PatternOutputLayer::MarkPrototype {
-                id: output_id,
-                site_mechanism_id: site_id,
-                prototype: MarkPrototype::Circle,
-                orientation,
-            }],
+            output_layers: vec![PatternOutputLayer::all(
+                output_id,
+                PatternOutputRealization::MarkPrototype {
+                    site_mechanism_id: site_id,
+                    prototype: MarkPrototype::Circle,
+                    orientation,
+                },
+            )],
             modulation: PatternModulation,
             coverage,
         }
@@ -2478,12 +3296,14 @@ impl PatternDefinition {
                     maximum_neighbor_checks,
                 },
             ],
-            output_layers: vec![PatternOutputLayer::MarkPrototype {
-                id: output_id,
-                site_mechanism_id: site_id,
-                prototype: MarkPrototype::Circle,
-                orientation: MarkOrientation::Fixed,
-            }],
+            output_layers: vec![PatternOutputLayer::all(
+                output_id,
+                PatternOutputRealization::MarkPrototype {
+                    site_mechanism_id: site_id,
+                    prototype: MarkPrototype::Circle,
+                    orientation: MarkOrientation::Fixed,
+                },
+            )],
             modulation: PatternModulation,
             coverage,
         }
@@ -2955,12 +3775,14 @@ impl Document {
         };
         validate_effective_pattern(&effective)?;
         validate_effective_response_compatibility(definition, &effective.output_settings)?;
-        if matches!(
-            definition.output_layers.as_slice(),
-            [PatternOutputLayer::GuidePaths { .. }
-                | PatternOutputLayer::ConnectionPaths { .. }
-                | PatternOutputLayer::MazeWalls { .. }]
-        ) && effective.shape_rotation_degrees != 0.0
+        if definition.output_layers.len() == 1
+            && matches!(
+                &definition.output_layers[0].realization,
+                PatternOutputRealization::GuidePaths { .. }
+                    | PatternOutputRealization::ConnectionPaths { .. }
+                    | PatternOutputRealization::MazeWalls { .. }
+            )
+            && effective.shape_rotation_degrees != 0.0
         {
             return Err(ValidationError::new(
                 "effective_pattern.shape_rotation_degrees",
@@ -3577,10 +4399,12 @@ impl Document {
             DocumentCommand::EditSelectedChannelPatternDefinitionBundle {
                 channel_id,
                 base_bundle,
-                edit: PatternOutputSettingsEdit::SetRegionResponse {
-                    output_layer_id,
-                    response,
-                },
+                edit: PatternDefinitionBundleEdit::OutputSettings(
+                    PatternOutputSettingsEdit::SetRegionResponse {
+                        output_layer_id,
+                        response,
+                    },
+                ),
             },
         )
     }
@@ -3606,10 +4430,12 @@ impl Document {
         Ok(DocumentCommand::EditSharedPatternDefinitionBundle {
             definition_id,
             base_bundle,
-            edit: PatternOutputSettingsEdit::SetRegionResponse {
-                output_layer_id,
-                response,
-            },
+            edit: PatternDefinitionBundleEdit::OutputSettings(
+                PatternOutputSettingsEdit::SetRegionResponse {
+                    output_layer_id,
+                    response,
+                },
+            ),
         })
     }
 
@@ -3655,16 +4481,15 @@ impl Document {
                 }
             }
             for layer in &definition.output_layers {
-                if let PatternOutputLayer::MarkPrototype {
-                    id,
+                if let PatternOutputRealization::MarkPrototype {
                     prototype: MarkPrototype::AuthoredClosedShape { structure_id },
                     ..
-                } = layer
+                } = &layer.realization
                 {
                     uses.push(AuthoredStructureUse::Mark {
                         channel_id,
                         definition_id,
-                        output_layer_id: *id,
+                        output_layer_id: layer.id,
                         structure_id: *structure_id,
                     });
                 }
@@ -3690,8 +4515,8 @@ impl Document {
                 )
             }) || definition.output_layers.iter().any(|layer| {
                 matches!(
-                    layer,
-                    PatternOutputLayer::MarkPrototype {
+                    &layer.realization,
+                    PatternOutputRealization::MarkPrototype {
                         prototype: MarkPrototype::AuthoredClosedShape { structure_id },
                         ..
                     } if *structure_id == id
@@ -3824,20 +4649,20 @@ impl Document {
                 && let Some(definition) = self.definition(effective.definition_id)
             {
                 for output in &definition.output_layers {
-                    let fields: &[PropertyFieldId] = match output {
-                        PatternOutputLayer::CircularMarks { .. }
-                        | PatternOutputLayer::MarkPrototype { .. } => &[
+                    let fields: &[PropertyFieldId] = match &output.realization {
+                        PatternOutputRealization::CircularMarks { .. }
+                        | PatternOutputRealization::MarkPrototype { .. } => &[
                             PropertyFieldId::MarkMinimumFill,
                             PropertyFieldId::MarkMaximumFill,
                         ],
-                        PatternOutputLayer::GuidePaths { .. }
-                        | PatternOutputLayer::ParametricPaths { .. }
-                        | PatternOutputLayer::ConnectionPaths { .. }
-                        | PatternOutputLayer::MazeWalls { .. } => &[
+                        PatternOutputRealization::GuidePaths { .. }
+                        | PatternOutputRealization::ParametricPaths { .. }
+                        | PatternOutputRealization::ConnectionPaths { .. }
+                        | PatternOutputRealization::MazeWalls { .. } => &[
                             PropertyFieldId::ConnectedMinimumThickness,
                             PropertyFieldId::ConnectedMaximumThickness,
                         ],
-                        PatternOutputLayer::Regions { .. } => match effective
+                        PatternOutputRealization::Regions { .. } => match effective
                             .output_settings
                             .iter()
                             .find(|setting| setting.output_layer_id == output.id())
@@ -4148,7 +4973,19 @@ impl Document {
             }
             for layer in &definition.output_layers {
                 let target = PropertyTarget::OutputLayer(definition.id, layer.id());
-                if let PatternOutputLayer::ConnectionPaths { program, .. } = layer {
+                descriptors.push(descriptor_from_contract(
+                    PropertyFieldId::OutputSiteUseFilterKind,
+                    target,
+                ));
+                if layer.source_filter.referenced_output_layer_id().is_some() {
+                    descriptors.push(descriptor_from_contract(
+                        PropertyFieldId::OutputSiteUseFilterReference,
+                        target,
+                    ));
+                }
+                if let PatternOutputRealization::ConnectionPaths { program, .. } =
+                    &layer.realization
+                {
                     for field in [
                         PropertyFieldId::ConnectionProgram,
                         PropertyFieldId::ConnectionMaximumDegree,
@@ -4169,20 +5006,25 @@ impl Document {
                         ));
                     }
                 }
-                if matches!(layer, PatternOutputLayer::MazeWalls { .. }) {
+                if matches!(
+                    &layer.realization,
+                    PatternOutputRealization::MazeWalls { .. }
+                ) {
                     descriptors.push(descriptor_from_contract(PropertyFieldId::MazeSeed, target));
                 }
                 if matches!(
-                    layer,
-                    PatternOutputLayer::CircularMarks { .. }
-                        | PatternOutputLayer::MarkPrototype { .. }
+                    &layer.realization,
+                    PatternOutputRealization::CircularMarks { .. }
+                        | PatternOutputRealization::MarkPrototype { .. }
                 ) {
                     descriptors.push(descriptor_from_contract(
                         PropertyFieldId::OutputSiteProduct,
                         target,
                     ));
                 }
-                if let PatternOutputLayer::MarkPrototype { orientation, .. } = layer {
+                if let PatternOutputRealization::MarkPrototype { orientation, .. } =
+                    &layer.realization
+                {
                     for field in [
                         PropertyFieldId::OutputPrototype,
                         PropertyFieldId::OutputOrientation,
@@ -4199,8 +5041,8 @@ impl Document {
                         ));
                     }
                     if matches!(
-                        layer,
-                        PatternOutputLayer::MarkPrototype {
+                        &layer.realization,
+                        PatternOutputRealization::MarkPrototype {
                             prototype: MarkPrototype::AuthoredClosedShape { .. },
                             ..
                         }
@@ -4500,38 +5342,38 @@ impl Document {
                     .find(|setting| setting.output_layer_id == output_layer_id)
                     .map(|setting| &setting.response)
                     .expect("active output descriptor resolves an output setting");
-                match (descriptor.field, output, response) {
+                match (descriptor.field, &output.realization, response) {
                     (
                         PropertyFieldId::MarkMinimumFill,
-                        PatternOutputLayer::CircularMarks { .. }
-                        | PatternOutputLayer::MarkPrototype { .. },
+                        PatternOutputRealization::CircularMarks { .. }
+                        | PatternOutputRealization::MarkPrototype { .. },
                         PatternGeometryResponse::Marks(response),
                     ) => PropertyCurrentValueKind::FiniteF64(response.minimum_fill),
                     (
                         PropertyFieldId::MarkMaximumFill,
-                        PatternOutputLayer::CircularMarks { .. }
-                        | PatternOutputLayer::MarkPrototype { .. },
+                        PatternOutputRealization::CircularMarks { .. }
+                        | PatternOutputRealization::MarkPrototype { .. },
                         PatternGeometryResponse::Marks(response),
                     ) => PropertyCurrentValueKind::FiniteF64(response.maximum_fill),
                     (
                         PropertyFieldId::ConnectedMinimumThickness,
-                        PatternOutputLayer::GuidePaths { .. }
-                        | PatternOutputLayer::ParametricPaths { .. }
-                        | PatternOutputLayer::ConnectionPaths { .. }
-                        | PatternOutputLayer::MazeWalls { .. },
+                        PatternOutputRealization::GuidePaths { .. }
+                        | PatternOutputRealization::ParametricPaths { .. }
+                        | PatternOutputRealization::ConnectionPaths { .. }
+                        | PatternOutputRealization::MazeWalls { .. },
                         PatternGeometryResponse::Connected(response),
                     ) => PropertyCurrentValueKind::FiniteF64(response.minimum_thickness),
                     (
                         PropertyFieldId::ConnectedMaximumThickness,
-                        PatternOutputLayer::GuidePaths { .. }
-                        | PatternOutputLayer::ParametricPaths { .. }
-                        | PatternOutputLayer::ConnectionPaths { .. }
-                        | PatternOutputLayer::MazeWalls { .. },
+                        PatternOutputRealization::GuidePaths { .. }
+                        | PatternOutputRealization::ParametricPaths { .. }
+                        | PatternOutputRealization::ConnectionPaths { .. }
+                        | PatternOutputRealization::MazeWalls { .. },
                         PatternGeometryResponse::Connected(response),
                     ) => PropertyCurrentValueKind::FiniteF64(response.maximum_thickness),
                     (
                         PropertyFieldId::RegionTreatment,
-                        PatternOutputLayer::Regions { .. },
+                        PatternOutputRealization::Regions { .. },
                         PatternGeometryResponse::Regions(response),
                     ) => PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::RegionTreatment(
                         match response {
@@ -4546,7 +5388,7 @@ impl Document {
                     )),
                     (
                         PropertyFieldId::RegionSampling,
-                        PatternOutputLayer::Regions { .. },
+                        PatternOutputRealization::Regions { .. },
                         PatternGeometryResponse::Regions(response),
                     ) => PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::RegionSampling(
                         match response {
@@ -4557,7 +5399,7 @@ impl Document {
                     )),
                     (
                         PropertyFieldId::RegionMinimumScale,
-                        PatternOutputLayer::Regions { .. },
+                        PatternOutputRealization::Regions { .. },
                         PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
                             minimum_scale,
                             ..
@@ -4565,7 +5407,7 @@ impl Document {
                     ) => PropertyCurrentValueKind::FiniteF64(*minimum_scale),
                     (
                         PropertyFieldId::RegionMaximumScale,
-                        PatternOutputLayer::Regions { .. },
+                        PatternOutputRealization::Regions { .. },
                         PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
                             maximum_scale,
                             ..
@@ -4573,7 +5415,7 @@ impl Document {
                     ) => PropertyCurrentValueKind::FiniteF64(*maximum_scale),
                     (
                         PropertyFieldId::RegionMinimumGap,
-                        PatternOutputLayer::Regions { .. },
+                        PatternOutputRealization::Regions { .. },
                         PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap {
                             minimum_gap,
                             ..
@@ -4581,7 +5423,7 @@ impl Document {
                     ) => PropertyCurrentValueKind::FiniteF64(*minimum_gap),
                     (
                         PropertyFieldId::RegionMaximumGap,
-                        PatternOutputLayer::Regions { .. },
+                        PatternOutputRealization::Regions { .. },
                         PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap {
                             maximum_gap,
                             ..
@@ -4805,43 +5647,57 @@ impl Document {
                             .find(|layer| layer.id() == output_layer_id)
                     })
                     .expect("active output descriptor");
-                match (descriptor.field, layer) {
+                match (descriptor.field, &layer.realization) {
+                    (PropertyFieldId::OutputSiteUseFilterKind, _) => {
+                        PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::SiteUseFilter(
+                            layer.source_filter.kind(),
+                        ))
+                    }
+                    (PropertyFieldId::OutputSiteUseFilterReference, _) => {
+                        PropertyCurrentValueKind::Reference(PropertyReferenceValue::OutputLayer(
+                            layer
+                                .source_filter
+                                .referenced_output_layer_id()
+                                .expect("active filter-reference descriptor"),
+                        ))
+                    }
                     (
                         PropertyFieldId::ConnectionProgram,
-                        PatternOutputLayer::ConnectionPaths { program, .. },
+                        PatternOutputRealization::ConnectionPaths { program, .. },
                     ) => PropertyCurrentValueKind::EnumChoice(
                         PropertyEnumChoice::ConnectionProgram(program.kind()),
                     ),
                     (
                         PropertyFieldId::ConnectionMaximumDegree,
-                        PatternOutputLayer::ConnectionPaths { program, .. },
+                        PatternOutputRealization::ConnectionPaths { program, .. },
                     ) => PropertyCurrentValueKind::U32(program.adjacency().maximum_degree),
                     (
                         PropertyFieldId::ConnectionMaximumDistance,
-                        PatternOutputLayer::ConnectionPaths { program, .. },
+                        PatternOutputRealization::ConnectionPaths { program, .. },
                     ) => PropertyCurrentValueKind::FiniteF64(program.adjacency().maximum_distance),
                     (
                         PropertyFieldId::ConnectionMinimumDegree,
-                        PatternOutputLayer::ConnectionPaths {
+                        PatternOutputRealization::ConnectionPaths {
                             program: ConnectionProgram::RandomLinks { minimum_degree, .. },
                             ..
                         },
                     ) => PropertyCurrentValueKind::U32(*minimum_degree),
                     (
                         PropertyFieldId::ConnectionSeed,
-                        PatternOutputLayer::ConnectionPaths { program, .. },
+                        PatternOutputRealization::ConnectionPaths { program, .. },
                     ) => PropertyCurrentValueKind::U32(
                         program.seed().expect("active connection seed descriptor"),
                     ),
-                    (PropertyFieldId::MazeSeed, PatternOutputLayer::MazeWalls { program, .. }) => {
-                        PropertyCurrentValueKind::U32(program.seed)
-                    }
+                    (
+                        PropertyFieldId::MazeSeed,
+                        PatternOutputRealization::MazeWalls { program, .. },
+                    ) => PropertyCurrentValueKind::U32(program.seed),
                     (
                         PropertyFieldId::OutputSiteProduct,
-                        PatternOutputLayer::CircularMarks {
+                        PatternOutputRealization::CircularMarks {
                             site_mechanism_id, ..
                         }
-                        | PatternOutputLayer::MarkPrototype {
+                        | PatternOutputRealization::MarkPrototype {
                             site_mechanism_id, ..
                         },
                     ) => PropertyCurrentValueKind::Reference(PropertyReferenceValue::Mechanism(
@@ -4849,7 +5705,7 @@ impl Document {
                     )),
                     (
                         PropertyFieldId::OutputPrototype,
-                        PatternOutputLayer::MarkPrototype { prototype, .. },
+                        PatternOutputRealization::MarkPrototype { prototype, .. },
                     ) => PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::MarkPrototype(
                         match prototype {
                             MarkPrototype::Circle => MarkPrototypeKind::Circle,
@@ -4860,7 +5716,7 @@ impl Document {
                     )),
                     (
                         PropertyFieldId::OutputAuthoredClosedShape,
-                        PatternOutputLayer::MarkPrototype {
+                        PatternOutputRealization::MarkPrototype {
                             prototype: MarkPrototype::AuthoredClosedShape { structure_id },
                             ..
                         },
@@ -4869,7 +5725,7 @@ impl Document {
                     ),
                     (
                         PropertyFieldId::OutputOrientation,
-                        PatternOutputLayer::MarkPrototype { orientation, .. },
+                        PatternOutputRealization::MarkPrototype { orientation, .. },
                     ) => PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::MarkOrientation(
                         match orientation {
                             MarkOrientation::Fixed => MarkOrientationKind::Fixed,
@@ -4881,7 +5737,7 @@ impl Document {
                     )),
                     (
                         PropertyFieldId::OutputOrientationDimension,
-                        PatternOutputLayer::MarkPrototype {
+                        PatternOutputRealization::MarkPrototype {
                             orientation:
                                 MarkOrientation::GuideTangent { dimension_id }
                                 | MarkOrientation::GuideNormal { dimension_id },
@@ -5341,13 +6197,20 @@ impl Document {
             ));
         };
         let (prototype, orientation) = match base.output_layers.as_slice() {
-            [PatternOutputLayer::CircularMarks { .. }] => {
-                (MarkPrototype::Circle, MarkOrientation::Fixed)
-            }
             [
-                PatternOutputLayer::MarkPrototype {
-                    prototype,
-                    orientation,
+                PatternOutputLayer {
+                    realization: PatternOutputRealization::CircularMarks { .. },
+                    ..
+                },
+            ] => (MarkPrototype::Circle, MarkOrientation::Fixed),
+            [
+                PatternOutputLayer {
+                    realization:
+                        PatternOutputRealization::MarkPrototype {
+                            prototype,
+                            orientation,
+                            ..
+                        },
                     ..
                 },
             ] => (prototype.clone(), orientation.clone()),
@@ -5390,8 +6253,12 @@ impl Document {
             base.coverage.clone(),
         );
         let [
-            PatternOutputLayer::MarkPrototype {
-                prototype: target_prototype,
+            PatternOutputLayer {
+                realization:
+                    PatternOutputRealization::MarkPrototype {
+                        prototype: target_prototype,
+                        ..
+                    },
                 ..
             },
         ] = definition.output_layers.as_mut_slice()
@@ -5452,6 +6319,18 @@ impl Document {
         channel_id: Option<ChannelId>,
         recipe: &PatternDefinitionRecipe,
     ) -> Result<MaterializedPatternDefinitionRecipe, ValidationError> {
+        if let PatternStructureRecipe::OrderedOutputs {
+            definition,
+            outputs,
+        } = &recipe.structure
+        {
+            return self.allocate_ordered_outputs_from_recipe(
+                channel_id,
+                definition,
+                outputs,
+                &recipe.output_settings,
+            );
+        }
         let (definition_recipe, shape_draft, connection, maze, voronoi, guide_faces) =
             match &recipe.structure {
                 PatternStructureRecipe::AuthoredClosedShapeMarks { definition, shape } => {
@@ -5520,33 +6399,29 @@ impl Document {
                 .iter_mut()
                 .find(|definition| definition.id == neutral.id)
                 .expect("fresh recipe definition");
-            let (output_id, site_mechanism_id) = match definition.output_layers.as_slice() {
-                [
-                    PatternOutputLayer::CircularMarks {
-                        id,
-                        site_mechanism_id,
-                    },
-                ]
-                | [
-                    PatternOutputLayer::MarkPrototype {
-                        id,
-                        site_mechanism_id,
-                        ..
-                    },
-                ] => (*id, *site_mechanism_id),
-                _ => {
-                    return Err(ValidationError::new(
+            let output = definition.output_layers.first().ok_or_else(|| {
+                ValidationError::new(
+                    "pattern_definitions.recipe.connection",
+                    "connection recipe materialized an incompatible output",
+                )
+            })?;
+            let (output_id, site_mechanism_id) = (
+                output.id,
+                output.site_mechanism_id().ok_or_else(|| {
+                    ValidationError::new(
                         "pattern_definitions.recipe.connection",
                         "connection recipe materialized an incompatible output",
-                    ));
-                }
-            };
-            definition.output_layers = vec![PatternOutputLayer::ConnectionPaths {
-                id: output_id,
-                site_mechanism_id,
-                program: program.clone(),
-                style,
-            }];
+                    )
+                })?,
+            );
+            definition.output_layers = vec![PatternOutputLayer::all(
+                output_id,
+                PatternOutputRealization::ConnectionPaths {
+                    site_mechanism_id,
+                    program: program.clone(),
+                    style,
+                },
+            )];
             validate_definition(definition)?;
         }
         if let Some((program, style)) = maze {
@@ -5555,33 +6430,29 @@ impl Document {
                 .iter_mut()
                 .find(|definition| definition.id == neutral.id)
                 .expect("fresh recipe definition");
-            let (output_id, site_mechanism_id) = match definition.output_layers.as_slice() {
-                [
-                    PatternOutputLayer::CircularMarks {
-                        id,
-                        site_mechanism_id,
-                    },
-                ]
-                | [
-                    PatternOutputLayer::MarkPrototype {
-                        id,
-                        site_mechanism_id,
-                        ..
-                    },
-                ] => (*id, *site_mechanism_id),
-                _ => {
-                    return Err(ValidationError::new(
+            let output = definition.output_layers.first().ok_or_else(|| {
+                ValidationError::new(
+                    "pattern_definitions.recipe.maze",
+                    "maze recipe materialized an incompatible output",
+                )
+            })?;
+            let (output_id, site_mechanism_id) = (
+                output.id,
+                output.site_mechanism_id().ok_or_else(|| {
+                    ValidationError::new(
                         "pattern_definitions.recipe.maze",
                         "maze recipe materialized an incompatible output",
-                    ));
-                }
-            };
-            definition.output_layers = vec![PatternOutputLayer::MazeWalls {
-                id: output_id,
-                site_mechanism_id,
-                program: program.clone(),
-                style,
-            }];
+                    )
+                })?,
+            );
+            definition.output_layers = vec![PatternOutputLayer::all(
+                output_id,
+                PatternOutputRealization::MazeWalls {
+                    site_mechanism_id,
+                    program: program.clone(),
+                    style,
+                },
+            )];
             validate_definition(definition)?;
         }
         if voronoi {
@@ -5590,31 +6461,27 @@ impl Document {
                 .iter_mut()
                 .find(|definition| definition.id == neutral.id)
                 .expect("fresh recipe definition");
-            let (output_id, site_mechanism_id) = match definition.output_layers.as_slice() {
-                [
-                    PatternOutputLayer::CircularMarks {
-                        id,
-                        site_mechanism_id,
-                    },
-                ]
-                | [
-                    PatternOutputLayer::MarkPrototype {
-                        id,
-                        site_mechanism_id,
-                        ..
-                    },
-                ] => (*id, *site_mechanism_id),
-                _ => {
-                    return Err(ValidationError::new(
+            let output = definition.output_layers.first().ok_or_else(|| {
+                ValidationError::new(
+                    "pattern_definitions.recipe.voronoi",
+                    "Voronoi recipe materialized an incompatible output",
+                )
+            })?;
+            let (output_id, site_mechanism_id) = (
+                output.id,
+                output.site_mechanism_id().ok_or_else(|| {
+                    ValidationError::new(
                         "pattern_definitions.recipe.voronoi",
                         "Voronoi recipe materialized an incompatible output",
-                    ));
-                }
-            };
-            definition.output_layers = vec![PatternOutputLayer::Regions {
-                id: output_id,
-                source: RegionSourceIntent::VoronoiSites { site_mechanism_id },
-            }];
+                    )
+                })?,
+            );
+            definition.output_layers = vec![PatternOutputLayer::all(
+                output_id,
+                PatternOutputRealization::Regions {
+                    source: RegionSourceIntent::VoronoiSites { site_mechanism_id },
+                },
+            )];
             validate_definition(definition)?;
         }
         if let Some(dimension_indices) = guide_faces {
@@ -5628,8 +6495,7 @@ impl Document {
                 definition.mechanisms.as_slice(),
             ) {
                 (
-                    [PatternOutputLayer::CircularMarks { id, .. }]
-                    | [PatternOutputLayer::MarkPrototype { id, .. }],
+                    [PatternOutputLayer { id, .. }],
                     [
                         PatternMechanism::StraightGuideDimensions {
                             id: guide_id,
@@ -5655,13 +6521,15 @@ impl Document {
                         "Guide Faces recipe dimension index is out of bounds",
                     )
                 })?;
-            definition.output_layers = vec![PatternOutputLayer::Regions {
-                id: output_id,
-                source: RegionSourceIntent::GuideFaces {
-                    guide_mechanism_id,
-                    dimensions: selected,
+            definition.output_layers = vec![PatternOutputLayer::all(
+                output_id,
+                PatternOutputRealization::Regions {
+                    source: RegionSourceIntent::GuideFaces {
+                        guide_mechanism_id,
+                        dimensions: selected,
+                    },
                 },
-            }];
+            )];
             validate_definition(definition)?;
         }
         let authored_structure = if let Some(shape_draft) = shape_draft {
@@ -5671,18 +6539,21 @@ impl Document {
                 .find(|definition| definition.id == neutral.id)
                 .expect("fresh recipe definition");
             if let [
-                PatternOutputLayer::CircularMarks {
+                PatternOutputLayer {
                     id,
-                    site_mechanism_id,
+                    realization: PatternOutputRealization::CircularMarks { site_mechanism_id },
+                    ..
                 },
             ] = definition.output_layers.as_slice()
             {
-                definition.output_layers = vec![PatternOutputLayer::MarkPrototype {
-                    id: *id,
-                    site_mechanism_id: *site_mechanism_id,
-                    prototype: MarkPrototype::Circle,
-                    orientation: MarkOrientation::Fixed,
-                }];
+                definition.output_layers = vec![PatternOutputLayer::all(
+                    *id,
+                    PatternOutputRealization::MarkPrototype {
+                        site_mechanism_id: *site_mechanism_id,
+                        prototype: MarkPrototype::Circle,
+                        orientation: MarkOrientation::Fixed,
+                    },
+                )];
                 validate_definition(definition)?;
             }
             let structure_id = next_authored_structure_id(&candidate.authored_structures)?;
@@ -5720,9 +6591,227 @@ impl Document {
         })
     }
 
+    /// Materializes one family recipe plus ordered ID-free heterogeneous output recipes.
+    ///
+    /// # Errors
+    ///
+    /// Returns stable allocation, mechanism-compatibility, recipe-index, or complete-bundle
+    /// diagnostics without publishing IDs, definitions, or derived state.
+    fn allocate_ordered_outputs_from_recipe(
+        &self,
+        channel_id: Option<ChannelId>,
+        family_recipe: &PatternStructureRecipe,
+        outputs: &[PatternOutputRealizationRecipe],
+        settings: &[PatternOutputSettingsRecipe],
+    ) -> Result<MaterializedPatternDefinitionRecipe, ValidationError> {
+        if outputs.is_empty() || outputs.len() != settings.len() {
+            return Err(ValidationError::new(
+                "preset.recipe.outputs.cardinality",
+                "ordered output recipes and settings must be nonempty and cardinally aligned",
+            ));
+        }
+        let neutral = self.allocate_neutral_definition_from_recipe(family_recipe)?;
+        let mut candidate = self.clone();
+        candidate
+            .pattern_definition_bundles
+            .push(bundle_from_definition(neutral.clone()));
+        if let Some(channel_id) = channel_id {
+            candidate.retarget_channel(channel_id, neutral.id);
+        } else {
+            candidate.pattern_settings.definition_id = neutral.id;
+        }
+        candidate.apply_recipe_controls(neutral.id, family_recipe)?;
+        let mut definition =
+            candidate
+                .definition(neutral.id)
+                .cloned()
+                .ok_or(ValidationError::new(
+                    "pattern_definitions.recipe",
+                    "ordered recipe materialization lost its fresh family",
+                ))?;
+        let first_output_id = definition
+            .output_layers
+            .first()
+            .map(|output| output.id)
+            .ok_or(ValidationError::new(
+                "preset.recipe.outputs.cardinality",
+                "ordered recipe family must allocate one neutral output ID",
+            ))?;
+        let site_mechanism_id = match definition.family {
+            PatternFamily::GuideIntersections {
+                site_mechanism_id, ..
+            } => Some(site_mechanism_id),
+            PatternFamily::RandomSites {
+                site_product_id, ..
+            } => Some(site_product_id),
+            PatternFamily::ParametricCurve {
+                site_mechanism_id, ..
+            } => site_mechanism_id,
+        };
+        let structural_mechanism_id = match definition.family {
+            PatternFamily::GuideIntersections {
+                guide_mechanism_id, ..
+            } => guide_mechanism_id,
+            PatternFamily::ParametricCurve {
+                curve_mechanism_id, ..
+            } => curve_mechanism_id,
+            PatternFamily::RandomSites { .. } => PatternMechanismId(0),
+        };
+        let neutral_marks = definition
+            .output_layers
+            .first()
+            .map(|output| output.realization.clone());
+        let dimension_ids = definition
+            .mechanisms
+            .iter()
+            .find_map(|mechanism| match mechanism {
+                PatternMechanism::StraightGuideDimensions { dimensions, .. } => Some(
+                    dimensions
+                        .iter()
+                        .map(|dimension| dimension.id)
+                        .collect::<Vec<_>>(),
+                ),
+                PatternMechanism::GuideDimensions { dimensions, .. } => Some(
+                    dimensions
+                        .iter()
+                        .map(|dimension| dimension.id)
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let mut output_layers = Vec::with_capacity(outputs.len());
+        for (index, output) in outputs.iter().enumerate() {
+            let output_id = PatternOutputLayerId(
+                first_output_id
+                    .0
+                    .checked_add(u64::try_from(index).map_err(|_| {
+                        ValidationError::new(
+                            "pattern_definitions.output_layers.id",
+                            "ordered recipe output index exceeds document ID space",
+                        )
+                    })?)
+                    .ok_or(ValidationError::new(
+                        "pattern_definitions.output_layers.id",
+                        "document output-layer ID space is exhausted",
+                    ))?,
+            );
+            if self
+                .pattern_definition_bundles
+                .iter()
+                .flat_map(|bundle| &bundle.definition.output_layers)
+                .any(|existing| existing.id == output_id)
+            {
+                return Err(ValidationError::new(
+                    "pattern_definitions.output_layers.id",
+                    "ordered recipe output-layer allocation collided",
+                ));
+            }
+            let realization = match output {
+                PatternOutputRealizationRecipe::Marks => {
+                    let realization = neutral_marks.clone().ok_or(ValidationError::new(
+                        "preset.recipe.outputs.marks",
+                        "family recipe cannot materialize mark output",
+                    ))?;
+                    match realization {
+                        PatternOutputRealization::CircularMarks { .. }
+                        | PatternOutputRealization::MarkPrototype { .. } => realization,
+                        _ => {
+                            return Err(ValidationError::new(
+                                "preset.recipe.outputs.marks",
+                                "family recipe does not publish a site-backed mark capability",
+                            ));
+                        }
+                    }
+                }
+                PatternOutputRealizationRecipe::StructuralPaths { style } => {
+                    match definition.family {
+                        PatternFamily::GuideIntersections { .. } => {
+                            PatternOutputRealization::GuidePaths {
+                                guide_mechanism_id: structural_mechanism_id,
+                                style: *style,
+                            }
+                        }
+                        PatternFamily::ParametricCurve { .. } => {
+                            PatternOutputRealization::ParametricPaths {
+                                curve_mechanism_id: structural_mechanism_id,
+                                style: *style,
+                            }
+                        }
+                        PatternFamily::RandomSites { .. } => {
+                            return Err(ValidationError::new(
+                                "preset.recipe.outputs.structural_paths",
+                                "random-site families do not publish structural paths",
+                            ));
+                        }
+                    }
+                }
+                PatternOutputRealizationRecipe::ConnectionPaths { program, style } => {
+                    PatternOutputRealization::ConnectionPaths {
+                        site_mechanism_id: site_mechanism_id.ok_or(ValidationError::new(
+                            "preset.recipe.outputs.connection",
+                            "connection output requires a site-backed family",
+                        ))?,
+                        program: program.clone(),
+                        style: *style,
+                    }
+                }
+                PatternOutputRealizationRecipe::MazeWalls { program, style } => {
+                    PatternOutputRealization::MazeWalls {
+                        site_mechanism_id: site_mechanism_id.ok_or(ValidationError::new(
+                            "preset.recipe.outputs.maze",
+                            "maze output requires a site-backed family",
+                        ))?,
+                        program: program.clone(),
+                        style: *style,
+                    }
+                }
+                PatternOutputRealizationRecipe::VoronoiRegions => {
+                    PatternOutputRealization::Regions {
+                        source: RegionSourceIntent::VoronoiSites {
+                            site_mechanism_id: site_mechanism_id.ok_or(ValidationError::new(
+                                "preset.recipe.outputs.voronoi",
+                                "Voronoi output requires a site-backed family",
+                            ))?,
+                        },
+                    }
+                }
+                PatternOutputRealizationRecipe::GuideFaceRegions { dimension_indices } => {
+                    let selected = dimension_indices
+                        .iter()
+                        .map(|index| dimension_ids.get(*index).copied())
+                        .collect::<Option<Vec<_>>>()
+                        .ok_or(ValidationError::new(
+                            "preset.recipe.outputs.guide_faces.dimension_indices",
+                            "Guide Faces output references an out-of-bounds dimension index",
+                        ))?;
+                    PatternOutputRealization::Regions {
+                        source: RegionSourceIntent::GuideFaces {
+                            guide_mechanism_id: structural_mechanism_id,
+                            dimensions: selected,
+                        },
+                    }
+                }
+            };
+            output_layers.push(PatternOutputLayer::all(output_id, realization));
+        }
+        definition.output_layers = output_layers;
+        validate_definition(&definition)?;
+        let bundle = bind_recipe_output_settings(definition, settings)?;
+        Ok(MaterializedPatternDefinitionRecipe {
+            bundle,
+            authored_structure: None,
+        })
+    }
+
     /// Allocates only a valid neutral topology for an ID-free recipe. Variant
     /// payloads deliberately remain neutral here and are applied later through
     /// the public transition-draft authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns stable allocation, recipe-reference, or structural validation diagnostics without
+    /// publishing a partially allocated definition.
     fn allocate_neutral_definition_from_recipe(
         &self,
         recipe: &PatternStructureRecipe,
@@ -5864,7 +6953,8 @@ impl Document {
             | PatternStructureRecipe::MazeWalls { .. }
             | PatternStructureRecipe::AuthoredClosedShapeMarks { .. }
             | PatternStructureRecipe::VoronoiRegions { .. }
-            | PatternStructureRecipe::GuideFaceRegions { .. } => {
+            | PatternStructureRecipe::GuideFaceRegions { .. }
+            | PatternStructureRecipe::OrderedOutputs { .. } => {
                 unreachable!("output recipe wrapper is removed before neutral allocation")
             }
         }
@@ -5873,6 +6963,11 @@ impl Document {
     /// Applies a recipe's scalar controls and compound alternatives to a
     /// private candidate definition. All payload-bearing alternatives pass
     /// through `variant_transition_draft`; scalar leaves use existing edits.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first stable recipe-edit or validation diagnostic while the private candidate
+    /// remains unpublished.
     fn apply_recipe_controls(
         &mut self,
         definition_id: PatternDefinitionId,
@@ -6141,7 +7236,8 @@ impl Document {
             | PatternStructureRecipe::MazeWalls { .. }
             | PatternStructureRecipe::AuthoredClosedShapeMarks { .. }
             | PatternStructureRecipe::VoronoiRegions { .. }
-            | PatternStructureRecipe::GuideFaceRegions { .. } => {
+            | PatternStructureRecipe::GuideFaceRegions { .. }
+            | PatternStructureRecipe::OrderedOutputs { .. } => {
                 unreachable!("output recipe wrapper is removed before control application")
             }
         }
@@ -6226,659 +7322,388 @@ impl Document {
         &self,
         source: &PatternDefinition,
     ) -> Result<PatternDefinition, ValidationError> {
-        if let (
-            [
-                PatternMechanism::StraightGuides { .. },
-                PatternMechanism::GuideIntersections { .. },
-            ],
-            [
-                PatternOutputLayer::Regions {
-                    source:
-                        RegionSourceIntent::VoronoiSites {
-                            site_mechanism_id: _,
-                        },
-                    ..
-                },
-            ],
-        ) = (
-            source.mechanisms.as_slice(),
-            source.output_layers.as_slice(),
-        ) {
-            let id = self.allocate_definition_id()?;
-            let guide_id = self.allocate_mechanism_id()?;
-            let site_id = PatternMechanismId(guide_id.0.checked_add(1).ok_or_else(|| {
+        validate_definition(source)?;
+        let definition_id = self.allocate_definition_id()?;
+
+        let mechanism_start = self.allocate_mechanism_id()?.0;
+        let mut mechanism_ids = BTreeMap::new();
+        for (index, mechanism) in source.mechanisms.iter().enumerate() {
+            let offset = u64::try_from(index).map_err(|_| {
+                ValidationError::new(
+                    "pattern_definitions.mechanisms.id",
+                    "document mechanism ID space is exhausted",
+                )
+            })?;
+            let id = PatternMechanismId(mechanism_start.checked_add(offset).ok_or_else(|| {
                 ValidationError::new(
                     "pattern_definitions.mechanisms.id",
                     "document mechanism ID space is exhausted",
                 )
             })?);
-            let output_id = self.allocate_output_layer_id()?;
-            let mut duplicate = PatternDefinition::supported_straight_grid(
-                id,
-                source.name.clone(),
-                guide_id,
-                site_id,
-                output_id,
-                source.coverage.clone(),
-            );
-            duplicate.output_layers = vec![PatternOutputLayer::Regions {
-                id: output_id,
-                source: RegionSourceIntent::VoronoiSites {
-                    site_mechanism_id: site_id,
-                },
-            }];
-            return Ok(duplicate);
+            mechanism_ids.insert(mechanism.id(), id);
         }
-        if let (
-            [
-                PatternMechanism::StraightGuides { .. },
-                PatternMechanism::GuideIntersections { .. },
-            ],
-            [PatternOutputLayer::ConnectionPaths { program, style, .. }],
-        ) = (
-            source.mechanisms.as_slice(),
-            source.output_layers.as_slice(),
-        ) {
-            let id = self.allocate_definition_id()?;
-            let guide_id = self.allocate_mechanism_id()?;
-            let site_id = PatternMechanismId(guide_id.0.checked_add(1).ok_or_else(|| {
+
+        let output_start = self.allocate_output_layer_id()?.0;
+        let mut output_ids = BTreeMap::new();
+        for (index, output) in source.output_layers.iter().enumerate() {
+            let offset = u64::try_from(index).map_err(|_| {
                 ValidationError::new(
-                    "pattern_definitions.mechanisms.id",
-                    "document mechanism ID space is exhausted",
+                    "pattern_definitions.output_layers.id",
+                    "document output-layer ID space is exhausted",
+                )
+            })?;
+            let id = PatternOutputLayerId(output_start.checked_add(offset).ok_or_else(|| {
+                ValidationError::new(
+                    "pattern_definitions.output_layers.id",
+                    "document output-layer ID space is exhausted",
                 )
             })?);
-            let output_id = self.allocate_output_layer_id()?;
-            return Ok(PatternDefinition {
-                id,
-                name: source.name.clone(),
-                family: PatternFamily::GuideIntersections {
-                    guide_mechanism_id: guide_id,
-                    site_mechanism_id: site_id,
-                },
-                mechanisms: vec![
-                    PatternMechanism::StraightGuides { id: guide_id },
-                    PatternMechanism::GuideIntersections {
-                        id: site_id,
-                        guide_mechanism_id: guide_id,
-                    },
-                ],
-                output_layers: vec![PatternOutputLayer::ConnectionPaths {
-                    id: output_id,
-                    site_mechanism_id: site_id,
-                    program: program.clone(),
-                    style: *style,
-                }],
-                modulation: source.modulation.clone(),
-                coverage: source.coverage.clone(),
-            });
+            output_ids.insert(output.id, id);
         }
-        if let (
-            [
-                PatternMechanism::StraightGuides { .. },
-                PatternMechanism::GuideIntersections { .. },
-            ],
-            [PatternOutputLayer::MazeWalls { program, style, .. }],
-        ) = (
-            source.mechanisms.as_slice(),
-            source.output_layers.as_slice(),
-        ) {
-            let id = self.allocate_definition_id()?;
-            let guide_id = self.allocate_mechanism_id()?;
-            let site_id = PatternMechanismId(guide_id.0.checked_add(1).ok_or_else(|| {
-                ValidationError::new(
-                    "pattern_definitions.mechanisms.id",
-                    "document mechanism ID space is exhausted",
-                )
-            })?);
-            let output_id = self.allocate_output_layer_id()?;
-            return Ok(PatternDefinition {
-                id,
-                name: source.name.clone(),
-                family: PatternFamily::GuideIntersections {
-                    guide_mechanism_id: guide_id,
-                    site_mechanism_id: site_id,
-                },
-                mechanisms: vec![
-                    PatternMechanism::StraightGuides { id: guide_id },
-                    PatternMechanism::GuideIntersections {
-                        id: site_id,
-                        guide_mechanism_id: guide_id,
-                    },
-                ],
-                output_layers: vec![PatternOutputLayer::MazeWalls {
-                    id: output_id,
-                    site_mechanism_id: site_id,
-                    program: program.clone(),
-                    style: *style,
-                }],
-                modulation: source.modulation.clone(),
-                coverage: source.coverage.clone(),
-            });
-        }
-        if let [PatternMechanism::GuideDimensions { dimensions, .. }, site] =
-            source.mechanisms.as_slice()
-        {
-            let id = self.allocate_definition_id()?;
-            let guide_id = self.allocate_mechanism_id()?;
-            let site_id = PatternMechanismId(guide_id.0.checked_add(1).ok_or_else(|| {
-                ValidationError::new(
-                    "pattern_definitions.mechanisms.id",
-                    "document mechanism ID space is exhausted",
-                )
-            })?);
-            let output_id = self.allocate_output_layer_id()?;
-            let mut next_dimension = self.allocate_dimension_id()?.0;
-            let mut remapped = Vec::with_capacity(dimensions.len());
-            for dimension in dimensions {
-                let new_id = GuideDimensionId(next_dimension);
-                next_dimension = next_dimension.checked_add(1).ok_or_else(|| {
-                    ValidationError::new(
-                        "pattern_definitions.mechanisms.guide_dimensions.id",
-                        "document dimension ID space is exhausted",
-                    )
-                })?;
-                remapped.push((
-                    dimension.id,
-                    GuideDimension {
-                        id: new_id,
-                        baseline_angle_degrees: dimension.baseline_angle_degrees,
-                        phase: dimension.phase,
-                        prototype: dimension.prototype.clone(),
-                        repetition: dimension.repetition.clone(),
-                    },
-                ));
-            }
-            let remap = |old: GuideDimensionId| {
-                remapped
-                    .iter()
-                    .find(|(candidate, _)| *candidate == old)
-                    .map(|(_, value)| value.id)
-                    .expect("source selection is validated")
-            };
-            let product = match site {
-                PatternMechanism::SelectedGuideIntersections {
-                    dimensions,
-                    merge_epsilon,
-                    ..
-                } => GeneralizedSiteProduct::Intersections {
-                    dimensions: dimensions.iter().copied().map(remap).collect(),
-                    merge_epsilon: *merge_epsilon,
-                },
-                PatternMechanism::AlongGuideSites {
-                    dimensions,
-                    interval_multiplier,
-                    phase,
-                    ..
-                } => GeneralizedSiteProduct::AlongGuides {
-                    dimensions: dimensions.iter().copied().map(remap).collect(),
-                    interval_multiplier: *interval_multiplier,
-                    phase: *phase,
-                },
-                _ => {
-                    return Err(ValidationError::new(
-                        "pattern_definitions.family",
-                        "generic definition has an incompatible site mechanism",
-                    ));
-                }
-            };
-            if let [PatternOutputLayer::ConnectionPaths { program, style, .. }] =
-                source.output_layers.as_slice()
-            {
-                let mut duplicate = PatternDefinition::generalized_guides(
-                    id,
-                    source.name.clone(),
-                    guide_id,
-                    site_id,
-                    output_id,
-                    remapped.into_iter().map(|(_, value)| value).collect(),
-                    product,
-                    MarkOrientation::Fixed,
-                    source.coverage.clone(),
-                );
-                duplicate.output_layers = vec![PatternOutputLayer::ConnectionPaths {
-                    id: output_id,
-                    site_mechanism_id: site_id,
-                    program: program.clone(),
-                    style: *style,
-                }];
-                return Ok(duplicate);
-            }
-            if let [
-                PatternOutputLayer::Regions {
-                    source:
-                        RegionSourceIntent::GuideFaces {
-                            dimensions: selected,
-                            ..
-                        },
-                    ..
-                },
-            ] = source.output_layers.as_slice()
-            {
-                let mut duplicate = PatternDefinition::generalized_guides(
-                    id,
-                    source.name.clone(),
-                    guide_id,
-                    site_id,
-                    output_id,
-                    remapped.iter().map(|(_, value)| value.clone()).collect(),
-                    product,
-                    MarkOrientation::Fixed,
-                    source.coverage.clone(),
-                );
-                duplicate.output_layers = vec![PatternOutputLayer::Regions {
-                    id: output_id,
-                    source: RegionSourceIntent::GuideFaces {
-                        guide_mechanism_id: guide_id,
-                        dimensions: selected.iter().copied().map(remap).collect(),
-                    },
-                }];
-                return Ok(duplicate);
-            }
-            let orientation = match source.output_layers.as_slice() {
-                [
-                    PatternOutputLayer::MarkPrototype {
-                        orientation: MarkOrientation::Fixed,
-                        ..
-                    },
-                ] => MarkOrientation::Fixed,
-                [
-                    PatternOutputLayer::MarkPrototype {
-                        orientation: MarkOrientation::GuideTangent { dimension_id },
-                        ..
-                    },
-                ] => MarkOrientation::GuideTangent {
-                    dimension_id: remap(*dimension_id),
-                },
-                [
-                    PatternOutputLayer::MarkPrototype {
-                        orientation: MarkOrientation::GuideNormal { dimension_id },
-                        ..
-                    },
-                ] => MarkOrientation::GuideNormal {
-                    dimension_id: remap(*dimension_id),
-                },
-                _ => {
-                    return Err(ValidationError::new(
-                        "pattern_definitions.output_layers",
-                        "generic definition has an incompatible mark prototype",
-                    ));
-                }
-            };
-            return retain_duplicated_mark_prototype(
-                source,
-                PatternDefinition::generalized_guides(
-                    id,
-                    source.name.clone(),
-                    guide_id,
-                    site_id,
-                    output_id,
-                    remapped.into_iter().map(|(_, value)| value).collect(),
-                    product,
-                    orientation,
-                    source.coverage.clone(),
-                ),
-            );
-        }
-        if let [
-            PatternMechanism::StraightGuideDimensions { dimensions, .. },
-            site,
-        ] = source.mechanisms.as_slice()
-        {
-            let id = self.allocate_definition_id()?;
-            let guide_id = self.allocate_mechanism_id()?;
-            let site_id = PatternMechanismId(guide_id.0.checked_add(1).ok_or_else(|| {
-                ValidationError::new(
-                    "pattern_definitions.mechanisms.id",
-                    "document mechanism ID space is exhausted",
-                )
-            })?);
-            let output_id = self.allocate_output_layer_id()?;
-            let mut next_dimension = self.allocate_dimension_id()?.0;
-            let mut remapped = Vec::with_capacity(dimensions.len());
-            for dimension in dimensions {
-                let new_id = GuideDimensionId(next_dimension);
-                next_dimension = next_dimension.checked_add(1).ok_or_else(|| {
-                    ValidationError::new(
-                        "pattern_definitions.mechanisms.dimensions.id",
-                        "document dimension ID space is exhausted",
-                    )
-                })?;
-                remapped.push((
-                    dimension.id,
-                    StraightGuideDimension {
-                        id: new_id,
-                        baseline_angle_degrees: dimension.baseline_angle_degrees,
-                        phase: dimension.phase,
-                        repetition: dimension.repetition.clone(),
-                    },
-                ));
-            }
-            let remap = |old: GuideDimensionId| {
-                remapped
-                    .iter()
-                    .find(|(candidate, _)| *candidate == old)
-                    .map(|(_, value)| value.id)
-                    .expect("source selection is validated")
-            };
-            let product = match site {
-                PatternMechanism::SelectedGuideIntersections {
-                    dimensions,
-                    merge_epsilon,
-                    ..
-                } => GeneralizedSiteProduct::Intersections {
-                    dimensions: dimensions.iter().copied().map(remap).collect(),
-                    merge_epsilon: *merge_epsilon,
-                },
-                PatternMechanism::AlongGuideSites {
-                    dimensions,
-                    interval_multiplier,
-                    phase,
-                    ..
-                } => GeneralizedSiteProduct::AlongGuides {
-                    dimensions: dimensions.iter().copied().map(remap).collect(),
-                    interval_multiplier: *interval_multiplier,
-                    phase: *phase,
-                },
-                _ => {
-                    return Err(ValidationError::new(
-                        "pattern_definitions.family",
-                        "generalized definition has an incompatible site mechanism",
-                    ));
-                }
-            };
-            if let [PatternOutputLayer::ConnectionPaths { program, style, .. }] =
-                source.output_layers.as_slice()
-            {
-                let mut duplicate = PatternDefinition::generalized_straight_guides(
-                    id,
-                    source.name.clone(),
-                    guide_id,
-                    site_id,
-                    output_id,
-                    remapped.into_iter().map(|(_, value)| value).collect(),
-                    product,
-                    MarkOrientation::Fixed,
-                    source.coverage.clone(),
-                );
-                duplicate.output_layers = vec![PatternOutputLayer::ConnectionPaths {
-                    id: output_id,
-                    site_mechanism_id: site_id,
-                    program: program.clone(),
-                    style: *style,
-                }];
-                return Ok(duplicate);
-            }
-            if let [
-                PatternOutputLayer::Regions {
-                    source:
-                        RegionSourceIntent::GuideFaces {
-                            dimensions: selected,
-                            ..
-                        },
-                    ..
-                },
-            ] = source.output_layers.as_slice()
-            {
-                let mut duplicate = PatternDefinition::generalized_straight_guides(
-                    id,
-                    source.name.clone(),
-                    guide_id,
-                    site_id,
-                    output_id,
-                    remapped.iter().map(|(_, value)| value.clone()).collect(),
-                    product,
-                    MarkOrientation::Fixed,
-                    source.coverage.clone(),
-                );
-                duplicate.output_layers = vec![PatternOutputLayer::Regions {
-                    id: output_id,
-                    source: RegionSourceIntent::GuideFaces {
-                        guide_mechanism_id: guide_id,
-                        dimensions: selected.iter().copied().map(remap).collect(),
-                    },
-                }];
-                return Ok(duplicate);
-            }
-            let orientation = match source.output_layers.as_slice() {
-                [
-                    PatternOutputLayer::MarkPrototype {
-                        orientation: MarkOrientation::Fixed,
-                        ..
-                    },
-                ] => MarkOrientation::Fixed,
-                [
-                    PatternOutputLayer::MarkPrototype {
-                        orientation: MarkOrientation::GuideTangent { dimension_id },
-                        ..
-                    },
-                ] => MarkOrientation::GuideTangent {
-                    dimension_id: remap(*dimension_id),
-                },
-                [
-                    PatternOutputLayer::MarkPrototype {
-                        orientation: MarkOrientation::GuideNormal { dimension_id },
-                        ..
-                    },
-                ] => MarkOrientation::GuideNormal {
-                    dimension_id: remap(*dimension_id),
-                },
-                _ => {
-                    return Err(ValidationError::new(
-                        "pattern_definitions.output_layers",
-                        "generalized definition has an incompatible mark prototype",
-                    ));
-                }
-            };
-            return retain_duplicated_mark_prototype(
-                source,
-                PatternDefinition::generalized_straight_guides(
-                    id,
-                    source.name.clone(),
-                    guide_id,
-                    site_id,
-                    output_id,
-                    remapped.into_iter().map(|(_, value)| value).collect(),
-                    product,
-                    orientation,
-                    source.coverage.clone(),
-                ),
-            );
-        }
-        if let PatternFamily::ParametricCurve { .. } = source.family {
-            let id = self.allocate_definition_id()?;
-            let curve_id = self.allocate_mechanism_id()?;
-            let output_id = self.allocate_output_layer_id()?;
-            let [
-                PatternMechanism::ParametricCurveSource {
-                    curve, repetition, ..
-                },
-                rest @ ..,
-            ] = source.mechanisms.as_slice()
-            else {
-                return Err(ValidationError::new(
-                    "pattern_definitions.family",
-                    "parametric definition has an incompatible source mechanism",
-                ));
-            };
-            let (site_id, mechanisms, site_mechanism_id) = match rest {
-                [] => (
-                    None,
-                    vec![PatternMechanism::ParametricCurveSource {
-                        id: curve_id,
-                        curve: curve.clone(),
-                        repetition: repetition.clone(),
-                    }],
-                    None,
-                ),
-                [
-                    PatternMechanism::AlongParametricCurveSites {
-                        interval, phase, ..
-                    },
-                ] => {
-                    let site_id =
-                        PatternMechanismId(curve_id.0.checked_add(1).ok_or_else(|| {
+
+        let dimension_start = self.allocate_dimension_id()?.0;
+        let mut dimension_ids = BTreeMap::new();
+        let mut dimension_offset = 0_u64;
+        for mechanism in &source.mechanisms {
+            match mechanism {
+                PatternMechanism::StraightGuideDimensions { dimensions, .. } => {
+                    for dimension in dimensions {
+                        let id = GuideDimensionId(
+                            dimension_start
+                                .checked_add(dimension_offset)
+                                .ok_or_else(|| {
+                                    ValidationError::new(
+                                        "pattern_definitions.mechanisms.dimensions.id",
+                                        "document dimension ID space is exhausted",
+                                    )
+                                })?,
+                        );
+                        dimension_offset = dimension_offset.checked_add(1).ok_or_else(|| {
                             ValidationError::new(
-                                "pattern_definitions.mechanisms.id",
-                                "document mechanism ID space is exhausted",
+                                "pattern_definitions.mechanisms.dimensions.id",
+                                "document dimension ID space is exhausted",
                             )
-                        })?);
-                    (
-                        Some(site_id),
-                        vec![
-                            PatternMechanism::ParametricCurveSource {
-                                id: curve_id,
-                                curve: curve.clone(),
-                                repetition: repetition.clone(),
-                            },
-                            PatternMechanism::AlongParametricCurveSites {
-                                id: site_id,
-                                curve_mechanism_id: curve_id,
-                                interval: *interval,
-                                phase: *phase,
-                            },
-                        ],
-                        Some(site_id),
-                    )
+                        })?;
+                        dimension_ids.insert(dimension.id, id);
+                    }
                 }
-                _ => {
-                    return Err(ValidationError::new(
-                        "pattern_definitions.family",
-                        "parametric definition has an incompatible site mechanism",
-                    ));
+                PatternMechanism::GuideDimensions { dimensions, .. } => {
+                    for dimension in dimensions {
+                        let id = GuideDimensionId(
+                            dimension_start
+                                .checked_add(dimension_offset)
+                                .ok_or_else(|| {
+                                    ValidationError::new(
+                                        "pattern_definitions.mechanisms.dimensions.id",
+                                        "document dimension ID space is exhausted",
+                                    )
+                                })?,
+                        );
+                        dimension_offset = dimension_offset.checked_add(1).ok_or_else(|| {
+                            ValidationError::new(
+                                "pattern_definitions.mechanisms.dimensions.id",
+                                "document dimension ID space is exhausted",
+                            )
+                        })?;
+                        dimension_ids.insert(dimension.id, id);
+                    }
                 }
-            };
-            let output_layers = match (source.output_layers.as_slice(), site_id) {
-                ([PatternOutputLayer::ParametricPaths { style, .. }], None) => {
-                    vec![PatternOutputLayer::ParametricPaths {
-                        id: output_id,
-                        curve_mechanism_id: curve_id,
-                        style: *style,
-                    }]
-                }
-                ([PatternOutputLayer::CircularMarks { .. }], Some(site_id)) => {
-                    vec![PatternOutputLayer::CircularMarks {
-                        id: output_id,
-                        site_mechanism_id: site_id,
-                    }]
-                }
-                (
-                    [
-                        PatternOutputLayer::MarkPrototype {
-                            prototype,
-                            orientation: MarkOrientation::Fixed,
-                            ..
-                        },
-                    ],
-                    Some(site_id),
-                ) => vec![PatternOutputLayer::MarkPrototype {
-                    id: output_id,
-                    site_mechanism_id: site_id,
-                    prototype: prototype.clone(),
-                    orientation: MarkOrientation::Fixed,
-                }],
-                ([PatternOutputLayer::ConnectionPaths { program, style, .. }], Some(site_id)) => {
-                    vec![PatternOutputLayer::ConnectionPaths {
-                        id: output_id,
-                        site_mechanism_id: site_id,
-                        program: program.clone(),
-                        style: *style,
-                    }]
-                }
-                _ => {
-                    return Err(ValidationError::new(
-                        "pattern_definitions.output_layers",
-                        "parametric definition has an incompatible output layer",
-                    ));
-                }
-            };
-            return Ok(PatternDefinition {
-                id,
-                name: source.name.clone(),
-                family: PatternFamily::ParametricCurve {
-                    curve_mechanism_id: curve_id,
-                    site_mechanism_id,
-                },
-                mechanisms,
-                output_layers,
-                modulation: source.modulation.clone(),
-                coverage: source.coverage.clone(),
-            });
+                _ => {}
+            }
         }
-        if let PatternFamily::RandomSites { .. } = source.family {
-            let id = self.allocate_definition_id()?;
-            let base_id = self.allocate_mechanism_id()?;
-            let modulation_id = PatternMechanismId(base_id.0.checked_add(1).ok_or_else(|| {
-                ValidationError::new(
-                    "pattern_definitions.mechanisms.id",
-                    "document mechanism ID space is exhausted",
-                )
-            })?);
-            let exclusion_id =
-                PatternMechanismId(modulation_id.0.checked_add(1).ok_or_else(|| {
-                    ValidationError::new(
-                        "pattern_definitions.mechanisms.id",
-                        "document mechanism ID space is exhausted",
-                    )
-                })?);
-            let site_id = PatternMechanismId(exclusion_id.0.checked_add(1).ok_or_else(|| {
-                ValidationError::new(
-                    "pattern_definitions.mechanisms.id",
-                    "document mechanism ID space is exhausted",
-                )
-            })?);
-            let output_id = self.allocate_output_layer_id()?;
-            let [
-                PatternMechanism::RandomSiteProcess {
-                    character, seed, ..
+
+        let remap_mechanism = |id: PatternMechanismId| {
+            mechanism_ids
+                .get(&id)
+                .copied()
+                .expect("validated definition owns every mechanism reference")
+        };
+        let remap_output = |id: PatternOutputLayerId| {
+            output_ids
+                .get(&id)
+                .copied()
+                .expect("validated definition owns every output reference")
+        };
+        let remap_dimension = |id: GuideDimensionId| {
+            dimension_ids
+                .get(&id)
+                .copied()
+                .expect("validated definition owns every dimension reference")
+        };
+
+        let family = match &source.family {
+            PatternFamily::GuideIntersections {
+                guide_mechanism_id,
+                site_mechanism_id,
+            } => PatternFamily::GuideIntersections {
+                guide_mechanism_id: remap_mechanism(*guide_mechanism_id),
+                site_mechanism_id: remap_mechanism(*site_mechanism_id),
+            },
+            PatternFamily::RandomSites {
+                base_site_process_id,
+                density_modulation_id,
+                exclusion_id,
+                site_product_id,
+            } => PatternFamily::RandomSites {
+                base_site_process_id: remap_mechanism(*base_site_process_id),
+                density_modulation_id: remap_mechanism(*density_modulation_id),
+                exclusion_id: remap_mechanism(*exclusion_id),
+                site_product_id: remap_mechanism(*site_product_id),
+            },
+            PatternFamily::ParametricCurve {
+                curve_mechanism_id,
+                site_mechanism_id,
+            } => PatternFamily::ParametricCurve {
+                curve_mechanism_id: remap_mechanism(*curve_mechanism_id),
+                site_mechanism_id: site_mechanism_id.map(remap_mechanism),
+            },
+        };
+
+        let mechanisms = source
+            .mechanisms
+            .iter()
+            .map(|mechanism| match mechanism {
+                PatternMechanism::StraightGuides { id } => PatternMechanism::StraightGuides {
+                    id: remap_mechanism(*id),
                 },
-                PatternMechanism::SiteDensityModulation { modulation, .. },
-                PatternMechanism::SiteExclusion { policy, .. },
+                PatternMechanism::GuideIntersections {
+                    id,
+                    guide_mechanism_id,
+                } => PatternMechanism::GuideIntersections {
+                    id: remap_mechanism(*id),
+                    guide_mechanism_id: remap_mechanism(*guide_mechanism_id),
+                },
+                PatternMechanism::StraightGuideDimensions { id, dimensions } => {
+                    PatternMechanism::StraightGuideDimensions {
+                        id: remap_mechanism(*id),
+                        dimensions: dimensions
+                            .iter()
+                            .map(|dimension| StraightGuideDimension {
+                                id: remap_dimension(dimension.id),
+                                baseline_angle_degrees: dimension.baseline_angle_degrees,
+                                phase: dimension.phase,
+                                repetition: dimension.repetition.clone(),
+                            })
+                            .collect(),
+                    }
+                }
+                PatternMechanism::GuideDimensions { id, dimensions } => {
+                    PatternMechanism::GuideDimensions {
+                        id: remap_mechanism(*id),
+                        dimensions: dimensions
+                            .iter()
+                            .map(|dimension| GuideDimension {
+                                id: remap_dimension(dimension.id),
+                                baseline_angle_degrees: dimension.baseline_angle_degrees,
+                                phase: dimension.phase,
+                                prototype: dimension.prototype.clone(),
+                                repetition: dimension.repetition.clone(),
+                            })
+                            .collect(),
+                    }
+                }
+                PatternMechanism::SelectedGuideIntersections {
+                    id,
+                    guide_mechanism_id,
+                    dimensions,
+                    merge_epsilon,
+                } => PatternMechanism::SelectedGuideIntersections {
+                    id: remap_mechanism(*id),
+                    guide_mechanism_id: remap_mechanism(*guide_mechanism_id),
+                    dimensions: dimensions.iter().copied().map(remap_dimension).collect(),
+                    merge_epsilon: *merge_epsilon,
+                },
+                PatternMechanism::AlongGuideSites {
+                    id,
+                    guide_mechanism_id,
+                    dimensions,
+                    interval_multiplier,
+                    phase,
+                } => PatternMechanism::AlongGuideSites {
+                    id: remap_mechanism(*id),
+                    guide_mechanism_id: remap_mechanism(*guide_mechanism_id),
+                    dimensions: dimensions.iter().copied().map(remap_dimension).collect(),
+                    interval_multiplier: *interval_multiplier,
+                    phase: *phase,
+                },
+                PatternMechanism::ParametricCurveSource {
+                    id,
+                    curve,
+                    repetition,
+                } => PatternMechanism::ParametricCurveSource {
+                    id: remap_mechanism(*id),
+                    curve: curve.clone(),
+                    repetition: repetition.clone(),
+                },
+                PatternMechanism::AlongParametricCurveSites {
+                    id,
+                    curve_mechanism_id,
+                    interval,
+                    phase,
+                } => PatternMechanism::AlongParametricCurveSites {
+                    id: remap_mechanism(*id),
+                    curve_mechanism_id: remap_mechanism(*curve_mechanism_id),
+                    interval: *interval,
+                    phase: *phase,
+                },
+                PatternMechanism::RandomSiteProcess {
+                    id,
+                    character,
+                    seed,
+                } => PatternMechanism::RandomSiteProcess {
+                    id: remap_mechanism(*id),
+                    character: character.clone(),
+                    seed: *seed,
+                },
+                PatternMechanism::SiteDensityModulation {
+                    id,
+                    base_site_process_id,
+                    modulation,
+                } => PatternMechanism::SiteDensityModulation {
+                    id: remap_mechanism(*id),
+                    base_site_process_id: remap_mechanism(*base_site_process_id),
+                    modulation: modulation.clone(),
+                },
+                PatternMechanism::SiteExclusion {
+                    id,
+                    density_modulation_id,
+                    policy,
+                } => PatternMechanism::SiteExclusion {
+                    id: remap_mechanism(*id),
+                    density_modulation_id: remap_mechanism(*density_modulation_id),
+                    policy: policy.clone(),
+                },
                 PatternMechanism::RandomSiteProduct {
+                    id,
+                    exclusion_id,
                     maximum_attempts,
                     maximum_neighbor_checks,
-                    ..
+                } => PatternMechanism::RandomSiteProduct {
+                    id: remap_mechanism(*id),
+                    exclusion_id: remap_mechanism(*exclusion_id),
+                    maximum_attempts: *maximum_attempts,
+                    maximum_neighbor_checks: *maximum_neighbor_checks,
                 },
-            ] = source.mechanisms.as_slice()
-            else {
-                return Err(ValidationError::new(
-                    "pattern_definitions.family",
-                    "random definition has an incompatible mechanism chain",
-                ));
-            };
-            let mut duplicate = PatternDefinition::random_sites(
-                id,
-                source.name.clone(),
-                base_id,
-                modulation_id,
-                exclusion_id,
-                site_id,
-                output_id,
-                character.clone(),
-                *seed,
-                modulation.clone(),
-                policy.clone(),
-                *maximum_attempts,
-                *maximum_neighbor_checks,
-                source.coverage.clone(),
-            );
-            if let [PatternOutputLayer::ConnectionPaths { program, style, .. }] =
-                source.output_layers.as_slice()
-            {
-                duplicate.output_layers = vec![PatternOutputLayer::ConnectionPaths {
-                    id: output_id,
-                    site_mechanism_id: site_id,
-                    program: program.clone(),
-                    style: *style,
-                }];
-                return Ok(duplicate);
-            }
-            return retain_duplicated_mark_prototype(source, duplicate);
-        }
-        let draft = PatternDefinitionDraft {
+            })
+            .collect();
+
+        let output_layers = source
+            .output_layers
+            .iter()
+            .map(|output| {
+                let realization = match &output.realization {
+                    PatternOutputRealization::CircularMarks { site_mechanism_id } => {
+                        PatternOutputRealization::CircularMarks {
+                            site_mechanism_id: remap_mechanism(*site_mechanism_id),
+                        }
+                    }
+                    PatternOutputRealization::MarkPrototype {
+                        site_mechanism_id,
+                        prototype,
+                        orientation,
+                    } => PatternOutputRealization::MarkPrototype {
+                        site_mechanism_id: remap_mechanism(*site_mechanism_id),
+                        prototype: prototype.clone(),
+                        orientation: match orientation {
+                            MarkOrientation::Fixed => MarkOrientation::Fixed,
+                            MarkOrientation::GuideTangent { dimension_id } => {
+                                MarkOrientation::GuideTangent {
+                                    dimension_id: remap_dimension(*dimension_id),
+                                }
+                            }
+                            MarkOrientation::GuideNormal { dimension_id } => {
+                                MarkOrientation::GuideNormal {
+                                    dimension_id: remap_dimension(*dimension_id),
+                                }
+                            }
+                        },
+                    },
+                    PatternOutputRealization::GuidePaths {
+                        guide_mechanism_id,
+                        style,
+                    } => PatternOutputRealization::GuidePaths {
+                        guide_mechanism_id: remap_mechanism(*guide_mechanism_id),
+                        style: *style,
+                    },
+                    PatternOutputRealization::ParametricPaths {
+                        curve_mechanism_id,
+                        style,
+                    } => PatternOutputRealization::ParametricPaths {
+                        curve_mechanism_id: remap_mechanism(*curve_mechanism_id),
+                        style: *style,
+                    },
+                    PatternOutputRealization::ConnectionPaths {
+                        site_mechanism_id,
+                        program,
+                        style,
+                    } => PatternOutputRealization::ConnectionPaths {
+                        site_mechanism_id: remap_mechanism(*site_mechanism_id),
+                        program: program.clone(),
+                        style: *style,
+                    },
+                    PatternOutputRealization::MazeWalls {
+                        site_mechanism_id,
+                        program,
+                        style,
+                    } => PatternOutputRealization::MazeWalls {
+                        site_mechanism_id: remap_mechanism(*site_mechanism_id),
+                        program: program.clone(),
+                        style: *style,
+                    },
+                    PatternOutputRealization::Regions { source } => {
+                        PatternOutputRealization::Regions {
+                            source: match source {
+                                RegionSourceIntent::VoronoiSites { site_mechanism_id } => {
+                                    RegionSourceIntent::VoronoiSites {
+                                        site_mechanism_id: remap_mechanism(*site_mechanism_id),
+                                    }
+                                }
+                                RegionSourceIntent::GuideFaces {
+                                    guide_mechanism_id,
+                                    dimensions,
+                                } => RegionSourceIntent::GuideFaces {
+                                    guide_mechanism_id: remap_mechanism(*guide_mechanism_id),
+                                    dimensions: dimensions
+                                        .iter()
+                                        .copied()
+                                        .map(remap_dimension)
+                                        .collect(),
+                                },
+                            },
+                        }
+                    }
+                };
+                PatternOutputLayer {
+                    id: remap_output(output.id),
+                    source_filter: match output.source_filter {
+                        SiteUseFilter::All => SiteUseFilter::All,
+                        SiteUseFilter::SitesUsedBy { output_layer_id } => {
+                            SiteUseFilter::SitesUsedBy {
+                                output_layer_id: remap_output(output_layer_id),
+                            }
+                        }
+                        SiteUseFilter::SitesUnusedBy { output_layer_id } => {
+                            SiteUseFilter::SitesUnusedBy {
+                                output_layer_id: remap_output(output_layer_id),
+                            }
+                        }
+                    },
+                    realization,
+                }
+            })
+            .collect();
+
+        let duplicate = PatternDefinition {
+            id: definition_id,
             name: source.name.clone(),
+            family,
+            mechanisms,
+            output_layers,
+            modulation: source.modulation.clone(),
             coverage: source.coverage.clone(),
         };
-        self.allocate_definition_from_draft(&draft)
+        validate_definition(&duplicate)?;
+        Ok(duplicate)
     }
 
     fn retarget_channel(&mut self, channel_id: ChannelId, definition_id: PatternDefinitionId) {
@@ -7080,11 +7905,15 @@ impl Document {
             ) && self
                 .definition(effective.definition_id)
                 .is_some_and(|definition| {
-                    matches!(
-                        definition.output_layers.as_slice(),
-                        [PatternOutputLayer::GuidePaths { .. }
-                            | PatternOutputLayer::ConnectionPaths { .. }]
-                    )
+                    definition.output_layers.iter().any(|output| {
+                        matches!(
+                            &output.realization,
+                            PatternOutputRealization::GuidePaths { .. }
+                                | PatternOutputRealization::ParametricPaths { .. }
+                                | PatternOutputRealization::ConnectionPaths { .. }
+                                | PatternOutputRealization::MazeWalls { .. }
+                        )
+                    })
                 })
             {
                 return Err(ValidationError::new(
@@ -7154,47 +7983,6 @@ impl Document {
     }
 }
 
-/// Copies the external mark resource selection onto a structurally remapped typed duplicate.
-///
-/// Definition-owned output IDs and guide-orientation references remain those allocated by the
-/// duplicate constructor; only the prototype variant and its document-owned structure ID persist.
-///
-/// # Errors
-///
-/// Returns the stable output-layer diagnostic if either definition is not the one-layer typed
-/// mark family already required by the duplication branch.
-fn retain_duplicated_mark_prototype(
-    source: &PatternDefinition,
-    mut duplicate: PatternDefinition,
-) -> Result<PatternDefinition, ValidationError> {
-    let [
-        PatternOutputLayer::MarkPrototype {
-            prototype: source_prototype,
-            ..
-        },
-    ] = source.output_layers.as_slice()
-    else {
-        return Err(ValidationError::new(
-            "pattern_definitions.output_layers",
-            "typed definition duplication requires one mark-prototype output",
-        ));
-    };
-    let [
-        PatternOutputLayer::MarkPrototype {
-            prototype: duplicate_prototype,
-            ..
-        },
-    ] = duplicate.output_layers.as_mut_slice()
-    else {
-        return Err(ValidationError::new(
-            "pattern_definitions.output_layers",
-            "typed definition duplication requires one mark-prototype output",
-        ));
-    };
-    *duplicate_prototype = source_prototype.clone();
-    Ok(duplicate)
-}
-
 /// Resolves every authored guide and mark reference through the owning document store.
 ///
 /// # Errors
@@ -7228,10 +8016,10 @@ fn validate_definition_guide_references(
         }
     }
     for layer in &definition.output_layers {
-        let PatternOutputLayer::MarkPrototype {
+        let PatternOutputRealization::MarkPrototype {
             prototype: MarkPrototype::AuthoredClosedShape { structure_id },
             ..
-        } = layer
+        } = &layer.realization
         else {
             continue;
         };
@@ -8322,11 +9110,11 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
             site_mechanism_id,
         } => {
             if let Some(
-                PatternOutputLayer::CircularMarks {
+                PatternOutputRealization::CircularMarks {
                     site_mechanism_id: current,
                     ..
                 }
-                | PatternOutputLayer::MarkPrototype {
+                | PatternOutputRealization::MarkPrototype {
                     site_mechanism_id: current,
                     ..
                 },
@@ -8334,6 +9122,7 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
                 .output_layers
                 .iter_mut()
                 .find(|layer| layer.id() == *output_layer_id)
+                .map(|layer| &mut layer.realization)
             {
                 *current = *site_mechanism_id;
             }
@@ -8347,26 +9136,22 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
                 .iter_mut()
                 .find(|layer| layer.id() == *output_layer_id)
             {
-                match layer {
-                    PatternOutputLayer::MarkPrototype {
+                match &mut layer.realization {
+                    PatternOutputRealization::MarkPrototype {
                         prototype: current, ..
                     } => *current = prototype.clone(),
-                    PatternOutputLayer::CircularMarks {
-                        id,
-                        site_mechanism_id,
-                    } => {
-                        *layer = PatternOutputLayer::MarkPrototype {
-                            id: *id,
+                    PatternOutputRealization::CircularMarks { site_mechanism_id } => {
+                        layer.realization = PatternOutputRealization::MarkPrototype {
                             site_mechanism_id: *site_mechanism_id,
                             prototype: prototype.clone(),
                             orientation: MarkOrientation::Fixed,
                         };
                     }
-                    PatternOutputLayer::GuidePaths { .. }
-                    | PatternOutputLayer::ParametricPaths { .. }
-                    | PatternOutputLayer::ConnectionPaths { .. }
-                    | PatternOutputLayer::MazeWalls { .. }
-                    | PatternOutputLayer::Regions { .. } => {}
+                    PatternOutputRealization::GuidePaths { .. }
+                    | PatternOutputRealization::ParametricPaths { .. }
+                    | PatternOutputRealization::ConnectionPaths { .. }
+                    | PatternOutputRealization::MazeWalls { .. }
+                    | PatternOutputRealization::Regions { .. } => {}
                 }
             }
         }
@@ -8374,7 +9159,7 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
             output_layer_id,
             structure_id,
         } => {
-            if let Some(PatternOutputLayer::MarkPrototype {
+            if let Some(PatternOutputRealization::MarkPrototype {
                 prototype:
                     MarkPrototype::AuthoredClosedShape {
                         structure_id: current,
@@ -8384,6 +9169,7 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
                 .output_layers
                 .iter_mut()
                 .find(|layer| layer.id() == *output_layer_id)
+                .map(|layer| &mut layer.realization)
             {
                 *current = *structure_id;
             }
@@ -8392,13 +9178,14 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
             output_layer_id,
             orientation,
         } => {
-            if let Some(PatternOutputLayer::MarkPrototype {
+            if let Some(PatternOutputRealization::MarkPrototype {
                 orientation: current,
                 ..
             }) = definition
                 .output_layers
                 .iter_mut()
                 .find(|layer| layer.id() == *output_layer_id)
+                .map(|layer| &mut layer.realization)
             {
                 *current = orientation.clone();
             }
@@ -8407,10 +9194,11 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
             output_layer_id,
             dimension_id,
         } => {
-            if let Some(PatternOutputLayer::MarkPrototype { orientation, .. }) = definition
+            if let Some(PatternOutputRealization::MarkPrototype { orientation, .. }) = definition
                 .output_layers
                 .iter_mut()
                 .find(|layer| layer.id() == *output_layer_id)
+                .map(|layer| &mut layer.realization)
             {
                 match orientation {
                     MarkOrientation::GuideTangent {
@@ -8477,7 +9265,7 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
             output_layer_id,
             dimensions,
         } => {
-            if let Some(PatternOutputLayer::Regions {
+            if let Some(PatternOutputRealization::Regions {
                 source:
                     RegionSourceIntent::GuideFaces {
                         dimensions: current,
@@ -8488,6 +9276,7 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
                 .output_layers
                 .iter_mut()
                 .find(|layer| layer.id() == *output_layer_id)
+                .map(|layer| &mut layer.realization)
             {
                 *current = dimensions.clone();
             }
@@ -8504,10 +9293,11 @@ fn apply_connection_program(
     output_layer_id: PatternOutputLayerId,
     mutate: impl FnOnce(&mut ConnectionProgram),
 ) {
-    if let Some(PatternOutputLayer::ConnectionPaths { program, .. }) = definition
+    if let Some(PatternOutputRealization::ConnectionPaths { program, .. }) = definition
         .output_layers
         .iter_mut()
         .find(|layer| layer.id() == output_layer_id)
+        .map(|layer| &mut layer.realization)
     {
         mutate(program);
     }
@@ -8519,10 +9309,11 @@ fn apply_maze_program(
     output_layer_id: PatternOutputLayerId,
     mutate: impl FnOnce(&mut MazeProgram),
 ) {
-    if let Some(PatternOutputLayer::MazeWalls { program, .. }) = definition
+    if let Some(PatternOutputRealization::MazeWalls { program, .. }) = definition
         .output_layers
         .iter_mut()
         .find(|layer| layer.id() == output_layer_id)
+        .map(|layer| &mut layer.realization)
     {
         mutate(program);
     }
@@ -9845,7 +10636,7 @@ fn validate_definition_edit(
         PatternDefinitionEdit::SetOutputAuthoredClosedShape {
             output_layer_id, ..
         } => match validate_mark_prototype_output_target(definition, *output_layer_id)? {
-            PatternOutputLayer::MarkPrototype {
+            PatternOutputRealization::MarkPrototype {
                 prototype: MarkPrototype::AuthoredClosedShape { .. },
                 ..
             } => Ok(()),
@@ -9865,7 +10656,7 @@ fn validate_definition_edit(
             output_layer_id,
             dimension_id,
         } => match validate_mark_prototype_output_target(definition, *output_layer_id)? {
-            PatternOutputLayer::MarkPrototype {
+            PatternOutputRealization::MarkPrototype {
                 orientation:
                     MarkOrientation::GuideTangent { .. } | MarkOrientation::GuideNormal { .. },
                 ..
@@ -9966,13 +10757,13 @@ fn validate_definition_edit(
             output_layer_id,
             dimensions,
         } => {
-            let PatternOutputLayer::Regions {
+            let PatternOutputRealization::Regions {
                 source:
                     RegionSourceIntent::GuideFaces {
                         guide_mechanism_id, ..
                     },
                 ..
-            } = validate_output_layer_target(definition, *output_layer_id)?
+            } = &validate_output_layer_target(definition, *output_layer_id)?.realization
             else {
                 return Err(ValidationError::new(
                     "pattern_definitions.output_layers.guide_faces",
@@ -10416,30 +11207,30 @@ fn validate_output_layer_target(
 fn validate_mark_prototype_output_target(
     definition: &PatternDefinition,
     output_layer_id: PatternOutputLayerId,
-) -> Result<&PatternOutputLayer, ValidationError> {
-    match validate_output_layer_target(definition, output_layer_id)? {
-        layer @ PatternOutputLayer::MarkPrototype { .. } => Ok(layer),
-        PatternOutputLayer::CircularMarks { .. } => Err(ValidationError::new(
+) -> Result<&PatternOutputRealization, ValidationError> {
+    match &validate_output_layer_target(definition, output_layer_id)?.realization {
+        layer @ PatternOutputRealization::MarkPrototype { .. } => Ok(layer),
+        PatternOutputRealization::CircularMarks { .. } => Err(ValidationError::new(
             "pattern_definitions.output_layers",
             "command targets an output without a mark-prototype configuration",
         )),
-        PatternOutputLayer::GuidePaths { .. } => Err(ValidationError::new(
+        PatternOutputRealization::GuidePaths { .. } => Err(ValidationError::new(
             "pattern_definitions.output_layers",
             "command targets a guide-path output without a mark-prototype configuration",
         )),
-        PatternOutputLayer::ParametricPaths { .. } => Err(ValidationError::new(
+        PatternOutputRealization::ParametricPaths { .. } => Err(ValidationError::new(
             "pattern_definitions.output_layers",
             "command targets a parametric-path output without a mark-prototype configuration",
         )),
-        PatternOutputLayer::ConnectionPaths { .. } => Err(ValidationError::new(
+        PatternOutputRealization::ConnectionPaths { .. } => Err(ValidationError::new(
             "pattern_definitions.output_layers",
             "command targets a connection-path output without a mark-prototype configuration",
         )),
-        PatternOutputLayer::MazeWalls { .. } => Err(ValidationError::new(
+        PatternOutputRealization::MazeWalls { .. } => Err(ValidationError::new(
             "pattern_definitions.output_layers",
             "command targets a maze-wall output without a mark-prototype configuration",
         )),
-        PatternOutputLayer::Regions { .. } => Err(ValidationError::new(
+        PatternOutputRealization::Regions { .. } => Err(ValidationError::new(
             "pattern_definitions.output_layers",
             "command targets a region output without a mark-prototype configuration",
         )),
@@ -10455,8 +11246,8 @@ fn validate_connection_output_target(
     definition: &PatternDefinition,
     output_layer_id: PatternOutputLayerId,
 ) -> Result<&ConnectionProgram, ValidationError> {
-    match validate_output_layer_target(definition, output_layer_id)? {
-        PatternOutputLayer::ConnectionPaths { program, .. } => Ok(program),
+    match &validate_output_layer_target(definition, output_layer_id)?.realization {
+        PatternOutputRealization::ConnectionPaths { program, .. } => Ok(program),
         _ => Err(ValidationError::new(
             "pattern_definitions.output_layers.connection",
             "command targets an output without a connection-program configuration",
@@ -10473,8 +11264,8 @@ fn validate_maze_output_target(
     definition: &PatternDefinition,
     output_layer_id: PatternOutputLayerId,
 ) -> Result<&MazeProgram, ValidationError> {
-    match validate_output_layer_target(definition, output_layer_id)? {
-        PatternOutputLayer::MazeWalls { program, .. } => Ok(program),
+    match &validate_output_layer_target(definition, output_layer_id)?.realization {
+        PatternOutputRealization::MazeWalls { program, .. } => Ok(program),
         _ => Err(ValidationError::new(
             "pattern_definitions.output_layers.maze",
             "command targets an output without a maze-program configuration",
@@ -10593,6 +11384,138 @@ fn validate_and_project_definition(
 ///
 /// Returns the first stable family, mechanism, output, coverage, or payload diagnostic.
 fn validate_definition_structure(definition: &PatternDefinition) -> Result<(), ValidationError> {
+    if definition.output_layers.is_empty() {
+        return Err(ValidationError::new(
+            "pattern.output_layers.cardinality",
+            "pattern definitions require at least one output layer",
+        ));
+    }
+    let mut output_ids = HashSet::new();
+    for output in &definition.output_layers {
+        if !output_ids.insert(output.id) {
+            return Err(ValidationError::new(
+                "pattern.output_layers.id",
+                "output layer IDs must be unique",
+            ));
+        }
+    }
+    pattern_output_evaluation_order(definition)?;
+    for output in &definition.output_layers {
+        let mut singleton = definition.clone();
+        singleton.output_layers = vec![PatternOutputLayer {
+            id: output.id,
+            source_filter: SiteUseFilter::All,
+            realization: output.realization.clone(),
+        }];
+        validate_single_output_definition_structure(&singleton)?;
+    }
+    Ok(())
+}
+
+/// Derives the stable dependency-topological output order without changing painter order.
+///
+/// # Errors
+///
+/// Rejects missing, self, non-site, incompatible-mechanism, or cyclic references before any
+/// family or output realization can begin.
+pub fn pattern_output_evaluation_order(
+    definition: &PatternDefinition,
+) -> Result<Vec<PatternOutputLayerId>, ValidationError> {
+    let by_id: BTreeMap<_, _> = definition
+        .output_layers
+        .iter()
+        .map(|output| (output.id, output))
+        .collect();
+    let mut indegree: BTreeMap<_, usize> = by_id.keys().map(|id| (*id, 0)).collect();
+    let mut dependents: BTreeMap<PatternOutputLayerId, Vec<PatternOutputLayerId>> = BTreeMap::new();
+    for output in &definition.output_layers {
+        let Some(reference_id) = output.source_filter.referenced_output_layer_id() else {
+            continue;
+        };
+        let Some(source_mechanism_id) = output.site_mechanism_id() else {
+            return Err(ValidationError::new(
+                "pattern.output_layers.filter.non_site_source",
+                "non-site outputs accept only the All site-use filter",
+            ));
+        };
+        if reference_id == output.id {
+            return Err(ValidationError::new(
+                "pattern.output_layers.filter.self_reference",
+                "an output site-use filter cannot reference itself",
+            ));
+        }
+        let referenced = by_id.get(&reference_id).ok_or_else(|| {
+            ValidationError::new(
+                "pattern.output_layers.filter.missing_reference",
+                "an output site-use filter references a missing output",
+            )
+        })?;
+        let Some(referenced_mechanism_id) = referenced.site_mechanism_id() else {
+            return Err(ValidationError::new(
+                "pattern.output_layers.filter.non_site_reference",
+                "an output site-use filter must reference a site-backed output",
+            ));
+        };
+        if referenced_mechanism_id != source_mechanism_id {
+            return Err(ValidationError::new(
+                "pattern.output_layers.filter.incompatible_mechanism",
+                "site-use filter outputs must consume the same exact site mechanism",
+            ));
+        }
+        *indegree
+            .get_mut(&output.id)
+            .expect("output ID was collected above") += 1;
+        dependents.entry(reference_id).or_default().push(output.id);
+    }
+    for values in dependents.values_mut() {
+        values.sort_unstable();
+    }
+    let mut ready: BTreeSet<_> = indegree
+        .iter()
+        .filter_map(|(id, count)| (*count == 0).then_some(*id))
+        .collect();
+    let mut ordered = Vec::with_capacity(definition.output_layers.len());
+    while let Some(id) = ready.pop_first() {
+        ordered.push(id);
+        if let Some(values) = dependents.get(&id) {
+            for dependent in values {
+                let count = indegree
+                    .get_mut(dependent)
+                    .expect("dependent output ID was collected above");
+                *count -= 1;
+                if *count == 0 {
+                    ready.insert(*dependent);
+                }
+            }
+        }
+    }
+    if ordered.len() != definition.output_layers.len() {
+        return Err(ValidationError::new(
+            "pattern.output_layers.dependency.cycle",
+            "output site-use filter dependencies must be acyclic",
+        ));
+    }
+    Ok(ordered)
+}
+
+/// Clones the realization-only view used by retained single-output family validators.
+fn output_realizations(definition: &PatternDefinition) -> Vec<PatternOutputRealization> {
+    definition
+        .output_layers
+        .iter()
+        .map(|output| output.realization.clone())
+        .collect()
+}
+
+/// Validates one output against its family and mechanism chain.
+///
+/// # Errors
+///
+/// Returns the first stable family, mechanism, output, or realization diagnostic without
+/// accepting a partially valid definition.
+fn validate_single_output_definition_structure(
+    definition: &PatternDefinition,
+) -> Result<(), ValidationError> {
     validate_nonnegative_finite(
         definition.coverage.additional_margin,
         "pattern_definitions.coverage.additional_margin",
@@ -10614,10 +11537,10 @@ fn validate_definition_structure(definition: &PatternDefinition) -> Result<(), V
                 "output layer IDs must be unique and deterministically ordered",
             ));
         }
-        if let PatternOutputLayer::ConnectionPaths { program, .. } = layer {
+        if let PatternOutputRealization::ConnectionPaths { program, .. } = &layer.realization {
             program.validate()?;
         }
-        if let PatternOutputLayer::MazeWalls { program, .. } = layer {
+        if let PatternOutputRealization::MazeWalls { program, .. } = &layer.realization {
             program.validate()?;
         }
     }
@@ -10668,7 +11591,7 @@ fn validate_definition_structure(definition: &PatternDefinition) -> Result<(), V
         validate_straight_dimensions(dimensions)?;
         validate_site_mechanism(site, *id, root_site_id, dimensions)?;
         validate_generalized_output_layers(
-            &definition.output_layers,
+            &output_realizations(definition),
             *id,
             root_site_id,
             dimensions,
@@ -10688,9 +11611,14 @@ fn validate_definition_structure(definition: &PatternDefinition) -> Result<(), V
         validate_guide_dimensions(dimensions)?;
         let ids: Vec<_> = dimensions.iter().map(|dimension| dimension.id).collect();
         validate_site_mechanism_ids(site, *id, root_site_id, &ids)?;
-        validate_generalized_output_layers_ids(&definition.output_layers, *id, root_site_id, &ids)?;
+        validate_generalized_output_layers_ids(
+            &output_realizations(definition),
+            *id,
+            root_site_id,
+            &ids,
+        )?;
         if let [
-            PatternOutputLayer::Regions {
+            PatternOutputRealization::Regions {
                 source:
                     RegionSourceIntent::GuideFaces {
                         dimensions: selected,
@@ -10698,7 +11626,7 @@ fn validate_definition_structure(definition: &PatternDefinition) -> Result<(), V
                     },
                 ..
             },
-        ] = definition.output_layers.as_slice()
+        ] = output_realizations(definition).as_slice()
             && selected.iter().any(|selected_id| {
                 !dimensions.iter().any(|dimension| {
                     dimension.id == *selected_id
@@ -10722,40 +11650,40 @@ fn validate_definition_structure(definition: &PatternDefinition) -> Result<(), V
             "family root requires ordered straight-guide and intersection mechanisms",
         ));
     }
-    let has_compatible_output = match definition.output_layers.as_slice() {
+    let has_compatible_output = match output_realizations(definition).as_slice() {
         [
-            PatternOutputLayer::CircularMarks {
+            PatternOutputRealization::CircularMarks {
                 site_mechanism_id, ..
             },
         ] => *site_mechanism_id == root_site_id,
         [
-            PatternOutputLayer::MarkPrototype {
+            PatternOutputRealization::MarkPrototype {
                 site_mechanism_id,
                 orientation: MarkOrientation::Fixed,
                 ..
             },
         ] => *site_mechanism_id == root_site_id,
         [
-            PatternOutputLayer::GuidePaths {
+            PatternOutputRealization::GuidePaths {
                 guide_mechanism_id: output_guide_id,
                 ..
             },
         ] => *output_guide_id == guide_mechanism_id,
         [
-            PatternOutputLayer::ConnectionPaths {
+            PatternOutputRealization::ConnectionPaths {
                 site_mechanism_id,
                 program,
                 ..
             },
         ] => *site_mechanism_id == root_site_id && program.validate().is_ok(),
         [
-            PatternOutputLayer::MazeWalls {
+            PatternOutputRealization::MazeWalls {
                 site_mechanism_id,
                 program,
                 ..
             },
         ] => *site_mechanism_id == root_site_id && program.validate().is_ok(),
-        [PatternOutputLayer::Regions { source, .. }] => {
+        [PatternOutputRealization::Regions { source, .. }] => {
             source.site_mechanism_id() == Some(root_site_id)
         }
         _ => false,
@@ -10912,13 +11840,13 @@ fn validate_parametric_curve_definition(
     match (
         site_id,
         definition.mechanisms.as_slice(),
-        definition.output_layers.as_slice(),
+        output_realizations(definition).as_slice(),
     ) {
         (
             None,
             [PatternMechanism::ParametricCurveSource { .. }],
             [
-                PatternOutputLayer::ParametricPaths {
+                PatternOutputRealization::ParametricPaths {
                     curve_mechanism_id, ..
                 },
             ],
@@ -10935,7 +11863,7 @@ fn validate_parametric_curve_definition(
                 },
             ],
             [
-                PatternOutputLayer::CircularMarks {
+                PatternOutputRealization::CircularMarks {
                     site_mechanism_id, ..
                 },
             ],
@@ -10960,7 +11888,7 @@ fn validate_parametric_curve_definition(
                     phase,
                 },
             ],
-            [PatternOutputLayer::Regions { source, .. }],
+            [PatternOutputRealization::Regions { source, .. }],
         ) if *id == site_id
             && *curve_mechanism_id == curve_id
             && source.site_mechanism_id() == Some(site_id) =>
@@ -10986,7 +11914,7 @@ fn validate_parametric_curve_definition(
                 },
             ],
             [
-                PatternOutputLayer::MarkPrototype {
+                PatternOutputRealization::MarkPrototype {
                     site_mechanism_id,
                     orientation: MarkOrientation::Fixed,
                     ..
@@ -11064,9 +11992,28 @@ fn project_validated_pattern_definition(
         .output_layers
         .iter()
         .zip(settings)
-        .map(|(output, setting)| {
+        .enumerate()
+        .map(|(painter_index, (output, setting))| {
+            let compatible_filter_targets = output
+                .site_mechanism_id()
+                .map(|mechanism_id| {
+                    definition
+                        .output_layers
+                        .iter()
+                        .filter(|candidate| {
+                            candidate.id != output.id
+                                && candidate.publishes_site_usage()
+                                && candidate.site_mechanism_id() == Some(mechanism_id)
+                        })
+                        .map(|candidate| candidate.id)
+                        .collect()
+                })
+                .unwrap_or_default();
             Ok(PatternOutputCapabilityRecord {
                 output_layer_id: output.id(),
+                painter_index,
+                source_filter: output.source_filter,
+                compatible_filter_targets,
                 structural: project_output_capability(output)?,
                 response: setting.response.clone(),
             })
@@ -11200,7 +12147,7 @@ fn project_validated_pattern_definition(
 fn project_output_capability(
     output: &PatternOutputLayer,
 ) -> Result<PatternOutputCapabilityProjection, ValidationError> {
-    if let PatternOutputLayer::Regions { source, .. } = output {
+    if let PatternOutputRealization::Regions { source, .. } = &output.realization {
         return Ok(PatternOutputCapabilityProjection::Regions(
             RegionOutputCapabilityProjection {
                 source: match source {
@@ -11231,8 +12178,9 @@ fn project_output_capability(
         ));
     }
     if matches!(
-        output,
-        PatternOutputLayer::GuidePaths { .. } | PatternOutputLayer::ParametricPaths { .. }
+        &output.realization,
+        PatternOutputRealization::GuidePaths { .. }
+            | PatternOutputRealization::ParametricPaths { .. }
     ) {
         return Ok(PatternOutputCapabilityProjection::GuidePaths(
             GuidePathOutputCapabilityProjection {
@@ -11242,7 +12190,7 @@ fn project_output_capability(
             },
         ));
     }
-    if let PatternOutputLayer::ConnectionPaths { program, .. } = output {
+    if let PatternOutputRealization::ConnectionPaths { program, .. } = &output.realization {
         let (program_kind, minimum_degree, seed) = match program {
             ConnectionProgram::NearestLinks { .. } => {
                 (ConnectionProgramKind::NearestLinks, None, None)
@@ -11274,7 +12222,7 @@ fn project_output_capability(
             },
         ));
     }
-    if let PatternOutputLayer::MazeWalls { program, .. } = output {
+    if let PatternOutputRealization::MazeWalls { program, .. } = &output.realization {
         program.validate()?;
         return Ok(PatternOutputCapabilityProjection::MazeWalls(
             MazeWallOutputCapabilityProjection {
@@ -11289,11 +12237,11 @@ fn project_output_capability(
             },
         ));
     }
-    let (prototype, orientation) = match output {
-        PatternOutputLayer::CircularMarks { .. } => {
+    let (prototype, orientation) = match &output.realization {
+        PatternOutputRealization::CircularMarks { .. } => {
             (MarkPrototypeKind::Circle, MarkOrientationKind::Fixed)
         }
-        PatternOutputLayer::MarkPrototype {
+        PatternOutputRealization::MarkPrototype {
             prototype,
             orientation,
             ..
@@ -11301,13 +12249,17 @@ fn project_output_capability(
             mark_prototype_kind(prototype),
             mark_orientation_kind(orientation),
         ),
-        PatternOutputLayer::GuidePaths { .. } | PatternOutputLayer::ParametricPaths { .. } => {
+        PatternOutputRealization::GuidePaths { .. }
+        | PatternOutputRealization::ParametricPaths { .. } => {
             unreachable!("handled above")
         }
-        PatternOutputLayer::ConnectionPaths { .. } | PatternOutputLayer::MazeWalls { .. } => {
+        PatternOutputRealization::ConnectionPaths { .. }
+        | PatternOutputRealization::MazeWalls { .. } => {
             unreachable!("handled above")
         }
-        PatternOutputLayer::Regions { .. } => unreachable!("regions have a dedicated capability"),
+        PatternOutputRealization::Regions { .. } => {
+            unreachable!("regions have a dedicated capability")
+        }
     };
     Ok(PatternOutputCapabilityProjection::Marks(
         MarkOutputCapabilityProjection {
@@ -11438,19 +12390,20 @@ fn validate_random_site_definition(
             "random-site maximum neighbor checks must be nonzero",
         ));
     }
-    let [output] = definition.output_layers.as_slice() else {
+    let realizations = output_realizations(definition);
+    let [output] = realizations.as_slice() else {
         return Err(ValidationError::new(
             "pattern_definitions.output_layers",
             "random-site products require exactly one fixed mark prototype layer",
         ));
     };
     let source_id = match output {
-        PatternOutputLayer::MarkPrototype {
+        PatternOutputRealization::MarkPrototype {
             site_mechanism_id,
             orientation: MarkOrientation::Fixed,
             ..
         } => *site_mechanism_id,
-        PatternOutputLayer::ConnectionPaths {
+        PatternOutputRealization::ConnectionPaths {
             site_mechanism_id,
             program,
             ..
@@ -11458,7 +12411,7 @@ fn validate_random_site_definition(
             program.validate()?;
             *site_mechanism_id
         }
-        PatternOutputLayer::Regions { source, .. } => {
+        PatternOutputRealization::Regions { source, .. } => {
             source.site_mechanism_id().ok_or_else(|| {
                 ValidationError::new(
                     "pattern.output_layers.region_source",
@@ -11836,13 +12789,13 @@ fn validate_site_mechanism_ids(
 ///
 /// Returns a stable output-layer or orientation-reference diagnostic.
 fn validate_generalized_output_layers_ids(
-    layers: &[PatternOutputLayer],
+    layers: &[PatternOutputRealization],
     guide_id: PatternMechanismId,
     site_id: PatternMechanismId,
     dimensions: &[GuideDimensionId],
 ) -> Result<(), ValidationError> {
     if let [
-        PatternOutputLayer::ConnectionPaths {
+        PatternOutputRealization::ConnectionPaths {
             site_mechanism_id,
             program,
             ..
@@ -11857,11 +12810,11 @@ fn validate_generalized_output_layers_ids(
                 "connection output must consume its declared site mechanism",
             ));
     }
-    if let [PatternOutputLayer::Regions { source, .. }] = layers {
+    if let [PatternOutputRealization::Regions { source, .. }] = layers {
         return validate_region_source_ids(source, guide_id, site_id, dimensions);
     }
     if let [
-        PatternOutputLayer::GuidePaths {
+        PatternOutputRealization::GuidePaths {
             guide_mechanism_id, ..
         },
     ] = layers
@@ -11874,7 +12827,7 @@ fn validate_generalized_output_layers_ids(
             ));
     }
     let [
-        PatternOutputLayer::MarkPrototype {
+        PatternOutputRealization::MarkPrototype {
             site_mechanism_id,
             orientation,
             ..
@@ -12024,14 +12977,14 @@ fn validate_site_mechanism(
 ///
 /// Returns a stable output-layer, site-product, or orientation-reference diagnostic.
 fn validate_generalized_output_layers(
-    layers: &[PatternOutputLayer],
+    layers: &[PatternOutputRealization],
     guide_id: PatternMechanismId,
     site_id: PatternMechanismId,
     dimensions: &[StraightGuideDimension],
     site_mechanism: &PatternMechanism,
 ) -> Result<(), ValidationError> {
     if let [
-        PatternOutputLayer::ConnectionPaths {
+        PatternOutputRealization::ConnectionPaths {
             site_mechanism_id,
             program,
             ..
@@ -12046,7 +12999,7 @@ fn validate_generalized_output_layers(
                 "connection output must consume its declared site mechanism",
             ));
     }
-    if let [PatternOutputLayer::Regions { source, .. }] = layers {
+    if let [PatternOutputRealization::Regions { source, .. }] = layers {
         let ids = dimensions
             .iter()
             .map(|dimension| dimension.id)
@@ -12054,7 +13007,7 @@ fn validate_generalized_output_layers(
         return validate_region_source_ids(source, guide_id, site_id, &ids);
     }
     if let [
-        PatternOutputLayer::GuidePaths {
+        PatternOutputRealization::GuidePaths {
             guide_mechanism_id, ..
         },
     ] = layers
@@ -12067,7 +13020,7 @@ fn validate_generalized_output_layers(
             ));
     }
     if let [
-        PatternOutputLayer::MazeWalls {
+        PatternOutputRealization::MazeWalls {
             site_mechanism_id,
             program,
             ..
@@ -12093,7 +13046,7 @@ fn validate_generalized_output_layers(
         };
     }
     let [
-        PatternOutputLayer::MarkPrototype {
+        PatternOutputRealization::MarkPrototype {
             site_mechanism_id,
             orientation,
             ..
@@ -12608,6 +13561,8 @@ pub enum PropertyFieldId {
     OutputAuthoredClosedShape,
     OutputOrientation,
     OutputOrientationDimension,
+    OutputSiteUseFilterKind,
+    OutputSiteUseFilterReference,
     ConnectionProgram,
     ConnectionMaximumDegree,
     ConnectionMaximumDistance,
@@ -12714,6 +13669,8 @@ pub const PROPERTY_FIELD_IDS: &[PropertyFieldId] = &[
     PropertyFieldId::OutputAuthoredClosedShape,
     PropertyFieldId::OutputOrientation,
     PropertyFieldId::OutputOrientationDimension,
+    PropertyFieldId::OutputSiteUseFilterKind,
+    PropertyFieldId::OutputSiteUseFilterReference,
     PropertyFieldId::ConnectionProgram,
     PropertyFieldId::ConnectionMaximumDegree,
     PropertyFieldId::ConnectionMaximumDistance,
@@ -12776,6 +13733,7 @@ pub enum PropertyEnumChoice {
     VisibleMarkSizingPolicy(VisibleMarkSizingPolicy),
     MarkPrototype(MarkPrototypeKind),
     MarkOrientation(MarkOrientationKind),
+    SiteUseFilter(SiteUseFilterKind),
     ConnectionProgram(ConnectionProgramKind),
     GuidePrototype(GuidePrototypeKind),
     GuideRepetition(GuideRepetitionKind),
@@ -13008,6 +13966,7 @@ pub enum PropertyCommandKind {
     SetOutputAuthoredClosedShape,
     SetOutputOrientation,
     SetOutputOrientationDimension,
+    SetSiteUseFilter,
     SetConnectionProgram,
     SetConnectionMaximumDegree,
     SetConnectionMaximumDistance,
@@ -13086,6 +14045,7 @@ pub enum PropertyReferenceValue {
     Definition(PatternDefinitionId),
     Mechanism(PatternMechanismId),
     GuideDimension(GuideDimensionId),
+    OutputLayer(PatternOutputLayerId),
     AuthoredStructure(AuthoredStructureId),
 }
 
@@ -13894,7 +14854,10 @@ fn orientation_transition_fields(
                 "transition output layer is missing",
             )
         })?;
-    if !matches!(layer, PatternOutputLayer::MarkPrototype { .. }) {
+    if !matches!(
+        &layer.realization,
+        PatternOutputRealization::MarkPrototype { .. }
+    ) {
         return Err(ValidationError::new(
             "transition_draft.target",
             "selector is not a mark-prototype output",
@@ -13915,8 +14878,8 @@ fn orientation_transition_fields(
         })
         .collect::<Vec<_>>();
     let existing = if base == choice {
-        match layer {
-            PatternOutputLayer::MarkPrototype {
+        match &layer.realization {
+            PatternOutputRealization::MarkPrototype {
                 orientation:
                     MarkOrientation::GuideTangent { dimension_id }
                     | MarkOrientation::GuideNormal { dimension_id },
@@ -13963,7 +14926,7 @@ fn mark_prototype_transition_fields(
                 "transition output layer is missing",
             )
         })?;
-    let PatternOutputLayer::MarkPrototype { prototype, .. } = layer else {
+    let PatternOutputRealization::MarkPrototype { prototype, .. } = &layer.realization else {
         return Err(ValidationError::new(
             "transition_draft.target",
             "selector is not a mark-prototype output",
@@ -14553,6 +15516,10 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::OutputOrientationDimension => {
                 PropertyCommandKind::SetOutputOrientationDimension
             }
+            PropertyFieldId::OutputSiteUseFilterKind
+            | PropertyFieldId::OutputSiteUseFilterReference => {
+                PropertyCommandKind::SetSiteUseFilter
+            }
             PropertyFieldId::ConnectionProgram => PropertyCommandKind::SetConnectionProgram,
             PropertyFieldId::ConnectionMaximumDegree => {
                 PropertyCommandKind::SetConnectionMaximumDegree
@@ -14577,6 +15544,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::AlongGuideDimensions
             | PropertyFieldId::OutputSiteProduct
             | PropertyFieldId::OutputOrientationDimension
+            | PropertyFieldId::OutputSiteUseFilterReference
             | PropertyFieldId::GuideAuthoredStructure
             | PropertyFieldId::OutputAuthoredClosedShape => PropertyValueKind::StableIdReference,
             PropertyFieldId::DensityAspectLocked
@@ -14605,6 +15573,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::VisibleMarkSizingPolicy
             | PropertyFieldId::OutputPrototype
             | PropertyFieldId::OutputOrientation
+            | PropertyFieldId::OutputSiteUseFilterKind
             | PropertyFieldId::ConnectionProgram
             | PropertyFieldId::GuidePrototype
             | PropertyFieldId::GuideRepetition
@@ -14634,6 +15603,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::VisibleMarkSizingPolicy => VISIBLE_MARK_SIZING_POLICY_CHOICES,
             PropertyFieldId::OutputPrototype => MARK_PROTOTYPE_CHOICES,
             PropertyFieldId::OutputOrientation => MARK_ORIENTATION_CHOICES,
+            PropertyFieldId::OutputSiteUseFilterKind => SITE_USE_FILTER_CHOICES,
             PropertyFieldId::GuidePrototype => GUIDE_PROTOTYPE_CHOICES,
             PropertyFieldId::GuideRepetition => GUIDE_REPETITION_CHOICES,
             PropertyFieldId::GuideOffsetSides => OFFSET_SIDES_CHOICES,
@@ -14855,7 +15825,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::OutputPrototype
             | PropertyFieldId::OutputAuthoredClosedShape
             | PropertyFieldId::OutputOrientation
-            | PropertyFieldId::OutputOrientationDimension => InvalidationLevel::Realization,
+            | PropertyFieldId::OutputOrientationDimension
+            | PropertyFieldId::OutputSiteUseFilterKind
+            | PropertyFieldId::OutputSiteUseFilterReference => InvalidationLevel::Realization,
             PropertyFieldId::RegionTreatment | PropertyFieldId::RegionSampling => {
                 InvalidationLevel::Family
             }
@@ -14922,6 +15894,8 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
                 | PropertyFieldId::OutputAuthoredClosedShape
                 | PropertyFieldId::OutputOrientation
                 | PropertyFieldId::OutputOrientationDimension
+                | PropertyFieldId::OutputSiteUseFilterKind
+                | PropertyFieldId::OutputSiteUseFilterReference
                 | PropertyFieldId::ConnectionProgram
                 | PropertyFieldId::ConnectionMaximumDegree
                 | PropertyFieldId::ConnectionMaximumDistance
@@ -14957,6 +15931,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::DefinitionSelection
             | PropertyFieldId::OutputSiteProduct
             | PropertyFieldId::OutputOrientationDimension
+            | PropertyFieldId::OutputSiteUseFilterReference
             | PropertyFieldId::GuideAuthoredStructure
             | PropertyFieldId::OutputAuthoredClosedShape => PropertyReferenceConstraint::Singular,
             _ => PropertyReferenceConstraint::NotReference,
@@ -15032,6 +16007,11 @@ const MARK_ORIENTATION_CHOICES: &[PropertyEnumChoice] = &[
     PropertyEnumChoice::MarkOrientation(MarkOrientationKind::Fixed),
     PropertyEnumChoice::MarkOrientation(MarkOrientationKind::GuideTangent),
     PropertyEnumChoice::MarkOrientation(MarkOrientationKind::GuideNormal),
+];
+const SITE_USE_FILTER_CHOICES: &[PropertyEnumChoice] = &[
+    PropertyEnumChoice::SiteUseFilter(SiteUseFilterKind::All),
+    PropertyEnumChoice::SiteUseFilter(SiteUseFilterKind::SitesUsedBy),
+    PropertyEnumChoice::SiteUseFilter(SiteUseFilterKind::SitesUnusedBy),
 ];
 const CONNECTION_PROGRAM_CHOICES: &[PropertyEnumChoice] = &[
     PropertyEnumChoice::ConnectionProgram(ConnectionProgramKind::NearestLinks),
@@ -15415,20 +16395,61 @@ pub enum PatternStructureRecipe {
         definition: Box<PatternStructureRecipe>,
         dimension_indices: Vec<usize>,
     },
+    /// Wraps one ID-free family with an authored heterogeneous output collection.
+    OrderedOutputs {
+        definition: Box<PatternStructureRecipe>,
+        outputs: Vec<PatternOutputRealizationRecipe>,
+    },
+}
+
+/// One ID-free output realization authored in preset painter order.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PatternOutputRealizationRecipe {
+    /// Uses the family recipe's mark prototype and orientation controls.
+    Marks,
+    /// Emits the family's complete structural guide or parametric paths.
+    StructuralPaths {
+        style: PathStrokeStyle,
+    },
+    ConnectionPaths {
+        program: ConnectionProgram,
+        style: PathStrokeStyle,
+    },
+    MazeWalls {
+        program: MazeProgram,
+        style: PathStrokeStyle,
+    },
+    VoronoiRegions,
+    GuideFaceRegions {
+        dimension_indices: Vec<usize>,
+    },
 }
 
 /// One ordered ID-free base response authored alongside a structural output.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PatternOutputSettingsRecipe {
+    pub source_filter: SiteUseFilterRecipe,
     pub response: PatternGeometryResponse,
+}
+
+/// ID-free site-use dependency whose target is an ordered recipe-local output index.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SiteUseFilterRecipe {
+    #[default]
+    All,
+    SitesUsedBy {
+        output_index: usize,
+    },
+    SitesUnusedBy {
+        output_index: usize,
+    },
 }
 
 /// Complete ID-free pattern definition authority.
 ///
 /// The structure never carries document IDs, while settings are ordered to
-/// bind atomically to output IDs allocated during materialization. Current
-/// Stage 20N validation deliberately retains the one-output authoring gate;
-/// the ordered form is the authority Stage 20R will generalize.
+/// bind atomically to output IDs allocated during materialization. Ordered-output recipes retain
+/// one family recipe and use recipe-local indices for every site-use dependency.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PatternDefinitionRecipe {
     pub structure: PatternStructureRecipe,
@@ -15441,6 +16462,7 @@ impl PatternDefinitionRecipe {
         Self {
             structure,
             output_settings: vec![PatternOutputSettingsRecipe {
+                source_filter: SiteUseFilterRecipe::All,
                 response: PatternGeometryResponse::Marks(MarkGeometryResponse {
                     minimum_fill: 0.0,
                     maximum_fill: 1.0,
@@ -15454,6 +16476,7 @@ impl PatternDefinitionRecipe {
         Self {
             structure,
             output_settings: vec![PatternOutputSettingsRecipe {
+                source_filter: SiteUseFilterRecipe::All,
                 response: PatternGeometryResponse::Connected(ConnectedGeometryResponse {
                     minimum_thickness: 0.0,
                     maximum_thickness: 1.0,
@@ -15469,6 +16492,7 @@ impl PatternDefinitionRecipe {
                 definition: Box::new(structure),
             },
             output_settings: vec![PatternOutputSettingsRecipe {
+                source_filter: SiteUseFilterRecipe::All,
                 response: PatternGeometryResponse::Regions(RegionGeometryResponse::default()),
             }],
         }
@@ -15482,6 +16506,7 @@ impl PatternDefinitionRecipe {
                 dimension_indices,
             },
             output_settings: vec![PatternOutputSettingsRecipe {
+                source_filter: SiteUseFilterRecipe::All,
                 response: PatternGeometryResponse::Regions(RegionGeometryResponse::default()),
             }],
         }
@@ -15542,6 +16567,10 @@ pub fn validate_preset_record(record: &PresetRecord) -> Result<(), ValidationErr
 }
 
 /// Validates one ID-free structural recipe without allocating output IDs.
+///
+/// # Errors
+///
+/// Returns the first stable recipe-shape, bounds, cardinality, or reference diagnostic.
 fn validate_pattern_structure_recipe(
     recipe: &PatternStructureRecipe,
 ) -> Result<(), ValidationError> {
@@ -15780,25 +16809,87 @@ fn validate_pattern_structure_recipe(
             }
             validate_pattern_structure_recipe(definition)
         }
+        PatternStructureRecipe::OrderedOutputs {
+            definition,
+            outputs,
+        } => {
+            if outputs.is_empty()
+                || matches!(
+                    definition.as_ref(),
+                    PatternStructureRecipe::ConnectionPaths { .. }
+                        | PatternStructureRecipe::MazeWalls { .. }
+                        | PatternStructureRecipe::AuthoredClosedShapeMarks { .. }
+                        | PatternStructureRecipe::VoronoiRegions { .. }
+                        | PatternStructureRecipe::GuideFaceRegions { .. }
+                        | PatternStructureRecipe::OrderedOutputs { .. }
+                )
+            {
+                return Err(ValidationError::new(
+                    "preset.recipe.outputs",
+                    "ordered outputs require a nonempty collection over one unwrapped family recipe",
+                ));
+            }
+            for output in outputs {
+                match output {
+                    PatternOutputRealizationRecipe::ConnectionPaths { program, .. } => {
+                        validate_connection_recipe(definition, program)?;
+                    }
+                    PatternOutputRealizationRecipe::MazeWalls { program, .. } => {
+                        validate_maze_recipe(definition, program)?;
+                    }
+                    PatternOutputRealizationRecipe::GuideFaceRegions { dimension_indices } => {
+                        let PatternStructureRecipe::GeneralizedStraightGuides {
+                            dimensions, ..
+                        } = definition.as_ref()
+                        else {
+                            return Err(ValidationError::new(
+                                "preset.recipe.outputs.guide_faces.family",
+                                "Guide Faces output requires a straight-guide family recipe",
+                            ));
+                        };
+                        if !(2..=3).contains(&dimension_indices.len())
+                            || dimension_indices
+                                .iter()
+                                .any(|index| *index >= dimensions.len())
+                        {
+                            return Err(ValidationError::new(
+                                "preset.recipe.outputs.guide_faces.dimension_indices",
+                                "Guide Faces output requires two or three in-bounds dimension indices",
+                            ));
+                        }
+                    }
+                    PatternOutputRealizationRecipe::Marks
+                    | PatternOutputRealizationRecipe::StructuralPaths { .. }
+                    | PatternOutputRealizationRecipe::VoronoiRegions => {}
+                }
+            }
+            validate_pattern_structure_recipe(definition)
+        }
     }
 }
 
-/// Validates the ordered ID-free response collection against the current
-/// one-output authoring gate and its structural response kind.
+/// Validates ordered ID-free responses and recipe-local dependency references.
+///
+/// # Errors
+///
+/// Returns a stable cardinality, response-kind, filter-reference, or dependency-cycle diagnostic.
 fn validate_recipe_output_settings(
     recipe: &PatternDefinitionRecipe,
 ) -> Result<(), ValidationError> {
-    if recipe.output_settings.len() != 1 {
+    if recipe.output_settings.is_empty() {
         return Err(ValidationError::new(
             "preset.recipe.output_settings.cardinality",
-            "current pattern recipes require exactly one output setting",
+            "pattern recipes require at least one output setting",
         ));
     }
-    let setting = recipe.output_settings.first().ok_or(ValidationError::new(
-        "preset.recipe.output_settings.cardinality",
-        "current pattern recipes require exactly one output setting",
-    ))?;
-    let response = &setting.response;
+    if let PatternStructureRecipe::OrderedOutputs { outputs, .. } = &recipe.structure
+        && outputs.len() != recipe.output_settings.len()
+    {
+        return Err(ValidationError::new(
+            "preset.recipe.outputs.cardinality",
+            "ordered output recipes and settings must be cardinally aligned",
+        ));
+    }
     let connected = matches!(
         recipe.structure,
         PatternStructureRecipe::ConnectionPaths { .. } | PatternStructureRecipe::MazeWalls { .. }
@@ -15808,17 +16899,114 @@ fn validate_recipe_output_settings(
         PatternStructureRecipe::VoronoiRegions { .. }
             | PatternStructureRecipe::GuideFaceRegions { .. }
     );
-    match (connected, regions, response) {
-        (false, false, PatternGeometryResponse::Marks(_))
-        | (true, false, PatternGeometryResponse::Connected(_))
-        | (false, true, PatternGeometryResponse::Regions(_)) => {
-            validate_pattern_geometry_response(response)
+    let recipe_output_is_site_backed = |index: usize| match &recipe.structure {
+        PatternStructureRecipe::OrderedOutputs { outputs, .. } => matches!(
+            outputs.get(index),
+            Some(
+                PatternOutputRealizationRecipe::Marks
+                    | PatternOutputRealizationRecipe::ConnectionPaths { .. }
+                    | PatternOutputRealizationRecipe::MazeWalls { .. }
+                    | PatternOutputRealizationRecipe::VoronoiRegions
+            )
+        ),
+        PatternStructureRecipe::GuideFaceRegions { .. } => false,
+        _ => true,
+    };
+    let mut dependencies = Vec::with_capacity(recipe.output_settings.len());
+    for (index, setting) in recipe.output_settings.iter().enumerate() {
+        if let Some(reference_index) = match setting.source_filter {
+            SiteUseFilterRecipe::All => None,
+            SiteUseFilterRecipe::SitesUsedBy { output_index }
+            | SiteUseFilterRecipe::SitesUnusedBy { output_index } => Some(output_index),
+        } {
+            if reference_index >= recipe.output_settings.len() {
+                return Err(ValidationError::new(
+                    "preset.recipe.output_settings.source_filter.output_index",
+                    "site-use filter references an out-of-bounds recipe output index",
+                ));
+            }
+            if reference_index == index {
+                return Err(ValidationError::new(
+                    "preset.recipe.output_settings.source_filter.self_reference",
+                    "site-use filter cannot reference its own recipe output index",
+                ));
+            }
+            if !recipe_output_is_site_backed(index) {
+                return Err(ValidationError::new(
+                    "preset.recipe.output_settings.source_filter.non_site_source",
+                    "non-site recipe outputs accept only the All site-use filter",
+                ));
+            }
+            if !recipe_output_is_site_backed(reference_index) {
+                return Err(ValidationError::new(
+                    "preset.recipe.output_settings.source_filter.non_site_reference",
+                    "recipe site-use filters must reference a site-backed output",
+                ));
+            }
+            dependencies.push((reference_index, index));
         }
-        _ => Err(ValidationError::new(
-            "preset.recipe.output_settings.kind",
-            "recipe response kind must match its structural output",
-        )),
+        let kind_matches = match &recipe.structure {
+            PatternStructureRecipe::OrderedOutputs { outputs, .. } => {
+                matches!(
+                    (&outputs[index], &setting.response),
+                    (
+                        PatternOutputRealizationRecipe::Marks,
+                        PatternGeometryResponse::Marks(_)
+                    ) | (
+                        PatternOutputRealizationRecipe::StructuralPaths { .. }
+                            | PatternOutputRealizationRecipe::ConnectionPaths { .. }
+                            | PatternOutputRealizationRecipe::MazeWalls { .. },
+                        PatternGeometryResponse::Connected(_),
+                    ) | (
+                        PatternOutputRealizationRecipe::VoronoiRegions
+                            | PatternOutputRealizationRecipe::GuideFaceRegions { .. },
+                        PatternGeometryResponse::Regions(_),
+                    )
+                )
+            }
+            _ => matches!(
+                (connected, regions, &setting.response),
+                (false, false, PatternGeometryResponse::Marks(_))
+                    | (true, false, PatternGeometryResponse::Connected(_))
+                    | (false, true, PatternGeometryResponse::Regions(_))
+            ),
+        };
+        if !kind_matches {
+            return Err(ValidationError::new(
+                "preset.recipe.output_settings.kind",
+                "recipe response kind must match its structural output",
+            ));
+        }
+        validate_pattern_geometry_response(&setting.response)?;
     }
+    let mut indegree = vec![0_usize; recipe.output_settings.len()];
+    let mut dependents = vec![Vec::new(); recipe.output_settings.len()];
+    for (reference, dependent) in dependencies {
+        indegree[dependent] += 1;
+        dependents[reference].push(dependent);
+    }
+    let mut ready = indegree
+        .iter()
+        .enumerate()
+        .filter_map(|(index, count)| (*count == 0).then_some(index))
+        .collect::<BTreeSet<_>>();
+    let mut completed = 0_usize;
+    while let Some(index) = ready.pop_first() {
+        completed += 1;
+        for dependent in &dependents[index] {
+            indegree[*dependent] -= 1;
+            if indegree[*dependent] == 0 {
+                ready.insert(*dependent);
+            }
+        }
+    }
+    if completed != recipe.output_settings.len() {
+        return Err(ValidationError::new(
+            "preset.recipe.output_settings.source_filter.cycle",
+            "recipe-local site-use filter dependencies must be acyclic",
+        ));
+    }
+    Ok(())
 }
 
 /// Validates whether one ID-free family recipe can own the supplied connection program.
@@ -15855,7 +17043,8 @@ fn validate_connection_recipe(
         | PatternStructureRecipe::MazeWalls { .. }
         | PatternStructureRecipe::AuthoredClosedShapeMarks { .. }
         | PatternStructureRecipe::VoronoiRegions { .. }
-        | PatternStructureRecipe::GuideFaceRegions { .. } => Err(ValidationError::new(
+        | PatternStructureRecipe::GuideFaceRegions { .. }
+        | PatternStructureRecipe::OrderedOutputs { .. } => Err(ValidationError::new(
             "preset.recipe.definition",
             "connection recipes cannot wrap another output recipe wrapper",
         )),
@@ -15888,7 +17077,8 @@ fn validate_maze_recipe(
         | PatternStructureRecipe::MazeWalls { .. }
         | PatternStructureRecipe::AuthoredClosedShapeMarks { .. }
         | PatternStructureRecipe::VoronoiRegions { .. }
-        | PatternStructureRecipe::GuideFaceRegions { .. } => Err(ValidationError::new(
+        | PatternStructureRecipe::GuideFaceRegions { .. }
+        | PatternStructureRecipe::OrderedOutputs { .. } => Err(ValidationError::new(
             "preset.recipe.maze.family",
             "maze recipes require an unwrapped straight guide intersection family",
         )),
@@ -16284,14 +17474,14 @@ pub enum DocumentCommand {
         channel_id: ChannelId,
         /// Immutable complete base, including response records, used for stale detection.
         base_bundle: PatternDefinitionBundle,
-        edit: PatternOutputSettingsEdit,
+        edit: PatternDefinitionBundleEdit,
     },
     /// Edits one shared response bundle in place for every linked channel in document order.
     EditSharedPatternDefinitionBundle {
         definition_id: PatternDefinitionId,
         /// Immutable complete base, including response records, used for stale detection.
         base_bundle: PatternDefinitionBundle,
-        edit: PatternOutputSettingsEdit,
+        edit: PatternDefinitionBundleEdit,
     },
     /// Adds one validated reusable authored structure with a fresh document-scoped ID.
     AddAuthoredStructure {
@@ -16428,6 +17618,7 @@ pub struct PropertyCommandFieldProjection {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NonFieldCommandOperation {
     EffectivePatternAuthority,
+    MoveOutputLayer,
     AddAuthoredStructure,
     DuplicateAuthoredStructure,
     ReplaceAuthoredStructure,
@@ -16848,13 +18039,39 @@ impl DocumentCommand {
             | Command::SetChannelShapeRotationDelta { .. }
             | Command::ResetChannelShapeRotationDelta { .. }
             | Command::SetChannelOutputResponseDelta { .. }
-            | Command::ResetChannelOutputResponseDelta { .. }
-            | Command::EditSelectedChannelPatternDefinitionBundle { .. }
-            | Command::EditSharedPatternDefinitionBundle { .. } => {
+            | Command::ResetChannelOutputResponseDelta { .. } => {
                 DocumentCommandFieldClassification::NonField(
                     NonFieldCommandOperation::EffectivePatternAuthority,
                 )
             }
+            Command::EditSelectedChannelPatternDefinitionBundle { edit, .. }
+            | Command::EditSharedPatternDefinitionBundle { edit, .. } => match edit {
+                PatternDefinitionBundleEdit::SetSiteUseFilter { source_filter, .. } => {
+                    let mut projections = vec![PropertyCommandFieldProjection {
+                        field: PropertyFieldId::OutputSiteUseFilterKind,
+                        value: PropertyFieldValue::EnumChoice(PropertyEnumChoice::SiteUseFilter(
+                            source_filter.kind(),
+                        )),
+                    }];
+                    if source_filter.referenced_output_layer_id().is_some() {
+                        projections.push(PropertyCommandFieldProjection {
+                            field: PropertyFieldId::OutputSiteUseFilterReference,
+                            value: PropertyFieldValue::StableIdReference,
+                        });
+                    }
+                    DocumentCommandFieldClassification::DescriptorBacked(projections)
+                }
+                PatternDefinitionBundleEdit::MoveOutputLayer { .. } => {
+                    DocumentCommandFieldClassification::NonField(
+                        NonFieldCommandOperation::MoveOutputLayer,
+                    )
+                }
+                PatternDefinitionBundleEdit::OutputSettings(_) => {
+                    DocumentCommandFieldClassification::NonField(
+                        NonFieldCommandOperation::EffectivePatternAuthority,
+                    )
+                }
+            },
             Command::AddAuthoredStructure { .. } => DocumentCommandFieldClassification::NonField(
                 NonFieldCommandOperation::AddAuthoredStructure,
             ),
@@ -17475,7 +18692,7 @@ impl DocumentCommand {
                 let mut edited = base_bundle.clone();
                 edit.apply_to_bundle(&mut edited)?;
                 if document.linked_channels(base_bundle.definition.id).len() > 1 {
-                    let duplicate = document.duplicate_definition(&base_bundle.definition)?;
+                    let duplicate = document.duplicate_definition(&edited.definition)?;
                     let duplicate = document.bundle_for_duplicate(&edited, duplicate)?;
                     duplicate.validate()?;
                 }
@@ -17880,7 +19097,7 @@ impl DocumentCommand {
                     edit.apply_to_bundle(&mut edited)
                         .expect("validated selected response bundle edit");
                     let duplicate = document
-                        .duplicate_definition(&source.definition)
+                        .duplicate_definition(&edited.definition)
                         .expect("validated selected response clone allocation");
                     let clone = document
                         .bundle_for_duplicate(&edited, duplicate)
@@ -17888,7 +19105,7 @@ impl DocumentCommand {
                     let clone_id = clone.definition.id;
                     document.pattern_definition_bundles.push(clone.clone());
                     document.retarget_channel(*channel_id, clone_id);
-                    document.remap_channel_output_response_deltas(*channel_id, &source, &clone);
+                    document.remap_channel_output_response_deltas(*channel_id, &edited, &clone);
                     document.prune_incompatible_output_response_deltas(*channel_id);
                 } else {
                     let bundle = document
@@ -18261,6 +19478,7 @@ impl DocumentCommand {
             }
             DocumentCommandFieldClassification::NonField(operation) => match operation {
                 NonFieldCommandOperation::EffectivePatternAuthority => InvalidationLevel::Family,
+                NonFieldCommandOperation::MoveOutputLayer => InvalidationLevel::Presentation,
                 NonFieldCommandOperation::AddAuthoredStructure
                 | NonFieldCommandOperation::DuplicateAuthoredStructure
                 | NonFieldCommandOperation::RemoveUnreferencedAuthoredStructure
@@ -18319,8 +19537,8 @@ impl DocumentCommand {
                                             if structure_id == base_structure.id()
                                     ))
                             )) || definition.output_layers.iter().any(|layer| matches!(
-                                layer,
-                                PatternOutputLayer::MarkPrototype {
+                                &layer.realization,
+                                PatternOutputRealization::MarkPrototype {
                                     prototype: MarkPrototype::AuthoredClosedShape { structure_id },
                                     ..
                                 } if *structure_id == base_structure.id()
@@ -19353,12 +20571,14 @@ mod history_tests {
                     phase: 0.0,
                 },
             ],
-            output_layers: vec![PatternOutputLayer::MarkPrototype {
-                id: PatternOutputLayerId(43),
-                site_mechanism_id: site_id,
-                prototype: MarkPrototype::Circle,
-                orientation: MarkOrientation::Fixed,
-            }],
+            output_layers: vec![PatternOutputLayer::all(
+                PatternOutputLayerId(43),
+                PatternOutputRealization::MarkPrototype {
+                    site_mechanism_id: site_id,
+                    prototype: MarkPrototype::Circle,
+                    orientation: MarkOrientation::Fixed,
+                },
+            )],
             modulation: PatternModulation,
             coverage: CoveragePolicy {
                 guard_steps: 0,
@@ -19422,12 +20642,14 @@ mod history_tests {
                 additional_margin: 0.0,
             },
         );
-        definition.output_layers = vec![PatternOutputLayer::ConnectionPaths {
-            id: output_id,
-            site_mechanism_id: site_id,
-            program,
-            style: PathStrokeStyle::default(),
-        }];
+        definition.output_layers = vec![PatternOutputLayer::all(
+            output_id,
+            PatternOutputRealization::ConnectionPaths {
+                site_mechanism_id: site_id,
+                program,
+                style: PathStrokeStyle::default(),
+            },
+        )];
         let mut first = history()
             .document()
             .channels()
@@ -19520,13 +20742,15 @@ mod history_tests {
                 additional_margin: 0.0,
             },
         );
-        definition.output_layers = vec![PatternOutputLayer::Regions {
-            id: output_id,
-            source: RegionSourceIntent::GuideFaces {
-                guide_mechanism_id: guide_id,
-                dimensions: vec![first_dimension, second_dimension],
+        definition.output_layers = vec![PatternOutputLayer::all(
+            output_id,
+            PatternOutputRealization::Regions {
+                source: RegionSourceIntent::GuideFaces {
+                    guide_mechanism_id: guide_id,
+                    dimensions: vec![first_dimension, second_dimension],
+                },
             },
-        }];
+        )];
         let mut first = history().document().channels().expect("history channel")[0].clone();
         let mut second = first.clone();
         second.id = ChannelId(2);
@@ -19575,15 +20799,14 @@ mod history_tests {
         let (output_layer_id, guide_mechanism_id, selected) = definition
             .output_layers
             .iter()
-            .find_map(|output| match output {
-                PatternOutputLayer::Regions {
-                    id,
+            .find_map(|output| match &output.realization {
+                PatternOutputRealization::Regions {
                     source:
                         RegionSourceIntent::GuideFaces {
                             guide_mechanism_id,
                             dimensions,
                         },
-                } => Some((*id, *guide_mechanism_id, dimensions.clone())),
+                } => Some((output.id, *guide_mechanism_id, dimensions.clone())),
                 _ => None,
             })
             .expect("Guide Faces output exists");
@@ -20027,8 +21250,8 @@ mod history_tests {
         assert!(matches!(
             (shared.output_layers.as_slice(), duplicate.output_layers.as_slice()),
             (
-                [PatternOutputLayer::MarkPrototype { prototype, orientation: MarkOrientation::Fixed, .. }],
-                [PatternOutputLayer::MarkPrototype { prototype: duplicate_prototype, orientation: MarkOrientation::Fixed, .. }]
+                [PatternOutputLayer { realization: PatternOutputRealization::MarkPrototype { prototype, orientation: MarkOrientation::Fixed, .. }, .. }],
+                [PatternOutputLayer { realization: PatternOutputRealization::MarkPrototype { prototype: duplicate_prototype, orientation: MarkOrientation::Fixed, .. }, .. }]
             ) if prototype == duplicate_prototype
         ));
         let _ = (
@@ -20278,15 +21501,17 @@ mod history_tests {
             .iter_mut()
             .find(|definition| definition.id == PatternDefinitionId(60))
             .expect("connection fixture definition exists")
-            .output_layers = vec![PatternOutputLayer::MazeWalls {
-            id: PatternOutputLayerId(63),
-            site_mechanism_id: PatternMechanismId(62),
-            program: MazeProgram {
-                algorithm: GridMazeAlgorithm::RecursiveBacktracker,
-                seed: 17,
+            .output_layers = vec![PatternOutputLayer::all(
+            PatternOutputLayerId(63),
+            PatternOutputRealization::MazeWalls {
+                site_mechanism_id: PatternMechanismId(62),
+                program: MazeProgram {
+                    algorithm: GridMazeAlgorithm::RecursiveBacktracker,
+                    seed: 17,
+                },
+                style: PathStrokeStyle::default(),
             },
-            style: PathStrokeStyle::default(),
-        }];
+        )];
         let projection = maze_document
             .pattern_capabilities(PatternCapabilityScope::DocumentBase)
             .expect("validated maze definition projects through the public authority");
@@ -20338,8 +21563,11 @@ mod history_tests {
                 .expect("definition")
                 .output_layers
                 .as_slice(),
-            [PatternOutputLayer::ConnectionPaths {
-                program: ConnectionProgram::NearestLinks { .. },
+            [PatternOutputLayer {
+                realization: PatternOutputRealization::ConnectionPaths {
+                    program: ConnectionProgram::NearestLinks { .. },
+                    ..
+                },
                 ..
             }]
         ));
@@ -20363,7 +21591,7 @@ mod history_tests {
             .expect("random scalar edit applies");
         assert!(matches!(
             history.document().definition(PatternDefinitionId(60)).expect("definition").output_layers.as_slice(),
-            [PatternOutputLayer::ConnectionPaths { program: ConnectionProgram::RandomLinks { adjacency, minimum_degree: 2, seed: 7 }, .. }]
+            [PatternOutputLayer { realization: PatternOutputRealization::ConnectionPaths { program: ConnectionProgram::RandomLinks { adjacency, minimum_degree: 2, seed: 7 }, .. }, .. }]
                 if adjacency.maximum_degree == 3 && adjacency.maximum_distance == 12.0
         ));
     }
@@ -20472,15 +21700,17 @@ mod history_tests {
             .iter_mut()
             .find(|definition| definition.id == PatternDefinitionId(60))
             .expect("connection definition exists")
-            .output_layers = vec![PatternOutputLayer::MazeWalls {
-            id: PatternOutputLayerId(63),
-            site_mechanism_id: PatternMechanismId(62),
-            program: MazeProgram {
-                algorithm: GridMazeAlgorithm::RecursiveBacktracker,
-                seed: 7,
+            .output_layers = vec![PatternOutputLayer::all(
+            PatternOutputLayerId(63),
+            PatternOutputRealization::MazeWalls {
+                site_mechanism_id: PatternMechanismId(62),
+                program: MazeProgram {
+                    algorithm: GridMazeAlgorithm::RecursiveBacktracker,
+                    seed: 7,
+                },
+                style: PathStrokeStyle::default(),
             },
-            style: PathStrokeStyle::default(),
-        }];
+        )];
         let base = history
             .document()
             .definition(PatternDefinitionId(60))
@@ -20506,8 +21736,11 @@ mod history_tests {
                 .expect("selected copied maze definition")
                 .output_layers
                 .as_slice(),
-            [PatternOutputLayer::MazeWalls {
-                program: MazeProgram { seed: 99, .. },
+            [PatternOutputLayer {
+                realization: PatternOutputRealization::MazeWalls {
+                    program: MazeProgram { seed: 99, .. },
+                    ..
+                },
                 ..
             }]
         ));
@@ -20564,11 +21797,15 @@ mod history_tests {
             .definition(history.document().pattern_settings().definition_id)
             .expect("materialized definition");
         let [
-            PatternOutputLayer::ConnectionPaths {
+            PatternOutputLayer {
                 id,
-                site_mechanism_id,
-                program: materialized_program,
-                style,
+                realization:
+                    PatternOutputRealization::ConnectionPaths {
+                        site_mechanism_id,
+                        program: materialized_program,
+                        style,
+                    },
+                ..
             },
         ] = definition.output_layers.as_slice()
         else {
@@ -20677,12 +21914,12 @@ mod history_tests {
                 additional_margin: 0.0,
             },
         );
-        definition
-            .output_layers
-            .push(PatternOutputLayer::CircularMarks {
-                id: PatternOutputLayerId(11),
+        definition.output_layers.push(PatternOutputLayer::all(
+            PatternOutputLayerId(11),
+            PatternOutputRealization::CircularMarks {
                 site_mechanism_id: PatternMechanismId(2),
-            });
+            },
+        ));
         let bundle = PatternDefinitionBundle {
             definition,
             output_settings: vec![

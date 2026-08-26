@@ -1873,6 +1873,7 @@ fn reference_label(reference: &PropertyReferenceValue) -> String {
         PropertyReferenceValue::Definition(_) => "Current pattern".into(),
         PropertyReferenceValue::Mechanism(_) => "Current placement".into(),
         PropertyReferenceValue::GuideDimension(_) => "Direction".into(),
+        PropertyReferenceValue::OutputLayer(_) => "Pattern output".into(),
         PropertyReferenceValue::AuthoredStructure(_) => "Authored open path".into(),
     }
 }
