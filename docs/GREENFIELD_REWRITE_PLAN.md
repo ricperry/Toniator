@@ -2040,7 +2040,7 @@ publication, or Stage 20S work. The implementation checkpoint is
 `458c9a981dd349999240a18052e055a71c7b6c3c`; the documentation closeout is
 tracked separately.
 
-**Remaining Stage 20N+ — Stage 20S Complete at implementation commit
+**Stage 20N+ history and remaining roadmap — Stage 20S Complete at implementation commit
 `55651dee7c744c2aa207924bf0dbb7737609942d`.** The user accepted the revised headless
 remainder roadmap on 2026-08-24 under
 [`STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md`](STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md).
@@ -2056,24 +2056,27 @@ guides. The user accepted it on 2026-08-26 after independent review/re-review,
 verified evidence, and parent intrinsic RGB/alpha inspection. `semantic-map
 check` is unavailable and inapplicable because Toniator has no semantic-map
 architecture schema; project documentation is authority and
-`scripts/validate_architecture.sh` is mechanical validation only. Its durable
-documentation checkpoint is pending without an assigned hash. A separately
-gated final scrub of all Stage 20 work must occur before Stage 21; Stages 21–23
-remain Planned, while push, publication, and every later stage remain separately
-gated.
+`scripts/validate_architecture.sh` is mechanical validation only. The
+integrated final scrub is complete at implementation checkpoint
+`dc7e988200c5be4d22791ca1d231336caac19a24` (accepted 2026-08-27); its durable
+architecture and concurrency record includes the full-resolution scaling
+proof. Stages 21–23 remain Planned, while the GTK4/Blueprint re-baseline,
+push, publication, and every later stage remain separately gated.
 
-**Final Stage 20 scrub — Ready for user acceptance in the 2026-08-27 working
-tree.** The integrated closeout reconciles Stage 20A–20S under the final
+**Final Stage 20 scrub — Complete at implementation checkpoint
+`dc7e988200c5be4d22791ca1d231336caac19a24`.** The user accepted the integrated
+Stage 20A–20S scrub on 2026-08-27. It reconciles Stage 20A–20S under the final
 effective-pattern, multi-output, current-v5, normalized-region, capability,
 and 16-card catalog authorities. It repairs confirmed bounded contract and
-coverage defects and records the final evaluator/cache/concurrency design in
+coverage defects and records the final evaluator/cache/concurrency design and
+full-resolution scaling proof in
 [`STAGE_20_FINAL_ARCHITECTURE_AND_CONCURRENCY.md`](STAGE_20_FINAL_ARCHITECTURE_AND_CONCURRENCY.md).
 One complete evaluation remains the cancellation and transactional-publication
 unit; deterministic per-site, per-region, and per-pixel work uses the bounded
 shared Rayon pool, while global topology, dependency/budget traversal, painter
 order, and publication remain serial. The retired `regions-plus-marks` debug
-tool remains absent. This state has no checkpoint hash and does not authorize
-the GTK4/Blueprint re-baseline, Stage 21, publication, or push.
+tool remains absent. The GTK4/Blueprint re-baseline, Stage 21, publication, and
+push remain separately gated.
 
 Every mechanism must enter through the Stage 14 typed schema, Stage 15 generic
 pipeline, Stage 17 command/descriptor contract, canonical geometry, and

@@ -457,19 +457,18 @@ centered-local curved-guide corrections remain headless. No GTK workflow or
 compatibility adapter was added. Project documentation remains architecture
 authority; `scripts/validate_architecture.sh` is mechanical validation only,
 and `semantic-map check` is unavailable because Toniator has no corresponding
-architecture schema. The durable documentation checkpoint has no assigned hash
-yet.
+architecture schema. The later integrated Stage 20 scrub is recorded below.
 
-The integrated final Stage 20 scrub is ready for user acceptance in the
-2026-08-27 working tree. Its [final architecture and concurrency
+The integrated final Stage 20 scrub is complete at implementation checkpoint
+`dc7e988200c5be4d22791ca1d231336caac19a24` (accepted 2026-08-27). Its [final architecture and concurrency
 record](docs/STAGE_20_FINAL_ARCHITECTURE_AND_CONCURRENCY.md) documents the
 single headless authority path, current-v5 persistence, output-scoped caches,
 request-wide limits, evaluation-local performance metrics, deterministic
 Rayon work inside one coordinated evaluation, and the intentionally serial
 global-topology/publication boundaries. The bundled registry remains exactly
 16 cards; `regions-plus-marks` remains retired and direct mixed-output evidence
-is not a recipe. No closeout checkpoint is assigned, and the GTK4/Blueprint
-re-baseline, Stage 21, push, and publication remain separate gates.
+is not a recipe. The GTK4/Blueprint re-baseline and Stage 21 remain separately
+gated; publication and push are not implied by this checkpoint.
 
 Low-resolution fixtures and outputs are supplementary only. Every future stage
 that exercises source loading, sampling, rendering, preview, or export must

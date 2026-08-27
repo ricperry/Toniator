@@ -1,6 +1,6 @@
 # Toniator Progress Tracker
 
-Last updated: **2026-08-26**. The durable execution contract is
+Last updated: **2026-08-27**. The durable execution contract is
 [GREENFIELD_REWRITE_PLAN.md](docs/GREENFIELD_REWRITE_PLAN.md). Normative
 architecture remains in the five protected [Project Specification files](Project%20Specification/Addendum.md).
 
@@ -677,12 +677,16 @@ authority, while `scripts/validate_architecture.sh` is the mechanical check.
 GTK work and compatibility adapters remain excluded. The user accepted Stage
 20S on 2026-08-26 after independent review and re-review, focused verification,
 verified evidence, parent intrinsic RGB/alpha inspection, and durable-document
-reconciliation. This documentation closeout awaits a separate checkpoint whose
-hash is not yet assigned; push, publication, and later-stage work remain
-unauthorized and separately gated.
+reconciliation. The integrated Stage 20A–20S scrub is recorded below at
+implementation checkpoint `dc7e988200c5be4d22791ca1d231336caac19a24`; push,
+publication, and later-stage work remain unauthorized and separately gated.
 
-**Final Stage 20 scrub — Ready for user acceptance in the 2026-08-27 working
-tree.** The integrated Stage 20A–20S audit repaired bounded current-authority,
+**Final Stage 20 scrub — Complete at implementation checkpoint
+`dc7e988200c5be4d22791ca1d231336caac19a24`.** The user accepted the integrated
+Stage 20A–20S scrub on 2026-08-27 after the final architecture, persistence,
+cache/invalidation, capability/recipe, rendering, cancellation, scheduler,
+performance, native-artifact, and independent-review gates passed. The audit
+repaired bounded current-authority,
 descriptor, persistence-hardening, cache-key, request-budget, and cancellation
 defects; added evaluation-local timing/workload/cache/worker-participation
 metrics; and parallelized deterministic per-site marks, per-region sampling
@@ -694,21 +698,23 @@ preset v3; the bundled registry remains exactly 16 cards and the retired
 `regions-plus-marks` debug tool was not restored. The durable architecture and
 performance record is
 [`STAGE_20_FINAL_ARCHITECTURE_AND_CONCURRENCY.md`](docs/STAGE_20_FINAL_ARCHITECTURE_AND_CONCURRENCY.md).
-This working tree has no closeout checkpoint hash and remains subject to user
-acceptance; no push, publication, GUI re-baseline, or Stage 21 work is
-authorized.
+The 1024×1024 release scaling proof is recorded in the same architecture
+document. The accepted checkpoint remains headless-only; no push, publication,
+GUI re-baseline, or Stage 21 work is authorized by this acceptance.
 
-**Remaining Stage 20N+ — Stage 20R Complete; Stage 20S Complete at
+**Stage 20N+ history and remaining roadmap — Stage 20R Complete; Stage 20S Complete at
 `55651dee7c744c2aa207924bf0dbb7737609942d`.** The user accepted the revised remainder
 roadmap on 2026-08-24 under
 [`STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md`](docs/STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md).
 The accepted order after completed 20Q is 20R composites and site-use filters;
 then 20S headless capability/gallery recipe
-completion. Stage 21 owns pattern-authoring GTK, Stage 22 owns all headless
+completion. The integrated Stage 20 scrub is complete at implementation
+checkpoint `dc7e988200c5be4d22791ca1d231336caac19a24`. Stage 21 owns
+pattern-authoring GTK, Stage 22 owns all headless
 frame/media/sequence/simple-transition work, and Stage 23 owns temporal GTK
-with start/end pins. The final scrub is now ready for user acceptance; Stage
-21 and the separate GTK4/Blueprint re-baseline remain gated. Stages 21–23
-remain Planned and separately gated.
+with start/end pins. The integrated final scrub is complete at the checkpoint
+above; Stage 21 and the separate GTK4/Blueprint re-baseline remain gated.
+Stages 21–23 remain Planned and separately gated.
 
 ## Maintenance rules
 

@@ -141,21 +141,20 @@ Toniator has no semantic-map architecture schema; project documentation is the
 architecture authority, while `scripts/validate_architecture.sh` is the
 mechanical validation check. The user accepted Stage 20S on 2026-08-26 after
 independent review and re-review, focused verification, parent intrinsic
-RGB/alpha visual inspection, and durable-document reconciliation. This durable
-documentation closeout awaits a separate checkpoint whose hash is not yet
-assigned; push, publication, and later-stage work remain unauthorized and
-separately gated. A final scrub of all Stage 20 work remains separately gated
-before Stage 21.
+RGB/alpha visual inspection, and durable-document reconciliation. The
+integrated Stage 20A–20S scrub is complete at implementation checkpoint
+`dc7e988200c5be4d22791ca1d231336caac19a24` (accepted 2026-08-27); push,
+publication, and later-stage work remain unauthorized and separately gated.
 
 ## Final integrated Stage 20 closeout
 
-The 2026-08-27 Stage 20A–20S scrub is **Ready for user acceptance** without a
-checkpoint hash. It preserves this plan's exact 16-card registry and explicit
+The 2026-08-27 Stage 20A–20S scrub is **Complete at implementation checkpoint
+`dc7e988200c5be4d22791ca1d231336caac19a24`**. It preserves this plan's exact 16-card registry and explicit
 retirement of `regions-plus-marks`; direct region-and-mark evidence is ordinary
 authored document data outside the catalog. The final headless architecture,
 current-v5 persistence, descriptor repairs, cache/invalidation audit,
 deterministic Rayon boundaries, performance evidence, and verification record
 are documented in
 [`STAGE_20_FINAL_ARCHITECTURE_AND_CONCURRENCY.md`](STAGE_20_FINAL_ARCHITECTURE_AND_CONCURRENCY.md).
-No GTK4/Blueprint, Stage 21, publication, or push authority follows from this
-working-tree status.
+No GTK4/Blueprint or Stage 21 work is included; publication and push remain
+separate gates.

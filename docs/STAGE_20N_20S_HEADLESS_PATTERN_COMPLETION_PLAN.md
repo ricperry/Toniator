@@ -4,16 +4,19 @@ Status: **Accepted roadmap; Stages 20N through 20S are complete** (Stage 20O che
 `7ab97f01ec372ab1e6201b3913742476a1511c02`; Stage 20P checkpoint
 `cd531eb65dd2e161e62f355905ad936b8c1ca3c4`; Stage 20Q checkpoint
 `071f3604098c0660a876fbe30050a64223fe41b3`; Stage 20R checkpoint
-`458c9a981dd349999240a18052e055a71c7b6c3c`).
+`458c9a981dd349999240a18052e055a71c7b6c3c`). Final integrated Stage 20A–20S
+scrub: **Complete at implementation checkpoint
+`dc7e988200c5be4d22791ca1d231336caac19a24`** (accepted 2026-08-27).
 
-Final Stage 20A–20S scrub status: **Ready for user acceptance in the
-2026-08-27 working tree; no checkpoint assigned.** The integrated authority,
+Final Stage 20A–20S scrub status: **Complete at implementation checkpoint
+`dc7e988200c5be4d22791ca1d231336caac19a24`.** The integrated authority,
 repairs, current-v5 persistence boundary, deterministic internal CPU
-parallelism, release profiles, and direct mixed-output evidence are recorded in
+parallelism, release profiles, direct mixed-output evidence, and the
+full-resolution scaling proof are recorded in
 [`STAGE_20_FINAL_ARCHITECTURE_AND_CONCURRENCY.md`](STAGE_20_FINAL_ARCHITECTURE_AND_CONCURRENCY.md).
 The catalog remains the accepted 16 records; `regions-plus-marks` remains a
-retired debug tool and is not a recipe. This status does not authorize the GUI
-re-baseline, Stage 21, publication, or push.
+retired debug tool and is not a recipe. This accepted checkpoint does not
+authorize the GUI re-baseline, Stage 21, publication, or push.
 
 ## Summary and stage boundary
 
@@ -231,9 +234,9 @@ only. At that checkpoint, Stage 20S remained separately planned and gated.
 Status: **Complete at implementation commit
 `55651dee7c744c2aa207924bf0dbb7737609942d`** (user accepted 2026-08-26 after
 independent review/re-review, verified evidence, and parent intrinsic RGB/alpha
-inspection). It completes the headless Stage 20 implementation sequence; a
-separately gated final scrub of all Stage 20 work remains required before Stage
-21.
+inspection). It completes the headless Stage 20 implementation sequence. The
+integrated Stage 20A–20S scrub is recorded at implementation checkpoint
+`dc7e988200c5be4d22791ca1d231336caac19a24` below.
 
 - Extend the domain-owned projection with region sources, treatments, sampling
   strategies, composite ordering, filter dependencies, typed bounds, and
@@ -280,8 +283,9 @@ separately gated final scrub of all Stage 20 work remains required before Stage
   unavoidable mechanical app adapter.
 - Stage 20S stopped at **Implemented awaiting review** and **Ready for user
   acceptance**, then completed at `55651dee7c744c2aa207924bf0dbb7737609942d`.
-  Its separate durable-document checkpoint is pending without an assigned hash;
-  push, publication, and all later stages remain separately gated.
+  The integrated Stage 20A–20S scrub is complete at
+  `dc7e988200c5be4d22791ca1d231336caac19a24`; push, publication, and all later
+  stages remain separately gated.
 
 ## Later roadmap
 

@@ -1,9 +1,10 @@
 # Stage 20 Final Architecture and Concurrency
 
-Status: **Ready for user acceptance in the 2026-08-27 working tree.** This
-closeout has no commit or checkpoint hash. It is subordinate to the protected
-project specifications and the accepted Stage 20 plans. It does not authorize
-publication, the GTK4/Blueprint re-baseline, or Stage 21.
+Status: **Complete at implementation checkpoint
+`dc7e988200c5be4d22791ca1d231336caac19a24` (accepted 2026-08-27).** This
+closeout is subordinate to the protected project specifications and the
+accepted Stage 20 plans. It does not authorize publication, the GTK4/Blueprint
+re-baseline, or Stage 21.
 
 ## Final authority path
 
@@ -193,6 +194,29 @@ benchmark. Large generic one-guide/spiral profile requests correctly stop at
 the request-wide 262,144 stroke-profile limit; validation uses documented
 bounded derivatives rather than raising the product limit.
 
+The final full-resolution scaling proof reran the ordinary
+`source-weighted-dispersion-voronoi` workload against the immutable 1024×1024
+raster source and canvas three times at each bounded pool width. Timings exclude
+PNG/SVG encoding; every run retained identical workload counts, observed the
+configured worker count, and produced the same 2,408,623-byte PNG and
+17,581,538-byte SVG.
+
+| Workers | Median cold total | Speedup | AreaAverage sampling | Raster |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 7.255440 s | 1.000x | 3.839368 s | 2.508955 s |
+| 2 | 5.315112 s | 1.365x | 1.962854 s | 2.451237 s |
+| 4 | 4.361046 s | 1.664x | 1.025950 s | 2.443771 s |
+| 8 | 3.919247 s | 1.851x | 0.558364 s | 2.452102 s |
+| 16 | 3.720236 s | 1.950x | 0.386928 s | 2.419974 s |
+| 24 | 3.698403 s | 1.962x | 0.356633 s | 2.451726 s |
+
+AreaAverage sampling improves 10.77x from one to 24 workers, while total
+evaluation improves 1.962x. Raster remains approximately 2.42–2.51 seconds
+and is the dominant saturation boundary; 16 versus 24 workers differs by only
+21.8 ms, within the observed three-run ranges. The detailed command, workload,
+raw totals, and limitations are retained in the checkout-local
+`.codex-work/evidence/2026-08-27-stage20-full-resolution-scaling.md` record.
+
 ## Persistence and recipes
 
 The immutable container layout remains version 1, the only current document
@@ -238,5 +262,6 @@ is not an applicable acceptance boundary for this headless closeout.
 The GTK4-only/Blueprint re-baseline, Pattern Wizard/gallery UI, Stage 21
 pattern authoring, all media/sequence/temporal stages, GPU work, new topology
 families, wall complements, and compatibility/import remain outside Stage 20.
-The final Stage 20 headless surface is ready for the separately authorized GUI
-re-baseline and later Stage 21 only after user acceptance of this working tree.
+The final Stage 20 headless surface is complete at the checkpoint above. The
+separately authorized GUI re-baseline and later Stage 21 remain outside this
+closeout and require their own gates.
