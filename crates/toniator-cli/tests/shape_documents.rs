@@ -3,12 +3,10 @@ use std::{fs, path::Path, process::Command};
 use sha2::{Digest, Sha256};
 use toniator_domain::{
     AuthoredCurveSegment, AuthoredPoint2, AuthoredStructure, AuthoredStructureId,
-    AuthoredStructureKind, CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternLayout,
-    ChannelSourceMapping, ChannelState, ChannelTopologyTemplate, ColorValue, CoveragePolicy,
-    DensityMetric2D, Document, DocumentId, GeneralizedSiteProduct, GuideDimensionId,
-    HalftoneChannelModel, MarkGeometryResponse, MarkOrientation, MarkPrototype, PatternDefinition,
-    PatternDefinitionId, PatternMechanismId, PatternOutputLayer, PatternOutputLayerId,
-    SourceComponent, SourcePlacement, SourceReference, SourceReferenceId, StraightGuideDimension,
+    AuthoredStructureKind, CanvasSpec, CoveragePolicy, DensityMetric2D, Document,
+    GeneralizedSiteProduct, GuideDimensionId, MarkOrientation, MarkPrototype, PatternDefinition,
+    PatternDefinitionId, PatternGeometryResponse, PatternMechanismId, PatternOutputLayerId,
+    PatternOutputRealization, SourceReference, SourceReferenceId, StraightGuideDimension,
     StraightGuideRepetition,
 };
 use toniator_engine::{SourceFormatHint, resolve_source_identity};
@@ -21,6 +19,15 @@ fn sha256(bytes: &[u8]) -> String {
 
 /// Builds a current shape-bearing modeled document at the supplied intrinsic source dimensions.
 fn shape_document(source_id: SourceReferenceId, width: u32, height: u32) -> Document {
+    let canvas = CanvasSpec {
+        width: f64::from(width),
+        height: f64::from(height),
+    };
+    let base = Document::new_default_document(
+        canvas.clone(),
+        SourceReference::Assigned(source_id.clone()),
+    )
+    .expect("default modeled document validates");
     let mut definition = PatternDefinition::generalized_straight_guides(
         PatternDefinitionId(1),
         "CLI authored shape",
@@ -57,63 +64,8 @@ fn shape_document(source_id: SourceReferenceId, width: u32, height: u32) -> Docu
             additional_margin: 4.5,
         },
     );
-    let canvas = CanvasSpec {
-        width: f64::from(width),
-        height: f64::from(height),
-    };
-    let layout = ChannelPatternLayout {
-        density: DensityMetric2D {
-            across_x: 12.0,
-            across_y: 12.0,
-            aspect_locked: true,
-        },
-        rotation_degrees: 7.0,
-        translation_x: 0.0,
-        translation_y: 0.0,
-    };
-    let response = MarkGeometryResponse {
-        minimum_fill: 0.25,
-        maximum_fill: 1.0,
-        rotation_offset_degrees: 15.0,
-    };
-    let legacy = Document::with_source(
-        DocumentId(1),
-        canvas.clone(),
-        SourceReference::Assigned(source_id.clone()),
-        vec![definition.clone()],
-        vec![ChannelState {
-            id: ChannelId(1),
-            pattern_definition_id: PatternDefinitionId(1),
-            layout: layout.clone(),
-            appearance: ChannelAppearance {
-                visible: true,
-                color: ColorValue {
-                    red: 0.0,
-                    green: 0.0,
-                    blue: 0.0,
-                    alpha: 1.0,
-                },
-                opacity: 1.0,
-            },
-            mark_geometry_response: response.clone(),
-            source_mapping: ChannelSourceMapping {
-                component: SourceComponent::Luminance,
-                placement: SourcePlacement::StretchToCanvas,
-            },
-        }],
-    )
-    .unwrap();
-    let topology = legacy
-        .canonical_channel_topology(
-            HalftoneChannelModel::Rgb,
-            ChannelTopologyTemplate {
-                pattern_definition_id: PatternDefinitionId(1),
-                layout,
-                mark_geometry_response: response,
-            },
-        )
-        .unwrap();
-    let PatternOutputLayer::MarkPrototype { prototype, .. } = &mut definition.output_layers[0]
+    let PatternOutputRealization::MarkPrototype { prototype, .. } =
+        &mut definition.output_layers[0].realization
     else {
         panic!("generalized guides own a typed mark output")
     };
@@ -149,13 +101,29 @@ fn shape_document(source_id: SourceReferenceId, width: u32, height: u32) -> Docu
         ],
     )
     .unwrap();
+    let mut bundle = base.pattern_definition_bundles()[0].clone();
+    bundle.definition = definition;
+    let PatternGeometryResponse::Marks(response) = &mut bundle.output_settings[0].response else {
+        panic!("default bundle owns a mark response")
+    };
+    response.minimum_fill = 0.25;
+    response.maximum_fill = 1.0;
+    let mut settings = base.pattern_settings().clone();
+    settings.density = DensityMetric2D {
+        across_x: 12.0,
+        across_y: 12.0,
+        aspect_locked: true,
+    };
+    settings.pattern_rotation_degrees = 7.0;
+    settings.shape_rotation_degrees = 15.0;
     Document::with_source_topology_and_authored_structures(
-        DocumentId(1),
+        base.id(),
         canvas,
         SourceReference::Assigned(source_id),
-        vec![definition],
-        HalftoneChannelModel::Rgb,
-        topology,
+        vec![bundle],
+        settings,
+        base.channel_model().expect("modeled document").to_owned(),
+        base.channel_topology().expect("modeled document").clone(),
         vec![shape],
     )
     .unwrap()
@@ -221,8 +189,7 @@ fn shape_documents_validate_inspect_and_render_both_immutable_sources_intrinsica
         let svg = case_root.join("editable.svg");
         save(&container, &document, &sources).unwrap();
         let validate = run(&["validate", "--input", container.to_str().unwrap()]);
-        assert!(validate.contains("document v3"));
-        assert!(validate.contains("migrations: empty"));
+        assert!(validate.contains("document v5"));
         fs::write(case_root.join("validate.txt"), &validate).unwrap();
         let capabilities = run(&["capabilities", "--input", container.to_str().unwrap()]);
         assert!(capabilities.contains("OutputAuthoredClosedShape"));

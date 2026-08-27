@@ -2,21 +2,20 @@
 
 //! The shared mutable-document boundary for headless Toniator frontends.
 
+use std::cell::Cell;
 #[cfg(test)]
-use std::{
-    cell::{Cell, RefCell},
-    sync::atomic::AtomicUsize,
-};
+use std::cell::RefCell;
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, Receiver, Sender, TryRecvError},
     },
     thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
 
 mod scheduler;
@@ -1188,11 +1187,84 @@ pub(crate) fn evaluate_channel_diagnostic_cancellable_with_gate(
     .map(|result| result.result)
 }
 
-trait CancellationProbe {
+trait CancellationProbe: Sync {
     fn is_cancelled(&self) -> bool;
 
     #[cfg(test)]
     fn observe_stage(&self, _stage: EvaluationStage, _checkpoint: EvaluationCheckpoint) {}
+}
+
+thread_local! {
+    /// Remembers the last profiled invocation registered by each participating worker thread.
+    static LAST_PROFILE_PARTICIPATION_ID: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Supplies process-local identities for opt-in profiling invocations only.
+static NEXT_PROFILE_PARTICIPATION_ID: AtomicUsize = AtomicUsize::new(1);
+
+/// Records lightweight observed Rayon participation through existing cancellation polls.
+struct ParallelParticipation {
+    id: usize,
+    worker_mask: AtomicU64,
+    worker_registration_count: AtomicUsize,
+}
+
+impl Default for ParallelParticipation {
+    /// Allocates one diagnostic-only invocation identity and empty participation set.
+    fn default() -> Self {
+        Self {
+            id: NEXT_PROFILE_PARTICIPATION_ID.fetch_add(1, Ordering::Relaxed),
+            worker_mask: AtomicU64::new(0),
+            worker_registration_count: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl ParallelParticipation {
+    /// Registers the current Rayon worker once per profiled invocation.
+    ///
+    /// The thread-local fast path avoids an atomic operation on every fine-grained cancellation
+    /// poll while leaving the wrapped cancellation decision unchanged.
+    fn observe(&self) {
+        LAST_PROFILE_PARTICIPATION_ID.with(|last| {
+            if last.get() == self.id {
+                return;
+            }
+            last.set(self.id);
+            if let Some(index) = rayon::current_thread_index() {
+                self.worker_registration_count
+                    .fetch_add(1, Ordering::Relaxed);
+                if index < u64::BITS as usize {
+                    self.worker_mask.fetch_or(1_u64 << index, Ordering::Relaxed);
+                }
+            }
+        });
+    }
+
+    /// Returns the number of distinct representable worker indices observed in real work.
+    fn observed_worker_count(&self) -> usize {
+        self.worker_mask.load(Ordering::Relaxed).count_ones() as usize
+    }
+}
+
+/// Delegates cancellation unchanged while observing worker participation for opt-in profiling.
+struct ProfiledCancellation<'a> {
+    inner: &'a dyn CancellationProbe,
+    participation: &'a ParallelParticipation,
+}
+
+impl CancellationProbe for ProfiledCancellation<'_> {
+    /// Preserves the underlying cancellation decision after one diagnostic-only observation.
+    fn is_cancelled(&self) -> bool {
+        self.participation.observe();
+        self.inner.is_cancelled()
+    }
+
+    #[cfg(test)]
+    /// Forwards test-only stage gates without altering scheduler ordering.
+    fn observe_stage(&self, stage: EvaluationStage, checkpoint: EvaluationCheckpoint) {
+        self.inner.observe_stage(stage, checkpoint);
+    }
 }
 
 struct NeverCancelled;
@@ -2113,6 +2185,182 @@ pub struct DocumentCacheDiagnostics {
     pub aggregate: CacheDiagnostics,
     pub channels: Vec<ChannelCacheDiagnostics>,
 }
+
+/// Coarse authoritative compute boundary recorded by opt-in evaluation profiling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EvaluationPerformanceStage {
+    Preflight,
+    SourceDecode,
+    Family,
+    DependencyFilter,
+    MarkRealization,
+    StructuralPathRealization,
+    ConnectionRealization,
+    MazeRealization,
+    VoronoiRealization,
+    GuideFaceRealization,
+    RegionSampling,
+    RegionTreatment,
+    Scene,
+    Raster,
+    Total,
+}
+
+/// Diagnostic classification of whether one timed boundary computed, replayed, or reused work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EvaluationExecutionClass {
+    Computed,
+    AcceptedCacheHit,
+    LocalReuse,
+}
+
+/// Stable workload category paired with one inexpensive deterministic count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EvaluationWorkloadKind {
+    SourcePixels,
+    OutputLayers,
+    FamilySites,
+    StructuralPaths,
+    RetainedSites,
+    Marks,
+    Strokes,
+    StrokeProfileSamples,
+    StrokeOutlineSegments,
+    Regions,
+    RegionBoundarySegments,
+    AreaAverageFlattenedSegments,
+    AreaAverageCellIntersections,
+    RasterPixels,
+    MarkOutput,
+    StructuralPathOutput,
+    ConnectionOutput,
+    MazeOutput,
+    VoronoiOutput,
+    GuideFaceOutput,
+}
+
+/// One deterministic workload count attached to a performance stage record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EvaluationWorkloadMetric {
+    pub kind: EvaluationWorkloadKind,
+    pub count: usize,
+}
+
+/// Diagnostic-only timing for one scoped architectural compute boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EvaluationPerformanceRecord {
+    pub stage: EvaluationPerformanceStage,
+    pub channel_id: Option<ChannelId>,
+    pub output_layer_id: Option<toniator_domain::PatternOutputLayerId>,
+    pub elapsed: Duration,
+    pub cache: Option<CacheDisposition>,
+    pub execution: EvaluationExecutionClass,
+    pub workloads: Vec<EvaluationWorkloadMetric>,
+}
+
+/// Complete opt-in timing/workload report from one authoritative evaluation invocation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EvaluationPerformanceMetrics {
+    /// Reports configured shared Rayon pool capacity; workload/CPU evidence establishes use.
+    pub configured_worker_count: usize,
+    /// Counts distinct Rayon worker indices that executed cancellation-polled evaluation work.
+    pub observed_worker_count: usize,
+    /// Counts first-poll worker registrations, avoiding per-poll atomic diagnostic overhead.
+    pub worker_registration_count: usize,
+    /// Retains records in deterministic coordinator traversal order, never worker completion order.
+    pub records: Vec<EvaluationPerformanceRecord>,
+}
+
+/// One complete evaluation plus cache and diagnostic-only performance facts.
+pub struct ProfiledEvaluation {
+    pub result: EvaluationResult,
+    pub diagnostics: DocumentCacheDiagnostics,
+    pub performance: EvaluationPerformanceMetrics,
+}
+
+/// Stateful diagnostic cache for cold, warm, and targeted-invalidation performance comparisons.
+///
+/// The wrapper exposes no derived entries or mutation authority. Successful profiled evaluations
+/// publish their ordinary evaluator transaction; failures leave the previously accepted state
+/// unchanged.
+#[derive(Clone, Default)]
+pub struct EvaluationProfileCache {
+    derived: DocumentDerivedCache,
+}
+
+/// Private collector that never enters cache keys, transactions, persistence, or result identity.
+struct EvaluationPerformanceBuilder {
+    records: Vec<EvaluationPerformanceRecord>,
+}
+
+impl EvaluationPerformanceBuilder {
+    /// Starts an empty current-run record collection.
+    fn new() -> Self {
+        Self {
+            records: Vec::new(),
+        }
+    }
+
+    /// Appends one coordinator-ordered coarse record after its boundary completes.
+    fn record(
+        &mut self,
+        stage: EvaluationPerformanceStage,
+        channel_id: Option<ChannelId>,
+        output_layer_id: Option<toniator_domain::PatternOutputLayerId>,
+        elapsed: Duration,
+        cache: Option<CacheDisposition>,
+        workloads: Vec<EvaluationWorkloadMetric>,
+    ) {
+        let execution = match cache {
+            Some(CacheDisposition::Hit) => EvaluationExecutionClass::AcceptedCacheHit,
+            Some(CacheDisposition::Miss) | None => EvaluationExecutionClass::Computed,
+        };
+        self.record_with_execution(
+            stage,
+            channel_id,
+            output_layer_id,
+            elapsed,
+            cache,
+            execution,
+            workloads,
+        );
+    }
+
+    /// Appends one record whose execution class differs from its aggregate cache disposition.
+    #[allow(clippy::too_many_arguments)]
+    fn record_with_execution(
+        &mut self,
+        stage: EvaluationPerformanceStage,
+        channel_id: Option<ChannelId>,
+        output_layer_id: Option<toniator_domain::PatternOutputLayerId>,
+        elapsed: Duration,
+        cache: Option<CacheDisposition>,
+        execution: EvaluationExecutionClass,
+        workloads: Vec<EvaluationWorkloadMetric>,
+    ) {
+        self.records.push(EvaluationPerformanceRecord {
+            stage,
+            channel_id,
+            output_layer_id,
+            elapsed,
+            cache,
+            execution,
+            workloads,
+        });
+    }
+
+    /// Finishes the report with configured and actually observed worker participation.
+    fn finish(self, participation: &ParallelParticipation) -> EvaluationPerformanceMetrics {
+        EvaluationPerformanceMetrics {
+            configured_worker_count: rayon::current_num_threads(),
+            observed_worker_count: participation.observed_worker_count(),
+            worker_registration_count: participation
+                .worker_registration_count
+                .load(Ordering::Relaxed),
+            records: self.records,
+        }
+    }
+}
 impl ChannelEvaluationSummary {
     pub const fn role(&self) -> HalftoneChannelRole {
         self.role
@@ -2541,6 +2789,102 @@ pub fn evaluate_with_limits(
     })
 }
 
+/// Evaluates one complete document while collecting diagnostic-only architectural metrics.
+///
+/// The call uses the ordinary evaluator with a fresh private cache, preserving the same authority,
+/// deterministic outputs, cancellation semantics, and transactional candidate construction.
+/// Metrics never enter the returned result identity, cache keys, persistence, or scheduler state.
+///
+/// # Errors
+///
+/// Returns the same validation, source, family, realization, scene, or raster error as
+/// [`evaluate_with_limits`] without returning a partial performance report.
+pub fn evaluate_profiled_with_limits(
+    request: EvaluationRequest,
+    limits: EvaluationLimits,
+) -> Result<ProfiledEvaluation, EvaluationError> {
+    evaluate_profiled_cached_with_limits(request, limits, &mut EvaluationProfileCache::default())
+}
+
+/// Profiles one evaluation against caller-retained accepted derived state.
+///
+/// This is a diagnostic seam for cold-to-warm and targeted-edit comparisons. It delegates all
+/// semantic work to the ordinary evaluator and commits cache candidates only after complete
+/// success; neither timing nor participation facts enter cache keys or product results.
+///
+/// # Errors
+///
+/// Returns the same stable evaluation error as [`evaluate_with_limits`] and leaves `cache`
+/// unchanged on failure.
+pub fn evaluate_profiled_cached_with_limits(
+    request: EvaluationRequest,
+    limits: EvaluationLimits,
+    cache: &mut EvaluationProfileCache,
+) -> Result<ProfiledEvaluation, EvaluationError> {
+    let started = Instant::now();
+    let mut performance = EvaluationPerformanceBuilder::new();
+    let participation = ParallelParticipation::default();
+    let cancellation = ProfiledCancellation {
+        inner: &NeverCancelled,
+        participation: &participation,
+    };
+    let evaluation = evaluate_cached_document_profiled(
+        request,
+        limits,
+        &cache.derived,
+        &cancellation,
+        &mut performance,
+    )
+    .map_err(|error| match error {
+        EvaluationRunError::Evaluation(error) => error,
+        EvaluationRunError::Cancelled => {
+            unreachable!("synchronous evaluation never cancels")
+        }
+    })?;
+    let CachedDocumentEvaluation {
+        result,
+        diagnostics,
+        transaction,
+    } = evaluation;
+    cache.derived.commit(transaction);
+    performance.record(
+        EvaluationPerformanceStage::Total,
+        None,
+        None,
+        started.elapsed(),
+        None,
+        Vec::new(),
+    );
+    Ok(ProfiledEvaluation {
+        result,
+        diagnostics,
+        performance: performance.finish(&participation),
+    })
+}
+
+/// Routes profiled synchronous evaluation through the same implementation in all builds.
+fn evaluate_cached_document_profiled(
+    request: EvaluationRequest,
+    limits: EvaluationLimits,
+    accepted: &DocumentDerivedCache,
+    cancellation: &dyn CancellationProbe,
+    performance: &mut EvaluationPerformanceBuilder,
+) -> Result<CachedDocumentEvaluation, EvaluationRunError> {
+    #[cfg(test)]
+    {
+        evaluate_cached_document_impl(
+            request,
+            limits,
+            accepted,
+            cancellation,
+            Some(performance),
+            None,
+        )
+    }
+    #[cfg(not(test))]
+    evaluate_cached_document_impl(request, limits, accepted, cancellation, Some(performance))
+}
+
 // Holds an engine-test-only Region snapshot for the current synchronous evaluation thread. This
 // storage is never serialized, cached, projected as capability data, or present in production.
 #[cfg(test)]
@@ -2600,7 +2944,7 @@ fn evaluate_cached_document(
         evaluate_cached_document_with_test_observer(request, limits, accepted, cancellation, None)
     }
     #[cfg(not(test))]
-    evaluate_cached_document_impl(request, limits, accepted, cancellation)
+    evaluate_cached_document_impl(request, limits, accepted, cancellation, None)
 }
 
 #[cfg(test)]
@@ -2611,7 +2955,14 @@ fn evaluate_cached_document_with_test_observer(
     cancellation: &dyn CancellationProbe,
     decode_observer: Option<&AtomicUsize>,
 ) -> Result<CachedDocumentEvaluation, EvaluationRunError> {
-    evaluate_cached_document_impl(request, limits, accepted, cancellation, decode_observer)
+    evaluate_cached_document_impl(
+        request,
+        limits,
+        accepted,
+        cancellation,
+        None,
+        decode_observer,
+    )
 }
 
 /// Evaluates one complete modeled document into private cache candidates under request-wide limits.
@@ -2625,8 +2976,10 @@ fn evaluate_cached_document_impl(
     limits: EvaluationLimits,
     accepted: &DocumentDerivedCache,
     cancellation: &dyn CancellationProbe,
+    mut performance: Option<&mut EvaluationPerformanceBuilder>,
     #[cfg(test)] decode_observer: Option<&AtomicUsize>,
 ) -> Result<CachedDocumentEvaluation, EvaluationRunError> {
+    let preflight_started = Instant::now();
     if cancellation.is_cancelled() {
         return Err(EvaluationRunError::Cancelled);
     }
@@ -2713,12 +3066,26 @@ fn evaluate_cached_document_impl(
             return Err(EvaluationRunError::Cancelled);
         }
     }
+    if let Some(performance) = performance.as_deref_mut() {
+        performance.record(
+            EvaluationPerformanceStage::Preflight,
+            None,
+            None,
+            preflight_started.elapsed(),
+            None,
+            vec![EvaluationWorkloadMetric {
+                kind: EvaluationWorkloadKind::OutputLayers,
+                count: output_units,
+            }],
+        );
+    }
     let source_key = SourceCacheKey {
         reference_id: request.source.reference_id().as_str().to_owned(),
         bytes: Arc::clone(&request.source.bytes),
         format: request.source.format(),
         decoder_contract: DECODER_CONTRACT_ID,
     };
+    let decode_started = Instant::now();
     let (source, source_hit) = match &accepted.decoded_source {
         Some((key, value)) if *key == source_key => (Arc::clone(value), CacheDisposition::Hit),
         _ => (
@@ -2737,6 +3104,27 @@ fn evaluate_cached_document_impl(
             CacheDisposition::Miss,
         ),
     };
+    if let Some(performance) = performance.as_deref_mut() {
+        let source_pixels = usize::try_from(source.identity().width)
+            .ok()
+            .and_then(|width| {
+                usize::try_from(source.identity().height)
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+            .unwrap_or(usize::MAX);
+        performance.record(
+            EvaluationPerformanceStage::SourceDecode,
+            None,
+            None,
+            decode_started.elapsed(),
+            Some(source_hit),
+            vec![EvaluationWorkloadMetric {
+                kind: EvaluationWorkloadKind::SourcePixels,
+                count: source_pixels,
+            }],
+        );
+    }
     let mut summaries = Vec::with_capacity(topology.channels().len());
     let mut layers = Vec::with_capacity(topology.channels().len());
     let mut families = Vec::with_capacity(topology.channels().len());
@@ -2746,6 +3134,8 @@ fn evaluate_cached_document_impl(
     let mut output_realization_dispositions = Vec::with_capacity(topology.channels().len());
     let mut remaining_transformed_curve_segment_instances =
         limits.max_transformed_curve_segment_instances();
+    let mut remaining_stroke_profile_samples = limits.max_stroke_profile_samples();
+    let mut remaining_stroke_outline_segments = limits.max_stroke_outline_segments();
     let mut remaining_usage_memberships = composite_limits.maximum_usage_memberships;
     let mut remaining_dependency_inspections = composite_limits.maximum_dependency_inspections;
     for (channel, effective, definition, plan) in &resolved {
@@ -2767,37 +3157,74 @@ fn evaluate_cached_document_impl(
             &plan.ordered_outputs,
             &source,
         )?;
-        let (family, disposition) = match accepted
-            .families
+        let family_started = Instant::now();
+        let (family, disposition, family_execution) = match families
             .iter()
-            .find(|(candidate, _)| document_family_key_supports(candidate, &key))
+            .find(|(candidate, _, _)| document_family_key_supports(candidate, &key))
         {
-            Some((_, family)) => (Arc::clone(family), CacheDisposition::Hit),
-            None => (
-                Arc::new(evaluate_generic_family_stage(
-                    &plan.family,
-                    &GridInspectRequest {
-                        canvas: document.canvas().clone(),
-                        density: effective.density.clone(),
-                        rotation_degrees: effective.pattern_rotation_degrees,
-                        translation_x: effective.translation_x,
-                        translation_y: effective.translation_y,
-                        guard_steps: definition.coverage.guard_steps,
-                        support_radius: required_support_radius_for_outputs(
-                            document.canvas(),
-                            effective,
-                            definition,
-                            &plan.family,
-                            &plan.ordered_outputs,
-                        )?,
-                        max_family_candidates: limits.max_family_candidates(),
-                    },
-                    &source,
-                    cancellation,
-                )?),
-                CacheDisposition::Miss,
+            Some((_, family, origin)) => (
+                Arc::clone(family),
+                *origin,
+                EvaluationExecutionClass::LocalReuse,
             ),
+            None => match accepted
+                .families
+                .iter()
+                .find(|(candidate, _)| document_family_key_supports(candidate, &key))
+            {
+                Some((_, family)) => (
+                    Arc::clone(family),
+                    CacheDisposition::Hit,
+                    EvaluationExecutionClass::AcceptedCacheHit,
+                ),
+                None => (
+                    Arc::new(evaluate_generic_family_stage(
+                        &plan.family,
+                        &GridInspectRequest {
+                            canvas: document.canvas().clone(),
+                            density: effective.density.clone(),
+                            rotation_degrees: effective.pattern_rotation_degrees,
+                            translation_x: effective.translation_x,
+                            translation_y: effective.translation_y,
+                            guard_steps: definition.coverage.guard_steps,
+                            support_radius: required_support_radius_for_outputs(
+                                document.canvas(),
+                                effective,
+                                definition,
+                                &plan.family,
+                                &plan.ordered_outputs,
+                            )?,
+                            max_family_candidates: limits.max_family_candidates(),
+                        },
+                        &source,
+                        cancellation,
+                    )?),
+                    CacheDisposition::Miss,
+                    EvaluationExecutionClass::Computed,
+                ),
+            },
         };
+        if let Some(performance) = performance.as_deref_mut() {
+            let mut workloads = vec![EvaluationWorkloadMetric {
+                kind: EvaluationWorkloadKind::FamilySites,
+                count: family.site_set().len(),
+            }];
+            if let Some(paths) = family.structural_path_set() {
+                workloads.push(EvaluationWorkloadMetric {
+                    kind: EvaluationWorkloadKind::StructuralPaths,
+                    count: paths.paths().len(),
+                });
+            }
+            performance.record_with_execution(
+                EvaluationPerformanceStage::Family,
+                Some(channel.id),
+                None,
+                family_started.elapsed(),
+                Some(disposition),
+                family_execution,
+                workloads,
+            );
+        }
         let mut bindings_by_id = BTreeMap::new();
         for (capability, setting) in &output_bindings {
             bindings_by_id.insert(capability.layer_id, (*capability, *setting));
@@ -2844,9 +3271,23 @@ fn evaluate_cached_document_impl(
                     "realization.composite.limits.dependency_inspections",
                     "request-wide dependency and selection inspection limit exceeded",
                 ))?;
+            let filter_started = Instant::now();
             let filtered_family = family
                 .filtered_for_output(output_capability.source_filter, referenced_usage)
                 .map_err(EvaluationError::from_pipeline)?;
+            if let Some(performance) = performance.as_deref_mut() {
+                performance.record(
+                    EvaluationPerformanceStage::DependencyFilter,
+                    Some(channel.id),
+                    Some(*output_layer_id),
+                    filter_started.elapsed(),
+                    None,
+                    vec![EvaluationWorkloadMetric {
+                        kind: EvaluationWorkloadKind::RetainedSites,
+                        count: filtered_family.site_set().len(),
+                    }],
+                );
+            }
             let realization_key = document_realization_cache_key(
                 document,
                 definition,
@@ -2858,16 +3299,17 @@ fn evaluate_cached_document_impl(
                 output_setting,
                 referenced_usage,
                 limits,
-                remaining_transformed_curve_segment_instances,
             )?;
-            let (realization, realization_disposition) = match accepted
+            let realization_started = Instant::now();
+            let collect_performance = performance.is_some();
+            let (realization, realization_disposition, region_performance) = match accepted
                 .realizations
                 .iter()
                 .find(|(candidate, _)| *candidate == realization_key)
             {
-                Some((_, realization)) => (Arc::clone(realization), CacheDisposition::Hit),
-                None => (
-                    Arc::new(
+                Some((_, realization)) => (Arc::clone(realization), CacheDisposition::Hit, None),
+                None => {
+                    let (realization, region_performance) =
                         match evaluate_stage(EvaluationStage::Realization, cancellation, || {
                             evaluate_document_output(
                                 document,
@@ -2881,8 +3323,8 @@ fn evaluate_cached_document_impl(
                                 output_setting,
                                 limits.max_family_candidates(),
                                 remaining_transformed_curve_segment_instances,
-                                limits.max_stroke_profile_samples(),
-                                limits.max_stroke_outline_segments(),
+                                remaining_stroke_profile_samples,
+                                remaining_stroke_outline_segments,
                                 limits.site_adjacency_limits(),
                                 limits.connection_path_limits(),
                                 limits.maze_limits(),
@@ -2890,6 +3332,7 @@ fn evaluate_cached_document_impl(
                                 limits.guide_face_limits(),
                                 limits.region_sampling_limits(),
                                 limits.region_treatment_limits(),
+                                collect_performance,
                                 &|| cancellation.is_cancelled(),
                             )
                         }) {
@@ -2899,11 +3342,61 @@ fn evaluate_cached_document_impl(
                                 return Err(EvaluationRunError::Cancelled);
                             }
                             result => result?,
-                        },
-                    ),
-                    CacheDisposition::Miss,
-                ),
+                        };
+                    (
+                        Arc::new(realization),
+                        CacheDisposition::Miss,
+                        region_performance,
+                    )
+                }
             };
+            let realization_elapsed = realization_started.elapsed();
+            if let Some(performance) = performance.as_deref_mut() {
+                let workloads =
+                    realization_workloads(&realization.realization, &realization.capability)?;
+                performance.record(
+                    output_performance_stage(&realization.capability),
+                    Some(channel.id),
+                    Some(*output_layer_id),
+                    realization_elapsed,
+                    Some(realization_disposition),
+                    workloads,
+                );
+                if let Some(region) = &region_performance {
+                    performance.record(
+                        EvaluationPerformanceStage::RegionSampling,
+                        Some(channel.id),
+                        Some(*output_layer_id),
+                        region.sampling_duration,
+                        Some(realization_disposition),
+                        vec![
+                            EvaluationWorkloadMetric {
+                                kind: EvaluationWorkloadKind::Regions,
+                                count: region.sampled_bases,
+                            },
+                            EvaluationWorkloadMetric {
+                                kind: EvaluationWorkloadKind::AreaAverageFlattenedSegments,
+                                count: region.flattened_segments,
+                            },
+                            EvaluationWorkloadMetric {
+                                kind: EvaluationWorkloadKind::AreaAverageCellIntersections,
+                                count: region.cell_intersections,
+                            },
+                        ],
+                    );
+                    performance.record(
+                        EvaluationPerformanceStage::RegionTreatment,
+                        Some(channel.id),
+                        Some(*output_layer_id),
+                        region.treatment_duration,
+                        Some(realization_disposition),
+                        vec![EvaluationWorkloadMetric {
+                            kind: EvaluationWorkloadKind::Regions,
+                            count: region.retained_regions,
+                        }],
+                    );
+                }
+            }
             remaining_transformed_curve_segment_instances =
                 remaining_transformed_curve_segment_instances
                     .checked_sub(transformed_curve_segment_instances(
@@ -2913,6 +3406,19 @@ fn evaluate_cached_document_impl(
                         "realization.mark.segment_limit",
                         "transformed curve-segment instance limit exceeded",
                     ))?;
+            let (profile_samples, outline_segments) = stroke_work(&realization.realization)?;
+            remaining_stroke_profile_samples = remaining_stroke_profile_samples
+                .checked_sub(profile_samples)
+                .ok_or(EvaluationError::new(
+                    "realization.stroke.profile_limit",
+                    "request-wide canonical stroke profile sample limit exceeded",
+                ))?;
+            remaining_stroke_outline_segments = remaining_stroke_outline_segments
+                .checked_sub(outline_segments)
+                .ok_or(EvaluationError::new(
+                    "realization.stroke.outline_limit",
+                    "request-wide canonical stroke outline segment limit exceeded",
+                ))?;
             remaining_usage_memberships = remaining_usage_memberships
                 .checked_sub(realization.usage.members().len())
                 .ok_or(EvaluationError::new(
@@ -2981,7 +3487,7 @@ fn evaluate_cached_document_impl(
                 .map(|output| (*output).clone())
                 .collect(),
         )?);
-        families.push((key, family));
+        families.push((key, family, disposition));
         family_dispositions.push(disposition);
         realization_dispositions.push(realization_disposition);
         output_realization_dispositions.push(channel_output_dispositions);
@@ -3007,6 +3513,7 @@ fn evaluate_cached_document_impl(
             )
         }),
     );
+    let scene_started = Instant::now();
     let built_scene = evaluate_stage(EvaluationStage::Scene, cancellation, || {
         RenderScene::new_modeled(
             document.canvas().clone(),
@@ -3022,6 +3529,19 @@ fn evaluate_cached_document_impl(
         Some((key, value)) if *key == scene_key => (Arc::clone(value), CacheDisposition::Hit),
         _ => (Arc::new(built_scene), CacheDisposition::Miss),
     };
+    if let Some(performance) = performance.as_deref_mut() {
+        performance.record(
+            EvaluationPerformanceStage::Scene,
+            None,
+            None,
+            scene_started.elapsed(),
+            Some(scene_disposition),
+            vec![EvaluationWorkloadMetric {
+                kind: EvaluationWorkloadKind::OutputLayers,
+                count: output_units,
+            }],
+        );
+    }
     let raster_key = match request.preview_target {
         Some(target) => format!(
             "{}:{TRANSPARENT_RASTER_CONTRACT_ID}:preview-v1:{model:?}:{}x{}:edges={}",
@@ -3036,6 +3556,7 @@ fn evaluate_cached_document_impl(
             limits.max_flattened_raster_edges()
         ),
     };
+    let raster_started = Instant::now();
     let (raster, raster_disposition) = match &accepted.raster {
         Some((key, value)) if *key == raster_key => (Arc::clone(value), CacheDisposition::Hit),
         _ => (
@@ -3069,6 +3590,27 @@ fn evaluate_cached_document_impl(
             CacheDisposition::Miss,
         ),
     };
+    if let Some(performance) = performance {
+        let raster_pixels = usize::try_from(raster.width())
+            .ok()
+            .and_then(|width| {
+                usize::try_from(raster.height())
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+            .unwrap_or(usize::MAX);
+        performance.record(
+            EvaluationPerformanceStage::Raster,
+            None,
+            None,
+            raster_started.elapsed(),
+            Some(raster_disposition),
+            vec![EvaluationWorkloadMetric {
+                kind: EvaluationWorkloadKind::RasterPixels,
+                count: raster_pixels,
+            }],
+        );
+    }
     let result = EvaluationResult {
         token: request.snapshot.token(),
         source_identity: source.identity().clone(),
@@ -3115,7 +3657,10 @@ fn evaluate_cached_document_impl(
         },
         transaction: DocumentCacheTransaction {
             decoded_source: (source_hit == CacheDisposition::Miss).then_some((source_key, source)),
-            families,
+            families: families
+                .into_iter()
+                .map(|(key, family, _)| (key, family))
+                .collect(),
             realizations,
             scene: (scene_disposition == CacheDisposition::Miss).then_some((scene_key, scene)),
             raster: (raster_disposition == CacheDisposition::Miss).then_some((raster_key, raster)),
@@ -3126,12 +3671,14 @@ fn evaluate_cached_document_impl(
 /// Returns geometry-owned algorithm identities only for a typed connection output.
 fn connection_cache_contracts(
     definition: &PatternDefinition,
+    output_layer_id: toniator_domain::PatternOutputLayerId,
     adjacency_limits: SiteAdjacencyLimits,
     connection_limits: ConnectionPathLimits,
 ) -> Option<ConnectionCacheContracts> {
-    let [output] = definition.output_layers.as_slice() else {
-        return None;
-    };
+    let output = definition
+        .output_layers
+        .iter()
+        .find(|output| output.id() == output_layer_id)?;
     let PatternOutputRealization::ConnectionPaths { program, .. } = &output.realization else {
         return None;
     };
@@ -3148,11 +3695,13 @@ fn connection_cache_contracts(
 /// Returns geometry-owned identity and bounded work inputs only for a typed maze-wall output.
 fn maze_cache_contracts(
     definition: &PatternDefinition,
+    output_layer_id: toniator_domain::PatternOutputLayerId,
     limits: MazeLimits,
 ) -> Option<MazeCacheContracts> {
-    let [output] = definition.output_layers.as_slice() else {
-        return None;
-    };
+    let output = definition
+        .output_layers
+        .iter()
+        .find(|output| output.id() == output_layer_id)?;
     let PatternOutputRealization::MazeWalls { program, .. } = &output.realization else {
         return None;
     };
@@ -3336,12 +3885,19 @@ fn evaluate_document_output(
     guide_face_limits: GuideFaceLimits,
     region_sampling_limits: RegionSamplingLimits,
     region_treatment_limits: RegionTreatmentLimits,
-    is_cancelled: &dyn Fn() -> bool,
-) -> Result<DocumentOutputRealization, EvaluationError> {
+    profiled: bool,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<
+    (
+        DocumentOutputRealization,
+        Option<toniator_patterns::RegionOutputPerformanceMetrics>,
+    ),
+    EvaluationError,
+> {
     let mut output_plan = plan.clone();
     output_plan.ordered_outputs = vec![capability.clone()];
     output_plan.evaluation_order = vec![capability.layer_id];
-    let (realization, usage) = evaluate_document_channel(
+    let (realization, usage, performance) = evaluate_document_channel(
         document,
         definition,
         channel,
@@ -3362,15 +3918,19 @@ fn evaluate_document_output(
         guide_face_limits,
         region_sampling_limits,
         region_treatment_limits,
+        profiled,
         is_cancelled,
     )?;
-    Ok(DocumentOutputRealization {
-        output_layer_id: capability.layer_id,
-        capability: capability.clone(),
-        setting: setting.clone(),
-        realization,
-        usage,
-    })
+    Ok((
+        DocumentOutputRealization {
+            output_layer_id: capability.layer_id,
+            capability: capability.clone(),
+            setting: setting.clone(),
+            realization,
+            usage,
+        },
+        performance,
+    ))
 }
 
 /// Aggregates ordered output fingerprints without rewriting existing one-output identities.
@@ -3433,6 +3993,185 @@ fn transformed_curve_segment_instances(
     })
 }
 
+/// Counts canonical stroke profile and outline work for request-wide budget enforcement.
+///
+/// Cache hits and misses charge the same completed immutable geometry, so aggregate limits never
+/// depend on cache disposition or output ordering beyond the authored deterministic traversal.
+///
+/// # Errors
+///
+/// Returns a stable stroke-limit diagnostic if a completed collection overflows `usize`.
+fn stroke_work(value: &DocumentRealization) -> Result<(usize, usize), EvaluationError> {
+    let DocumentRealization::Strokes(value) = value else {
+        return Ok((0, 0));
+    };
+    canonical_stroke_work(&value.output.strokes)
+}
+
+/// Counts work in one completed canonical stroke slice without inspecting semantic identity.
+///
+/// # Errors
+///
+/// Returns a stable stroke-limit diagnostic if profile or outline counts overflow `usize`.
+fn canonical_stroke_work(
+    strokes: &[toniator_patterns::CanonicalStroke],
+) -> Result<(usize, usize), EvaluationError> {
+    strokes.iter().try_fold(
+        (0_usize, 0_usize),
+        |(profile_samples, outline_segments), stroke| {
+            let profile_samples =
+                profile_samples
+                    .checked_add(stroke.profile.len())
+                    .ok_or(EvaluationError::new(
+                        "realization.stroke.profile_limit",
+                        "canonical stroke profile sample count overflows",
+                    ))?;
+            let stroke_outline_segments =
+                stroke
+                    .outline
+                    .contours
+                    .iter()
+                    .try_fold(0_usize, |total, contour| {
+                        total
+                            .checked_add(contour.segments.len())
+                            .ok_or(EvaluationError::new(
+                                "realization.stroke.outline_limit",
+                                "canonical stroke outline segment count overflows",
+                            ))
+                    })?;
+            let outline_segments = outline_segments
+                .checked_add(stroke_outline_segments)
+                .ok_or(EvaluationError::new(
+                    "realization.stroke.outline_limit",
+                    "canonical stroke outline segment count overflows",
+                ))?;
+            Ok((profile_samples, outline_segments))
+        },
+    )
+}
+
+/// Derives inexpensive deterministic output counts for the opt-in performance report.
+///
+/// # Errors
+///
+/// Returns the existing stable stroke or region count diagnostic if a completed immutable output
+/// overflows the platform count type.
+fn realization_workloads(
+    value: &DocumentRealization,
+    capability: &toniator_patterns::OutputCapability,
+) -> Result<Vec<EvaluationWorkloadMetric>, EvaluationError> {
+    let mut workloads = vec![EvaluationWorkloadMetric {
+        kind: output_workload_kind(value, capability),
+        count: 1,
+    }];
+    let details = match value {
+        DocumentRealization::Mapped(value) => Ok(vec![EvaluationWorkloadMetric {
+            kind: EvaluationWorkloadKind::Marks,
+            count: value.output.marks.len(),
+        }]),
+        DocumentRealization::SourceColor(value) => Ok(vec![EvaluationWorkloadMetric {
+            kind: EvaluationWorkloadKind::Marks,
+            count: value.output.marks.len(),
+        }]),
+        DocumentRealization::Canonical(value) => Ok(vec![EvaluationWorkloadMetric {
+            kind: EvaluationWorkloadKind::Marks,
+            count: value.output.marks.len(),
+        }]),
+        DocumentRealization::Strokes(value) => {
+            let (profile_samples, outline_segments) = canonical_stroke_work(&value.output.strokes)?;
+            Ok(vec![
+                EvaluationWorkloadMetric {
+                    kind: EvaluationWorkloadKind::Strokes,
+                    count: value.output.strokes.len(),
+                },
+                EvaluationWorkloadMetric {
+                    kind: EvaluationWorkloadKind::StrokeProfileSamples,
+                    count: profile_samples,
+                },
+                EvaluationWorkloadMetric {
+                    kind: EvaluationWorkloadKind::StrokeOutlineSegments,
+                    count: outline_segments,
+                },
+            ])
+        }
+        DocumentRealization::Regions { regions, .. } => {
+            let boundary_segments =
+                regions
+                    .regions()
+                    .iter()
+                    .try_fold(0_usize, |total, region| {
+                        total
+                            .checked_add(region.ring.segments().len())
+                            .ok_or(EvaluationError::new(
+                                "region.resize.limits.canonical",
+                                "profiled region boundary segment count overflows",
+                            ))
+                    })?;
+            Ok(vec![
+                EvaluationWorkloadMetric {
+                    kind: EvaluationWorkloadKind::Regions,
+                    count: regions.regions().len(),
+                },
+                EvaluationWorkloadMetric {
+                    kind: EvaluationWorkloadKind::RegionBoundarySegments,
+                    count: boundary_segments,
+                },
+            ])
+        }
+    }?;
+    workloads.extend(details);
+    Ok(workloads)
+}
+
+/// Classifies one completed output by its authoritative producer without timing sub-protocols.
+fn output_workload_kind(
+    value: &DocumentRealization,
+    capability: &toniator_patterns::OutputCapability,
+) -> EvaluationWorkloadKind {
+    if capability.connection_paths().is_some() {
+        EvaluationWorkloadKind::ConnectionOutput
+    } else if capability.maze_walls().is_some() {
+        EvaluationWorkloadKind::MazeOutput
+    } else if let Some(source) = capability.regions() {
+        match source {
+            toniator_domain::RegionSourceIntent::VoronoiSites { .. } => {
+                EvaluationWorkloadKind::VoronoiOutput
+            }
+            toniator_domain::RegionSourceIntent::GuideFaces { .. } => {
+                EvaluationWorkloadKind::GuideFaceOutput
+            }
+        }
+    } else if matches!(value, DocumentRealization::Strokes(_)) {
+        EvaluationWorkloadKind::StructuralPathOutput
+    } else {
+        EvaluationWorkloadKind::MarkOutput
+    }
+}
+
+/// Selects the narrowest existing output-authority boundary for one complete realization timing.
+fn output_performance_stage(
+    capability: &toniator_patterns::OutputCapability,
+) -> EvaluationPerformanceStage {
+    if capability.connection_paths().is_some() {
+        EvaluationPerformanceStage::ConnectionRealization
+    } else if capability.maze_walls().is_some() {
+        EvaluationPerformanceStage::MazeRealization
+    } else if let Some(source) = capability.regions() {
+        match source {
+            toniator_domain::RegionSourceIntent::VoronoiSites { .. } => {
+                EvaluationPerformanceStage::VoronoiRealization
+            }
+            toniator_domain::RegionSourceIntent::GuideFaces { .. } => {
+                EvaluationPerformanceStage::GuideFaceRealization
+            }
+        }
+    } else if capability.guide_paths().is_some() {
+        EvaluationPerformanceStage::StructuralPathRealization
+    } else {
+        EvaluationPerformanceStage::MarkRealization
+    }
+}
+
 /// Invokes the sole patterns Region realizer and optionally records its test-only completed state.
 ///
 /// Production calls the ordinary patterns authority unchanged. Test builds select the evidence
@@ -3454,8 +4193,15 @@ fn realize_document_region_output(
     paint: &ChannelPaint,
     sampling_limits: RegionSamplingLimits,
     treatment_limits: RegionTreatmentLimits,
-    is_cancelled: &dyn Fn() -> bool,
-) -> Result<toniator_patterns::TypedRegionOutputRealization, EvaluationError> {
+    profiled: bool,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<
+    (
+        toniator_patterns::TypedRegionOutputRealization,
+        Option<toniator_patterns::RegionOutputPerformanceMetrics>,
+    ),
+    EvaluationError,
+> {
     #[cfg(test)]
     if region_evaluation_evidence_enabled() {
         let (realization, evidence) = realize_region_output_with_evidence_cancellable(
@@ -3473,7 +4219,24 @@ fn realize_document_region_output(
         )
         .map_err(|error| EvaluationError::new(error.path(), error.message()))?;
         record_region_evaluation_evidence(evidence);
-        return Ok(realization);
+        return Ok((realization, None));
+    }
+    if profiled {
+        return toniator_patterns::realize_region_output_profiled_cancellable(
+            capability,
+            setting,
+            untreated,
+            references,
+            Some(source),
+            canvas,
+            mapping,
+            paint,
+            sampling_limits,
+            treatment_limits,
+            is_cancelled,
+        )
+        .map(|(realization, performance)| (realization, Some(performance)))
+        .map_err(|error| EvaluationError::new(error.path(), error.message()));
     }
     realize_region_output_cancellable(
         capability,
@@ -3488,6 +4251,7 @@ fn realize_document_region_output(
         treatment_limits,
         is_cancelled,
     )
+    .map(|realization| (realization, None))
     .map_err(|error| EvaluationError::new(error.path(), error.message()))
 }
 
@@ -3521,8 +4285,16 @@ fn evaluate_document_channel(
     guide_face_limits: GuideFaceLimits,
     region_sampling_limits: RegionSamplingLimits,
     region_treatment_limits: RegionTreatmentLimits,
-    is_cancelled: &dyn Fn() -> bool,
-) -> Result<(DocumentRealization, SiteUsageSet), EvaluationError> {
+    profiled: bool,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<
+    (
+        DocumentRealization,
+        SiteUsageSet,
+        Option<toniator_patterns::RegionOutputPerformanceMetrics>,
+    ),
+    EvaluationError,
+> {
     toniator_patterns::validate_output_realization_binding(plan, output_capability, output_setting)
         .map_err(EvaluationError::from_pipeline)?;
     if let Some(region_source) = output_capability.regions() {
@@ -3564,7 +4336,7 @@ fn evaluate_document_channel(
                         .into_iter()
                         .map(|(region_id, point)| RegionReference { region_id, point })
                         .collect();
-                let realized = realize_document_region_output(
+                let (realized, performance) = realize_document_region_output(
                     output_capability,
                     output_setting,
                     &regions,
@@ -3575,6 +4347,7 @@ fn evaluate_document_channel(
                     &channel.paint,
                     region_sampling_limits,
                     region_treatment_limits,
+                    profiled,
                     is_cancelled,
                 )?;
                 let toniator_domain::PatternGeometryResponse::Regions(response) =
@@ -3605,6 +4378,7 @@ fn evaluate_document_channel(
                         ),
                     },
                     usage,
+                    performance,
                 ));
             }
             toniator_domain::RegionSourceIntent::GuideFaces {
@@ -3642,7 +4416,7 @@ fn evaluate_document_channel(
                     .cloned()
                     .map(|(region_id, point)| RegionReference { region_id, point })
                     .collect();
-                let realized = realize_document_region_output(
+                let (realized, performance) = realize_document_region_output(
                     output_capability,
                     output_setting,
                     &result.regions,
@@ -3653,6 +4427,7 @@ fn evaluate_document_channel(
                     &channel.paint,
                     region_sampling_limits,
                     region_treatment_limits,
+                    profiled,
                     is_cancelled,
                 )?;
                 let toniator_domain::PatternGeometryResponse::Regions(response) =
@@ -3682,6 +4457,7 @@ fn evaluate_document_channel(
                         ),
                     },
                     SiteUsageSet::empty_non_site(),
+                    performance,
                 ));
             }
         }
@@ -3751,6 +4527,7 @@ fn evaluate_document_channel(
                 .realization,
             ),
             usage,
+            None,
         ));
     }
     if let Some((_site_mechanism_id, program, _style)) = output_capability.connection_paths() {
@@ -3814,6 +4591,7 @@ fn evaluate_document_channel(
                 .realization,
             ),
             usage,
+            None,
         ));
     }
     let authored_output = definition
@@ -3862,6 +4640,7 @@ fn evaluate_document_channel(
                 .realization,
             ),
             SiteUsageSet::empty_non_site(),
+            None,
         ));
     }
     let realization = if matches!(
@@ -3889,7 +4668,7 @@ fn evaluate_document_channel(
     } else {
         match channel.paint {
             ChannelPaint::Solid(_) => DocumentRealization::Mapped(
-                toniator_patterns::realize_typed_mapped_output(
+                toniator_patterns::realize_typed_mapped_output_cancellable(
                     family,
                     plan,
                     output_capability,
@@ -3898,12 +4677,13 @@ fn evaluate_document_channel(
                     document.canvas(),
                     channel.mapping,
                     effective.shape_rotation_degrees,
+                    is_cancelled,
                 )
                 .map_err(EvaluationError::from_pipeline)?
                 .realization,
             ),
             ChannelPaint::SampledSource => DocumentRealization::SourceColor(
-                toniator_patterns::realize_typed_source_color_output(
+                toniator_patterns::realize_typed_source_color_output_cancellable(
                     family,
                     plan,
                     output_capability,
@@ -3912,6 +4692,7 @@ fn evaluate_document_channel(
                     document.canvas(),
                     channel.mapping,
                     effective.shape_rotation_degrees,
+                    is_cancelled,
                 )
                 .map_err(EvaluationError::from_pipeline)?
                 .realization,
@@ -3919,7 +4700,7 @@ fn evaluate_document_channel(
         }
     };
     let usage = mark_site_usage(family, &realization)?;
-    Ok((realization, usage))
+    Ok((realization, usage, None))
 }
 
 /// Derives every unique Voronoi co-owner retained after treatment and alpha suppression.
@@ -4512,7 +5293,6 @@ struct DocumentRealizationCacheKey {
     mapping: Option<String>,
     response: DocumentResponseIdentity,
     sampled_paint: bool,
-    max_transformed_curve_segment_instances: usize,
 }
 
 /// Constructs the independent cache identity for one ordered output realization.
@@ -4536,7 +5316,6 @@ fn document_realization_cache_key(
     output_setting: &toniator_domain::EffectivePatternOutputSettings,
     referenced_usage: Option<&SiteUsageSet>,
     limits: EvaluationLimits,
-    remaining_transformed_curve_segment_instances: usize,
 ) -> Result<DocumentRealizationCacheKey, EvaluationError> {
     let sampling_required = output_sampling_required(&output_setting.response, &channel.paint);
     let region_sampling_limits = sampling_required.then(|| limits.region_sampling_limits());
@@ -4585,11 +5364,13 @@ fn document_realization_cache_key(
                     outline_segment_limit: limits.max_stroke_outline_segments(),
                     connection_contracts: Box::new(connection_cache_contracts(
                         definition,
+                        output_setting.output_layer_id,
                         limits.site_adjacency_limits(),
                         limits.connection_path_limits(),
                     )),
                     maze_contracts: Box::new(maze_cache_contracts(
                         definition,
+                        output_setting.output_layer_id,
                         limits.maze_limits(),
                     )),
                 }
@@ -4628,7 +5409,6 @@ fn document_realization_cache_key(
             },
         },
         sampled_paint: matches!(channel.paint, ChannelPaint::SampledSource),
-        max_transformed_curve_segment_instances: remaining_transformed_curve_segment_instances,
     })
 }
 
@@ -6463,6 +7243,13 @@ pub(crate) mod test_support {
         )
     }
 
+    /// Encodes a constant one-pixel source for cache tests that do not exercise source sampling.
+    fn flat_document_bytes() -> Arc<[u8]> {
+        let surface = RasterSurface::new(1, 1, vec![127, 127, 127, 255])
+            .expect("flat cache-test source validates");
+        Arc::<[u8]>::from(encode_png(&surface).expect("flat cache-test source encodes"))
+    }
+
     /// Builds one small typed-parametric-site Voronoi document at an intrinsic evidence canvas.
     ///
     /// The definition deliberately exposes only `AlongParametricCurveSites` to a Region layer;
@@ -6851,7 +7638,7 @@ pub(crate) mod test_support {
         let treated = treat_region_requests_cancellable(
             output_layer_id,
             &source,
-            &[request.clone()],
+            std::slice::from_ref(&request),
             RegionTreatmentLimits::default(),
             || false,
         )
@@ -6859,7 +7646,7 @@ pub(crate) mod test_support {
         let replayed = treat_region_requests_cancellable(
             output_layer_id,
             &source,
-            &[request.clone()],
+            std::slice::from_ref(&request),
             RegionTreatmentLimits::default(),
             || false,
         )
@@ -8040,7 +8827,7 @@ pub(crate) mod test_support {
         assert_eq!(paints.len(), regions.regions().len());
         assert!(paints.iter().all(|paint| paint.alpha > 0.0));
         let svg = write_svg(evaluated.scene());
-        assert!(svg.contains("channel-8-region-0"));
+        assert!(svg.contains(&format!("channel-{}-region-", layer.channel_id().0)));
         assert!(svg.contains("fill-rule=\"nonzero\""));
         assert!(
             evaluated
@@ -8251,7 +9038,7 @@ pub(crate) mod test_support {
     fn connected_path_cache_reuses_family_and_rebuilds_downstream_products() {
         let scheduler = EvaluationScheduler::new_with_limits(EvaluationLimits::default()).unwrap();
         let mut session = modeled_path_session();
-        let bytes = valid_document_bytes();
+        let bytes = flat_document_bytes();
         let first_ticket = scheduler
             .submit(document_request(&session, Arc::clone(&bytes)))
             .unwrap();
@@ -8878,7 +9665,7 @@ pub(crate) mod test_support {
             limits.maximum_cusp_isolation_work
         );
         assert_eq!(algorithm_key.tolerance, limits.tolerance.to_bits());
-        let bytes = valid_document_bytes();
+        let bytes = flat_document_bytes();
         let submit =
             |scheduler: &EvaluationScheduler, session: &DocumentSession, bytes: Arc<[u8]>| {
                 let ticket = scheduler.submit(document_request(session, bytes)).unwrap();
@@ -8969,7 +9756,7 @@ pub(crate) mod test_support {
                 .unwrap();
         let mut history = DocumentHistory::new(modeled_normal_offset_session());
         let stale_ticket = scheduler
-            .submit(document_request(history.session(), valid_document_bytes()))
+            .submit(document_request(history.session(), flat_document_bytes()))
             .unwrap();
         entered.recv_timeout(GUARD).unwrap();
         let base_definition = history.document().pattern_definition_bundles()[0]
@@ -8987,7 +9774,7 @@ pub(crate) mod test_support {
             })
             .unwrap();
         let newest_ticket = scheduler
-            .submit(document_request(history.session(), valid_document_bytes()))
+            .submit(document_request(history.session(), flat_document_bytes()))
             .unwrap();
         gate.release();
         let completion = wait_for_document_completion(&scheduler);
@@ -9000,7 +9787,7 @@ pub(crate) mod test_support {
                 .unwrap()
         );
         let repeated_ticket = scheduler
-            .submit(document_request(history.session(), valid_document_bytes()))
+            .submit(document_request(history.session(), flat_document_bytes()))
             .unwrap();
         let repeated = wait_for_document_completion(&scheduler);
         assert_eq!(repeated.ticket(), repeated_ticket);
@@ -9165,6 +9952,44 @@ pub(crate) mod test_support {
         )
     }
 
+    /// Builds independent mark and connection outputs whose connection seed alone changes identity.
+    fn modeled_independent_mark_connection_session(seed: u32) -> DocumentSession {
+        let base = modeled_stage20r_composite_session(false);
+        let document = base.document();
+        let mut bundle = document.pattern_definition_bundles()[0].clone();
+        for output in &mut bundle.definition.output_layers {
+            match &mut output.realization {
+                PatternOutputRealization::ConnectionPaths { program, .. } => match program {
+                    ConnectionProgram::RandomLinks {
+                        seed: current_seed, ..
+                    } => *current_seed = seed,
+                    _ => unreachable!("fixture connection uses random links"),
+                },
+                PatternOutputRealization::MarkPrototype { .. } => {
+                    output.source_filter = SiteUseFilter::All;
+                }
+                _ => unreachable!("fixture contains only connection and mark outputs"),
+            }
+        }
+        DocumentSession::new(
+            Document::with_source_topology_and_authored_structures(
+                document.id(),
+                document.canvas().clone(),
+                document.source().clone(),
+                vec![bundle],
+                document.pattern_settings().clone(),
+                document.channel_model().expect("modeled document model"),
+                document
+                    .channel_topology()
+                    .expect("modeled document topology")
+                    .clone(),
+                Vec::new(),
+            )
+            .expect("independent mixed-output document validates"),
+        )
+        .expect("independent mixed-output session validates")
+    }
+
     /// Builds the connection/residual-mark fixture at one intrinsic artifact canvas.
     fn modeled_stage20r_composite_session_for_canvas(
         mark_first: bool,
@@ -9291,6 +10116,51 @@ pub(crate) mod test_support {
         )
         .expect("sampled composite document validates");
         stage20q_sampled_region_session(document, 0.63)
+    }
+
+    /// Builds direct authored sampled-region and mark outputs without registering a catalog recipe.
+    fn modeled_stage20_authored_region_mark_session(canvas: CanvasSpec) -> DocumentSession {
+        let base = modeled_stage20r_sampled_region_session(canvas);
+        let document = base.document();
+        let original = &document.pattern_definition_bundles()[0];
+        let mut definition = original.definition.clone();
+        let mark_id = PatternOutputLayerId(123);
+        definition.output_layers.push(PatternOutputLayer::all(
+            mark_id,
+            PatternOutputRealization::MarkPrototype {
+                site_mechanism_id: PatternMechanismId(121),
+                prototype: MarkPrototype::Circle,
+                orientation: MarkOrientation::Fixed,
+            },
+        ));
+        let mut output_settings = original.output_settings.clone();
+        output_settings.push(PatternOutputSettings {
+            output_layer_id: mark_id,
+            response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+                minimum_fill: 0.12,
+                maximum_fill: 0.3,
+            }),
+        });
+        DocumentSession::new(
+            Document::with_source_topology_and_authored_structures(
+                document.id(),
+                document.canvas().clone(),
+                document.source().clone(),
+                vec![PatternDefinitionBundle {
+                    definition,
+                    output_settings,
+                }],
+                document.pattern_settings().clone(),
+                document.channel_model().expect("modeled document model"),
+                document
+                    .channel_topology()
+                    .expect("modeled document topology")
+                    .clone(),
+                Vec::new(),
+            )
+            .expect("direct authored region-and-mark document validates"),
+        )
+        .expect("direct authored region-and-mark session validates")
     }
 
     /// Gives every modeled artifact channel an independently authored seed while retaining all
@@ -9658,6 +10528,43 @@ pub(crate) mod test_support {
         );
     }
 
+    /// Proves a connection seed edit invalidates only that independently keyed mixed output.
+    #[test]
+    fn connection_program_identity_is_scoped_to_the_matching_output_cache_unit() {
+        let first_session = modeled_independent_mark_connection_session(29);
+        let edited_session = modeled_independent_mark_connection_session(31);
+        let bytes = valid_document_bytes();
+        let mut cache = DocumentDerivedCache::default();
+        let first = evaluate_cached_document(
+            document_request(&first_session, Arc::clone(&bytes)),
+            EvaluationLimits::default(),
+            &cache,
+            &NeverCancelled,
+        )
+        .expect("initial mixed-output document evaluates");
+        cache.commit(first.transaction);
+        let edited = evaluate_cached_document(
+            document_request(&edited_session, bytes),
+            EvaluationLimits::default(),
+            &cache,
+            &NeverCancelled,
+        )
+        .expect("seed-edited mixed-output document evaluates");
+        assert!(edited.diagnostics.channels.iter().all(|channel| {
+            channel.family == CacheDisposition::Hit
+                && channel
+                    .outputs
+                    .iter()
+                    .find(|output| output.output_layer_id == PatternOutputLayerId(123))
+                    .is_some_and(|output| output.realization == CacheDisposition::Hit)
+                && channel
+                    .outputs
+                    .iter()
+                    .find(|output| output.output_layer_id == PatternOutputLayerId(122))
+                    .is_some_and(|output| output.realization == CacheDisposition::Miss)
+        }));
+    }
+
     /// Proves maze usage publishes retained wall endpoints and dependent marks consume that exact set.
     #[test]
     fn stage20r_maze_endpoint_usage_drives_dependent_marks() {
@@ -9792,6 +10699,92 @@ pub(crate) mod test_support {
         }
     }
 
+    /// Proves stroke-profile work is charged across every independently realized channel output.
+    #[test]
+    fn request_wide_stroke_profile_limit_aggregates_outputs() {
+        let session = modeled_connection_session(random_connection_program(31, 24.0));
+        let baseline = evaluate_cached_document(
+            document_request(&session, valid_document_bytes()),
+            EvaluationLimits::default(),
+            &DocumentDerivedCache::default(),
+            &NeverCancelled,
+        )
+        .expect("connection outputs evaluate under default stroke limits");
+        let per_output = baseline
+            .transaction
+            .realizations
+            .iter()
+            .map(|(_, output)| match &output.realization {
+                DocumentRealization::Strokes(strokes) => {
+                    canonical_stroke_work(&strokes.output.strokes)
+                        .expect("bounded stroke work counts")
+                        .0
+                }
+                _ => panic!("connection fixture owns only stroke outputs"),
+            })
+            .collect::<Vec<_>>();
+        let total = per_output.iter().sum::<usize>();
+        assert!(per_output.len() >= 2);
+        assert!(per_output.iter().all(|count| *count < total));
+        let limits = EvaluationLimits::default()
+            .with_max_stroke_profile_samples(total - 1)
+            .expect("aggregate-limited policy validates");
+        let error = match evaluate_cached_document(
+            document_request(&session, valid_document_bytes()),
+            limits,
+            &DocumentDerivedCache::default(),
+            &NeverCancelled,
+        ) {
+            Err(EvaluationRunError::Evaluation(error)) => error,
+            Err(EvaluationRunError::Cancelled) => panic!("limit must not report cancellation"),
+            Ok(_) => panic!("aggregate stroke work must exceed the request-wide limit"),
+        };
+        assert_eq!(error.path(), "connection.stroke.profile_limit");
+    }
+
+    /// Proves canonical outline-segment work is charged across all independent channel outputs.
+    #[test]
+    fn request_wide_stroke_outline_limit_aggregates_outputs() {
+        let session = modeled_connection_session(random_connection_program(31, 24.0));
+        let baseline = evaluate_cached_document(
+            document_request(&session, valid_document_bytes()),
+            EvaluationLimits::default(),
+            &DocumentDerivedCache::default(),
+            &NeverCancelled,
+        )
+        .expect("connection outputs evaluate under default outline limits");
+        let per_output = baseline
+            .transaction
+            .realizations
+            .iter()
+            .map(|(_, output)| match &output.realization {
+                DocumentRealization::Strokes(strokes) => {
+                    canonical_stroke_work(&strokes.output.strokes)
+                        .expect("bounded stroke work counts")
+                        .1
+                }
+                _ => panic!("connection fixture owns only stroke outputs"),
+            })
+            .collect::<Vec<_>>();
+        let total = per_output.iter().sum::<usize>();
+        assert!(per_output.len() >= 2);
+        assert!(per_output.iter().all(|count| *count < total));
+        let limits = EvaluationLimits::default()
+            .with_max_stroke_outline_segments(total - 1)
+            .expect("aggregate outline-limited policy validates");
+        let error = match evaluate_cached_document(
+            document_request(&session, valid_document_bytes()),
+            limits,
+            &DocumentDerivedCache::default(),
+            &NeverCancelled,
+        ) {
+            Err(EvaluationRunError::Evaluation(error)) => error,
+            Err(EvaluationRunError::Cancelled) => panic!("limit must not report cancellation"),
+            Ok(_) => panic!("aggregate outline work must exceed the request-wide limit"),
+        };
+        assert_eq!(error.path(), "connection.stroke.outline_limit");
+    }
+
     /// Generates native Stage 20R composite documents, PNG/SVG outputs, identities, and raw statistics.
     #[test]
     #[ignore = "writes Stage 20R composite validation artifacts"]
@@ -9838,6 +10831,16 @@ pub(crate) mod test_support {
                 SourceFormatHint::Svg,
             ),
             (
+                "authored-regions-and-marks-900x620",
+                modeled_stage20_authored_region_mark_session(CanvasSpec {
+                    width: 900.0,
+                    height: 620.0,
+                }),
+                root.join("assets/vector-sample.svg"),
+                EmbeddedSourceFormat::Svg,
+                SourceFormatHint::Svg,
+            ),
+            (
                 "maze-endpoint-usage-64x48",
                 stage20r_seeded_output_channels(
                     modeled_maze_session(11),
@@ -9856,7 +10859,8 @@ pub(crate) mod test_support {
             "# Stage 20R ordered composite validation\n\n\
              Native RGBA is preserved. SVG rasterizations are comparison witnesses only.\n\
              Solid RGB witnesses retain every channel, with distinct deterministic output seeds\n\
-             per channel and one realization kind per artifact.\n\n",
+             per channel. The mixed region-and-mark witness is direct authored document data,\n\
+             not a bundled recipe or wizard card.\n\n",
         );
         for (stem, session, source_path, embedded_format, source_format) in cases {
             let source_bytes = fs::read(&source_path).expect("immutable source reads");
@@ -10295,8 +11299,8 @@ mod cache_key_tests {
                 additional_margin: 0.0,
             },
         );
-        connection.output_layers = vec![PatternOutputLayer::all(
-            toniator_domain::PatternOutputLayerId(11),
+        connection.output_layers.push(PatternOutputLayer::all(
+            toniator_domain::PatternOutputLayerId(12),
             PatternOutputRealization::ConnectionPaths {
                 site_mechanism_id: toniator_domain::PatternMechanismId(10),
                 program: toniator_domain::ConnectionProgram::RandomLinks {
@@ -10309,22 +11313,19 @@ mod cache_key_tests {
                 },
                 style: toniator_domain::PathStrokeStyle::default(),
             },
-        )];
+        ));
         let maze = connection_cache_contracts(
             &connection,
+            toniator_domain::PatternOutputLayerId(12),
             SiteAdjacencyLimits::default(),
             ConnectionPathLimits::default(),
         )
         .expect("connection contracts");
         let mut tree = connection.clone();
-        let [
-            PatternOutputLayer {
-                realization: PatternOutputRealization::ConnectionPaths { program, .. },
-                ..
-            },
-        ] = tree.output_layers.as_mut_slice()
+        let PatternOutputRealization::ConnectionPaths { program, .. } =
+            &mut tree.output_layers[1].realization
         else {
-            panic!("connection fixture retains output")
+            panic!("connection fixture retains its second output")
         };
         *program = toniator_domain::ConnectionProgram::GridSpanningTree {
             adjacency: toniator_domain::ConnectionAdjacencyIntent {
@@ -10338,10 +11339,21 @@ mod cache_key_tests {
             maze,
             connection_cache_contracts(
                 &tree,
+                toniator_domain::PatternOutputLayerId(12),
                 SiteAdjacencyLimits::default(),
                 ConnectionPathLimits::default(),
             )
             .expect("tree contracts")
+        );
+        assert_eq!(
+            connection_cache_contracts(
+                &connection,
+                toniator_domain::PatternOutputLayerId(11),
+                SiteAdjacencyLimits::default(),
+                ConnectionPathLimits::default(),
+            ),
+            None,
+            "the adjacent mark output never inherits connection identity"
         );
         let marks = PatternDefinition::supported_straight_grid(
             toniator_domain::PatternDefinitionId(12),
@@ -10357,6 +11369,7 @@ mod cache_key_tests {
         assert_eq!(
             connection_cache_contracts(
                 &marks,
+                toniator_domain::PatternOutputLayerId(15),
                 SiteAdjacencyLimits::default(),
                 ConnectionPathLimits::default(),
             ),
@@ -10379,8 +11392,8 @@ mod cache_key_tests {
                 additional_margin: 0.0,
             },
         );
-        definition.output_layers = vec![PatternOutputLayer::all(
-            toniator_domain::PatternOutputLayerId(24),
+        definition.output_layers.push(PatternOutputLayer::all(
+            toniator_domain::PatternOutputLayerId(25),
             PatternOutputRealization::MazeWalls {
                 site_mechanism_id: toniator_domain::PatternMechanismId(23),
                 program: toniator_domain::MazeProgram {
@@ -10389,9 +11402,14 @@ mod cache_key_tests {
                 },
                 style: toniator_domain::PathStrokeStyle::default(),
             },
-        )];
+        ));
         let baseline_limits = MazeLimits::default();
-        let baseline = maze_cache_contracts(&definition, baseline_limits).expect("maze contracts");
+        let baseline = maze_cache_contracts(
+            &definition,
+            toniator_domain::PatternOutputLayerId(25),
+            baseline_limits,
+        )
+        .expect("maze contracts");
         assert_eq!(baseline.arrangement, MAZE_WALL_CONTRACT_ID);
         assert_eq!(
             baseline.algorithm,
@@ -10399,19 +11417,20 @@ mod cache_key_tests {
             "the only current algorithm still participates as an explicit contract field"
         );
         let mut seeded = definition.clone();
-        let [
-            PatternOutputLayer {
-                realization: PatternOutputRealization::MazeWalls { program, .. },
-                ..
-            },
-        ] = seeded.output_layers.as_mut_slice()
+        let PatternOutputRealization::MazeWalls { program, .. } =
+            &mut seeded.output_layers[1].realization
         else {
-            panic!("maze fixture retains its maze output")
+            panic!("maze fixture retains its second output")
         };
         program.seed = 11;
         assert_ne!(
             baseline,
-            maze_cache_contracts(&seeded, baseline_limits).expect("seeded maze contracts")
+            maze_cache_contracts(
+                &seeded,
+                toniator_domain::PatternOutputLayerId(25),
+                baseline_limits,
+            )
+            .expect("seeded maze contracts")
         );
         let changed_limits = MazeLimits {
             maximum_faces: baseline_limits.maximum_faces - 1,
@@ -10419,7 +11438,21 @@ mod cache_key_tests {
         };
         assert_ne!(
             baseline,
-            maze_cache_contracts(&definition, changed_limits).expect("limited maze contracts")
+            maze_cache_contracts(
+                &definition,
+                toniator_domain::PatternOutputLayerId(25),
+                changed_limits,
+            )
+            .expect("limited maze contracts")
+        );
+        assert_eq!(
+            maze_cache_contracts(
+                &definition,
+                toniator_domain::PatternOutputLayerId(24),
+                baseline_limits,
+            ),
+            None,
+            "the adjacent mark output never inherits maze identity"
         );
         assert_eq!(
             family(true),

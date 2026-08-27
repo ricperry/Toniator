@@ -5,7 +5,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use toniator_domain::{CanvasSpec, Document, SourceReference, SourceReferenceId};
+use toniator_domain::{
+    CanvasSpec, Document, MarkGeometryResponse, PatternGeometryResponse, SourceReference,
+    SourceReferenceId,
+};
 use toniator_io::{
     DOCUMENT_SCHEMA_VERSION, EmbeddedSource, EmbeddedSourceFormat, SourceBundle, load, save,
 };
@@ -45,9 +48,17 @@ fn current_document() -> (Document, SourceBundle) {
     )
 }
 
-/// Proves v3 round-trips deterministic normalized fill fields without a migration path.
+/// Resolves the first document-owned mark response through the current output-settings authority.
+fn first_mark_response(document: &Document) -> &MarkGeometryResponse {
+    match &document.pattern_definition_bundles()[0].output_settings[0].response {
+        PatternGeometryResponse::Marks(response) => response,
+        _ => panic!("fixture owns one mark response"),
+    }
+}
+
+/// Proves current v5 round-trips deterministic normalized fill fields without a migration path.
 #[test]
-fn v3_round_trips_normalized_fill_deterministically() {
+fn current_v5_round_trips_normalized_fill_deterministically() {
     let (document, sources) = current_document();
     let first = temporary("first.toniator");
     let second = temporary("second.toniator");
@@ -58,19 +69,14 @@ fn v3_round_trips_normalized_fill_deterministically() {
         fs::read(&second).expect("second bytes")
     );
 
-    let loaded = load(&first).expect("v3 archive loads");
+    let loaded = load(&first).expect("current v5 archive loads");
     assert_eq!(loaded.versions().document(), DOCUMENT_SCHEMA_VERSION);
-    let response = &loaded
-        .document()
-        .channel_topology()
-        .expect("modeled topology")
-        .channels()[0]
-        .mark_geometry_response;
+    let response = first_mark_response(loaded.document());
     assert_eq!(
         (
             response.minimum_fill,
             response.maximum_fill,
-            response.rotation_offset_degrees
+            loaded.document().pattern_settings().shape_rotation_degrees
         ),
         (0.0, 1.0, 0.0)
     );
@@ -133,26 +139,27 @@ fn v2_document_schema_is_rejected_without_migration() {
     fs::remove_file(obsolete).expect("remove obsolete archive");
 }
 
-/// Proves each renamed baseline fixture preserves its legacy representative mark diameters.
+/// Proves every current baseline fixture retains its authored normalized mark-fill endpoints.
 #[test]
-fn normalized_fixture_fill_converts_the_legacy_representative_diameter() {
+fn current_baseline_fixtures_retain_authoritative_normalized_fill() {
     let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
-    for name in [
-        "raster-sample.toniator",
-        "vector-sample.toniator",
-        "HolidayMugs_2024_2025.toniator",
+    for (name, expected) in [
+        (
+            "raster-sample.toniator",
+            (0.141_421_356_237_309_5, 0.636_396_103_067_892_7),
+        ),
+        (
+            "vector-sample.toniator",
+            (0.141_421_356_237_309_5, 0.636_396_103_067_892_7),
+        ),
+        ("HolidayMugs_2024_2025.toniator", (0.0, 2.0)),
     ] {
         let loaded = load(&assets.join(name)).expect("current fixture loads");
-        let response = &loaded
-            .document()
-            .channel_topology()
-            .expect("modeled topology")
-            .channels()[0]
-            .mark_geometry_response;
-        let representative_diameter = 10.0_f64.hypot(10.0);
-        assert!((response.maximum_fill * representative_diameter - 9.0).abs() < 1e-12);
-        if name != "HolidayMugs_2024_2025.toniator" {
-            assert!((response.minimum_fill * representative_diameter - 2.0).abs() < 1e-12);
-        }
+        let response = first_mark_response(loaded.document());
+        assert_eq!(
+            (response.minimum_fill, response.maximum_fill),
+            expected,
+            "{name} retains current normalized intent"
+        );
     }
 }

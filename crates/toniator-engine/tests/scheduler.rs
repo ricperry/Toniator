@@ -9,8 +9,9 @@ use toniator_domain::{
     ChannelSourceMapping, ChannelState, ColorValue, CoveragePolicy, DensityEditedAxis,
     DensityMetric2D, Document, DocumentCommand, DocumentHistory, DocumentId,
     DocumentPatternSettings, DocumentSession, MarkGeometryFieldEdit, MarkGeometryResponse,
-    PatternDefinition, PatternDefinitionId, PatternGeometryResponse, PatternMechanismId,
-    PatternOutputLayerId, SourceComponent, SourcePlacement, SourceReference, SourceReferenceId,
+    PatternDefinition, PatternDefinitionBundle, PatternDefinitionId, PatternGeometryResponse,
+    PatternMechanismId, PatternOutputLayerId, PatternOutputSettings, SourceComponent,
+    SourcePlacement, SourceReference, SourceReferenceId,
 };
 use toniator_engine::{
     CacheDiagnostics, CacheDisposition, ChannelDiagnosticCompletion, ChannelDiagnosticRequest,
@@ -33,17 +34,26 @@ fn session() -> DocumentSession {
                 height: 600.0,
             },
             SourceReference::Assigned(source_id),
-            vec![PatternDefinition::supported_straight_grid(
-                PatternDefinitionId(1),
-                "straight-grid",
-                PatternMechanismId(1),
-                PatternMechanismId(2),
-                PatternOutputLayerId(1),
-                CoveragePolicy {
-                    guard_steps: 2,
-                    additional_margin: 4.5,
-                },
-            )],
+            vec![PatternDefinitionBundle {
+                definition: PatternDefinition::supported_straight_grid(
+                    PatternDefinitionId(1),
+                    "straight-grid",
+                    PatternMechanismId(1),
+                    PatternMechanismId(2),
+                    PatternOutputLayerId(1),
+                    CoveragePolicy {
+                        guard_steps: 2,
+                        additional_margin: 4.5,
+                    },
+                ),
+                output_settings: vec![PatternOutputSettings {
+                    output_layer_id: PatternOutputLayerId(1),
+                    response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+                        minimum_fill: 0.2,
+                        maximum_fill: 0.9,
+                    }),
+                }],
+            }],
             DocumentPatternSettings {
                 definition_id: PatternDefinitionId(1),
                 density: DensityMetric2D {
@@ -53,10 +63,6 @@ fn session() -> DocumentSession {
                 },
                 pattern_rotation_degrees: 17.0,
                 shape_rotation_degrees: 0.0,
-                geometry_response: PatternGeometryResponse::Marks(MarkGeometryResponse {
-                    minimum_fill: 0.2,
-                    maximum_fill: 0.9,
-                }),
             },
             vec![ChannelState {
                 id: CHANNEL_ID,
@@ -69,7 +75,7 @@ fn session() -> DocumentSession {
                         translation_y: -4.5,
                     },
                     shape_rotation_delta_degrees: None,
-                    geometry_response_delta: None,
+                    output_response_deltas: Vec::new(),
                 },
                 appearance: ChannelAppearance {
                     visible: true,
@@ -300,6 +306,7 @@ fn accepted_cache_obeys_the_complete_reuse_matrix_and_keeps_outputs_exact() {
         .document()
         .set_channel_mark_response_field_for_effective(
             CHANNEL_ID,
+            PatternOutputLayerId(1),
             MarkGeometryFieldEdit::MaximumFill(0.8),
         )
         .expect("response edit builds");

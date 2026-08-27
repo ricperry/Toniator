@@ -1,1163 +1,244 @@
-use sha2::{Digest, Sha256};
+//! Current-schema container integration witnesses.
+//!
+//! Toniator is pre-release, so obsolete schema migration belongs nowhere in this suite. These
+//! tests exercise the public current-v5 boundary, archive hardening, deterministic bytes,
+//! transactional publication, source correspondence, and Stage 20 visible-mark exclusion intent.
+
 use std::{
     collections::HashSet,
-    fs,
-    io::{Read, Write},
+    fs::{self, File},
+    io::{Cursor, Read, Write},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use toniator_domain::{
-    ArtworkWeightResponse, AuthoredCurveSegment, AuthoredPoint2, AuthoredStructure,
-    AuthoredStructureId, AuthoredStructureKind, CanvasSpec, ChannelAppearance, ChannelId,
-    ChannelPaint, ChannelPatternLayout, ChannelSourceMapping, ChannelState, ChannelTopology,
-    ChannelTopologyTemplate, ColorComponent, ColorValue, CoveragePolicy, DensityMetric2D, Document,
-    DocumentCommand, DocumentHistory, DocumentId, DocumentSession, GeneralizedSiteProduct,
-    GuideDimension, GuideDimensionId, GuidePrototype, GuideRepetition, HalftoneChannelModel,
-    MarkGeometryResponse, MarkOrientation, ModeledMappingFieldEdit, PatternDefinition,
-    PatternDefinitionEdit, PatternDefinitionId, PatternMechanismId, PatternOutputLayerId,
-    RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy, SourceComponent,
-    SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId,
-    StraightGuideDimension, StraightGuideRepetition, TranslationEditedAxis,
-    VisibleMarkSizingPolicy,
+    CanvasSpec, CoveragePolicy, Document, PatternDefinition, PatternMechanismId,
+    PatternOutputLayerId, RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy,
+    SourceReference, SourceReferenceId,
 };
 use toniator_io::{
-    CONTAINER_VERSION, DOCUMENT_SCHEMA_VERSION, EmbeddedSource, EmbeddedSourceFormat, LoadError,
-    MAX_ARCHIVE_BYTES, MAX_DOCUMENT_BYTES, MAX_SOURCE_BYTES, SourceBundle, load, save,
+    DOCUMENT_SCHEMA_VERSION, EmbeddedSource, EmbeddedSourceFormat, LoadError, MAX_ARCHIVE_BYTES,
+    MAX_DOCUMENT_BYTES, MAX_SOURCE_BYTES, MAX_UNCOMPRESSED_BYTES, SourceBundle, load, save,
 };
+use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
+/// Allocates one collision-resistant path for a disposable container witness.
 fn temporary(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
-        "toniator-stage12-{name}-{}",
+        "toniator-current-persistence-{name}-{}",
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .expect("system time follows epoch")
             .as_nanos()
     ))
 }
 
-fn legacy_document() -> (Document, SourceBundle) {
-    let id = SourceReferenceId::new("source-1").unwrap();
-    let document = Document::with_source(
-        DocumentId(81),
+/// Builds a current source-backed document and its exactly corresponding source bundle.
+fn source_backed_document() -> (Document, SourceBundle) {
+    let source_id = SourceReferenceId::new("current-source").expect("source ID validates");
+    let document = Document::new_default_document(
         CanvasSpec {
-            width: 101.25,
-            height: 77.5,
+            width: 160.0,
+            height: 90.0,
         },
-        SourceReference::Assigned(id.clone()),
-        vec![PatternDefinition::supported_straight_grid(
-            PatternDefinitionId(91),
-            "grid",
-            PatternMechanismId(181),
-            PatternMechanismId(182),
-            PatternOutputLayerId(91),
-            CoveragePolicy {
-                guard_steps: 2,
-                additional_margin: 4.5,
-            },
-        )],
-        vec![ChannelState {
-            id: ChannelId(55),
-            pattern_definition_id: PatternDefinitionId(91),
-            layout: ChannelPatternLayout {
-                density: DensityMetric2D {
-                    across_x: 10.125,
-                    across_y: 7.75,
-                    aspect_locked: false,
-                },
-                rotation_degrees: -17.25,
-                translation_x: 3.5,
-                translation_y: -2.75,
-            },
-            appearance: ChannelAppearance {
-                visible: false,
-                color: ColorValue {
-                    red: 0.1,
-                    green: 0.2,
-                    blue: 0.3,
-                    alpha: 0.4,
-                },
-                opacity: 0.5,
-            },
-            mark_geometry_response: MarkGeometryResponse {
-                minimum_fill: 1.0,
-                maximum_fill: 8.0,
-                rotation_offset_degrees: 0.0,
-            },
-            source_mapping: ChannelSourceMapping {
-                component: SourceComponent::Alpha,
-                placement: SourcePlacement::StretchToCanvas,
-            },
-        }],
+        SourceReference::Assigned(source_id.clone()),
     )
-    .unwrap();
-    let bundle = SourceBundle::new([EmbeddedSource::new(
-        id,
+    .expect("default document validates");
+    let source = EmbeddedSource::new(
+        source_id,
         EmbeddedSourceFormat::Svg,
-        b"<svg/>".to_vec(),
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_vec(),
         Some("source.svg".into()),
     )
-    .unwrap()])
-    .unwrap();
-    (document, bundle)
-}
-
-#[test]
-fn generalized_v2_definition_round_trips_without_serializing_runtime_state() {
-    let (mut document, sources) = legacy_document();
-    let definition = PatternDefinition::generalized_straight_guides(
-        PatternDefinitionId(91),
-        "typed",
-        PatternMechanismId(181),
-        PatternMechanismId(182),
-        PatternOutputLayerId(91),
-        vec![
-            StraightGuideDimension {
-                id: GuideDimensionId(1),
-                baseline_angle_degrees: 0.0,
-                phase: 0.0,
-                repetition: StraightGuideRepetition {
-                    spacing_multiplier: 1.0,
-                },
-            },
-            StraightGuideDimension {
-                id: GuideDimensionId(2),
-                baseline_angle_degrees: 60.0,
-                phase: 0.25,
-                repetition: StraightGuideRepetition {
-                    spacing_multiplier: 1.0,
-                },
-            },
-            StraightGuideDimension {
-                id: GuideDimensionId(3),
-                baseline_angle_degrees: 120.0,
-                phase: 0.5,
-                repetition: StraightGuideRepetition {
-                    spacing_multiplier: 0.75,
-                },
-            },
-        ],
-        GeneralizedSiteProduct::AlongGuides {
-            dimensions: vec![GuideDimensionId(1), GuideDimensionId(3)],
-            interval_multiplier: 0.5,
-            phase: 1.25,
-        },
-        MarkOrientation::GuideTangent {
-            dimension_id: GuideDimensionId(3),
-        },
-        CoveragePolicy {
-            guard_steps: 2,
-            additional_margin: 4.5,
-        },
-    );
-    document = Document::with_source(
-        DocumentId(81),
-        document.canvas().clone(),
-        document.source().clone(),
-        vec![definition],
-        document.channels().unwrap().to_vec(),
-    )
-    .unwrap();
-    let path = temporary("stage16a-generalized.toniator");
-    save(&path, &document, &sources).unwrap();
-    let loaded = load(&path).unwrap();
-    fs::remove_file(path).unwrap();
-    assert_eq!(loaded.document(), &document);
-}
-
-#[test]
-fn random_site_v2_definition_round_trips_without_changing_existing_v2_forms() {
-    let (document, sources) = legacy_document();
-    let random = PatternDefinition::random_sites(
-        PatternDefinitionId(91),
-        "random typed",
-        PatternMechanismId(181),
-        PatternMechanismId(182),
-        PatternMechanismId(183),
-        PatternMechanismId(184),
-        PatternOutputLayerId(91),
-        RandomSiteCharacter::Clustered {
-            cluster_density: 0.2,
-            cluster_spread: 3.5,
-            cluster_strength: 0.75,
-        },
-        42,
-        SiteDensityModulation::ArtworkWeighted {
-            mapping: toniator_domain::SourceMapping {
-                component: SourceMappingComponent::Luminance,
-                placement: SourcePlacement::StretchToCanvas,
-                inverted: false,
-                gain: 1.0,
-                bias: 0.0,
-            },
-            strength: 0.8,
-            response: ArtworkWeightResponse::Smoothstep,
-        },
-        SiteExclusionPolicy::VisibleMarkMargin {
-            margin: 0.5,
-            sizing: VisibleMarkSizingPolicy::MaximumSupportRadius,
-        },
-        64,
-        16_000_000,
-        CoveragePolicy {
-            guard_steps: 2,
-            additional_margin: 4.5,
-        },
-    );
-    let document = Document::with_source(
-        DocumentId(81),
-        document.canvas().clone(),
-        document.source().clone(),
-        vec![random],
-        document.channels().unwrap().to_vec(),
-    )
-    .unwrap();
-    let first = temporary("stage16b-random-one.toniator");
-    let second = temporary("stage16b-random-two.toniator");
-    save(&first, &document, &sources).unwrap();
-    save(&second, &document, &sources).unwrap();
-    assert_eq!(fs::read(&first).unwrap(), fs::read(&second).unwrap());
-    let loaded = load(&first).unwrap();
-    fs::remove_file(first).unwrap();
-    fs::remove_file(second).unwrap();
-    assert_eq!(loaded.document(), &document);
-}
-
-/// Builds a finite authored point for deterministic Stage 20C persistence fixtures.
-fn authored_point(x: f64, y: f64) -> AuthoredPoint2 {
-    AuthoredPoint2 { x, y }
-}
-
-/// Builds one document with ordered authored open and closed construction structures.
-fn document_with_authored_structures() -> (Document, SourceBundle) {
-    let (base, sources) = legacy_document();
-    let structures = vec![
-        AuthoredStructure::new(
-            AuthoredStructureId(21),
-            AuthoredStructureKind::OpenPath,
-            vec![
-                AuthoredCurveSegment::Line {
-                    start: authored_point(-0.0, 1.0),
-                    end: authored_point(2.0, 3.0),
-                },
-                AuthoredCurveSegment::CubicBezier {
-                    start: authored_point(2.0, 3.0),
-                    control_1: authored_point(4.0, 5.0),
-                    control_2: authored_point(6.0, 7.0),
-                    end: authored_point(8.0, 9.0),
-                },
-            ],
-        )
-        .unwrap(),
-        AuthoredStructure::new(
-            AuthoredStructureId(4),
-            AuthoredStructureKind::ClosedShape,
-            vec![AuthoredCurveSegment::Line {
-                start: authored_point(10.0, 11.0),
-                end: authored_point(10.0, 11.0),
-            }],
-        )
-        .unwrap(),
-    ];
+    .expect("embedded source validates");
     (
-        Document::with_source_and_authored_structures(
-            base.id(),
-            base.canvas().clone(),
-            base.source().clone(),
-            base.pattern_definitions().to_vec(),
-            base.channels().unwrap().to_vec(),
-            structures,
-        )
-        .unwrap(),
-        sources,
+        document,
+        SourceBundle::new([source]).expect("one source bundle validates"),
     )
 }
 
-/// Round-trips ordered authored structures with exact IDs, variants, declared topology, and coordinates.
-#[test]
-fn stage20c_authored_structures_round_trip_ids_order_topology_and_coordinates() {
-    let (document, sources) = document_with_authored_structures();
-    let first = temporary("stage20c-authored-first.toniator");
-    let second = temporary("stage20c-authored-second.toniator");
-    save(&first, &document, &sources).unwrap();
-    save(&second, &document, &sources).unwrap();
-    assert_eq!(fs::read(&first).unwrap(), fs::read(&second).unwrap());
-    let loaded = load(&first).unwrap();
-    assert_eq!(loaded.document(), &document);
-    let structures = loaded.document().authored_structures();
-    assert_eq!(
-        structures
-            .iter()
-            .map(|structure| structure.id())
-            .collect::<Vec<_>>(),
-        vec![AuthoredStructureId(21), AuthoredStructureId(4)]
-    );
-    assert_eq!(structures[0].kind(), AuthoredStructureKind::OpenPath);
-    assert_eq!(structures[1].kind(), AuthoredStructureKind::ClosedShape);
-    let AuthoredCurveSegment::Line { start, .. } = structures[0].segments()[0] else {
-        panic!("first authored segment must retain its line variant");
-    };
-    assert_eq!(start.x.to_bits(), (-0.0_f64).to_bits());
-    assert!(matches!(
-        structures[0].segments()[1],
-        AuthoredCurveSegment::CubicBezier { .. }
-    ));
-    fs::remove_file(first).unwrap();
-    fs::remove_file(second).unwrap();
-}
-
-/// Proves empty-store saves retain accepted current-v2 bytes and immutable v1 migration begins empty.
-#[test]
-fn stage20c_empty_store_preserves_accepted_v2_bytes_and_v1_migration() {
-    let (document, sources) = legacy_document();
-    let (first_json, _, _) = saved_parts(&document, &sources);
-    let (second_json, _, _) = saved_parts(&document, &sources);
-    assert_eq!(first_json, second_json);
-    let json = String::from_utf8(first_json).unwrap();
-    assert!(!json.contains("authored_structures"));
-    for fixture in ["raster-sample-v1.toniator", "vector-sample-v1.toniator"] {
-        let loaded = load(&asset(fixture)).unwrap();
-        assert!(!loaded.migration_report().is_empty());
-        assert!(loaded.document().authored_structures().is_empty());
-    }
-    let migrated = load(&asset("raster-sample-v1.toniator")).unwrap();
-    let path = temporary("stage20c-accepted-old-v2.toniator");
-    save(&path, migrated.document(), migrated.sources()).unwrap();
-    assert_eq!(
-        format!("{:x}", Sha256::digest(fs::read(&path).unwrap())),
-        "7135531041b8a4f9136731267b356ce4b3acbdb74c6e12c6670817e0613436cf"
-    );
-    fs::remove_file(path).unwrap();
-}
-
-/// Proves current-v2 documents without the defaulted field load with an empty authored-structure store.
-#[test]
-fn stage20c_existing_documents_load_with_empty_authored_structure_store() {
-    let (document, sources) = legacy_document();
-    let (json, source_name, source) = saved_parts(&document, &sources);
-    assert!(
-        !String::from_utf8(json.clone())
-            .unwrap()
-            .contains("authored_structures")
-    );
-    let bytes = archive_from_entries(&[
-        ("document.json", &json, zip::CompressionMethod::Stored),
-        (&source_name, &source, zip::CompressionMethod::Stored),
-    ]);
-    let path = temporary("stage20c-existing-v2.toniator");
-    fs::write(&path, bytes).unwrap();
-    let loaded = load(&path).unwrap();
-    assert!(loaded.migration_report().is_empty());
-    assert!(loaded.document().authored_structures().is_empty());
-    fs::remove_file(path).unwrap();
-}
-
-/// Rejects invalid authored resource JSON before it can publish a partially reconstructed document.
-#[test]
-fn stage20c_invalid_resource_json_rejects_before_document_commit() {
-    let (document, sources) = legacy_document();
-    let (json, source_name, source) = saved_parts(&document, &sources);
-    let mut value: serde_json::Value = serde_json::from_slice(&json).unwrap();
-    value["document"]["authored_structures"] = serde_json::json!([{
-        "id": 0,
-        "kind": "open_path",
-        "segments": [{
-            "kind": "line",
-            "start": {"x": 0.0, "y": 0.0},
-            "end": {"x": 1.0, "y": 0.0}
-        }]
-    }]);
-    let invalid = serde_json::to_vec(&value).unwrap();
-    assert_load_error(
-        &archive_from_entries(&[
-            ("document.json", &invalid, zip::CompressionMethod::Stored),
-            (&source_name, &source, zip::CompressionMethod::Stored),
-        ]),
-        |error| {
-            matches!(
-                error,
-                LoadError::DomainValidation { context }
-                    if context == "authored_structures.id: authored structure IDs must be nonzero"
-            )
-        },
-    );
-}
-
-#[test]
-fn stage17_history_commands_save_current_v2_without_runtime_state() {
-    let (document, sources) = legacy_document();
-    let mut history = DocumentHistory::new(DocumentSession::new(document).unwrap());
-    let base = history.document().pattern_definitions()[0].clone();
-    history
-        .apply(&DocumentCommand::SetTranslationAxis {
-            channel_id: ChannelId(55),
-            edited_axis: TranslationEditedAxis::Y,
-            value: -4.0,
-        })
-        .unwrap();
-    history
-        .apply(&DocumentCommand::EditSharedPatternDefinition {
-            definition_id: PatternDefinitionId(91),
-            base_definition: base,
-            edit: toniator_domain::PatternDefinitionEdit::SetCoverageGuardSteps { guard_steps: 3 },
-        })
-        .unwrap();
-    let edited = history.document().clone();
-    let first = temporary("stage17-history-first.toniator");
-    let second = temporary("stage17-history-second.toniator");
-    save(&first, &edited, &sources).unwrap();
-    save(&second, &edited, &sources).unwrap();
-    assert_eq!(fs::read(&first).unwrap(), fs::read(&second).unwrap());
-    let loaded = load(&first).unwrap();
-    assert_eq!(loaded.document(), &edited);
-    let loaded_history =
-        DocumentHistory::new(DocumentSession::new(loaded.document().clone()).unwrap());
-    assert_eq!(loaded_history.revision().0, 0);
-    assert!(!loaded_history.can_undo());
-    assert!(!loaded_history.can_redo());
-    let (json, _, _) = saved_parts(&edited, &sources);
-    let json = String::from_utf8(json).unwrap();
-    let frontend_runtime_key = ['g', 't', 'k'].into_iter().collect::<String>();
-    for runtime_key in [
-        "descriptor",
-        "command_base",
-        "history",
-        "revision",
-        "savepoint",
-        "scheduler",
-        "cache",
-        frontend_runtime_key.as_str(),
-        "ui_state",
-    ] {
-        assert!(
-            !json.contains(runtime_key),
-            "runtime key leaked: {runtime_key}"
-        );
-    }
-    history.undo().unwrap();
-    history.redo().unwrap();
-    assert_eq!(history.document(), &edited);
-    fs::remove_file(first).unwrap();
-    fs::remove_file(second).unwrap();
-}
-
-#[test]
-fn stage17_command_installed_guide_raw_and_even_v2_matrix_is_deterministic() {
-    let (document, sources) = legacy_document();
-    let mut history = DocumentHistory::new(DocumentSession::new(document).unwrap());
-    let guides = |id, root, product_mechanism, output, site, site_product, orientation| {
-        PatternDefinition::generalized_straight_guides(
-            PatternDefinitionId(id),
-            "stage17-guides",
-            PatternMechanismId(root),
-            PatternMechanismId(product_mechanism),
-            PatternOutputLayerId(output),
-            vec![
-                StraightGuideDimension {
-                    id: GuideDimensionId(site),
-                    baseline_angle_degrees: 0.0,
-                    phase: 0.0,
-                    repetition: StraightGuideRepetition {
-                        spacing_multiplier: 1.0,
-                    },
-                },
-                StraightGuideDimension {
-                    id: GuideDimensionId(site + 1),
-                    baseline_angle_degrees: 90.0,
-                    phase: 0.25,
-                    repetition: StraightGuideRepetition {
-                        spacing_multiplier: 1.0,
-                    },
-                },
-            ],
-            site_product,
-            orientation,
-            CoveragePolicy {
-                guard_steps: 2,
-                additional_margin: 4.5,
-            },
-        )
-    };
-    let definitions = vec![
-        guides(
-            100,
-            1000,
-            1001,
-            2000,
-            500,
-            GeneralizedSiteProduct::Intersections {
-                dimensions: vec![GuideDimensionId(500), GuideDimensionId(501)],
-                merge_epsilon: 0.0,
-            },
-            MarkOrientation::Fixed,
-        ),
-        guides(
-            101,
-            1002,
-            1003,
-            2001,
-            510,
-            GeneralizedSiteProduct::AlongGuides {
-                dimensions: vec![GuideDimensionId(510)],
-                interval_multiplier: 0.75,
-                phase: 0.5,
-            },
-            MarkOrientation::GuideTangent {
-                dimension_id: GuideDimensionId(510),
-            },
-        ),
-        PatternDefinition::random_sites(
-            PatternDefinitionId(102),
-            "stage17-raw",
-            PatternMechanismId(1100),
-            PatternMechanismId(1101),
-            PatternMechanismId(1102),
-            PatternMechanismId(1103),
-            PatternOutputLayerId(2002),
-            RandomSiteCharacter::RawUniform,
-            7,
-            SiteDensityModulation::Uniform,
-            SiteExclusionPolicy::None,
-            64,
-            128,
-            CoveragePolicy {
-                guard_steps: 2,
-                additional_margin: 4.5,
-            },
-        ),
-        PatternDefinition::random_sites(
-            PatternDefinitionId(103),
-            "stage17-even",
-            PatternMechanismId(1200),
-            PatternMechanismId(1201),
-            PatternMechanismId(1202),
-            PatternMechanismId(1203),
-            PatternOutputLayerId(2003),
-            RandomSiteCharacter::Even {
-                minimum_center_distance: 1.5,
-            },
-            9,
-            SiteDensityModulation::Uniform,
-            SiteExclusionPolicy::None,
-            64,
-            128,
-            CoveragePolicy {
-                guard_steps: 2,
-                additional_margin: 4.5,
-            },
-        ),
-        PatternDefinition::random_sites(
-            PatternDefinitionId(104),
-            "stage17-clustered",
-            PatternMechanismId(1300),
-            PatternMechanismId(1301),
-            PatternMechanismId(1302),
-            PatternMechanismId(1303),
-            PatternOutputLayerId(2004),
-            RandomSiteCharacter::Clustered {
-                cluster_density: 0.2,
-                cluster_spread: 2.0,
-                cluster_strength: 0.6,
-            },
-            11,
-            SiteDensityModulation::Uniform,
-            SiteExclusionPolicy::None,
-            64,
-            128,
-            CoveragePolicy {
-                guard_steps: 2,
-                additional_margin: 4.5,
-            },
-        ),
-        PatternDefinition::random_sites(
-            PatternDefinitionId(105),
-            "stage17-weighted",
-            PatternMechanismId(1400),
-            PatternMechanismId(1401),
-            PatternMechanismId(1402),
-            PatternMechanismId(1403),
-            PatternOutputLayerId(2005),
-            RandomSiteCharacter::RawUniform,
-            13,
-            SiteDensityModulation::ArtworkWeighted {
-                mapping: toniator_domain::SourceMapping {
-                    component: SourceMappingComponent::Luminance,
-                    placement: SourcePlacement::StretchToCanvas,
-                    inverted: false,
-                    gain: 1.0,
-                    bias: 0.0,
-                },
-                strength: 0.5,
-                response: ArtworkWeightResponse::Linear,
-            },
-            SiteExclusionPolicy::None,
-            64,
-            128,
-            CoveragePolicy {
-                guard_steps: 2,
-                additional_margin: 4.5,
-            },
-        ),
-        PatternDefinition::random_sites(
-            PatternDefinitionId(106),
-            "stage17-center-excluded",
-            PatternMechanismId(1500),
-            PatternMechanismId(1501),
-            PatternMechanismId(1502),
-            PatternMechanismId(1503),
-            PatternOutputLayerId(2006),
-            RandomSiteCharacter::RawUniform,
-            15,
-            SiteDensityModulation::Uniform,
-            SiteExclusionPolicy::MinimumCenterDistance { minimum: 1.0 },
-            64,
-            128,
-            CoveragePolicy {
-                guard_steps: 2,
-                additional_margin: 4.5,
-            },
-        ),
-        PatternDefinition::random_sites(
-            PatternDefinitionId(107),
-            "stage17-visible-excluded",
-            PatternMechanismId(1600),
-            PatternMechanismId(1601),
-            PatternMechanismId(1602),
-            PatternMechanismId(1603),
-            PatternOutputLayerId(2007),
-            RandomSiteCharacter::RawUniform,
-            17,
-            SiteDensityModulation::Uniform,
-            SiteExclusionPolicy::VisibleMarkMargin {
-                margin: 0.5,
-                sizing: VisibleMarkSizingPolicy::MaximumSupportRadius,
-            },
-            64,
-            128,
-            CoveragePolicy {
-                guard_steps: 2,
-                additional_margin: 4.5,
-            },
-        ),
-    ];
-    for definition in definitions {
-        let id = definition.id;
-        history
-            .apply(&DocumentCommand::AddTypedPatternDefinition { definition })
-            .unwrap();
-        history
-            .apply(&DocumentCommand::RetargetChannelPatternDefinition {
-                channel_id: ChannelId(55),
-                definition_id: id,
-            })
-            .unwrap();
-        let edit = match id.0 {
-            102 => Some(PatternDefinitionEdit::SetRandomMaximumAttempts {
-                mechanism_id: PatternMechanismId(1103),
-                maximum_attempts: 65,
-            }),
-            103 => Some(PatternDefinitionEdit::SetRandomEvenMinimumCenterDistance {
-                mechanism_id: PatternMechanismId(1200),
-                minimum_center_distance: 1.75,
-            }),
-            104 => Some(PatternDefinitionEdit::SetRandomClusterDensity {
-                mechanism_id: PatternMechanismId(1300),
-                cluster_density: 0.25,
-            }),
-            105 => Some(PatternDefinitionEdit::SetArtworkWeightStrength {
-                mechanism_id: PatternMechanismId(1401),
-                strength: 0.75,
-            }),
-            106 => Some(PatternDefinitionEdit::SetExclusionMinimumCenterDistance {
-                mechanism_id: PatternMechanismId(1502),
-                minimum_center_distance: 1.25,
-            }),
-            107 => Some(PatternDefinitionEdit::SetVisibleMarkMargin {
-                mechanism_id: PatternMechanismId(1602),
-                margin: 0.75,
-            }),
-            _ => None,
-        };
-        if let Some(edit) = edit {
-            let base = history
-                .document()
-                .pattern_definitions()
-                .iter()
-                .find(|definition| definition.id == id)
-                .unwrap()
-                .clone();
-            history
-                .apply(&DocumentCommand::EditSharedPatternDefinition {
-                    definition_id: id,
-                    base_definition: base,
-                    edit,
-                })
-                .unwrap();
-        }
-        let first = temporary(&format!("stage17-command-{id:?}-one.toniator"));
-        let second = temporary(&format!("stage17-command-{id:?}-two.toniator"));
-        save(&first, history.document(), &sources).unwrap();
-        save(&second, history.document(), &sources).unwrap();
-        assert_eq!(fs::read(&first).unwrap(), fs::read(&second).unwrap());
-        let loaded = load(&first).unwrap();
-        assert_eq!(loaded.document(), history.document());
-        let clean = DocumentHistory::new(DocumentSession::new(loaded.document().clone()).unwrap());
-        assert_eq!(clean.revision().0, 0);
-        assert!(!clean.can_undo() && !clean.can_redo());
-        let (json, _, _) = saved_parts(history.document(), &sources);
-        assert!(!String::from_utf8(json).unwrap().contains("descriptor"));
-        fs::remove_file(first).unwrap();
-        fs::remove_file(second).unwrap();
-    }
-}
-
-#[test]
-fn stage17_selected_shared_copy_persistence_restores_exact_ids_and_bytes() {
-    let (document, sources) = legacy_document();
-    let mut channels = document.channels().unwrap().to_vec();
-    let mut linked = channels[0].clone();
-    linked.id = ChannelId(56);
-    channels.push(linked);
-    let definition = PatternDefinition::generalized_straight_guides(
-        PatternDefinitionId(91),
-        "shared-guides",
-        PatternMechanismId(181),
-        PatternMechanismId(182),
-        PatternOutputLayerId(91),
-        vec![
-            StraightGuideDimension {
-                id: GuideDimensionId(1810),
-                baseline_angle_degrees: 0.0,
-                phase: 0.0,
-                repetition: StraightGuideRepetition {
-                    spacing_multiplier: 1.0,
-                },
-            },
-            StraightGuideDimension {
-                id: GuideDimensionId(1811),
-                baseline_angle_degrees: 90.0,
-                phase: 0.0,
-                repetition: StraightGuideRepetition {
-                    spacing_multiplier: 1.0,
-                },
-            },
-        ],
-        GeneralizedSiteProduct::Intersections {
-            dimensions: vec![GuideDimensionId(1810), GuideDimensionId(1811)],
-            merge_epsilon: 0.0,
-        },
-        MarkOrientation::GuideTangent {
-            dimension_id: GuideDimensionId(1810),
-        },
+/// Rebuilds the source-backed document with active visible-mark-margin exclusion intent.
+fn visible_mark_margin_document() -> (Document, SourceBundle) {
+    let (base, sources) = source_backed_document();
+    let definition = PatternDefinition::random_sites(
+        base.pattern_settings().definition_id,
+        "visible support exclusion",
+        PatternMechanismId(1),
+        PatternMechanismId(2),
+        PatternMechanismId(3),
+        PatternMechanismId(4),
+        PatternOutputLayerId(1),
+        RandomSiteCharacter::RawUniform,
+        42,
+        SiteDensityModulation::Uniform,
+        SiteExclusionPolicy::VisibleMarkMargin { margin: 2.75 },
+        20_000,
+        20_000,
         CoveragePolicy {
-            guard_steps: 2,
-            additional_margin: 4.5,
+            guard_steps: 1,
+            additional_margin: 0.0,
         },
     );
-    let shared = Document::with_source(
-        DocumentId(81),
-        document.canvas().clone(),
-        document.source().clone(),
-        vec![definition],
-        channels,
+    let mut bundle = base.pattern_definition_bundles()[0].clone();
+    bundle.definition = definition;
+    let document = Document::with_source_and_topology(
+        base.id(),
+        base.canvas().clone(),
+        base.source().clone(),
+        vec![bundle],
+        base.pattern_settings().clone(),
+        base.channel_model().expect("modeled document").to_owned(),
+        base.channel_topology().expect("modeled document").clone(),
     )
-    .unwrap();
-    let mut history = DocumentHistory::new(DocumentSession::new(shared).unwrap());
-    let before = history.document().clone();
-    let before_path = temporary("stage17-selected-before.toniator");
-    save(&before_path, &before, &sources).unwrap();
-    let before_bytes = fs::read(&before_path).unwrap();
-    let base = before.pattern_definitions()[0].clone();
-    history
-        .apply(&DocumentCommand::EditSelectedChannelPatternDefinition {
-            channel_id: ChannelId(55),
-            base_definition: base,
-            edit: PatternDefinitionEdit::SetOutputOrientation {
-                output_layer_id: PatternOutputLayerId(91),
-                orientation: MarkOrientation::Fixed,
-            },
-        })
-        .unwrap();
-    let applied = history.document().clone();
-    assert_ne!(applied, before);
-    assert_eq!(
-        applied.channels().unwrap()[1].pattern_definition_id,
-        PatternDefinitionId(91)
-    );
-    assert_ne!(
-        applied.channels().unwrap()[0].pattern_definition_id,
-        PatternDefinitionId(91)
-    );
-    let applied_path = temporary("stage17-selected-applied.toniator");
-    save(&applied_path, &applied, &sources).unwrap();
-    let applied_bytes = fs::read(&applied_path).unwrap();
-    let reopened = load(&applied_path).unwrap();
-    assert_eq!(reopened.document(), &applied);
-    let clean = DocumentHistory::new(DocumentSession::new(reopened.document().clone()).unwrap());
-    assert_eq!(clean.revision().0, 0);
-    assert!(!clean.can_undo() && !clean.can_redo());
-    history.undo().unwrap();
-    assert_eq!(history.document(), &before);
-    let undo_path = temporary("stage17-selected-undo.toniator");
-    save(&undo_path, history.document(), &sources).unwrap();
-    assert_eq!(fs::read(&undo_path).unwrap(), before_bytes);
-    history.redo().unwrap();
-    assert_eq!(history.document(), &applied);
-    let redo_path = temporary("stage17-selected-redo.toniator");
-    save(&redo_path, history.document(), &sources).unwrap();
-    assert_eq!(fs::read(&redo_path).unwrap(), applied_bytes);
-    for path in [before_path, applied_path, undo_path, redo_path] {
-        fs::remove_file(path).unwrap();
+    .expect("visible-mark exclusion document validates");
+    (document, sources)
+}
+
+/// Reads one named member from a derived test container without extracting it.
+fn archive_entry(path: &Path, name: &str) -> Vec<u8> {
+    let mut archive =
+        ZipArchive::new(File::open(path).expect("container opens")).expect("container is ZIP");
+    let mut bytes = Vec::new();
+    archive
+        .by_name(name)
+        .expect("named member exists")
+        .read_to_end(&mut bytes)
+        .expect("member reads");
+    bytes
+}
+
+/// Copies a derived container and appends one forbidden archive member for topology rejection.
+fn append_extra_member(source: &Path, destination: &Path) {
+    let mut input = ZipArchive::new(File::open(source).expect("source container opens"))
+        .expect("source is ZIP");
+    let mut entries = Vec::new();
+    for index in 0..input.len() {
+        let mut entry = input.by_index(index).expect("entry opens");
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).expect("entry reads");
+        entries.push((entry.name().to_owned(), bytes));
     }
-}
-
-#[test]
-fn stage17_typed_modeled_topologies_round_trip_current_v2_cleanly() {
-    let (document, sources) = legacy_document();
-    for model in [
-        HalftoneChannelModel::Rgb,
-        HalftoneChannelModel::Cmyk,
-        HalftoneChannelModel::SourceColorAlpha,
-    ] {
-        let mut history = DocumentHistory::new(DocumentSession::new(document.clone()).unwrap());
-        let template = ChannelTopologyTemplate {
-            pattern_definition_id: PatternDefinitionId(91),
-            layout: history.document().channels().unwrap()[0].layout.clone(),
-            mark_geometry_response: history.document().channels().unwrap()[0]
-                .mark_geometry_response
-                .clone(),
-        };
-        let topology = history
-            .document()
-            .canonical_channel_topology(model, template)
-            .unwrap();
-        history
-            .apply(&DocumentCommand::ReplaceChannelTopology { model, topology })
-            .unwrap();
-        let first_id = history.document().channel_topology().unwrap().channels()[0].id;
-        history
-            .apply(&DocumentCommand::SetModeledMappingField {
-                channel_id: first_id,
-                edit: ModeledMappingFieldEdit::Gain(0.75),
-            })
-            .unwrap();
-        history
-            .apply(&DocumentCommand::SetModeledMappingField {
-                channel_id: first_id,
-                edit: ModeledMappingFieldEdit::Component(SourceMappingComponent::Luminance),
-            })
-            .unwrap();
-        // StretchToCanvas is the sole accepted placement choice; its
-        // descriptor and persisted mapping remain authoritative without a
-        // semantic no-op transition.
-        assert_eq!(
-            history
-                .document()
-                .modeled_channel(first_id)
-                .unwrap()
-                .mapping
-                .placement,
-            SourcePlacement::StretchToCanvas
-        );
-        history
-            .apply(&DocumentCommand::SetModeledMappingField {
-                channel_id: first_id,
-                edit: ModeledMappingFieldEdit::Inverted(true),
-            })
-            .unwrap();
-        history
-            .apply(&DocumentCommand::SetModeledMappingField {
-                channel_id: first_id,
-                edit: ModeledMappingFieldEdit::Bias(0.1),
-            })
-            .unwrap();
-        history
-            .apply(&DocumentCommand::SetOpacity {
-                channel_id: first_id,
-                opacity: 0.5,
-            })
-            .unwrap();
-        history
-            .apply(&DocumentCommand::SetVisibility {
-                channel_id: first_id,
-                visible: false,
-            })
-            .unwrap();
-        if model != HalftoneChannelModel::SourceColorAlpha {
-            history
-                .apply(&DocumentCommand::SetColorComponent {
-                    channel_id: first_id,
-                    component: ColorComponent::Blue,
-                    value: 0.25,
-                })
-                .unwrap();
-        }
-        let edited = history.document().clone();
-        let first = temporary(&format!("stage17-{model:?}-one.toniator"));
-        let second = temporary(&format!("stage17-{model:?}-two.toniator"));
-        save(&first, &edited, &sources).unwrap();
-        save(&second, &edited, &sources).unwrap();
-        assert_eq!(fs::read(&first).unwrap(), fs::read(&second).unwrap());
-        let reopened = load(&first).unwrap();
-        assert_eq!(reopened.document(), &edited);
-        assert_eq!(reopened.document().channel_model(), Some(model));
-        assert_eq!(
-            reopened
-                .document()
-                .channel_topology()
-                .unwrap()
-                .channels()
-                .iter()
-                .map(|channel| channel.id)
-                .collect::<Vec<_>>(),
-            edited
-                .channel_topology()
-                .unwrap()
-                .channels()
-                .iter()
-                .map(|channel| channel.id)
-                .collect::<Vec<_>>()
-        );
-        let clean =
-            DocumentHistory::new(DocumentSession::new(reopened.document().clone()).unwrap());
-        assert_eq!(clean.revision().0, 0);
-        assert!(!clean.can_undo() && !clean.can_redo());
-        let before = history.document().clone();
-        let revision = history.revision();
-        if model == HalftoneChannelModel::SourceColorAlpha {
-            assert!(
-                history
-                    .apply(&DocumentCommand::SetChannelPaint {
-                        channel_id: first_id,
-                        paint: ChannelPaint::Solid(ColorValue {
-                            red: 0.0,
-                            green: 0.0,
-                            blue: 0.0,
-                            alpha: 1.0
-                        }),
-                    })
-                    .is_err()
-            );
-            assert_eq!(history.document(), &before);
-            assert_eq!(history.revision(), revision);
-        }
-        fs::remove_file(first).unwrap();
-        fs::remove_file(second).unwrap();
+    entries.push(("unexpected.bin".into(), vec![1, 2, 3]));
+    let options = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Stored)
+        .last_modified_time(zip::DateTime::default())
+        .unix_permissions(0o100644);
+    let mut writer = ZipWriter::new(File::create(destination).expect("destination creates"));
+    for (name, bytes) in entries {
+        writer.start_file(name, options).expect("entry starts");
+        writer.write_all(&bytes).expect("entry writes");
     }
+    writer.finish().expect("container finishes");
 }
 
-#[test]
-fn stage17_source_and_definition_retarget_persistence_restore_transition_bytes() {
-    let (document, _) = legacy_document();
-    let source_one = SourceReferenceId::new("source-1").unwrap();
-    let source_two = SourceReferenceId::new("source-2").unwrap();
-    // Current v2 deliberately carries exactly the selected immutable source;
-    // retain two immutable bundles in test scope and select between them via
-    // the logical source command rather than widening the container schema.
-    let sources_one = SourceBundle::new([EmbeddedSource::new(
-        source_one.clone(),
-        EmbeddedSourceFormat::Svg,
-        b"<svg/>".to_vec(),
-        Some("one.svg".into()),
-    )
-    .unwrap()])
-    .unwrap();
-    let sources_two = SourceBundle::new([EmbeddedSource::new(
-        source_two.clone(),
-        EmbeddedSourceFormat::Svg,
-        b"<svg/>".to_vec(),
-        Some("two.svg".into()),
-    )
-    .unwrap()])
-    .unwrap();
-    let mut history = DocumentHistory::new(DocumentSession::new(document).unwrap());
-    let template = ChannelTopologyTemplate {
-        pattern_definition_id: PatternDefinitionId(91),
-        layout: history.document().channels().unwrap()[0].layout.clone(),
-        mark_geometry_response: history.document().channels().unwrap()[0]
-            .mark_geometry_response
-            .clone(),
-    };
-    let topology = history
-        .document()
-        .canonical_channel_topology(HalftoneChannelModel::Rgb, template)
-        .unwrap();
-    history
-        .apply(&DocumentCommand::ReplaceChannelTopology {
-            model: HalftoneChannelModel::Rgb,
-            topology,
-        })
-        .unwrap();
-    history
-        .apply(&DocumentCommand::DuplicatePatternDefinition {
-            definition_id: PatternDefinitionId(91),
-        })
-        .unwrap();
-    let base_path = temporary("stage17-source-retarget-base.toniator");
-    save(&base_path, history.document(), &sources_one).unwrap();
-    let base_bytes = fs::read(&base_path).unwrap();
-    let source_result = history
-        .apply(&DocumentCommand::SetSourceReference {
-            source: SourceReference::Assigned(source_two.clone()),
-        })
-        .unwrap();
-    assert_eq!(
-        source_result.affected_channels,
-        vec![ChannelId(1), ChannelId(2), ChannelId(3)]
-    );
-    let source_path = temporary("stage17-source-retarget-source.toniator");
-    save(&source_path, history.document(), &sources_two).unwrap();
-    let source_bytes = fs::read(&source_path).unwrap();
-    let retarget_result = history
-        .apply(&DocumentCommand::RetargetChannelPatternDefinition {
-            channel_id: ChannelId(1),
-            definition_id: PatternDefinitionId(92),
-        })
-        .unwrap();
-    assert_eq!(retarget_result.affected_channels, vec![ChannelId(1)]);
-    let retarget_path = temporary("stage17-source-retarget-final.toniator");
-    save(&retarget_path, history.document(), &sources_two).unwrap();
-    let retarget_bytes = fs::read(&retarget_path).unwrap();
-    let reopened = load(&retarget_path).unwrap();
-    assert_eq!(reopened.document(), history.document());
-    assert_eq!(
-        reopened.document().source(),
-        &SourceReference::Assigned(source_two)
-    );
-    let clean = DocumentHistory::new(DocumentSession::new(reopened.document().clone()).unwrap());
-    assert_eq!(clean.revision().0, 0);
-    assert!(!clean.can_undo() && !clean.can_redo());
-    history.undo().unwrap();
-    let undo_retarget = temporary("stage17-source-retarget-undo-retarget.toniator");
-    save(&undo_retarget, history.document(), &sources_two).unwrap();
-    assert_eq!(fs::read(&undo_retarget).unwrap(), source_bytes);
-    history.undo().unwrap();
-    let undo_source = temporary("stage17-source-retarget-undo-source.toniator");
-    save(&undo_source, history.document(), &sources_one).unwrap();
-    assert_eq!(fs::read(&undo_source).unwrap(), base_bytes);
-    history.redo().unwrap();
-    history.redo().unwrap();
-    let redo = temporary("stage17-source-retarget-redo.toniator");
-    save(&redo, history.document(), &sources_two).unwrap();
-    assert_eq!(fs::read(&redo).unwrap(), retarget_bytes);
-    for path in [
-        base_path,
-        source_path,
-        retarget_path,
-        undo_retarget,
-        undo_source,
-        redo,
-    ] {
-        fs::remove_file(path).unwrap();
-    }
-}
-
-#[test]
-fn frozen_v1_migrated_old_v2_bytes_remain_at_the_accepted_hash_after_random_dto_additions() {
-    let loaded = load(&asset("raster-sample-v1.toniator")).unwrap();
-    let first = temporary("stage16b-old-v2-first.toniator");
-    let second = temporary("stage16b-old-v2-second.toniator");
-    save(&first, loaded.document(), loaded.sources()).unwrap();
-    save(&second, loaded.document(), loaded.sources()).unwrap();
-    let first_bytes = fs::read(&first).unwrap();
-    assert_eq!(first_bytes, fs::read(&second).unwrap());
-    assert_eq!(
-        format!("{:x}", Sha256::digest(&first_bytes)),
-        "7135531041b8a4f9136731267b356ce4b3acbdb74c6e12c6670817e0613436cf"
-    );
-    fs::remove_file(first).unwrap();
-    fs::remove_file(second).unwrap();
-}
-
-fn asset(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../assets")
-        .join(name)
-}
-
+/// Returns current document JSON, its canonical source entry name, and exact source bytes.
 fn saved_parts(document: &Document, sources: &SourceBundle) -> (Vec<u8>, String, Vec<u8>) {
     let path = temporary("parts.toniator");
-    save(&path, document, sources).unwrap();
-    let bytes = fs::read(&path).unwrap();
-    fs::remove_file(path).unwrap();
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+    save(&path, document, sources).expect("current parts save");
+    let bytes = fs::read(&path).expect("current container reads");
+    fs::remove_file(path).expect("temporary parts container removes");
+    let mut archive = ZipArchive::new(std::io::Cursor::new(bytes)).expect("saved container is ZIP");
     let mut json = Vec::new();
     archive
         .by_name("document.json")
-        .unwrap()
+        .expect("document member exists")
         .read_to_end(&mut json)
-        .unwrap();
-    let source_name = archive.by_index(1).unwrap().name().to_owned();
+        .expect("document member reads");
+    let source_name = archive
+        .by_index(1)
+        .expect("source member exists")
+        .name()
+        .to_owned();
     let mut source = Vec::new();
     archive
         .by_name(&source_name)
-        .unwrap()
+        .expect("named source member exists")
         .read_to_end(&mut source)
-        .unwrap();
+        .expect("source member reads");
     (json, source_name, source)
 }
 
-fn archive_from_entries(entries: &[(&str, &[u8], zip::CompressionMethod)]) -> Vec<u8> {
-    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+/// Builds one in-memory ZIP from explicitly named members and compression methods.
+fn archive_from_entries(entries: &[(&str, &[u8], CompressionMethod)]) -> Vec<u8> {
+    let mut writer = ZipWriter::new(std::io::Cursor::new(Vec::new()));
     for (name, bytes, method) in entries {
         writer
             .start_file(
                 *name,
-                zip::write::SimpleFileOptions::default().compression_method(*method),
+                SimpleFileOptions::default().compression_method(*method),
             )
-            .unwrap();
-        writer.write_all(bytes).unwrap();
+            .expect("hostile archive member starts");
+        writer
+            .write_all(bytes)
+            .expect("hostile archive member writes");
     }
-    writer.finish().unwrap().into_inner()
+    writer
+        .finish()
+        .expect("hostile archive finishes")
+        .into_inner()
 }
 
-fn archive_with_sources_marker(
-    document: (&[u8], zip::CompressionMethod),
-    source_name: &str,
-    source: (&[u8], zip::CompressionMethod),
-) -> Vec<u8> {
-    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-    writer
-        .start_file(
-            "document.json",
-            zip::write::SimpleFileOptions::default().compression_method(document.1),
-        )
-        .unwrap();
-    writer.write_all(document.0).unwrap();
-    writer
-        .add_directory("sources/", zip::write::SimpleFileOptions::default())
-        .unwrap();
-    writer
-        .start_file(
-            source_name,
-            zip::write::SimpleFileOptions::default().compression_method(source.1),
-        )
-        .unwrap();
-    writer.write_all(source.0).unwrap();
-    writer.finish().unwrap().into_inner()
+/// Adds a duplicate source central-directory record without changing the declared entry counts.
+///
+/// This witnesses the hostile shape where an ordinary ZIP reader honors the two-entry EOCD count
+/// and ignores a third record that is nevertheless included in the central-directory byte span.
+fn duplicate_source_member(mut bytes: Vec<u8>) -> Vec<u8> {
+    let end = bytes
+        .windows(4)
+        .rposition(|value| value == b"PK\x05\x06")
+        .expect("ZIP end record exists");
+    let central = bytes[..end]
+        .windows(4)
+        .enumerate()
+        .filter_map(|(index, value)| (value == b"PK\x01\x02").then_some(index))
+        .collect::<Vec<_>>();
+    assert_eq!(central.len(), 2);
+    let source = central[1];
+    let name_length = u16::from_le_bytes([bytes[source + 28], bytes[source + 29]]) as usize;
+    let extra_length = u16::from_le_bytes([bytes[source + 30], bytes[source + 31]]) as usize;
+    let comment_length = u16::from_le_bytes([bytes[source + 32], bytes[source + 33]]) as usize;
+    let record_length = 46 + name_length + extra_length + comment_length;
+    let duplicate = bytes[source..source + record_length].to_vec();
+    bytes.splice(end..end, duplicate);
+    let shifted_end = end + record_length;
+    let central_size = u32::from_le_bytes([
+        bytes[shifted_end + 12],
+        bytes[shifted_end + 13],
+        bytes[shifted_end + 14],
+        bytes[shifted_end + 15],
+    ]);
+    bytes[shifted_end + 12..shifted_end + 16]
+        .copy_from_slice(&(central_size + record_length as u32).to_le_bytes());
+    bytes
 }
 
-fn archive_with_directory_and_files(
+/// Builds an archive containing one explicit directory marker plus canonical files.
+fn archive_with_directory_marker(
     directory: &str,
     document: &[u8],
     source_name: &str,
     source: &[u8],
 ) -> Vec<u8> {
-    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let mut writer = ZipWriter::new(std::io::Cursor::new(Vec::new()));
     writer
-        .start_file("document.json", zip::write::SimpleFileOptions::default())
-        .unwrap();
-    writer.write_all(document).unwrap();
+        .start_file("document.json", SimpleFileOptions::default())
+        .expect("document member starts");
+    writer.write_all(document).expect("document member writes");
     writer
-        .add_directory(directory, zip::write::SimpleFileOptions::default())
-        .unwrap();
+        .add_directory(directory, SimpleFileOptions::default())
+        .expect("directory marker writes");
     writer
-        .start_file(source_name, zip::write::SimpleFileOptions::default())
-        .unwrap();
-    writer.write_all(source).unwrap();
-    writer.finish().unwrap().into_inner()
+        .start_file(source_name, SimpleFileOptions::default())
+        .expect("source member starts");
+    writer.write_all(source).expect("source member writes");
+    writer
+        .finish()
+        .expect("marked archive finishes")
+        .into_inner()
 }
 
+/// Overwrites central-directory compressed and uncompressed sizes for one indexed member.
 fn set_central_entry_sizes(bytes: &mut [u8], entry_index: usize, size: u64) {
     let positions = bytes
         .windows(4)
@@ -1165,11 +246,14 @@ fn set_central_entry_sizes(bytes: &mut [u8], entry_index: usize, size: u64) {
         .filter_map(|(index, value)| (value == b"PK\x01\x02").then_some(index))
         .collect::<Vec<_>>();
     let position = positions[entry_index];
-    let size = u32::try_from(size).unwrap().to_le_bytes();
+    let size = u32::try_from(size)
+        .expect("test limit fits ZIP32")
+        .to_le_bytes();
     bytes[position + 20..position + 24].copy_from_slice(&size);
     bytes[position + 24..position + 28].copy_from_slice(&size);
 }
 
+/// Understates one central-directory uncompressed size without changing its deflated payload.
 fn set_central_uncompressed_size(bytes: &mut [u8], entry_index: usize, size: u64) {
     let positions = bytes
         .windows(4)
@@ -1177,370 +261,124 @@ fn set_central_uncompressed_size(bytes: &mut [u8], entry_index: usize, size: u64
         .filter_map(|(index, value)| (value == b"PK\x01\x02").then_some(index))
         .collect::<Vec<_>>();
     let position = positions[entry_index];
-    let size = u32::try_from(size).unwrap().to_le_bytes();
+    let size = u32::try_from(size)
+        .expect("test size fits ZIP32")
+        .to_le_bytes();
     bytes[position + 24..position + 28].copy_from_slice(&size);
 }
 
-fn set_local_entry_sizes(bytes: &mut [u8], entry_index: usize, size: u64) {
-    let position = bytes
-        .windows(4)
-        .enumerate()
-        .filter_map(|(index, value)| (value == b"PK\x03\x04").then_some(index))
-        .collect::<Vec<_>>()[entry_index];
-    let size = u32::try_from(size).unwrap().to_le_bytes();
-    bytes[position + 18..position + 22].copy_from_slice(&size);
-    bytes[position + 22..position + 26].copy_from_slice(&size);
-}
-
-fn replace_central_name(bytes: &mut [u8], entry_index: usize, replacement: &[u8]) {
-    let position = bytes
-        .windows(4)
-        .enumerate()
-        .filter_map(|(index, value)| (value == b"PK\x01\x02").then_some(index))
-        .collect::<Vec<_>>()[entry_index];
-    let name_length = u16::from_le_bytes([bytes[position + 28], bytes[position + 29]]) as usize;
-    assert_eq!(name_length, replacement.len());
-    bytes[position + 46..position + 46 + name_length].copy_from_slice(replacement);
-}
-
+/// Writes hostile container bytes to one disposable path.
 fn write_bytes(bytes: &[u8]) -> PathBuf {
     let path = temporary("hostile.toniator");
-    fs::write(&path, bytes).unwrap();
+    fs::write(&path, bytes).expect("hostile bytes write");
     path
 }
 
+/// Loads hostile bytes without allowing a panic and checks their public error category.
 fn assert_load_error(bytes: &[u8], predicate: impl FnOnce(&LoadError) -> bool) {
+    let byte_length = bytes.len();
     let path = write_bytes(bytes);
     let result = std::panic::catch_unwind(|| load(&path));
     assert!(result.is_ok(), "hostile input must not panic");
-    let error = result.unwrap().unwrap_err();
+    let error = match result.expect("load did not panic") {
+        Ok(_) => panic!("hostile input ({byte_length} bytes) rejects"),
+        Err(error) => error,
+    };
     assert!(predicate(&error), "unexpected error: {error}");
-    fs::remove_file(path).unwrap();
+    fs::remove_file(path).expect("hostile input removes");
 }
 
+/// Proves current-v5 saves are byte deterministic and reload exact authoritative state.
 #[test]
-fn v1_round_trips_legacy_exactly_and_is_byte_deterministic() {
-    let (document, sources) = legacy_document();
-    let one = temporary("one.toniator");
-    let two = temporary("two.toniator");
-    save(&one, &document, &sources).unwrap();
-    save(&two, &document, &sources).unwrap();
-    assert_eq!(fs::read(&one).unwrap(), fs::read(&two).unwrap());
-    let loaded = load(&one).unwrap();
+fn current_v5_round_trip_is_byte_deterministic() {
+    assert_eq!(DOCUMENT_SCHEMA_VERSION, 5);
+    let (document, sources) = source_backed_document();
+    let first = temporary("first.toniator");
+    let second = temporary("second.toniator");
+    save(&first, &document, &sources).expect("first save succeeds");
+    save(&second, &document, &sources).expect("second save succeeds");
+    assert_eq!(fs::read(&first).unwrap(), fs::read(&second).unwrap());
+    let loaded = load(&first).expect("current container reloads");
+    assert_eq!(loaded.versions().document(), DOCUMENT_SCHEMA_VERSION);
     assert_eq!(loaded.document(), &document);
     assert_eq!(loaded.sources(), &sources);
-    assert_eq!(loaded.versions().container(), CONTAINER_VERSION);
-    assert_eq!(loaded.versions().document(), DOCUMENT_SCHEMA_VERSION);
-    assert!(loaded.migration_report().is_empty());
-    let history = DocumentHistory::new(DocumentSession::new(loaded.document().clone()).unwrap());
-    assert_eq!(history.revision().0, 0);
-    assert!(!history.can_undo());
-    assert!(!history.can_redo());
-    fs::remove_file(one).unwrap();
-    fs::remove_file(two).unwrap();
+    fs::remove_file(first).unwrap();
+    fs::remove_file(second).unwrap();
 }
 
+/// Proves Stage 20 visible-mark exclusion persists only margin intent and no derived support value.
 #[test]
-fn v1_round_trips_every_canonical_modeled_topology() {
-    for model in [
-        HalftoneChannelModel::Rgb,
-        HalftoneChannelModel::Cmyk,
-        HalftoneChannelModel::SourceColorAlpha,
-    ] {
-        let (legacy, sources) = legacy_document();
-        let topology = legacy
-            .canonical_channel_topology(
-                model,
-                ChannelTopologyTemplate {
-                    pattern_definition_id: PatternDefinitionId(91),
-                    layout: legacy.channels().unwrap()[0].layout.clone(),
-                    mark_geometry_response: legacy.channels().unwrap()[0]
-                        .mark_geometry_response
-                        .clone(),
-                },
-            )
-            .unwrap();
-        let document = Document::with_source_and_topology(
-            legacy.id(),
-            legacy.canvas().clone(),
-            legacy.source().clone(),
-            legacy.pattern_definitions().to_vec(),
-            model,
-            topology,
-        )
-        .unwrap();
-        let path = temporary("modeled.toniator");
-        save(&path, &document, &sources).unwrap();
-        assert_eq!(load(&path).unwrap().document(), &document);
-        fs::remove_file(path).unwrap();
-    }
-}
-
-#[test]
-fn rejects_extra_entries_and_changed_source_integrity_without_extracting() {
-    let (document, sources) = legacy_document();
-    let path = temporary("bad.toniator");
-    save(&path, &document, &sources).unwrap();
-    let bytes = fs::read(&path).unwrap();
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
-    let mut document_json = Vec::new();
-    archive
-        .by_name("document.json")
-        .unwrap()
-        .read_to_end(&mut document_json)
-        .unwrap();
-    let mut source = Vec::new();
-    archive
-        .by_name("sources/source-1.svg")
-        .unwrap()
-        .read_to_end(&mut source)
-        .unwrap();
-    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-    let options =
-        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
-    writer.start_file("document.json", options).unwrap();
-    writer.write_all(&document_json).unwrap();
-    writer.start_file("sources/source-1.svg", options).unwrap();
-    writer.write_all(b"changed").unwrap();
-    let bytes = writer.finish().unwrap().into_inner();
-    fs::write(&path, bytes).unwrap();
-    assert!(matches!(
-        load(&path),
-        Err(toniator_io::LoadError::Integrity { .. })
-    ));
+fn visible_mark_margin_round_trip_excludes_derived_support() {
+    let (document, sources) = visible_mark_margin_document();
+    let path = temporary("visible-margin.toniator");
+    save(&path, &document, &sources).expect("visible-margin document saves");
+    let json = String::from_utf8(archive_entry(&path, "document.json")).unwrap();
+    assert!(json.contains("\"visible_mark_margin\""));
+    assert!(json.contains("\"margin\":2.75"));
+    assert!(!json.contains("support_radius"));
+    assert!(!json.contains("sizing"));
+    assert_eq!(load(&path).unwrap().document(), &document);
     fs::remove_file(path).unwrap();
 }
 
+/// Proves a mismatched or missing source fails before replacing an existing destination.
 #[test]
-fn failed_save_does_not_replace_existing_destination() {
-    let (document, sources) = legacy_document();
-    let path = temporary("destination.toniator");
-    fs::write(&path, b"preserve me").unwrap();
-    let empty = SourceBundle::new([]).unwrap();
-    assert!(save(&path, &document, &empty).is_err());
-    assert_eq!(fs::read(&path).unwrap(), b"preserve me");
-    let _ = sources;
+fn failed_save_preserves_existing_destination_transactionally() {
+    let (document, _) = source_backed_document();
+    let path = temporary("transaction.toniator");
+    fs::write(&path, b"existing bytes").expect("sentinel writes");
+    let empty = SourceBundle::new([]).expect("empty bundle itself validates");
+    let error = save(&path, &document, &empty).expect_err("source mismatch rejects");
+    assert_eq!(error.path(), "source.document");
+    assert_eq!(fs::read(&path).unwrap(), b"existing bytes");
     fs::remove_file(path).unwrap();
 }
 
+/// Proves an extra archive member is rejected without extracting or partially publishing state.
 #[test]
-fn modeled_round_trip_retains_nondefault_fields_and_arbitrary_stable_ids() {
-    for model in [
-        HalftoneChannelModel::Rgb,
-        HalftoneChannelModel::Cmyk,
-        HalftoneChannelModel::SourceColorAlpha,
-    ] {
-        let (legacy, sources) = legacy_document();
-        let mut channels = legacy
-            .canonical_channel_topology(
-                model,
-                ChannelTopologyTemplate {
-                    pattern_definition_id: PatternDefinitionId(91),
-                    layout: legacy.channels().unwrap()[0].layout.clone(),
-                    mark_geometry_response: legacy.channels().unwrap()[0]
-                        .mark_geometry_response
-                        .clone(),
-                },
-            )
-            .unwrap()
-            .channels()
-            .to_vec();
-        for (index, channel) in channels.iter_mut().enumerate() {
-            channel.id = ChannelId(1_000 + index as u64 * 17);
-            channel.layout.density.aspect_locked = false;
-            channel.layout.rotation_degrees = index as f64 + 3.5;
-            channel.layout.translation_x = -(index as f64) - 0.25;
-            channel.layout.translation_y = index as f64 + 0.75;
-            channel.mark_geometry_response = MarkGeometryResponse {
-                minimum_fill: 1.5,
-                maximum_fill: 8.5,
-                rotation_offset_degrees: 0.0,
-            };
-            channel.mapping.component = if index % 2 == 0 {
-                SourceMappingComponent::Luminance
-            } else {
-                SourceMappingComponent::Alpha
-            };
-            channel.mapping.inverted = index % 2 == 1;
-            channel.mapping.gain = 0.75;
-            channel.mapping.bias = -0.1;
-            channel.visible = index % 2 == 0;
-            channel.opacity = 0.6;
-            if let ChannelPaint::Solid(color) = &mut channel.paint {
-                *color = ColorValue {
-                    red: 0.2,
-                    green: 0.3,
-                    blue: 0.4,
-                    alpha: 0.5,
-                };
-            }
-        }
-        let document = Document::with_source_and_topology(
-            legacy.id(),
-            legacy.canvas().clone(),
-            legacy.source().clone(),
-            legacy.pattern_definitions().to_vec(),
-            model,
-            ChannelTopology::new(channels),
-        )
-        .unwrap();
-        let path = temporary("non-default-modeled.toniator");
-        save(&path, &document, &sources).unwrap();
-        assert_eq!(load(&path).unwrap().document(), &document);
-        fs::remove_file(path).unwrap();
-    }
+fn extra_archive_member_is_rejected_at_topology_boundary() {
+    let (document, sources) = source_backed_document();
+    let current = temporary("topology-current.toniator");
+    let invalid = temporary("topology-invalid.toniator");
+    save(&current, &document, &sources).expect("current container saves");
+    append_extra_member(&current, &invalid);
+    let error = load(&invalid).expect_err("extra member rejects");
+    assert!(matches!(error, LoadError::EntryTopology { .. }));
+    fs::remove_file(current).unwrap();
+    fs::remove_file(invalid).unwrap();
 }
 
+/// Proves duplicate source IDs and document/source correspondence remain strict public contracts.
 #[test]
-fn frozen_fixtures_preserve_committed_baseline_bytes_and_v1_metadata() {
-    for (fixture, baseline, format) in [
-        (
-            "raster-sample-v1.toniator",
-            "raster-sample.png",
-            EmbeddedSourceFormat::Png,
-        ),
-        (
-            "vector-sample-v1.toniator",
-            "vector-sample.svg",
-            EmbeddedSourceFormat::Svg,
-        ),
-    ] {
-        let loaded = load(&asset(fixture)).unwrap();
-        assert_eq!(loaded.versions().container(), 1);
-        assert_eq!(loaded.versions().document(), 1);
-        assert!(!loaded.migration_report().is_empty());
-        assert_eq!(
-            loaded.migration_report().generated_definition_ids(),
-            vec![PatternDefinitionId(1)]
-        );
-        assert_eq!(
-            loaded.migration_report().generated_definitions()[0].mechanism_ids,
-            vec![PatternMechanismId(1), PatternMechanismId(2)]
-        );
-        assert_eq!(
-            loaded.migration_report().generated_definitions()[0].output_layer_ids,
-            vec![PatternOutputLayerId(1)]
-        );
-        let source = loaded.sources().entries().next().unwrap();
-        assert_eq!(source.format(), format);
-        assert_eq!(source.bytes(), fs::read(asset(baseline)).unwrap());
-    }
-    assert!(
-        std::str::from_utf8(
-            load(&asset("vector-sample-v1.toniator"))
-                .unwrap()
-                .sources()
-                .entries()
-                .next()
-                .unwrap()
-                .bytes()
-        )
-        .unwrap()
-        .contains(">T<")
-    );
+fn source_bundle_identity_is_strict() {
+    let id = SourceReferenceId::new("duplicate").unwrap();
+    let source = EmbeddedSource::new(id, EmbeddedSourceFormat::Png, vec![1, 2, 3], None).unwrap();
+    assert!(SourceBundle::new([source.clone(), source]).is_err());
 }
 
+/// Proves current archives retain deterministic metadata and exclude transient evaluator state.
 #[test]
-fn frozen_v1_documents_migrate_to_deterministic_v2_saves_without_transient_state() {
-    let validation = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/validation/stage-14");
-    fs::create_dir_all(&validation).unwrap();
-    for fixture in ["raster-sample-v1.toniator", "vector-sample-v1.toniator"] {
-        let loaded = load(&asset(fixture)).unwrap();
-        assert_eq!(loaded.versions().document(), 1);
-        assert!(!loaded.migration_report().is_empty());
-        let v2 = validation.join(fixture.replace("-v1", "-migrated-v2"));
-        let duplicate = validation.join(fixture.replace("-v1", "-migrated-v2-repeat"));
-        save(&v2, loaded.document(), loaded.sources()).unwrap();
-        save(&duplicate, loaded.document(), loaded.sources()).unwrap();
-        assert_eq!(fs::read(&v2).unwrap(), fs::read(&duplicate).unwrap());
-        let reopened = load(&v2).unwrap();
-        assert_eq!(reopened.versions().document(), 2);
-        assert!(reopened.migration_report().is_empty());
-        assert_eq!(reopened.document(), loaded.document());
-        assert_eq!(
-            reopened.sources().entries().next().unwrap().bytes(),
-            loaded.sources().entries().next().unwrap().bytes()
-        );
-        let (json, _, _) = saved_parts(reopened.document(), reopened.sources());
-        let json = String::from_utf8(json).unwrap();
-        assert!(json.contains("\"document_schema_version\":2"));
-        assert!(json.contains("\"mechanisms\""));
-        assert!(json.contains("\"output_layers\""));
-        for forbidden in [
-            "history",
-            "revision",
-            "dirty",
-            "savepoint",
-            "preview",
-            "export",
-            "original_path",
-            "scheduler",
-            "cache",
-        ] {
-            assert!(
-                !json.contains(&format!("\"{forbidden}\"")),
-                "serialized transient {forbidden}"
-            );
-        }
-    }
-}
-
-#[test]
-fn moved_container_survives_external_source_deletion() {
-    let root = temporary("move-root");
-    fs::create_dir(&root).unwrap();
-    let external = root.join("external.png");
-    fs::copy(asset("raster-sample.png"), &external).unwrap();
-    let (document, _) = legacy_document();
-    let sources = SourceBundle::new([EmbeddedSource::new(
-        SourceReferenceId::new("source-1").unwrap(),
-        EmbeddedSourceFormat::Png,
-        fs::read(&external).unwrap(),
-        None,
-    )
-    .unwrap()])
-    .unwrap();
-    let original = root.join("original.toniator");
-    save(&original, &document, &sources).unwrap();
-    let moved = root.join("moved.toniator");
-    fs::rename(&original, &moved).unwrap();
-    fs::remove_file(external).unwrap();
-    let loaded = load(&moved).unwrap();
-    assert_eq!(
-        loaded.sources().entries().next().unwrap().bytes(),
-        fs::read(asset("raster-sample.png")).unwrap()
-    );
-    fs::remove_file(moved).unwrap();
-    fs::remove_dir(root).unwrap();
-}
-
-#[test]
-fn deterministic_archive_metadata_and_json_exclude_transient_state() {
-    let (document, sources) = legacy_document();
+fn current_archive_metadata_and_json_are_deterministic_and_intent_only() {
+    let (document, sources) = source_backed_document();
     let path = temporary("metadata.toniator");
-    save(&path, &document, &sources).unwrap();
-    let bytes = fs::read(&path).unwrap();
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    save(&path, &document, &sources).expect("metadata witness saves");
+    let bytes = fs::read(&path).expect("metadata witness reads");
+    let mut archive =
+        ZipArchive::new(std::io::Cursor::new(bytes)).expect("metadata witness is ZIP");
     assert_eq!(archive.len(), 2);
     assert_eq!(archive.by_index(0).unwrap().name(), "document.json");
-    {
-        let document_entry = archive.by_index(0).unwrap();
-        assert_eq!(document_entry.compression(), zip::CompressionMethod::Stored);
-        assert_eq!(document_entry.last_modified().unwrap().year(), 1980);
-        assert_eq!(document_entry.unix_mode(), Some(0o100644));
-    }
-    {
-        let source_entry = archive.by_index(1).unwrap();
-        assert_eq!(source_entry.compression(), zip::CompressionMethod::Stored);
-        assert_eq!(source_entry.last_modified().unwrap().year(), 1980);
-        assert_eq!(source_entry.unix_mode(), Some(0o100644));
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index).expect("metadata entry opens");
+        assert_eq!(entry.compression(), CompressionMethod::Stored);
+        assert_eq!(entry.last_modified().expect("fixed timestamp").year(), 1980);
+        assert_eq!(entry.unix_mode(), Some(0o100644));
     }
     let mut json = String::new();
     archive
-        .by_index(0)
-        .unwrap()
+        .by_name("document.json")
+        .expect("document member opens")
         .read_to_string(&mut json)
-        .unwrap();
+        .expect("document JSON reads");
     assert!(json.ends_with('\n'));
     for forbidden in [
         "history",
@@ -1552,262 +390,162 @@ fn deterministic_archive_metadata_and_json_exclude_transient_state() {
         "scheduler",
         "cache",
         "decoded",
-        "path",
+        "performance",
+        "worker",
     ] {
         assert!(
             !json.contains(forbidden),
             "unexpected transient key: {forbidden}"
         );
     }
-    fs::remove_file(path).unwrap();
+    fs::remove_file(path).expect("metadata witness removes");
 }
 
+/// Proves source length and digest correspondence reject changed payloads without extraction.
 #[test]
-fn archive_topology_names_formats_and_integrity_fail_without_panic() {
-    let (document, sources) = legacy_document();
+fn source_length_and_hash_integrity_are_checked_before_publication() {
+    let (document, sources) = source_backed_document();
+    let (json, source_name, source) = saved_parts(&document, &sources);
+    let mut same_length = source.clone();
+    same_length[0] ^= 1;
+    for changed in [same_length, b"different length".to_vec()] {
+        assert_load_error(
+            &archive_from_entries(&[
+                ("document.json", &json, CompressionMethod::Stored),
+                (&source_name, &changed, CompressionMethod::Stored),
+            ]),
+            |error| matches!(error, LoadError::Integrity { .. }),
+        );
+    }
+}
+
+/// Proves hostile names, duplicate members, malformed payloads, and unsupported compression reject.
+#[test]
+fn archive_topology_and_compression_reject_without_panic() {
+    let (document, sources) = source_backed_document();
     let (json, source_name, source) = saved_parts(&document, &sources);
     assert_load_error(
-        &archive_from_entries(&[("document.json", &json, zip::CompressionMethod::Stored)]),
-        |e| matches!(e, LoadError::EntryTopology { .. }),
+        &archive_from_entries(&[("document.json", &json, CompressionMethod::Stored)]),
+        |error| matches!(error, LoadError::EntryTopology { .. }),
     );
-    assert_load_error(
-        &archive_from_entries(&[
-            ("document.json", &json, zip::CompressionMethod::Stored),
-            (
-                "sources/source-1.svg",
-                &source,
-                zip::CompressionMethod::Stored,
-            ),
-            ("extra", b"x", zip::CompressionMethod::Stored),
-        ]),
-        |e| matches!(e, LoadError::EntryTopology { .. }),
-    );
-    let mut duplicate = archive_from_entries(&[
-        (
-            "sources/source-1.svg",
-            &json,
-            zip::CompressionMethod::Stored,
-        ),
-        (
-            "sources/source-2.svg",
-            &source,
-            zip::CompressionMethod::Stored,
-        ),
-    ]);
-    replace_central_name(&mut duplicate, 1, b"sources/source-1.svg");
-    assert_load_error(&duplicate, |e| matches!(e, LoadError::EntryTopology { .. }));
     for unsafe_name in [
-        "/sources/source-1.svg",
-        "sources/../source-1.svg",
-        "sources\\source-1.svg",
-        "sources/\u{0001}.svg",
+        "/sources/current-source.svg",
+        "sources/../current-source.svg",
+        "sources\\current-source.svg",
+        "sources/\u{0001}urrent-source.svg",
     ] {
         assert_load_error(
             &archive_from_entries(&[
-                ("document.json", &json, zip::CompressionMethod::Stored),
-                (unsafe_name, &source, zip::CompressionMethod::Stored),
+                ("document.json", &json, CompressionMethod::Stored),
+                (unsafe_name, &source, CompressionMethod::Stored),
             ]),
-            |e| matches!(e, LoadError::EntryTopology { .. }),
-        );
-    }
-    assert_load_error(
-        &archive_from_entries(&[
-            ("document.json", b"not json", zip::CompressionMethod::Stored),
-            (&source_name, &source, zip::CompressionMethod::Stored),
-        ]),
-        |e| matches!(e, LoadError::Json { .. }),
-    );
-    assert_load_error(b"not a zip", |e| matches!(e, LoadError::Archive { .. }));
-    let mut changed = json.clone();
-    changed[0] = b'!';
-    assert_load_error(
-        &archive_from_entries(&[
-            ("document.json", &changed, zip::CompressionMethod::Stored),
-            (&source_name, &source, zip::CompressionMethod::Stored),
-        ]),
-        |e| matches!(e, LoadError::Json { .. }),
-    );
-}
-
-#[test]
-fn v1_reader_accepts_deflated_files_and_optional_sources_directory_marker() {
-    let (document, sources) = legacy_document();
-    let (json, source_name, source) = saved_parts(&document, &sources);
-    for document_method in [
-        zip::CompressionMethod::Stored,
-        zip::CompressionMethod::Deflated,
-    ] {
-        for source_method in [
-            zip::CompressionMethod::Stored,
-            zip::CompressionMethod::Deflated,
-        ] {
-            let bytes = archive_from_entries(&[
-                ("document.json", &json, document_method),
-                (&source_name, &source, source_method),
-            ]);
-            let path = write_bytes(&bytes);
-            let loaded = load(&path).unwrap();
-            assert_eq!(loaded.document(), &document);
-            assert_eq!(loaded.sources(), &sources);
-            fs::remove_file(path).unwrap();
-
-            let marked = archive_with_sources_marker(
-                (&json, document_method),
-                &source_name,
-                (&source, source_method),
-            );
-            let path = write_bytes(&marked);
-            let loaded = load(&path).unwrap();
-            assert_eq!(loaded.document(), &document);
-            assert_eq!(loaded.sources(), &sources);
-            fs::remove_file(path).unwrap();
-        }
-    }
-}
-
-#[test]
-fn v1_reader_rejects_noncanonical_directory_topology_and_compression() {
-    let (document, sources) = legacy_document();
-    let (json, source_name, source) = saved_parts(&document, &sources);
-    for directory in ["source/", "metadata/"] {
-        assert_load_error(
-            &archive_with_directory_and_files(directory, &json, &source_name, &source),
             |error| matches!(error, LoadError::EntryTopology { .. }),
         );
     }
-    let mut nonempty_marker = archive_with_sources_marker(
-        (&json, zip::CompressionMethod::Stored),
-        &source_name,
-        (&source, zip::CompressionMethod::Stored),
+    let alternate_name = source_name.replace("source.svg", "sourcf.svg");
+    let multiple_sources = archive_from_entries(&[
+        ("document.json", &json, CompressionMethod::Stored),
+        (&source_name, &source, CompressionMethod::Stored),
+        (&alternate_name, &source, CompressionMethod::Stored),
+    ]);
+    assert_load_error(&multiple_sources, |error| {
+        matches!(error, LoadError::EntryTopology { .. })
+    });
+    let duplicate = duplicate_source_member(archive_from_entries(&[
+        ("document.json", &json, CompressionMethod::Stored),
+        (&source_name, &source, CompressionMethod::Stored),
+    ]));
+    let mut duplicate_archive = ZipArchive::new(Cursor::new(&duplicate)).unwrap();
+    let duplicate_names = (0..duplicate_archive.len())
+        .map(|index| {
+            duplicate_archive
+                .by_index_raw(index)
+                .unwrap()
+                .name()
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        duplicate_names,
+        vec!["document.json".to_owned(), source_name.clone()],
+        "the ZIP reader collapses the repeated raw central-directory name"
     );
-    set_central_entry_sizes(&mut nonempty_marker, 1, 1);
-    set_local_entry_sizes(&mut nonempty_marker, 1, 1);
     assert_load_error(
-        &nonempty_marker,
-        |error| matches!(error, LoadError::EntryTopology { context } if context.contains("sources/")),
+        &duplicate,
+        |error| matches!(error, LoadError::EntryTopology { context } if context.contains("duplicate or conflicting")),
+    );
+    assert_load_error(b"not a zip", |error| {
+        matches!(error, LoadError::Archive { .. })
+    });
+    assert_load_error(
+        &archive_from_entries(&[
+            ("document.json", b"not json", CompressionMethod::Stored),
+            (&source_name, &source, CompressionMethod::Stored),
+        ]),
+        |error| matches!(error, LoadError::Json { .. }),
     );
     let mut unsupported = archive_from_entries(&[
-        ("document.json", &json, zip::CompressionMethod::Stored),
-        (&source_name, &source, zip::CompressionMethod::Stored),
+        ("document.json", &json, CompressionMethod::Stored),
+        (&source_name, &source, CompressionMethod::Stored),
     ]);
     let local = unsupported
         .windows(4)
         .enumerate()
         .find_map(|(index, value)| (value == b"PK\x03\x04").then_some(index))
-        .unwrap();
+        .expect("local ZIP header exists");
     unsupported[local + 8..local + 10].copy_from_slice(&12_u16.to_le_bytes());
     let central = unsupported
         .windows(4)
         .enumerate()
         .find_map(|(index, value)| (value == b"PK\x01\x02").then_some(index))
-        .unwrap();
+        .expect("central ZIP header exists");
     unsupported[central + 10..central + 12].copy_from_slice(&12_u16.to_le_bytes());
     assert_load_error(
         &unsupported,
-        |error| matches!(error, LoadError::Archive { context } if context.contains("document.json") && context.contains("Unsupported(12)")),
+        |error| matches!(error, LoadError::Archive { context } if context.contains("Unsupported(12)")),
     );
 }
 
+/// Proves accepted deflate input works while noncanonical directory topology rejects.
 #[test]
-fn manifests_versions_and_invalid_domain_are_rejected() {
-    let (document, sources) = legacy_document();
+fn deflated_current_members_load_and_noncanonical_directories_reject() {
+    let (document, sources) = source_backed_document();
     let (json, source_name, source) = saved_parts(&document, &sources);
-    for (needle, replacement, category) in [
-        (
-            "\"container_version\":1",
-            "\"container_version\":2",
-            "version",
-        ),
-        (
-            "\"document_schema_version\":2",
-            "\"document_schema_version\":3",
-            "version",
-        ),
-        (
-            "\"entry_name\":\"sources/source-1.svg\"",
-            "\"entry_name\":\"sources/source-1.png\"",
-            "topology",
-        ),
-        ("\"byte_length\":6", "\"byte_length\":7", "integrity"),
-        ("\"sha256\":\"", "\"sha256\":\"0", "integrity"),
-        ("\"width\":101.25", "\"width\":0", "domain"),
-    ] {
-        let altered = String::from_utf8(json.clone())
-            .unwrap()
-            .replacen(needle, replacement, 1)
-            .into_bytes();
+    let deflated = archive_from_entries(&[
+        ("document.json", &json, CompressionMethod::Deflated),
+        (&source_name, &source, CompressionMethod::Deflated),
+    ]);
+    let path = write_bytes(&deflated);
+    let loaded = load(&path).expect("deflated current archive loads");
+    assert_eq!(loaded.document(), &document);
+    assert_eq!(loaded.sources(), &sources);
+    fs::remove_file(path).expect("deflated witness removes");
+    for directory in ["source/", "metadata/"] {
         assert_load_error(
-            &archive_from_entries(&[
-                ("document.json", &altered, zip::CompressionMethod::Stored),
-                (&source_name, &source, zip::CompressionMethod::Stored),
-            ]),
-            |error| match category {
-                "version" => matches!(error, LoadError::Version { .. }),
-                "topology" => matches!(error, LoadError::EntryTopology { .. }),
-                "integrity" => matches!(error, LoadError::Integrity { .. }),
-                _ => matches!(error, LoadError::DomainValidation { .. }),
-            },
+            &archive_with_directory_marker(directory, &json, &source_name, &source),
+            |error| matches!(error, LoadError::EntryTopology { .. }),
         );
     }
 }
 
+/// Proves archive and member limits reject from metadata and during understated deflate reads.
 #[test]
-fn bundle_constructors_and_save_correspondence_are_strict() {
-    let id = SourceReferenceId::new("source-1").unwrap();
-    assert!(
-        EmbeddedSource::new(
-            id.clone(),
-            EmbeddedSourceFormat::Png,
-            Vec::<u8>::new(),
-            None
-        )
-        .is_err()
-    );
-    assert!(
-        EmbeddedSource::new(
-            SourceReferenceId::new("x..y").unwrap(),
-            EmbeddedSourceFormat::Png,
-            b"x".to_vec(),
-            None
-        )
-        .is_err()
-    );
-    let a =
-        EmbeddedSource::new(id.clone(), EmbeddedSourceFormat::Png, b"x".to_vec(), None).unwrap();
-    let b = EmbeddedSource::new(id, EmbeddedSourceFormat::Png, b"y".to_vec(), None).unwrap();
-    assert!(SourceBundle::new([a, b]).is_err());
-    let (document, sources) = legacy_document();
-    let wrong = SourceBundle::new([EmbeddedSource::new(
-        SourceReferenceId::new("other").unwrap(),
-        EmbeddedSourceFormat::Png,
-        b"x".to_vec(),
-        None,
-    )
-    .unwrap()])
-    .unwrap();
+fn archive_and_entry_limits_are_enforced_before_publication() {
+    let oversized_path = temporary("oversized.toniator");
+    let file = File::create(&oversized_path).expect("oversized sparse file creates");
+    file.set_len(MAX_ARCHIVE_BYTES + 1)
+        .expect("oversized sparse file extends");
     assert!(matches!(
-        save(&temporary("mismatch.toniator"), &document, &wrong),
-        Err(toniator_io::SaveError::SourceDocumentMismatch { .. })
+        load(&oversized_path),
+        Err(LoadError::Limits { .. })
     ));
-    let _ = sources;
-}
+    fs::remove_file(oversized_path).expect("oversized sparse file removes");
 
-#[test]
-fn archive_size_limit_is_checked_before_zip_opening() {
-    let path = temporary("oversized.toniator");
-    let file = fs::File::create(&path).unwrap();
-    file.set_len(MAX_ARCHIVE_BYTES + 1).unwrap();
-    assert!(matches!(load(&path), Err(LoadError::Limits { .. })));
-    fs::remove_file(path).unwrap();
-}
-
-#[test]
-fn entry_limits_are_checked_from_zip_metadata_before_reading_payloads() {
-    let (document, sources) = legacy_document();
+    let (document, sources) = source_backed_document();
     let path = temporary("limit-base.toniator");
-    save(&path, &document, &sources).unwrap();
-    let base = fs::read(&path).unwrap();
-    fs::remove_file(path).unwrap();
+    save(&path, &document, &sources).expect("limit base saves");
+    let base = fs::read(&path).expect("limit base reads");
+    fs::remove_file(path).expect("limit base removes");
     let mut oversized_document = base.clone();
     set_central_entry_sizes(&mut oversized_document, 0, MAX_DOCUMENT_BYTES + 1);
     assert_load_error(&oversized_document, |error| {
@@ -1818,50 +556,36 @@ fn entry_limits_are_checked_from_zip_metadata_before_reading_payloads() {
     assert_load_error(&oversized_source, |error| {
         matches!(error, LoadError::Limits { .. })
     });
-    let aggregate_path = temporary("aggregate-base.toniator");
-    save(&aggregate_path, &document, &sources).unwrap();
-    let mut aggregate = fs::read(&aggregate_path).unwrap();
-    fs::remove_file(aggregate_path).unwrap();
-    set_central_entry_sizes(&mut aggregate, 0, MAX_DOCUMENT_BYTES);
-    set_central_entry_sizes(&mut aggregate, 1, MAX_SOURCE_BYTES + 1);
-    assert_load_error(
-        &aggregate,
-        |error| matches!(error, LoadError::Limits { context } if context.contains("total uncompressed data exceeds the 132 MiB")),
-    );
     assert_eq!(
-        MAX_DOCUMENT_BYTES + MAX_SOURCE_BYTES,
-        132 * 1024 * 1024,
-        "the two-entry v1 aggregate limit is exactly its individually allowed boundary"
+        MAX_UNCOMPRESSED_BYTES,
+        MAX_DOCUMENT_BYTES + MAX_SOURCE_BYTES
     );
-}
 
-#[test]
-fn deflated_document_with_understated_metadata_is_limited_while_reading() {
-    let (document, sources) = legacy_document();
     let (_, source_name, source) = saved_parts(&document, &sources);
-    let oversized_document = vec![b' '; usize::try_from(MAX_DOCUMENT_BYTES + 1).unwrap()];
-    let mut bytes = archive_from_entries(&[
+    let oversized_json = vec![b' '; usize::try_from(MAX_DOCUMENT_BYTES + 1).unwrap()];
+    let mut understated = archive_from_entries(&[
         (
             "document.json",
-            &oversized_document,
-            zip::CompressionMethod::Deflated,
+            &oversized_json,
+            CompressionMethod::Deflated,
         ),
-        (&source_name, &source, zip::CompressionMethod::Stored),
+        (&source_name, &source, CompressionMethod::Stored),
     ]);
-    set_central_uncompressed_size(&mut bytes, 0, 1);
+    set_central_uncompressed_size(&mut understated, 0, 1);
     assert_load_error(
-        &bytes,
+        &understated,
         |error| matches!(error, LoadError::Limits { context } if context.contains("document.json")),
     );
 }
 
+/// Proves encrypted flags reject before member reads without requiring encrypted writer support.
 #[test]
-fn encrypted_flag_is_rejected_without_needing_an_encrypted_writer() {
-    let (document, sources) = legacy_document();
+fn encrypted_entries_are_rejected_before_reading() {
+    let (document, sources) = source_backed_document();
     let path = temporary("encrypted-base.toniator");
-    save(&path, &document, &sources).unwrap();
-    let mut bytes = fs::read(&path).unwrap();
-    fs::remove_file(path).unwrap();
+    save(&path, &document, &sources).expect("encrypted base saves");
+    let mut bytes = fs::read(&path).expect("encrypted base reads");
+    fs::remove_file(path).expect("encrypted base removes");
     let positions = bytes
         .windows(4)
         .enumerate()
@@ -1877,231 +601,24 @@ fn encrypted_flag_is_rejected_without_needing_an_encrypted_writer() {
     );
 }
 
+/// Proves failed final rename removes only its create-new temporary container.
 #[test]
 fn post_write_rename_failure_cleans_only_the_attempted_temp() {
-    let (document, sources) = legacy_document();
+    let (document, sources) = source_backed_document();
     let root = temporary("rename-failure-root");
-    fs::create_dir(&root).unwrap();
+    fs::create_dir(&root).expect("rename witness root creates");
     let directory_target = root.join("destination.toniator");
-    fs::create_dir(&directory_target).unwrap();
-    let parent = &root;
-    let before: HashSet<_> = fs::read_dir(parent)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name())
+    fs::create_dir(&directory_target).expect("directory target creates");
+    let before: HashSet<_> = fs::read_dir(&root)
+        .expect("rename root reads")
+        .map(|entry| entry.expect("rename root entry").file_name())
         .collect();
-    assert!(matches!(
-        save(&directory_target, &document, &sources),
-        Err(toniator_io::SaveError::Filesystem { .. })
-    ));
-    let after: HashSet<_> = fs::read_dir(parent)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name())
+    assert!(save(&directory_target, &document, &sources).is_err());
+    let after: HashSet<_> = fs::read_dir(&root)
+        .expect("rename root rereads")
+        .map(|entry| entry.expect("rename root entry").file_name())
         .collect();
-    assert_eq!(
-        before, after,
-        "rename failure must remove its create-new temporary file"
-    );
-    fs::remove_dir(directory_target).unwrap();
-    fs::remove_dir(root).unwrap();
-}
-
-/// Proves Stage 20D guide DTO absence preserves accepted old-v2 bytes and v1 migration output.
-#[test]
-fn stage20d_absent_variants_preserve_existing_v2_bytes_and_v1_migration() {
-    let (document, sources) = legacy_document();
-    let first = temporary("stage20d-absent-first.toniator");
-    let second = temporary("stage20d-absent-second.toniator");
-    save(&first, &document, &sources).unwrap();
-    let loaded = load(&first).unwrap();
-    save(&second, loaded.document(), loaded.sources()).unwrap();
-    assert_eq!(fs::read(&first).unwrap(), fs::read(&second).unwrap());
-    let migrated = load(&asset("raster-sample-v1.toniator")).unwrap();
-    assert_eq!(migrated.versions().document(), 1);
-    assert!(!migrated.migration_report().is_empty());
-    let migrated_path = temporary("stage20d-accepted-old-v2.toniator");
-    save(&migrated_path, migrated.document(), migrated.sources()).unwrap();
-    assert_eq!(
-        format!("{:x}", Sha256::digest(fs::read(&migrated_path).unwrap())),
-        "7135531041b8a4f9136731267b356ce4b3acbdb74c6e12c6670817e0613436cf"
-    );
-    fs::remove_file(first).unwrap();
-    fs::remove_file(second).unwrap();
-    fs::remove_file(migrated_path).unwrap();
-}
-
-/// Proves current-v2 persistence retains generic-guide variants, order, references, and authored numeric bits.
-#[test]
-fn stage20d_guide_definitions_round_trip_references_variants_order_and_numeric_bits() {
-    let (base, sources) = document_with_authored_structures();
-    let definition = PatternDefinition::generalized_guides(
-        PatternDefinitionId(91),
-        "curved",
-        PatternMechanismId(181),
-        PatternMechanismId(182),
-        PatternOutputLayerId(91),
-        vec![
-            GuideDimension {
-                id: GuideDimensionId(501),
-                baseline_angle_degrees: -0.0,
-                phase: 3.25,
-                prototype: GuidePrototype::AuthoredOpenPath {
-                    structure_id: AuthoredStructureId(21),
-                },
-                repetition: GuideRepetition::Single,
-            },
-            GuideDimension {
-                id: GuideDimensionId(502),
-                baseline_angle_degrees: 17.0,
-                phase: -2.5,
-                prototype: GuidePrototype::CircularArc {
-                    center: authored_point(-0.0, 4.0),
-                    radius: 8.0,
-                    start_angle_degrees: -45.0,
-                    sweep_angle_degrees: 270.0,
-                },
-                repetition: GuideRepetition::TransformStack {
-                    direction_degrees: 90.0,
-                    spacing_multiplier: 1.5,
-                },
-            },
-        ],
-        GeneralizedSiteProduct::Intersections {
-            dimensions: vec![GuideDimensionId(501), GuideDimensionId(502)],
-            merge_epsilon: 0.25,
-        },
-        MarkOrientation::Fixed,
-        CoveragePolicy {
-            guard_steps: 2,
-            additional_margin: 4.5,
-        },
-    );
-    let document = Document::with_source_and_authored_structures(
-        base.id(),
-        base.canvas().clone(),
-        base.source().clone(),
-        vec![definition],
-        base.channels().unwrap().to_vec(),
-        base.authored_structures().to_vec(),
-    )
-    .unwrap();
-    let path = temporary("stage20d-guide-roundtrip.toniator");
-    save(&path, &document, &sources).unwrap();
-    let loaded = load(&path).unwrap();
-    assert_eq!(loaded.document(), &document);
-    let dimensions = match &loaded.document().pattern_definitions()[0].mechanisms[0] {
-        toniator_domain::PatternMechanism::GuideDimensions { dimensions, .. } => dimensions,
-        other => panic!("expected generic guide root, got {other:?}"),
-    };
-    assert_eq!(
-        dimensions[0].baseline_angle_degrees.to_bits(),
-        (-0.0_f64).to_bits()
-    );
-    assert_eq!(dimensions[0].phase.to_bits(), 3.25_f64.to_bits());
-    assert_eq!(
-        dimensions[1].baseline_angle_degrees.to_bits(),
-        17.0_f64.to_bits()
-    );
-    assert_eq!(dimensions[1].phase.to_bits(), (-2.5_f64).to_bits());
-    match &dimensions[1].prototype {
-        GuidePrototype::CircularArc {
-            center,
-            radius,
-            start_angle_degrees,
-            sweep_angle_degrees,
-        } => {
-            assert_eq!(center.x.to_bits(), (-0.0_f64).to_bits());
-            assert_eq!(center.y.to_bits(), 4.0_f64.to_bits());
-            assert_eq!(radius.to_bits(), 8.0_f64.to_bits());
-            assert_eq!(start_angle_degrees.to_bits(), (-45.0_f64).to_bits());
-            assert_eq!(sweep_angle_degrees.to_bits(), 270.0_f64.to_bits());
-        }
-        other => panic!("expected circular arc, got {other:?}"),
-    }
-    match &dimensions[1].repetition {
-        GuideRepetition::TransformStack {
-            direction_degrees,
-            spacing_multiplier,
-        } => {
-            assert_eq!(direction_degrees.to_bits(), 90.0_f64.to_bits());
-            assert_eq!(spacing_multiplier.to_bits(), 1.5_f64.to_bits());
-        }
-        other => panic!("expected transform stack, got {other:?}"),
-    }
-    fs::remove_file(path).unwrap();
-}
-
-/// Proves missing and closed generic guide references reject during complete current-v2 reconstruction.
-#[test]
-fn stage20d_invalid_or_closed_guide_references_reject_before_document_commit() {
-    let (base, sources) = document_with_authored_structures();
-    let definition = PatternDefinition::generalized_guides(
-        PatternDefinitionId(91),
-        "curved",
-        PatternMechanismId(181),
-        PatternMechanismId(182),
-        PatternOutputLayerId(91),
-        vec![
-            GuideDimension {
-                id: GuideDimensionId(501),
-                baseline_angle_degrees: 0.0,
-                phase: 0.0,
-                prototype: GuidePrototype::AuthoredOpenPath {
-                    structure_id: AuthoredStructureId(21),
-                },
-                repetition: GuideRepetition::Single,
-            },
-            GuideDimension {
-                id: GuideDimensionId(502),
-                baseline_angle_degrees: 0.0,
-                phase: 0.0,
-                prototype: GuidePrototype::CircularArc {
-                    center: authored_point(0.0, 0.0),
-                    radius: 1.0,
-                    start_angle_degrees: 0.0,
-                    sweep_angle_degrees: 90.0,
-                },
-                repetition: GuideRepetition::Single,
-            },
-        ],
-        GeneralizedSiteProduct::Intersections {
-            dimensions: vec![GuideDimensionId(501), GuideDimensionId(502)],
-            merge_epsilon: 0.0,
-        },
-        MarkOrientation::Fixed,
-        CoveragePolicy {
-            guard_steps: 1,
-            additional_margin: 4.5,
-        },
-    );
-    let document = Document::with_source_and_authored_structures(
-        base.id(),
-        base.canvas().clone(),
-        base.source().clone(),
-        vec![definition],
-        base.channels().unwrap().to_vec(),
-        base.authored_structures().to_vec(),
-    )
-    .unwrap();
-    let (json, source_name, source) = saved_parts(&document, &sources);
-    let mut value: serde_json::Value = serde_json::from_slice(&json).unwrap();
-    value["document"]["pattern_definitions"][0]["mechanisms"][0]["dimensions"][0]["prototype"]["structure_id"] =
-        serde_json::json!(4);
-    let invalid = serde_json::to_vec(&value).unwrap();
-    assert_load_error(
-        &archive_from_entries(&[
-            ("document.json", &invalid, zip::CompressionMethod::Stored),
-            (&source_name, &source, zip::CompressionMethod::Stored),
-        ]),
-        |error| matches!(error, LoadError::DomainValidation { context } if context == "pattern_definitions.mechanisms.guide_prototype.kind: authored guide prototypes require an open path"),
-    );
-    value["document"]["pattern_definitions"][0]["mechanisms"][0]["dimensions"][0]["prototype"]["structure_id"] =
-        serde_json::json!(999);
-    let missing = serde_json::to_vec(&value).unwrap();
-    assert_load_error(
-        &archive_from_entries(&[
-            ("document.json", &missing, zip::CompressionMethod::Stored),
-            (&source_name, &source, zip::CompressionMethod::Stored),
-        ]),
-        |error| matches!(error, LoadError::DomainValidation { context } if context == "pattern_definitions.mechanisms.guide_prototype.reference: authored guide prototype references a missing structure"),
-    );
+    assert_eq!(before, after, "failed rename must clean its temporary file");
+    fs::remove_dir(directory_target).expect("directory target removes");
+    fs::remove_dir(root).expect("rename witness root removes");
 }

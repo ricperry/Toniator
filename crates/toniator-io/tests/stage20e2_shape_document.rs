@@ -8,7 +8,7 @@ use toniator_domain::{
     AuthoredCurveSegment, AuthoredPoint2, AuthoredStructure, AuthoredStructureId,
     AuthoredStructureKind, CanvasSpec, CoveragePolicy, Document, GeneralizedSiteProduct,
     GuideDimensionId, MarkOrientation, MarkPrototype, PatternDefinition, PatternDefinitionId,
-    PatternMechanismId, PatternOutputLayer, PatternOutputLayerId, SourceReference,
+    PatternMechanismId, PatternOutputLayerId, PatternOutputRealization, SourceReference,
     SourceReferenceId, StraightGuideDimension, StraightGuideRepetition,
 };
 use toniator_io::{
@@ -73,7 +73,8 @@ fn shape_document() -> (Document, SourceBundle) {
             additional_margin: 4.5,
         },
     );
-    let PatternOutputLayer::MarkPrototype { prototype, .. } = &mut definition.output_layers[0]
+    let PatternOutputRealization::MarkPrototype { prototype, .. } =
+        &mut definition.output_layers[0].realization
     else {
         panic!("generalized guides own a typed output")
     };
@@ -101,7 +102,12 @@ fn shape_document() -> (Document, SourceBundle) {
         base.id(),
         base.canvas().clone(),
         base.source().clone(),
-        vec![definition],
+        vec![{
+            let mut bundle = base.pattern_definition_bundles()[0].clone();
+            bundle.definition = definition;
+            bundle
+        }],
+        base.pattern_settings().clone(),
         base.channel_model().unwrap(),
         base.channel_topology().unwrap().clone(),
         vec![shape],
@@ -128,11 +134,11 @@ fn document_json(path: &PathBuf) -> String {
     String::from_utf8(bytes).unwrap()
 }
 
-/// Proves document-v3 persists the typed stable reference and exact closed shape deterministically,
+/// Proves document-v5 persists the typed stable reference and exact closed shape deterministically,
 /// then reconstructs the same validated document without a migration report or runtime geometry.
 #[test]
-fn authored_shape_document_v3_round_trip_is_deterministic_and_additive() {
-    assert_eq!(DOCUMENT_SCHEMA_VERSION, 3);
+fn authored_shape_document_v5_round_trip_is_deterministic_and_additive() {
+    assert_eq!(DOCUMENT_SCHEMA_VERSION, 5);
     let (document, sources) = shape_document();
     let first = temporary("shape-first.toniator");
     let second = temporary("shape-second.toniator");
@@ -144,7 +150,6 @@ fn authored_shape_document_v3_round_trip_is_deterministic_and_additive() {
     assert!(json.contains("\"kind\":\"closed_shape\""));
     assert!(!json.contains("canonical_marks"));
     let loaded = load(&first).unwrap();
-    assert!(loaded.migration_report().is_empty());
     assert_eq!(loaded.document(), &document);
     fs::remove_file(first).unwrap();
     fs::remove_file(second).unwrap();

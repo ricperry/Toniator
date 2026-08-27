@@ -6,6 +6,15 @@ Status: **Accepted roadmap; Stages 20N through 20S are complete** (Stage 20O che
 `071f3604098c0660a876fbe30050a64223fe41b3`; Stage 20R checkpoint
 `458c9a981dd349999240a18052e055a71c7b6c3c`).
 
+Final Stage 20A–20S scrub status: **Ready for user acceptance in the
+2026-08-27 working tree; no checkpoint assigned.** The integrated authority,
+repairs, current-v5 persistence boundary, deterministic internal CPU
+parallelism, release profiles, and direct mixed-output evidence are recorded in
+[`STAGE_20_FINAL_ARCHITECTURE_AND_CONCURRENCY.md`](STAGE_20_FINAL_ARCHITECTURE_AND_CONCURRENCY.md).
+The catalog remains the accepted 16 records; `regions-plus-marks` remains a
+retired debug tool and is not a recipe. This status does not authorize the GUI
+re-baseline, Stage 21, publication, or push.
+
 ## Summary and stage boundary
 
 Stages 20N–20S complete the remaining headless pattern architecture after the

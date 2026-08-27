@@ -2,7 +2,7 @@ use toniator_domain::{
     CanvasSpec, CoveragePolicy, CurveWinding, DensityMetric2D, GuideRepetition, MarkOrientation,
     MarkPrototype, OffsetCleanup, OffsetSides, ParametricCurve, PathStrokeStyle, PatternDefinition,
     PatternDefinitionId, PatternFamily, PatternMechanism, PatternMechanismId, PatternModulation,
-    PatternOutputLayer, PatternOutputLayerId, SpiralCurve, SpiralShape,
+    PatternOutputLayer, PatternOutputLayerId, PatternOutputRealization, SpiralCurve, SpiralShape,
 };
 use toniator_patterns::{
     GridInspectRequest, StructuralProductCapability, evaluate_typed_family,
@@ -75,18 +75,22 @@ fn definition(shape: SpiralShape, sites: bool) -> PatternDefinition {
             }]
         },
         output_layers: if sites {
-            vec![PatternOutputLayer::MarkPrototype {
-                id: PatternOutputLayerId(93),
-                site_mechanism_id: site_id,
-                prototype: MarkPrototype::Circle,
-                orientation: MarkOrientation::Fixed,
-            }]
+            vec![PatternOutputLayer::all(
+                PatternOutputLayerId(93),
+                PatternOutputRealization::MarkPrototype {
+                    site_mechanism_id: site_id,
+                    prototype: MarkPrototype::Circle,
+                    orientation: MarkOrientation::Fixed,
+                },
+            )]
         } else {
-            vec![PatternOutputLayer::ParametricPaths {
-                id: PatternOutputLayerId(93),
-                curve_mechanism_id: curve_id,
-                style: PathStrokeStyle::default(),
-            }]
+            vec![PatternOutputLayer::all(
+                PatternOutputLayerId(93),
+                PatternOutputRealization::ParametricPaths {
+                    curve_mechanism_id: curve_id,
+                    style: PathStrokeStyle::default(),
+                },
+            )]
         },
         modulation: PatternModulation,
         coverage: CoveragePolicy {

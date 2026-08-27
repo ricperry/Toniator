@@ -350,9 +350,10 @@ pub enum CurveRepetition {
     },
 }
 
-/// Compatibility spelling for persisted/current guide mechanisms. New common
-/// curve sources are authored against `CurveRepetition`; the v4 guide DTO name
-/// intentionally remains unchanged.
+/// Current public guide-mechanism spelling over the shared curve-repetition vocabulary.
+///
+/// New common curve sources are authored against `CurveRepetition`; current v5 persistence keeps
+/// the established `GuideRepetition` field vocabulary without retaining an obsolete decoder.
 pub type GuideRepetition = CurveRepetition;
 
 /// One bounded analytic curve source owned by the parametric family.
@@ -2211,6 +2212,37 @@ mod stage20r_domain_tests {
         document
             .validate_property_descriptors()
             .expect("composite filter descriptors are bidirectionally complete");
+        let compatible_filter = document
+            .property_descriptors()
+            .into_iter()
+            .find(|descriptor| {
+                descriptor.field == PropertyFieldId::OutputSiteUseFilterKind
+                    && descriptor.target
+                        == PropertyTarget::OutputLayer(
+                            PatternDefinitionId(20),
+                            PatternOutputLayerId(31),
+                        )
+            })
+            .expect("compatible composite output exposes its filter selector");
+        assert_eq!(compatible_filter.choices, SITE_USE_FILTER_CHOICES);
+        let lone_output_document = Document::new_default_document(
+            CanvasSpec {
+                width: 64.0,
+                height: 48.0,
+            },
+            SourceReference::Unassigned,
+        )
+        .expect("single-output document validates");
+        assert!(
+            lone_output_document
+                .property_descriptors()
+                .into_iter()
+                .filter(|descriptor| {
+                    descriptor.field == PropertyFieldId::OutputSiteUseFilterKind
+                })
+                .all(|descriptor| descriptor.choices == ALL_SITE_USE_FILTER_CHOICES),
+            "single-output definitions must not advertise impossible filter variants"
+        );
         let filter_values = document
             .property_values()
             .into_iter()
@@ -2391,6 +2423,80 @@ mod stage20r_domain_tests {
                 .path(),
             "preset.recipe.output_settings.source_filter.non_site_source"
         );
+    }
+
+    /// Projects generic guide repetition flags from authored mechanisms without inferring them from path output.
+    #[test]
+    fn generic_guide_capabilities_distinguish_single_stack_and_normal_offset() {
+        let projection = |repetition| {
+            let guide_id = PatternMechanismId(401);
+            let dimension_id = GuideDimensionId(402);
+            let output_id = PatternOutputLayerId(403);
+            let mut definition = PatternDefinition::generalized_guides(
+                PatternDefinitionId(400),
+                "generic capability fixture",
+                guide_id,
+                PatternMechanismId(404),
+                output_id,
+                vec![GuideDimension {
+                    id: dimension_id,
+                    baseline_angle_degrees: 0.0,
+                    phase: 0.0,
+                    prototype: GuidePrototype::CircularArc {
+                        center: AuthoredPoint2 { x: 0.0, y: 0.0 },
+                        radius: 12.0,
+                        start_angle_degrees: 0.0,
+                        sweep_angle_degrees: 180.0,
+                    },
+                    repetition,
+                }],
+                GeneralizedSiteProduct::AlongGuides {
+                    dimensions: vec![dimension_id],
+                    interval_multiplier: 1.0,
+                    phase: 0.0,
+                },
+                MarkOrientation::Fixed,
+                CoveragePolicy {
+                    guard_steps: 1,
+                    additional_margin: 0.0,
+                },
+            );
+            definition.output_layers = vec![PatternOutputLayer::all(
+                output_id,
+                PatternOutputRealization::GuidePaths {
+                    guide_mechanism_id: guide_id,
+                    style: PathStrokeStyle::default(),
+                },
+            )];
+            project_validated_pattern_definition(
+                &definition,
+                &[EffectivePatternOutputSettings {
+                    output_layer_id: output_id,
+                    response: PatternGeometryResponse::Connected(ConnectedGeometryResponse {
+                        minimum_thickness: 0.0,
+                        maximum_thickness: 1.0,
+                    }),
+                }],
+            )
+            .expect("generic guide capability projects")
+        };
+
+        let single = projection(GuideRepetition::Single);
+        assert!(!single.supports_all(&[PatternCapabilityFlag::StackedPaths]));
+        assert!(!single.supports_all(&[PatternCapabilityFlag::NormalOffsetPaths]));
+        let stacked = projection(GuideRepetition::TransformStack {
+            direction_degrees: 90.0,
+            spacing_multiplier: 1.0,
+        });
+        assert!(stacked.supports_all(&[PatternCapabilityFlag::StackedPaths]));
+        assert!(!stacked.supports_all(&[PatternCapabilityFlag::NormalOffsetPaths]));
+        let normal = projection(GuideRepetition::NormalOffset {
+            spacing: 4.0,
+            sides: OffsetSides::Both,
+            cleanup: OffsetCleanup::DissolveCrossings,
+        });
+        assert!(!normal.supports_all(&[PatternCapabilityFlag::StackedPaths]));
+        assert!(normal.supports_all(&[PatternCapabilityFlag::NormalOffsetPaths]));
     }
 }
 
@@ -2770,7 +2876,13 @@ pub enum ArtworkWeightResponse {
 #[derive(Clone, Debug, PartialEq)]
 pub enum SiteExclusionPolicy {
     None,
-    MinimumCenterDistance { minimum: f64 },
+    MinimumCenterDistance {
+        minimum: f64,
+    },
+    /// Separates accepted centers by twice the active maximum realized support plus a margin.
+    VisibleMarkMargin {
+        margin: f64,
+    },
 }
 
 /// A typed reusable structural mechanism.  Stage 14 retains only the accepted
@@ -2784,8 +2896,8 @@ pub enum PatternMechanism {
         id: PatternMechanismId,
         guide_mechanism_id: PatternMechanismId,
     },
-    /// Generalized ordered straight dimensions.  The legacy `StraightGuides`
-    /// form remains readable/writable for exact existing-v2 bytes.
+    /// Generalized ordered straight dimensions. The compact `StraightGuides`
+    /// form remains a current built-in adapter alongside this authored form.
     StraightGuideDimensions {
         id: PatternMechanismId,
         dimensions: Vec<StraightGuideDimension>,
@@ -3050,8 +3162,8 @@ impl PatternOutputLayer {
     }
 }
 
-/// Structural modulation is a separate typed top-level slot.  The accepted
-/// v1 configuration has no modulation; later additions must remain typed.
+/// Structural modulation is a separate typed top-level slot. The accepted
+/// current configuration has no modulation; later additions must remain typed.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PatternModulation;
 
@@ -4801,12 +4913,18 @@ impl Document {
                         }
                     }
                     PatternMechanism::SiteExclusion { policy, .. } => {
+                        let visible =
+                            matches!(policy, SiteExclusionPolicy::VisibleMarkMargin { .. });
                         descriptors.push(descriptor_with_runtime_context(
                             PropertyFieldId::RandomExclusion,
                             target,
                             DescriptorRuntimeContext::Exclusion {
                                 dependency: PropertyDependency::RandomProcess,
-                                support: StructuralSupportConstraint::None,
+                                support: if visible {
+                                    StructuralSupportConstraint::VisibleMarkMarginUsesMaximumRealizedSupport
+                                } else {
+                                    StructuralSupportConstraint::None
+                                },
                             },
                         ));
                         match policy {
@@ -4814,6 +4932,12 @@ impl Document {
                             SiteExclusionPolicy::MinimumCenterDistance { .. } => {
                                 descriptors.push(descriptor_from_contract(
                                     PropertyFieldId::ExclusionMinimumCenterDistance,
+                                    target,
+                                ))
+                            }
+                            SiteExclusionPolicy::VisibleMarkMargin { .. } => {
+                                descriptors.push(descriptor_from_contract(
+                                    PropertyFieldId::VisibleMarkMargin,
                                     target,
                                 ))
                             }
@@ -4833,9 +4957,24 @@ impl Document {
             }
             for layer in &definition.output_layers {
                 let target = PropertyTarget::OutputLayer(definition.id, layer.id());
-                descriptors.push(descriptor_from_contract(
+                let has_compatible_filter_target =
+                    layer.site_mechanism_id().is_some_and(|mechanism_id| {
+                        definition.output_layers.iter().any(|candidate| {
+                            candidate.id != layer.id
+                                && candidate.publishes_site_usage()
+                                && candidate.site_mechanism_id() == Some(mechanism_id)
+                        })
+                    });
+                descriptors.push(descriptor_with_runtime_context(
                     PropertyFieldId::OutputSiteUseFilterKind,
                     target,
+                    DescriptorRuntimeContext::SiteUseFilter {
+                        choices: if has_compatible_filter_target {
+                            SITE_USE_FILTER_CHOICES
+                        } else {
+                            ALL_SITE_USE_FILTER_CHOICES
+                        },
+                    },
                 ));
                 if layer.source_filter.referenced_output_layer_id().is_some() {
                     descriptors.push(descriptor_from_contract(
@@ -5738,23 +5877,10 @@ impl Document {
                     PropertyFieldId::ShapeRotationDegrees => instance
                         .shape_rotation_delta_degrees
                         .map(PropertyCurrentValueKind::FiniteF64),
-                    PropertyFieldId::MarkMinimumFill | PropertyFieldId::MarkMaximumFill => None,
-                    PropertyFieldId::ConnectedMinimumThickness => {
-                        match None::<&ChannelGeometryResponseDelta> {
-                            Some(ChannelGeometryResponseDelta::Connected(delta)) => delta
-                                .minimum_thickness_delta
-                                .map(PropertyCurrentValueKind::FiniteF64),
-                            _ => None,
-                        }
-                    }
-                    PropertyFieldId::ConnectedMaximumThickness => {
-                        match None::<&ChannelGeometryResponseDelta> {
-                            Some(ChannelGeometryResponseDelta::Connected(delta)) => delta
-                                .maximum_thickness_delta
-                                .map(PropertyCurrentValueKind::FiniteF64),
-                            _ => None,
-                        }
-                    }
+                    PropertyFieldId::MarkMinimumFill
+                    | PropertyFieldId::MarkMaximumFill
+                    | PropertyFieldId::ConnectedMinimumThickness
+                    | PropertyFieldId::ConnectedMaximumThickness => None,
                     _ => None,
                 }
             }
@@ -5766,6 +5892,30 @@ impl Document {
                     .find(|entry| entry.output_layer_id == output_layer_id)
                     .map(|entry| &entry.delta);
                 match (descriptor.field, delta) {
+                    (
+                        PropertyFieldId::MarkMinimumFill,
+                        Some(ChannelGeometryResponseDelta::Marks(delta)),
+                    ) => delta
+                        .minimum_fill_delta
+                        .map(PropertyCurrentValueKind::FiniteF64),
+                    (
+                        PropertyFieldId::MarkMaximumFill,
+                        Some(ChannelGeometryResponseDelta::Marks(delta)),
+                    ) => delta
+                        .maximum_fill_delta
+                        .map(PropertyCurrentValueKind::FiniteF64),
+                    (
+                        PropertyFieldId::ConnectedMinimumThickness,
+                        Some(ChannelGeometryResponseDelta::Connected(delta)),
+                    ) => delta
+                        .minimum_thickness_delta
+                        .map(PropertyCurrentValueKind::FiniteF64),
+                    (
+                        PropertyFieldId::ConnectedMaximumThickness,
+                        Some(ChannelGeometryResponseDelta::Connected(delta)),
+                    ) => delta
+                        .maximum_thickness_delta
+                        .map(PropertyCurrentValueKind::FiniteF64),
                     (
                         PropertyFieldId::RegionMinimumFill,
                         Some(ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta {
@@ -8151,6 +8301,13 @@ fn recipe_exclusion_transition(
                 VariantTransitionValue::FiniteF64(*minimum),
             )],
         ),
+        SiteExclusionPolicy::VisibleMarkMargin { margin } => (
+            ExclusionKind::VisibleMarkMargin,
+            vec![(
+                PropertyFieldId::VisibleMarkMargin,
+                VariantTransitionValue::FiniteF64(*margin),
+            )],
+        ),
     }
 }
 
@@ -8845,6 +9002,21 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
                 .find(|mechanism| mechanism.id() == *mechanism_id)
             {
                 *current = *minimum_center_distance;
+            }
+        }
+        PatternDefinitionEdit::SetVisibleMarkMargin {
+            mechanism_id,
+            margin,
+        } => {
+            if let Some(PatternMechanism::SiteExclusion {
+                policy: SiteExclusionPolicy::VisibleMarkMargin { margin: current },
+                ..
+            }) = definition
+                .mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.id() == *mechanism_id)
+            {
+                *current = *margin;
             }
         }
         PatternDefinitionEdit::SetRandomMaximumAttempts {
@@ -9644,6 +9816,13 @@ fn remap_definition_edit_for_duplicate(
             mechanism_id: mechanism(*mechanism_id),
             minimum_center_distance: *minimum_center_distance,
         },
+        PatternDefinitionEdit::SetVisibleMarkMargin {
+            mechanism_id,
+            margin,
+        } => PatternDefinitionEdit::SetVisibleMarkMargin {
+            mechanism_id: mechanism(*mechanism_id),
+            margin: *margin,
+        },
         PatternDefinitionEdit::SetRandomMaximumAttempts {
             mechanism_id,
             maximum_attempts,
@@ -10313,6 +10492,19 @@ fn validate_definition_edit(
             ),
             _ => Err(ValidationError::new(
                 "pattern_definitions.mechanisms.site_exclusion.minimum",
+                "field is inactive for the current exclusion policy",
+            )),
+        },
+        PatternDefinitionEdit::SetVisibleMarkMargin {
+            mechanism_id,
+            margin,
+        } => match validate_exclusion_target(definition, *mechanism_id)? {
+            SiteExclusionPolicy::VisibleMarkMargin { .. } => validate_nonnegative_finite(
+                *margin,
+                "pattern_definitions.mechanisms.site_exclusion.visible_mark_margin",
+            ),
+            _ => Err(ValidationError::new(
+                "pattern_definitions.mechanisms.site_exclusion.visible_mark_margin",
                 "field is inactive for the current exclusion policy",
             )),
         },
@@ -11896,6 +12088,26 @@ fn project_validated_pattern_definition(
                 }
                 GuideSiteProductCapability::AlongGuides => PatternCapabilityFlag::AlongGuideSites,
             });
+            for repetition in definition
+                .mechanisms
+                .iter()
+                .filter_map(|mechanism| match mechanism {
+                    PatternMechanism::GuideDimensions { dimensions, .. } => Some(dimensions),
+                    _ => None,
+                })
+                .flatten()
+                .map(|dimension| &dimension.repetition)
+            {
+                match repetition {
+                    GuideRepetition::Single => {}
+                    GuideRepetition::TransformStack { .. } => {
+                        feature_set.insert(PatternCapabilityFlag::StackedPaths);
+                    }
+                    GuideRepetition::NormalOffset { .. } => {
+                        feature_set.insert(PatternCapabilityFlag::NormalOffsetPaths);
+                    }
+                }
+            }
         }
         PatternFamilyCapabilityProjection::Dispersion(dispersion) => {
             feature_set.extend([
@@ -11963,21 +12175,8 @@ fn project_validated_pattern_definition(
             PatternOutputCapabilityProjection::GuidePaths(_) => {
                 feature_set.extend([
                     PatternCapabilityFlag::RawPaths,
-                    PatternCapabilityFlag::StackedPaths,
                     PatternCapabilityFlag::ExtendBeyondCanvas,
                 ]);
-                if definition.mechanisms.iter().any(|mechanism| {
-                    matches!(
-                        mechanism,
-                        PatternMechanism::GuideDimensions { dimensions, .. }
-                            if dimensions.iter().any(|dimension| matches!(
-                                dimension.repetition,
-                                GuideRepetition::TransformStack { .. }
-                            ))
-                    )
-                }) {
-                    feature_set.insert(PatternCapabilityFlag::StackedPaths);
-                }
             }
             PatternOutputCapabilityProjection::ConnectionPaths(_) => {
                 feature_set.extend([
@@ -12220,6 +12419,7 @@ fn exclusion_kind(policy: &SiteExclusionPolicy) -> ExclusionKind {
     match policy {
         SiteExclusionPolicy::None => ExclusionKind::None,
         SiteExclusionPolicy::MinimumCenterDistance { .. } => ExclusionKind::MinimumCenterDistance,
+        SiteExclusionPolicy::VisibleMarkMargin { .. } => ExclusionKind::VisibleMarkMargin,
     }
 }
 
@@ -12420,6 +12620,10 @@ fn validate_site_exclusion(policy: &SiteExclusionPolicy) -> Result<(), Validatio
         SiteExclusionPolicy::MinimumCenterDistance { minimum } => validate_positive_finite(
             *minimum,
             "pattern_definitions.mechanisms.site_exclusion.minimum",
+        ),
+        SiteExclusionPolicy::VisibleMarkMargin { margin } => validate_nonnegative_finite(
+            *margin,
+            "pattern_definitions.mechanisms.site_exclusion.visible_mark_margin",
         ),
     }
 }
@@ -13471,6 +13675,7 @@ pub enum PropertyFieldId {
     ArtworkWeightResponse,
     RandomExclusion,
     ExclusionMinimumCenterDistance,
+    VisibleMarkMargin,
     RandomMaximumAttempts,
     RandomMaximumNeighborChecks,
     OutputSiteProduct,
@@ -13575,6 +13780,7 @@ pub const PROPERTY_FIELD_IDS: &[PropertyFieldId] = &[
     PropertyFieldId::ArtworkWeightResponse,
     PropertyFieldId::RandomExclusion,
     PropertyFieldId::ExclusionMinimumCenterDistance,
+    PropertyFieldId::VisibleMarkMargin,
     PropertyFieldId::RandomMaximumAttempts,
     PropertyFieldId::RandomMaximumNeighborChecks,
     PropertyFieldId::OutputSiteProduct,
@@ -13676,6 +13882,7 @@ pub enum DensityModulationKind {
 pub enum ExclusionKind {
     None,
     MinimumCenterDistance,
+    VisibleMarkMargin,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MarkPrototypeKind {
@@ -13740,6 +13947,7 @@ pub enum PropertyDependency {
     ClusteredRandomProcess,
     ArtworkWeightedDensity,
     MinimumCenterExclusion,
+    VisibleMarkExclusion,
     MarkPrototypeOutput,
     AuthoredClosedShapeMark,
     GuidedOutputOrientation,
@@ -13765,6 +13973,7 @@ pub enum PropertyApplicability {
     ClusteredRandomProcess,
     ArtworkWeightedDensity,
     MinimumCenterExclusion,
+    VisibleMarkExclusion,
     MarkPrototypeOutput,
     AuthoredClosedShapeMark,
     GuidedOutputOrientation,
@@ -13784,6 +13993,8 @@ pub enum StructuralSupportConstraint {
     None,
     /// The active maximum fill derives the conservative family coverage envelope.
     MaximumFillDefinesCoverage,
+    /// Visible-mark exclusion derives separation from the active maximum realized support.
+    VisibleMarkMarginUsesMaximumRealizedSupport,
 }
 
 /// Validation shape for stable references. Collection fields carry their
@@ -13805,6 +14016,8 @@ pub enum PropertyReferenceConstraint {
 pub enum PropertyChoicePolicy {
     Static,
     ModelRolePaint,
+    /// Resolves filter kinds from the active output's compatible site-usage targets.
+    CompatibleSiteUseFilter,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -13862,6 +14075,7 @@ pub enum PropertyCommandKind {
     SetArtworkWeightResponse,
     SetExclusionVariant,
     SetExclusionMinimumCenterDistance,
+    SetVisibleMarkMargin,
     SetRandomMaximumAttempts,
     SetRandomMaximumNeighborChecks,
     SetOutputSiteProduct,
@@ -14376,6 +14590,7 @@ fn property_value_for_mechanism(
                 SiteExclusionPolicy::MinimumCenterDistance { .. } => {
                     ExclusionKind::MinimumCenterDistance
                 }
+                SiteExclusionPolicy::VisibleMarkMargin { .. } => ExclusionKind::VisibleMarkMargin,
             }))
         }
         (
@@ -14385,6 +14600,13 @@ fn property_value_for_mechanism(
                 ..
             },
         ) => PropertyCurrentValueKind::FiniteF64(*minimum),
+        (
+            PropertyFieldId::VisibleMarkMargin,
+            PatternMechanism::SiteExclusion {
+                policy: SiteExclusionPolicy::VisibleMarkMargin { margin },
+                ..
+            },
+        ) => PropertyCurrentValueKind::FiniteF64(*margin),
         (
             PropertyFieldId::RandomMaximumAttempts,
             PatternMechanism::RandomSiteProduct {
@@ -14680,6 +14902,22 @@ fn exclusion_transition_fields(
                 PropertyFieldId::ExclusionMinimumCenterDistance,
                 target,
                 VariantTransitionValue::FiniteF64(minimum),
+                Vec::new(),
+            )])
+        }
+        ExclusionKind::VisibleMarkMargin => {
+            let margin = if base == choice {
+                match policy {
+                    SiteExclusionPolicy::VisibleMarkMargin { margin } => *margin,
+                    _ => unreachable!("base selector is current"),
+                }
+            } else {
+                0.0
+            };
+            Ok(vec![transition_field(
+                PropertyFieldId::VisibleMarkMargin,
+                target,
+                VariantTransitionValue::FiniteF64(margin),
                 Vec::new(),
             )])
         }
@@ -15119,6 +15357,9 @@ fn transition_draft_edit(
                         )?,
                     }
                 }
+                ExclusionKind::VisibleMarkMargin => SiteExclusionPolicy::VisibleMarkMargin {
+                    margin: transition_f64(draft, PropertyFieldId::VisibleMarkMargin)?,
+                },
             };
             Ok(PatternDefinitionEdit::SetExclusionVariant {
                 mechanism_id,
@@ -15341,6 +15582,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::ExclusionMinimumCenterDistance => {
                 PropertyCommandKind::SetExclusionMinimumCenterDistance
             }
+            PropertyFieldId::VisibleMarkMargin => PropertyCommandKind::SetVisibleMarkMargin,
             PropertyFieldId::RandomMaximumAttempts => PropertyCommandKind::SetRandomMaximumAttempts,
             PropertyFieldId::RandomMaximumNeighborChecks => {
                 PropertyCommandKind::SetRandomMaximumNeighborChecks
@@ -15489,6 +15731,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
                 fill_bounds()
             }
             PropertyFieldId::CoverageAdditionalMargin
+            | PropertyFieldId::VisibleMarkMargin
             | PropertyFieldId::ModeledMappingGain
             | PropertyFieldId::ArtworkWeightMappingGain
             | PropertyFieldId::IntersectionMergeEpsilon => nonnegative_bounds(),
@@ -15520,7 +15763,8 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::IntersectionMergeEpsilon
             | PropertyFieldId::RandomEvenMinimumCenterDistance
             | PropertyFieldId::RandomClusterSpread
-            | PropertyFieldId::ExclusionMinimumCenterDistance => PropertyUnit::DocumentDistance,
+            | PropertyFieldId::ExclusionMinimumCenterDistance
+            | PropertyFieldId::VisibleMarkMargin => PropertyUnit::DocumentDistance,
             PropertyFieldId::ConnectionMaximumDistance => PropertyUnit::DocumentDistance,
             PropertyFieldId::GuideArcCenterX
             | PropertyFieldId::GuideArcCenterY
@@ -15611,6 +15855,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::ExclusionMinimumCenterDistance => {
                 PropertyApplicability::MinimumCenterExclusion
             }
+            PropertyFieldId::VisibleMarkMargin => PropertyApplicability::VisibleMarkExclusion,
             PropertyFieldId::RandomMaximumAttempts
             | PropertyFieldId::RandomMaximumNeighborChecks => PropertyApplicability::RandomProcess,
             PropertyFieldId::OutputSiteProduct
@@ -15636,6 +15881,8 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::SourceReference => InvalidationLevel::Source,
             PropertyFieldId::MarkMinimumFill
             | PropertyFieldId::MarkMaximumFill
+            | PropertyFieldId::ConnectedMinimumThickness
+            | PropertyFieldId::ConnectedMaximumThickness
             | PropertyFieldId::ShapeRotationDegrees
             | PropertyFieldId::LegacyMappingComponent
             | PropertyFieldId::LegacyMappingPlacement
@@ -15707,6 +15954,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
                 | PropertyFieldId::ArtworkWeightResponse
                 | PropertyFieldId::RandomExclusion
                 | PropertyFieldId::ExclusionMinimumCenterDistance
+                | PropertyFieldId::VisibleMarkMargin
                 | PropertyFieldId::RandomMaximumAttempts
                 | PropertyFieldId::RandomMaximumNeighborChecks
                 | PropertyFieldId::OutputSiteProduct
@@ -15726,6 +15974,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
         structural_support: match field {
             PropertyFieldId::MarkMaximumFill => {
                 StructuralSupportConstraint::MaximumFillDefinesCoverage
+            }
+            PropertyFieldId::RandomExclusion | PropertyFieldId::VisibleMarkMargin => {
+                StructuralSupportConstraint::VisibleMarkMarginUsesMaximumRealizedSupport
             }
             _ => StructuralSupportConstraint::None,
         },
@@ -15753,6 +16004,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
         },
         choice_policy: match field {
             PropertyFieldId::Paint => PropertyChoicePolicy::ModelRolePaint,
+            PropertyFieldId::OutputSiteUseFilterKind => {
+                PropertyChoicePolicy::CompatibleSiteUseFilter
+            }
             _ => PropertyChoicePolicy::Static,
         },
     }
@@ -15808,6 +16062,7 @@ const ARTWORK_RESPONSE_CHOICES: &[PropertyEnumChoice] = &[
 const EXCLUSION_CHOICES: &[PropertyEnumChoice] = &[
     PropertyEnumChoice::Exclusion(ExclusionKind::None),
     PropertyEnumChoice::Exclusion(ExclusionKind::MinimumCenterDistance),
+    PropertyEnumChoice::Exclusion(ExclusionKind::VisibleMarkMargin),
 ];
 const MARK_PROTOTYPE_CHOICES: &[PropertyEnumChoice] = &[
     PropertyEnumChoice::MarkPrototype(MarkPrototypeKind::Circle),
@@ -15823,6 +16078,8 @@ const SITE_USE_FILTER_CHOICES: &[PropertyEnumChoice] = &[
     PropertyEnumChoice::SiteUseFilter(SiteUseFilterKind::SitesUsedBy),
     PropertyEnumChoice::SiteUseFilter(SiteUseFilterKind::SitesUnusedBy),
 ];
+const ALL_SITE_USE_FILTER_CHOICES: &[PropertyEnumChoice] =
+    &[PropertyEnumChoice::SiteUseFilter(SiteUseFilterKind::All)];
 const CONNECTION_PROGRAM_CHOICES: &[PropertyEnumChoice] = &[
     PropertyEnumChoice::ConnectionProgram(ConnectionProgramKind::NearestLinks),
     PropertyEnumChoice::ConnectionProgram(ConnectionProgramKind::RandomLinks),
@@ -15888,6 +16145,7 @@ const fn dependency_for_contract(
         PropertyApplicability::ClusteredRandomProcess => PropertyDependency::ClusteredRandomProcess,
         PropertyApplicability::ArtworkWeightedDensity => PropertyDependency::ArtworkWeightedDensity,
         PropertyApplicability::MinimumCenterExclusion => PropertyDependency::MinimumCenterExclusion,
+        PropertyApplicability::VisibleMarkExclusion => PropertyDependency::VisibleMarkExclusion,
         PropertyApplicability::MarkPrototypeOutput => PropertyDependency::MarkPrototypeOutput,
         PropertyApplicability::AuthoredClosedShapeMark => {
             PropertyDependency::AuthoredClosedShapeMark
@@ -15917,6 +16175,9 @@ enum DescriptorRuntimeContext {
     Exclusion {
         dependency: PropertyDependency,
         support: StructuralSupportConstraint,
+    },
+    SiteUseFilter {
+        choices: &'static [PropertyEnumChoice],
     },
 }
 
@@ -15962,6 +16223,11 @@ const fn descriptor_with_runtime_context(
             dependency,
             support,
         } => (contract.choices, dependency, support),
+        DescriptorRuntimeContext::SiteUseFilter { choices } => (
+            choices,
+            dependency_for_contract(contract.applicability, PropertyDependency::Always),
+            contract.structural_support,
+        ),
     };
     PropertyDescriptor {
         field,
@@ -16009,6 +16275,8 @@ const fn property_authority(field: PropertyFieldId, target: PropertyTarget) -> P
             | PropertyFieldId::ShapeRotationDegrees
             | PropertyFieldId::MarkMinimumFill
             | PropertyFieldId::MarkMaximumFill
+            | PropertyFieldId::ConnectedMinimumThickness
+            | PropertyFieldId::ConnectedMaximumThickness
             | PropertyFieldId::RegionMinimumFill
             | PropertyFieldId::RegionMaximumFill
             | PropertyFieldId::DefinitionSelection => PropertyAuthority::ChannelDelta,
@@ -16048,6 +16316,8 @@ const fn property_reset_capable(field: PropertyFieldId, target: PropertyTarget) 
             | PropertyFieldId::ShapeRotationDegrees
             | PropertyFieldId::MarkMinimumFill
             | PropertyFieldId::MarkMaximumFill
+            | PropertyFieldId::ConnectedMinimumThickness
+            | PropertyFieldId::ConnectedMaximumThickness
             | PropertyFieldId::RegionMinimumFill
             | PropertyFieldId::RegionMaximumFill
             | PropertyFieldId::DefinitionSelection
@@ -16534,6 +16804,10 @@ fn validate_pattern_structure_recipe(
                 SiteExclusionPolicy::MinimumCenterDistance { minimum } => {
                     validate_positive_finite(*minimum, "preset.recipe.exclusion.minimum")?
                 }
+                SiteExclusionPolicy::VisibleMarkMargin { margin } => validate_nonnegative_finite(
+                    *margin,
+                    "preset.recipe.exclusion.visible_mark_margin",
+                )?,
             }
             if *maximum_attempts == 0 || *maximum_neighbor_checks == 0 {
                 return Err(ValidationError::new(
@@ -16687,14 +16961,18 @@ fn validate_pattern_structure_recipe(
                                 "Guide Faces output requires a straight-guide family recipe",
                             ));
                         };
+                        let mut prior = None;
                         if !(2..=3).contains(&dimension_indices.len())
-                            || dimension_indices
-                                .iter()
-                                .any(|index| *index >= dimensions.len())
+                            || dimension_indices.iter().any(|index| {
+                                let invalid = *index >= dimensions.len()
+                                    || prior.is_some_and(|value| value >= *index);
+                                prior = Some(*index);
+                                invalid
+                            })
                         {
                             return Err(ValidationError::new(
                                 "preset.recipe.outputs.guide_faces.dimension_indices",
-                                "Guide Faces output requires two or three in-bounds dimension indices",
+                                "Guide Faces output requires two or three unique increasing in-bounds dimension indices",
                             ));
                         }
                     }
@@ -17160,6 +17438,10 @@ pub enum PatternDefinitionEdit {
     SetExclusionMinimumCenterDistance {
         mechanism_id: PatternMechanismId,
         minimum_center_distance: f64,
+    },
+    SetVisibleMarkMargin {
+        mechanism_id: PatternMechanismId,
+        margin: f64,
     },
     SetRandomMaximumAttempts {
         mechanism_id: PatternMechanismId,
@@ -17751,6 +18033,9 @@ impl PatternDefinitionEdit {
                     SiteExclusionPolicy::MinimumCenterDistance { .. } => {
                         ExclusionKind::MinimumCenterDistance
                     }
+                    SiteExclusionPolicy::VisibleMarkMargin { .. } => {
+                        ExclusionKind::VisibleMarkMargin
+                    }
                 })),
             ),
             Edit::SetExclusionMinimumCenterDistance {
@@ -17759,6 +18044,10 @@ impl PatternDefinitionEdit {
             } => (
                 PropertyFieldId::ExclusionMinimumCenterDistance,
                 PropertyFieldValue::FiniteF64(*minimum_center_distance),
+            ),
+            Edit::SetVisibleMarkMargin { margin, .. } => (
+                PropertyFieldId::VisibleMarkMargin,
+                PropertyFieldValue::FiniteF64(*margin),
             ),
             Edit::SetRandomMaximumAttempts {
                 maximum_attempts, ..

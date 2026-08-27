@@ -6,8 +6,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt,
+    time::{Duration, Instant},
 };
 
+use rayon::prelude::*;
 use serde::Serialize;
 use toniator_domain::{
     ArtworkWeightResponse, AuthoredCurveSegment, AuthoredPoint2, AuthoredStructureDraft,
@@ -50,9 +52,9 @@ pub use toniator_geometry::{
     treat_regions_cancellable, voronoi_region_references,
 };
 use toniator_sampling::{
-    RegionSamplingLimits, RegionSourceSample, SampledSourcePaint, SamplingError, SourceComponent,
-    SourceField, SourceMappingComponent, SourcePlacement, sample_region_area_average_batch,
-    sample_region_reference,
+    RegionSamplingDiagnostics, RegionSamplingLimits, RegionSourceSample, SampledSourcePaint,
+    SamplingError, SourceComponent, SourceField, SourceMappingComponent, SourcePlacement,
+    sample_region_area_average_batch_with_diagnostics, sample_region_reference,
 };
 
 /// The finite antialiasing envelope included in every Stage 3 generation plan.
@@ -1552,6 +1554,25 @@ pub struct RegionOutputRealizationDiagnostics {
     pub retained_regions: usize,
 }
 
+/// Diagnostic-only timing and workload facts from one completed typed region realization.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RegionOutputPerformanceMetrics {
+    /// Measures complete untreated-region source sampling.
+    pub sampling_duration: Duration,
+    /// Measures positive region resize and canonical treatment work.
+    pub treatment_duration: Duration,
+    /// Counts sampled untreated bases in stable producer order.
+    pub sampled_bases: usize,
+    /// Counts AreaAverage flattened boundary chords, or zero for ReferencePoint sampling.
+    pub flattened_segments: usize,
+    /// Counts AreaAverage source-cell intersections, or zero for ReferencePoint sampling.
+    pub cell_intersections: usize,
+    /// Counts retained positive treated canonical components.
+    pub retained_regions: usize,
+    /// Reports the shared Rayon worker count available to indexed region work.
+    pub worker_count: usize,
+}
+
 /// Records one already-completed typed region realization for engine test evidence only.
 ///
 /// This record exists solely behind the opt-in `test-evidence` feature. It is not serialized,
@@ -1637,7 +1658,7 @@ pub fn realize_region_output_cancellable(
     paint: &ChannelPaint,
     sampling_limits: RegionSamplingLimits,
     treatment_limits: RegionTreatmentLimits,
-    cancelled: &dyn Fn() -> bool,
+    cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<TypedRegionOutputRealization, RegionOutputRealizationError> {
     realize_region_output_cancellable_impl(
         capability,
@@ -1651,9 +1672,59 @@ pub fn realize_region_output_cancellable(
         sampling_limits,
         treatment_limits,
         cancelled,
+        None,
         #[cfg(feature = "test-evidence")]
         None,
     )
+}
+
+/// Realizes one typed region output and reports coarse production boundary metrics.
+///
+/// This calls the same authority as [`realize_region_output_cancellable`]. Timings and workload
+/// counters remain diagnostic-only and are returned only with a complete realization.
+///
+/// # Errors
+///
+/// Returns the normal binding, identity, sampling, treatment, allocation, or cancellation failure
+/// without returning partial geometry or performance data.
+#[allow(clippy::too_many_arguments)]
+pub fn realize_region_output_profiled_cancellable(
+    capability: &OutputCapability,
+    setting: &EffectivePatternOutputSettings,
+    untreated: &CanonicalRegionSet,
+    references: &[RegionReference],
+    source: Option<&SourceField>,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    paint: &ChannelPaint,
+    sampling_limits: RegionSamplingLimits,
+    treatment_limits: RegionTreatmentLimits,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<
+    (TypedRegionOutputRealization, RegionOutputPerformanceMetrics),
+    RegionOutputRealizationError,
+> {
+    let mut performance = RegionOutputPerformanceMetrics {
+        worker_count: rayon::current_num_threads(),
+        ..RegionOutputPerformanceMetrics::default()
+    };
+    let realization = realize_region_output_cancellable_impl(
+        capability,
+        setting,
+        untreated,
+        references,
+        source,
+        canvas,
+        mapping,
+        paint,
+        sampling_limits,
+        treatment_limits,
+        cancelled,
+        Some(&mut performance),
+        #[cfg(feature = "test-evidence")]
+        None,
+    )?;
+    Ok((realization, performance))
 }
 
 /// Realizes one Region output while retaining a test-only record from that exact invocation.
@@ -1677,7 +1748,7 @@ pub fn realize_region_output_with_evidence_cancellable(
     paint: &ChannelPaint,
     sampling_limits: RegionSamplingLimits,
     treatment_limits: RegionTreatmentLimits,
-    cancelled: &dyn Fn() -> bool,
+    cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<(TypedRegionOutputRealization, RegionEvaluationEvidence), RegionOutputRealizationError>
 {
     let mut evidence = None;
@@ -1693,6 +1764,7 @@ pub fn realize_region_output_with_evidence_cancellable(
         sampling_limits,
         treatment_limits,
         cancelled,
+        None,
         Some(&mut evidence),
     )?;
     let evidence = evidence.expect("successful test evidence realization records one snapshot");
@@ -1719,7 +1791,8 @@ fn realize_region_output_cancellable_impl(
     paint: &ChannelPaint,
     sampling_limits: RegionSamplingLimits,
     treatment_limits: RegionTreatmentLimits,
-    cancelled: &dyn Fn() -> bool,
+    cancelled: &(dyn Fn() -> bool + Sync),
+    mut performance: Option<&mut RegionOutputPerformanceMetrics>,
     #[cfg(feature = "test-evidence")] evidence: Option<&mut Option<RegionEvaluationEvidence>>,
 ) -> Result<TypedRegionOutputRealization, RegionOutputRealizationError> {
     validate_region_output_binding(capability, setting)?;
@@ -1735,7 +1808,8 @@ fn realize_region_output_cancellable_impl(
         "sampling.region.source",
         "region sampling requires a decoded source field",
     ))?;
-    let samples = sample_untreated_regions(
+    let sampling_started = Instant::now();
+    let (samples, sampling_diagnostics) = sample_untreated_regions(
         source,
         untreated,
         &references_by_id,
@@ -1745,6 +1819,12 @@ fn realize_region_output_cancellable_impl(
         sampling_limits,
         cancelled,
     )?;
+    if let Some(performance) = performance.as_deref_mut() {
+        performance.sampling_duration = sampling_started.elapsed();
+        performance.sampled_bases = samples.len();
+        performance.flattened_segments = sampling_diagnostics.flattened_segments;
+        performance.cell_intersections = sampling_diagnostics.cell_intersections;
+    }
     let mut requests = Vec::new();
     requests
         .try_reserve(untreated.regions().len())
@@ -1767,6 +1847,7 @@ fn realize_region_output_cancellable_impl(
             treatment,
         });
     }
+    let treatment_started = Instant::now();
     let treated = treat_region_requests_cancellable(
         capability.layer_id,
         untreated,
@@ -1775,6 +1856,10 @@ fn realize_region_output_cancellable_impl(
         cancelled,
     )
     .map_err(|error| region_realization_error(error.path(), error.message()))?;
+    if let Some(performance) = performance {
+        performance.treatment_duration = treatment_started.elapsed();
+        performance.retained_regions = treated.regions.regions().len();
+    }
     let paints = matches!(paint, ChannelPaint::SampledSource)
         .then(|| align_treated_region_paints(&treated, untreated, &samples))
         .transpose()?;
@@ -1924,26 +2009,33 @@ fn sample_untreated_regions(
     mapping: SourceMapping,
     response: &toniator_domain::RegionGeometryResponse,
     limits: RegionSamplingLimits,
-    cancelled: &dyn Fn() -> bool,
-) -> Result<Vec<RegionSourceSample>, RegionOutputRealizationError> {
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<(Vec<RegionSourceSample>, RegionSamplingDiagnostics), RegionOutputRealizationError> {
     match response.sampling {
-        toniator_domain::RegionSamplingStrategy::ReferencePoint => untreated
-            .regions()
-            .iter()
-            .map(|region| {
-                poll_region_realizer(cancelled)?;
-                sample_region_reference(source, references[&region.id], canvas, mapping)
-                    .map_err(|error| region_realization_error(error.path(), error.message()))
-            })
-            .collect(),
+        toniator_domain::RegionSamplingStrategy::ReferencePoint => {
+            let samples = untreated
+                .regions()
+                .par_iter()
+                .map(|region| {
+                    poll_region_realizer(cancelled)?;
+                    sample_region_reference(source, references[&region.id], canvas, mapping)
+                        .map_err(|error| region_realization_error(error.path(), error.message()))
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((samples, RegionSamplingDiagnostics::default()))
+        }
         toniator_domain::RegionSamplingStrategy::AreaAverage => {
             let rings: Vec<_> = untreated
                 .regions()
                 .iter()
                 .map(|region| region.ring.clone())
                 .collect();
-            sample_region_area_average_batch(source, &rings, canvas, mapping, limits, cancelled)
-                .map_err(|error| region_realization_error(error.path(), error.message()))
+            sample_region_area_average_batch_with_diagnostics(
+                source, &rings, canvas, mapping, limits, cancelled,
+            )
+            .map_err(|error| region_realization_error(error.path(), error.message()))
         }
     }
 }
@@ -6002,10 +6094,12 @@ fn required_exclusion_distance(random: &RandomSiteCapability, support: f64) -> f
     random_neighborhood(random, support)
 }
 
-fn exclusion_distance(policy: &SiteExclusionPolicy, _support: f64) -> f64 {
+/// Resolves an exclusion policy against the evaluator-supplied active maximum mark support.
+fn exclusion_distance(policy: &SiteExclusionPolicy, support: f64) -> f64 {
     match policy {
         SiteExclusionPolicy::None => 0.0,
         SiteExclusionPolicy::MinimumCenterDistance { minimum } => *minimum,
+        SiteExclusionPolicy::VisibleMarkMargin { margin } => support * 2.0 + margin,
     }
 }
 
@@ -6141,6 +6235,10 @@ fn random_family_fingerprint(
             bytes.push(2);
             bytes.extend(minimum.to_bits().to_le_bytes());
         }
+        SiteExclusionPolicy::VisibleMarkMargin { margin } => {
+            bytes.push(3);
+            bytes.extend(margin.to_bits().to_le_bytes());
+        }
     }
     bytes.extend(random.maximum_attempts.to_le_bytes());
     bytes.extend(random.maximum_neighbor_checks.to_le_bytes());
@@ -6173,15 +6271,48 @@ pub fn realize_typed_mapped_outputs(
     mapping: SourceMapping,
     response: MarkResponse,
 ) -> Result<TypedRealization<MappedCircularMarkRealization>, PatternPipelineError> {
+    realize_typed_mapped_outputs_cancellable(
+        family,
+        plan,
+        source,
+        canvas,
+        mapping,
+        response,
+        &|| false,
+    )
+}
+
+/// Realizes typed mapped marks with indexed CPU work and cooperative cancellation.
+///
+/// # Errors
+///
+/// Returns cancellation or the existing typed provenance, sampling, response, and geometry
+/// diagnostics without exposing a partial output.
+pub fn realize_typed_mapped_outputs_cancellable(
+    family: &TypedFamilyOutput,
+    plan: &PatternPipelinePlan,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: MarkResponse,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<TypedRealization<MappedCircularMarkRealization>, PatternPipelineError> {
     let provenance = realization_provenance(family, plan)?;
     let compatibility = legacy_grid_sites_for_circular_marks(family)?;
-    realize_mapped_circular_marks(&compatibility, source, canvas, mapping, response)
-        .map(|mut output| {
-            output.realization_fingerprint =
-                orientation_identity(&output.realization_fingerprint, family, &provenance);
-            TypedRealization { provenance, output }
-        })
-        .map_err(|error| PatternPipelineError::new(error.path(), error.message()))
+    realize_mapped_circular_marks_cancellable(
+        &compatibility,
+        source,
+        canvas,
+        mapping,
+        response,
+        is_cancelled,
+    )
+    .map(|mut output| {
+        output.realization_fingerprint =
+            orientation_identity(&output.realization_fingerprint, family, &provenance);
+        TypedRealization { provenance, output }
+    })
+    .map_err(|error| PatternPipelineError::new(error.path(), error.message()))
 }
 
 /// Ordered sampled-paint output realization through the declared typed layer.
@@ -6193,15 +6324,48 @@ pub fn realize_typed_source_color_outputs(
     mapping: SourceMapping,
     response: MarkResponse,
 ) -> Result<TypedRealization<SourceColorCircularMarkRealization>, PatternPipelineError> {
+    realize_typed_source_color_outputs_cancellable(
+        family,
+        plan,
+        source,
+        canvas,
+        mapping,
+        response,
+        &|| false,
+    )
+}
+
+/// Realizes typed sampled-color marks with indexed CPU work and cancellation.
+///
+/// # Errors
+///
+/// Returns cancellation or the existing typed provenance, sampling, response, and geometry
+/// diagnostics without exposing a partial output.
+pub fn realize_typed_source_color_outputs_cancellable(
+    family: &TypedFamilyOutput,
+    plan: &PatternPipelinePlan,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: MarkResponse,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<TypedRealization<SourceColorCircularMarkRealization>, PatternPipelineError> {
     let provenance = realization_provenance(family, plan)?;
     let compatibility = legacy_grid_sites_for_circular_marks(family)?;
-    realize_source_color_circular_marks(&compatibility, source, canvas, mapping, response)
-        .map(|mut output| {
-            output.realization_fingerprint =
-                orientation_identity(&output.realization_fingerprint, family, &provenance);
-            TypedRealization { provenance, output }
-        })
-        .map_err(|error| PatternPipelineError::new(error.path(), error.message()))
+    realize_source_color_circular_marks_cancellable(
+        &compatibility,
+        source,
+        canvas,
+        mapping,
+        response,
+        is_cancelled,
+    )
+    .map(|mut output| {
+        output.realization_fingerprint =
+            orientation_identity(&output.realization_fingerprint, family, &provenance);
+        TypedRealization { provenance, output }
+    })
+    .map_err(|error| PatternPipelineError::new(error.path(), error.message()))
 }
 
 /// Realizes one explicit mark output into a capability-addressed mapped unit.
@@ -6221,6 +6385,37 @@ pub fn realize_typed_mapped_output(
     mapping: SourceMapping,
     shape_rotation_degrees: f64,
 ) -> Result<TypedOutputRealization<MappedCircularMarkRealization>, PatternPipelineError> {
+    realize_typed_mapped_output_cancellable(
+        family,
+        plan,
+        capability,
+        setting,
+        source,
+        canvas,
+        mapping,
+        shape_rotation_degrees,
+        &|| false,
+    )
+}
+
+/// Realizes one explicit mapped mark output with cooperative worker cancellation.
+///
+/// # Errors
+///
+/// Returns cancellation or the existing binding, response, sampling, and geometry diagnostic
+/// without exposing a partial output unit.
+#[allow(clippy::too_many_arguments)]
+pub fn realize_typed_mapped_output_cancellable(
+    family: &TypedFamilyOutput,
+    plan: &PatternPipelinePlan,
+    capability: &OutputCapability,
+    setting: &EffectivePatternOutputSettings,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    shape_rotation_degrees: f64,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<TypedOutputRealization<MappedCircularMarkRealization>, PatternPipelineError> {
     validate_output_realization_binding(plan, capability, setting)?;
     let PatternGeometryResponse::Marks(response) = &setting.response else {
         return Err(PatternPipelineError::new(
@@ -6228,7 +6423,7 @@ pub fn realize_typed_mapped_output(
             "mapped mark realization requires a mark response",
         ));
     };
-    let realization = realize_typed_mapped_outputs(
+    let realization = realize_typed_mapped_outputs_cancellable(
         family,
         plan,
         source,
@@ -6239,6 +6434,7 @@ pub fn realize_typed_mapped_output(
             maximum_fill: response.maximum_fill,
             rotation_offset_degrees: shape_rotation_degrees,
         },
+        is_cancelled,
     )?;
     Ok(TypedOutputRealization {
         output_layer_id: capability.layer_id,
@@ -6264,6 +6460,37 @@ pub fn realize_typed_source_color_output(
     mapping: SourceMapping,
     shape_rotation_degrees: f64,
 ) -> Result<TypedOutputRealization<SourceColorCircularMarkRealization>, PatternPipelineError> {
+    realize_typed_source_color_output_cancellable(
+        family,
+        plan,
+        capability,
+        setting,
+        source,
+        canvas,
+        mapping,
+        shape_rotation_degrees,
+        &|| false,
+    )
+}
+
+/// Realizes one explicit sampled-color mark output with cooperative worker cancellation.
+///
+/// # Errors
+///
+/// Returns cancellation or the existing binding, response, sampling, and geometry diagnostic
+/// without exposing a partial output unit.
+#[allow(clippy::too_many_arguments)]
+pub fn realize_typed_source_color_output_cancellable(
+    family: &TypedFamilyOutput,
+    plan: &PatternPipelinePlan,
+    capability: &OutputCapability,
+    setting: &EffectivePatternOutputSettings,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    shape_rotation_degrees: f64,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<TypedOutputRealization<SourceColorCircularMarkRealization>, PatternPipelineError> {
     validate_output_realization_binding(plan, capability, setting)?;
     let PatternGeometryResponse::Marks(response) = &setting.response else {
         return Err(PatternPipelineError::new(
@@ -6271,7 +6498,7 @@ pub fn realize_typed_source_color_output(
             "sampled mark realization requires a mark response",
         ));
     };
-    let realization = realize_typed_source_color_outputs(
+    let realization = realize_typed_source_color_outputs_cancellable(
         family,
         plan,
         source,
@@ -6282,6 +6509,7 @@ pub fn realize_typed_source_color_output(
             maximum_fill: response.maximum_fill,
             rotation_offset_degrees: shape_rotation_degrees,
         },
+        is_cancelled,
     )?;
     Ok(TypedOutputRealization {
         output_layer_id: capability.layer_id,
@@ -6374,7 +6602,7 @@ pub fn realize_typed_canonical_marks_cancellable(
     source: &SourceField,
     canvas: &CanvasSpec,
     request: CanonicalMarkRequest,
-    is_cancelled: &dyn Fn() -> bool,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<TypedRealization<CanonicalMarkRealization>, PatternPipelineError> {
     let provenance = realization_provenance(family, plan)?;
     let [output] = plan.ordered_outputs.as_slice() else {
@@ -6430,9 +6658,10 @@ pub fn realize_typed_canonical_marks_cancellable(
             request.max_transformed_curve_segment_instances,
         )?;
     }
-    let orientations = family
+    let parallel_results = family
         .site_set()
-        .iter()
+        .sites()
+        .par_iter()
         .map(|site| {
             if is_cancelled() {
                 return Err(PatternPipelineError::new(
@@ -6440,102 +6669,106 @@ pub fn realize_typed_canonical_marks_cancellable(
                     "realization was cancelled",
                 ));
             }
-            site_orientation_degrees(
+            let orientation = site_orientation_degrees(
                 family,
                 site,
                 orientation,
                 request.response.rotation_offset_degrees,
-            )
+            )?;
+            let (ink, sampled_paint) = if request.sampled_paint {
+                let sample = source
+                    .sample_source_color(site.position, canvas, request.mapping)
+                    .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
+                (
+                    sample.response,
+                    Some(match sample.paint {
+                        Some(paint) => (paint, false),
+                        None => (
+                            SampledSourcePaint {
+                                red: 0.0,
+                                green: 0.0,
+                                blue: 0.0,
+                                alpha: 1.0,
+                            },
+                            true,
+                        ),
+                    }),
+                )
+            } else {
+                (
+                    source
+                        .sample_mapping_response(site.position, canvas, request.mapping)
+                        .map_err(|error| {
+                            PatternPipelineError::new(error.path(), error.message())
+                        })?,
+                    None,
+                )
+            };
+            let radius = if sampled_paint.is_some_and(|(_, suppressed)| suppressed) {
+                0.0
+            } else {
+                radius_from_ink_with_diameter(
+                    ink,
+                    request.response,
+                    site.nominal_cell_basis.diameter(),
+                )
+                .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?
+            };
+            if radius > family.planned_support_radius() {
+                return Err(PatternPipelineError::new(
+                    "realization.family.support_radius",
+                    "realized mark radius exceeds the planned family support",
+                ));
+            }
+            let mark = match &prototype_path {
+                None => CanonicalMark::Circle {
+                    source_site_id: site.id,
+                    center: site.position,
+                    radius,
+                    scope: site.scope,
+                    provenance: site.provenance.clone(),
+                    fill_rule: CanonicalFillRule::EvenOdd,
+                },
+                Some((path, anchor, reference_radius, _)) => {
+                    let scale = radius / reference_radius;
+                    let transformed = transform_closed_shape(
+                        path,
+                        *anchor,
+                        scale,
+                        orientation,
+                        site.position,
+                        is_cancelled,
+                    )?;
+                    CanonicalMark::ClosedPath(
+                        CanonicalPathMark::new(
+                            site.id,
+                            transformed,
+                            site.scope,
+                            site.provenance.clone(),
+                            CanonicalFillRule::EvenOdd,
+                        )
+                        .map_err(|_| {
+                            PatternPipelineError::new(
+                                "realization.mark",
+                                "transformed authored closed shape must remain finite and closed",
+                            )
+                        })?,
+                    )
+                }
+            };
+            Ok((mark, sampled_paint.map(|(paint, _)| paint)))
         })
+        .collect::<Vec<_>>();
+    let completed = parallel_results
+        .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
-    let mut marks = Vec::with_capacity(family.site_set().len());
+    let mut marks = Vec::with_capacity(completed.len());
     let mut paints = request
         .sampled_paint
-        .then(|| Vec::with_capacity(family.site_set().len()));
-    for (site, orientation) in family.site_set().iter().zip(orientations) {
-        if is_cancelled() {
-            return Err(PatternPipelineError::new(
-                "evaluation.cancelled",
-                "realization was cancelled",
-            ));
-        }
-        let (ink, sampled_paint) = if request.sampled_paint {
-            let sample = source
-                .sample_source_color(site.position, canvas, request.mapping)
-                .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
-            (
-                sample.response,
-                Some(match sample.paint {
-                    Some(paint) => (paint, false),
-                    None => (
-                        SampledSourcePaint {
-                            red: 0.0,
-                            green: 0.0,
-                            blue: 0.0,
-                            alpha: 1.0,
-                        },
-                        true,
-                    ),
-                }),
-            )
-        } else {
-            (
-                source
-                    .sample_mapping_response(site.position, canvas, request.mapping)
-                    .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?,
-                None,
-            )
-        };
-        let radius = if sampled_paint.is_some_and(|(_, suppressed)| suppressed) {
-            0.0
-        } else {
-            radius_from_ink_with_diameter(ink, request.response, site.nominal_cell_basis.diameter())
-                .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?
-        };
-        if radius > family.planned_support_radius() {
-            return Err(PatternPipelineError::new(
-                "realization.family.support_radius",
-                "realized mark radius exceeds the planned family support",
-            ));
-        }
-        let mark = match &prototype_path {
-            None => CanonicalMark::Circle {
-                source_site_id: site.id,
-                center: site.position,
-                radius,
-                scope: site.scope,
-                provenance: site.provenance.clone(),
-                fill_rule: CanonicalFillRule::EvenOdd,
-            },
-            Some((path, anchor, reference_radius, _)) => {
-                let scale = radius / reference_radius;
-                let transformed = transform_closed_shape(
-                    path,
-                    *anchor,
-                    scale,
-                    orientation,
-                    site.position,
-                    is_cancelled,
-                )?;
-                CanonicalMark::ClosedPath(
-                    CanonicalPathMark::new(
-                        site.id,
-                        transformed,
-                        site.scope,
-                        site.provenance.clone(),
-                        CanonicalFillRule::EvenOdd,
-                    )
-                    .map_err(|_| {
-                        PatternPipelineError::new(
-                            "realization.mark",
-                            "transformed authored closed shape must remain finite and closed",
-                        )
-                    })?,
-                )
-            }
-        };
+        .then(|| Vec::with_capacity(completed.len()));
+    for (mark, paint) in completed {
         marks.push(mark);
-        if let Some((paint, _)) = sampled_paint {
+        if let Some(paint) = paint {
             paints
                 .as_mut()
                 .expect("sampled paint mode initialized paint storage")
@@ -6604,7 +6837,7 @@ pub fn realize_typed_canonical_mark_output_cancellable(
     sampled_paint: bool,
     shape_rotation_degrees: f64,
     max_transformed_curve_segment_instances: usize,
-    is_cancelled: &dyn Fn() -> bool,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<TypedOutputRealization<CanonicalMarkRealization>, PatternPipelineError> {
     validate_output_realization_binding(plan, capability, setting)?;
     let PatternGeometryResponse::Marks(response) = &setting.response else {
@@ -9263,6 +9496,35 @@ pub fn realize_circular_marks(
     component: SourceComponent,
     response: MarkResponse,
 ) -> Result<CircularMarkRealization, RealizationError> {
+    realize_circular_marks_cancellable(
+        family,
+        source,
+        canvas,
+        placement,
+        component,
+        response,
+        &|| false,
+    )
+}
+
+/// Realizes legacy circular marks through indexed CPU work with cooperative cancellation.
+///
+/// Stable family order is restored before fingerprint construction, and no partial mark vector is
+/// returned when any worker observes cancellation or a realization failure.
+///
+/// # Errors
+///
+/// Returns cancellation or the same stable sampling, response, support, and geometry failures as
+/// [`realize_circular_marks`].
+pub fn realize_circular_marks_cancellable(
+    family: &GridFamilyOutput,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    placement: SourcePlacement,
+    component: SourceComponent,
+    response: MarkResponse,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<CircularMarkRealization, RealizationError> {
     validate_response(response, family.support_radius)?;
     if !family.has_only_finite_geometry() {
         return Err(RealizationError::new(
@@ -9270,35 +9532,45 @@ pub fn realize_circular_marks(
             "family geometry must be finite",
         ));
     }
-    let mut marks = Vec::with_capacity(family.sites.len());
-    for site in &family.sites {
-        let ink = source.sample_mark_ink(site.position, canvas, placement, component)?;
-        if !ink.is_finite() {
-            return Err(RealizationError::new(
-                "realization.sample",
-                "effective mark ink must be finite",
-            ));
-        }
-        let radius = radius_from_ink_with_diameter(ink, response, site.nominal_cell_diameter)?;
-        if radius > family.support_radius {
-            return Err(RealizationError::new(
-                "realization.family.support_radius",
-                "realized radius exceeds the planned family support",
-            ));
-        }
-        let mark = CanonicalCircleMark::new(
-            site.id,
-            site.position,
-            radius,
-            site.scope,
-            site.provenance.clone(),
-        )
-        .ok_or(RealizationError::new(
-            "realization.mark",
-            "mark geometry must be finite",
-        ))?;
-        marks.push(mark);
-    }
+    let results = family
+        .sites
+        .par_iter()
+        .map(|site| {
+            if is_cancelled() {
+                return Err(RealizationError::new(
+                    "evaluation.cancelled",
+                    "realization was cancelled",
+                ));
+            }
+            let ink = source.sample_mark_ink(site.position, canvas, placement, component)?;
+            if !ink.is_finite() {
+                return Err(RealizationError::new(
+                    "realization.sample",
+                    "effective mark ink must be finite",
+                ));
+            }
+            let radius = radius_from_ink_with_diameter(ink, response, site.nominal_cell_diameter)?;
+            if radius > family.support_radius {
+                return Err(RealizationError::new(
+                    "realization.family.support_radius",
+                    "realized radius exceeds the planned family support",
+                ));
+            }
+            let mark = CanonicalCircleMark::new(
+                site.id,
+                site.position,
+                radius,
+                site.scope,
+                site.provenance.clone(),
+            )
+            .ok_or(RealizationError::new(
+                "realization.mark",
+                "mark geometry must be finite",
+            ))?;
+            Ok(mark)
+        })
+        .collect::<Vec<_>>();
+    let marks = results.into_iter().collect::<Result<Vec<_>, _>>()?;
     let output = CircularMarkRealization {
         family_fingerprint: family.family_fingerprint.clone(),
         realization_fingerprint: realization_fingerprint(
@@ -9329,6 +9601,23 @@ pub fn realize_mapped_circular_marks(
     mapping: SourceMapping,
     response: MarkResponse,
 ) -> Result<MappedCircularMarkRealization, RealizationError> {
+    realize_mapped_circular_marks_cancellable(family, source, canvas, mapping, response, &|| false)
+}
+
+/// Realizes mapped circles in stable indexed parallel order with cooperative cancellation.
+///
+/// # Errors
+///
+/// Returns cancellation or the ordinary mapped sampling, response, support, and geometry failure
+/// without publishing a partial realization.
+pub fn realize_mapped_circular_marks_cancellable(
+    family: &GridFamilyOutput,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: MarkResponse,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<MappedCircularMarkRealization, RealizationError> {
     validate_response(response, family.support_radius)?;
     if !family.has_only_finite_geometry() {
         return Err(RealizationError::new(
@@ -9336,29 +9625,39 @@ pub fn realize_mapped_circular_marks(
             "family geometry must be finite",
         ));
     }
-    let mut marks = Vec::with_capacity(family.sites.len());
-    for site in &family.sites {
-        let ink = source.sample_mapping_response(site.position, canvas, mapping)?;
-        let radius = radius_from_ink_with_diameter(ink, response, site.nominal_cell_diameter)?;
-        if radius > family.support_radius {
-            return Err(RealizationError::new(
-                "realization.family.support_radius",
-                "realized radius exceeds the planned family support",
-            ));
-        }
-        let mark = CanonicalCircleMark::new(
-            site.id,
-            site.position,
-            radius,
-            site.scope,
-            site.provenance.clone(),
-        )
-        .ok_or(RealizationError::new(
-            "realization.mark",
-            "mark geometry must be finite",
-        ))?;
-        marks.push(mark);
-    }
+    let results = family
+        .sites
+        .par_iter()
+        .map(|site| {
+            if is_cancelled() {
+                return Err(RealizationError::new(
+                    "evaluation.cancelled",
+                    "realization was cancelled",
+                ));
+            }
+            let ink = source.sample_mapping_response(site.position, canvas, mapping)?;
+            let radius = radius_from_ink_with_diameter(ink, response, site.nominal_cell_diameter)?;
+            if radius > family.support_radius {
+                return Err(RealizationError::new(
+                    "realization.family.support_radius",
+                    "realized radius exceeds the planned family support",
+                ));
+            }
+            let mark = CanonicalCircleMark::new(
+                site.id,
+                site.position,
+                radius,
+                site.scope,
+                site.provenance.clone(),
+            )
+            .ok_or(RealizationError::new(
+                "realization.mark",
+                "mark geometry must be finite",
+            ))?;
+            Ok(mark)
+        })
+        .collect::<Vec<_>>();
+    let marks = results.into_iter().collect::<Result<Vec<_>, _>>()?;
     let output = MappedCircularMarkRealization {
         family_fingerprint: family.family_fingerprint.clone(),
         realization_fingerprint: mapped_realization_fingerprint(
@@ -9390,6 +9689,33 @@ pub fn realize_source_color_circular_marks(
     mapping: SourceMapping,
     response: MarkResponse,
 ) -> Result<SourceColorCircularMarkRealization, RealizationError> {
+    realize_source_color_circular_marks_cancellable(
+        family,
+        source,
+        canvas,
+        mapping,
+        response,
+        &|| false,
+    )
+}
+
+/// Realizes source-colored circles in stable indexed parallel order with cancellation.
+///
+/// Exact-zero-alpha sites retain their existing omission semantics, and the sequential ordered
+/// collection keeps paint/mark correspondence and fingerprints scheduling-independent.
+///
+/// # Errors
+///
+/// Returns cancellation or the ordinary sampled-color, response, support, and geometry failure
+/// without publishing a partial realization.
+pub fn realize_source_color_circular_marks_cancellable(
+    family: &GridFamilyOutput,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: MarkResponse,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<SourceColorCircularMarkRealization, RealizationError> {
     validate_response(response, family.support_radius)?;
     if !family.has_only_finite_geometry() {
         return Err(RealizationError::new(
@@ -9397,33 +9723,51 @@ pub fn realize_source_color_circular_marks(
             "family geometry must be finite",
         ));
     }
-    let mut marks = Vec::with_capacity(family.sites.len());
-    for site in &family.sites {
-        let sample = source.sample_source_color(site.position, canvas, mapping)?;
-        let Some(paint) = sample.paint else {
-            continue;
-        };
-        let radius =
-            radius_from_ink_with_diameter(sample.response, response, site.nominal_cell_diameter)?;
-        if radius > family.support_radius {
-            return Err(RealizationError::new(
-                "realization.family.support_radius",
-                "realized radius exceeds the planned family support",
-            ));
-        }
-        let mark = CanonicalCircleMark::new(
-            site.id,
-            site.position,
-            radius,
-            site.scope,
-            site.provenance.clone(),
-        )
-        .ok_or(RealizationError::new(
-            "realization.mark",
-            "mark geometry must be finite",
-        ))?;
-        marks.push(SourceColorCircleMark { mark, paint });
-    }
+    let results = family
+        .sites
+        .par_iter()
+        .map(|site| {
+            if is_cancelled() {
+                return Err(RealizationError::new(
+                    "evaluation.cancelled",
+                    "realization was cancelled",
+                ));
+            }
+            let sample = source.sample_source_color(site.position, canvas, mapping)?;
+            let Some(paint) = sample.paint else {
+                return Ok(None);
+            };
+            let radius = radius_from_ink_with_diameter(
+                sample.response,
+                response,
+                site.nominal_cell_diameter,
+            )?;
+            if radius > family.support_radius {
+                return Err(RealizationError::new(
+                    "realization.family.support_radius",
+                    "realized radius exceeds the planned family support",
+                ));
+            }
+            let mark = CanonicalCircleMark::new(
+                site.id,
+                site.position,
+                radius,
+                site.scope,
+                site.provenance.clone(),
+            )
+            .ok_or(RealizationError::new(
+                "realization.mark",
+                "mark geometry must be finite",
+            ))?;
+            Ok(Some(SourceColorCircleMark { mark, paint }))
+        })
+        .collect::<Vec<_>>();
+    let marks: Vec<SourceColorCircleMark> = results
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect();
     let output = SourceColorCircularMarkRealization {
         family_fingerprint: family.family_fingerprint.clone(),
         realization_fingerprint: source_color_realization_fingerprint(
@@ -10090,6 +10434,7 @@ mod stage20m_allocation_tests {
 mod random_prng_contract_tests {
     use super::*;
     use std::cell::Cell;
+    use toniator_domain::{CoveragePolicy, PatternDefinitionId};
 
     #[test]
     fn xorshift32_sequence_and_zero_seed_mapping_are_fixed() {
@@ -10150,6 +10495,77 @@ mod random_prng_contract_tests {
             artwork_weight_response(2.0, &ArtworkWeightResponse::Smoothstep),
             1.0
         );
+    }
+
+    /// Proves visible-mark exclusion derives center spacing from active maximum support plus margin.
+    #[test]
+    fn visible_mark_margin_changes_random_site_separation_with_support() {
+        let definition = PatternDefinition::random_sites(
+            PatternDefinitionId(501),
+            "visible mark margin",
+            PatternMechanismId(502),
+            PatternMechanismId(503),
+            PatternMechanismId(504),
+            PatternMechanismId(505),
+            PatternOutputLayerId(506),
+            RandomSiteCharacter::RawUniform,
+            7,
+            SiteDensityModulation::Uniform,
+            SiteExclusionPolicy::VisibleMarkMargin { margin: 1.0 },
+            10_000,
+            1_000_000,
+            CoveragePolicy {
+                guard_steps: 1,
+                additional_margin: 0.0,
+            },
+        );
+        let plan = resolve_pattern_pipeline(&definition).expect("random pipeline resolves");
+        let evaluate = |support_radius| {
+            evaluate_random_sites_cancellable(
+                &plan.family,
+                &GridInspectRequest {
+                    canvas: CanvasSpec {
+                        width: 100.0,
+                        height: 100.0,
+                    },
+                    density: DensityMetric2D {
+                        across_x: 5.0,
+                        across_y: 5.0,
+                        aspect_locked: true,
+                    },
+                    rotation_degrees: 0.0,
+                    translation_x: 0.0,
+                    translation_y: 0.0,
+                    guard_steps: 1,
+                    support_radius,
+                    max_family_candidates: 100_000,
+                },
+                None,
+                &|| false,
+            )
+            .expect("bounded random sites evaluate")
+        };
+        let small = evaluate(1.0);
+        let large = evaluate(4.0);
+        assert_eq!(
+            required_exclusion_distance(&plan.family.random.clone().unwrap(), 1.0),
+            3.0
+        );
+        assert_eq!(
+            required_exclusion_distance(&plan.family.random.clone().unwrap(), 4.0),
+            9.0
+        );
+        for (evaluation, minimum) in [(&small, 3.0), (&large, 9.0)] {
+            for (index, site) in evaluation.sites.iter().enumerate() {
+                assert!(evaluation.sites[index + 1..].iter().all(|other| {
+                    (site.position.x - other.position.x).hypot(site.position.y - other.position.y)
+                        + 1.0e-12
+                        >= minimum
+                }));
+            }
+        }
+        assert_ne!(small.family_fingerprint, large.family_fingerprint);
+        assert!(large.diagnostics.rejected_by_exclusion > small.diagnostics.rejected_by_exclusion);
     }
 }
 
@@ -10713,6 +11129,58 @@ mod realization_tests {
             .path(),
             "realization.response"
         );
+    }
+
+    /// Proves mapped per-site workers preserve stable output and observe cancellation atomically.
+    #[test]
+    fn mapped_parallel_realization_matches_one_worker_and_cancels() {
+        let positions = (0..128)
+            .map(|value| f64::from(value) / 127.0)
+            .collect::<Vec<_>>();
+        let family = sites_at_positions(&positions);
+        let source = source_from_rgba(2, vec![255, 0, 0, 255, 0, 0, 0, 255]);
+        let canvas = CanvasSpec {
+            width: 1.0,
+            height: 1.0,
+        };
+        let mapping = SourceMapping::canonical(SourceMappingComponent::Red);
+        let response = MarkResponse {
+            minimum_fill: 0.2,
+            maximum_fill: 0.9,
+            rotation_offset_degrees: 0.0,
+        };
+        let run = || {
+            realize_mapped_circular_marks_cancellable(
+                &family,
+                &source,
+                &canvas,
+                mapping,
+                response,
+                &|| false,
+            )
+            .expect("mapped realization completes")
+        };
+        let one = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("one-worker pool builds")
+            .install(run);
+        let many = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("four-worker pool builds")
+            .install(run);
+        assert_eq!(one, many);
+        let error = realize_mapped_circular_marks_cancellable(
+            &family,
+            &source,
+            &canvas,
+            mapping,
+            response,
+            &|| true,
+        )
+        .expect_err("cancelled per-site work publishes nothing");
+        assert_eq!(error.path(), "evaluation.cancelled");
     }
 
     /// Verifies source-colored realization omits transparent samples and keeps paint opaque.

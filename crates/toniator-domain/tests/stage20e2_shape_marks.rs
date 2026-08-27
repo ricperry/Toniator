@@ -1,14 +1,12 @@
 use toniator_domain::{
     AuthoredCurveSegment, AuthoredPoint2, AuthoredStructure, AuthoredStructureDraft,
-    AuthoredStructureId, AuthoredStructureKind, CanvasSpec, ChannelAppearance, ChannelId,
-    ChannelPatternLayout, ChannelSourceMapping, ChannelState, ColorValue, CoveragePolicy,
-    DensityMetric2D, Document, DocumentCommand, DocumentHistory, DocumentId, DocumentSession,
-    GeneralizedSiteProduct, GuideDimension, GuideDimensionId, GuidePrototype, GuideRepetition,
-    InvalidationLevel, MarkGeometryResponse, MarkOrientation, MarkPrototype, MarkPrototypeKind,
-    PatternDefinition, PatternDefinitionEdit, PatternDefinitionId, PatternMechanismId,
-    PatternOutputLayer, PatternOutputLayerId, PropertyCurrentValueKind, PropertyEnumChoice,
-    PropertyFieldId, PropertyReferenceConstraint, PropertyReferenceValue, PropertyTarget,
-    SourceComponent, SourcePlacement, SourceReference, StraightGuideDimension,
+    AuthoredStructureId, AuthoredStructureKind, CanvasSpec, ChannelId, CoveragePolicy, Document,
+    DocumentCommand, DocumentHistory, DocumentSession, GeneralizedSiteProduct, GuideDimension,
+    GuideDimensionId, GuidePrototype, GuideRepetition, InvalidationLevel, MarkOrientation,
+    MarkPrototype, MarkPrototypeKind, PatternDefinition, PatternDefinitionEdit,
+    PatternDefinitionId, PatternMechanismId, PatternOutputLayerId, PatternOutputRealization,
+    PropertyCurrentValueKind, PropertyEnumChoice, PropertyFieldId, PropertyReferenceConstraint,
+    PropertyReferenceValue, PropertyTarget, SourceReference, StraightGuideDimension,
     StraightGuideRepetition, VariantTransitionFieldUpdate, VariantTransitionValue,
 };
 
@@ -43,17 +41,25 @@ fn structure(id: u64, kind: AuthoredStructureKind, offset: f64) -> AuthoredStruc
     AuthoredStructure::new(AuthoredStructureId(id), kind, segments).unwrap()
 }
 
-/// Builds one shared typed circle definition plus closed/open resources and two linked channels.
+/// Builds one shared typed circle definition plus closed/open resources and the current topology.
 fn shape_reference_document() -> Document {
+    let base = Document::new_default_document(
+        CanvasSpec {
+            width: 100.0,
+            height: 80.0,
+        },
+        SourceReference::Unassigned,
+    )
+    .expect("default modeled document");
     let definition = PatternDefinition::generalized_straight_guides(
-        PatternDefinitionId(10),
+        PatternDefinitionId(1),
         "shape references",
-        PatternMechanismId(20),
-        PatternMechanismId(21),
-        PatternOutputLayerId(30),
+        PatternMechanismId(1),
+        PatternMechanismId(2),
+        PatternOutputLayerId(1),
         vec![
             StraightGuideDimension {
-                id: GuideDimensionId(40),
+                id: GuideDimensionId(1),
                 baseline_angle_degrees: 0.0,
                 phase: 0.0,
                 repetition: StraightGuideRepetition {
@@ -61,7 +67,7 @@ fn shape_reference_document() -> Document {
                 },
             },
             StraightGuideDimension {
-                id: GuideDimensionId(41),
+                id: GuideDimensionId(2),
                 baseline_angle_degrees: 90.0,
                 phase: 0.0,
                 repetition: StraightGuideRepetition {
@@ -70,7 +76,7 @@ fn shape_reference_document() -> Document {
             },
         ],
         GeneralizedSiteProduct::Intersections {
-            dimensions: vec![GuideDimensionId(40), GuideDimensionId(41)],
+            dimensions: vec![GuideDimensionId(1), GuideDimensionId(2)],
             merge_epsilon: 0.0,
         },
         MarkOrientation::Fixed,
@@ -79,48 +85,16 @@ fn shape_reference_document() -> Document {
             additional_margin: 4.5,
         },
     );
-    let channel = |id| ChannelState {
-        id: ChannelId(id),
-        pattern_definition_id: PatternDefinitionId(10),
-        layout: ChannelPatternLayout {
-            density: DensityMetric2D {
-                across_x: 20.0,
-                across_y: 20.0,
-                aspect_locked: true,
-            },
-            rotation_degrees: 0.0,
-            translation_x: 0.0,
-            translation_y: 0.0,
-        },
-        appearance: ChannelAppearance {
-            visible: true,
-            color: ColorValue {
-                red: 0.0,
-                green: 0.0,
-                blue: 0.0,
-                alpha: 1.0,
-            },
-            opacity: 1.0,
-        },
-        mark_geometry_response: MarkGeometryResponse {
-            minimum_fill: 0.0,
-            maximum_fill: 2.0,
-            rotation_offset_degrees: 0.0,
-        },
-        source_mapping: ChannelSourceMapping {
-            component: SourceComponent::Luminance,
-            placement: SourcePlacement::StretchToCanvas,
-        },
-    };
-    Document::with_source_and_authored_structures(
-        DocumentId(1),
-        CanvasSpec {
-            width: 100.0,
-            height: 80.0,
-        },
-        SourceReference::Unassigned,
-        vec![definition],
-        vec![channel(1), channel(2)],
+    let mut bundle = base.pattern_definition_bundles()[0].clone();
+    bundle.definition = definition;
+    Document::with_source_topology_and_authored_structures(
+        base.id(),
+        base.canvas().clone(),
+        base.source().clone(),
+        vec![bundle],
+        base.pattern_settings().clone(),
+        base.channel_model().expect("modeled document").to_owned(),
+        base.channel_topology().expect("modeled document").clone(),
         vec![
             structure(7, AuthoredStructureKind::ClosedShape, 0.0),
             structure(8, AuthoredStructureKind::ClosedShape, 10.0),
@@ -179,7 +153,12 @@ fn shared_guide_document() -> Document {
         base.id(),
         base.canvas().clone(),
         base.source().clone(),
-        vec![definition],
+        vec![{
+            let mut bundle = base.pattern_definition_bundles()[0].clone();
+            bundle.definition = definition;
+            bundle
+        }],
+        base.pattern_settings().clone(),
         base.channel_model().expect("modeled document").to_owned(),
         base.channel_topology().expect("modeled document").clone(),
         vec![structure(7, AuthoredStructureKind::OpenPath, 0.0)],
@@ -189,11 +168,12 @@ fn shared_guide_document() -> Document {
 
 /// Returns the current shared output prototype without accepting legacy adapter layers.
 fn output_prototype(document: &Document, definition_id: PatternDefinitionId) -> &MarkPrototype {
-    match &current_definition(document, definition_id).output_layers[0] {
-        PatternOutputLayer::MarkPrototype { prototype, .. } => prototype,
-        PatternOutputLayer::CircularMarks { .. } => {
+    match &current_definition(document, definition_id).output_layers[0].realization {
+        PatternOutputRealization::MarkPrototype { prototype, .. } => prototype,
+        PatternOutputRealization::CircularMarks { .. } => {
             panic!("the fixture owns one typed mark layer")
         }
+        _ => panic!("the fixture owns one mark output"),
     }
 }
 
@@ -203,9 +183,10 @@ fn current_definition(
     definition_id: PatternDefinitionId,
 ) -> &PatternDefinition {
     document
-        .pattern_definitions()
+        .pattern_definition_bundles()
         .iter()
-        .find(|definition| definition.id == definition_id)
+        .find(|bundle| bundle.definition.id == definition_id)
+        .map(|bundle| &bundle.definition)
         .unwrap()
 }
 
@@ -214,7 +195,7 @@ fn apply_shared(
     history: &mut DocumentHistory,
     edit: PatternDefinitionEdit,
 ) -> toniator_domain::CommandResult {
-    let definition_id = PatternDefinitionId(10);
+    let definition_id = PatternDefinitionId(1);
     let base_definition = current_definition(history.document(), definition_id).clone();
     history
         .apply(&DocumentCommand::EditSharedPatternDefinition {
@@ -238,10 +219,7 @@ fn authored_shape_variant_requires_explicit_typed_reference_and_retargets_atomic
         .find(|descriptor| {
             descriptor.field == PropertyFieldId::OutputPrototype
                 && descriptor.target
-                    == PropertyTarget::OutputLayer(
-                        PatternDefinitionId(10),
-                        PatternOutputLayerId(30),
-                    )
+                    == PropertyTarget::OutputLayer(PatternDefinitionId(1), PatternOutputLayerId(1))
         })
         .unwrap();
     let draft = history
@@ -272,8 +250,8 @@ fn authored_shape_variant_requires_explicit_typed_reference_and_retargets_atomic
                 .with_updates(&[VariantTransitionFieldUpdate {
                     field: PropertyFieldId::OutputAuthoredClosedShape,
                     target: PropertyTarget::OutputLayer(
-                        PatternDefinitionId(10),
-                        PatternOutputLayerId(30),
+                        PatternDefinitionId(1),
+                        PatternOutputLayerId(1),
                     ),
                     value: VariantTransitionValue::StableReference(Some(
                         PropertyReferenceValue::AuthoredStructure(invalid_id),
@@ -285,7 +263,7 @@ fn authored_shape_variant_requires_explicit_typed_reference_and_retargets_atomic
     let draft = draft
         .with_updates(&[VariantTransitionFieldUpdate {
             field: PropertyFieldId::OutputAuthoredClosedShape,
-            target: PropertyTarget::OutputLayer(PatternDefinitionId(10), PatternOutputLayerId(30)),
+            target: PropertyTarget::OutputLayer(PatternDefinitionId(1), PatternOutputLayerId(1)),
             value: VariantTransitionValue::StableReference(Some(
                 PropertyReferenceValue::AuthoredStructure(AuthoredStructureId(7)),
             )),
@@ -293,10 +271,13 @@ fn authored_shape_variant_requires_explicit_typed_reference_and_retargets_atomic
         .unwrap();
     let edit = draft.finalize(history.document()).unwrap();
     let result = apply_shared(&mut history, edit);
-    assert_eq!(result.invalidation, InvalidationLevel::Realization);
-    assert_eq!(result.affected_channels, vec![ChannelId(1), ChannelId(2)]);
+    assert_eq!(result.invalidation, Some(InvalidationLevel::Realization));
     assert_eq!(
-        output_prototype(history.document(), PatternDefinitionId(10)),
+        result.affected_channels,
+        vec![ChannelId(1), ChannelId(2), ChannelId(3)]
+    );
+    assert_eq!(
+        output_prototype(history.document(), PatternDefinitionId(1)),
         &MarkPrototype::AuthoredClosedShape {
             structure_id: AuthoredStructureId(7)
         }
@@ -324,20 +305,23 @@ fn authored_shape_variant_requires_explicit_typed_reference_and_retargets_atomic
     let retarget = apply_shared(
         &mut history,
         PatternDefinitionEdit::SetOutputAuthoredClosedShape {
-            output_layer_id: PatternOutputLayerId(30),
+            output_layer_id: PatternOutputLayerId(1),
             structure_id: AuthoredStructureId(8),
         },
     );
-    assert_eq!(retarget.invalidation, InvalidationLevel::Realization);
-    assert_eq!(retarget.affected_channels, vec![ChannelId(1), ChannelId(2)]);
+    assert_eq!(retarget.invalidation, Some(InvalidationLevel::Realization));
+    assert_eq!(
+        retarget.affected_channels,
+        vec![ChannelId(1), ChannelId(2), ChannelId(3)]
+    );
     let before_noop = history.document().clone();
     let revision = history.revision();
-    let base_definition = current_definition(history.document(), PatternDefinitionId(10)).clone();
+    let base_definition = current_definition(history.document(), PatternDefinitionId(1)).clone();
     let no_op = history.apply(&DocumentCommand::EditSharedPatternDefinition {
-        definition_id: PatternDefinitionId(10),
+        definition_id: PatternDefinitionId(1),
         base_definition,
         edit: PatternDefinitionEdit::SetOutputAuthoredClosedShape {
-            output_layer_id: PatternOutputLayerId(30),
+            output_layer_id: PatternOutputLayerId(1),
             structure_id: AuthoredStructureId(8),
         },
     });
@@ -352,11 +336,11 @@ fn authored_shape_variant_requires_explicit_typed_reference_and_retargets_atomic
 fn authored_shape_reference_lifecycle_is_shared_failure_atomic_and_history_backed() {
     let mut history =
         DocumentHistory::new(DocumentSession::new(shape_reference_document()).unwrap());
-    let stale_base = current_definition(history.document(), PatternDefinitionId(10)).clone();
+    let stale_base = current_definition(history.document(), PatternDefinitionId(1)).clone();
     apply_shared(
         &mut history,
         PatternDefinitionEdit::SetOutputMarkPrototype {
-            output_layer_id: PatternOutputLayerId(30),
+            output_layer_id: PatternOutputLayerId(1),
             prototype: MarkPrototype::AuthoredClosedShape {
                 structure_id: AuthoredStructureId(8),
             },
@@ -372,18 +356,23 @@ fn authored_shape_reference_lifecycle_is_shared_failure_atomic_and_history_backe
         Some(AuthoredStructureId(10))
     );
     assert_eq!(
-        output_prototype(history.document(), PatternDefinitionId(10)),
+        output_prototype(history.document(), PatternDefinitionId(1)),
         &MarkPrototype::AuthoredClosedShape {
             structure_id: AuthoredStructureId(8)
         }
     );
     history
         .apply(&DocumentCommand::DuplicatePatternDefinition {
-            definition_id: PatternDefinitionId(10),
+            definition_id: PatternDefinitionId(1),
         })
         .unwrap();
-    let duplicate_definition = history.document().pattern_definitions().last().unwrap();
-    assert_ne!(duplicate_definition.id, PatternDefinitionId(10));
+    let duplicate_definition = &history
+        .document()
+        .pattern_definition_bundles()
+        .last()
+        .unwrap()
+        .definition;
+    assert_ne!(duplicate_definition.id, PatternDefinitionId(1));
     assert_eq!(
         output_prototype(history.document(), duplicate_definition.id),
         &MarkPrototype::AuthoredClosedShape {
@@ -417,8 +406,11 @@ fn authored_shape_reference_lifecycle_is_shared_failure_atomic_and_history_backe
             .unwrap(),
         })
         .unwrap();
-    assert_eq!(replace.invalidation, InvalidationLevel::Realization);
-    assert_eq!(replace.affected_channels, vec![ChannelId(1), ChannelId(2)]);
+    assert_eq!(replace.invalidation, Some(InvalidationLevel::Realization));
+    assert_eq!(
+        replace.affected_channels,
+        vec![ChannelId(1), ChannelId(2), ChannelId(3)]
+    );
     let replaced = history
         .document()
         .authored_structure(AuthoredStructureId(8))
@@ -446,10 +438,10 @@ fn authored_shape_reference_lifecycle_is_shared_failure_atomic_and_history_backe
     assert!(
         history
             .apply(&DocumentCommand::EditSharedPatternDefinition {
-                definition_id: PatternDefinitionId(10),
+                definition_id: PatternDefinitionId(1),
                 base_definition: stale_base,
                 edit: PatternDefinitionEdit::SetOutputAuthoredClosedShape {
-                    output_layer_id: PatternOutputLayerId(30),
+                    output_layer_id: PatternOutputLayerId(1),
                     structure_id: AuthoredStructureId(7),
                 },
             })
@@ -467,7 +459,7 @@ fn authored_structure_use_copy_retargets_one_selected_mark_use_atomically() {
     apply_shared(
         &mut history,
         PatternDefinitionEdit::SetOutputMarkPrototype {
-            output_layer_id: PatternOutputLayerId(30),
+            output_layer_id: PatternOutputLayerId(1),
             prototype: MarkPrototype::AuthoredClosedShape {
                 structure_id: AuthoredStructureId(7),
             },
@@ -536,7 +528,7 @@ fn shared_mark_copy_retarget_and_replacement_stay_one_undo_step() {
     apply_shared(
         &mut history,
         PatternDefinitionEdit::SetOutputMarkPrototype {
-            output_layer_id: PatternOutputLayerId(30),
+            output_layer_id: PatternOutputLayerId(1),
             prototype: MarkPrototype::AuthoredClosedShape {
                 structure_id: AuthoredStructureId(7),
             },
@@ -615,7 +607,7 @@ fn invalid_shared_mark_copy_replacement_is_atomic() {
     apply_shared(
         &mut history,
         PatternDefinitionEdit::SetOutputMarkPrototype {
-            output_layer_id: PatternOutputLayerId(30),
+            output_layer_id: PatternOutputLayerId(1),
             prototype: MarkPrototype::AuthoredClosedShape {
                 structure_id: AuthoredStructureId(7),
             },

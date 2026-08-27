@@ -28,16 +28,16 @@ decision.
 
 | File | Role | SHA-256 |
 | --- | --- | --- |
-| `HolidayMugs_2024_2025.toniator` | Authorized current-format real-world test case. | `541b9c0a1e603e258a10df9be37a5d64b91e0f48736399e30c5d9a3768550c9e` |
+| `HolidayMugs_2024_2025.toniator` | Authorized current-format real-world test case. | `253e3977ed0a9447ad9d4bf4df789ac51db7bec07721b51495206b261ba70d4b` |
 
-Stage 20G ports this current case to container version 1 and document schema
-version 4. Its first ordered channel supplies the shared pattern base; later
-channels retain exact definition overrides and additive rotation deltas. It is
-not a frozen source or migration baseline.
+The final Stage 20 current-format port uses container version 1 and document
+schema version 5. Its ordered definition bundles, output settings, authored
+resources, filters, and channel deltas are current intent only. It is not a
+frozen source or migration baseline.
 
 ## Current normalized-fill persistence fixtures
 
-`raster-sample.toniator` and `vector-sample.toniator` are current schema-v4
+`raster-sample.toniator` and `vector-sample.toniator` are current schema-v5
 containers derived from the immutable still-image baselines at their intrinsic
 canvases. Their per-channel 2.0/9.0 legacy diameters become
 0.1414213562373095/0.6363961030678927 fill against their 10×10 representative
@@ -46,8 +46,8 @@ validation inputs, not migration fixtures.
 
 | File | SHA-256 |
 | --- | --- |
-| `raster-sample.toniator` | `04013b6151ed7c3db8386fe31fadee95773de988731ac491b5cf8f2170527662` |
-| `vector-sample.toniator` | `9579c42974d250f41475cffdc1ad0ea22ff364517ed77ed8caa73dc049c8085d` |
+| `raster-sample.toniator` | `5430f1cf720b503de24babad7616fddbdb43ce03b6eddb79321001332224db3b` |
+| `vector-sample.toniator` | `4b06e818443b91ef76edf146a63cfc60fa9bfa0fa136add811c0b71b798aeb36` |
 
 ## Stage 10 small-preview regressions
 

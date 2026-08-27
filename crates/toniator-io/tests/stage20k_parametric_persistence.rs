@@ -6,9 +6,11 @@ use std::{
 
 use toniator_domain::{
     CanvasSpec, CoveragePolicy, CurveWinding, Document, DocumentId, GuideRepetition,
-    MarkOrientation, MarkPrototype, ParametricCurve, PatternDefinition, PatternDefinitionId,
-    PatternFamily, PatternMechanism, PatternMechanismId, PatternModulation, PatternOutputLayer,
-    PatternOutputLayerId, SourceReference, SourceReferenceId, SpiralCurve, SpiralShape,
+    MarkGeometryResponse, MarkOrientation, MarkPrototype, ParametricCurve, PatternDefinition,
+    PatternDefinitionBundle, PatternDefinitionId, PatternFamily, PatternGeometryResponse,
+    PatternMechanism, PatternMechanismId, PatternModulation, PatternOutputLayer,
+    PatternOutputLayerId, PatternOutputRealization, PatternOutputSettings, SourceReference,
+    SourceReferenceId, SpiralCurve, SpiralShape,
 };
 use toniator_io::{EmbeddedSource, EmbeddedSourceFormat, SourceBundle, load, save};
 
@@ -25,7 +27,7 @@ fn temporary() -> PathBuf {
 
 /// Persists analytic spiral intent deterministically without serializing derived paths, sites, or effective state.
 #[test]
-fn v4_round_trips_parametric_intent_deterministically_without_derived_geometry() {
+fn v5_round_trips_parametric_intent_deterministically_without_derived_geometry() {
     let source_id = SourceReferenceId::new("stage20k-source").expect("source id");
     let base = Document::new_default_document(
         CanvasSpec {
@@ -64,12 +66,14 @@ fn v4_round_trips_parametric_intent_deterministically_without_derived_geometry()
                 phase: 0.25,
             },
         ],
-        output_layers: vec![PatternOutputLayer::MarkPrototype {
-            id: PatternOutputLayerId(704),
-            site_mechanism_id: site_id,
-            prototype: MarkPrototype::Circle,
-            orientation: MarkOrientation::Fixed,
-        }],
+        output_layers: vec![PatternOutputLayer::all(
+            PatternOutputLayerId(704),
+            PatternOutputRealization::MarkPrototype {
+                site_mechanism_id: site_id,
+                prototype: MarkPrototype::Circle,
+                orientation: MarkOrientation::Fixed,
+            },
+        )],
         modulation: PatternModulation,
         coverage: CoveragePolicy {
             guard_steps: 1,
@@ -82,7 +86,16 @@ fn v4_round_trips_parametric_intent_deterministically_without_derived_geometry()
         DocumentId(700),
         base.canvas().clone(),
         base.source().clone(),
-        vec![definition],
+        vec![PatternDefinitionBundle {
+            definition,
+            output_settings: vec![PatternOutputSettings {
+                output_layer_id: PatternOutputLayerId(704),
+                response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+                    minimum_fill: 0.0,
+                    maximum_fill: 1.0,
+                }),
+            }],
+        }],
         settings,
         base.channel_model().expect("modeled channel model"),
         base.channel_topology().expect("modeled topology").clone(),

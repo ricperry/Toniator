@@ -13,7 +13,7 @@ use toniator_domain::{
 };
 use toniator_io::{EmbeddedSource, EmbeddedSourceFormat, SourceBundle, load, save};
 
-/// Builds one persisted-v4 connected guide-path document against supplied immutable source bytes.
+/// Builds one persisted-v5 connected guide-path document against supplied immutable source bytes.
 fn stroke_document(
     source_id: SourceReferenceId,
     width: f64,
@@ -86,7 +86,7 @@ fn stroke_document(
     .expect("connected document validates")
 }
 
-/// Saves and reopens exact v4 guide-path witnesses for subsequent intrinsic CLI render evidence.
+/// Saves and reopens exact v5 guide-path witnesses for subsequent intrinsic CLI render evidence.
 #[test]
 fn save_reopen_connected_path_documents_for_immutable_sources() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../");
@@ -115,8 +115,8 @@ fn save_reopen_connected_path_documents_for_immutable_sources() {
         ])
         .expect("bundle valid");
         let path = output.join(name);
-        save(&path, &document, &bundle).expect("v4 save succeeds");
-        let reopened = load(&path).expect("v4 reopen succeeds");
+        save(&path, &document, &bundle).expect("v5 save succeeds");
+        let reopened = load(&path).expect("v5 reopen succeeds");
         assert!(matches!(
             reopened.document().pattern_definition_bundles()[0].output_settings[0].response,
             PatternGeometryResponse::Connected(_)
@@ -157,14 +157,14 @@ fn save_reopen_connected_path_documents_for_immutable_sources() {
         ])
         .expect("bundle valid");
         let path = low_resolution.join(name);
-        save(&path, &document, &bundle).expect("low-res v4 save succeeds");
-        assert!(load(&path).is_ok(), "low-res v4 document reopens");
+        save(&path, &document, &bundle).expect("low-res v5 save succeeds");
+        assert!(load(&path).is_ok(), "low-res v5 document reopens");
     }
 }
 
-/// Proves deterministic v4 persistence preserves explicit guide-path style and omits derived canonical stroke state.
+/// Proves deterministic v5 persistence preserves explicit guide-path style and omits derived canonical stroke state.
 #[test]
-fn connected_path_v4_save_is_deterministic_and_never_serializes_derived_strokes() {
+fn connected_path_v5_save_is_deterministic_and_never_serializes_derived_strokes() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../");
     let id = SourceReferenceId::new("stage20i-deterministic").expect("valid id");
     let document = stroke_document(id.clone(), 64.0, 48.0, 32.0, 2);
@@ -187,8 +187,8 @@ fn connected_path_v4_save_is_deterministic_and_never_serializes_derived_strokes(
     let second = root.join(format!(
         "target/validation/stage-20i/deterministic-{stamp}-b.toniator"
     ));
-    save(&first, &document, &sources).expect("first v4 save");
-    save(&second, &document, &sources).expect("second v4 save");
+    save(&first, &document, &sources).expect("first v5 save");
+    save(&second, &document, &sources).expect("second v5 save");
     assert_eq!(
         fs::read(&first).expect("first bytes"),
         fs::read(&second).expect("second bytes")

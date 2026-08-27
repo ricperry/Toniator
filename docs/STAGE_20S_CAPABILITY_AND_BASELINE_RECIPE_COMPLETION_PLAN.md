@@ -146,3 +146,16 @@ documentation closeout awaits a separate checkpoint whose hash is not yet
 assigned; push, publication, and later-stage work remain unauthorized and
 separately gated. A final scrub of all Stage 20 work remains separately gated
 before Stage 21.
+
+## Final integrated Stage 20 closeout
+
+The 2026-08-27 Stage 20A–20S scrub is **Ready for user acceptance** without a
+checkpoint hash. It preserves this plan's exact 16-card registry and explicit
+retirement of `regions-plus-marks`; direct region-and-mark evidence is ordinary
+authored document data outside the catalog. The final headless architecture,
+current-v5 persistence, descriptor repairs, cache/invalidation audit,
+deterministic Rayon boundaries, performance evidence, and verification record
+are documented in
+[`STAGE_20_FINAL_ARCHITECTURE_AND_CONCURRENCY.md`](STAGE_20_FINAL_ARCHITECTURE_AND_CONCURRENCY.md).
+No GTK4/Blueprint, Stage 21, publication, or push authority follows from this
+working-tree status.

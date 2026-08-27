@@ -2,9 +2,14 @@
 
 //! Byte-oriented source decoding and deterministic source-field sampling.
 
-use std::{error::Error, fmt};
+use std::{
+    error::Error,
+    fmt,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use image::{ImageFormat, ImageReader};
+use rayon::prelude::*;
 use resvg::{tiny_skia, usvg};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -99,6 +104,15 @@ pub struct RegionSourceSample {
     pub response: f64,
     /// Supplies sampled paint only for positive alpha, suppressing hidden RGB at exact zero.
     pub paint: Option<SampledSourcePaint>,
+}
+
+/// Non-authoritative request work counts for one completed AreaAverage batch.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RegionSamplingDiagnostics {
+    /// Counts emitted deterministic flattened boundary chords across all sampled regions.
+    pub flattened_segments: usize,
+    /// Counts candidate source-cell intersections across all sampled regions.
+    pub cell_intersections: usize,
 }
 
 /// SVG-specific decoder behavior surfaced to headless diagnostics.
@@ -356,12 +370,12 @@ pub fn sample_region_area_average(
     canvas: &CanvasSpec,
     mapping: SourceMapping,
     limits: RegionSamplingLimits,
-    cancelled: &dyn Fn() -> bool,
+    cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<RegionSourceSample, SamplingError> {
     validate_canvas(canvas)?;
     validate_mapping(mapping)?;
-    let mut work = RegionSamplingWork::new(limits, cancelled)?;
-    sample_region_area_average_with_work(field, region, canvas, mapping, &mut work)
+    let work = RegionSamplingWork::new(limits, cancelled)?;
+    sample_region_area_average_with_work(field, region, canvas, mapping, &work)
 }
 
 /// Deterministically averages every supplied untreated base region with one shared work budget.
@@ -378,25 +392,44 @@ pub fn sample_region_area_average_batch(
     canvas: &CanvasSpec,
     mapping: SourceMapping,
     limits: RegionSamplingLimits,
-    cancelled: &dyn Fn() -> bool,
+    cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<Vec<RegionSourceSample>, SamplingError> {
+    sample_region_area_average_batch_with_diagnostics(
+        field, regions, canvas, mapping, limits, cancelled,
+    )
+    .map(|(samples, _)| samples)
+}
+
+/// Samples one ordered AreaAverage batch and reports lightweight request work counts.
+///
+/// Diagnostics are produced from the same shared atomic budget counters, remain outside source
+/// identity and persistence, and are returned only after every indexed result succeeds.
+///
+/// # Errors
+///
+/// Returns the first stable ordered sampling, geometry, allocation, limit, or cancellation
+/// failure without returning samples or partial diagnostics.
+pub fn sample_region_area_average_batch_with_diagnostics(
+    field: &SourceField,
+    regions: &[CurvePath],
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    limits: RegionSamplingLimits,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<(Vec<RegionSourceSample>, RegionSamplingDiagnostics), SamplingError> {
     validate_canvas(canvas)?;
     validate_mapping(mapping)?;
-    let mut work = RegionSamplingWork::new(limits, cancelled)?;
-    let mut samples = Vec::new();
-    samples.try_reserve(regions.len()).map_err(|_| {
-        SamplingError::new(
-            "sampling.region_average.allocation.samples",
-            "region sample allocation failed",
-        )
-    })?;
-    for region in regions {
-        work.poll()?;
-        samples.push(sample_region_area_average_with_work(
-            field, region, canvas, mapping, &mut work,
-        )?);
-    }
-    Ok(samples)
+    let work = RegionSamplingWork::new(limits, cancelled)?;
+    let prepared = regions
+        .iter()
+        .map(|region| prepare_region_area_average(field, region, canvas, &work))
+        .collect::<Result<Vec<_>, _>>()?;
+    let results = prepared
+        .par_iter()
+        .map(|region| integrate_prepared_region_average(field, region, mapping, &work))
+        .collect::<Vec<_>>();
+    let samples = results.into_iter().collect::<Result<Vec<_>, _>>()?;
+    Ok((samples, work.diagnostics()))
 }
 
 /// Integrates one flattened region over all intersected source cells and exterior clamp bands.
@@ -412,8 +445,27 @@ fn sample_region_area_average_with_work(
     region: &CurvePath,
     canvas: &CanvasSpec,
     mapping: SourceMapping,
-    work: &mut RegionSamplingWork<'_>,
+    work: &RegionSamplingWork<'_>,
 ) -> Result<RegionSourceSample, SamplingError> {
+    let prepared = prepare_region_area_average(field, region, canvas, work)?;
+    integrate_prepared_region_average(field, &prepared, mapping, work)
+}
+
+/// Prepares one region and charges request budgets in authoritative input order.
+///
+/// Flattening, geometry validation, source partition allocation, and candidate-cell charges stay
+/// serial across a batch. This makes bounded failures identical for every worker count while the
+/// independent cell integrations remain eligible for indexed parallel execution.
+///
+/// # Errors
+///
+/// Returns the first ordered geometry, allocation, cancellation, or aggregate-limit failure.
+fn prepare_region_area_average(
+    field: &SourceField,
+    region: &CurvePath,
+    canvas: &CanvasSpec,
+    work: &RegionSamplingWork<'_>,
+) -> Result<PreparedRegionAverage, SamplingError> {
     let polygon = flatten_region_source_space_with_work(
         region,
         canvas,
@@ -431,13 +483,35 @@ fn sample_region_area_average_with_work(
     let (minimum, maximum) = polygon_bounds(&polygon)?;
     let xs = source_axis_intervals(minimum.x, maximum.x, field.identity.width)?;
     let ys = source_axis_intervals(minimum.y, maximum.y, field.identity.height)?;
+    for _ in 0..ys.len().saturating_mul(xs.len()) {
+        work.poll()?;
+        work.charge_cell()?;
+    }
+    Ok(PreparedRegionAverage {
+        polygon,
+        complete,
+        xs,
+        ys,
+    })
+}
+
+/// Integrates one fully budgeted region without mutating request workload counters.
+///
+/// # Errors
+///
+/// Returns canonical cancellation without publishing a partial sample.
+fn integrate_prepared_region_average(
+    field: &SourceField,
+    prepared: &PreparedRegionAverage,
+    mapping: SourceMapping,
+    work: &RegionSamplingWork<'_>,
+) -> Result<RegionSourceSample, SamplingError> {
     let mut totals = [0.0; 5];
-    for y in ys {
-        for x in &xs {
+    for y in &prepared.ys {
+        for x in &prepared.xs {
             work.poll()?;
-            work.charge_cell()?;
             let clipped = clip_polygon_to_rect_cancellable(
-                &polygon,
+                &prepared.polygon,
                 x.start,
                 x.end,
                 y.start,
@@ -451,7 +525,7 @@ fn sample_region_area_average_with_work(
                 polygon_moments(&clipped),
                 Point2::new(f64::from(x.cell), f64::from(y.cell)),
             );
-            let values = region_cell_values(field, mapping, *x, y);
+            let values = region_cell_values(field, mapping, *x, *y);
             for (total, coefficients) in totals.iter_mut().zip(values) {
                 *total += coefficients[0] * moments.area
                     + coefficients[1] * moments.mx
@@ -460,8 +534,8 @@ fn sample_region_area_average_with_work(
             }
         }
     }
-    let orientation = complete.area.signum();
-    let area = complete.area.abs();
+    let orientation = prepared.complete.area.signum();
+    let area = prepared.complete.area.abs();
     let response = (totals[0] * orientation / area).clamp(0.0, 1.0);
     let alpha = (totals[4] * orientation / area).clamp(0.0, 1.0);
     let paint = (alpha > 0.0).then(|| SampledSourcePaint {
@@ -471,6 +545,14 @@ fn sample_region_area_average_with_work(
         alpha: 1.0,
     });
     Ok(RegionSourceSample { response, paint })
+}
+
+/// One ordered region after deterministic source-space preparation and budget accounting.
+struct PreparedRegionAverage {
+    polygon: Vec<Point2>,
+    complete: PolygonMoments,
+    xs: Vec<SourceAxisInterval>,
+    ys: Vec<SourceAxisInterval>,
 }
 
 /// Flattens one closed region into unclamped decoded-source coordinates.
@@ -490,10 +572,10 @@ fn flatten_region_source_space(
     source_width: u32,
     source_height: u32,
     limits: RegionSamplingLimits,
-    cancelled: &dyn Fn() -> bool,
+    cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<Vec<Point2>, SamplingError> {
-    let mut work = RegionSamplingWork::new(limits, cancelled)?;
-    flatten_region_source_space_with_work(region, canvas, source_width, source_height, &mut work)
+    let work = RegionSamplingWork::new(limits, cancelled)?;
+    flatten_region_source_space_with_work(region, canvas, source_width, source_height, &work)
 }
 
 /// Flattens one closed boundary into source space while charging the caller-owned request budget.
@@ -509,7 +591,7 @@ fn flatten_region_source_space_with_work(
     canvas: &CanvasSpec,
     source_width: u32,
     source_height: u32,
-    work: &mut RegionSamplingWork<'_>,
+    work: &RegionSamplingWork<'_>,
 ) -> Result<Vec<Point2>, SamplingError> {
     if region.closure() != toniator_geometry::PathClosure::Closed {
         return Err(SamplingError::new(
@@ -568,7 +650,7 @@ fn flatten_cubic_source_space(
     control_2: Point2,
     end: Point2,
     depth: usize,
-    work: &mut RegionSamplingWork<'_>,
+    work: &RegionSamplingWork<'_>,
     output: &mut Vec<Point2>,
 ) -> Result<(), SamplingError> {
     work.poll()?;
@@ -621,7 +703,7 @@ fn cubic_source_flat_enough(
 fn push_flattened_point(
     output: &mut Vec<Point2>,
     point: Point2,
-    work: &mut RegionSamplingWork<'_>,
+    work: &RegionSamplingWork<'_>,
 ) -> Result<(), SamplingError> {
     if !point.is_finite() {
         return Err(SamplingError::new(
@@ -657,9 +739,9 @@ struct PolygonMoments {
 #[allow(dead_code)]
 struct RegionSamplingWork<'a> {
     limits: RegionSamplingLimits,
-    cancelled: &'a dyn Fn() -> bool,
-    flattened_segments: usize,
-    cell_intersections: usize,
+    cancelled: &'a (dyn Fn() -> bool + Sync),
+    flattened_segments: AtomicUsize,
+    cell_intersections: AtomicUsize,
 }
 
 #[allow(dead_code)]
@@ -667,7 +749,7 @@ impl<'a> RegionSamplingWork<'a> {
     /// Builds a shared nonzero work budget for a complete region-sampling request.
     fn new(
         limits: RegionSamplingLimits,
-        cancelled: &'a dyn Fn() -> bool,
+        cancelled: &'a (dyn Fn() -> bool + Sync),
     ) -> Result<Self, SamplingError> {
         if limits.max_flattened_segments == 0
             || limits.max_cell_intersections == 0
@@ -681,47 +763,48 @@ impl<'a> RegionSamplingWork<'a> {
         Ok(Self {
             limits,
             cancelled,
-            flattened_segments: 0,
-            cell_intersections: 0,
+            flattened_segments: AtomicUsize::new(0),
+            cell_intersections: AtomicUsize::new(0),
         })
     }
     /// Polls cancellation using the canonical evaluation failure path.
     fn poll(&self) -> Result<(), SamplingError> {
         poll_region(self.cancelled)
     }
-    /// Charges one emitted flattened chord across every region using this request.
-    fn charge_flattened(&mut self) -> Result<(), SamplingError> {
-        self.flattened_segments =
-            self.flattened_segments
-                .checked_add(1)
-                .ok_or(SamplingError::new(
-                    "sampling.region_average.limits.flattening",
-                    "flattened segment counter overflowed",
-                ))?;
-        if self.flattened_segments > self.limits.max_flattened_segments {
-            return Err(SamplingError::new(
-                "sampling.region_average.limits.flattening",
-                "flattened segment limit exceeded",
-            ));
+    /// Snapshots completed aggregate work after every ordered result succeeds.
+    fn diagnostics(&self) -> RegionSamplingDiagnostics {
+        RegionSamplingDiagnostics {
+            flattened_segments: self.flattened_segments.load(Ordering::Relaxed),
+            cell_intersections: self.cell_intersections.load(Ordering::Relaxed),
         }
-        Ok(())
+    }
+    /// Charges one emitted flattened chord across every region using this request.
+    fn charge_flattened(&self) -> Result<(), SamplingError> {
+        self.flattened_segments
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                (current < self.limits.max_flattened_segments).then_some(current + 1)
+            })
+            .map(|_| ())
+            .map_err(|_| {
+                SamplingError::new(
+                    "sampling.region_average.limits.flattening",
+                    "flattened segment limit exceeded",
+                )
+            })
     }
     /// Charges one candidate cell intersection across every region using this request.
-    fn charge_cell(&mut self) -> Result<(), SamplingError> {
-        self.cell_intersections =
-            self.cell_intersections
-                .checked_add(1)
-                .ok_or(SamplingError::new(
+    fn charge_cell(&self) -> Result<(), SamplingError> {
+        self.cell_intersections
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                (current < self.limits.max_cell_intersections).then_some(current + 1)
+            })
+            .map(|_| ())
+            .map_err(|_| {
+                SamplingError::new(
                     "sampling.region_average.limits.cell_intersections",
-                    "cell intersection counter overflowed",
-                ))?;
-        if self.cell_intersections > self.limits.max_cell_intersections {
-            return Err(SamplingError::new(
-                "sampling.region_average.limits.cell_intersections",
-                "cell intersection limit exceeded",
-            ));
-        }
-        Ok(())
+                    "cell intersection limit exceeded",
+                )
+            })
     }
 }
 
@@ -2425,7 +2508,7 @@ mod tests {
     /// Verifies shared request counters aggregate limits and canonical cancellation failures.
     #[test]
     fn stage20q_sampling_work_is_request_wide_and_bounded() {
-        let mut work = RegionSamplingWork::new(
+        let work = RegionSamplingWork::new(
             RegionSamplingLimits {
                 max_flattened_segments: 2,
                 max_cell_intersections: 1,
@@ -2804,6 +2887,82 @@ mod tests {
             error.path(),
             "sampling.region_average.limits.cell_intersections"
         );
+    }
+
+    /// Proves indexed AreaAverage workers preserve samples, workloads, and bounded failure order.
+    #[test]
+    fn stage20q_parallel_area_average_matches_single_worker_reference() {
+        let field = stage20q_field(
+            2,
+            2,
+            vec![
+                SourcePixel {
+                    red: 0.2,
+                    green: 0.4,
+                    blue: 0.8,
+                    alpha: 0.75,
+                };
+                4
+            ],
+        );
+        let regions = (0..64)
+            .map(|index| {
+                let inset = f64::from(index % 8) / 128.0;
+                stage20q_rectangle(inset, 1.0 - inset, inset, 1.0 - inset)
+            })
+            .collect::<Vec<_>>();
+        let sample = || {
+            sample_region_area_average_batch_with_diagnostics(
+                &field,
+                &regions,
+                &CanvasSpec {
+                    width: 1.0,
+                    height: 1.0,
+                },
+                SourceMapping::canonical(SourceMappingComponent::Alpha),
+                RegionSamplingLimits::default(),
+                &|| false,
+            )
+            .expect("complete AreaAverage batch evaluates")
+        };
+        let one = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("one-worker pool builds")
+            .install(sample);
+        let many = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("four-worker pool builds")
+            .install(sample);
+        assert_eq!(one, many);
+        let limited = |workers| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .expect("bounded sampling pool builds")
+                .install(|| {
+                    sample_region_area_average_batch_with_diagnostics(
+                        &field,
+                        &regions,
+                        &CanvasSpec {
+                            width: 1.0,
+                            height: 1.0,
+                        },
+                        SourceMapping::canonical(SourceMappingComponent::Alpha),
+                        RegionSamplingLimits {
+                            max_cell_intersections: 10,
+                            ..RegionSamplingLimits::default()
+                        },
+                        &|| false,
+                    )
+                    .expect_err("aggregate cell budget rejects the batch")
+                })
+        };
+        let expected = limited(1);
+        for _ in 0..8 {
+            assert_eq!(limited(4), expected);
+        }
     }
 
     /// Verifies cancellation is reported before any area-average candidate can publish.

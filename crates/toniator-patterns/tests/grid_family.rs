@@ -36,16 +36,17 @@ fn request(rotation_degrees: f64, translation_x: f64, translation_y: f64) -> Gri
     }
 }
 
+/// Proves the centered-local straight-grid adapter reports exact spacing and inclusive ranges.
 #[test]
 fn resolves_reference_spacing_and_inclusive_guide_ranges() {
     let output = evaluate_straight_grid(&request(0.0, 0.0, 0.0)).expect("valid family");
 
     assert_eq!(output.coverage[0].spacing, 10.0);
     assert_eq!(output.coverage[1].spacing, 10.0);
-    assert_eq!(output.coverage[0].first_index, -3);
-    assert_eq!(output.coverage[0].last_index, 93);
-    assert_eq!(output.coverage[1].first_index, -3);
-    assert_eq!(output.coverage[1].last_index, 63);
+    assert_eq!(output.coverage[0].first_index, -48);
+    assert_eq!(output.coverage[0].last_index, 48);
+    assert_eq!(output.coverage[1].first_index, -33);
+    assert_eq!(output.coverage[1].last_index, 33);
     assert_eq!(output.guides.len(), 164);
     assert_eq!(output.antialias_margin, ANTIALIAS_MARGIN);
 }
@@ -114,6 +115,7 @@ fn sites_have_stable_ids_ordering_provenance_and_fingerprint() {
     assert!(output.family_fingerprint.starts_with("fnv1a64:"));
 }
 
+/// Proves centered-local enumeration publishes every site in the exact world-space envelope.
 #[test]
 fn support_envelope_is_complete_and_bounded_across_rotation_translation_and_anisotropy() {
     let mut anisotropic = request(45.0, -6.75, 8.25);
@@ -165,6 +167,7 @@ fn support_envelope_is_complete_and_bounded_across_rotation_translation_and_anis
     }
 }
 
+/// Proves conservative centered-local guide ranges do not publish dead Cartesian corners.
 #[test]
 fn rotated_coverage_rectangle_omits_all_four_dead_cartesian_corners() {
     let input = request(17.0, 3.25, -4.5);
@@ -200,6 +203,7 @@ fn rotated_coverage_rectangle_omits_all_four_dead_cartesian_corners() {
     }
 }
 
+/// Proves the centered-local envelope retains its outer required ring with truthful scope.
 #[test]
 fn support_envelope_retains_required_edge_sites_and_scopes_them_as_guards() {
     let output = evaluate_straight_grid(&request(0.0, 0.0, 0.0)).unwrap();
@@ -210,9 +214,9 @@ fn support_envelope_retains_required_edge_sites_and_scopes_them_as_guards() {
             site.id
                 == SiteId {
                     first_dimension_id: 1,
-                    first_index: -2,
+                    first_index: -47,
                     second_dimension_id: 2,
-                    second_index: 30,
+                    second_index: 0,
                 }
         })
         .unwrap();
@@ -220,9 +224,9 @@ fn support_envelope_retains_required_edge_sites_and_scopes_them_as_guards() {
     assert!(!output.sites.iter().any(|site| site.id
         == SiteId {
             first_dimension_id: 1,
-            first_index: -3,
+            first_index: -48,
             second_dimension_id: 2,
-            second_index: 30,
+            second_index: 0,
         }));
 }
 
@@ -329,6 +333,7 @@ fn planning_envelope(input: &GridInspectRequest, spacing_x: f64, spacing_y: f64)
         + f64::from(input.guard_steps) * spacing_x.max(spacing_y)
 }
 
+/// Reconstructs one centered-local candidate under the shared rotation and document placement.
 fn candidate_position(
     input: &GridInspectRequest,
     spacing_x: f64,
@@ -338,8 +343,8 @@ fn candidate_position(
 ) -> (f64, f64) {
     let radians = input.rotation_degrees.to_radians();
     let (cosine, sine) = (radians.cos(), radians.sin());
-    let local_x = first_index as f64 * spacing_x - input.canvas.width / 2.0;
-    let local_y = second_index as f64 * spacing_y - input.canvas.height / 2.0;
+    let local_x = first_index as f64 * spacing_x;
+    let local_y = second_index as f64 * spacing_y;
     (
         input.canvas.width / 2.0 + cosine * local_x - sine * local_y + input.translation_x,
         input.canvas.height / 2.0 + sine * local_x + cosine * local_y + input.translation_y,

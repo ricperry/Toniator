@@ -3,8 +3,9 @@ use toniator_domain::{
     AuthoredStructureDraft, AuthoredStructureId, AuthoredStructureKind, CanvasSpec, ChannelId,
     CoveragePolicy, Document, DocumentCommand, DocumentHistory, DocumentSession,
     GeneralizedSiteProduct, GuideDimension, GuideDimensionId, GuidePrototype, GuideRepetition,
-    InvalidationLevel, MarkOrientation, MarkPrototype, PatternDefinition, PatternDefinitionEdit,
-    PatternDefinitionId, PatternMechanismId, PatternOutputLayerId, SourceReference,
+    InvalidationLevel, MarkOrientation, MarkPrototype, PatternDefinition, PatternDefinitionBundle,
+    PatternDefinitionEdit, PatternDefinitionId, PatternMechanismId, PatternOutputLayerId,
+    SourceReference,
 };
 
 /// Builds the supported default document used by draft-root history witnesses.
@@ -17,6 +18,14 @@ fn document() -> Document {
         SourceReference::Unassigned,
     )
     .expect("default document")
+}
+
+/// Binds a mark-producing definition to the current typed output-settings authority.
+fn definition_bundle(definition: PatternDefinition) -> PatternDefinitionBundle {
+    let base = document();
+    let mut bundle = base.pattern_definition_bundles()[0].clone();
+    bundle.definition = definition;
+    bundle
 }
 
 /// Builds a document whose shared generic definition refers to one guide and one mark resource.
@@ -93,7 +102,7 @@ fn document_with_typed_guide_and_mark_uses() -> Document {
         base.id(),
         base.canvas().clone(),
         base.source().clone(),
-        vec![definition],
+        vec![definition_bundle(definition)],
         base.pattern_settings().clone(),
         base.channel_model().expect("modeled document").to_owned(),
         base.channel_topology().expect("modeled document").clone(),
@@ -259,7 +268,9 @@ fn authored_structure_uses_project_real_guides_and_marks_in_order() {
     let mut history = DocumentHistory::new(
         DocumentSession::new(document_with_typed_guide_and_mark_uses()).expect("session"),
     );
-    let base = history.document().pattern_definitions()[0].clone();
+    let base = history.document().pattern_definition_bundles()[0]
+        .definition
+        .clone();
     history
         .apply(&DocumentCommand::EditSharedPatternDefinition {
             definition_id: PatternDefinitionId(1),

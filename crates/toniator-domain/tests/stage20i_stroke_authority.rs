@@ -183,9 +183,25 @@ fn connected_document_exposes_connected_not_mark_response_descriptors() {
 fn guide_paths_expose_connected_fields_without_mark_output_descriptors() {
     let document = stroke_document();
     let descriptors = document.property_descriptors();
-    assert!(descriptors.iter().any(|descriptor| {
-        descriptor.field == toniator_domain::PropertyFieldId::ConnectedMinimumThickness
-    }));
+    let minimum = descriptors
+        .iter()
+        .find(|descriptor| {
+            descriptor.field == toniator_domain::PropertyFieldId::ConnectedMinimumThickness
+        })
+        .expect("connected minimum descriptor exists");
+    assert_eq!(
+        minimum.target,
+        toniator_domain::PropertyTarget::ChannelOutput(ChannelId(1), PatternOutputLayerId(33))
+    );
+    assert_eq!(
+        minimum.authority,
+        toniator_domain::PropertyAuthority::ChannelDelta
+    );
+    assert_eq!(
+        minimum.invalidation,
+        toniator_domain::InvalidationLevel::Realization
+    );
+    assert!(minimum.reset_capable);
     assert!(!descriptors.iter().any(|descriptor| {
         descriptor.field == toniator_domain::PropertyFieldId::OutputSiteProduct
     }));
@@ -197,6 +213,49 @@ fn guide_paths_expose_connected_fields_without_mark_output_descriptors() {
     document
         .validate_property_descriptors()
         .expect("guide paths retain a complete non-mark descriptor surface");
+
+    let command = document
+        .set_channel_output_response_for_effective(
+            ChannelId(1),
+            PatternOutputLayerId(33),
+            PatternGeometryResponse::Connected(ConnectedGeometryResponse {
+                minimum_thickness: 0.3,
+                maximum_thickness: 1.1,
+            }),
+        )
+        .expect("connected delta command builds");
+    let (candidate, _) = document
+        .apply_command(&command)
+        .expect("connected delta command applies");
+    let authored = candidate
+        .property_values()
+        .into_iter()
+        .filter(|value| {
+            value.descriptor.target
+                == toniator_domain::PropertyTarget::ChannelOutput(
+                    ChannelId(1),
+                    PatternOutputLayerId(33),
+                )
+                && matches!(
+                    value.descriptor.field,
+                    toniator_domain::PropertyFieldId::ConnectedMinimumThickness
+                        | toniator_domain::PropertyFieldId::ConnectedMaximumThickness
+                )
+        })
+        .map(|value| (value.descriptor.field, value.authored_value))
+        .collect::<Vec<_>>();
+    assert_eq!(authored.len(), 2);
+    for (field, value) in authored {
+        let Some(toniator_domain::PropertyCurrentValueKind::FiniteF64(delta)) = value else {
+            panic!("connected delta descriptor must expose authored intent")
+        };
+        let expected = match field {
+            toniator_domain::PropertyFieldId::ConnectedMinimumThickness => 0.05,
+            toniator_domain::PropertyFieldId::ConnectedMaximumThickness => 0.1,
+            _ => unreachable!("filter retains only connected response fields"),
+        };
+        assert!((delta - expected).abs() < 1.0e-12);
+    }
 }
 
 /// Proves connected response authority rejects stale bases and round-trips exact stored delta intent through history.

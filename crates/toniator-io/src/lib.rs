@@ -9,7 +9,7 @@
 use std::{
     collections::{BTreeMap, HashSet},
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -380,7 +380,140 @@ impl std::fmt::Display for SaveError {
 }
 impl std::error::Error for SaveError {}
 
-/// Loads through the immutable v1 dispatch pipeline.
+/// Validates ordinary ZIP32 central-directory topology from the bounded end-record search tail.
+///
+/// Container v1 writes at most three entries. The raw directory span and every record boundary are
+/// checked before the ZIP reader can ignore records beyond the end record's declared cardinality or
+/// collapse duplicate names in its internal map.
+///
+/// # Errors
+///
+/// Returns an archive diagnostic for missing, truncated, multidisk, inconsistent, or ZIP64 end
+/// records; the current container writer emits none of those forms.
+fn declared_zip_entry_count(file: &mut File, length: u64) -> Result<usize, LoadError> {
+    const END_RECORD_BYTES: u64 = 22;
+    const MAX_COMMENT_BYTES: u64 = u16::MAX as u64;
+    let tail_start = length.saturating_sub(END_RECORD_BYTES + MAX_COMMENT_BYTES);
+    file.seek(SeekFrom::Start(tail_start))
+        .map_err(|error| LoadError::Archive {
+            context: error.to_string(),
+        })?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail)
+        .map_err(|error| LoadError::Archive {
+            context: error.to_string(),
+        })?;
+    let end = tail
+        .windows(4)
+        .rposition(|value| value == b"PK\x05\x06")
+        .ok_or_else(|| LoadError::Archive {
+            context: "ZIP end-of-central-directory record is missing".into(),
+        })?;
+    if end + END_RECORD_BYTES as usize > tail.len() {
+        return Err(LoadError::Archive {
+            context: "ZIP end-of-central-directory record is truncated".into(),
+        });
+    }
+    let disk = u16::from_le_bytes([tail[end + 4], tail[end + 5]]);
+    let central_disk = u16::from_le_bytes([tail[end + 6], tail[end + 7]]);
+    let disk_entries = u16::from_le_bytes([tail[end + 8], tail[end + 9]]);
+    let total_entries = u16::from_le_bytes([tail[end + 10], tail[end + 11]]);
+    let central_size = u32::from_le_bytes([
+        tail[end + 12],
+        tail[end + 13],
+        tail[end + 14],
+        tail[end + 15],
+    ]) as u64;
+    let central_offset = u32::from_le_bytes([
+        tail[end + 16],
+        tail[end + 17],
+        tail[end + 18],
+        tail[end + 19],
+    ]) as u64;
+    let comment_length = u16::from_le_bytes([tail[end + 20], tail[end + 21]]) as usize;
+    if end + END_RECORD_BYTES as usize + comment_length != tail.len() {
+        return Err(LoadError::Archive {
+            context: "ZIP end-of-central-directory comment length is inconsistent".into(),
+        });
+    }
+    if disk != 0 || central_disk != 0 || disk_entries != total_entries {
+        return Err(LoadError::Archive {
+            context: "multidisk ZIP containers are unsupported".into(),
+        });
+    }
+    if total_entries == u16::MAX {
+        return Err(LoadError::Archive {
+            context: "ZIP64 entry cardinality is unsupported by container v1".into(),
+        });
+    }
+    let end_offset = tail_start + end as u64;
+    if central_offset.checked_add(central_size) != Some(end_offset) {
+        return Err(LoadError::Archive {
+            context: "ZIP central-directory offset or size is inconsistent".into(),
+        });
+    }
+    file.seek(SeekFrom::Start(central_offset))
+        .map_err(|error| LoadError::Archive {
+            context: error.to_string(),
+        })?;
+    let central_end = central_offset + central_size;
+    let mut cursor = central_offset;
+    let mut scanned_entries = 0_usize;
+    while cursor < central_end {
+        const CENTRAL_HEADER_BYTES: u64 = 46;
+        if central_end - cursor < CENTRAL_HEADER_BYTES {
+            return Err(LoadError::Archive {
+                context: "ZIP central-directory record is truncated".into(),
+            });
+        }
+        let mut header = [0_u8; CENTRAL_HEADER_BYTES as usize];
+        file.read_exact(&mut header)
+            .map_err(|error| LoadError::Archive {
+                context: error.to_string(),
+            })?;
+        if &header[..4] != b"PK\x01\x02" {
+            return Err(LoadError::Archive {
+                context: "ZIP central-directory record signature is invalid".into(),
+            });
+        }
+        let name_length = u16::from_le_bytes([header[28], header[29]]) as u64;
+        let extra_length = u16::from_le_bytes([header[30], header[31]]) as u64;
+        let comment_length = u16::from_le_bytes([header[32], header[33]]) as u64;
+        let record_length = CENTRAL_HEADER_BYTES + name_length + extra_length + comment_length;
+        let record_end = cursor
+            .checked_add(record_length)
+            .ok_or_else(|| LoadError::Archive {
+                context: "ZIP central-directory record length overflows".into(),
+            })?;
+        if record_end > central_end {
+            return Err(LoadError::Archive {
+                context: "ZIP central-directory record exceeds its declared span".into(),
+            });
+        }
+        file.seek(SeekFrom::Start(record_end))
+            .map_err(|error| LoadError::Archive {
+                context: error.to_string(),
+            })?;
+        cursor = record_end;
+        scanned_entries += 1;
+    }
+    if scanned_entries != total_entries as usize {
+        return Err(LoadError::EntryTopology {
+            context: "duplicate or conflicting central-directory entry names".into(),
+        });
+    }
+    Ok(scanned_entries)
+}
+
+/// Loads one current-v5 document through the immutable container-v1 dispatch pipeline.
+///
+/// Raw central-directory cardinality is retained before `zip` can collapse duplicate names;
+/// topology, limits, integrity, and current-domain validation then complete transactionally.
+///
+/// # Errors
+///
+/// Returns a stable filesystem, archive, topology, limit, JSON, integrity, or domain error without
+/// publishing a partial document or source bundle.
 pub fn load(path: &Path) -> Result<LoadedDocument, LoadError> {
     let metadata = fs::metadata(path).map_err(|error| LoadError::Filesystem {
         path: path.to_owned(),
@@ -391,13 +524,19 @@ pub fn load(path: &Path) -> Result<LoadedDocument, LoadError> {
             context: "archive exceeds the 256 MiB v1 limit".into(),
         });
     }
-    let file = File::open(path).map_err(|error| LoadError::Filesystem {
+    let mut file = File::open(path).map_err(|error| LoadError::Filesystem {
         path: path.to_owned(),
         context: error.to_string(),
     })?;
+    let declared_entry_count = declared_zip_entry_count(&mut file, metadata.len())?;
     let mut archive = ZipArchive::new(file).map_err(|error| LoadError::Archive {
         context: error.to_string(),
     })?;
+    if archive.len() != declared_entry_count {
+        return Err(LoadError::EntryTopology {
+            context: "duplicate or conflicting central-directory entry names".into(),
+        });
+    }
     if !(2..=3).contains(&archive.len()) {
         return Err(LoadError::EntryTopology {
             context: "v1 archive must contain exactly two file entries; the only optional marker is an empty sources/ directory entry".into(),
@@ -504,7 +643,7 @@ pub fn load(path: &Path) -> Result<LoadedDocument, LoadError> {
     }
     let (current, manifest) = match envelope.document_schema_version {
         DOCUMENT_SCHEMA_VERSION => {
-            let stored: StoredDocumentDtoV4 =
+            let stored: StoredDocumentDtoV5 =
                 serde_json::from_slice(&document_bytes).map_err(|error| LoadError::Json {
                     context: error.to_string(),
                 })?;
@@ -604,7 +743,7 @@ fn ensure_supported_file_compression(
     })
 }
 
-/// Saves one fully source-backed current document using deterministic v4 JSON
+/// Saves one fully source-backed current document using deterministic v5 JSON
 /// inside the immutable v1 ZIP container layout.
 pub fn save(path: &Path, document: &Document, sources: &SourceBundle) -> Result<(), SaveError> {
     document.validate().map_err(save_domain_error)?;
@@ -612,13 +751,13 @@ pub fn save(path: &Path, document: &Document, sources: &SourceBundle) -> Result<
         SourceReference::Assigned(id) => id,
         SourceReference::Unassigned => {
             return Err(SaveError::SourceDocumentMismatch {
-                context: "v4 saving requires an assigned document source".into(),
+                context: "v5 saving requires an assigned document source".into(),
             });
         }
     };
     if sources.len() != 1 {
         return Err(SaveError::SourceDocumentMismatch {
-            context: "v4 saving requires exactly one embedded source".into(),
+            context: "v5 saving requires exactly one embedded source".into(),
         });
     }
     let source = sources
@@ -631,7 +770,7 @@ pub fn save(path: &Path, document: &Document, sources: &SourceBundle) -> Result<
             context: error.context().into(),
         }
     })?;
-    let dto = StoredDocumentDtoV4::from_domain(document, source, entry_name.clone())?;
+    let dto = StoredDocumentDtoV5::from_domain(document, source, entry_name.clone())?;
     let mut document_json = serde_json::to_vec(&dto).map_err(|error| SaveError::Archive {
         context: error.to_string(),
     })?;
@@ -857,46 +996,46 @@ enum SiteUseFilterRecipeDtoV3 {
 enum PresetStructureRecipeDto {
     StraightGrid {
         name: String,
-        coverage: CoverageDtoV4,
+        coverage: CoverageDtoV5,
     },
     GeneralizedStraightGuides {
         name: String,
-        coverage: CoverageDtoV4,
+        coverage: CoverageDtoV5,
         dimensions: Vec<GuideDimensionDraftDto>,
         product: GeneralizedSiteProductDraftDto,
         orientation: MarkOrientationDraftDto,
     },
     RandomSites {
         name: String,
-        coverage: CoverageDtoV4,
-        character: RandomSiteCharacterDtoV4,
+        coverage: CoverageDtoV5,
+        character: RandomSiteCharacterDtoV5,
         seed: u32,
-        density_modulation: SiteDensityModulationDtoV4,
-        exclusion: SiteExclusionPolicyDtoV4,
+        density_modulation: SiteDensityModulationDtoV5,
+        exclusion: SiteExclusionPolicyDtoV5,
         maximum_attempts: u32,
         maximum_neighbor_checks: u32,
     },
     ParametricCurve {
         name: String,
-        coverage: CoverageDtoV4,
-        curve: ParametricCurveDtoV4,
+        coverage: CoverageDtoV5,
+        curve: ParametricCurveDtoV5,
         spiral_coverage: SpiralCoveragePolicyDtoV3,
-        repetition: GuideRepetitionDtoV4,
+        repetition: GuideRepetitionDtoV5,
         sites: Option<ParametricCurveSiteRecipeDtoV3>,
     },
     ConnectionPaths {
         definition: Box<PresetStructureRecipeDto>,
-        program: ConnectionProgramDtoV4,
+        program: ConnectionProgramDtoV5,
         style: PathStrokeStyle,
     },
     MazeWalls {
         definition: Box<PresetStructureRecipeDto>,
-        program: MazeProgramDtoV4,
+        program: MazeProgramDtoV5,
         style: PathStrokeStyle,
     },
     AuthoredClosedShapeMarks {
         definition: Box<PresetStructureRecipeDto>,
-        segments: Vec<AuthoredCurveSegmentDtoV4>,
+        segments: Vec<AuthoredCurveSegmentDtoV5>,
     },
     VoronoiRegions {
         definition: Box<PresetStructureRecipeDto>,
@@ -935,11 +1074,11 @@ enum PatternOutputRealizationRecipeDtoV3 {
         style: PathStrokeStyle,
     },
     ConnectionPaths {
-        program: ConnectionProgramDtoV4,
+        program: ConnectionProgramDtoV5,
         style: PathStrokeStyle,
     },
     MazeWalls {
-        program: MazeProgramDtoV4,
+        program: MazeProgramDtoV5,
         style: PathStrokeStyle,
     },
     VoronoiRegions,
@@ -986,23 +1125,23 @@ struct SourceManifestDto {
     display_name: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
-struct StoredDocumentDtoV4 {
+struct StoredDocumentDtoV5 {
     container_version: u32,
     document_schema_version: u32,
-    document: DocumentDtoV4,
+    document: DocumentDtoV5,
     source: SourceManifestDto,
 }
 #[derive(Serialize, Deserialize)]
 struct CurrentDocumentDto {
-    document: DocumentDtoV4,
+    document: DocumentDtoV5,
 }
 
-impl StoredDocumentDtoV4 {
-    /// Projects a validated document and its matching source into the exact v4 archive envelope.
+impl StoredDocumentDtoV5 {
+    /// Projects a validated document and its matching source into the exact v5 archive envelope.
     ///
     /// # Errors
     ///
-    /// Returns a save error when the document cannot be represented by current-v4 persistence.
+    /// Returns a save error when the document cannot be represented by current-v5 persistence.
     fn from_domain(
         document: &Document,
         source: &EmbeddedSource,
@@ -1011,7 +1150,7 @@ impl StoredDocumentDtoV4 {
         Ok(Self {
             container_version: CONTAINER_VERSION,
             document_schema_version: DOCUMENT_SCHEMA_VERSION,
-            document: DocumentDtoV4::from_domain(document)?,
+            document: DocumentDtoV5::from_domain(document)?,
             source: SourceManifestDto {
                 id: source.id().as_str().into(),
                 entry_name,
@@ -1025,7 +1164,7 @@ impl StoredDocumentDtoV4 {
 }
 
 #[derive(Serialize, Deserialize)]
-struct DocumentDtoV4 {
+struct DocumentDtoV5 {
     id: u64,
     canvas: CanvasDto,
     source_reference_id: String,
@@ -1033,44 +1172,44 @@ struct DocumentDtoV4 {
     pattern_settings: DocumentPatternSettingsDto,
     channel_configuration: ChannelConfigurationDto,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    authored_structures: Vec<AuthoredStructureDtoV4>,
+    authored_structures: Vec<AuthoredStructureDtoV5>,
 }
 
-/// Current-v4 persistence representation of one document-owned authored structure.
+/// Current-v5 persistence representation of one document-owned authored structure.
 #[derive(Serialize, Deserialize)]
-struct AuthoredStructureDtoV4 {
+struct AuthoredStructureDtoV5 {
     id: u64,
-    kind: AuthoredStructureKindDtoV4,
-    segments: Vec<AuthoredCurveSegmentDtoV4>,
+    kind: AuthoredStructureKindDtoV5,
+    segments: Vec<AuthoredCurveSegmentDtoV5>,
 }
 
-/// Current-v4 persistence representation of declared authored-structure topology.
+/// Current-v5 persistence representation of declared authored-structure topology.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum AuthoredStructureKindDtoV4 {
+enum AuthoredStructureKindDtoV5 {
     OpenPath,
     ClosedShape,
 }
 
-/// Current-v4 persistence representation of one explicit authored construction segment.
+/// Current-v5 persistence representation of one explicit authored construction segment.
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum AuthoredCurveSegmentDtoV4 {
+enum AuthoredCurveSegmentDtoV5 {
     Line {
-        start: AuthoredPointDtoV4,
-        end: AuthoredPointDtoV4,
+        start: AuthoredPointDtoV5,
+        end: AuthoredPointDtoV5,
     },
     CubicBezier {
-        start: AuthoredPointDtoV4,
-        control_1: AuthoredPointDtoV4,
-        control_2: AuthoredPointDtoV4,
-        end: AuthoredPointDtoV4,
+        start: AuthoredPointDtoV5,
+        control_1: AuthoredPointDtoV5,
+        control_2: AuthoredPointDtoV5,
+        end: AuthoredPointDtoV5,
     },
 }
 
-/// Current-v4 persistence representation of one authored finite coordinate pair.
+/// Current-v5 persistence representation of one authored finite coordinate pair.
 #[derive(Serialize, Deserialize)]
-struct AuthoredPointDtoV4 {
+struct AuthoredPointDtoV5 {
     x: f64,
     y: f64,
 }
@@ -1080,20 +1219,20 @@ struct CanvasDto {
     height: f64,
 }
 #[derive(Serialize, Deserialize)]
-struct PatternDefinitionDtoV4 {
+struct PatternDefinitionDtoV5 {
     id: u64,
     name: String,
-    family: PatternFamilyDtoV4,
-    mechanisms: Vec<PatternMechanismDtoV4>,
-    output_layers: Vec<PatternOutputLayerDtoV4>,
-    modulation: PatternModulationDtoV4,
-    coverage: CoverageDtoV4,
+    family: PatternFamilyDtoV5,
+    mechanisms: Vec<PatternMechanismDtoV5>,
+    output_layers: Vec<PatternOutputLayerDtoV5>,
+    modulation: PatternModulationDtoV5,
+    coverage: CoverageDtoV5,
 }
 
 /// Current-v5 atomic structural definition and ordered response authority.
 #[derive(Serialize, Deserialize)]
 struct PatternDefinitionBundleDtoV5 {
-    definition: PatternDefinitionDtoV4,
+    definition: PatternDefinitionDtoV5,
     output_settings: Vec<PatternOutputSettingsDtoV5>,
 }
 
@@ -1105,7 +1244,7 @@ struct PatternOutputSettingsDtoV5 {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum PatternFamilyDtoV4 {
+enum PatternFamilyDtoV5 {
     GuideIntersections {
         guide_mechanism_id: u64,
         site_mechanism_id: u64,
@@ -1123,7 +1262,7 @@ enum PatternFamilyDtoV4 {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum PatternMechanismDtoV4 {
+enum PatternMechanismDtoV5 {
     StraightGuides {
         id: u64,
     },
@@ -1133,11 +1272,11 @@ enum PatternMechanismDtoV4 {
     },
     StraightGuideDimensions {
         id: u64,
-        dimensions: Vec<StraightGuideDimensionDtoV4>,
+        dimensions: Vec<StraightGuideDimensionDtoV5>,
     },
     GuideDimensions {
         id: u64,
-        dimensions: Vec<GuideDimensionDtoV4>,
+        dimensions: Vec<GuideDimensionDtoV5>,
     },
     SelectedGuideIntersections {
         id: u64,
@@ -1154,8 +1293,8 @@ enum PatternMechanismDtoV4 {
     },
     ParametricCurveSource {
         id: u64,
-        curve: ParametricCurveDtoV4,
-        repetition: GuideRepetitionDtoV4,
+        curve: ParametricCurveDtoV5,
+        repetition: GuideRepetitionDtoV5,
     },
     AlongParametricCurveSites {
         id: u64,
@@ -1165,18 +1304,18 @@ enum PatternMechanismDtoV4 {
     },
     RandomSiteProcess {
         id: u64,
-        character: RandomSiteCharacterDtoV4,
+        character: RandomSiteCharacterDtoV5,
         seed: u32,
     },
     SiteDensityModulation {
         id: u64,
         base_site_process_id: u64,
-        modulation: SiteDensityModulationDtoV4,
+        modulation: SiteDensityModulationDtoV5,
     },
     SiteExclusion {
         id: u64,
         density_modulation_id: u64,
-        policy: SiteExclusionPolicyDtoV4,
+        policy: SiteExclusionPolicyDtoV5,
     },
     RandomSiteProduct {
         id: u64,
@@ -1193,7 +1332,7 @@ const fn default_random_site_neighbor_checks() -> u32 {
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum RandomSiteCharacterDtoV4 {
+enum RandomSiteCharacterDtoV5 {
     RawUniform,
     Even {
         minimum_center_distance: f64,
@@ -1206,49 +1345,50 @@ enum RandomSiteCharacterDtoV4 {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum SiteDensityModulationDtoV4 {
+enum SiteDensityModulationDtoV5 {
     Uniform,
     ArtworkWeighted {
         mapping: SourceMappingDto,
         strength: f64,
-        response: ArtworkWeightResponseDtoV4,
+        response: ArtworkWeightResponseDtoV5,
     },
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum ArtworkWeightResponseDtoV4 {
+enum ArtworkWeightResponseDtoV5 {
     Linear,
     Smoothstep,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum SiteExclusionPolicyDtoV4 {
+enum SiteExclusionPolicyDtoV5 {
     None,
     MinimumCenterDistance { minimum: f64 },
+    VisibleMarkMargin { margin: f64 },
 }
 #[derive(Serialize, Deserialize)]
-struct StraightGuideDimensionDtoV4 {
+struct StraightGuideDimensionDtoV5 {
     id: u64,
     baseline_angle_degrees: f64,
     phase: f64,
     spacing_multiplier: f64,
 }
 #[derive(Serialize, Deserialize)]
-struct GuideDimensionDtoV4 {
+struct GuideDimensionDtoV5 {
     id: u64,
     baseline_angle_degrees: f64,
     phase: f64,
-    prototype: GuidePrototypeDtoV4,
-    repetition: GuideRepetitionDtoV4,
+    prototype: GuidePrototypeDtoV5,
+    repetition: GuideRepetitionDtoV5,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum GuidePrototypeDtoV4 {
+enum GuidePrototypeDtoV5 {
     AuthoredOpenPath {
         structure_id: u64,
     },
     CircularArc {
-        center: AuthoredPointDtoV4,
+        center: AuthoredPointDtoV5,
         radius: f64,
         start_angle_degrees: f64,
         sweep_angle_degrees: f64,
@@ -1256,7 +1396,7 @@ enum GuidePrototypeDtoV4 {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum GuideRepetitionDtoV4 {
+enum GuideRepetitionDtoV5 {
     Single,
     TransformStack {
         direction_degrees: f64,
@@ -1264,65 +1404,65 @@ enum GuideRepetitionDtoV4 {
     },
     NormalOffset {
         spacing: f64,
-        sides: OffsetSidesDtoV4,
-        cleanup: OffsetCleanupDtoV4,
+        sides: OffsetSidesDtoV5,
+        cleanup: OffsetCleanupDtoV5,
     },
 }
 
-/// Current-v4 analytic intent for the bounded parametric source vocabulary.
+/// Current-v5 analytic intent for the bounded parametric source vocabulary.
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum ParametricCurveDtoV4 {
+enum ParametricCurveDtoV5 {
     Spiral {
-        shape: SpiralShapeDtoV4,
+        shape: SpiralShapeDtoV5,
         turns: f64,
         radial_spacing: f64,
         phase_degrees: f64,
-        winding: CurveWindingDtoV4,
+        winding: CurveWindingDtoV5,
     },
 }
 
-/// Current-v4 round/square discriminant for one spiral source.
+/// Current-v5 round/square discriminant for one spiral source.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum SpiralShapeDtoV4 {
+enum SpiralShapeDtoV5 {
     Round,
     Square,
 }
 
-/// Current-v4 winding discriminant for one spiral source.
+/// Current-v5 winding discriminant for one spiral source.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum CurveWindingDtoV4 {
+enum CurveWindingDtoV5 {
     Clockwise,
     CounterClockwise,
 }
 
-/// Persisted current-v4 signed-side intent for normal-offset guide repetition.
+/// Persisted current-v5 signed-side intent for normal-offset guide repetition.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum OffsetSidesDtoV4 {
+enum OffsetSidesDtoV5 {
     Left,
     Right,
     Both,
 }
 
-/// Persisted current-v4 cleanup discriminant for normal-offset guide repetition.
+/// Persisted current-v5 cleanup discriminant for normal-offset guide repetition.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum OffsetCleanupDtoV4 {
+enum OffsetCleanupDtoV5 {
     DissolveCrossings,
 }
 
-impl GuideDimensionDtoV4 {
+impl GuideDimensionDtoV5 {
     /// Projects one generic guide dimension into persisted intent without resolving resources.
     fn from_domain(value: &GuideDimension) -> Self {
         Self {
             id: value.id.0,
             baseline_angle_degrees: value.baseline_angle_degrees,
             phase: value.phase,
-            prototype: GuidePrototypeDtoV4::from_domain(&value.prototype),
-            repetition: GuideRepetitionDtoV4::from_domain(&value.repetition),
+            prototype: GuidePrototypeDtoV5::from_domain(&value.prototype),
+            repetition: GuideRepetitionDtoV5::from_domain(&value.repetition),
         }
     }
 
@@ -1338,8 +1478,8 @@ impl GuideDimensionDtoV4 {
     }
 }
 
-impl GuidePrototypeDtoV4 {
-    /// Projects a persisted generic-guide prototype into deterministic current-v4 fields.
+impl GuidePrototypeDtoV5 {
+    /// Projects a persisted generic-guide prototype into deterministic current-v5 fields.
     fn from_domain(value: &GuidePrototype) -> Self {
         match value {
             GuidePrototype::AuthoredOpenPath { structure_id } => Self::AuthoredOpenPath {
@@ -1351,7 +1491,7 @@ impl GuidePrototypeDtoV4 {
                 start_angle_degrees,
                 sweep_angle_degrees,
             } => Self::CircularArc {
-                center: AuthoredPointDtoV4::from_domain(*center),
+                center: AuthoredPointDtoV5::from_domain(*center),
                 radius: *radius,
                 start_angle_degrees: *start_angle_degrees,
                 sweep_angle_degrees: *sweep_angle_degrees,
@@ -1380,8 +1520,8 @@ impl GuidePrototypeDtoV4 {
     }
 }
 
-impl GuideRepetitionDtoV4 {
-    /// Projects a bounded generic-guide repetition variant into current-v4 intent fields.
+impl GuideRepetitionDtoV5 {
+    /// Projects a bounded generic-guide repetition variant into current-v5 intent fields.
     fn from_domain(value: &GuideRepetition) -> Self {
         match value {
             GuideRepetition::Single => Self::Single,
@@ -1399,13 +1539,13 @@ impl GuideRepetitionDtoV4 {
             } => Self::NormalOffset {
                 spacing: *spacing,
                 sides: match sides {
-                    toniator_domain::OffsetSides::Left => OffsetSidesDtoV4::Left,
-                    toniator_domain::OffsetSides::Right => OffsetSidesDtoV4::Right,
-                    toniator_domain::OffsetSides::Both => OffsetSidesDtoV4::Both,
+                    toniator_domain::OffsetSides::Left => OffsetSidesDtoV5::Left,
+                    toniator_domain::OffsetSides::Right => OffsetSidesDtoV5::Right,
+                    toniator_domain::OffsetSides::Both => OffsetSidesDtoV5::Both,
                 },
                 cleanup: match cleanup {
                     toniator_domain::OffsetCleanup::DissolveCrossings => {
-                        OffsetCleanupDtoV4::DissolveCrossings
+                        OffsetCleanupDtoV5::DissolveCrossings
                     }
                 },
             },
@@ -1430,12 +1570,12 @@ impl GuideRepetitionDtoV4 {
             } => GuideRepetition::NormalOffset {
                 spacing,
                 sides: match sides {
-                    OffsetSidesDtoV4::Left => toniator_domain::OffsetSides::Left,
-                    OffsetSidesDtoV4::Right => toniator_domain::OffsetSides::Right,
-                    OffsetSidesDtoV4::Both => toniator_domain::OffsetSides::Both,
+                    OffsetSidesDtoV5::Left => toniator_domain::OffsetSides::Left,
+                    OffsetSidesDtoV5::Right => toniator_domain::OffsetSides::Right,
+                    OffsetSidesDtoV5::Both => toniator_domain::OffsetSides::Both,
                 },
                 cleanup: match cleanup {
-                    OffsetCleanupDtoV4::DissolveCrossings => {
+                    OffsetCleanupDtoV5::DissolveCrossings => {
                         toniator_domain::OffsetCleanup::DissolveCrossings
                     }
                 },
@@ -1444,7 +1584,7 @@ impl GuideRepetitionDtoV4 {
     }
 }
 #[derive(Serialize, Deserialize)]
-struct PatternOutputLayerDtoV4 {
+struct PatternOutputLayerDtoV5 {
     id: u64,
     source_filter: SiteUseFilterDtoV5,
     realization: PatternOutputRealizationDtoV5,
@@ -1466,8 +1606,8 @@ enum PatternOutputRealizationDtoV5 {
     },
     MarkPrototype {
         site_mechanism_id: u64,
-        prototype: MarkPrototypeDtoV4,
-        orientation: MarkOrientationDtoV4,
+        prototype: MarkPrototypeDtoV5,
+        orientation: MarkOrientationDtoV5,
     },
     GuidePaths {
         guide_mechanism_id: u64,
@@ -1479,12 +1619,12 @@ enum PatternOutputRealizationDtoV5 {
     },
     ConnectionPaths {
         site_mechanism_id: u64,
-        program: ConnectionProgramDtoV4,
+        program: ConnectionProgramDtoV5,
         style: PathStrokeStyle,
     },
     MazeWalls {
         site_mechanism_id: u64,
-        program: MazeProgramDtoV4,
+        program: MazeProgramDtoV5,
         style: PathStrokeStyle,
     },
     Regions {
@@ -1506,68 +1646,68 @@ enum RegionSourceIntentDtoV5 {
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum ConnectionProgramDtoV4 {
+enum ConnectionProgramDtoV5 {
     NearestLinks {
-        adjacency: ConnectionAdjacencyIntentDtoV4,
+        adjacency: ConnectionAdjacencyIntentDtoV5,
     },
     RandomLinks {
-        adjacency: ConnectionAdjacencyIntentDtoV4,
+        adjacency: ConnectionAdjacencyIntentDtoV5,
         minimum_degree: u32,
         seed: u32,
     },
     GridSpanningTree {
-        adjacency: ConnectionAdjacencyIntentDtoV4,
-        algorithm: GridSpanningTreeAlgorithmDtoV4,
+        adjacency: ConnectionAdjacencyIntentDtoV5,
+        algorithm: GridSpanningTreeAlgorithmDtoV5,
         seed: u32,
     },
 }
 
 #[derive(Serialize, Deserialize)]
-struct ConnectionAdjacencyIntentDtoV4 {
+struct ConnectionAdjacencyIntentDtoV5 {
     maximum_degree: u32,
     maximum_distance: f64,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum GridMazeAlgorithmDtoV4 {
+enum GridMazeAlgorithmDtoV5 {
     RecursiveBacktracker,
 }
 
 #[derive(Serialize, Deserialize)]
-struct MazeProgramDtoV4 {
-    algorithm: GridMazeAlgorithmDtoV4,
+struct MazeProgramDtoV5 {
+    algorithm: GridMazeAlgorithmDtoV5,
     seed: u32,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum GridSpanningTreeAlgorithmDtoV4 {
+enum GridSpanningTreeAlgorithmDtoV5 {
     RandomizedPrim,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum MarkPrototypeDtoV4 {
+enum MarkPrototypeDtoV5 {
     Circle,
     AuthoredClosedShape { structure_id: u64 },
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum MarkOrientationDtoV4 {
+enum MarkOrientationDtoV5 {
     Fixed,
     GuideTangent { dimension_id: u64 },
     GuideNormal { dimension_id: u64 },
 }
 #[derive(Serialize, Deserialize)]
-struct PatternModulationDtoV4 {}
+struct PatternModulationDtoV5 {}
 #[derive(Serialize, Deserialize)]
-struct CoverageDtoV4 {
+struct CoverageDtoV5 {
     guard_steps: u32,
     additional_margin: f64,
 }
 
 impl PresetEnvelopeDto {
-    /// Converts a pure-schema preset record into the standalone v2 DTO.
+    /// Converts a pure-schema preset record into the current standalone v3 DTO.
     fn from_domain(value: &PresetRecord) -> Self {
         Self {
             preset_format_version: PRESET_FORMAT_VERSION,
@@ -1675,7 +1815,7 @@ impl PresetRecipeDto {
 impl PresetStructureRecipeDto {
     /// Converts an ID-free recipe into its stable standalone representation.
     fn from_domain(value: &PatternStructureRecipe) -> Self {
-        let coverage = |coverage: &CoveragePolicy| CoverageDtoV4 {
+        let coverage = |coverage: &CoveragePolicy| CoverageDtoV5 {
             guard_steps: coverage.guard_steps,
             additional_margin: coverage.additional_margin,
         };
@@ -1716,10 +1856,10 @@ impl PresetStructureRecipeDto {
             } => Self::RandomSites {
                 name: name.clone(),
                 coverage: coverage(definition_coverage),
-                character: RandomSiteCharacterDtoV4::from_domain(character),
+                character: RandomSiteCharacterDtoV5::from_domain(character),
                 seed: *seed,
-                density_modulation: SiteDensityModulationDtoV4::from_domain(density_modulation),
-                exclusion: SiteExclusionPolicyDtoV4::from_domain(exclusion),
+                density_modulation: SiteDensityModulationDtoV5::from_domain(density_modulation),
+                exclusion: SiteExclusionPolicyDtoV5::from_domain(exclusion),
                 maximum_attempts: *maximum_attempts,
                 maximum_neighbor_checks: *maximum_neighbor_checks,
             },
@@ -1733,12 +1873,12 @@ impl PresetStructureRecipeDto {
             } => Self::ParametricCurve {
                 name: name.clone(),
                 coverage: coverage(definition_coverage),
-                curve: ParametricCurveDtoV4::from_domain(curve),
+                curve: ParametricCurveDtoV5::from_domain(curve),
                 spiral_coverage: match spiral_coverage {
                     SpiralCoveragePolicy::Fixed => SpiralCoveragePolicyDtoV3::Fixed,
                     SpiralCoveragePolicy::CoverCanvas => SpiralCoveragePolicyDtoV3::CoverCanvas,
                 },
-                repetition: GuideRepetitionDtoV4::from_domain(repetition),
+                repetition: GuideRepetitionDtoV5::from_domain(repetition),
                 sites: sites.as_ref().map(|sites| ParametricCurveSiteRecipeDtoV3 {
                     interval: sites.interval,
                     phase: sites.phase,
@@ -1750,7 +1890,7 @@ impl PresetStructureRecipeDto {
                 style,
             } => Self::ConnectionPaths {
                 definition: Box::new(Self::from_domain(definition)),
-                program: ConnectionProgramDtoV4::from_domain(program),
+                program: ConnectionProgramDtoV5::from_domain(program),
                 style: *style,
             },
             PatternStructureRecipe::MazeWalls {
@@ -1759,7 +1899,7 @@ impl PresetStructureRecipeDto {
                 style,
             } => Self::MazeWalls {
                 definition: Box::new(Self::from_domain(definition)),
-                program: MazeProgramDtoV4::from_domain(program),
+                program: MazeProgramDtoV5::from_domain(program),
                 style: *style,
             },
             PatternStructureRecipe::AuthoredClosedShapeMarks { definition, shape } => {
@@ -1768,7 +1908,7 @@ impl PresetStructureRecipeDto {
                     segments: shape
                         .segments()
                         .iter()
-                        .map(AuthoredCurveSegmentDtoV4::from_domain)
+                        .map(AuthoredCurveSegmentDtoV5::from_domain)
                         .collect(),
                 }
             }
@@ -1801,7 +1941,7 @@ impl PresetStructureRecipeDto {
     ///
     /// Returns stable preset validation context when an embedded authored shape is invalid.
     fn into_domain(self) -> Result<PatternStructureRecipe, PresetIoError> {
-        let coverage_from = |value: CoverageDtoV4| CoveragePolicy {
+        let coverage_from = |value: CoverageDtoV5| CoveragePolicy {
             guard_steps: value.guard_steps,
             additional_margin: value.additional_margin,
         };
@@ -1898,7 +2038,7 @@ impl PresetStructureRecipeDto {
                     AuthoredStructureKind::ClosedShape,
                     segments
                         .into_iter()
-                        .map(AuthoredCurveSegmentDtoV4::into_domain)
+                        .map(AuthoredCurveSegmentDtoV5::into_domain)
                         .collect(),
                 )
                 .map_err(|error| PresetIoError {
@@ -1943,12 +2083,12 @@ impl PatternOutputRealizationRecipeDtoV3 {
             }
             PatternOutputRealizationRecipe::ConnectionPaths { program, style } => {
                 Self::ConnectionPaths {
-                    program: ConnectionProgramDtoV4::from_domain(program),
+                    program: ConnectionProgramDtoV5::from_domain(program),
                     style: *style,
                 }
             }
             PatternOutputRealizationRecipe::MazeWalls { program, style } => Self::MazeWalls {
-                program: MazeProgramDtoV4::from_domain(program),
+                program: MazeProgramDtoV5::from_domain(program),
                 style: *style,
             },
             PatternOutputRealizationRecipe::VoronoiRegions => Self::VoronoiRegions,
@@ -2431,19 +2571,19 @@ dto_enum!(
     }
 );
 
-impl DocumentDtoV4 {
-    /// Projects an authoritative document into deterministic current-v4 persistence without runtime state.
+impl DocumentDtoV5 {
+    /// Projects an authoritative document into deterministic current-v5 persistence without runtime state.
     ///
     /// # Errors
     ///
     /// Returns a save error for an unassigned source or incoherent channel configuration before an
-    /// archive is written; an empty authored store is omitted to preserve accepted old-v4 bytes.
+    /// archive is written; an empty authored store is omitted to preserve accepted old-v5 bytes.
     fn from_domain(document: &Document) -> Result<Self, SaveError> {
         let source_reference_id = match document.source() {
             SourceReference::Assigned(id) => id.as_str().to_owned(),
             SourceReference::Unassigned => {
                 return Err(SaveError::SourceDocumentMismatch {
-                    context: "v4 saving requires an assigned document source".into(),
+                    context: "v5 saving requires an assigned document source".into(),
                 });
             }
         };
@@ -2486,7 +2626,7 @@ impl DocumentDtoV4 {
             authored_structures: document
                 .authored_structures()
                 .iter()
-                .map(AuthoredStructureDtoV4::from_domain)
+                .map(AuthoredStructureDtoV5::from_domain)
                 .collect(),
         })
     }
@@ -2506,7 +2646,7 @@ impl DocumentDtoV4 {
         let authored_structures = self
             .authored_structures
             .into_iter()
-            .map(AuthoredStructureDtoV4::into_domain)
+            .map(AuthoredStructureDtoV5::into_domain)
             .collect::<Result<Vec<_>, _>>()?;
         match self.channel_configuration {
             ChannelConfigurationDto::Legacy { channels } => {
@@ -2550,16 +2690,16 @@ impl DocumentDtoV4 {
     }
 }
 
-impl AuthoredStructureDtoV4 {
-    /// Projects one validated domain-owned structure into deterministic current-v4 persistence fields.
+impl AuthoredStructureDtoV5 {
+    /// Projects one validated domain-owned structure into deterministic current-v5 persistence fields.
     fn from_domain(value: &AuthoredStructure) -> Self {
         Self {
             id: value.id().0,
-            kind: AuthoredStructureKindDtoV4::from_domain(value.kind()),
+            kind: AuthoredStructureKindDtoV5::from_domain(value.kind()),
             segments: value
                 .segments()
                 .iter()
-                .map(AuthoredCurveSegmentDtoV4::from_domain)
+                .map(AuthoredCurveSegmentDtoV5::from_domain)
                 .collect(),
         }
     }
@@ -2575,14 +2715,14 @@ impl AuthoredStructureDtoV4 {
             self.kind.into_domain(),
             self.segments
                 .into_iter()
-                .map(AuthoredCurveSegmentDtoV4::into_domain)
+                .map(AuthoredCurveSegmentDtoV5::into_domain)
                 .collect(),
         )
     }
 }
 
-impl AuthoredStructureKindDtoV4 {
-    /// Converts declared domain topology into its stable current-v4 string representation.
+impl AuthoredStructureKindDtoV5 {
+    /// Converts declared domain topology into its stable current-v5 string representation.
     fn from_domain(value: AuthoredStructureKind) -> Self {
         match value {
             AuthoredStructureKind::OpenPath => Self::OpenPath,
@@ -2590,7 +2730,7 @@ impl AuthoredStructureKindDtoV4 {
         }
     }
 
-    /// Converts stable current-v4 topology into its domain-owned enum.
+    /// Converts stable current-v5 topology into its domain-owned enum.
     fn into_domain(self) -> AuthoredStructureKind {
         match self {
             Self::OpenPath => AuthoredStructureKind::OpenPath,
@@ -2599,13 +2739,13 @@ impl AuthoredStructureKindDtoV4 {
     }
 }
 
-impl AuthoredCurveSegmentDtoV4 {
-    /// Projects one explicit domain segment into the matching tagged current-v4 representation.
+impl AuthoredCurveSegmentDtoV5 {
+    /// Projects one explicit domain segment into the matching tagged current-v5 representation.
     fn from_domain(value: &AuthoredCurveSegment) -> Self {
         match value {
             AuthoredCurveSegment::Line { start, end } => Self::Line {
-                start: AuthoredPointDtoV4::from_domain(*start),
-                end: AuthoredPointDtoV4::from_domain(*end),
+                start: AuthoredPointDtoV5::from_domain(*start),
+                end: AuthoredPointDtoV5::from_domain(*end),
             },
             AuthoredCurveSegment::CubicBezier {
                 start,
@@ -2613,15 +2753,15 @@ impl AuthoredCurveSegmentDtoV4 {
                 control_2,
                 end,
             } => Self::CubicBezier {
-                start: AuthoredPointDtoV4::from_domain(*start),
-                control_1: AuthoredPointDtoV4::from_domain(*control_1),
-                control_2: AuthoredPointDtoV4::from_domain(*control_2),
-                end: AuthoredPointDtoV4::from_domain(*end),
+                start: AuthoredPointDtoV5::from_domain(*start),
+                control_1: AuthoredPointDtoV5::from_domain(*control_1),
+                control_2: AuthoredPointDtoV5::from_domain(*control_2),
+                end: AuthoredPointDtoV5::from_domain(*end),
             },
         }
     }
 
-    /// Converts one tagged current-v4 segment without inferring closure, winding, or render semantics.
+    /// Converts one tagged current-v5 segment without inferring closure, winding, or render semantics.
     fn into_domain(self) -> AuthoredCurveSegment {
         match self {
             Self::Line { start, end } => AuthoredCurveSegment::Line {
@@ -2643,8 +2783,8 @@ impl AuthoredCurveSegmentDtoV4 {
     }
 }
 
-impl AuthoredPointDtoV4 {
-    /// Projects one authored coordinate pair into deterministic current-v4 numeric fields.
+impl AuthoredPointDtoV5 {
+    /// Projects one authored coordinate pair into deterministic current-v5 numeric fields.
     fn from_domain(value: AuthoredPoint2) -> Self {
         Self {
             x: value.x,
@@ -2661,24 +2801,24 @@ impl AuthoredPointDtoV4 {
     }
 }
 
-impl PatternDefinitionDtoV4 {
+impl PatternDefinitionDtoV5 {
     fn from_domain(value: &PatternDefinition) -> Self {
         Self {
             id: value.id.0,
             name: value.name.clone(),
-            family: PatternFamilyDtoV4::from_domain(&value.family),
+            family: PatternFamilyDtoV5::from_domain(&value.family),
             mechanisms: value
                 .mechanisms
                 .iter()
-                .map(PatternMechanismDtoV4::from_domain)
+                .map(PatternMechanismDtoV5::from_domain)
                 .collect(),
             output_layers: value
                 .output_layers
                 .iter()
-                .map(PatternOutputLayerDtoV4::from_domain)
+                .map(PatternOutputLayerDtoV5::from_domain)
                 .collect(),
-            modulation: PatternModulationDtoV4 {},
-            coverage: CoverageDtoV4 {
+            modulation: PatternModulationDtoV5 {},
+            coverage: CoverageDtoV5 {
                 guard_steps: value.coverage.guard_steps,
                 additional_margin: value.coverage.additional_margin,
             },
@@ -2692,12 +2832,12 @@ impl PatternDefinitionDtoV4 {
             mechanisms: self
                 .mechanisms
                 .into_iter()
-                .map(PatternMechanismDtoV4::into_domain)
+                .map(PatternMechanismDtoV5::into_domain)
                 .collect(),
             output_layers: self
                 .output_layers
                 .into_iter()
-                .map(PatternOutputLayerDtoV4::into_domain)
+                .map(PatternOutputLayerDtoV5::into_domain)
                 .collect(),
             modulation: toniator_domain::PatternModulation,
             coverage: CoveragePolicy {
@@ -2712,7 +2852,7 @@ impl PatternDefinitionBundleDtoV5 {
     /// Projects one complete v5 structural-and-response bundle without derived state.
     fn from_domain(value: &PatternDefinitionBundle) -> Self {
         Self {
-            definition: PatternDefinitionDtoV4::from_domain(&value.definition),
+            definition: PatternDefinitionDtoV5::from_domain(&value.definition),
             output_settings: value
                 .output_settings
                 .iter()
@@ -2739,7 +2879,7 @@ impl PatternDefinitionBundleDtoV5 {
         })
     }
 }
-impl PatternFamilyDtoV4 {
+impl PatternFamilyDtoV5 {
     fn from_domain(value: &toniator_domain::PatternFamily) -> Self {
         match value {
             toniator_domain::PatternFamily::GuideIntersections {
@@ -2799,7 +2939,7 @@ impl PatternFamilyDtoV4 {
         }
     }
 }
-impl PatternMechanismDtoV4 {
+impl PatternMechanismDtoV5 {
     fn from_domain(value: &toniator_domain::PatternMechanism) -> Self {
         match value {
             toniator_domain::PatternMechanism::StraightGuides { id } => {
@@ -2817,7 +2957,7 @@ impl PatternMechanismDtoV4 {
                     id: id.0,
                     dimensions: dimensions
                         .iter()
-                        .map(StraightGuideDimensionDtoV4::from_domain)
+                        .map(StraightGuideDimensionDtoV5::from_domain)
                         .collect(),
                 }
             }
@@ -2826,7 +2966,7 @@ impl PatternMechanismDtoV4 {
                     id: id.0,
                     dimensions: dimensions
                         .iter()
-                        .map(GuideDimensionDtoV4::from_domain)
+                        .map(GuideDimensionDtoV5::from_domain)
                         .collect(),
                 }
             }
@@ -2860,8 +3000,8 @@ impl PatternMechanismDtoV4 {
                 repetition,
             } => Self::ParametricCurveSource {
                 id: id.0,
-                curve: ParametricCurveDtoV4::from_domain(curve),
-                repetition: GuideRepetitionDtoV4::from_domain(repetition),
+                curve: ParametricCurveDtoV5::from_domain(curve),
+                repetition: GuideRepetitionDtoV5::from_domain(repetition),
             },
             toniator_domain::PatternMechanism::AlongParametricCurveSites {
                 id,
@@ -2880,7 +3020,7 @@ impl PatternMechanismDtoV4 {
                 seed,
             } => Self::RandomSiteProcess {
                 id: id.0,
-                character: RandomSiteCharacterDtoV4::from_domain(character),
+                character: RandomSiteCharacterDtoV5::from_domain(character),
                 seed: *seed,
             },
             toniator_domain::PatternMechanism::SiteDensityModulation {
@@ -2890,7 +3030,7 @@ impl PatternMechanismDtoV4 {
             } => Self::SiteDensityModulation {
                 id: id.0,
                 base_site_process_id: base_site_process_id.0,
-                modulation: SiteDensityModulationDtoV4::from_domain(modulation),
+                modulation: SiteDensityModulationDtoV5::from_domain(modulation),
             },
             toniator_domain::PatternMechanism::SiteExclusion {
                 id,
@@ -2899,7 +3039,7 @@ impl PatternMechanismDtoV4 {
             } => Self::SiteExclusion {
                 id: id.0,
                 density_modulation_id: density_modulation_id.0,
-                policy: SiteExclusionPolicyDtoV4::from_domain(policy),
+                policy: SiteExclusionPolicyDtoV5::from_domain(policy),
             },
             toniator_domain::PatternMechanism::RandomSiteProduct {
                 id,
@@ -2931,7 +3071,7 @@ impl PatternMechanismDtoV4 {
                     id: PatternMechanismId(id),
                     dimensions: dimensions
                         .into_iter()
-                        .map(StraightGuideDimensionDtoV4::into_domain)
+                        .map(StraightGuideDimensionDtoV5::into_domain)
                         .collect(),
                 }
             }
@@ -2940,7 +3080,7 @@ impl PatternMechanismDtoV4 {
                     id: PatternMechanismId(id),
                     dimensions: dimensions
                         .into_iter()
-                        .map(GuideDimensionDtoV4::into_domain)
+                        .map(GuideDimensionDtoV5::into_domain)
                         .collect(),
                 }
             }
@@ -3030,7 +3170,7 @@ impl PatternMechanismDtoV4 {
     }
 }
 
-impl RandomSiteCharacterDtoV4 {
+impl RandomSiteCharacterDtoV5 {
     fn from_domain(value: &RandomSiteCharacter) -> Self {
         match value {
             RandomSiteCharacter::RawUniform => Self::RawUniform,
@@ -3071,7 +3211,7 @@ impl RandomSiteCharacterDtoV4 {
     }
 }
 
-impl SiteDensityModulationDtoV4 {
+impl SiteDensityModulationDtoV5 {
     fn from_domain(value: &SiteDensityModulation) -> Self {
         match value {
             SiteDensityModulation::Uniform => Self::Uniform,
@@ -3082,7 +3222,7 @@ impl SiteDensityModulationDtoV4 {
             } => Self::ArtworkWeighted {
                 mapping: SourceMappingDto::from_domain(*mapping),
                 strength: *strength,
-                response: ArtworkWeightResponseDtoV4::from_domain(response),
+                response: ArtworkWeightResponseDtoV5::from_domain(response),
             },
         }
     }
@@ -3102,7 +3242,7 @@ impl SiteDensityModulationDtoV4 {
     }
 }
 
-impl ArtworkWeightResponseDtoV4 {
+impl ArtworkWeightResponseDtoV5 {
     fn from_domain(value: &ArtworkWeightResponse) -> Self {
         match value {
             ArtworkWeightResponse::Linear => Self::Linear,
@@ -3117,25 +3257,31 @@ impl ArtworkWeightResponseDtoV4 {
     }
 }
 
-impl SiteExclusionPolicyDtoV4 {
+impl SiteExclusionPolicyDtoV5 {
+    /// Projects current exclusion intent into the persisted schema without derived support.
     fn from_domain(value: &SiteExclusionPolicy) -> Self {
         match value {
             SiteExclusionPolicy::None => Self::None,
             SiteExclusionPolicy::MinimumCenterDistance { minimum } => {
                 Self::MinimumCenterDistance { minimum: *minimum }
             }
+            SiteExclusionPolicy::VisibleMarkMargin { margin } => {
+                Self::VisibleMarkMargin { margin: *margin }
+            }
         }
     }
+    /// Restores current exclusion intent while leaving active-support resolution to evaluation.
     fn into_domain(self) -> SiteExclusionPolicy {
         match self {
             Self::None => SiteExclusionPolicy::None,
             Self::MinimumCenterDistance { minimum } => {
                 SiteExclusionPolicy::MinimumCenterDistance { minimum }
             }
+            Self::VisibleMarkMargin { margin } => SiteExclusionPolicy::VisibleMarkMargin { margin },
         }
     }
 }
-impl PatternOutputLayerDtoV4 {
+impl PatternOutputLayerDtoV5 {
     /// Serializes one authored output layer, including its explicit site-use filter.
     fn from_domain(value: &toniator_domain::PatternOutputLayer) -> Self {
         let source_filter = match value.source_filter {
@@ -3163,8 +3309,8 @@ impl PatternOutputLayerDtoV4 {
                 orientation,
             } => PatternOutputRealizationDtoV5::MarkPrototype {
                 site_mechanism_id: site_mechanism_id.0,
-                prototype: MarkPrototypeDtoV4::from_domain(prototype),
-                orientation: MarkOrientationDtoV4::from_domain(orientation),
+                prototype: MarkPrototypeDtoV5::from_domain(prototype),
+                orientation: MarkOrientationDtoV5::from_domain(orientation),
             },
             toniator_domain::PatternOutputRealization::GuidePaths {
                 guide_mechanism_id,
@@ -3186,7 +3332,7 @@ impl PatternOutputLayerDtoV4 {
                 style,
             } => PatternOutputRealizationDtoV5::ConnectionPaths {
                 site_mechanism_id: site_mechanism_id.0,
-                program: ConnectionProgramDtoV4::from_domain(program),
+                program: ConnectionProgramDtoV5::from_domain(program),
                 style: *style,
             },
             toniator_domain::PatternOutputRealization::MazeWalls {
@@ -3195,7 +3341,7 @@ impl PatternOutputLayerDtoV4 {
                 style,
             } => PatternOutputRealizationDtoV5::MazeWalls {
                 site_mechanism_id: site_mechanism_id.0,
-                program: MazeProgramDtoV4::from_domain(program),
+                program: MazeProgramDtoV5::from_domain(program),
                 style: *style,
             },
             toniator_domain::PatternOutputRealization::Regions { source } => {
@@ -3321,20 +3467,20 @@ impl RegionSourceIntentDtoV5 {
     }
 }
 
-impl ConnectionProgramDtoV4 {
+impl ConnectionProgramDtoV5 {
     /// Serializes authored program intent without materializing a graph or path result.
     fn from_domain(value: &toniator_domain::ConnectionProgram) -> Self {
         use toniator_domain::ConnectionProgram;
         match value {
             ConnectionProgram::NearestLinks { adjacency } => Self::NearestLinks {
-                adjacency: ConnectionAdjacencyIntentDtoV4::from_domain(*adjacency),
+                adjacency: ConnectionAdjacencyIntentDtoV5::from_domain(*adjacency),
             },
             ConnectionProgram::RandomLinks {
                 adjacency,
                 minimum_degree,
                 seed,
             } => Self::RandomLinks {
-                adjacency: ConnectionAdjacencyIntentDtoV4::from_domain(*adjacency),
+                adjacency: ConnectionAdjacencyIntentDtoV5::from_domain(*adjacency),
                 minimum_degree: *minimum_degree,
                 seed: *seed,
             },
@@ -3343,8 +3489,8 @@ impl ConnectionProgramDtoV4 {
                 algorithm,
                 seed,
             } => Self::GridSpanningTree {
-                adjacency: ConnectionAdjacencyIntentDtoV4::from_domain(*adjacency),
-                algorithm: GridSpanningTreeAlgorithmDtoV4::from_domain(*algorithm),
+                adjacency: ConnectionAdjacencyIntentDtoV5::from_domain(*adjacency),
+                algorithm: GridSpanningTreeAlgorithmDtoV5::from_domain(*algorithm),
                 seed: *seed,
             },
         }
@@ -3379,11 +3525,11 @@ impl ConnectionProgramDtoV4 {
     }
 }
 
-impl MazeProgramDtoV4 {
+impl MazeProgramDtoV5 {
     /// Serializes only recursive-backtracker maze intent and its deterministic seed.
     fn from_domain(value: &MazeProgram) -> Self {
         Self {
-            algorithm: GridMazeAlgorithmDtoV4::from_domain(value.algorithm),
+            algorithm: GridMazeAlgorithmDtoV5::from_domain(value.algorithm),
             seed: value.seed,
         }
     }
@@ -3397,7 +3543,7 @@ impl MazeProgramDtoV4 {
     }
 }
 
-impl ConnectionAdjacencyIntentDtoV4 {
+impl ConnectionAdjacencyIntentDtoV5 {
     /// Serializes only finite authored adjacency controls.
     fn from_domain(value: toniator_domain::ConnectionAdjacencyIntent) -> Self {
         Self {
@@ -3414,7 +3560,7 @@ impl ConnectionAdjacencyIntentDtoV4 {
     }
 }
 
-impl GridMazeAlgorithmDtoV4 {
+impl GridMazeAlgorithmDtoV5 {
     /// Serializes the fixed maze algorithm contract.
     fn from_domain(value: toniator_domain::GridMazeAlgorithm) -> Self {
         match value {
@@ -3429,7 +3575,7 @@ impl GridMazeAlgorithmDtoV4 {
     }
 }
 
-impl GridSpanningTreeAlgorithmDtoV4 {
+impl GridSpanningTreeAlgorithmDtoV5 {
     /// Serializes the fixed spanning-tree algorithm contract.
     fn from_domain(value: toniator_domain::GridSpanningTreeAlgorithm) -> Self {
         match value {
@@ -3444,7 +3590,7 @@ impl GridSpanningTreeAlgorithmDtoV4 {
     }
 }
 
-impl ParametricCurveDtoV4 {
+impl ParametricCurveDtoV5 {
     /// Projects analytic parametric intent without serializing derived CurvePath geometry.
     fn from_domain(value: &ParametricCurve) -> Self {
         match value {
@@ -3456,15 +3602,15 @@ impl ParametricCurveDtoV4 {
                 winding,
             }) => Self::Spiral {
                 shape: match shape {
-                    SpiralShape::Round => SpiralShapeDtoV4::Round,
-                    SpiralShape::Square => SpiralShapeDtoV4::Square,
+                    SpiralShape::Round => SpiralShapeDtoV5::Round,
+                    SpiralShape::Square => SpiralShapeDtoV5::Square,
                 },
                 turns: *turns,
                 radial_spacing: *radial_spacing,
                 phase_degrees: *phase_degrees,
                 winding: match winding {
-                    CurveWinding::Clockwise => CurveWindingDtoV4::Clockwise,
-                    CurveWinding::CounterClockwise => CurveWindingDtoV4::CounterClockwise,
+                    CurveWinding::Clockwise => CurveWindingDtoV5::Clockwise,
+                    CurveWinding::CounterClockwise => CurveWindingDtoV5::CounterClockwise,
                 },
             },
         }
@@ -3481,22 +3627,22 @@ impl ParametricCurveDtoV4 {
                 winding,
             } => ParametricCurve::Spiral(SpiralCurve {
                 shape: match shape {
-                    SpiralShapeDtoV4::Round => SpiralShape::Round,
-                    SpiralShapeDtoV4::Square => SpiralShape::Square,
+                    SpiralShapeDtoV5::Round => SpiralShape::Round,
+                    SpiralShapeDtoV5::Square => SpiralShape::Square,
                 },
                 turns,
                 radial_spacing,
                 phase_degrees,
                 winding: match winding {
-                    CurveWindingDtoV4::Clockwise => CurveWinding::Clockwise,
-                    CurveWindingDtoV4::CounterClockwise => CurveWinding::CounterClockwise,
+                    CurveWindingDtoV5::Clockwise => CurveWinding::Clockwise,
+                    CurveWindingDtoV5::CounterClockwise => CurveWinding::CounterClockwise,
                 },
             }),
         }
     }
 }
 
-impl StraightGuideDimensionDtoV4 {
+impl StraightGuideDimensionDtoV5 {
     fn from_domain(value: &StraightGuideDimension) -> Self {
         Self {
             id: value.id.0,
@@ -3516,7 +3662,7 @@ impl StraightGuideDimensionDtoV4 {
         }
     }
 }
-impl MarkPrototypeDtoV4 {
+impl MarkPrototypeDtoV5 {
     /// Serializes the exact persisted mark variant and its explicit resource reference.
     fn from_domain(value: &MarkPrototype) -> Self {
         match value {
@@ -3537,7 +3683,7 @@ impl MarkPrototypeDtoV4 {
         }
     }
 }
-impl MarkOrientationDtoV4 {
+impl MarkOrientationDtoV5 {
     fn from_domain(value: &MarkOrientation) -> Self {
         match value {
             MarkOrientation::Fixed => Self::Fixed,
@@ -3899,10 +4045,10 @@ mod stage20r_tests {
                     site_mechanism_id: PatternMechanismId(4),
                 },
             );
-            let dto = PatternOutputLayerDtoV4::from_domain(&layer);
+            let dto = PatternOutputLayerDtoV5::from_domain(&layer);
             let json = serde_json::to_string(&dto).expect("output DTO serializes");
             assert!(json.contains("source_filter"));
-            let decoded: PatternOutputLayerDtoV4 =
+            let decoded: PatternOutputLayerDtoV5 =
                 serde_json::from_str(&json).expect("output DTO decodes");
             assert_eq!(decoded.into_domain(), layer);
         }
@@ -3915,7 +4061,7 @@ mod stage20r_tests {
             "id": 9,
             "realization": {"kind":"circular_marks","site_mechanism_id":4}
         }"#;
-        assert!(serde_json::from_str::<PatternOutputLayerDtoV4>(malformed).is_err());
+        assert!(serde_json::from_str::<PatternOutputLayerDtoV5>(malformed).is_err());
     }
 
     /// Proves preset-v3 filter references remain ID-free recipe-local indices.

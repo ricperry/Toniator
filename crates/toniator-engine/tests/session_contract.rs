@@ -2,9 +2,9 @@ use toniator_domain::{
     CanvasSpec, ChannelAppearance, ChannelId, ChannelPatternInstance, ChannelPatternLayoutDelta,
     ChannelSourceMapping, ChannelState, ColorValue, CoveragePolicy, DensityEditedAxis,
     DensityMetric2D, Document, DocumentCommand, DocumentId, DocumentSession, InvalidationLevel,
-    MarkGeometryFieldEdit, MarkGeometryResponse, PatternDefinition, PatternDefinitionId,
-    PatternGeometryResponse, PatternMechanismId, PatternOutputLayerId, Revision, SourceComponent,
-    SourcePlacement,
+    MarkGeometryFieldEdit, MarkGeometryResponse, PatternDefinition, PatternDefinitionBundle,
+    PatternDefinitionId, PatternGeometryResponse, PatternMechanismId, PatternOutputLayerId,
+    PatternOutputSettings, Revision, SourceComponent, SourcePlacement,
 };
 
 const CHANNEL_ID: ChannelId = ChannelId(1);
@@ -18,17 +18,26 @@ fn session() -> DocumentSession {
             width: 900.0,
             height: 600.0,
         },
-        vec![PatternDefinition::supported_straight_grid(
-            PatternDefinitionId(1),
-            "minimal",
-            PatternMechanismId(1),
-            PatternMechanismId(2),
-            PatternOutputLayerId(1),
-            CoveragePolicy {
-                guard_steps: 2,
-                additional_margin: 4.5,
-            },
-        )],
+        vec![PatternDefinitionBundle {
+            definition: PatternDefinition::supported_straight_grid(
+                PatternDefinitionId(1),
+                "minimal",
+                PatternMechanismId(1),
+                PatternMechanismId(2),
+                PatternOutputLayerId(1),
+                CoveragePolicy {
+                    guard_steps: 2,
+                    additional_margin: 4.5,
+                },
+            ),
+            output_settings: vec![PatternOutputSettings {
+                output_layer_id: PatternOutputLayerId(1),
+                response: PatternGeometryResponse::Marks(MarkGeometryResponse {
+                    minimum_fill: 0.2,
+                    maximum_fill: 0.9,
+                }),
+            }],
+        }],
         toniator_domain::DocumentPatternSettings {
             definition_id: PatternDefinitionId(1),
             density: DensityMetric2D {
@@ -38,10 +47,6 @@ fn session() -> DocumentSession {
             },
             pattern_rotation_degrees: 0.0,
             shape_rotation_degrees: 0.0,
-            geometry_response: PatternGeometryResponse::Marks(MarkGeometryResponse {
-                minimum_fill: 0.2,
-                maximum_fill: 0.9,
-            }),
         },
         vec![ChannelState {
             id: CHANNEL_ID,
@@ -54,7 +59,7 @@ fn session() -> DocumentSession {
                     translation_y: 0.0,
                 },
                 shape_rotation_delta_degrees: None,
-                geometry_response_delta: None,
+                output_response_deltas: Vec::new(),
             },
             appearance: ChannelAppearance {
                 visible: true,
@@ -117,6 +122,7 @@ fn successful_commands_mutate_once_and_advance_revision_once() {
                 .document()
                 .set_channel_mark_response_field_for_effective(
                     CHANNEL_ID,
+                    PatternOutputLayerId(1),
                     MarkGeometryFieldEdit::MaximumFill(0.85),
                 )
                 .expect("mark response command builds"),
@@ -161,7 +167,7 @@ fn successful_commands_mutate_once_and_advance_revision_once() {
     assert_eq!(channel.pattern_rotation_degrees, 20.0);
     assert_eq!(channel.translation_x, 2.0);
     assert_eq!(channel.translation_y, 0.0);
-    let PatternGeometryResponse::Marks(response) = channel.geometry_response else {
+    let PatternGeometryResponse::Marks(response) = &channel.output_settings[0].response else {
         panic!("fixture remains marks")
     };
     assert_eq!(response.maximum_fill, 0.85);
@@ -199,6 +205,7 @@ fn failed_commands_preserve_exact_document_and_revision() {
             .document()
             .set_channel_mark_response_field_for_effective(
                 CHANNEL_ID,
+                PatternOutputLayerId(1),
                 MarkGeometryFieldEdit::MinimumFill(-1.0),
             ),
     ];

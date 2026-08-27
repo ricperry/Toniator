@@ -132,12 +132,12 @@ fn capability_queries_are_cache_inert_before_and_after_authoritative_evaluation(
     }
 }
 
-/// Proves the current Holiday v4 fixture resolves divergent effective definitions without a cache or UI path.
+/// Proves the current Holiday v5 fixture resolves divergent effective definitions without a cache or UI path.
 #[test]
-fn holiday_v4_channels_project_independently_from_their_effective_definitions() {
+fn holiday_v5_channels_project_independently_from_their_effective_definitions() {
     let path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/HolidayMugs_2024_2025.toniator");
-    let loaded = toniator_io::load(&path).expect("Holiday v4 fixture opens");
+    let loaded = toniator_io::load(&path).expect("Holiday v5 fixture opens");
     let projections = [ChannelId(1), ChannelId(2), ChannelId(3)].map(|channel_id| {
         loaded
             .document()

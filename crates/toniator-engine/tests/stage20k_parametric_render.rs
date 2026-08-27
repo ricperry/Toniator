@@ -7,10 +7,11 @@ use std::{
 use toniator_domain::{
     CanvasSpec, ConnectedGeometryResponse, CoveragePolicy, CurveWinding, Document, DocumentCommand,
     DocumentHistory, DocumentId, DocumentSession, GuideRepetition, MarkGeometryResponse,
-    MarkOrientation, MarkPrototype, ParametricCurve, PatternDefinition, PatternDefinitionEdit,
-    PatternDefinitionId, PatternFamily, PatternGeometryResponse, PatternMechanism,
-    PatternMechanismId, PatternModulation, PatternOutputLayer, PatternOutputLayerId,
-    SourceReference, SourceReferenceId, SpiralCurve, SpiralShape,
+    MarkOrientation, MarkPrototype, ParametricCurve, PatternDefinition, PatternDefinitionBundle,
+    PatternDefinitionEdit, PatternDefinitionId, PatternFamily, PatternGeometryResponse,
+    PatternMechanism, PatternMechanismId, PatternModulation, PatternOutputLayer,
+    PatternOutputLayerId, PatternOutputRealization, PatternOutputSettings, SourceReference,
+    SourceReferenceId, SpiralCurve, SpiralShape,
 };
 use toniator_engine::{
     CacheDisposition, EvaluationCompletion, EvaluationLimits, EvaluationRequest,
@@ -102,18 +103,22 @@ fn document(
             mechanisms
         },
         output_layers: if sites {
-            vec![PatternOutputLayer::MarkPrototype {
-                id: PatternOutputLayerId(813),
-                site_mechanism_id: site_id,
-                prototype: MarkPrototype::Circle,
-                orientation: MarkOrientation::Fixed,
-            }]
+            vec![PatternOutputLayer::all(
+                PatternOutputLayerId(813),
+                PatternOutputRealization::MarkPrototype {
+                    site_mechanism_id: site_id,
+                    prototype: MarkPrototype::Circle,
+                    orientation: MarkOrientation::Fixed,
+                },
+            )]
         } else {
-            vec![PatternOutputLayer::ParametricPaths {
-                id: PatternOutputLayerId(813),
-                curve_mechanism_id: curve_id,
-                style: toniator_domain::PathStrokeStyle::default(),
-            }]
+            vec![PatternOutputLayer::all(
+                PatternOutputLayerId(813),
+                PatternOutputRealization::ParametricPaths {
+                    curve_mechanism_id: curve_id,
+                    style: toniator_domain::PathStrokeStyle::default(),
+                },
+            )]
         },
         modulation: PatternModulation,
         coverage: CoveragePolicy {
@@ -123,7 +128,7 @@ fn document(
     };
     let mut settings = base.pattern_settings().clone();
     settings.definition_id = definition_id;
-    settings.geometry_response = if sites {
+    let response = if sites {
         PatternGeometryResponse::Marks(MarkGeometryResponse {
             minimum_fill: 0.02,
             maximum_fill: 0.28,
@@ -138,7 +143,13 @@ fn document(
         DocumentId(809),
         base.canvas().clone(),
         base.source().clone(),
-        vec![definition],
+        vec![PatternDefinitionBundle {
+            definition,
+            output_settings: vec![PatternOutputSettings {
+                output_layer_id: PatternOutputLayerId(813),
+                response,
+            }],
+        }],
         settings,
         base.channel_model().expect("model"),
         base.channel_topology().expect("topology").clone(),
@@ -280,10 +291,11 @@ fn parametric_transform_stack_edits_miss_authoritative_family_cache_entries() {
     );
     let base_definition = history
         .document()
-        .pattern_definitions()
+        .pattern_definition_bundles()
         .iter()
-        .find(|definition| definition.id == PatternDefinitionId(810))
+        .find(|bundle| bundle.definition.id == PatternDefinitionId(810))
         .expect("parametric definition")
+        .definition
         .clone();
     history
         .apply(&DocumentCommand::EditSharedPatternDefinition {

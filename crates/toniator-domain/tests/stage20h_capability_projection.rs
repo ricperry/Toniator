@@ -8,9 +8,10 @@ use toniator_domain::{
     MarkPrototypeKind, PatternCapabilityScope, PatternDefinition, PatternDefinitionBundle,
     PatternDefinitionId, PatternFamilyCapabilityProjection, PatternGeometryResponse,
     PatternMechanismId, PatternOutputCapabilityProjection, PatternOutputLayerId,
-    PatternOutputRealization, PatternOutputSettings, PropertyTarget, RandomCharacterKind,
-    RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy, SourceMapping,
-    SourceMappingComponent, SourcePlacement, SourceReference,
+    PatternOutputRealization, PatternOutputSettings, PropertyFieldId, PropertyTarget,
+    RandomCharacterKind, RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy,
+    SourceMapping, SourceMappingComponent, SourcePlacement, SourceReference,
+    StructuralSupportConstraint,
 };
 
 /// Builds the current modeled document used to verify base and effective authority scopes.
@@ -432,6 +433,14 @@ fn dispersion_variants_are_deterministic_and_missing_scope_is_an_error() {
             toniator_domain::DensityModulationKind::ArtworkWeighted,
             toniator_domain::ExclusionKind::MinimumCenterDistance,
         ),
+        (
+            RandomSiteCharacter::RawUniform,
+            SiteDensityModulation::Uniform,
+            SiteExclusionPolicy::VisibleMarkMargin { margin: 0.75 },
+            RandomCharacterKind::RawUniform,
+            toniator_domain::DensityModulationKind::Uniform,
+            toniator_domain::ExclusionKind::VisibleMarkMargin,
+        ),
     ];
     for (
         character,
@@ -453,6 +462,22 @@ fn dispersion_variants_are_deterministic_and_missing_scope_is_an_error() {
             .pattern_capabilities(PatternCapabilityScope::DocumentBase)
             .expect("random projection repeats");
         assert_eq!(first, second);
+        if expected_exclusion == toniator_domain::ExclusionKind::VisibleMarkMargin {
+            let descriptors = document.property_descriptors();
+            let selector = descriptors
+                .iter()
+                .find(|descriptor| descriptor.field == PropertyFieldId::RandomExclusion)
+                .expect("visible exclusion selector projects");
+            assert_eq!(
+                selector.structural_support,
+                StructuralSupportConstraint::VisibleMarkMarginUsesMaximumRealizedSupport
+            );
+            assert!(
+                descriptors
+                    .iter()
+                    .any(|descriptor| descriptor.field == PropertyFieldId::VisibleMarkMargin)
+            );
+        }
         assert_eq!(
             first.family,
             PatternFamilyCapabilityProjection::Dispersion(

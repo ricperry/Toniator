@@ -3,9 +3,10 @@ use toniator_domain::{
     AuthoredStructureId, AuthoredStructureKind, CanvasSpec, CoveragePolicy, Document,
     DocumentCommand, DocumentHistory, DocumentId, DocumentSession, GeneralizedSiteProduct,
     GuideDimension, GuideDimensionId, GuidePrototype, GuideRepetition, InvalidationLevel,
-    MarkOrientation, OffsetCleanup, OffsetSides, PatternDefinition, PatternDefinitionEdit,
-    PatternDefinitionId, PatternMechanism, PatternMechanismId, PatternOutputLayerId,
-    PropertyCurrentValueKind, PropertyEnumChoice, PropertyFieldId, SourceReference,
+    MarkOrientation, OffsetCleanup, OffsetSides, PatternDefinition, PatternDefinitionBundle,
+    PatternDefinitionEdit, PatternDefinitionId, PatternMechanism, PatternMechanismId,
+    PatternOutputLayerId, PropertyCurrentValueKind, PropertyEnumChoice, PropertyFieldId,
+    SourceReference,
 };
 
 /// Builds one valid document-owned open path used by generic guide validation tests.
@@ -60,6 +61,21 @@ fn definition(prototype: GuidePrototype) -> PatternDefinition {
     )
 }
 
+/// Binds one mark-producing guide definition to the current typed output settings authority.
+fn definition_bundle(definition: PatternDefinition) -> PatternDefinitionBundle {
+    let base = Document::new_default_document(
+        CanvasSpec {
+            width: 100.0,
+            height: 100.0,
+        },
+        SourceReference::Unassigned,
+    )
+    .expect("default bundle source is valid");
+    let mut bundle = base.pattern_definition_bundles()[0].clone();
+    bundle.definition = definition;
+    bundle
+}
+
 /// Builds a complete modeled document whose existing channels all reference the generic test root.
 fn document_with_generic_guides(prototype: GuidePrototype) -> Document {
     let base = Document::new_default_document(
@@ -74,7 +90,7 @@ fn document_with_generic_guides(prototype: GuidePrototype) -> Document {
         base.id(),
         base.canvas().clone(),
         base.source().clone(),
-        vec![definition(prototype)],
+        vec![definition_bundle(definition(prototype))],
         base.pattern_settings().clone(),
         base.channel_model().expect("modeled document").to_owned(),
         base.channel_topology().expect("modeled document").clone(),
@@ -104,7 +120,7 @@ fn generic_guide_definitions_validate_prototypes_repetition_references_and_produ
             height: 100.0,
         },
         SourceReference::Unassigned,
-        vec![guide_definition],
+        vec![definition_bundle(guide_definition)],
         settings_document.pattern_settings().clone(),
         toniator_domain::HalftoneChannelModel::Rgb,
         Document::new_default_document(
@@ -178,7 +194,7 @@ fn normal_offset_repetition_requires_zero_phase() {
         base.id(),
         base.canvas().clone(),
         base.source().clone(),
-        vec![definition],
+        vec![definition_bundle(definition)],
         base.pattern_settings().clone(),
         base.channel_model().expect("modeled document").to_owned(),
         base.channel_topology().expect("modeled document").clone(),
@@ -222,7 +238,7 @@ fn generic_guide_edits_descriptors_history_and_affected_channels_are_atomic() {
         descriptors.iter().any(|descriptor| descriptor.field
             == toniator_domain::PropertyFieldId::GuideAuthoredStructure)
     );
-    let original = document.pattern_definitions()[0].clone();
+    let original = document.pattern_definition_bundles()[0].definition.clone();
     let mut history = DocumentHistory::new(DocumentSession::new(document).unwrap());
     let edit = DocumentCommand::EditSharedPatternDefinition {
         definition_id: PatternDefinitionId(1),
@@ -284,10 +300,11 @@ fn generic_guide_edits_descriptors_history_and_affected_channels_are_atomic() {
     let apply_generic = |history: &mut DocumentHistory, edit: PatternDefinitionEdit| {
         let base = history
             .document()
-            .pattern_definitions()
+            .pattern_definition_bundles()
             .iter()
-            .find(|definition| definition.id == PatternDefinitionId(1))
+            .find(|bundle| bundle.definition.id == PatternDefinitionId(1))
             .unwrap()
+            .definition
             .clone();
         history
             .apply(&DocumentCommand::EditSharedPatternDefinition {
@@ -386,10 +403,11 @@ fn generic_guide_edits_descriptors_history_and_affected_channels_are_atomic() {
     );
     let authored_noop_base = history
         .document()
-        .pattern_definitions()
+        .pattern_definition_bundles()
         .iter()
-        .find(|definition| definition.id == PatternDefinitionId(1))
+        .find(|bundle| bundle.definition.id == PatternDefinitionId(1))
         .unwrap()
+        .definition
         .clone();
     assert!(
         history
@@ -408,10 +426,11 @@ fn generic_guide_edits_descriptors_history_and_affected_channels_are_atomic() {
     let before_invalid = history.document().clone();
     let before_revision = history.revision();
     let base = before_invalid
-        .pattern_definitions()
+        .pattern_definition_bundles()
         .iter()
-        .find(|definition| definition.id == PatternDefinitionId(1))
+        .find(|bundle| bundle.definition.id == PatternDefinitionId(1))
         .unwrap()
+        .definition
         .clone();
     assert!(
         history
@@ -463,7 +482,9 @@ fn normal_offset_payload_descriptors_and_typed_edits_are_history_safe() {
     });
     let mut history = DocumentHistory::new(DocumentSession::new(document).expect("valid session"));
     let apply = |history: &mut DocumentHistory, edit: PatternDefinitionEdit| {
-        let base_definition = history.document().pattern_definitions()[0].clone();
+        let base_definition = history.document().pattern_definition_bundles()[0]
+            .definition
+            .clone();
         history
             .apply(&DocumentCommand::EditSharedPatternDefinition {
                 definition_id: PatternDefinitionId(1),
@@ -516,7 +537,9 @@ fn normal_offset_payload_descriptors_and_typed_edits_are_history_safe() {
         ))
     );
 
-    let stale_base = history.document().pattern_definitions()[0].clone();
+    let stale_base = history.document().pattern_definition_bundles()[0]
+        .definition
+        .clone();
     let result = apply(
         &mut history,
         PatternDefinitionEdit::SetGuideOffsetSpacing {
@@ -553,7 +576,9 @@ fn normal_offset_payload_descriptors_and_typed_edits_are_history_safe() {
     assert_eq!(history.document(), &before);
     assert_eq!(history.revision(), revision);
 
-    let current_base = history.document().pattern_definitions()[0].clone();
+    let current_base = history.document().pattern_definition_bundles()[0]
+        .definition
+        .clone();
     assert!(
         history
             .apply(&DocumentCommand::EditSharedPatternDefinition {
@@ -571,7 +596,9 @@ fn normal_offset_payload_descriptors_and_typed_edits_are_history_safe() {
     history.undo().expect("offset side edit is undoable");
     history.redo().expect("offset side edit is redoable");
     let PatternMechanism::GuideDimensions { dimensions, .. } =
-        &history.document().pattern_definitions()[0].mechanisms[0]
+        &history.document().pattern_definition_bundles()[0]
+            .definition
+            .mechanisms[0]
     else {
         panic!("generic guide root remains active")
     };

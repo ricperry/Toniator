@@ -2,8 +2,9 @@
 
 use toniator_domain::{
     CoveragePolicy, GeneralizedSiteProductDraft, GuideDimensionDraft, MarkOrientationDraft,
-    PatternDefinitionRecipe, PatternGeometryResponse, PatternStructureRecipe, PresetMetadata,
-    PresetRecord, RegionGeometryResponse, validate_preset_record,
+    PatternDefinitionRecipe, PatternGeometryResponse, PatternOutputRealizationRecipe,
+    PatternOutputSettingsRecipe, PatternStructureRecipe, PresetMetadata, PresetRecord,
+    RegionGeometryResponse, SiteUseFilterRecipe, validate_preset_record,
 };
 
 /// Builds an ID-free phase-aligned three-guide recipe eligible for arrangement-face regions.
@@ -65,5 +66,44 @@ fn guide_face_recipe_requires_ordered_straight_dimensions() {
             recipe: invalid
         })
         .is_err()
+    );
+}
+
+/// Rejects duplicate and reversed Guide Faces selections inside ordered-output recipes.
+#[test]
+fn ordered_guide_face_output_requires_unique_increasing_dimensions() {
+    let recipe = |dimension_indices| PatternDefinitionRecipe {
+        structure: PatternStructureRecipe::OrderedOutputs {
+            definition: Box::new(three_guide_structure()),
+            outputs: vec![PatternOutputRealizationRecipe::GuideFaceRegions { dimension_indices }],
+        },
+        output_settings: vec![PatternOutputSettingsRecipe {
+            source_filter: SiteUseFilterRecipe::All,
+            response: PatternGeometryResponse::Regions(RegionGeometryResponse::default()),
+        }],
+    };
+    let record = |recipe| PresetRecord {
+        metadata: PresetMetadata {
+            id: "ordered-guide-faces".into(),
+            name: "Ordered guide faces".into(),
+            category: "test".into(),
+            description: "ordered Guide Faces validation fixture".into(),
+            thumbnail: None,
+        },
+        recipe,
+    };
+    validate_preset_record(&record(recipe(vec![0, 1, 2])))
+        .expect("unique increasing indices validate");
+    assert_eq!(
+        validate_preset_record(&record(recipe(vec![0, 1, 1])))
+            .expect_err("duplicate indices reject")
+            .path(),
+        "preset.recipe.outputs.guide_faces.dimension_indices"
+    );
+    assert_eq!(
+        validate_preset_record(&record(recipe(vec![2, 1, 0])))
+            .expect_err("reversed indices reject")
+            .path(),
+        "preset.recipe.outputs.guide_faces.dimension_indices"
     );
 }

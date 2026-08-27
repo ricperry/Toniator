@@ -3,8 +3,8 @@ use toniator_domain::{
     GuideDimensionId, GuideRepetition, MarkOrientation, MarkPrototype, ParametricCurve,
     PathStrokeStyle, PatternDefinition, PatternDefinitionId, PatternFamily, PatternMechanism,
     PatternMechanismId, PatternModulation, PatternOutputLayer, PatternOutputLayerId,
-    RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy, SpiralCurve, SpiralShape,
-    StraightGuideDimension, StraightGuideRepetition,
+    PatternOutputRealization, RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy,
+    SpiralCurve, SpiralShape, StraightGuideDimension, StraightGuideRepetition,
 };
 use toniator_patterns::{
     GridInspectRequest, SiteAdjacencyLimits, SiteAdjacencyPolicy, StructuralProductCapability,
@@ -78,18 +78,22 @@ fn spiral_definition(sites: bool) -> PatternDefinition {
             }]
         },
         output_layers: if sites {
-            vec![PatternOutputLayer::MarkPrototype {
-                id: PatternOutputLayerId(93),
-                site_mechanism_id: site_id,
-                prototype: MarkPrototype::Circle,
-                orientation: MarkOrientation::Fixed,
-            }]
+            vec![PatternOutputLayer::all(
+                PatternOutputLayerId(93),
+                PatternOutputRealization::MarkPrototype {
+                    site_mechanism_id: site_id,
+                    prototype: MarkPrototype::Circle,
+                    orientation: MarkOrientation::Fixed,
+                },
+            )]
         } else {
-            vec![PatternOutputLayer::ParametricPaths {
-                id: PatternOutputLayerId(93),
-                curve_mechanism_id: curve_id,
-                style: PathStrokeStyle::default(),
-            }]
+            vec![PatternOutputLayer::all(
+                PatternOutputLayerId(93),
+                PatternOutputRealization::ParametricPaths {
+                    curve_mechanism_id: curve_id,
+                    style: PathStrokeStyle::default(),
+                },
+            )]
         },
         modulation: PatternModulation,
         coverage: CoveragePolicy {

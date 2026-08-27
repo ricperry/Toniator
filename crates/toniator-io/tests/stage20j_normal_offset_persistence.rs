@@ -6,12 +6,12 @@ use toniator_domain::{
     DocumentId, GeneralizedSiteProduct, GuideDimension, GuideDimensionId, GuidePrototype,
     GuideRepetition, MarkOrientation, OffsetCleanup, OffsetSides, PathStrokeStyle,
     PatternDefinition, PatternDefinitionBundle, PatternDefinitionId, PatternGeometryResponse,
-    PatternMechanismId, PatternOutputLayer, PatternOutputLayerId, PatternOutputSettings,
-    SourceReference, SourceReferenceId,
+    PatternMechanismId, PatternOutputLayer, PatternOutputLayerId, PatternOutputRealization,
+    PatternOutputSettings, SourceReference, SourceReferenceId,
 };
 use toniator_io::{EmbeddedSource, EmbeddedSourceFormat, SourceBundle, load, save};
 
-/// Builds one current-v4 document whose persisted generic guide owns normal-offset intent.
+/// Builds one current-v5 document whose persisted generic guide owns normal-offset intent.
 fn normal_offset_document(
     source_id: SourceReferenceId,
     width: f64,
@@ -55,11 +55,13 @@ fn normal_offset_document(
             additional_margin: 0.0,
         },
     );
-    definition.output_layers = vec![PatternOutputLayer::GuidePaths {
-        id: PatternOutputLayerId(94),
-        guide_mechanism_id: PatternMechanismId(92),
-        style: PathStrokeStyle::default(),
-    }];
+    definition.output_layers = vec![PatternOutputLayer::all(
+        PatternOutputLayerId(94),
+        PatternOutputRealization::GuidePaths {
+            guide_mechanism_id: PatternMechanismId(92),
+            style: PathStrokeStyle::default(),
+        },
+    )];
     let mut settings = base.pattern_settings().clone();
     settings.definition_id = definition.id;
     let bundle = PatternDefinitionBundle {
@@ -122,9 +124,9 @@ fn normal_offset_document(
     .expect("normal-offset document validates")
 }
 
-/// Proves current-v4 persistence retains authored normal-offset intent and no derived centerlines.
+/// Proves current-v5 persistence retains authored normal-offset intent and no derived centerlines.
 #[test]
-fn normal_offset_v4_round_trip_is_deterministic_and_derived_state_free() {
+fn normal_offset_v5_round_trip_is_deterministic_and_derived_state_free() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../");
     let output = root.join("target/validation/stage-20j");
     fs::create_dir_all(&output).expect("derived validation directory creates");
@@ -147,8 +149,8 @@ fn normal_offset_v4_round_trip_is_deterministic_and_derived_state_free() {
     .expect("source bundle validates");
     let first = output.join("normal-offset-a.toniator");
     let second = output.join("normal-offset-b.toniator");
-    save(&first, &document, &sources).expect("first current-v4 save succeeds");
-    let reopened = load(&first).expect("current-v4 load succeeds");
+    save(&first, &document, &sources).expect("first current-v5 save succeeds");
+    let reopened = load(&first).expect("current-v5 load succeeds");
     save(&second, reopened.document(), reopened.sources()).expect("second save succeeds");
     assert_eq!(
         fs::read(&first).expect("first bytes"),
@@ -168,7 +170,7 @@ fn normal_offset_v4_round_trip_is_deterministic_and_derived_state_free() {
     assert!(!String::from_utf8_lossy(&archive).contains("offset_path"));
 }
 
-/// Writes v4 native-artwork offset documents for the authoritative CLI render witnesses.
+/// Writes v5 native-artwork offset documents for the authoritative CLI render witnesses.
 #[test]
 fn writes_native_offset_documents_for_both_immutable_sources() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../");
@@ -211,8 +213,8 @@ fn writes_native_offset_documents_for_both_immutable_sources() {
         .expect("embedded source validates")])
         .expect("source bundle validates");
         let path = output.join(name);
-        save(&path, &document, &sources).expect("native v4 source document saves");
-        assert!(load(&path).is_ok(), "native v4 source document reopens");
+        save(&path, &document, &sources).expect("native v5 source document saves");
+        assert!(load(&path).is_ok(), "native v5 source document reopens");
     }
 }
 

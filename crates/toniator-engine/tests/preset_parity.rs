@@ -23,8 +23,9 @@ use toniator_domain::{
 };
 use toniator_engine::{
     CacheDisposition, ConnectionPathLimits, EvaluationCompletion, EvaluationLimits,
-    EvaluationRequest, EvaluationScheduler, GeometryOutput, ResolvedSource, SourceFormatHint,
-    encode_png, evaluate, evaluate_with_limits, write_svg,
+    EvaluationProfileCache, EvaluationRequest, EvaluationScheduler, GeometryOutput, ResolvedSource,
+    SourceFormatHint, encode_png, evaluate, evaluate_profiled_cached_with_limits,
+    evaluate_profiled_with_limits, evaluate_with_limits, write_svg,
 };
 use toniator_io::{load_preset, save_preset};
 use toniator_patterns::PresetRegistry;
@@ -47,11 +48,12 @@ const CANVAS_COVERING_SPIRAL_PRESET_IDS: [&str; 3] = [
     "square-spiral-marks",
 ];
 
-/// Slow raster-assigned catalog cards that use the deterministic 256-square
+/// Slow or request-budget-bound raster cards that use the deterministic 256-square
 /// derived raster source and matching evidence canvas after measured preflight.
-const DERIVED_RASTER_ARTIFACT_PRESET_IDS: [&str; 8] = [
+const DERIVED_RASTER_ARTIFACT_PRESET_IDS: [&str; 9] = [
     "clustered-dispersion-random-links",
     "grid-voronoi-scale",
+    "one-guide-lines",
     "residual-sites-along-guide",
     "source-weighted-dispersion-voronoi",
     "two-guide-maze",
@@ -763,8 +765,8 @@ fn apply_recipe_to_rgb(
 /// Applies an authorized artifact-only resolution density to all three modeled
 /// channels without changing a bundled recipe, product default, or request limit.
 ///
-/// The intrinsic one-guide representative retains its separate 48-by-48 edit.
-/// Measured slow cards and derived validation documents use `AcrossX=16` with
+/// The intrinsic one-guide representative uses `AcrossX=4`; derived validation documents use
+/// `AcrossX=16`. Measured slow cards use the corresponding bounded density with
 /// their 25%-linear source and canvas so site and cell work reduce at both
 /// relevant boundaries while the base aspect lock derives the companion axis.
 fn apply_artifact_resolution_density(
@@ -773,7 +775,7 @@ fn apply_artifact_resolution_density(
     preset_id: &str,
 ) -> String {
     let density = if preset_id == "one-guide-lines" {
-        48.0
+        4.0
     } else if DERIVED_RASTER_ARTIFACT_PRESET_IDS.contains(&preset_id)
         || DERIVED_SVG_ARTIFACT_PRESET_IDS.contains(&preset_id)
         || CURVED_GUIDE_FIXTURE_IDS.contains(&preset_id)
@@ -1028,7 +1030,7 @@ fn artifact_resolution_preflight_note(preset_id: &str) -> &'static str {
             "intrinsic assigned source/canvas passed in 23.91s, below the 30s demonstration threshold; intrinsic input remains the acceptance policy"
         }
         "one-guide-lines" => {
-            "intrinsic assigned source/canvas passed in 19.31s, below the 30s demonstration threshold; intrinsic input remains the acceptance policy"
+            "intrinsic assigned source/canvas reaches the request-wide canonical stroke budget across three RGB outputs; final acceptance uses the 25%-linear derived raster source and 256x256 canvas with artifact-only density 4x4"
         }
         "straight-grid-circles" => {
             "ordinary small mark baseline retains its intrinsic input; no slow preflight requires a derived evidence resolution"
@@ -1052,13 +1054,18 @@ fn artifact_input(
             .expect("slow raster acceptance prepares the derived raster before its catalog loop");
         let raster = &derived[0];
         let cover_canvas = CANVAS_COVERING_SPIRAL_PRESET_IDS.contains(&preset_id);
+        let density_note = if preset_id == "one-guide-lines" {
+            "4x4"
+        } else {
+            "16x16"
+        };
         return ArtifactInput {
             source_path: raster.derived_path.clone(),
-            format: raster.format.clone(),
+            format: raster.format,
             source_dimensions: raster.dimensions,
             canvas_dimensions: (256.0, 256.0),
             manifest_note: format!(
-                "derived 256x256 raster source from `{}` (source_sha256={}, derived_sha256={}, method={}); document/output canvas is 256x256{}; preflight: {}; artifact-only per-channel density is 16x16; no recipe, default, or request-limit change.",
+                "derived 256x256 raster source from `{}` (source_sha256={}, derived_sha256={}, method={}); document/output canvas is 256x256{}; preflight: {}; artifact-only per-channel density is {density_note}; no recipe, default, or request-limit change.",
                 raster.source_path,
                 raster.source_sha256,
                 raster.derived_sha256,
@@ -1078,7 +1085,7 @@ fn artifact_input(
         let vector = &derived[1];
         return ArtifactInput {
             source_path: vector.derived_path.clone(),
-            format: vector.format.clone(),
+            format: vector.format,
             source_dimensions: vector.dimensions,
             canvas_dimensions: (225.0, 155.0),
             manifest_note: format!(
@@ -2190,13 +2197,13 @@ fn curved_two_stack_intersections_evaluates_repeated_mark_layers() {
         );
         let centers = marks
             .iter()
-            .filter_map(|mark| match mark {
-                toniator_patterns::CanonicalMark::Circle { center, .. } => Some(*center),
+            .map(|mark| match mark {
+                toniator_patterns::CanonicalMark::Circle { center, .. } => *center,
                 toniator_patterns::CanonicalMark::ClosedPath(path) => {
-                    Some(toniator_patterns::Point2::new(
+                    toniator_patterns::Point2::new(
                         (path.bounds.min.x + path.bounds.max.x) * 0.5,
                         (path.bounds.min.y + path.bounds.max.y) * 0.5,
-                    ))
+                    )
                 }
             })
             .collect::<Vec<_>>();
@@ -2314,7 +2321,12 @@ fn derived_stage20s_inputs_preserve_immutable_provenance() {
         assert_eq!(input.source_dimensions, (256, 256));
         assert_eq!(input.canvas_dimensions, (256.0, 256.0));
         assert!(input.manifest_note.contains("derived_sha256"));
-        assert!(input.manifest_note.contains("16x16"));
+        let expected_density = if preset_id == "one-guide-lines" {
+            "4x4"
+        } else {
+            "16x16"
+        };
+        assert!(input.manifest_note.contains(expected_density));
     }
     for preset_id in DERIVED_SVG_ARTIFACT_PRESET_IDS {
         let input = artifact_input(preset_id, Some(&records));
@@ -2343,7 +2355,6 @@ fn derived_stage20s_inputs_preserve_immutable_provenance() {
     for preset_id in [
         "even-random-circles",
         "triagrid-custom-shape-marks",
-        "one-guide-lines",
         "straight-grid-circles",
     ] {
         let input = artifact_input(preset_id, Some(&records));
@@ -2415,7 +2426,7 @@ fn artifact_resolution_density_preserves_authoritative_aspect_lock() {
             one_guide_channels,
             "one-guide-lines"
         )
-        .contains("R=48x48")
+        .contains("R=4x4")
     );
     let heterogeneous_source_id = SourceReferenceId::new("heterogeneous-density")
         .expect("heterogeneous density source ID validates");
@@ -2436,7 +2447,7 @@ fn artifact_resolution_density_preserves_authoritative_aspect_lock() {
             vector_channels,
             (16.0, 16.0 * 155.0 / 225.0),
         ),
-        (&one_guide_history, one_guide_channels, (48.0, 48.0)),
+        (&one_guide_history, one_guide_channels, (4.0, 4.0)),
         (
             &heterogeneous_history,
             heterogeneous_channels,
@@ -2944,6 +2955,158 @@ fn independent_rgb_history(
     (history, channels)
 }
 
+/// Builds one ordinary catalog workload and immutable source for performance validation.
+fn performance_fixture(
+    preset_id: &str,
+    width: f64,
+    height: f64,
+) -> (DocumentHistory, ResolvedSource) {
+    let source_id = SourceReferenceId::new(format!("stage20-profile-{preset_id}"))
+        .expect("profile source ID validates");
+    let source_bytes =
+        fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/raster-sample.png"))
+            .expect("immutable raster source reads");
+    let source = ResolvedSource::new(source_id.clone(), source_bytes, SourceFormatHint::Png)
+        .expect("immutable raster source resolves");
+    let mut history = history(source_id, width, height);
+    apply_recipe_to_rgb(
+        &PresetRegistry::bundled(),
+        &mut history,
+        [ChannelId(1), ChannelId(2), ChannelId(3)],
+        preset_id,
+    );
+    (history, source)
+}
+
+/// Proves one-worker and multi-worker evaluation preserve exact semantic output and work counts.
+#[test]
+fn parallel_evaluation_matches_single_worker_reference() {
+    let (history, source) = performance_fixture("straight-grid-circles", 320.0, 240.0);
+    let request = || {
+        EvaluationRequest::new(
+            history.session().document_evaluation_snapshot(),
+            source.clone(),
+        )
+    };
+    let one = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .expect("one-worker pool builds")
+        .install(|| {
+            evaluate_profiled_with_limits(request(), EvaluationLimits::default())
+                .expect("one-worker evaluation completes")
+        });
+    let many = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .expect("four-worker pool builds")
+        .install(|| {
+            evaluate_profiled_with_limits(request(), EvaluationLimits::default())
+                .expect("four-worker evaluation completes")
+        });
+    assert_eq!(one.result, many.result);
+    assert_eq!(one.diagnostics, many.diagnostics);
+    let stable = |profile: &toniator_engine::EvaluationPerformanceMetrics| {
+        profile
+            .records
+            .iter()
+            .map(|record| {
+                (
+                    record.stage,
+                    record.channel_id,
+                    record.output_layer_id,
+                    record.cache,
+                    record.workloads.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(stable(&one.performance), stable(&many.performance));
+    assert_eq!(one.performance.configured_worker_count, 1);
+    assert_eq!(many.performance.configured_worker_count, 4);
+    assert_eq!(one.performance.observed_worker_count, 1);
+    assert!(
+        many.performance.observed_worker_count > 1,
+        "parallel work must execute cancellation-polled work on multiple Rayon workers"
+    );
+    assert!(many.performance.worker_registration_count > 1);
+}
+
+/// Prints release-mode architectural metrics for one caller-selected ordinary catalog workload.
+#[test]
+#[ignore = "run explicitly in release mode for Stage 20 performance evidence"]
+fn stage20_closeout_release_profile() {
+    let preset_id = std::env::var("STAGE20_PROFILE_PRESET_ID")
+        .unwrap_or_else(|_| "straight-grid-circles".to_owned());
+    let size = std::env::var("STAGE20_PROFILE_SIZE")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(512);
+    let (history, source) = performance_fixture(&preset_id, f64::from(size), f64::from(size));
+    let request = || {
+        EvaluationRequest::new(
+            history.session().document_evaluation_snapshot(),
+            source.clone(),
+        )
+    };
+    let mut cache = EvaluationProfileCache::default();
+    let profile =
+        evaluate_profiled_cached_with_limits(request(), EvaluationLimits::default(), &mut cache)
+            .expect("cold profile workload evaluates");
+    let png_started = Instant::now();
+    let png = encode_png(profile.result.raster()).expect("profile raster encodes");
+    let png_elapsed = png_started.elapsed();
+    let svg_started = Instant::now();
+    let svg = write_svg(profile.result.scene());
+    let svg_elapsed = svg_started.elapsed();
+    println!(
+        "stage20_profile run=cold preset={preset_id} size={size} configured_workers={} observed_workers={} worker_registrations={}",
+        profile.performance.configured_worker_count,
+        profile.performance.observed_worker_count,
+        profile.performance.worker_registration_count,
+    );
+    println!(
+        "stage20_export preset={preset_id} size={size} png_elapsed_us={} png_bytes={} svg_elapsed_us={} svg_bytes={}",
+        png_elapsed.as_micros(),
+        png.len(),
+        svg_elapsed.as_micros(),
+        svg.len(),
+    );
+    for record in profile.performance.records {
+        println!(
+            "stage={:?} channel={:?} output={:?} cache={:?} execution={:?} elapsed_us={} workloads={:?}",
+            record.stage,
+            record.channel_id,
+            record.output_layer_id,
+            record.cache,
+            record.execution,
+            record.elapsed.as_micros(),
+            record.workloads
+        );
+    }
+    let warm =
+        evaluate_profiled_cached_with_limits(request(), EvaluationLimits::default(), &mut cache)
+            .expect("warm profile workload evaluates");
+    println!(
+        "stage20_profile run=warm preset={preset_id} size={size} configured_workers={} observed_workers={} worker_registrations={}",
+        warm.performance.configured_worker_count,
+        warm.performance.observed_worker_count,
+        warm.performance.worker_registration_count,
+    );
+    for record in warm.performance.records {
+        println!(
+            "stage={:?} channel={:?} output={:?} cache={:?} execution={:?} elapsed_us={} workloads={:?}",
+            record.stage,
+            record.channel_id,
+            record.output_layer_id,
+            record.cache,
+            record.execution,
+            record.elapsed.as_micros(),
+            record.workloads
+        );
+    }
+}
+
 /// Applies one typed random-seed edit to red through `DocumentHistory`; the
 /// command uses the public existing mechanism ID and leaves independently
 /// owned green/blue definitions outside the command's affected scope.
@@ -3046,7 +3209,7 @@ fn bundled_presets_reload_and_preserve_canonical_output_parity() {
         let source_id = SourceReferenceId::new(format!("preset-{preset_id}")).unwrap();
         let source_bytes = fs::read(&input.source_path).expect("assigned artifact source reads");
         let source_hash = sha256(&source_bytes);
-        let source = ResolvedSource::new(source_id.clone(), source_bytes, input.format.clone())
+        let source = ResolvedSource::new(source_id.clone(), source_bytes, input.format)
             .expect("assigned source resolves");
         let (mut original_history, channels, topology_paint) = artifact_history(
             source_id.clone(),
@@ -3090,12 +3253,14 @@ fn bundled_presets_reload_and_preserve_canonical_output_parity() {
             )
         };
         let limits = artifact_limits();
-        let original = evaluate_with_limits(request(), limits).unwrap();
+        let original = evaluate_with_limits(request(), limits)
+            .unwrap_or_else(|error| panic!("{preset_id} original evaluation failed: {error:?}"));
         let reloaded_request = EvaluationRequest::new(
             reloaded_history.session().document_evaluation_snapshot(),
             source.clone(),
         );
-        let reloaded_output = evaluate_with_limits(reloaded_request, limits).unwrap();
+        let reloaded_output = evaluate_with_limits(reloaded_request, limits)
+            .unwrap_or_else(|error| panic!("{preset_id} reloaded evaluation failed: {error:?}"));
         let original_png = encode_png(original.raster()).unwrap();
         let reloaded_png = encode_png(reloaded_output.raster()).unwrap();
         let original_svg = write_svg(original.scene());

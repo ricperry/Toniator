@@ -67,7 +67,8 @@ fn try_document_with_structures(
         base.id(),
         base.canvas().clone(),
         base.source().clone(),
-        base.pattern_definitions().to_vec(),
+        base.pattern_definition_bundles().to_vec(),
+        base.pattern_settings().clone(),
         base.channel_model().unwrap(),
         base.channel_topology().unwrap().clone(),
         structures,
@@ -231,7 +232,8 @@ fn authored_structures_validate_finite_explicit_open_and_closed_topology() {
         document().id(),
         document().canvas().clone(),
         document().source().clone(),
-        document().pattern_definitions().to_vec(),
+        document().pattern_definition_bundles().to_vec(),
+        document().pattern_settings().clone(),
         document().channel_model().unwrap(),
         document().channel_topology().unwrap().clone(),
         vec![closed_structure(1), closed_structure(1)],
@@ -246,7 +248,8 @@ fn authored_structures_validate_finite_explicit_open_and_closed_topology() {
         document().id(),
         document().canvas().clone(),
         document().source().clone(),
-        document().pattern_definitions().to_vec(),
+        document().pattern_definition_bundles().to_vec(),
+        document().pattern_settings().clone(),
         document().channel_model().unwrap(),
         document().channel_topology().unwrap().clone(),
         (1..=4_097).map(closed_structure).collect(),
@@ -292,7 +295,7 @@ fn authored_structure_commands_allocate_duplicate_replace_remove_and_history_ato
         add.created_authored_structure_id,
         Some(AuthoredStructureId(1))
     );
-    assert_eq!(add.invalidation, InvalidationLevel::Family);
+    assert_eq!(add.invalidation, Some(InvalidationLevel::Family));
     assert!(add.affected_channels.is_empty());
     let original = history
         .document()
@@ -316,7 +319,7 @@ fn authored_structure_commands_allocate_duplicate_replace_remove_and_history_ato
             replacement: replacement.clone(),
         })
         .unwrap();
-    assert_eq!(replace.invalidation, InvalidationLevel::Family);
+    assert_eq!(replace.invalidation, Some(InvalidationLevel::Family));
     let replaced = history
         .document()
         .authored_structure(AuthoredStructureId(1))
@@ -334,7 +337,10 @@ fn authored_structure_commands_allocate_duplicate_replace_remove_and_history_ato
             replacement: closed_replacement,
         })
         .unwrap();
-    assert_eq!(closed_result.invalidation, InvalidationLevel::Realization);
+    assert_eq!(
+        closed_result.invalidation,
+        Some(InvalidationLevel::Realization)
+    );
     let before_failure = history.document().clone();
     let before_revision = history.revision();
     let stale = history
@@ -397,7 +403,7 @@ fn authored_structure_commands_allocate_duplicate_replace_remove_and_history_ato
             structure_id: AuthoredStructureId(2),
         })
         .unwrap();
-    assert_eq!(removed.invalidation, InvalidationLevel::Family);
+    assert_eq!(removed.invalidation, Some(InvalidationLevel::Family));
     history.undo().unwrap();
     assert_eq!(history.document(), &before_failure);
     history.redo().unwrap();
@@ -456,7 +462,8 @@ fn authored_structure_descriptors_match_commands_validation_and_invalidation() {
         document().id(),
         document().canvas().clone(),
         document().source().clone(),
-        document().pattern_definitions().to_vec(),
+        document().pattern_definition_bundles().to_vec(),
+        document().pattern_settings().clone(),
         document().channel_model().unwrap(),
         document().channel_topology().unwrap().clone(),
         vec![structure],
@@ -521,7 +528,8 @@ fn authored_structure_ids_resolve_stably_without_name_or_position_aliases() {
         base.id(),
         base.canvas().clone(),
         base.source().clone(),
-        base.pattern_definitions().to_vec(),
+        base.pattern_definition_bundles().to_vec(),
+        base.pattern_settings().clone(),
         base.channel_model().unwrap(),
         base.channel_topology().unwrap().clone(),
         vec![first, second],

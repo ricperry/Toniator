@@ -1,17 +1,18 @@
 use image::{ColorType, ImageEncoder, codecs::png::PngEncoder};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use toniator_domain::{
     AuthoredCurveSegment, AuthoredPoint2, AuthoredStructure, AuthoredStructureId,
     AuthoredStructureKind, CanvasSpec, CoveragePolicy, DensityMetric2D, Document,
     GeneralizedSiteProduct, GuideDimension, GuideDimensionId, GuidePrototype, GuideRepetition,
     MarkOrientation, MarkPrototype, PatternDefinition, PatternDefinitionId, PatternMechanismId,
-    PatternOutputLayer, PatternOutputLayerId, SourceMapping, SourceMappingComponent,
-    SourceReference,
+    PatternOutputLayerId, PatternOutputRealization, SourceMapping, SourceMappingComponent,
+    SourceReference, StraightGuideDimension, StraightGuideRepetition,
 };
 use toniator_geometry::{CanonicalMark, CurveSegment, Point2};
 use toniator_patterns::{
     CanonicalMarkRequest, GridInspectRequest, MarkResponse,
     evaluate_document_typed_family_cancellable, realize_typed_canonical_marks,
-    resolve_document_pattern_pipeline,
+    realize_typed_canonical_marks_cancellable, resolve_document_pattern_pipeline,
 };
 use toniator_sampling::{SourceFormatHint, decode_source};
 
@@ -69,7 +70,8 @@ fn shape_document(
             additional_margin: 4.5,
         },
     );
-    let PatternOutputLayer::MarkPrototype { prototype, .. } = &mut definition.output_layers[0]
+    let PatternOutputRealization::MarkPrototype { prototype, .. } =
+        &mut definition.output_layers[0].realization
     else {
         panic!("generalized guides own one typed mark output")
     };
@@ -104,11 +106,91 @@ fn shape_document(
         base.id(),
         base.canvas().clone(),
         base.source().clone(),
-        vec![definition.clone()],
+        vec![{
+            let mut bundle = base.pattern_definition_bundles()[0].clone();
+            bundle.definition = definition.clone();
+            bundle
+        }],
         base.pattern_settings().clone(),
         base.channel_model().unwrap(),
         base.channel_topology().unwrap().clone(),
         vec![horizontal, vertical, shape],
+    )
+    .unwrap();
+    (document, definition)
+}
+
+/// Builds a multi-site straight-grid document with one sampled authored-shape mark prototype.
+fn multi_site_shape_document() -> (Document, PatternDefinition) {
+    let base = Document::new_default_document(
+        CanvasSpec {
+            width: 100.0,
+            height: 100.0,
+        },
+        SourceReference::Unassigned,
+    )
+    .unwrap();
+    let mut definition = PatternDefinition::generalized_straight_guides(
+        PatternDefinitionId(1),
+        "parallel authored shapes",
+        PatternMechanismId(1),
+        PatternMechanismId(2),
+        PatternOutputLayerId(1),
+        vec![
+            StraightGuideDimension {
+                id: GuideDimensionId(1),
+                baseline_angle_degrees: 0.0,
+                phase: 0.0,
+                repetition: StraightGuideRepetition {
+                    spacing_multiplier: 1.0,
+                },
+            },
+            StraightGuideDimension {
+                id: GuideDimensionId(2),
+                baseline_angle_degrees: 90.0,
+                phase: 0.0,
+                repetition: StraightGuideRepetition {
+                    spacing_multiplier: 1.0,
+                },
+            },
+        ],
+        GeneralizedSiteProduct::Intersections {
+            dimensions: vec![GuideDimensionId(1), GuideDimensionId(2)],
+            merge_epsilon: 0.0,
+        },
+        MarkOrientation::Fixed,
+        CoveragePolicy {
+            guard_steps: 1,
+            additional_margin: 4.5,
+        },
+    );
+    let PatternOutputRealization::MarkPrototype { prototype, .. } =
+        &mut definition.output_layers[0].realization
+    else {
+        panic!("generalized straight guides own one typed mark output")
+    };
+    *prototype = MarkPrototype::AuthoredClosedShape {
+        structure_id: AuthoredStructureId(3),
+    };
+    let shape = AuthoredStructure::new(
+        AuthoredStructureId(3),
+        AuthoredStructureKind::ClosedShape,
+        asymmetric_shape(),
+    )
+    .unwrap();
+    let document = Document::with_source_topology_and_authored_structures(
+        base.id(),
+        base.canvas().clone(),
+        base.source().clone(),
+        vec![{
+            let mut bundle = base.pattern_definition_bundles()[0].clone();
+            bundle.definition = definition.clone();
+            bundle
+        }],
+        base.pattern_settings().clone(),
+        base.channel_model().unwrap(),
+        base.channel_topology().unwrap().clone(),
+        vec![shape],
     )
     .unwrap();
     (document, definition)
@@ -149,12 +231,12 @@ fn family_request() -> GridInspectRequest {
     }
 }
 
-/// Rotates one normalized authored offset by the expected output-plus-channel orientation.
-fn expected_point(offset: Point2, scale: f64, degrees: f64) -> Point2 {
+/// Rotates one normalized authored offset about the current family-owned site center.
+fn expected_point(center: Point2, offset: Point2, scale: f64, degrees: f64) -> Point2 {
     let radians = degrees.to_radians();
     Point2::new(
-        50.0 + scale * (radians.cos() * offset.x - radians.sin() * offset.y),
-        50.0 + scale * (radians.sin() * offset.x + radians.cos() * offset.y),
+        center.x + scale * (radians.cos() * offset.x - radians.sin() * offset.y),
+        center.y + scale * (radians.sin() * offset.x + radians.cos() * offset.y),
     )
 }
 
@@ -177,6 +259,83 @@ fn one_pixel_png(pixel: [u8; 4]) -> Vec<u8> {
         .write_image(&pixel, 1, 1, ColorType::Rgba8.into())
         .unwrap();
     bytes
+}
+
+/// Proves sampled authored-shape site workers preserve exact order and cancel inside parallel work.
+#[test]
+fn sampled_authored_shapes_match_one_worker_and_cancel_in_worker_stage() {
+    let (document, definition) = multi_site_shape_document();
+    let plan = resolve_document_pattern_pipeline(&document, &definition).unwrap();
+    let family_request = GridInspectRequest {
+        max_family_candidates: 4_096,
+        ..family_request()
+    };
+    let family = evaluate_document_typed_family_cancellable(
+        &document,
+        &definition,
+        &family_request,
+        &|| false,
+    )
+    .unwrap();
+    assert!(family.site_set().len() > 16);
+    let source = decode_source(&one_pixel_png([31, 127, 223, 191]), SourceFormatHint::Png).unwrap();
+    let request = CanonicalMarkRequest {
+        mapping: SourceMapping::canonical(SourceMappingComponent::Luminance),
+        sampled_paint: true,
+        response: MarkResponse {
+            minimum_fill: 0.2,
+            maximum_fill: 0.9,
+            rotation_offset_degrees: 17.0,
+        },
+        max_transformed_curve_segment_instances: 100_000,
+    };
+    let run = || {
+        realize_typed_canonical_marks_cancellable(
+            &document,
+            &family,
+            &plan,
+            &source,
+            &family_request.canvas,
+            request,
+            &|| false,
+        )
+        .expect("sampled authored-shape realization completes")
+    };
+    let one = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap()
+        .install(run);
+    let many = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .unwrap()
+        .install(run);
+    assert_eq!(one, many);
+
+    let polls = AtomicUsize::new(0);
+    let preflight_polls = asymmetric_shape().len();
+    let error = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .unwrap()
+        .install(|| {
+            realize_typed_canonical_marks_cancellable(
+                &document,
+                &family,
+                &plan,
+                &source,
+                &family_request.canvas,
+                request,
+                &|| {
+                    let next = polls.fetch_add(1, Ordering::Relaxed) + 1;
+                    next > preflight_polls
+                },
+            )
+        })
+        .expect_err("worker cancellation publishes no authored marks");
+    assert!(polls.load(Ordering::Relaxed) > preflight_polls);
+    assert_eq!(error.path(), "evaluation.cancelled");
 }
 
 /// Proves bounds-center anchoring, maximum-control/endpoint radius normalization, fixed/tangent/
@@ -238,15 +397,17 @@ fn authored_shape_normalization_and_all_orientations_are_exact() {
         let CurveSegment::Line(first_segment) = &mark.path.segments()[0] else {
             panic!("the first authored line must retain its construction variant")
         };
+        let center = family.site_set().sites()[0].position;
+        assert_eq!(center, Point2::new(100.0, 100.0));
         let nominal_radius = family.site_set().sites()[0].nominal_cell_basis.diameter() / 2.0;
         let scale = nominal_radius / 5.0_f64.sqrt();
         assert_point_close(
             first_segment.start(),
-            expected_point(Point2::new(-2.0, -1.0), scale, base_degrees + 30.0),
+            expected_point(center, Point2::new(-2.0, -1.0), scale, base_degrees + 30.0),
         );
         assert_point_close(
             first_segment.end(),
-            expected_point(Point2::new(2.0, -1.0), scale, base_degrees + 30.0),
+            expected_point(center, Point2::new(2.0, -1.0), scale, base_degrees + 30.0),
         );
         let error = realize_typed_canonical_marks(
             &document,
@@ -346,8 +507,10 @@ fn sampled_zero_alpha_retains_sites_and_complete_mapping_identity() {
     let [CanonicalMark::ClosedPath(mark)] = alpha.marks.as_slice() else {
         panic!("zero-alpha sampled output retains its authored canonical path")
     };
-    assert_eq!(mark.bounds.min, Point2::new(50.0, 50.0));
-    assert_eq!(mark.bounds.max, Point2::new(50.0, 50.0));
+    let center = family.site_set().sites()[0].position;
+    assert_eq!(center, Point2::new(100.0, 100.0));
+    assert_eq!(mark.bounds.min, center);
+    assert_eq!(mark.bounds.max, center);
     let paints = alpha.paints.as_ref().unwrap();
     assert_eq!(paints.len(), alpha.marks.len());
     assert_eq!(paints[0].red, 0.0);

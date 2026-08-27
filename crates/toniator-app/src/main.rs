@@ -7702,7 +7702,7 @@ mod tests {
         DocumentHistory::new(DocumentSession::new(document).expect("valid app session"))
     }
 
-    /// Builds one valid modeled GuidePaths document for inspector-command authority tests.
+    /// Builds one valid modeled ConnectionPaths document for inspector-command authority tests.
     fn connected_path_document() -> Document {
         let base = Document::new_default_document(
             CanvasSpec {
@@ -7738,89 +7738,102 @@ mod tests {
                 additional_margin: 0.0,
             },
         );
-        definition.output_layers = vec![toniator_domain::PatternOutputLayer::GuidePaths {
-            id: PatternOutputLayerId(33),
-            guide_mechanism_id: guide_id,
-            style: toniator_domain::PathStrokeStyle::default(),
-        }];
+        definition.output_layers = vec![toniator_domain::PatternOutputLayer::all(
+            PatternOutputLayerId(33),
+            toniator_domain::PatternOutputRealization::ConnectionPaths {
+                site_mechanism_id: PatternMechanismId(32),
+                program: toniator_domain::ConnectionProgram::RandomLinks {
+                    adjacency: toniator_domain::ConnectionAdjacencyIntent {
+                        maximum_degree: 2,
+                        maximum_distance: 60.0,
+                    },
+                    minimum_degree: 0,
+                    seed: 17,
+                },
+                style: toniator_domain::PathStrokeStyle::default(),
+            },
+        )];
         let mut settings = base.pattern_settings().clone();
         settings.definition_id = definition.id;
-        settings.geometry_response =
-            PatternGeometryResponse::Connected(toniator_domain::ConnectedGeometryResponse {
-                minimum_thickness: 0.25,
-                maximum_thickness: 1.0,
-            });
+        let bundle = toniator_domain::PatternDefinitionBundle {
+            definition,
+            output_settings: vec![toniator_domain::PatternOutputSettings {
+                output_layer_id: PatternOutputLayerId(33),
+                response: PatternGeometryResponse::Connected(
+                    toniator_domain::ConnectedGeometryResponse {
+                        minimum_thickness: 0.25,
+                        maximum_thickness: 1.0,
+                    },
+                ),
+            }],
+        };
         Document::with_source_topology_and_authored_structures(
             toniator_domain::DocumentId(201),
             base.canvas().clone(),
             SourceReference::Unassigned,
-            vec![definition],
+            vec![bundle],
             settings,
             base.channel_model().expect("modeled topology").to_owned(),
             base.channel_topology().expect("modeled topology").clone(),
             Vec::new(),
         )
-        .expect("connected guide-path document validates")
+        .expect("connected-path document validates")
     }
 
-    /// Builds stale-aware document and selected-channel Connected commands through the inspector boundary.
+    /// Builds stale-aware output-scoped Connected delta commands through the inspector boundary.
     #[test]
     fn inspector_dispatches_connected_document_and_channel_edits() {
         let document = connected_path_document();
-        let document_descriptor = document
+        let output_target = PropertyTarget::ChannelOutput(ChannelId(1), PatternOutputLayerId(33));
+        let minimum_descriptor = document
             .property_values()
             .into_iter()
             .find(|value| {
-                value.descriptor.target == PropertyTarget::Document
+                value.descriptor.target == output_target
                     && value.descriptor.field == PropertyFieldId::ConnectedMinimumThickness
             })
-            .expect("connected document thickness descriptor")
+            .expect("connected output minimum-thickness descriptor")
             .descriptor;
-        let document_command = command_for_inspector_input(
+        let minimum_command = command_for_inspector_input(
             &document,
             Some(ChannelId(1)),
             DefinitionEditScope::SelectedCopy,
-            &document_descriptor,
+            &minimum_descriptor,
             InspectorInput::FiniteF64(0.4),
         )
-        .expect("document connected command");
-        let (document_after, _) = document
-            .apply_command(&document_command)
-            .expect("document connected command applies");
-        let PatternGeometryResponse::Connected(response) =
-            &document_after.pattern_settings().geometry_response
-        else {
-            panic!("document remains connected");
-        };
-        assert_eq!(response.minimum_thickness, 0.4);
+        .expect("output minimum-thickness command");
+        let (minimum_after, _) = document
+            .apply_command(&minimum_command)
+            .expect("output minimum-thickness command applies");
 
-        let channel_descriptor = document
+        let maximum_descriptor = minimum_after
             .property_values()
             .into_iter()
             .find(|value| {
-                value.descriptor.target == PropertyTarget::Channel(ChannelId(1))
+                value.descriptor.target == output_target
                     && value.descriptor.field == PropertyFieldId::ConnectedMaximumThickness
             })
-            .expect("connected channel thickness descriptor")
+            .expect("connected output maximum-thickness descriptor")
             .descriptor;
-        let channel_command = command_for_inspector_input(
-            &document,
+        let maximum_command = command_for_inspector_input(
+            &minimum_after,
             Some(ChannelId(1)),
             DefinitionEditScope::SelectedCopy,
-            &channel_descriptor,
+            &maximum_descriptor,
             InspectorInput::FiniteF64(1.4),
         )
-        .expect("channel connected command");
-        let (channel_after, _) = document
-            .apply_command(&channel_command)
-            .expect("channel connected command applies");
-        let PatternGeometryResponse::Connected(response) = channel_after
+        .expect("output maximum-thickness command");
+        let (maximum_after, _) = minimum_after
+            .apply_command(&maximum_command)
+            .expect("output maximum-thickness command applies");
+        let effective = maximum_after
             .effective_channel_pattern(ChannelId(1))
-            .expect("effective channel")
-            .geometry_response
+            .expect("effective channel");
+        let PatternGeometryResponse::Connected(response) = &effective.output_settings[0].response
         else {
             panic!("channel remains connected");
         };
+        assert_eq!(response.minimum_thickness, 0.4);
         assert_eq!(response.maximum_thickness, 1.4);
     }
 
@@ -8086,7 +8099,7 @@ mod tests {
     /// files, or mutations of an external workspace.
     #[test]
     fn private_draft_history_switches_grid_random_grid_without_main_authority() {
-        let workspace = load_workspace(&asset("raster-sample-v1.toniator"))
+        let workspace = load_workspace(&asset("raster-sample.toniator"))
             .expect("frozen raster fixture opens for main-state comparison");
         let main_revision = workspace.history.revision();
         let selected = authoritative_channel_ids(workspace.document())[0];
@@ -8400,7 +8413,10 @@ mod tests {
                 PropertyFieldId::RandomExclusion,
                 PropertyEnumChoice::Exclusion(ExclusionKind::MinimumCenterDistance),
             ),
-            (PropertyFieldId::RandomExclusion,),
+            (
+                PropertyFieldId::RandomExclusion,
+                PropertyEnumChoice::Exclusion(ExclusionKind::VisibleMarkMargin),
+            ),
         ] {
             let descriptor = private_descriptor(draft.document(), selected, field);
             let command = private_draft_command_for_input(
@@ -8448,7 +8464,7 @@ mod tests {
             selected,
             &orientation,
             InspectorInput::EnumChoice(PropertyEnumChoice::MarkOrientation(
-                MarkOrientationKind::GuideTangent,
+                MarkOrientationKind::GuideNormal,
             )),
         )
         .expect("private orientation selects a compatible domain direction");
@@ -8572,7 +8588,7 @@ mod tests {
             );
             assert!(workspace.is_dirty());
         }
-        for fixture in ["raster-sample-v1.toniator", "vector-sample-v1.toniator"] {
+        for fixture in ["raster-sample.toniator", "vector-sample.toniator"] {
             let expected = load_container(&asset(fixture)).unwrap();
             let workspace = load_workspace(&asset(fixture)).unwrap();
             assert_eq!(workspace.document(), expected.document());
@@ -8619,7 +8635,7 @@ mod tests {
 
     #[test]
     fn semantic_noop_leaves_workspace_lifecycle_state_unchanged() {
-        let mut workspace = load_workspace(&asset("raster-sample-v1.toniator")).unwrap();
+        let mut workspace = load_workspace(&asset("raster-sample.toniator")).unwrap();
         let id = workspace.document().channel_topology().unwrap().channels()[0].id;
         let before = probe(&workspace);
         let can_undo = workspace.history.can_undo();
@@ -8734,7 +8750,7 @@ mod tests {
 
     #[test]
     fn failed_save_and_stale_candidate_leave_existing_workspace_content_unchanged() {
-        let mut workspace = load_workspace(&asset("raster-sample-v1.toniator")).unwrap();
+        let mut workspace = load_workspace(&asset("raster-sample.toniator")).unwrap();
         let original_location = workspace.location.clone();
         let original_savepoint = workspace.savepoint.clone();
         let original_title = workspace.title();
@@ -8809,7 +8825,7 @@ mod tests {
 
     #[test]
     fn stale_lifecycle_completion_policy_preserves_current_workspace_atomically() {
-        let current = load_workspace(&asset("raster-sample-v1.toniator")).unwrap();
+        let current = load_workspace(&asset("raster-sample.toniator")).unwrap();
         let before = probe(&current);
         let load_candidate = WorkspaceProbe {
             document: Workspace::from_new().unwrap().document().clone(),
@@ -8971,15 +8987,15 @@ mod tests {
 
     #[test]
     fn container_state_is_not_frontend_defaulted_and_failures_are_candidate_only() {
-        let loaded = load_container(&asset("vector-sample-v1.toniator")).unwrap();
-        let workspace = Workspace::from_container(&asset("vector-sample-v1.toniator")).unwrap();
+        let loaded = load_container(&asset("vector-sample.toniator")).unwrap();
+        let workspace = Workspace::from_container(&asset("vector-sample.toniator")).unwrap();
         assert_eq!(
             workspace.document().channel_model(),
             loaded.document().channel_model()
         );
         assert_eq!(
-            workspace.document().pattern_definitions(),
-            loaded.document().pattern_definitions()
+            workspace.document().pattern_definition_bundles(),
+            loaded.document().pattern_definition_bundles()
         );
         assert!(load_workspace(Path::new("unsupported.jpg")).is_err());
         assert!(Workspace::from_container(Path::new("missing.toniator")).is_err());
@@ -9080,8 +9096,8 @@ mod tests {
         assert!(parse_output_target("96x64").unwrap().is_some());
         assert!(parse_output_target("96").is_err());
         assert!(matches!(save_route(Some(&direct)), SaveRoute::SaveAs));
-        let mut container = load_workspace(&asset("raster-sample-v1.toniator")).unwrap();
-        assert_eq!(container.title(), "raster-sample-v1.toniator — Toniator");
+        let mut container = load_workspace(&asset("raster-sample.toniator")).unwrap();
+        assert_eq!(container.title(), "raster-sample.toniator — Toniator");
         let id = container.document().channel_topology().unwrap().channels()[0].id;
         container
             .history
@@ -9090,7 +9106,7 @@ mod tests {
                 visible: false,
             })
             .unwrap();
-        assert_eq!(container.title(), "raster-sample-v1.toniator* — Toniator");
+        assert_eq!(container.title(), "raster-sample.toniator* — Toniator");
     }
 
     #[test]
@@ -9134,13 +9150,13 @@ mod tests {
 
     #[test]
     fn programmatic_model_sync_keeps_loaded_source_color_alpha_clean_and_user_changes_apply() {
-        let mut source_color_alpha = load_workspace(&asset("raster-sample-v1.toniator")).unwrap();
+        let mut source_color_alpha = load_workspace(&asset("raster-sample.toniator")).unwrap();
         replace_model_topology(
             &mut source_color_alpha.history,
             PreviewModel::SourceColorAlpha,
         )
         .unwrap();
-        let saved = temporary("source-color-alpha-v2").with_extension("toniator");
+        let saved = temporary("source-color-alpha-current").with_extension("toniator");
         let snapshot = source_color_alpha.snapshot();
         save_container(&saved, &snapshot.document, &snapshot.sources).unwrap();
 
@@ -9208,8 +9224,8 @@ mod tests {
         for input in [
             "raster-sample.png",
             "vector-sample.svg",
-            "raster-sample-v1.toniator",
-            "vector-sample-v1.toniator",
+            "raster-sample.toniator",
+            "vector-sample.toniator",
         ] {
             for model in PreviewModel::ALL {
                 let mut workspace = load_workspace(&asset(input)).unwrap();
@@ -9221,8 +9237,8 @@ mod tests {
                 let source_name = match input {
                     "raster-sample.png" => "raster-direct",
                     "vector-sample.svg" => "vector-direct",
-                    "raster-sample-v1.toniator" => "raster-v1",
-                    "vector-sample-v1.toniator" => "vector-v1",
+                    "raster-sample.toniator" => "raster-current",
+                    "vector-sample.toniator" => "vector-current",
                     _ => unreachable!("fixed app-test input"),
                 };
                 let model_name = match model {
@@ -9292,7 +9308,7 @@ mod tests {
             }
         }
 
-        let workspace = load_workspace(&asset("raster-sample-v1.toniator")).unwrap();
+        let workspace = load_workspace(&asset("raster-sample.toniator")).unwrap();
         let before = probe(&workspace);
         let failure = export_snapshot(
             workspace.snapshot(),
@@ -9344,7 +9360,7 @@ mod tests {
         ] {
             assert!(
                 !serialized.contains(forbidden),
-                "v1 document JSON must not persist {forbidden}"
+                "current container must not persist {forbidden}"
             );
         }
     }
@@ -9398,7 +9414,7 @@ mod tests {
 
     #[test]
     fn inspector_uses_descriptor_value_pairs_and_typed_history_commands() {
-        let mut workspace = load_workspace(&asset("raster-sample-v1.toniator")).unwrap();
+        let mut workspace = load_workspace(&asset("raster-sample.toniator")).unwrap();
         let channel_id = authoritative_channel_ids(workspace.document())[0];
         let descriptor = workspace
             .document()
@@ -9433,7 +9449,7 @@ mod tests {
     /// publish the shared history transition.
     #[test]
     fn prepared_shared_preset_replacement_stays_separate_from_selected_copy() {
-        let mut workspace = load_workspace(&asset("raster-sample-v1.toniator")).unwrap();
+        let mut workspace = load_workspace(&asset("raster-sample.toniator")).unwrap();
         replace_model_topology(&mut workspace.history, PreviewModel::Rgb)
             .expect("RGB topology creates the shared pattern audience");
         let selected = authoritative_channel_ids(workspace.document())[0];
@@ -9506,7 +9522,7 @@ mod tests {
 
     #[test]
     fn inspector_focus_policy_preserves_rejected_drafts_and_restores_active_controls() {
-        let mut workspace = load_workspace(&asset("raster-sample-v1.toniator")).unwrap();
+        let mut workspace = load_workspace(&asset("raster-sample.toniator")).unwrap();
         let channel_id = authoritative_channel_ids(workspace.document())[0];
         let opacity = workspace
             .document()
@@ -9607,7 +9623,7 @@ mod tests {
 
     #[test]
     fn selected_copy_remaps_repeated_guide_scalars_by_authoritative_ordinal_only() {
-        let workspace = load_workspace(&asset("raster-sample-v1.toniator")).unwrap();
+        let workspace = load_workspace(&asset("raster-sample.toniator")).unwrap();
         let guide_scalar = workspace
             .document()
             .property_values()
@@ -9689,7 +9705,7 @@ mod tests {
 
     #[test]
     fn every_active_descriptor_value_has_one_generic_control_route() {
-        for input in ["raster-sample-v1.toniator", "vector-sample-v1.toniator"] {
+        for input in ["raster-sample.toniator", "vector-sample.toniator"] {
             let workspace = load_workspace(&asset(input)).unwrap();
             assert!(
                 workspace
@@ -9704,7 +9720,7 @@ mod tests {
             PreviewModel::Cmyk,
             PreviewModel::SourceColorAlpha,
         ] {
-            let mut workspace = load_workspace(&asset("raster-sample-v1.toniator")).unwrap();
+            let mut workspace = load_workspace(&asset("raster-sample.toniator")).unwrap();
             replace_model_topology(&mut workspace.history, model).unwrap();
             assert!(
                 workspace
@@ -9723,7 +9739,7 @@ mod tests {
     /// The test applies the accepted bundled shortcut only to the clone and
     /// proves the main document remains byte-for-byte equivalent in memory.
     fn private_pattern_editor_history_never_mutates_the_main_workspace() {
-        let workspace = load_workspace(&asset("raster-sample-v1.toniator")).unwrap();
+        let workspace = load_workspace(&asset("raster-sample.toniator")).unwrap();
         let main_document = workspace.document().clone();
         let selected = authoritative_channel_ids(&main_document)[0];
         let mut draft = fresh_history(main_document.clone()).unwrap();

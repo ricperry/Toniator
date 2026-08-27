@@ -9,6 +9,7 @@
 use std::{collections::HashSet, error::Error, fmt};
 
 use image::{ColorType, ImageEncoder, codecs::png::PngEncoder};
+use rayon::prelude::*;
 use toniator_domain::{CanvasSpec, ChannelId, ColorValue, HalftoneChannelModel};
 use toniator_geometry::{
     CanonicalCircleMark, CanonicalFillRule, CanonicalMark, CanonicalRegionSet, CanonicalStroke,
@@ -1482,7 +1483,7 @@ pub enum RasterAntialiasing {
 struct RasterWork<'a> {
     remaining_edges: usize,
     antialiasing: RasterAntialiasing,
-    is_cancelled: &'a dyn Fn() -> bool,
+    is_cancelled: &'a (dyn Fn() -> bool + Sync),
 }
 
 impl<'a> RasterWork<'a> {
@@ -1490,7 +1491,7 @@ impl<'a> RasterWork<'a> {
     fn new(
         limits: RasterizationLimits,
         antialiasing: RasterAntialiasing,
-        is_cancelled: &'a dyn Fn() -> bool,
+        is_cancelled: &'a (dyn Fn() -> bool + Sync),
     ) -> Self {
         Self {
             remaining_edges: limits.max_flattened_edges(),
@@ -1654,7 +1655,7 @@ pub fn rasterize_cancellable(
     scene: &RenderScene,
     background: RasterBackground,
     limits: RasterizationLimits,
-    is_cancelled: &dyn Fn() -> bool,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<RasterSurface, RenderError> {
     let mut work = RasterWork::new(limits, RasterAntialiasing::On, is_cancelled);
     // All native document-canvas rasterization crosses the same checked final
@@ -1671,9 +1672,13 @@ pub fn rasterize_cancellable(
         .iter()
         .map(|layer| rasterize_layer(layer, width, height, &mut work))
         .collect::<Result<Vec<_>, _>>()?;
-    let mut linear_pixels = compose_model(scene.model.expect("modeled scene"), &layer_pixels);
-    apply_background(&mut linear_pixels, background);
-    pixels_from_linear(width, height, linear_pixels)
+    let mut linear_pixels = compose_model(
+        scene.model.expect("modeled scene"),
+        &layer_pixels,
+        is_cancelled,
+    )?;
+    apply_background(&mut linear_pixels, background, is_cancelled)?;
+    pixels_from_linear(width, height, linear_pixels, is_cancelled)
 }
 
 /// Rerasterizes immutable canonical geometry for a PNG consumer. The
@@ -1710,7 +1715,7 @@ pub fn rasterize_output_cancellable(
     target: Option<OutputRasterTarget>,
     antialiasing: RasterAntialiasing,
     limits: RasterizationLimits,
-    is_cancelled: &dyn Fn() -> bool,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<RasterSurface, RenderError> {
     if target.is_none() && matches!(antialiasing, RasterAntialiasing::On) {
         return rasterize_cancellable(scene, background, limits, is_cancelled);
@@ -1727,22 +1732,11 @@ pub fn rasterize_output_cancellable(
         .map(|layer| rasterize_layer_for_output(layer, target, transform, antialiasing, &mut work))
         .collect::<Result<Vec<_>, _>>()?;
     let mut pixels = match scene.model {
-        Some(model) => compose_model(model, &layers),
-        None => {
-            let mut destination = vec![
-                background_pixel(RasterBackground::Transparent);
-                target.width as usize * target.height as usize
-            ];
-            for layer in layers {
-                for (destination_pixel, source) in destination.iter_mut().zip(layer) {
-                    source_over(destination_pixel, source);
-                }
-            }
-            destination
-        }
+        Some(model) => compose_model(model, &layers, is_cancelled)?,
+        None => compose_source_over_layers(&layers, is_cancelled)?,
     };
-    apply_background(&mut pixels, background);
-    pixels_from_linear(target.width, target.height, pixels)
+    apply_background(&mut pixels, background, is_cancelled)?;
+    pixels_from_linear(target.width, target.height, pixels, is_cancelled)
 }
 
 /// Stable consumer-only identity suitable for a PNG cache. It intentionally
@@ -1795,7 +1789,7 @@ pub fn rasterize_preview_cancellable(
     scene: &RenderScene,
     target: PreviewRasterTarget,
     limits: RasterizationLimits,
-    is_cancelled: &dyn Fn() -> bool,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<RasterSurface, RenderError> {
     let transform = PreviewTransform::for_scene(scene, target);
     let width = target.width;
@@ -1807,22 +1801,11 @@ pub fn rasterize_preview_cancellable(
         .map(|layer| rasterize_layer_with_transform(layer, width, height, transform, &mut work))
         .collect::<Result<Vec<_>, _>>()?;
     let mut pixels = match scene.model {
-        Some(model) => compose_model(model, &layers),
-        None => {
-            let mut destination = vec![
-                background_pixel(RasterBackground::Transparent);
-                width as usize * height as usize
-            ];
-            for layer in layers {
-                for (destination_pixel, source) in destination.iter_mut().zip(layer) {
-                    source_over(destination_pixel, source);
-                }
-            }
-            destination
-        }
+        Some(model) => compose_model(model, &layers, is_cancelled)?,
+        None => compose_source_over_layers(&layers, is_cancelled)?,
     };
-    apply_background(&mut pixels, RasterBackground::Transparent);
-    pixels_from_linear(width, height, pixels)
+    apply_background(&mut pixels, RasterBackground::Transparent, is_cancelled)?;
+    pixels_from_linear(width, height, pixels, is_cancelled)
 }
 
 #[derive(Clone, Copy)]
@@ -1937,7 +1920,7 @@ fn rasterize_stage5(
             }
         }
     }
-    pixels_from_linear(width, height, linear_pixels)
+    pixels_from_linear(width, height, linear_pixels, work.is_cancelled)
 }
 
 fn native_output_target(scene: &RenderScene) -> Result<OutputRasterTarget, RenderError> {
@@ -2303,14 +2286,22 @@ fn rasterize_layer_for_output(
     Ok(pixels)
 }
 
+/// Composes modeled channel pixels independently while preserving layer order within each pixel.
+///
+/// # Errors
+///
+/// Returns canonical cancellation without publishing a partial pixel buffer.
 fn compose_model(
     model: HalftoneChannelModel,
     layers: &[Vec<PremultipliedLinearPixel>],
-) -> Vec<PremultipliedLinearPixel> {
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<Vec<PremultipliedLinearPixel>, RenderError> {
     let count = layers.first().map_or(0, Vec::len);
     match model {
         HalftoneChannelModel::Rgb => (0..count)
+            .into_par_iter()
             .map(|index| {
+                check_parallel_raster_cancellation(is_cancelled)?;
                 let mut pixel = background_pixel(RasterBackground::Transparent);
                 for layer in layers {
                     let source = layer[index];
@@ -2319,11 +2310,13 @@ fn compose_model(
                     pixel.blue = (pixel.blue + source.blue).clamp(0.0, 1.0);
                     pixel.alpha = (pixel.alpha + source.alpha).clamp(0.0, 1.0);
                 }
-                pixel
+                Ok(pixel)
             })
             .collect(),
         HalftoneChannelModel::Cmyk => (0..count)
+            .into_par_iter()
             .map(|index| {
+                check_parallel_raster_cancellation(is_cancelled)?;
                 let mut transmittance = [1.0; 3];
                 let mut uncovered = 1.0;
                 for layer in layers {
@@ -2342,24 +2335,49 @@ fn compose_model(
                     }
                 }
                 let alpha = (1.0 - uncovered).clamp(0.0, 1.0);
-                PremultipliedLinearPixel {
+                Ok(PremultipliedLinearPixel {
                     red: boundary_clamp(transmittance[0] - (1.0 - alpha)),
                     green: boundary_clamp(transmittance[1] - (1.0 - alpha)),
                     blue: boundary_clamp(transmittance[2] - (1.0 - alpha)),
                     alpha,
-                }
+                })
             })
             .collect(),
         HalftoneChannelModel::SourceColorAlpha => (0..count)
+            .into_par_iter()
             .map(|index| {
+                check_parallel_raster_cancellation(is_cancelled)?;
                 let mut destination = background_pixel(RasterBackground::Transparent);
                 for layer in layers {
                     source_over(&mut destination, layer[index]);
                 }
-                destination
+                Ok(destination)
             })
             .collect(),
     }
+}
+
+/// Composes ordinary source-over layers in indexed pixel order without mutating shared state.
+///
+/// # Errors
+///
+/// Returns canonical cancellation without publishing a partial pixel buffer.
+fn compose_source_over_layers(
+    layers: &[Vec<PremultipliedLinearPixel>],
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<Vec<PremultipliedLinearPixel>, RenderError> {
+    let count = layers.first().map_or(0, Vec::len);
+    (0..count)
+        .into_par_iter()
+        .map(|index| {
+            check_parallel_raster_cancellation(is_cancelled)?;
+            let mut destination = background_pixel(RasterBackground::Transparent);
+            for layer in layers {
+                source_over(&mut destination, layer[index]);
+            }
+            Ok(destination)
+        })
+        .collect()
 }
 
 fn boundary_clamp(value: f64) -> f64 {
@@ -2381,41 +2399,81 @@ fn source_over(destination: &mut PremultipliedLinearPixel, source: Premultiplied
     destination.alpha = source.alpha + destination.alpha * remaining;
 }
 
-fn apply_background(pixels: &mut [PremultipliedLinearPixel], background: RasterBackground) {
+/// Applies one final background independently to each premultiplied pixel.
+///
+/// # Errors
+///
+/// Returns canonical cancellation before a worker mutates its next local pixel.
+fn apply_background(
+    pixels: &mut [PremultipliedLinearPixel],
+    background: RasterBackground,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<(), RenderError> {
     if matches!(background, RasterBackground::Transparent) {
-        return;
+        return check_parallel_raster_cancellation(is_cancelled);
     }
     let background = background_pixel(background);
-    for pixel in pixels {
+    pixels.par_iter_mut().try_for_each(|pixel| {
+        check_parallel_raster_cancellation(is_cancelled)?;
         let remaining = 1.0 - pixel.alpha;
         pixel.red += background.red * remaining;
         pixel.green += background.green * remaining;
         pixel.blue += background.blue * remaining;
         pixel.alpha = 1.0;
-    }
+        Ok(())
+    })
 }
 
+/// Quantizes a complete premultiplied linear buffer into straight row-major sRGBA bytes.
+///
+/// # Errors
+///
+/// Returns allocation, cancellation, or final surface validation failures without publication.
 fn pixels_from_linear(
     width: u32,
     height: u32,
     linear_pixels: Vec<PremultipliedLinearPixel>,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<RasterSurface, RenderError> {
-    let mut pixels = Vec::with_capacity(linear_pixels.len() * 4);
-    for pixel in linear_pixels {
-        let alpha = pixel.alpha.clamp(0.0, 1.0);
-        let (red, green, blue) = if alpha == 0.0 {
-            (0.0, 0.0, 0.0)
-        } else {
-            (pixel.red / alpha, pixel.green / alpha, pixel.blue / alpha)
-        };
-        pixels.extend([
-            quantize_srgb(red),
-            quantize_srgb(green),
-            quantize_srgb(blue),
-            quantize_linear(alpha),
-        ]);
-    }
+    let byte_count = linear_pixels.len().checked_mul(4).ok_or(RenderError::new(
+        "raster.allocation",
+        "raster byte count overflows",
+    ))?;
+    let mut pixels = vec![0_u8; byte_count];
+    pixels
+        .par_chunks_mut(4)
+        .zip(linear_pixels.par_iter())
+        .try_for_each(|(output, pixel)| {
+            check_parallel_raster_cancellation(is_cancelled)?;
+            let alpha = pixel.alpha.clamp(0.0, 1.0);
+            let (red, green, blue) = if alpha == 0.0 {
+                (0.0, 0.0, 0.0)
+            } else {
+                (pixel.red / alpha, pixel.green / alpha, pixel.blue / alpha)
+            };
+            output.copy_from_slice(&[
+                quantize_srgb(red),
+                quantize_srgb(green),
+                quantize_srgb(blue),
+                quantize_linear(alpha),
+            ]);
+            Ok(())
+        })?;
     RasterSurface::new(width, height, pixels)
+}
+
+/// Polls cancellation from an indexed raster worker using the canonical diagnostic.
+///
+/// # Errors
+///
+/// Returns `evaluation.cancelled` when the caller has superseded this raster request.
+fn check_parallel_raster_cancellation(
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<(), RenderError> {
+    (!is_cancelled()).then_some(()).ok_or(RenderError::new(
+        "evaluation.cancelled",
+        "rasterization was cancelled",
+    ))
 }
 
 fn integral_dimension(value: f64) -> Result<u32, RenderError> {
@@ -3612,7 +3670,7 @@ fn xml_escape(value: &str) -> String {
 
 #[cfg(test)]
 mod stage20e2_limit_tests {
-    use std::cell::Cell;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
     use super::*;
     use toniator_domain::PatternMechanismId;
@@ -3668,6 +3726,43 @@ mod stage20e2_limit_tests {
             ],
         )
         .expect("focused canonical scene validates")
+    }
+
+    /// Builds two deterministic premultiplied channel buffers for modeled pixel-stage tests.
+    fn modeled_linear_layers() -> Vec<Vec<PremultipliedLinearPixel>> {
+        let count = 64 * 64;
+        let first = (0..count)
+            .map(|index| {
+                let alpha = 0.25 + f64::from((index % 5) as u8) * 0.05;
+                PremultipliedLinearPixel {
+                    red: alpha * 0.8,
+                    green: alpha * 0.2,
+                    blue: alpha * 0.1,
+                    alpha,
+                }
+            })
+            .collect();
+        let second = (0..count)
+            .map(|index| {
+                let alpha = 0.15 + f64::from((index % 7) as u8) * 0.04;
+                PremultipliedLinearPixel {
+                    red: alpha * 0.1,
+                    green: alpha * 0.6,
+                    blue: alpha * 0.9,
+                    alpha,
+                }
+            })
+            .collect();
+        vec![first, second]
+    }
+
+    /// Builds a probe that cancels only after execution enters a Rayon worker.
+    fn worker_cancellation_probe(observed: &AtomicBool) -> impl Fn() -> bool + Sync + '_ {
+        move || {
+            let in_worker = rayon::current_thread_index().is_some();
+            observed.fetch_or(in_worker, Ordering::Relaxed);
+            in_worker
+        }
     }
 
     /// Measures Euclidean distance to a finite flattened edge for the output-pixel witness.
@@ -3889,7 +3984,7 @@ mod stage20e2_limit_tests {
             CurvePath::new(vec![CurveSegment::CubicBezier(cubic)], PathClosure::Closed)
                 .expect("loop fixture is closed"),
         )]);
-        let polls = Cell::new(0_u32);
+        let polls = AtomicU32::new(0);
         let error = rasterize_output_cancellable(
             &path_scene,
             RasterBackground::Transparent,
@@ -3897,8 +3992,7 @@ mod stage20e2_limit_tests {
             RasterAntialiasing::On,
             RasterizationLimits::new(100_000).expect("focused edge budget is bounded"),
             &|| {
-                let next = polls.get() + 1;
-                polls.set(next);
+                let next = polls.fetch_add(1, Ordering::Relaxed) + 1;
                 next > 64
             },
         )
@@ -3921,19 +4015,145 @@ mod stage20e2_limit_tests {
             fill_rule: CanonicalFillRule::EvenOdd,
         };
         let circle_scene = canonical_scene(vec![circle]);
-        let polls = Cell::new(0_u32);
+        let polls = AtomicU32::new(0);
         let error = rasterize_cancellable(
             &circle_scene,
             RasterBackground::Transparent,
             RasterizationLimits::default(),
             &|| {
-                let next = polls.get() + 1;
-                polls.set(next);
+                let next = polls.fetch_add(1, Ordering::Relaxed) + 1;
                 next > 8
             },
         )
         .expect_err("canonical ellipse sampling must stop when the probe cancels");
         assert_eq!(error.path(), "evaluation.cancelled");
+    }
+
+    /// Proves indexed pixel composition and quantization preserve exact native RGBA bytes.
+    #[test]
+    fn parallel_raster_output_matches_single_worker_bytes() {
+        let scene = canonical_scene(vec![CanonicalMark::Circle {
+            source_site_id: FamilySiteId {
+                mechanism_id: PatternMechanismId(41),
+                ordinal: 0,
+            },
+            center: Point2::new(5.0, 5.0),
+            radius: 4.5,
+            scope: toniator_geometry::SiteScope::Canvas,
+            provenance: FamilySiteProvenance::Random {
+                candidate_ordinal: 0,
+                accepted_ordinal: 0,
+                exclusion_neighbor_ordinal: None,
+            },
+            fill_rule: CanonicalFillRule::EvenOdd,
+        }]);
+        let run = || {
+            rasterize_output_cancellable(
+                &scene,
+                RasterBackground::Transparent,
+                Some(OutputRasterTarget::new(160, 160).expect("target is bounded")),
+                RasterAntialiasing::On,
+                RasterizationLimits::default(),
+                &|| false,
+            )
+            .expect("rasterization completes")
+        };
+        let one = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("one-worker pool builds")
+            .install(run);
+        let many = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("four-worker pool builds")
+            .install(run);
+        assert_eq!(one, many);
+        assert_eq!(one.pixels(), many.pixels());
+    }
+
+    /// Proves modeled CMYK/source-alpha composition, backgrounds, and quantization are byte exact.
+    #[test]
+    fn modeled_pixel_stages_match_one_worker_for_transparent_and_opaque_outputs() {
+        let layers = modeled_linear_layers();
+        for model in [
+            HalftoneChannelModel::Cmyk,
+            HalftoneChannelModel::SourceColorAlpha,
+        ] {
+            for background in [RasterBackground::Transparent, RasterBackground::OpaqueWhite] {
+                let run = || {
+                    let mut pixels = compose_model(model, &layers, &|| false)
+                        .expect("modeled composition completes");
+                    apply_background(&mut pixels, background, &|| false)
+                        .expect("background composition completes");
+                    pixels_from_linear(64, 64, pixels, &|| false)
+                        .expect("modeled quantization completes")
+                };
+                let one = rayon::ThreadPoolBuilder::new()
+                    .num_threads(1)
+                    .build()
+                    .unwrap()
+                    .install(run);
+                let many = rayon::ThreadPoolBuilder::new()
+                    .num_threads(4)
+                    .build()
+                    .unwrap()
+                    .install(run);
+                assert_eq!(one, many);
+                assert_eq!(one.pixels(), many.pixels());
+            }
+        }
+    }
+
+    /// Proves cancellation can be isolated inside composition, background, and quantization workers.
+    #[test]
+    fn parallel_pixel_stages_cancel_before_publication() {
+        let layers = modeled_linear_layers();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+
+        let composition_observed = AtomicBool::new(false);
+        let composition_error = pool
+            .install(|| {
+                compose_model(
+                    HalftoneChannelModel::SourceColorAlpha,
+                    &layers,
+                    &worker_cancellation_probe(&composition_observed),
+                )
+            })
+            .expect_err("composition cancellation publishes no pixel buffer");
+        assert!(composition_observed.load(Ordering::Relaxed));
+        assert_eq!(composition_error.path(), "evaluation.cancelled");
+
+        let background_observed = AtomicBool::new(false);
+        let mut background_pixels = layers[0].clone();
+        let background_error = pool
+            .install(|| {
+                apply_background(
+                    &mut background_pixels,
+                    RasterBackground::OpaqueWhite,
+                    &worker_cancellation_probe(&background_observed),
+                )
+            })
+            .expect_err("background cancellation publishes no final buffer");
+        assert!(background_observed.load(Ordering::Relaxed));
+        assert_eq!(background_error.path(), "evaluation.cancelled");
+
+        let quantization_observed = AtomicBool::new(false);
+        let quantization_error = pool
+            .install(|| {
+                pixels_from_linear(
+                    64,
+                    64,
+                    layers[0].clone(),
+                    &worker_cancellation_probe(&quantization_observed),
+                )
+            })
+            .expect_err("quantization cancellation publishes no surface");
+        assert!(quantization_observed.load(Ordering::Relaxed));
+        assert_eq!(quantization_error.path(), "evaluation.cancelled");
     }
 
     /// Accepts a tiny cubic at large finite coordinates through the control-polygon tolerance fast path.

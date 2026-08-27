@@ -458,8 +458,18 @@ compatibility adapter was added. Project documentation remains architecture
 authority; `scripts/validate_architecture.sh` is mechanical validation only,
 and `semantic-map check` is unavailable because Toniator has no corresponding
 architecture schema. The durable documentation checkpoint has no assigned hash
-yet. A separately gated final scrub of all Stage 20 work precedes planned Stage
-21; Stages 22–23 remain Planned, and push/publication remain separate.
+yet.
+
+The integrated final Stage 20 scrub is ready for user acceptance in the
+2026-08-27 working tree. Its [final architecture and concurrency
+record](docs/STAGE_20_FINAL_ARCHITECTURE_AND_CONCURRENCY.md) documents the
+single headless authority path, current-v5 persistence, output-scoped caches,
+request-wide limits, evaluation-local performance metrics, deterministic
+Rayon work inside one coordinated evaluation, and the intentionally serial
+global-topology/publication boundaries. The bundled registry remains exactly
+16 cards; `regions-plus-marks` remains retired and direct mixed-output evidence
+is not a recipe. No closeout checkpoint is assigned, and the GTK4/Blueprint
+re-baseline, Stage 21, push, and publication remain separate gates.
 
 Low-resolution fixtures and outputs are supplementary only. Every future stage
 that exercises source loading, sampling, rendering, preview, or export must

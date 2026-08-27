@@ -2062,6 +2062,19 @@ gated final scrub of all Stage 20 work must occur before Stage 21; Stages 21–2
 remain Planned, while push, publication, and every later stage remain separately
 gated.
 
+**Final Stage 20 scrub — Ready for user acceptance in the 2026-08-27 working
+tree.** The integrated closeout reconciles Stage 20A–20S under the final
+effective-pattern, multi-output, current-v5, normalized-region, capability,
+and 16-card catalog authorities. It repairs confirmed bounded contract and
+coverage defects and records the final evaluator/cache/concurrency design in
+[`STAGE_20_FINAL_ARCHITECTURE_AND_CONCURRENCY.md`](STAGE_20_FINAL_ARCHITECTURE_AND_CONCURRENCY.md).
+One complete evaluation remains the cancellation and transactional-publication
+unit; deterministic per-site, per-region, and per-pixel work uses the bounded
+shared Rayon pool, while global topology, dependency/budget traversal, painter
+order, and publication remain serial. The retired `regions-plus-marks` debug
+tool remains absent. This state has no checkpoint hash and does not authorize
+the GTK4/Blueprint re-baseline, Stage 21, publication, or push.
+
 Every mechanism must enter through the Stage 14 typed schema, Stage 15 generic
 pipeline, Stage 17 command/descriptor contract, canonical geometry, and
 final-consumer clipping. Artistic names remain pure-schema presets and adequacy

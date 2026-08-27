@@ -2,6 +2,7 @@
 
 use std::{collections::BTreeMap, error::Error, fmt};
 
+use rayon::prelude::*;
 use toniator_domain::{PatternOutputLayerId, RegionResizeAlgorithm};
 
 use crate::{
@@ -113,6 +114,146 @@ impl fmt::Display for RegionTreatmentError {
 
 impl Error for RegionTreatmentError {}
 
+/// Tracks canonical-region work across every intermediate and final resize build.
+struct CanonicalTreatmentWork {
+    limits: CanonicalRegionLimits,
+    source_groups: usize,
+    regions: usize,
+    segments: usize,
+    inspections: usize,
+}
+
+impl CanonicalTreatmentWork {
+    /// Starts one request-wide canonical budget without allocating geometry.
+    const fn new(limits: CanonicalRegionLimits) -> Self {
+        Self {
+            limits,
+            source_groups: 0,
+            regions: 0,
+            segments: 0,
+            inspections: 0,
+        }
+    }
+
+    /// Builds one untagged intermediate against the remaining aggregate budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns the stable resize canonical-limit, allocation, geometry, or cancellation error.
+    fn build(
+        &mut self,
+        proposal: CanonicalRegionProposal,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(CanonicalRegionSet, crate::CanonicalRegionDiagnostics), RegionTreatmentError> {
+        let result =
+            build_canonical_regions_cancellable(proposal, self.remaining_limits()?, cancelled)
+                .map_err(map_canonical_treatment_error)?;
+        self.charge(result.1)?;
+        Ok(result)
+    }
+
+    /// Builds final tagged geometry against the same aggregate intermediate-work budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns the stable resize canonical-limit, allocation, geometry, or cancellation error.
+    fn build_tagged(
+        &mut self,
+        output_layer_id: PatternOutputLayerId,
+        source_groups: Vec<crate::TaggedCanonicalRegionSourceGroup>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<
+        (
+            CanonicalRegionSet,
+            crate::CanonicalRegionDiagnostics,
+            Vec<u64>,
+        ),
+        RegionTreatmentError,
+    > {
+        let result = build_tagged_canonical_regions_cancellable(
+            output_layer_id,
+            source_groups,
+            self.remaining_limits()?,
+            cancelled,
+        )
+        .map_err(map_canonical_treatment_error)?;
+        self.charge(result.1)?;
+        Ok(result)
+    }
+
+    /// Derives one nonzero canonical builder limit set from remaining aggregate capacity.
+    ///
+    /// # Errors
+    ///
+    /// Returns the stable canonical-limit diagnostic when any required budget is exhausted.
+    fn remaining_limits(&self) -> Result<CanonicalRegionLimits, RegionTreatmentError> {
+        let remaining = [
+            self.limits
+                .max_source_groups()
+                .checked_sub(self.source_groups),
+            self.limits.max_regions().checked_sub(self.regions),
+            self.limits.max_segments().checked_sub(self.segments),
+            self.limits.max_inspections().checked_sub(self.inspections),
+        ];
+        if remaining
+            .iter()
+            .any(|value| value.is_none_or(|value| value == 0))
+        {
+            return Err(region_error(
+                "region.resize.limits.canonical",
+                "request-wide canonical region treatment limit exceeded",
+            ));
+        }
+        CanonicalRegionLimits::new(
+            remaining[0].expect("checked nonzero source-group remainder"),
+            remaining[1].expect("checked nonzero region remainder"),
+            remaining[2].expect("checked nonzero segment remainder"),
+            remaining[3].expect("checked nonzero inspection remainder"),
+        )
+        .map_err(map_canonical_treatment_error)
+    }
+
+    /// Charges one completed canonical build before any later candidate can start.
+    ///
+    /// # Errors
+    ///
+    /// Returns the aggregate canonical-limit diagnostic on arithmetic overflow or exhaustion.
+    fn charge(
+        &mut self,
+        diagnostics: crate::CanonicalRegionDiagnostics,
+    ) -> Result<(), RegionTreatmentError> {
+        self.source_groups = self
+            .source_groups
+            .checked_add(diagnostics.source_groups)
+            .ok_or(region_error(
+                "region.resize.limits.canonical",
+                "request-wide canonical source-group work overflowed",
+            ))?;
+        self.regions = self
+            .regions
+            .checked_add(diagnostics.regions)
+            .ok_or(region_error(
+                "region.resize.limits.canonical",
+                "request-wide canonical region work overflowed",
+            ))?;
+        self.segments = self
+            .segments
+            .checked_add(diagnostics.segments)
+            .ok_or(region_error(
+                "region.resize.limits.canonical",
+                "request-wide canonical segment work overflowed",
+            ))?;
+        self.inspections = self
+            .inspections
+            .checked_add(diagnostics.inspections)
+            .ok_or(region_error(
+                "region.resize.limits.canonical",
+                "request-wide canonical inspection work overflowed",
+            ))?;
+        Ok(())
+    }
+}
+
 /// Resizes independently resolved base regions and returns canonical positive geometry plus ownership.
 ///
 /// Every request addresses exactly one accepted untreated region. Fill zero and transparent bases
@@ -129,7 +270,7 @@ pub fn treat_region_requests_cancellable(
     source: &CanonicalRegionSet,
     requests: &[RegionTreatmentRequest],
     limits: RegionTreatmentLimits,
-    cancelled: impl Fn() -> bool,
+    cancelled: impl Fn() -> bool + Sync,
 ) -> Result<RegionTreatmentResult, RegionTreatmentError> {
     let cancelled_ref = &cancelled;
     poll_treatment(cancelled_ref)?;
@@ -181,55 +322,62 @@ pub fn treat_region_requests_cancellable(
 
     let mut offset_work = PathOffsetWork::new(limits.path_offset)
         .map_err(|error| region_error("region.resize.limits.offset", error.message()))?;
+    let mut canonical_work = CanonicalTreatmentWork::new(limits.canonical);
+    let ordered_sources = source_by_id.into_iter().collect::<Vec<_>>();
+    let has_nonidentity_offset = ordered_sources.iter().any(|(base_id, _)| {
+        requests_by_id[base_id].treatment.is_some_and(|treatment| {
+            treatment.algorithm == RegionResizeAlgorithm::UniformOffset
+                && treatment.fill != 0.0
+                && treatment.fill != 1.0
+        })
+    });
+    let prepared = if has_nonidentity_offset {
+        let mut prepared = Vec::with_capacity(ordered_sources.len());
+        for (base_id, region) in &ordered_sources {
+            poll_treatment(cancelled_ref)?;
+            prepared.push(prepare_region_components_serial(
+                output_layer_id,
+                base_id,
+                region,
+                requests_by_id[base_id],
+                &mut canonical_work,
+                &mut offset_work,
+                cancelled_ref,
+            )?);
+        }
+        prepared
+    } else {
+        let results = ordered_sources
+            .par_iter()
+            .map(|(base_id, region)| {
+                poll_treatment(cancelled_ref)?;
+                prepare_scale_region_components(
+                    base_id,
+                    region,
+                    requests_by_id[base_id],
+                    cancelled_ref,
+                )
+            })
+            .collect::<Vec<_>>();
+        results.into_iter().collect::<Result<Vec<_>, _>>()?
+    };
     let mut groups: BTreeMap<crate::CanonicalRegionSourceId, Vec<(CurvePath, u64)>> =
         BTreeMap::new();
     let mut owners = Vec::new();
-    for (base_id, region) in source_by_id {
-        poll_treatment(cancelled_ref)?;
-        let request = requests_by_id[&base_id];
-        let Some(treatment) = request.treatment else {
-            continue;
-        };
-        if treatment.fill == 0.0 {
-            continue;
-        }
-        let components = match treatment.algorithm {
-            RegionResizeAlgorithm::Scale if treatment.fill == 1.0 => vec![region.ring.clone()],
-            RegionResizeAlgorithm::Scale => vec![scale_path(
-                &region.ring,
-                request.reference.expect("validated Scale reference"),
-                treatment.fill,
-            )?],
-            RegionResizeAlgorithm::UniformOffset if treatment.fill == 1.0 => {
-                vec![region.ring.clone()]
-            }
-            RegionResizeAlgorithm::UniformOffset => uniform_offset_components_for_fill(
-                output_layer_id,
-                region,
-                treatment.fill,
-                limits,
-                &mut offset_work,
-                cancelled_ref,
-            )?,
-        };
-        if components.is_empty() {
-            continue;
-        }
+    for prepared in prepared.into_iter().flatten() {
         let owner_tag = u64::try_from(owners.len()).map_err(|_| {
             region_error(
                 "region.resize.allocation.provenance",
                 "resized base-owner ordinal exceeds u64",
             )
         })?;
-        owners.push(base_id);
-        groups
-            .entry(region.id.source_id.clone())
-            .or_default()
-            .extend(
-                components
-                    .into_iter()
-                    .map(|component| (component, owner_tag)),
-            );
+        owners.push(prepared.base_id);
+        groups.entry(prepared.source_id).or_default().extend(
+            prepared
+                .components
+                .into_iter()
+                .map(|component| (component, owner_tag)),
+        );
     }
     if groups.is_empty() {
         return Ok(RegionTreatmentResult {
@@ -246,13 +394,8 @@ pub fn treat_region_requests_cancellable(
             },
         )
         .collect();
-    let (regions, _, tags) = build_tagged_canonical_regions_cancellable(
-        output_layer_id,
-        source_groups,
-        limits.canonical,
-        cancelled_ref,
-    )
-    .map_err(map_canonical_treatment_error)?;
+    let (regions, _, tags) =
+        canonical_work.build_tagged(output_layer_id, source_groups, cancelled_ref)?;
     let mut provenance = Vec::new();
     provenance
         .try_reserve(regions.regions().len())
@@ -296,7 +439,7 @@ pub fn treat_regions_cancellable(
     source: &CanonicalRegionSet,
     references: &[RegionReference],
     treatment: RegionTreatment,
-    cancelled: impl Fn() -> bool,
+    cancelled: impl Fn() -> bool + Sync,
 ) -> Result<CanonicalRegionSet, RegionTreatmentError> {
     let references_by_id: BTreeMap<_, _> = references
         .iter()
@@ -374,6 +517,98 @@ fn identity_result(source: &CanonicalRegionSet) -> RegionTreatmentResult {
     }
 }
 
+/// One base region's independently prepared positive components in stable source order.
+struct PreparedRegionComponents {
+    base_id: crate::CanonicalRegionId,
+    source_id: crate::CanonicalRegionSourceId,
+    components: Vec<CurvePath>,
+}
+
+/// Prepares a Scale, identity, or suppressed region without shared mutable geometry work.
+///
+/// This is the indexed parallel seam for region treatment. UniformOffset candidates are routed to
+/// the serial shared-work helper so canonical and path-offset request budgets retain exact order.
+///
+/// # Errors
+///
+/// Returns cancellation or Scale geometry failures, or an internal routing diagnostic if a
+/// nonidentity UniformOffset bypasses the shared-work path.
+fn prepare_scale_region_components(
+    base_id: &crate::CanonicalRegionId,
+    region: &crate::CanonicalRegion,
+    request: &RegionTreatmentRequest,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Option<PreparedRegionComponents>, RegionTreatmentError> {
+    let Some(treatment) = request.treatment else {
+        return Ok(None);
+    };
+    if treatment.fill == 0.0 {
+        return Ok(None);
+    }
+    let components = match treatment.algorithm {
+        RegionResizeAlgorithm::Scale if treatment.fill == 1.0 => vec![region.ring.clone()],
+        RegionResizeAlgorithm::Scale => vec![scale_path(
+            &region.ring,
+            request.reference.expect("validated Scale reference"),
+            treatment.fill,
+            cancelled,
+        )?],
+        RegionResizeAlgorithm::UniformOffset if treatment.fill == 1.0 => {
+            vec![region.ring.clone()]
+        }
+        RegionResizeAlgorithm::UniformOffset => {
+            return Err(region_error(
+                "region.resize.geometry.routing",
+                "nonidentity UniformOffset requires shared request work",
+            ));
+        }
+    };
+    Ok(Some(PreparedRegionComponents {
+        base_id: base_id.clone(),
+        source_id: region.id.source_id.clone(),
+        components,
+    }))
+}
+
+/// Prepares one region through the serial shared-work path when UniformOffset is present.
+///
+/// # Errors
+///
+/// Returns stable Scale, offset, canonical-budget, path-budget, or cancellation diagnostics.
+#[allow(clippy::too_many_arguments)]
+fn prepare_region_components_serial(
+    output_layer_id: PatternOutputLayerId,
+    base_id: &crate::CanonicalRegionId,
+    region: &crate::CanonicalRegion,
+    request: &RegionTreatmentRequest,
+    canonical_work: &mut CanonicalTreatmentWork,
+    offset_work: &mut PathOffsetWork,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Option<PreparedRegionComponents>, RegionTreatmentError> {
+    let Some(treatment) = request.treatment else {
+        return Ok(None);
+    };
+    if treatment.fill == 0.0 {
+        return Ok(None);
+    }
+    if treatment.algorithm != RegionResizeAlgorithm::UniformOffset || treatment.fill == 1.0 {
+        return prepare_scale_region_components(base_id, region, request, cancelled);
+    }
+    let components = uniform_offset_components_for_fill(
+        output_layer_id,
+        region,
+        treatment.fill,
+        canonical_work,
+        offset_work,
+        cancelled,
+    )?;
+    Ok((!components.is_empty()).then(|| PreparedRegionComponents {
+        base_id: base_id.clone(),
+        source_id: region.id.source_id.clone(),
+        components,
+    }))
+}
+
 /// Solves the signed normal offset whose retained positive area matches `base_area * fill²`.
 ///
 /// The solver measures only canonical positive candidate components from this one region. It does
@@ -388,7 +623,7 @@ fn uniform_offset_components_for_fill(
     output_layer_id: PatternOutputLayerId,
     region: &crate::CanonicalRegion,
     fill: f64,
-    limits: RegionTreatmentLimits,
+    canonical_work: &mut CanonicalTreatmentWork,
     work: &mut PathOffsetWork,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<CurvePath>, RegionTreatmentError> {
@@ -405,19 +640,26 @@ fn uniform_offset_components_for_fill(
             output_layer_id,
             region,
             signed_distance,
-            limits,
+            canonical_work,
             work,
             cancelled,
-        );
+        )
+        .map(|candidate| candidate.components);
     }
     uniform_offset_fallback_components(
         output_layer_id,
         region,
         target_area,
-        limits,
+        canonical_work,
         work,
         cancelled,
     )
+}
+
+/// Canonical positive offset components plus their already-measured total area.
+struct CanonicalOffsetCandidate {
+    components: Vec<CurvePath>,
+    area: f64,
 }
 
 /// Builds one positive canonical result from one shared-work offset construction.
@@ -425,16 +667,19 @@ fn canonical_offset_components(
     output_layer_id: PatternOutputLayerId,
     region: &crate::CanonicalRegion,
     signed_distance: f64,
-    limits: RegionTreatmentLimits,
+    canonical_work: &mut CanonicalTreatmentWork,
     work: &mut PathOffsetWork,
     cancelled: &dyn Fn() -> bool,
-) -> Result<Vec<CurvePath>, RegionTreatmentError> {
+) -> Result<CanonicalOffsetCandidate, RegionTreatmentError> {
     poll_treatment(cancelled)?;
     let components = offset_region_path_with_work(&region.ring, signed_distance, work, cancelled)?;
     if components.is_empty() {
-        return Ok(components);
+        return Ok(CanonicalOffsetCandidate {
+            components,
+            area: 0.0,
+        });
     }
-    let (canonical, _) = build_canonical_regions_cancellable(
+    let (canonical, _) = canonical_work.build(
         CanonicalRegionProposal {
             output_layer_id,
             source_groups: vec![CanonicalRegionSourceGroup {
@@ -442,15 +687,21 @@ fn canonical_offset_components(
                 components,
             }],
         },
-        limits.canonical,
         cancelled,
-    )
-    .map_err(map_canonical_treatment_error)?;
-    Ok(canonical
+    )?;
+    let area = canonical
         .regions()
         .iter()
-        .map(|candidate| candidate.ring.clone())
-        .collect())
+        .map(|candidate| candidate.area)
+        .sum();
+    Ok(CanonicalOffsetCandidate {
+        components: canonical
+            .regions()
+            .iter()
+            .map(|candidate| candidate.ring.clone())
+            .collect(),
+        area,
+    })
 }
 
 /// Solves nonlinear, nonconvex, or topology-changing current producer rings with shared work.
@@ -462,7 +713,7 @@ fn uniform_offset_fallback_components(
     output_layer_id: PatternOutputLayerId,
     region: &crate::CanonicalRegion,
     target_area: f64,
-    limits: RegionTreatmentLimits,
+    canonical_work: &mut CanonicalTreatmentWork,
     work: &mut PathOffsetWork,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<CurvePath>, RegionTreatmentError> {
@@ -474,22 +725,21 @@ fn uniform_offset_fallback_components(
     for _ in 0..STEPS {
         poll_treatment(cancelled)?;
         let distance = (low + high) * 0.5;
-        let components = canonical_offset_components(
+        let candidate = canonical_offset_components(
             output_layer_id,
             region,
             if grows { -distance } else { distance },
-            limits,
+            canonical_work,
             work,
             cancelled,
         )?;
-        let area =
-            canonical_components_area(output_layer_id, region, &components, limits, cancelled)?;
+        let area = candidate.area;
         let error = (area - target_area).abs();
         if best
             .as_ref()
             .is_none_or(|(best_error, _)| error < *best_error)
         {
-            best = Some((error, components));
+            best = Some((error, candidate.components));
         }
         if (grows && area < target_area) || (!grows && area > target_area) {
             low = distance;
@@ -507,36 +757,6 @@ fn uniform_offset_fallback_components(
             "region.resize.geometry.offset",
             "UniformOffset fallback did not reach its bounded positive-area tolerance",
         ))
-}
-
-/// Sums already-canonical positive candidate area without measuring any negative geometry.
-fn canonical_components_area(
-    output_layer_id: PatternOutputLayerId,
-    region: &crate::CanonicalRegion,
-    components: &[CurvePath],
-    limits: RegionTreatmentLimits,
-    cancelled: &dyn Fn() -> bool,
-) -> Result<f64, RegionTreatmentError> {
-    if components.is_empty() {
-        return Ok(0.0);
-    }
-    let (canonical, _) = build_canonical_regions_cancellable(
-        CanonicalRegionProposal {
-            output_layer_id,
-            source_groups: vec![CanonicalRegionSourceGroup {
-                source_id: region.id.source_id.clone(),
-                components: components.to_vec(),
-            }],
-        },
-        limits.canonical,
-        cancelled,
-    )
-    .map_err(map_canonical_treatment_error)?;
-    Ok(canonical
-        .regions()
-        .iter()
-        .map(|candidate| candidate.area)
-        .sum())
 }
 
 /// Derives one exact signed normal displacement for a convex linear canonical region.
@@ -758,11 +978,12 @@ fn region_error(path: &'static str, message: &'static str) -> RegionTreatmentErr
 ///
 /// # Errors
 ///
-/// Returns geometry validation failures without changing closure or segment kind.
+/// Returns cancellation or geometry validation failures without changing closure or segment kind.
 fn scale_path(
     path: &CurvePath,
     reference: Point2,
     factor: f64,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<CurvePath, RegionTreatmentError> {
     let point = |value: Point2| {
         Point2::new(
@@ -772,6 +993,7 @@ fn scale_path(
     };
     let mut segments = Vec::with_capacity(path.segments().len());
     for segment in path.segments() {
+        poll_treatment(cancelled)?;
         let transformed = match segment {
             CurveSegment::Line(line) => CurveSegment::Line(
                 LineSegment::new(point(line.start()), point(line.end())).map_err(|_| {
@@ -844,6 +1066,41 @@ mod tests {
         .0
     }
 
+    /// Builds two positive squares whose intermediate and final canonical builds share one budget.
+    fn two_region_source() -> CanonicalRegionSet {
+        build_canonical_regions_cancellable(
+            CanonicalRegionProposal {
+                output_layer_id: PatternOutputLayerId(71),
+                source_groups: (0_usize..2)
+                    .map(|ordinal| CanonicalRegionSourceGroup {
+                        source_id: crate::CanonicalRegionSourceId::SiteOwners(vec![
+                            crate::FamilySiteId {
+                                mechanism_id: PatternMechanismId(9),
+                                ordinal,
+                            },
+                        ]),
+                        components: vec![
+                            CurvePath::polyline(
+                                vec![
+                                    Point2::new(ordinal as f64 * 4.0, 0.0),
+                                    Point2::new(ordinal as f64 * 4.0 + 2.0, 0.0),
+                                    Point2::new(ordinal as f64 * 4.0 + 2.0, 2.0),
+                                    Point2::new(ordinal as f64 * 4.0, 2.0),
+                                ],
+                                PathClosure::Closed,
+                            )
+                            .expect("square closes"),
+                        ],
+                    })
+                    .collect(),
+            },
+            CanonicalRegionLimits::default(),
+            || false,
+        )
+        .expect("two-region source canonicalizes")
+        .0
+    }
+
     /// Builds one request for the supplied normalized algorithm and fill.
     fn request(
         region: &crate::CanonicalRegion,
@@ -875,6 +1132,85 @@ mod tests {
         .unwrap();
         assert!(result.regions.regions().is_empty());
         assert!(result.provenance.is_empty());
+    }
+
+    /// Enforces canonical source-group work across intermediate offsets and final aggregation.
+    #[test]
+    fn uniform_offset_charges_one_request_wide_canonical_budget() {
+        let source = two_region_source();
+        let requests = source
+            .regions()
+            .iter()
+            .map(|region| request(region, RegionResizeAlgorithm::UniformOffset, 1.2))
+            .collect::<Vec<_>>();
+        let error = treat_region_requests_cancellable(
+            PatternOutputLayerId(71),
+            &source,
+            &requests,
+            RegionTreatmentLimits {
+                canonical: CanonicalRegionLimits::new(3, 100, 1_000, 100_000)
+                    .expect("nonzero limits"),
+                path_offset: crate::PathOffsetLimits::default(),
+            },
+            || false,
+        )
+        .expect_err("two intermediate groups plus two final groups exceed three");
+        assert_eq!(error.path(), "region.resize.limits.canonical");
+    }
+
+    /// Proves indexed Scale treatment preserves canonical order, identity, and provenance.
+    #[test]
+    fn parallel_scale_treatment_matches_single_worker_reference() {
+        let source = two_region_source();
+        let requests = source
+            .regions()
+            .iter()
+            .map(|region| request(region, RegionResizeAlgorithm::Scale, 1.25))
+            .collect::<Vec<_>>();
+        let run = || {
+            treat_region_requests_cancellable(
+                PatternOutputLayerId(71),
+                &source,
+                &requests,
+                RegionTreatmentLimits::default(),
+                || false,
+            )
+            .expect("Scale treatment completes")
+        };
+        let one = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("one-worker pool builds")
+            .install(run);
+        let many = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("four-worker pool builds")
+            .install(run);
+        assert_eq!(one, many);
+    }
+
+    /// Proves indexed Scale work observes cancellation before any treated region set publishes.
+    #[test]
+    fn parallel_scale_treatment_cancellation_is_atomic() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let source = two_region_source();
+        let requests = source
+            .regions()
+            .iter()
+            .map(|region| request(region, RegionResizeAlgorithm::Scale, 1.25))
+            .collect::<Vec<_>>();
+        let polls = AtomicUsize::new(0);
+        let error = treat_region_requests_cancellable(
+            PatternOutputLayerId(71),
+            &source,
+            &requests,
+            RegionTreatmentLimits::default(),
+            || polls.fetch_add(1, Ordering::Relaxed) >= 6,
+        )
+        .expect_err("cancelled Scale treatment publishes no partial region set");
+        assert_eq!(error.path(), "evaluation.cancelled");
     }
 
     /// Verifies both algorithms replay the exact natural producer boundary at fill one.

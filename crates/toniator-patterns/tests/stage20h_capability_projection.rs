@@ -225,6 +225,9 @@ fn definition_only_pipeline_products_match_domain_projection() {
                         SiteExclusionPolicy::MinimumCenterDistance { .. } => {
                             toniator_domain::ExclusionKind::MinimumCenterDistance
                         }
+                        SiteExclusionPolicy::VisibleMarkMargin { .. } => {
+                            toniator_domain::ExclusionKind::VisibleMarkMargin
+                        }
                     }
                 );
             }
