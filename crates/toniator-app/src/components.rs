@@ -10,14 +10,44 @@ use gtk::subclass::prelude::*;
 mod main_shell {
     use super::*;
 
-    /// Installs the resource-defined adaptive main-window composition.
+    /// Installs the resource-defined GTK main-window composition.
     #[derive(Default, gtk::CompositeTemplate)]
     #[template(resource = "/com/silentbutdigital/Toniator/window.ui")]
     pub struct ToniatorMainShell {
         #[template_child]
-        pub main_banner: gtk::TemplateChild<adw::Banner>,
+        pub main_banner_revealer: gtk::TemplateChild<gtk::Revealer>,
         #[template_child]
-        pub workspace_split: gtk::TemplateChild<adw::OverlaySplitView>,
+        pub main_banner: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub workspace_split: gtk::TemplateChild<gtk::Paned>,
+        #[template_child]
+        pub file_button: gtk::TemplateChild<gtk::MenuButton>,
+        #[template_child]
+        pub channel_settings_drawer: gtk::TemplateChild<gtk::ToggleButton>,
+        #[template_child]
+        pub window_title: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub page_stack: gtk::TemplateChild<gtk::Stack>,
+        #[template_child]
+        pub preview_picture: gtk::TemplateChild<gtk::Picture>,
+        #[template_child]
+        pub viewer: gtk::TemplateChild<gtk::Overlay>,
+        #[template_child]
+        pub preview_spinner: gtk::TemplateChild<gtk::Spinner>,
+        #[template_child]
+        pub error_label: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub inspector_scroll: gtk::TemplateChild<gtk::ScrolledWindow>,
+        #[template_child]
+        pub inspector_status: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub model_selector: gtk::TemplateChild<gtk::DropDown>,
+        #[template_child]
+        pub channel_selector: gtk::TemplateChild<gtk::DropDown>,
+        #[template_child]
+        pub inspector_catalog: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
+        pub inspector_descriptors: gtk::TemplateChild<gtk::Box>,
     }
 
     #[glib::object_subclass]
@@ -53,14 +83,89 @@ impl ToniatorMainShell {
         glib::Object::builder().build()
     }
 
-    /// Returns the template-owned status banner for artist-facing feedback.
-    pub fn banner(&self) -> adw::Banner {
-        self.imp().main_banner.get()
+    /// Applies one visible banner message without affecting application authority.
+    pub fn set_banner(&self, message: Option<&str>) {
+        self.imp()
+            .main_banner
+            .set_label(message.unwrap_or_default());
+        self.imp()
+            .main_banner_revealer
+            .set_reveal_child(message.is_some());
     }
 
-    /// Returns the template-owned adaptive split container.
-    pub fn split(&self) -> adw::OverlaySplitView {
+    /// Returns the template-owned conventional GTK split container.
+    pub fn split(&self) -> gtk::Paned {
         self.imp().workspace_split.get()
+    }
+
+    /// Returns the static File menu button whose menu model is runtime-owned.
+    pub fn file_button(&self) -> gtk::MenuButton {
+        self.imp().file_button.get()
+    }
+
+    /// Returns the static channel-settings visibility control.
+    pub fn drawer(&self) -> gtk::ToggleButton {
+        self.imp().channel_settings_drawer.get()
+    }
+
+    /// Returns the template-owned window title label.
+    pub fn title(&self) -> gtk::Label {
+        self.imp().window_title.get()
+    }
+
+    /// Returns the template-owned page stack.
+    pub fn stack(&self) -> gtk::Stack {
+        self.imp().page_stack.get()
+    }
+
+    /// Returns the template-owned canonical preview picture.
+    pub fn picture(&self) -> gtk::Picture {
+        self.imp().preview_picture.get()
+    }
+
+    /// Returns the template-owned preview overlay.
+    pub fn viewer(&self) -> gtk::Overlay {
+        self.imp().viewer.get()
+    }
+
+    /// Returns the template-owned preview pending indicator.
+    pub fn spinner(&self) -> gtk::Spinner {
+        self.imp().preview_spinner.get()
+    }
+
+    /// Returns the template-owned error presentation label.
+    pub fn error(&self) -> gtk::Label {
+        self.imp().error_label.get()
+    }
+
+    /// Returns the template-owned sidebar scroll surface.
+    pub fn inspector_scroll(&self) -> gtk::ScrolledWindow {
+        self.imp().inspector_scroll.get()
+    }
+
+    /// Returns the template-owned sidebar status label.
+    pub fn inspector_status(&self) -> gtk::Label {
+        self.imp().inspector_status.get()
+    }
+
+    /// Returns the template-owned model selector.
+    pub fn model_selector(&self) -> gtk::DropDown {
+        self.imp().model_selector.get()
+    }
+
+    /// Returns the template-owned selected-channel selector.
+    pub fn channel_selector(&self) -> gtk::DropDown {
+        self.imp().channel_selector.get()
+    }
+
+    /// Returns the dynamic catalog slot beneath the static sidebar controls.
+    pub fn inspector_catalog(&self) -> gtk::Box {
+        self.imp().inspector_catalog.get()
+    }
+
+    /// Returns the dynamic descriptor slot beneath the static sidebar controls.
+    pub fn inspector_descriptors(&self) -> gtk::Box {
+        self.imp().inspector_descriptors.get()
     }
 }
 
@@ -150,6 +255,38 @@ mod pattern_editor_shell {
         pub draft_scroll: gtk::TemplateChild<gtk::ScrolledWindow>,
         #[template_child]
         pub draft_actions: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
+        pub draft_introduction: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub draft_history: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub draft_current_pattern: gtk::TemplateChild<gtk::Label>,
+        #[template_child]
+        pub construction_layout: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
+        pub construction_sidebar: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
+        pub resource_list: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
+        pub new_structure: gtk::TemplateChild<gtk::Button>,
+        #[template_child]
+        pub construction_canvas: gtk::TemplateChild<gtk::DrawingArea>,
+        #[template_child]
+        pub coordinate_x: gtk::TemplateChild<gtk::Entry>,
+        #[template_child]
+        pub coordinate_y: gtk::TemplateChild<gtk::Entry>,
+        #[template_child]
+        pub primary_rows: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
+        pub advanced_rows: gtk::TemplateChild<gtk::Box>,
+        #[template_child]
+        pub make_curve: gtk::TemplateChild<gtk::Button>,
+        #[template_child]
+        pub make_line: gtk::TemplateChild<gtk::Button>,
+        #[template_child]
+        pub insert_node: gtk::TemplateChild<gtk::Button>,
+        #[template_child]
+        pub delete_node: gtk::TemplateChild<gtk::Button>,
     }
 
     #[glib::object_subclass]
@@ -193,13 +330,73 @@ impl ToniatorPatternEditorShell {
     pub fn spinner(&self) -> gtk::Spinner {
         self.imp().draft_preview_spinner.get()
     }
-    /// Installs the dynamic draft controls in the template-owned scroll area.
-    pub fn set_editor(&self, editor: &gtk::Box) {
-        self.imp().draft_scroll.set_child(Some(editor));
-    }
     /// Appends a stable footer action to the template-owned action row.
     pub fn append_action(&self, action: &impl IsA<gtk::Widget>) {
         self.imp().draft_actions.append(action);
+    }
+    /// Returns the static draft disclosure label.
+    pub fn introduction(&self) -> gtk::Label {
+        self.imp().draft_introduction.get()
+    }
+    /// Returns the template-owned draft-history label.
+    pub fn history(&self) -> gtk::Label {
+        self.imp().draft_history.get()
+    }
+    /// Returns the template-owned current-pattern label.
+    pub fn current_pattern(&self) -> gtk::Label {
+        self.imp().draft_current_pattern.get()
+    }
+    /// Returns the GTK-owned construction container whose orientation may follow window width.
+    pub fn construction_layout(&self) -> gtk::Box {
+        self.imp().construction_layout.get()
+    }
+    /// Returns the GTK-owned construction sidebar whose width follows the reflow policy.
+    pub fn construction_sidebar(&self) -> gtk::Box {
+        self.imp().construction_sidebar.get()
+    }
+    /// Returns the dynamic authored-resource list slot.
+    pub fn resource_list(&self) -> gtk::Box {
+        self.imp().resource_list.get()
+    }
+    /// Returns the purpose-labelled construction trigger.
+    pub fn new_structure(&self) -> gtk::Button {
+        self.imp().new_structure.get()
+    }
+    /// Returns the dynamic private-draft drawing surface.
+    pub fn construction_canvas(&self) -> gtk::DrawingArea {
+        self.imp().construction_canvas.get()
+    }
+    /// Returns the selected-anchor X entry.
+    pub fn coordinate_x(&self) -> gtk::Entry {
+        self.imp().coordinate_x.get()
+    }
+    /// Returns the selected-anchor Y entry.
+    pub fn coordinate_y(&self) -> gtk::Entry {
+        self.imp().coordinate_y.get()
+    }
+    /// Returns the dynamic ordinary-descriptor slot.
+    pub fn primary_rows(&self) -> gtk::Box {
+        self.imp().primary_rows.get()
+    }
+    /// Returns the dynamic advanced-descriptor slot.
+    pub fn advanced_rows(&self) -> gtk::Box {
+        self.imp().advanced_rows.get()
+    }
+    /// Returns the static line-to-curve action control.
+    pub fn make_curve(&self) -> gtk::Button {
+        self.imp().make_curve.get()
+    }
+    /// Returns the static curve-to-line action control.
+    pub fn make_line(&self) -> gtk::Button {
+        self.imp().make_line.get()
+    }
+    /// Returns the static segment-splitting action control.
+    pub fn insert_node(&self) -> gtk::Button {
+        self.imp().insert_node.get()
+    }
+    /// Returns the static selected-node deletion action control.
+    pub fn delete_node(&self) -> gtk::Button {
+        self.imp().delete_node.get()
     }
 }
 
@@ -323,6 +520,76 @@ impl ToniatorConfirmationContent {
 }
 
 impl Default for ToniatorConfirmationContent {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+mod png_export_options {
+    use super::*;
+
+    /// Installs the resource-owned fixed PNG export option layout.
+    #[derive(Default, gtk::CompositeTemplate)]
+    #[template(resource = "/com/silentbutdigital/Toniator/png-export-options.ui")]
+    pub struct ToniatorPngExportOptions {
+        #[template_child]
+        pub png_background: gtk::TemplateChild<gtk::DropDown>,
+        #[template_child]
+        pub png_antialiasing: gtk::TemplateChild<gtk::DropDown>,
+        #[template_child]
+        pub png_dimensions: gtk::TemplateChild<gtk::Entry>,
+    }
+
+    #[glib::object_subclass]
+    impl glib::subclass::types::ObjectSubclass for ToniatorPngExportOptions {
+        const NAME: &'static str = "ToniatorPngExportOptions";
+        type Type = super::ToniatorPngExportOptions;
+        type ParentType = gtk::Box;
+
+        fn class_init(class: &mut Self::Class) {
+            Self::bind_template(class);
+        }
+
+        fn instance_init(object: &glib::subclass::InitializingObject<Self>) {
+            object.init_template();
+        }
+    }
+
+    impl glib::subclass::object::ObjectImpl for ToniatorPngExportOptions {}
+    impl gtk::subclass::widget::WidgetImpl for ToniatorPngExportOptions {}
+    impl gtk::subclass::box_::BoxImpl for ToniatorPngExportOptions {}
+}
+
+glib::wrapper! {
+    /// Provides the template-owned fixed PNG export option controls.
+    pub struct ToniatorPngExportOptions(ObjectSubclass<png_export_options::ToniatorPngExportOptions>)
+        @extends gtk::Widget, gtk::Box,
+        @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget, gtk::Orientable;
+}
+
+impl ToniatorPngExportOptions {
+    /// Creates the fixed presentation surface before runtime defaults and callbacks attach.
+    pub fn new() -> Self {
+        glib::Object::builder().build()
+    }
+
+    /// Returns the runtime-modelled PNG backing selector.
+    pub fn background(&self) -> gtk::DropDown {
+        self.imp().png_background.get()
+    }
+
+    /// Returns the PNG raster-antialiasing selector.
+    pub fn antialiasing(&self) -> gtk::DropDown {
+        self.imp().png_antialiasing.get()
+    }
+
+    /// Returns the optional PNG output-dimension entry.
+    pub fn dimensions(&self) -> gtk::Entry {
+        self.imp().png_dimensions.get()
+    }
+}
+
+impl Default for ToniatorPngExportOptions {
     fn default() -> Self {
         Self::new()
     }

@@ -702,6 +702,21 @@ The 1024×1024 release scaling proof is recorded in the same architecture
 document. The accepted checkpoint remains headless-only; no push, publication,
 GUI re-baseline, or Stage 21 work is authorized by this acceptance.
 
+**GTK4/Blueprint re-baseline — Complete in checkpoint `ToniatorGUI`.** The user
+authorized this separately gated infrastructure migration on 2026-08-27
+through `guiRefactorPrompt.md` and accepted it on 2026-08-27 after the bounded
+implementation and independent re-review passed. `toniator-app` now uses GTK4
+without libadwaita, scoped Blueprint/GResource templates own the primary
+static interface composition, `main.rs` retains runtime and dynamic behavior,
+and compact controls retain natural vertical sizing. Blueprint compilation,
+focused app tests, app check/strict Clippy/format, architecture and diff gates,
+fresh raster/SVG private-Sway runs, narrow and normal Pattern Editor flows,
+targeted AT-SPI interaction, and independent read-only review passed. Evidence
+is recorded in
+`.codex-work/evidence/2026-08-27-gtk4-blueprint-rebaseline-parent-review.md`.
+Stage 21 pattern-authoring redesign, headless authority changes, publication,
+and push remain unauthorized and separately gated.
+
 **Stage 20N+ history and remaining roadmap — Stage 20R Complete; Stage 20S Complete at
 `55651dee7c744c2aa207924bf0dbb7737609942d`.** The user accepted the revised remainder
 roadmap on 2026-08-24 under
@@ -713,8 +728,8 @@ checkpoint `dc7e988200c5be4d22791ca1d231336caac19a24`. Stage 21 owns
 pattern-authoring GTK, Stage 22 owns all headless
 frame/media/sequence/simple-transition work, and Stage 23 owns temporal GTK
 with start/end pins. The integrated final scrub is complete at the checkpoint
-above; Stage 21 and the separate GTK4/Blueprint re-baseline remain gated.
-Stages 21–23 remain Planned and separately gated.
+above. The separately authorized GTK4/Blueprint re-baseline is complete in
+checkpoint `ToniatorGUI`; Stages 21–23 remain Planned and separately gated.
 
 ## Maintenance rules
 
@@ -730,6 +745,9 @@ Stages 21–23 remain Planned and separately gated.
   checkpoint**. That single local checkpoint contains all tracked Stage 20C
   implementation and synchronized durable documentation and is intentionally
   named rather than self-referenced by hash.
+- The GTK4/Blueprint re-baseline is **Complete in checkpoint `ToniatorGUI`**.
+  The user explicitly named this single local code-and-documentation checkpoint,
+  so the ledger names it rather than attempting to self-reference its hash.
 - Stage 20D is **Complete in the Stage 20D acceptance checkpoint**, whose
   direct planning parent is `453104e39204afc1e10397b9d5bbf551dd85deac`; the
   acceptance checkpoint is intentionally named rather than self-referenced by

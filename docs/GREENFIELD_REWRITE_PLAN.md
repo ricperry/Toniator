@@ -21,9 +21,9 @@ replace product architecture or authorize work outside a named stage.
 
 - Keep one authoritative `Document`/`DocumentSession`. Commands mutate that
   authority; widgets, evaluators, caches, previews, and exporters are derived.
-- Keep GTK/libadwaita in `toniator-app` only. `toniator-cli` is a peer,
-  headless frontend using `toniator-engine`; no headless crate depends on a
-  frontend or GTK.
+- Keep GTK concerns in `toniator-app` only. The current app is GTK4-only;
+  `toniator-cli` is a peer, headless frontend using `toniator-engine`, and no
+  headless crate depends on a frontend or GTK.
 - Preview, PNG, and SVG consume one canonical geometry/render-scene path.
 - Pattern families own guide and site generation. Voronoi only constructs
   ordinary cells from family-generated sites.
@@ -52,7 +52,7 @@ two frontends:
 | `toniator-io` | Document/preset serialization, migrations, recovery/recent metadata, source references, export coordination. | Uses domain (and render for export coordination); no pattern mathematics or UI binding. |
 | `toniator-engine` | Shared headless orchestration: immutable snapshots, evaluation requests, invalidation/revision scheduling, source-to-pattern-to-render pipeline, cancellation/cache boundaries. | Depends on domain, sampling, patterns, render, and IO; no GTK. This is the common boundary consumed by both frontends. |
 | `toniator-cli` | Deterministic command-line frontend (`validate`, then inspect/render and later commands), exit codes, arguments, artifact inspection. | Peer frontend; depends on engine/domain as needed; never GTK. |
-| `toniator-app` | GTK/libadwaita application, Blueprint/GResource resources, controllers, view models, command bindings, preview presentation, task coordination. | Peer frontend; consumes engine/domain/IO and owns all GTK concerns. |
+| `toniator-app` | GTK4 application, Blueprint/GResource resources, controllers, view models, command bindings, preview presentation, task coordination. | Peer frontend; consumes engine/domain/IO and owns all GTK concerns. |
 
 The intended flow is `domain → geometry/sampling → patterns → render/io →
 engine → app or cli`; engine is the shared orchestration boundary, not a
@@ -2060,8 +2060,8 @@ architecture schema; project documentation is authority and
 integrated final scrub is complete at implementation checkpoint
 `dc7e988200c5be4d22791ca1d231336caac19a24` (accepted 2026-08-27); its durable
 architecture and concurrency record includes the full-resolution scaling
-proof. Stages 21–23 remain Planned, while the GTK4/Blueprint re-baseline,
-push, publication, and every later stage remain separately gated.
+proof. Stages 21–23 remain Planned. The GTK4/Blueprint re-baseline is recorded
+below; push, publication, and every later stage remain separately gated.
 
 **Final Stage 20 scrub — Complete at implementation checkpoint
 `dc7e988200c5be4d22791ca1d231336caac19a24`.** The user accepted the integrated
@@ -2075,8 +2075,30 @@ One complete evaluation remains the cancellation and transactional-publication
 unit; deterministic per-site, per-region, and per-pixel work uses the bounded
 shared Rayon pool, while global topology, dependency/budget traversal, painter
 order, and publication remain serial. The retired `regions-plus-marks` debug
-tool remains absent. The GTK4/Blueprint re-baseline, Stage 21, publication, and
-push remain separately gated.
+tool remains absent. The GTK4/Blueprint re-baseline is recorded below; Stage
+21, publication, and push remain separately gated.
+
+## GTK4/Blueprint re-baseline
+
+**Complete in the accepted local checkpoint `ToniatorGUI` (2026-08-27).**
+This bounded infrastructure change removes libadwaita from `toniator-app` and
+uses GTK4-only widgets. Blueprint sources compiled by the build script and
+registered in the GResource own the static main shell, private Pattern Editor
+shell, and PNG-export-options structure. Rust remains authoritative for the
+document and commands, dynamic descriptor/catalog rows, signal handlers,
+preview scheduling, canvas interaction, export validation/submission, and the
+GTK-only responsive allocation policy.
+
+The accepted Stage 19B workflow and canonical preview/PNG/SVG paths remain in
+place. This re-baseline does not decide or implement Stage 21's workflow,
+information architecture, pattern wizard, expanded capability exposure, or
+broader controller decomposition. Focused Blueprint compilation, resource
+registration, app checks and strict Clippy, formatting, architecture
+validation, and diff checks passed. Fresh private Sway/AT-SPI/grim evidence
+covered raster and SVG inputs, normal and narrow layouts, sidebar visibility,
+Pattern Editor reflow, draft/discard actions, and accessible control actions.
+The evidence is automated wlroots evidence and native artifact inspection; it
+does not claim manual GNOME Shell/Mutter acceptance.
 
 Every mechanism must enter through the Stage 14 typed schema, Stage 15 generic
 pipeline, Stage 17 command/descriptor contract, canonical geometry, and

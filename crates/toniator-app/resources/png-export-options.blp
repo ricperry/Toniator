@@ -1,0 +1,73 @@
+using Gtk 4.0;
+
+template $ToniatorPngExportOptions : Gtk.Box {
+  orientation: vertical;
+  spacing: 12;
+  margin-top: 18;
+  margin-bottom: 18;
+  margin-start: 18;
+  margin-end: 18;
+
+  Gtk.Grid {
+    row-spacing: 12;
+    column-spacing: 12;
+
+    Gtk.Label {
+      label: "_Background";
+      use-underline: true;
+      halign: start;
+      mnemonic-widget: png_background;
+      layout {
+        column: 0;
+        row: 0;
+      }
+    }
+
+    Gtk.DropDown png_background {
+      tooltip-text: "PNG-only final-consumer backing";
+      layout {
+        column: 1;
+        row: 0;
+      }
+    }
+
+    Gtk.Label {
+      label: "_Antialiasing";
+      use-underline: true;
+      halign: start;
+      mnemonic-widget: png_antialiasing;
+      layout {
+        column: 0;
+        row: 1;
+      }
+    }
+
+    Gtk.DropDown png_antialiasing {
+      tooltip-text: "PNG edge rasterization";
+      layout {
+        column: 1;
+        row: 1;
+      }
+    }
+
+    Gtk.Label {
+      label: "Output _size";
+      use-underline: true;
+      halign: start;
+      mnemonic-widget: png_dimensions;
+      layout {
+        column: 0;
+        row: 2;
+      }
+    }
+
+    Gtk.Entry png_dimensions {
+      placeholder-text: "Document canvas (for example 1200x800)";
+      tooltip-text: "Optional PNG pixel dimensions";
+      layout {
+        column: 1;
+        row: 2;
+      }
+    }
+  }
+}

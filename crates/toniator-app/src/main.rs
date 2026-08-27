@@ -27,10 +27,10 @@ use std::{
     time::Duration,
 };
 
-use adw::prelude::*;
 use app_events::AppEvent;
 use automation::AutomationSink;
 use controller::{UiIntent, history_redo};
+use gtk::prelude::*;
 #[cfg(test)]
 use preview_coordinator::PreviewSubmission;
 use preview_coordinator::accepts_submission;
@@ -643,13 +643,14 @@ fn banner_policy(
     BannerPolicy::Hidden
 }
 
-fn apply_banner_policy(banner: &adw::Banner, policy: BannerPolicy) {
+/// Projects one non-authoritative status policy into the template-owned GTK banner.
+///
+/// The shell receives presentation text only; this helper never changes document, history,
+/// evaluator, cache, or lifecycle state.
+fn apply_banner_policy(shell: &components::ToniatorMainShell, policy: BannerPolicy) {
     match policy {
-        BannerPolicy::Hidden => banner.set_revealed(false),
-        BannerPolicy::Message(message) => {
-            banner.set_title(&message);
-            banner.set_revealed(true);
-        }
+        BannerPolicy::Hidden => shell.set_banner(None),
+        BannerPolicy::Message(message) => shell.set_banner(Some(&message)),
     }
 }
 
@@ -715,7 +716,7 @@ struct Actions {
 /// Dropping the surface on close discards that private authority.
 struct PatternEditorSurface {
     purpose: PatternEditorPurpose,
-    window: adw::Window,
+    window: gtk::Window,
     status: gtk::Label,
     picture: gtk::Picture,
     preview_spinner: gtk::Spinner,
@@ -774,39 +775,82 @@ impl PatternEditorPurpose {
     }
 }
 
-/// Defines the modal-width breakpoint where construction switches to its vertical fallback.
-///
-/// The exact pixel value is passed to Adwaita's `MaxWidth` condition; it is not inferred from a
-/// child widget's natural allocation.
-const NARROW_EDITOR_MAX_WIDTH_PX: f64 = 700.0;
-
-/// Keeps the wide construction resource list legible without preventing the modal breakpoint.
-const CONSTRUCTION_SIDEBAR_WIDTH_PX: i32 = 320;
-
-/// Requests only the compact minimum canvas width; wide mode receives surplus width through `hexpand`.
-const CONSTRUCTION_CANVAS_MIN_WIDTH_PX: i32 = 220;
-
 /// Names the construction canvas's direct-manipulation gestures without consuming editor height.
 const CONSTRUCTION_CANVAS_GESTURE_HINT: &str = "Click to select or add points after choosing New. Scroll to zoom; middle-button drag pans. Enter completes; Escape cancels.";
 
-/// Reports the same inclusive width policy used by the native modal breakpoint.
-///
-/// This test-only helper keeps the boundary witness aligned with `MaxWidth 700px`; runtime mode
-/// changes are emitted by libadwaita rather than by a child allocation notification.
-#[cfg(test)]
+/// Defines the GTK-only modal width at which the construction layout stacks vertically.
+const NARROW_EDITOR_MAX_WIDTH_PX: i32 = 700;
+
+/// Defines the readable wide-layout sidebar request without fixing its vertical allocation.
+const CONSTRUCTION_SIDEBAR_WIDTH_PX: i32 = 320;
+
+/// Defines the smallest usable channel-settings sidebar allocation.
+const MAIN_SIDEBAR_MIN_WIDTH_PX: i32 = 300;
+
+/// Defines the largest channel-settings sidebar allocation at wide window sizes.
+const MAIN_SIDEBAR_MAX_WIDTH_PX: i32 = 420;
+
+/// Reports whether a current editor allocation must use the reachable narrow layout.
 const fn uses_narrow_editor_layout(width: i32) -> bool {
-    width <= NARROW_EDITOR_MAX_WIDTH_PX as i32
+    width <= NARROW_EDITOR_MAX_WIDTH_PX
 }
 
-/// Reports whether the construction widgets' explicit horizontal requests leave room for the breakpoint.
+/// Computes the readable channel-settings width without letting it consume a wide preview.
+const fn main_sidebar_width_for_window(width: i32) -> i32 {
+    let requested = width / 3;
+    if requested < MAIN_SIDEBAR_MIN_WIDTH_PX {
+        MAIN_SIDEBAR_MIN_WIDTH_PX
+    } else if requested > MAIN_SIDEBAR_MAX_WIDTH_PX {
+        MAIN_SIDEBAR_MAX_WIDTH_PX
+    } else {
+        requested
+    }
+}
+
+/// Computes the GtkPaned start position that leaves the active sidebar at its target width.
+const fn main_split_position_for_window(width: i32) -> i32 {
+    let position = width - main_sidebar_width_for_window(width);
+    if position < 0 { 0 } else { position }
+}
+
+/// Applies the active-settings split policy without changing window, document, or preview state.
 ///
-/// The shell contributes 24px of horizontal margins and the layout uses a 12px gap. Child natural
-/// widths remain GTK authority, but this guards the explicit requests that previously locked the
-/// modal above its native `MaxWidth` breakpoint.
-#[cfg(test)]
-const fn requested_construction_width_allows_narrow_breakpoint() -> bool {
-    CONSTRUCTION_SIDEBAR_WIDTH_PX + CONSTRUCTION_CANVAS_MIN_WIDTH_PX + 12 + 24
-        < NARROW_EDITOR_MAX_WIDTH_PX as i32
+/// A hidden sidebar leaves the existing paned position alone. An active visible sidebar receives a
+/// width derived from its current allocation, keeping selectors and descriptors usable at the app's
+/// narrow minimum and avoiding oversized inspector allocation on wide displays.
+fn apply_main_sidebar_width_policy(
+    width: i32,
+    drawer: &gtk::ToggleButton,
+    inspector: &gtk::ScrolledWindow,
+    split: &gtk::Paned,
+) {
+    if width > 0 && drawer.is_active() && inspector.is_visible() {
+        split.set_position(main_split_position_for_window(width));
+    }
+}
+
+/// Applies the current GTK-only construction reflow without touching draft or document state.
+///
+/// The sidebar and canvas stay in the static Blueprint hierarchy. This function changes only
+/// their presentation allocation policy, preserving natural compact-control heights while the
+/// vertically scrollable editor keeps every control reachable at narrow modal widths.
+fn apply_pattern_editor_width_policy(
+    width: i32,
+    layout: &gtk::Box,
+    sidebar: &gtk::Box,
+    canvas: &gtk::DrawingArea,
+) {
+    if uses_narrow_editor_layout(width) {
+        layout.set_orientation(gtk::Orientation::Vertical);
+        sidebar.set_size_request(-1, -1);
+        sidebar.set_hexpand(true);
+        canvas.set_content_height(260);
+    } else {
+        layout.set_orientation(gtk::Orientation::Horizontal);
+        sidebar.set_size_request(CONSTRUCTION_SIDEBAR_WIDTH_PX, -1);
+        sidebar.set_hexpand(false);
+        canvas.set_content_height(220);
+    }
 }
 
 /// Retains one private-editor descriptor row and its immutable source value.
@@ -873,14 +917,14 @@ struct AppState {
     syncing_model: bool,
     window_close: WindowCloseController,
     actions: Actions,
-    window: adw::ApplicationWindow,
-    window_title: adw::WindowTitle,
+    window: gtk::ApplicationWindow,
+    window_title: gtk::Label,
     stack: gtk::Stack,
     picture: gtk::Picture,
     viewer: gtk::Overlay,
     preview_spinner: gtk::Spinner,
     error: gtk::Label,
-    banner: adw::Banner,
+    shell: components::ToniatorMainShell,
     selector: gtk::DropDown,
     channel_selector: gtk::DropDown,
     channel_selector_model: gtk::StringList,
@@ -919,6 +963,11 @@ impl std::ops::DerefMut for AppState {
     }
 }
 
+/// Starts the GTK frontend after registering required presentation resources.
+///
+/// This entrypoint owns process arguments and application activation only. Document, history,
+/// evaluation, and persistence authority begin in the runtime coordinator created for each window;
+/// invalid command-line input exits before GTK startup.
 fn main() {
     register_resources();
     let initial_path = match parse_args(env::args_os().skip(1).collect()) {
@@ -928,7 +977,7 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let app = adw::Application::builder().application_id(APP_ID).build();
+    let app = gtk::Application::builder().application_id(APP_ID).build();
     app.connect_activate(move |app| build_window(app, initial_path.clone()));
     app.run_with_args(&["toniator-app"]);
 }
@@ -956,134 +1005,75 @@ fn parse_args(arguments: Vec<std::ffi::OsString>) -> Result<Option<PathBuf>, Str
 /// authoritative headless workspace/history boundary. This function owns
 /// widget lifetime and notification wiring, but never directly mutates a
 /// document outside the existing command paths.
-fn build_window(app: &adw::Application, initial_path: Option<PathBuf>) {
+fn build_window(app: &gtk::Application, initial_path: Option<PathBuf>) {
     install_css();
-    let window = adw::ApplicationWindow::builder()
+    let window = gtk::ApplicationWindow::builder()
         .application(app)
         .title("Toniator")
         .default_width(960)
         .default_height(720)
         .build();
     window.set_size_request(480, 360);
-    let header = adw::HeaderBar::new();
     let file_menu = gio::Menu::new();
     for (label, action, tooltip) in LIFECYCLE_BUTTONS {
         file_menu.append(Some(label.trim_start_matches('_')), Some(action));
         let _ = tooltip;
     }
-    let file_button = gtk::MenuButton::builder()
-        .label("File")
-        .menu_model(&file_menu)
-        .tooltip_text("Document and export actions")
-        .build();
-    header.pack_start(&file_button);
-    for (label, action, tooltip) in [
-        ("_Undo", "app.undo", "Undo the last change (Ctrl+Z)"),
-        ("_Redo", "app.redo", "Redo the last change (Ctrl+Shift+Z)"),
-    ] {
-        let button = gtk::Button::with_mnemonic(label);
-        button.set_action_name(Some(action));
-        button.set_tooltip_text(Some(tooltip));
-        header.pack_start(&button);
-    }
-    let selector = gtk::DropDown::from_strings(&PreviewModel::ALL.map(PreviewModel::label));
-    selector.set_tooltip_text(Some("Choose the channel color model"));
-    let channel_selector_model = gtk::StringList::new(&[]);
-    let channel_selector = gtk::DropDown::new(
-        Some(channel_selector_model.clone()),
-        None::<gtk::Expression>,
-    );
-    channel_selector.set_sensitive(false);
-    channel_selector.set_tooltip_text(Some("Choose the channel to adjust"));
-    // Model and channel selectors remain in state for the ordinary inspector
-    // workflow; the responsive header reserves narrow-space for Undo/Redo and
-    // the clearly named settings drawer instead of cropping actionable controls.
-    let window_title = adw::WindowTitle::new("Toniator", "Document lifecycle");
-    header.set_title_widget(Some(&window_title));
-
     let shell = components::ToniatorMainShell::new();
-    let banner = shell.banner();
-    let stack = gtk::Stack::new();
-    stack.set_hexpand(true);
-    stack.set_vexpand(true);
-    stack.add_named(
-        &status_page("Create or open a Toniator document."),
-        Some(Page::Empty.name()),
-    );
-    stack.add_named(&status_page("Working…"), Some(Page::Loading.name()));
-    let error = gtk::Label::new(None);
-    error.set_wrap(true);
-    error.set_max_width_chars(70);
-    error.set_justify(gtk::Justification::Center);
-    stack.add_named(&centered(error.clone()), Some(Page::Error.name()));
-    let picture = gtk::Picture::new();
-    picture.set_focusable(false);
-    picture.set_can_shrink(true);
-    picture.set_content_fit(gtk::ContentFit::Contain);
-    picture.set_hexpand(true);
-    picture.set_vexpand(true);
-    let viewer = gtk::Overlay::new();
-    viewer.add_css_class("toniator-viewer");
-    viewer.add_css_class(PreviewModel::Rgb.css_class());
-    viewer.set_child(Some(&picture));
-    let preview_spinner = gtk::Spinner::new();
+    let file_button = shell.file_button();
+    file_button.set_menu_model(Some(&file_menu));
+    let selector = shell.model_selector();
+    selector.set_model(Some(&gtk::StringList::new(
+        &PreviewModel::ALL.map(PreviewModel::label),
+    )));
+    let channel_selector_model = gtk::StringList::new(&[]);
+    let channel_selector = shell.channel_selector();
+    channel_selector.set_model(Some(&channel_selector_model));
+    channel_selector.set_sensitive(false);
+    let window_title = shell.title();
+    let stack = shell.stack();
+    let error = shell.error();
+    let picture = shell.picture();
+    let viewer = shell.viewer();
+    let preview_spinner = shell.spinner();
     preview_spinner.set_visible(false);
-    preview_spinner.set_halign(gtk::Align::Center);
-    preview_spinner.set_valign(gtk::Align::Center);
-    preview_spinner.set_tooltip_text(Some("Preview updating"));
     preview_spinner.update_property(&[gtk::accessible::Property::Label("Preview updating")]);
-    viewer.add_overlay(&preview_spinner);
-    stack.add_named(&viewer, Some(Page::Success.name()));
-    stack.set_visible_child_name(Page::Empty.name());
-    let channel_editor = components::ToniatorChannelEditor::new();
-    channel_editor.add_css_class("toniator-inspector");
-    let inspector = channel_editor.content();
-    let inspector_status = channel_editor.status();
-    inspector_status.set_label("Open a source-backed document to inspect channels.");
-    let inspector_catalog = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    let inspector_descriptors = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    let selection_row = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    let model_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let model_label = gtk::Label::new(Some("Color model"));
-    model_label.set_xalign(0.0);
-    model_label.set_hexpand(true);
-    model_label.set_mnemonic_widget(Some(&selector));
     selector.update_property(&[gtk::accessible::Property::Label("Color model")]);
-    model_row.append(&model_label);
-    model_row.append(&selector);
-    let channel_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let channel_label = gtk::Label::new(Some("Channel"));
-    channel_label.set_xalign(0.0);
-    channel_label.set_hexpand(true);
-    channel_label.set_mnemonic_widget(Some(&channel_selector));
     channel_selector.update_property(&[gtk::accessible::Property::Label("Channel")]);
-    channel_row.append(&channel_label);
-    channel_row.append(&channel_selector);
-    selection_row.append(&model_row);
-    selection_row.append(&channel_row);
-    inspector.append(&selection_row);
-    inspector.append(&inspector_catalog);
-    inspector.append(&inspector_descriptors);
-    let inspector_scroll = gtk::ScrolledWindow::new();
-    inspector_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    inspector_scroll.set_min_content_width(300);
-    inspector_scroll.set_max_content_width(420);
-    inspector_scroll.set_child(Some(&channel_editor));
+    let inspector_status = shell.inspector_status();
+    let inspector_catalog = shell.inspector_catalog();
+    let inspector_descriptors = shell.inspector_descriptors();
+    let inspector_scroll = shell.inspector_scroll();
     let split = shell.split();
-    split.set_content(Some(&stack));
-    split.set_sidebar(Some(&inspector_scroll));
-    split.set_min_sidebar_width(320.0);
-    split.set_max_sidebar_width(360.0);
-    let drawer = gtk::ToggleButton::with_mnemonic("_Channel settings");
-    drawer.set_tooltip_text(Some("Show or hide channel settings"));
-    drawer.set_active(true);
+    let drawer = shell.drawer();
+    let inspector_scroll_for_drawer = inspector_scroll.clone();
     let split_for_drawer = split.clone();
-    drawer.connect_toggled(move |button| split_for_drawer.set_show_sidebar(button.is_active()));
-    header.pack_end(&drawer);
-    let toolbar_view = adw::ToolbarView::new();
-    toolbar_view.add_top_bar(&header);
-    toolbar_view.set_content(Some(&shell));
-    window.set_content(Some(&toolbar_view));
+    drawer.connect_toggled(move |button| {
+        inspector_scroll_for_drawer.set_visible(button.is_active());
+        apply_main_sidebar_width_policy(
+            split_for_drawer.width(),
+            button,
+            &inspector_scroll_for_drawer,
+            &split_for_drawer,
+        );
+    });
+    window.set_child(Some(&shell));
+    let sidebar_window = window.clone();
+    let sidebar_drawer = drawer.clone();
+    let sidebar_inspector = inspector_scroll.clone();
+    let sidebar_split = split.clone();
+    glib::timeout_add_local(Duration::from_millis(100), move || {
+        if !sidebar_window.is_visible() {
+            return glib::ControlFlow::Break;
+        }
+        apply_main_sidebar_width_policy(
+            sidebar_split.width(),
+            &sidebar_drawer,
+            &sidebar_inspector,
+            &sidebar_split,
+        );
+        glib::ControlFlow::Continue
+    });
 
     let actions = Actions {
         new: gio::SimpleAction::new("new", None),
@@ -1128,7 +1118,7 @@ fn build_window(app: &adw::Application, initial_path: Option<PathBuf>) {
         viewer,
         preview_spinner,
         error,
-        banner,
+        shell,
         selector,
         channel_selector,
         channel_selector_model,
@@ -2366,7 +2356,7 @@ fn apply_selected_preset(state: &Rc<RefCell<AppState>>, id: &str, name: &str) {
 /// choice then opens its own affected-channel disclosure and revalidates on
 /// confirmation through the preset registry.
 fn choose_shared_preset_choice(state: &Rc<RefCell<AppState>>) {
-    let dialog = adw::Window::builder()
+    let dialog = gtk::Window::builder()
         .title("Choose a shared pattern")
         .transient_for(&state.borrow().window)
         .modal(true)
@@ -2381,7 +2371,7 @@ fn choose_shared_preset_choice(state: &Rc<RefCell<AppState>>) {
     actions.append(&grid);
     actions.append(&cancel);
     content.append(&actions);
-    dialog.set_content(Some(&content));
+    dialog.set_child(Some(&content));
     let state_for_random = Rc::clone(state);
     let dialog_for_random = dialog.clone();
     random.connect_clicked(move |_| {
@@ -2450,7 +2440,7 @@ fn choose_shared_preset_replacement(
             .collect::<Vec<_>>()
             .join(", ")
     };
-    let dialog = adw::Window::builder()
+    let dialog = gtk::Window::builder()
         .title("Replace the shared pattern?")
         .transient_for(&state.borrow().window)
         .modal(true)
@@ -2464,7 +2454,7 @@ fn choose_shared_preset_replacement(
     actions.append(&cancel);
     actions.append(&replace);
     content.append(&actions);
-    dialog.set_content(Some(&content));
+    dialog.set_child(Some(&content));
     let dialog_for_cancel = dialog.clone();
     cancel.connect_clicked(move |_| dialog_for_cancel.close());
     let state_for_confirm = Rc::clone(state);
@@ -2594,14 +2584,13 @@ fn open_pattern_editor(state: &Rc<RefCell<AppState>>, purpose: PatternEditorPurp
             })),
         )
     };
-    let window = adw::Window::builder()
+    let window = gtk::Window::builder()
         .title(purpose.title())
         .default_width(980)
         .default_height(760)
         .transient_for(&parent)
         .modal(true)
         .build();
-    let editor = gtk::Box::new(gtk::Orientation::Vertical, 12);
     let shell = components::ToniatorPatternEditorShell::new();
     let status = shell.status();
     let picture = shell.picture();
@@ -2609,65 +2598,46 @@ fn open_pattern_editor(state: &Rc<RefCell<AppState>>, purpose: PatternEditorPurp
     preview_spinner.update_property(&[gtk::accessible::Property::Label("Preview updating")]);
     picture.set_can_shrink(true);
     picture.set_size_request(-1, 160);
-    shell.set_editor(&editor);
-    let introduction = gtk::Label::new(Some(
-        "Changes stay in this private draft. Cancel discards them and leaves your document unchanged.",
-    ));
-    introduction.set_xalign(0.0);
-    introduction.set_wrap(true);
-    introduction.add_css_class("dim-label");
-    let history = gtk::Label::new(None);
-    history.set_xalign(0.0);
-    history.add_css_class("dim-label");
-    let current_pattern = gtk::Label::new(None);
-    current_pattern.set_xalign(0.0);
-    current_pattern.add_css_class("heading");
-    let resource_list = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    let construction_actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    let new_structure = gtk::Button::with_label(purpose.construction_action_label());
-    construction_actions.append(&new_structure);
-    let construction_canvas = gtk::DrawingArea::new();
-    construction_canvas.set_content_width(CONSTRUCTION_CANVAS_MIN_WIDTH_PX);
-    construction_canvas.set_content_height(220);
-    construction_canvas.set_hexpand(true);
-    construction_canvas.set_tooltip_text(Some(CONSTRUCTION_CANVAS_GESTURE_HINT));
+    let introduction = shell.introduction();
+    let history = shell.history();
+    let current_pattern = shell.current_pattern();
+    let construction_layout = shell.construction_layout();
+    let construction_sidebar = shell.construction_sidebar();
+    let resource_list = shell.resource_list();
+    let new_structure = shell.new_structure();
+    new_structure.set_label(purpose.construction_action_label());
+    let construction_canvas = shell.construction_canvas();
     construction_canvas.update_property(&[gtk::accessible::Property::Description(
         CONSTRUCTION_CANVAS_GESTURE_HINT,
     )]);
-    construction_canvas.add_css_class("toniator-draft-preview");
-    let coordinate_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    let coordinate_x = gtk::Entry::new();
-    coordinate_x.set_sensitive(false);
-    let coordinate_y = gtk::Entry::new();
-    coordinate_y.set_sensitive(false);
-    coordinate_row.append(&gtk::Label::new(Some("X")));
-    coordinate_row.append(&coordinate_x);
-    coordinate_row.append(&gtk::Label::new(Some("Y")));
-    coordinate_row.append(&coordinate_y);
-    let segment_actions = gtk::Grid::new();
-    segment_actions.set_column_spacing(6);
-    segment_actions.set_row_spacing(6);
-    let make_curve = gtk::Button::with_label("Make curve");
-    make_curve.set_tooltip_text(Some("Convert the selected line segment to a cubic curve."));
-    let make_line = gtk::Button::with_label("Make line");
-    make_line.set_tooltip_text(Some(
-        "Convert the selected cubic segment to a straight line.",
-    ));
-    let insert_node = gtk::Button::with_label("Insert node");
-    insert_node.set_tooltip_text(Some(
-        "Split the selected segment at its selected hit position.",
-    ));
-    let delete_node = gtk::Button::with_label("Delete node");
-    delete_node.set_tooltip_text(Some(
-        "Delete the selected node when the path retains two nodes.",
-    ));
-    for (index, action) in [&make_curve, &make_line, &insert_node, &delete_node]
-        .into_iter()
-        .enumerate()
-    {
-        action.set_sensitive(false);
-        segment_actions.attach(action, (index % 2) as i32, (index / 2) as i32, 1, 1);
-    }
+    let coordinate_x = shell.coordinate_x();
+    let coordinate_y = shell.coordinate_y();
+    let make_curve = shell.make_curve();
+    let make_line = shell.make_line();
+    let insert_node = shell.insert_node();
+    let delete_node = shell.delete_node();
+    apply_pattern_editor_width_policy(
+        980,
+        &construction_layout,
+        &construction_sidebar,
+        &construction_canvas,
+    );
+    let reflow_window = window.clone();
+    let reflow_layout = construction_layout.clone();
+    let reflow_sidebar = construction_sidebar.clone();
+    let reflow_canvas = construction_canvas.clone();
+    glib::timeout_add_local(Duration::from_millis(100), move || {
+        if !reflow_window.is_visible() {
+            return glib::ControlFlow::Break;
+        }
+        apply_pattern_editor_width_policy(
+            reflow_window.width(),
+            &reflow_layout,
+            &reflow_sidebar,
+            &reflow_canvas,
+        );
+        glib::ControlFlow::Continue
+    });
     let state_for_canvas = Rc::clone(state);
     construction_canvas.set_draw_func(move |_, context, width, height| {
         context.set_source_rgb(0.16, 0.16, 0.18);
@@ -3068,63 +3038,8 @@ fn open_pattern_editor(state: &Rc<RefCell<AppState>>, purpose: PatternEditorPurp
     new_structure.connect_clicked(move |_| {
         begin_authored_construction(&state_for_new_structure, purpose.structure_kind())
     });
-    let primary = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    let advanced = gtk::Expander::new(Some("Advanced"));
-    advanced.set_tooltip_text(Some(
-        "Optional modulation, exclusion, coverage, and safety controls for this private draft.",
-    ));
-    let advanced_rows = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    advanced.set_child(Some(&advanced_rows));
-    let construction_sidebar = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    construction_sidebar.set_size_request(CONSTRUCTION_SIDEBAR_WIDTH_PX, -1);
-    construction_sidebar.append(&resource_list);
-    construction_sidebar.append(&construction_actions);
-    let construction_surface = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    construction_surface.set_hexpand(true);
-    let canvas_heading = gtk::Label::new(Some("Construction canvas"));
-    canvas_heading.set_xalign(0.0);
-    canvas_heading.add_css_class("heading");
-    construction_surface.append(&canvas_heading);
-    construction_surface.append(&construction_canvas);
-    construction_surface.append(&coordinate_row);
-    construction_surface.append(&segment_actions);
-    // A regular box keeps both construction regions in the draft scroll area's natural flow.
-    // `GtkPaned` could collapse both children after the native narrow breakpoint changed its
-    // orientation, leaving the editor inaccessible at a modal width of 620px.
-    let construction_layout = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    construction_layout.set_hexpand(true);
-    construction_layout.append(&construction_sidebar);
-    construction_layout.append(&construction_surface);
-    let narrow_breakpoint = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
-        adw::BreakpointConditionLengthType::MaxWidth,
-        NARROW_EDITOR_MAX_WIDTH_PX,
-        adw::LengthUnit::Px,
-    ));
-    let layout_for_narrow = construction_layout.clone();
-    let sidebar_for_narrow = construction_sidebar.clone();
-    let canvas_for_narrow = construction_canvas.clone();
-    narrow_breakpoint.connect_apply(move |_| {
-        layout_for_narrow.set_orientation(gtk::Orientation::Vertical);
-        sidebar_for_narrow.set_size_request(-1, -1);
-        sidebar_for_narrow.set_hexpand(true);
-        canvas_for_narrow.set_content_height(260);
-    });
-    let layout_for_wide = construction_layout.clone();
-    let sidebar_for_wide = construction_sidebar.clone();
-    let canvas_for_wide = construction_canvas.clone();
-    narrow_breakpoint.connect_unapply(move |_| {
-        layout_for_wide.set_orientation(gtk::Orientation::Horizontal);
-        sidebar_for_wide.set_size_request(CONSTRUCTION_SIDEBAR_WIDTH_PX, -1);
-        sidebar_for_wide.set_hexpand(false);
-        canvas_for_wide.set_content_height(220);
-    });
-    window.add_breakpoint(narrow_breakpoint);
-    editor.append(&introduction);
-    editor.append(&history);
-    editor.append(&current_pattern);
-    editor.append(&construction_layout);
-    editor.append(&primary);
-    editor.append(&advanced);
+    let primary = shell.primary_rows();
+    let advanced_rows = shell.advanced_rows();
     let undo = gtk::Button::with_mnemonic("_Undo");
     let state_for_undo = Rc::clone(state);
     undo.connect_clicked(move |_| apply_draft_history_navigation(&state_for_undo, false));
@@ -3150,11 +3065,7 @@ fn open_pattern_editor(state: &Rc<RefCell<AppState>>, purpose: PatternEditorPurp
     shell.append_action(&preset);
     shell.append_action(&cancel);
     shell.append_action(&apply);
-    let header = adw::HeaderBar::new();
-    let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&header);
-    toolbar.set_content(Some(&shell));
-    window.set_content(Some(&toolbar));
+    window.set_child(Some(&shell));
     let state_for_close = Rc::clone(state);
     window.connect_close_request(move |_| {
         if state_for_close.borrow().pattern_editor.is_none() {
@@ -3512,7 +3423,7 @@ fn show_shared_resource_choice(
         .as_ref()
         .map(|surface| surface.window.clone())
         .expect("shared resource choice belongs to a live Pattern Editor");
-    let dialog = adw::Window::builder()
+    let dialog = gtk::Window::builder()
         .title("Shared resource")
         .transient_for(&parent)
         .modal(true)
@@ -3535,7 +3446,7 @@ fn show_shared_resource_choice(
     actions.append(&edit_all);
     actions.append(&copy);
     content.append(&actions);
-    dialog.set_content(Some(&content));
+    dialog.set_child(Some(&content));
     let edit_all_dialog = dialog.clone();
     let edit_all_state = Rc::clone(state);
     edit_all.connect_clicked(move |_| {
@@ -4023,7 +3934,7 @@ fn show_custom_along_guide_confirmation(state: &Rc<RefCell<AppState>>) {
         .as_ref()
         .map(|surface| surface.window.clone())
         .expect("guide confirmation belongs to a live Grid Pattern Editor");
-    let dialog = adw::Window::builder()
+    let dialog = gtk::Window::builder()
         .title("Create a custom guide layout?")
         .transient_for(&parent)
         .modal(true)
@@ -4039,7 +3950,7 @@ fn show_custom_along_guide_confirmation(state: &Rc<RefCell<AppState>>) {
     actions.append(&cancel);
     actions.append(&confirm);
     content.append(&actions);
-    dialog.set_content(Some(&content));
+    dialog.set_child(Some(&content));
     let cancel_dialog = dialog.clone();
     cancel.connect_clicked(move |_| cancel_dialog.close());
     let confirm_dialog = dialog.clone();
@@ -4999,7 +4910,7 @@ fn request_draft_discard(state: &Rc<RefCell<AppState>>) {
         close_pattern_editor(state);
         return;
     }
-    let dialog = adw::Window::builder()
+    let dialog = gtk::Window::builder()
         .title("Discard pattern changes?")
         .transient_for(&parent)
         .modal(true)
@@ -5015,7 +4926,7 @@ fn request_draft_discard(state: &Rc<RefCell<AppState>>) {
     actions.append(&keep_editing);
     actions.append(&discard);
     content.append(&actions);
-    dialog.set_content(Some(&content));
+    dialog.set_child(Some(&content));
     let dialog_for_keep = dialog.clone();
     keep_editing.connect_clicked(move |_| dialog_for_keep.close());
     let state_for_discard = Rc::clone(state);
@@ -6363,21 +6274,6 @@ fn structural_command_for_input(
     })
 }
 
-fn centered(child: impl IsA<gtk::Widget>) -> gtk::Box {
-    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    box_.set_halign(gtk::Align::Center);
-    box_.set_valign(gtk::Align::Center);
-    box_.append(&child);
-    box_
-}
-
-fn status_page(message: &str) -> gtk::Box {
-    let label = gtk::Label::new(Some(message));
-    label.set_wrap(true);
-    label.set_justify(gtk::Justification::Center);
-    centered(label)
-}
-
 fn request_lifecycle(state: &Rc<RefCell<AppState>>, action: LifecycleAction) {
     if lifecycle_is_busy(&state.borrow()) {
         return;
@@ -6635,6 +6531,10 @@ fn export_filters() -> gio::ListStore {
     filters
 }
 
+/// Presents PNG-only consumer controls through template-owned static composition.
+///
+/// Runtime selections remain transient GTK state and never mutate document, scene, history,
+/// preview, or cache identity. Invalid output dimensions fail before export submission.
 #[allow(deprecated)] // GTK 4.10's lightweight custom-content dialog remains available on Fedora.
 fn choose_png_export_options(state: &Rc<RefCell<AppState>>, path: PathBuf) {
     let dialog = gtk::Dialog::builder()
@@ -6646,41 +6546,17 @@ fn choose_png_export_options(state: &Rc<RefCell<AppState>>, path: PathBuf) {
     dialog.add_button("_Export", gtk::ResponseType::Accept);
     dialog.set_default_response(gtk::ResponseType::Accept);
     let content = dialog.content_area();
-    content.set_spacing(12);
-    content.set_margin_top(18);
-    content.set_margin_bottom(18);
-    content.set_margin_start(18);
-    content.set_margin_end(18);
-    let grid = gtk::Grid::builder()
-        .row_spacing(12)
-        .column_spacing(12)
-        .build();
-    let background_label = gtk::Label::new(Some("_Background"));
-    background_label.set_use_underline(true);
-    background_label.set_halign(gtk::Align::Start);
-    let background = gtk::DropDown::from_strings(&["Transparent", "Black", "White"]);
-    background.set_tooltip_text(Some("PNG-only final-consumer backing"));
-    background_label.set_mnemonic_widget(Some(&background));
-    let antialiasing_label = gtk::Label::new(Some("_Antialiasing"));
-    antialiasing_label.set_use_underline(true);
-    antialiasing_label.set_halign(gtk::Align::Start);
-    let antialiasing = gtk::DropDown::from_strings(&["On", "Off"]);
-    antialiasing.set_tooltip_text(Some("PNG edge rasterization"));
-    antialiasing_label.set_mnemonic_widget(Some(&antialiasing));
-    let dimensions_label = gtk::Label::new(Some("Output _size"));
-    dimensions_label.set_use_underline(true);
-    dimensions_label.set_halign(gtk::Align::Start);
-    let dimensions = gtk::Entry::new();
-    dimensions.set_placeholder_text(Some("Document canvas (for example 1200x800)"));
-    dimensions.set_tooltip_text(Some("Optional PNG pixel dimensions"));
-    dimensions_label.set_mnemonic_widget(Some(&dimensions));
-    grid.attach(&background_label, 0, 0, 1, 1);
-    grid.attach(&background, 1, 0, 1, 1);
-    grid.attach(&antialiasing_label, 0, 1, 1, 1);
-    grid.attach(&antialiasing, 1, 1, 1, 1);
-    grid.attach(&dimensions_label, 0, 2, 1, 1);
-    grid.attach(&dimensions, 1, 2, 1, 1);
-    content.append(&grid);
+    let options = components::ToniatorPngExportOptions::new();
+    let background = options.background();
+    background.set_model(Some(&gtk::StringList::new(&[
+        "Transparent",
+        "Black",
+        "White",
+    ])));
+    let antialiasing = options.antialiasing();
+    antialiasing.set_model(Some(&gtk::StringList::new(&["On", "Off"])));
+    let dimensions = options.dimensions();
+    content.append(&options);
     let state = Rc::clone(state);
     dialog.connect_response(move |dialog, response| {
         if response == gtk::ResponseType::Accept {
@@ -6692,11 +6568,7 @@ fn choose_png_export_options(state: &Rc<RefCell<AppState>>, path: PathBuf) {
                     return;
                 }
             };
-            let background = match background.selected() {
-                1 => RasterBackground::OpaqueBlack,
-                2 => RasterBackground::OpaqueWhite,
-                _ => RasterBackground::Transparent,
-            };
+            let background = png_background_for_dropdown_position(background.selected());
             let antialiasing = if antialiasing.selected() == 1 {
                 RasterAntialiasing::Off
             } else {
@@ -6716,6 +6588,15 @@ fn choose_png_export_options(state: &Rc<RefCell<AppState>>, path: PathBuf) {
         dialog.close();
     });
     dialog.present();
+}
+
+/// Resolves one GTK background position without allowing an invalid position to invent backing.
+const fn png_background_for_dropdown_position(position: u32) -> RasterBackground {
+    match position {
+        1 => RasterBackground::OpaqueBlack,
+        2 => RasterBackground::OpaqueWhite,
+        _ => RasterBackground::Transparent,
+    }
 }
 
 fn suggested_export_filename(workspace: &Workspace, format: ExportFormat) -> String {
@@ -7278,7 +7159,7 @@ fn clear_workspace(state: &Rc<RefCell<AppState>>) {
         state.pending_export = false;
         clear_preview(&mut state);
         state.preview_target = None;
-        state.banner.set_revealed(false);
+        state.shell.set_banner(None);
         set_page(&mut state, Page::Empty);
         sync_ui(&mut state);
         pattern_editor_window
@@ -7605,7 +7486,7 @@ fn show_source_diagnostic(state: &mut AppState) {
         .and_then(|workspace| workspace.source_presentation.as_ref())
         .and_then(|source| source.identity.svg_text.as_ref());
     apply_banner_policy(
-        &state.banner,
+        &state.shell,
         banner_policy(migration_notice, diagnostic, None),
     );
 }
@@ -7616,7 +7497,7 @@ fn set_page(state: &mut AppState, page: Page) {
 
 fn show_error(state: &mut AppState, message: String) {
     state.error.set_label(&message);
-    apply_banner_policy(&state.banner, banner_policy(false, None, Some(&message)));
+    apply_banner_policy(&state.shell, banner_policy(false, None, Some(&message)));
     // A failed lifecycle operation must not destroy an accepted preview.
     set_page(state, page_after_preview_error(state.preview.is_some()));
 }
@@ -7661,7 +7542,7 @@ fn sync_ui(state: &mut AppState) {
     state.window.set_title(Some(&lifecycle_vm.title));
     state
         .window_title
-        .set_title(lifecycle_vm.title.trim_end_matches(" — Toniator"));
+        .set_label(lifecycle_vm.title.trim_end_matches(" — Toniator"));
     state
         .window
         .set_tooltip_text(Some(if lifecycle_vm.has_workspace && lifecycle_vm.dirty {
@@ -7688,6 +7569,81 @@ fn sync_ui(state: &mut AppState) {
 mod tests {
     use super::*;
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+    /// Verifies the build-compiled GTK-only Blueprint templates are registered and loadable.
+    ///
+    /// This check exercises the normal GResource boundary without creating a display, document,
+    /// history, scheduler, or file side effect. A missing resource or an accidental Adwaita type
+    /// makes the application fail before any window can be presented.
+    #[test]
+    fn gtk_blueprint_resources_register_and_remain_adwaita_free() {
+        register_resources();
+        for resource in [
+            "window.ui",
+            "channel-editor.ui",
+            "pattern-editor.ui",
+            "preset-row.ui",
+            "confirmation-dialog.ui",
+            "png-export-options.ui",
+        ] {
+            let data = gio::resources_lookup_data(
+                &format!("{RESOURCE_PREFIX}/{resource}"),
+                gio::ResourceLookupFlags::NONE,
+            )
+            .expect("build-compiled Blueprint resource remains registered");
+            let template = std::str::from_utf8(data.as_ref())
+                .expect("Blueprint compiler emits UTF-8 GtkBuilder XML");
+            assert!(
+                template.contains("Gtk"),
+                "{resource} remains a GTK template"
+            );
+            assert!(
+                !template.contains("Adw"),
+                "{resource} must not reintroduce an Adwaita type"
+            );
+            if resource == "window.ui" {
+                assert!(
+                    template.contains("GtkStackPage")
+                        && template.contains("name=\"child\"")
+                        && template.contains("type=\"start\"")
+                        && template.contains("type=\"end\""),
+                    "window must retain named stack-page widgets and valid paned child roles"
+                );
+            }
+        }
+    }
+
+    /// Proves the GTK-only private-editor policy stacks its static construction layout at 700px.
+    ///
+    /// The pure boundary has no GTK allocation, draft, document, scheduler, or file side effect;
+    /// runtime presentation applies this policy to the template-owned layout and scroll surface.
+    #[test]
+    fn narrow_pattern_editor_policy_keeps_controls_reachable() {
+        assert!(uses_narrow_editor_layout(620));
+        assert!(uses_narrow_editor_layout(NARROW_EDITOR_MAX_WIDTH_PX));
+        assert!(!uses_narrow_editor_layout(NARROW_EDITOR_MAX_WIDTH_PX + 1));
+        assert!(CONSTRUCTION_CANVAS_GESTURE_HINT.contains("Scroll to zoom"));
+        assert!(CONSTRUCTION_CANVAS_GESTURE_HINT.contains("middle-button drag pans"));
+        assert!(CONSTRUCTION_CANVAS_GESTURE_HINT.contains("Enter completes"));
+        assert!(CONSTRUCTION_CANVAS_GESTURE_HINT.contains("Escape cancels"));
+    }
+
+    /// Proves active channel settings retain a usable bounded width across supported windows.
+    ///
+    /// This allocation policy is pure: it neither creates GTK widgets nor changes document,
+    /// history, scheduler, preview, or persisted state.
+    #[test]
+    fn main_sidebar_policy_preserves_usable_width_without_oversizing() {
+        assert_eq!(main_sidebar_width_for_window(480), 300);
+        assert_eq!(main_sidebar_width_for_window(620), 300);
+        assert_eq!(main_sidebar_width_for_window(960), 320);
+        assert_eq!(main_sidebar_width_for_window(1440), 420);
+        for width in [480, 620, 960, 1440] {
+            let sidebar = main_sidebar_width_for_window(width);
+            assert!((MAIN_SIDEBAR_MIN_WIDTH_PX..=MAIN_SIDEBAR_MAX_WIDTH_PX).contains(&sidebar));
+            assert_eq!(main_split_position_for_window(width) + sidebar, width);
+        }
+    }
 
     /// Builds an app-owned main history whose private drafts use the Pattern Editor publication boundary.
     fn private_draft_main_history() -> DocumentHistory {
@@ -7927,22 +7883,6 @@ mod tests {
             &PropertyFieldId::OutputPrototype,
             PatternEditorPurpose::Grid
         ));
-    }
-
-    /// Proves the editor uses a vertical construction layout before a narrow modal can collapse its canvas.
-    ///
-    /// This pure policy witness creates no GTK allocation, history, preview, or external state.
-    #[test]
-    fn narrow_editor_layout_stacks_before_the_canvas_becomes_a_sliver() {
-        assert!(uses_narrow_editor_layout(620));
-        assert!(uses_narrow_editor_layout(700));
-        assert!(!uses_narrow_editor_layout(701));
-        assert!(!uses_narrow_editor_layout(980));
-        assert!(requested_construction_width_allows_narrow_breakpoint());
-        assert!(CONSTRUCTION_CANVAS_GESTURE_HINT.contains("Scroll to zoom"));
-        assert!(CONSTRUCTION_CANVAS_GESTURE_HINT.contains("middle-button drag pans"));
-        assert!(CONSTRUCTION_CANVAS_GESTURE_HINT.contains("Enter completes"));
-        assert!(CONSTRUCTION_CANVAS_GESTURE_HINT.contains("Escape cancels"));
     }
 
     fn asset(name: &str) -> PathBuf {
@@ -8493,6 +8433,7 @@ mod tests {
             "/com/silentbutdigital/Toniator/pattern-editor.ui",
             "/com/silentbutdigital/Toniator/preset-row.ui",
             "/com/silentbutdigital/Toniator/confirmation-dialog.ui",
+            "/com/silentbutdigital/Toniator/png-export-options.ui",
             "/com/silentbutdigital/Toniator/toniator.css",
         ] {
             assert!(

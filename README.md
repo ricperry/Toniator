@@ -467,8 +467,29 @@ request-wide limits, evaluation-local performance metrics, deterministic
 Rayon work inside one coordinated evaluation, and the intentionally serial
 global-topology/publication boundaries. The bundled registry remains exactly
 16 cards; `regions-plus-marks` remains retired and direct mixed-output evidence
-is not a recipe. The GTK4/Blueprint re-baseline and Stage 21 remain separately
-gated; publication and push are not implied by this checkpoint.
+is not a recipe. The GTK4/Blueprint re-baseline is recorded below; Stage 21
+remains separately gated. Publication and push are not implied by this
+checkpoint.
+
+The GTK4/Blueprint re-baseline is complete in the accepted local checkpoint
+`ToniatorGUI` (2026-08-27). `toniator-app` now uses GTK4-only application
+widgets: libadwaita has been removed from its dependencies and resources.
+Blueprint sources and the compiled GResource own the static main shell,
+private Pattern Editor shell, and PNG-export-options structure. Rust retains
+document and command authority, dynamic descriptor/catalog population, signal
+handlers, preview scheduling, canvas interaction, export validation, and the
+GTK-only responsive allocation policy. The app preserves the accepted
+Stage 19B workflow and canonical preview/PNG/SVG paths; this infrastructure
+re-baseline does not implement Stage 21's workflow, information-architecture,
+pattern-wizard, or broader controller decomposition work.
+
+Focused Blueprint compilation, GTK resource registration, app checks and
+Clippy, formatting, architecture validation, and diff checks passed. Fresh
+private Sway/AT-SPI/grim runs covered raster and SVG inputs, normal and narrow
+layouts, sidebar visibility, Pattern Editor reflow, draft/discard actions, and
+accessible control actions. These are automated wlroots evidence and direct
+native artifact inspection; they do not claim manual GNOME Shell/Mutter
+acceptance.
 
 Low-resolution fixtures and outputs are supplementary only. Every future stage
 that exercises source loading, sampling, rendering, preview, or export must
@@ -478,10 +499,9 @@ boundary.
 
 ## Build and run
 
-On Fedora, install the GTK4 development files (GTK 4.10 or newer), libadwaita
-development files (libadwaita 1.4 or newer), and `blueprint-compiler`; these
-are required by the `toniator-app` dependencies and build script. Then launch
-the preview with:
+On Fedora, install the GTK4 development files (GTK 4.10 or newer) and
+`blueprint-compiler`; these are required by the `toniator-app` dependencies and
+build script. Then launch the preview with:
 
 ```bash
 cargo run --bin toniator-app -- assets/raster-sample.png

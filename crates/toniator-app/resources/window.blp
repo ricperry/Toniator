@@ -1,19 +1,216 @@
 using Gtk 4.0;
-using Adw 1;
 
 template $ToniatorMainShell : Gtk.Box {
   orientation: vertical;
   vexpand: true;
 
-  Adw.Banner main_banner {
-    revealed: false;
+  Gtk.HeaderBar header {
+    [start]
+    Gtk.MenuButton file_button {
+      label: "File";
+      tooltip-text: "Document and export actions";
+    }
+
+    [start]
+    Gtk.Button undo_button {
+      label: "_Undo";
+      use-underline: true;
+      action-name: "app.undo";
+      tooltip-text: "Undo the last change (Ctrl+Z)";
+    }
+
+    [start]
+    Gtk.Button redo_button {
+      label: "_Redo";
+      use-underline: true;
+      action-name: "app.redo";
+      tooltip-text: "Redo the last change (Ctrl+Shift+Z)";
+    }
+
+    [title]
+    Gtk.Label window_title {
+      label: "Toniator";
+      ellipsize: end;
+      styles [ "title-4" ]
+    }
+
+    [end]
+    Gtk.ToggleButton channel_settings_drawer {
+      label: "_Channel settings";
+      use-underline: true;
+      active: true;
+      tooltip-text: "Show or hide channel settings";
+    }
   }
 
-  Adw.OverlaySplitView workspace_split {
+  Gtk.Revealer main_banner_revealer {
+    transition-type: slide_down;
+
+    Gtk.Label main_banner {
+      margin-top: 6;
+      margin-bottom: 6;
+      margin-start: 12;
+      margin-end: 12;
+      xalign: 0;
+      wrap: true;
+    }
+  }
+
+  Gtk.Paned workspace_split {
+    orientation: horizontal;
     vexpand: true;
-    sidebar-position: end;
-    show-sidebar: true;
-    enable-show-gesture: true;
-    enable-hide-gesture: true;
+    wide-handle: true;
+    resize-start-child: true;
+    shrink-start-child: false;
+    resize-end-child: false;
+    shrink-end-child: false;
+
+    [start]
+    Gtk.Stack page_stack {
+      transition-type: crossfade;
+      hexpand: true;
+      vexpand: true;
+
+      Gtk.StackPage {
+        name: "empty";
+        child: Gtk.Box empty_page {
+          orientation: vertical;
+          valign: center;
+          halign: center;
+
+          Gtk.Label {
+            label: "Create or open a Toniator document.";
+            wrap: true;
+          }
+        };
+      }
+
+      Gtk.StackPage {
+        name: "loading";
+        child: Gtk.Box loading_page {
+          orientation: vertical;
+          valign: center;
+          halign: center;
+
+          Gtk.Label {
+            label: "Working…";
+          }
+        };
+      }
+
+      Gtk.StackPage {
+        name: "error";
+        child: Gtk.Box error_page {
+          orientation: vertical;
+          valign: center;
+          halign: center;
+
+          Gtk.Label error_label {
+            max-width-chars: 70;
+            justify: center;
+            wrap: true;
+          }
+        };
+      }
+
+      Gtk.StackPage {
+        name: "success";
+        child: Gtk.Overlay viewer {
+          hexpand: true;
+          vexpand: true;
+          styles [ "toniator-viewer", "toniator-viewer-rgb" ]
+
+          Gtk.Picture preview_picture {
+            can-shrink: true;
+            content-fit: contain;
+            hexpand: true;
+            vexpand: true;
+          }
+
+          [overlay]
+          Gtk.Spinner preview_spinner {
+            halign: center;
+            valign: center;
+            tooltip-text: "Preview updating";
+          }
+        };
+      }
+    }
+
+    [end]
+    Gtk.ScrolledWindow inspector_scroll {
+      hscrollbar-policy: never;
+      vscrollbar-policy: automatic;
+      min-content-width: 300;
+      max-content-width: 420;
+
+      Gtk.Box inspector_content {
+        orientation: vertical;
+        spacing: 12;
+        margin-top: 12;
+        margin-bottom: 12;
+        margin-start: 12;
+        margin-end: 12;
+        valign: start;
+        styles [ "toniator-inspector" ]
+
+        Gtk.Label inspector_status {
+          label: "Open a source-backed document to inspect channels.";
+          xalign: 0;
+          wrap: true;
+          styles [ "dim-label" ]
+        }
+
+        Gtk.Box selection_row {
+          orientation: vertical;
+          spacing: 6;
+
+          Gtk.Box {
+            orientation: horizontal;
+            spacing: 8;
+
+            Gtk.Label {
+              label: "Color model";
+              xalign: 0;
+              hexpand: true;
+              mnemonic-widget: model_selector;
+            }
+
+            Gtk.DropDown model_selector {
+              tooltip-text: "Choose the channel color model";
+            }
+          }
+
+          Gtk.Box {
+            orientation: horizontal;
+            spacing: 8;
+
+            Gtk.Label {
+              label: "Channel";
+              xalign: 0;
+              hexpand: true;
+              mnemonic-widget: channel_selector;
+            }
+
+            Gtk.DropDown channel_selector {
+              sensitive: false;
+              tooltip-text: "Choose the channel to adjust";
+            }
+          }
+        }
+
+        Gtk.Box inspector_catalog {
+          orientation: vertical;
+          spacing: 8;
+          valign: start;
+        }
+
+        Gtk.Box inspector_descriptors {
+          orientation: vertical;
+          spacing: 8;
+          valign: start;
+        }
+      }
+    }
   }
 }

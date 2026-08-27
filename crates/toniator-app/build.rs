@@ -1,5 +1,10 @@
 use std::{env, fs, path::PathBuf, process::Command};
 
+/// Compiles every tracked Blueprint resource and registers the resulting GTK bundle for the app.
+///
+/// Cargo reruns this build script when a listed resource changes. Missing `OUT_DIR`, a missing
+/// Blueprint compiler, failed resource compilation, or staging failure aborts the build so runtime
+/// template loading cannot silently fall back to incomplete presentation assets.
 fn main() {
     for blueprint in [
         "resources/window.blp",
@@ -7,6 +12,7 @@ fn main() {
         "resources/pattern-editor.blp",
         "resources/preset-row.blp",
         "resources/confirmation-dialog.blp",
+        "resources/png-export-options.blp",
     ] {
         println!("cargo:rerun-if-changed={blueprint}");
     }
@@ -20,6 +26,7 @@ fn main() {
         "pattern-editor.blp",
         "preset-row.blp",
         "confirmation-dialog.blp",
+        "png-export-options.blp",
     ] {
         let output = out_dir.join(blueprint.replace(".blp", ".ui"));
         let source = format!("resources/{blueprint}");

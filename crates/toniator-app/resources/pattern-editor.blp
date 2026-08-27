@@ -1,5 +1,4 @@
 using Gtk 4.0;
-using Adw 1;
 
 template $ToniatorPatternEditorShell : Gtk.Box {
   orientation: vertical;
@@ -49,6 +48,167 @@ template $ToniatorPatternEditorShell : Gtk.Box {
     min-content-height: 180;
     propagate-natural-height: false;
     styles [ "toniator-draft-controls" ]
+
+    Gtk.Box draft_editor {
+      orientation: vertical;
+      spacing: 12;
+
+      Gtk.Label draft_introduction {
+        label: "Changes stay in this private draft. Cancel discards them and leaves your document unchanged.";
+        xalign: 0;
+        wrap: true;
+        styles [ "dim-label" ]
+      }
+
+      Gtk.Label draft_history {
+        xalign: 0;
+        styles [ "dim-label" ]
+      }
+
+      Gtk.Label draft_current_pattern {
+        xalign: 0;
+        styles [ "heading" ]
+      }
+
+      Gtk.Box construction_layout {
+        orientation: horizontal;
+        spacing: 12;
+        hexpand: true;
+
+        Gtk.Box construction_sidebar {
+          orientation: vertical;
+          spacing: 8;
+          width-request: 320;
+          valign: start;
+
+          Gtk.Box resource_list {
+            orientation: vertical;
+            spacing: 6;
+            valign: start;
+          }
+
+          Gtk.Box construction_actions {
+            orientation: horizontal;
+            spacing: 6;
+
+            Gtk.Button new_structure {
+              label: "New structure";
+            }
+          }
+        }
+
+        Gtk.Box construction_surface {
+          orientation: vertical;
+          spacing: 8;
+          hexpand: true;
+
+          Gtk.Label {
+            label: "Construction canvas";
+            xalign: 0;
+            styles [ "heading" ]
+          }
+
+          Gtk.DrawingArea construction_canvas {
+            content-width: 220;
+            content-height: 220;
+            hexpand: true;
+            tooltip-text: "Click to select or add points after choosing New. Scroll to zoom; middle-button drag pans. Enter completes; Escape cancels.";
+            styles [ "toniator-draft-preview" ]
+          }
+
+          Gtk.Box coordinate_row {
+            orientation: horizontal;
+            spacing: 6;
+
+            Gtk.Label {
+              label: "X";
+              mnemonic-widget: coordinate_x;
+            }
+
+            Gtk.Entry coordinate_x {
+              sensitive: false;
+              width-chars: 10;
+              input-purpose: number;
+              tooltip-text: "Selected anchor X coordinate";
+            }
+
+            Gtk.Label {
+              label: "Y";
+              mnemonic-widget: coordinate_y;
+            }
+
+            Gtk.Entry coordinate_y {
+              sensitive: false;
+              width-chars: 10;
+              input-purpose: number;
+              tooltip-text: "Selected anchor Y coordinate";
+            }
+          }
+
+          Gtk.Grid segment_actions {
+            column-spacing: 6;
+            row-spacing: 6;
+
+            Gtk.Button make_curve {
+              label: "Make curve";
+              sensitive: false;
+              tooltip-text: "Convert the selected line segment to a cubic curve.";
+              layout {
+                column: 0;
+                row: 0;
+              }
+            }
+
+            Gtk.Button make_line {
+              label: "Make line";
+              sensitive: false;
+              tooltip-text: "Convert the selected cubic segment to a straight line.";
+              layout {
+                column: 1;
+                row: 0;
+              }
+            }
+
+            Gtk.Button insert_node {
+              label: "Insert node";
+              sensitive: false;
+              tooltip-text: "Split the selected segment at its selected hit position.";
+              layout {
+                column: 0;
+                row: 1;
+              }
+            }
+
+            Gtk.Button delete_node {
+              label: "Delete node";
+              sensitive: false;
+              tooltip-text: "Delete the selected node when the path retains two nodes.";
+              layout {
+                column: 1;
+                row: 1;
+              }
+            }
+          }
+        }
+      }
+
+      Gtk.Box primary_rows {
+        orientation: vertical;
+        spacing: 12;
+        valign: start;
+      }
+
+      Gtk.Expander advanced {
+        label: "Advanced";
+        tooltip-text: "Optional modulation, exclusion, coverage, and safety controls for this private draft.";
+
+        Gtk.Box advanced_rows {
+          orientation: vertical;
+          spacing: 12;
+          valign: start;
+        }
+      }
+    }
   }
 
   Gtk.Box draft_actions {
