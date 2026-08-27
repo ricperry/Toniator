@@ -1,7 +1,6 @@
 # Stages 20N–20S — Headless Pattern Completion Plan
 
-Status: **Accepted roadmap; Stages 20N, 20O, 20P, 20Q, and 20R are complete,
-while Stage 20S remains Planned and separately gated** (Stage 20O checkpoint
+Status: **Accepted roadmap; Stages 20N through 20S are complete** (Stage 20O checkpoint
 `7ab97f01ec372ab1e6201b3913742476a1511c02`; Stage 20P checkpoint
 `cd531eb65dd2e161e62f355905ad936b8c1ca3c4`; Stage 20Q checkpoint
 `071f3604098c0660a876fbe30050a64223fe41b3`; Stage 20R checkpoint
@@ -27,8 +26,10 @@ Stage 20N is complete at implementation checkpoint
 one-output authoring/validation gate while providing ordered keyed output
 authority, schema-v5/preset-v3 persistence, independently keyed realization and
 cache units, and canonical-region/render foundations. It does not add a
-concrete region source or treatment. This roadmap does not authorize Stage 20S
-implementation, a commit, publication, Stage 21+, or a protected-specification
+concrete region source or treatment. At the Stage 20N checkpoint, this roadmap
+did not authorize Stage 20S implementation; that pre-implementation gate was
+subsequently satisfied by the separately approved Stage 20S plan. It did not
+authorize a commit, publication, Stage 21+, or a protected-specification
 revision. Every remaining row retains its own decision-complete plan, one-writer
 implementation, independent read-only review, user acceptance, and checkpoint
 gate.
@@ -67,7 +68,8 @@ gate.
 Status: **Complete at implementation checkpoint
 `7ab97f01ec372ab1e6201b3913742476a1511c02`** (user acceptance recorded
 2026-08-25; independent re-review and final artifact inspection passed).
-Stage 20R is complete; Stage 20S remains Planned and separately gated.
+Stage 20R is complete; at that checkpoint, Stage 20S remained Planned and
+separately gated.
 
 - Add `PatternOutputLayer::Regions` with
   `RegionSourceIntent::VoronoiSites { site_mechanism_id }` for eligible
@@ -104,8 +106,8 @@ Stage 20R is complete; Stage 20S remains Planned and separately gated.
 Status: **Complete at implementation checkpoint
 `cd531eb65dd2e161e62f355905ad936b8c1ca3c4`** (user acceptance recorded
 2026-08-25; independent read-only review, parent verification, and final
-artifact inspection passed). Stage 20R is complete; Stage 20S remains Planned
-and separately gated.
+artifact inspection passed). Stage 20R is complete; at that checkpoint, Stage
+20S remained Planned and separately gated.
 
 The accepted implementation derives complete deterministic bounded faces from
 two or three selected straight or authored-open guide dimensions through the
@@ -146,7 +148,10 @@ three-guide evidence uses positive inward gap and triangular line rings. The
 authored-cubic outward witness uses fixed `-40` gap, giving 20-unit outward
 edge growth and 40-unit neighbor overlap with smooth joins. Collapse evidence
 is intentionally transparent; sparse authored-cubic coverage reflects six
-complete bounded faces, not raster resolution.
+complete bounded faces, not raster resolution. This is retained checkpoint
+history only: Stage 20S supersedes current region authority with normalized,
+positive-only Scale/UniformOffset fill and no Full, ConstantGap, or
+negative-space/absolute-gap computation.
 
 - Provides fill-only region treatments `Full`, `Scale`, and `ConstantGap`. It adds no
   outlines, outline-only rendering, wall complements, or subtractive region
@@ -210,17 +215,25 @@ are exercised in separate visual witnesses, and the cross-channel witness
 confirms that a connection in one channel and regions in another remain
 separate. Native and SVG raster evidence agree in visible RGB and alpha; the
 implementation remains headless and renderer consumers apply final clipping
-only. Stage 20S remains separately planned and gated.
+only. At that checkpoint, Stage 20S remained separately planned and gated.
 
 ## Stage 20S — Headless capability and recipe completion
+
+Status: **Complete at implementation commit
+`55651dee7c744c2aa207924bf0dbb7737609942d`** (user accepted 2026-08-26 after
+independent review/re-review, verified evidence, and parent intrinsic RGB/alpha
+inspection). It completes the headless Stage 20 implementation sequence; a
+separately gated final scrub of all Stage 20 work remains required before Stage
+21.
 
 - Extend the domain-owned projection with region sources, treatments, sampling
   strategies, composite ordering, filter dependencies, typed bounds, and
   conditional availability.
 - Add ordinary data-only preset-v3 gallery recipes covering accepted guide,
   mark, spiral, structural-path, and connection behavior plus grid/dispersion
-  Voronoi, two-/three-guide faces, full/scaled/constant-gap regions, and
-  residual-site and regions-plus-marks composites.
+  Voronoi, two-/three-guide faces, normalized Scale/UniformOffset positive
+  regions, and residual-site composites. The temporary `regions-plus-marks`
+  maze-debug recipe is retired without a replacement card.
 - Reconstruct every recipe through the ordinary domain, engine, geometry,
   sampling, and renderer path. Names, gallery metadata, and eventual thumbnails
   never select evaluator behavior.
@@ -239,21 +252,27 @@ only. Stage 20S remains separately planned and gated.
   derived-data absence, and preserved existing mark/path geometry identities.
 - Geometry and sampling tests cover duplicates, degeneracy, guard coverage,
   boundary-touching sites, off-canvas support owners, curved faces, splits,
-  collapse, positive/negative gap, reference/area-average sampling, and exact
-  composite usage.
+  collapse, normalized positive-region Scale/UniformOffset fill,
+  reference/area-average sampling, and exact composite usage.
 - Render tests prove canonical PNG/SVG parity and that consumers never repair
   topology. Stage-scoped validation artifacts cover grid/dispersion Voronoi,
-  two-/three-guide faces, scale/gap, area averaging, and both composite filters.
+  two-/three-guide faces, Scale/UniformOffset fill, area averaging, and both
+  composite filters.
 - Exercise and directly inspect immutable `assets/raster-sample.png` at
   1024×1024 and `assets/vector-sample.svg` at 900×620. Retain raw SVG and
   rasterized inspection PNGs; inspect native RGB and alpha separately.
 - Run affected-package format checks, focused tests, strict Clippy,
   `scripts/validate_architecture.sh`, protected-path review, immutable-asset
-  hashes, and semantic-map reconciliation. No GTK/Wayland run is required;
-  compile-check only any unavoidable mechanical app adapter.
-- Stage 20S must stop at **Implemented awaiting review** and again at **Ready
-  for user acceptance**. Do not commit, push, publish, or begin Stage 20S
-  implementation until its decision-complete plan is separately approved.
+  hashes, and read-only semantic-map impact/navigation where available.
+  `semantic-map check` is unavailable and inapplicable because Toniator has no
+  semantic-map architecture schema; project documentation is architecture
+  authority, while `scripts/validate_architecture.sh` is the mechanical
+  validation check. No GTK/Wayland run is required; compile-check only any
+  unavoidable mechanical app adapter.
+- Stage 20S stopped at **Implemented awaiting review** and **Ready for user
+  acceptance**, then completed at `55651dee7c744c2aa207924bf0dbb7737609942d`.
+  Its separate durable-document checkpoint is pending without an assigned hash;
+  push, publication, and all later stages remain separately gated.
 
 ## Later roadmap
 

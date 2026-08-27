@@ -1,15 +1,16 @@
 # Toniator Pattern Wizard Plan
 
-Status: **approved future-work plan; implementation remains gated** (accepted
-2026-08-22; Stage 20R accepted and stage allocation reconciled 2026-08-26).
+Status: **approved future-work plan; Stage 20S headless authority is complete
+and Pattern Wizard implementation remains gated in Stage 21** (accepted
+2026-08-22; Stage 20S closeout reconciled 2026-08-26).
 
 This document records the intended replacement direction for the artist-facing
 Pattern Editor workflow. It does not authorize implementation, change the
-accepted Stage 20F–20R ledger state, or begin Stage 20S or Stage 21. The
+accepted Stage 20F–20S ledger state, or begin Stage 21. The
 user-authorized normative effective-pattern direction is recorded in the
 protected specifications and implemented by accepted Stage 20G authority.
 The complete Pattern Wizard remains a separately gated Stage 21 UI milestone
-after the remaining Stage 20N–20S headless capabilities it exposes exist. The
+after the accepted Stage 20N–20S headless capabilities it exposes exist. The
 2026-08-24 accepted remainder roadmap is
 [`STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md`](STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md).
 
@@ -21,7 +22,8 @@ Stage 20O–20P engine sequence. Stage 20N supplies the multi-output and
 canonical-region/render foundation; Stage 20O supplies ordinary Voronoi,
 Stage 20P supplies Guide Faces, Stage 20Q supplies headless region treatments
 and sampling, and Stage 20R supplies ordered heterogeneous outputs and site-use
-filters. Stage 20S capability and recipe completion remains planned.
+filters. Stage 20S capability and recipe completion is complete at
+`55651dee7c744c2aa207924bf0dbb7737609942d`; wizard exposure remains planned.
 
 ## Product direction
 
@@ -97,11 +99,11 @@ typed meaning:
 
 - marks: normalized mark fill/size, already established by Stage 20E1;
 - paths: normalized stroke-thickness response, after a headless path contract;
-- regions: normalized inset/grow-shrink response, after a headless region
-  contract.
+- regions: normalized Scale/UniformOffset fill response, after the accepted
+  headless region contract.
 
 The UI may present the common labels **Minimum fill** and **Maximum fill**, but
-the domain must not pretend mark size, stroke thickness, and region inset are
+the domain must not pretend mark size, stroke thickness, and region fill are
 the same stored field.
 
 ## Structural vocabulary
@@ -131,7 +133,7 @@ artist decisions:
 | Stacked / Constant Gap | Path realization | Paths or path family | Visible path geometry |
 | Voronoi Cells | Region derivation | Sites | Regions |
 | Guide Cells | Region derivation | Closed guide faces | Regions |
-| Scale / Constant Gap | Region realization | Regions | Visible region geometry |
+| Scale / UniformOffset | Region realization | Regions | Visible region geometry |
 
 ## Capability flag contract
 
@@ -190,9 +192,9 @@ normal gallery rather than leading to a dead wizard page.
 | `paths.spacing.stacked` | Generated path positions are preserved | Stacked path-spacing choice | Current headless Stage 20I; wizard exposure remains planned |
 | `paths.spacing.constant_gap` | Related paths are offset to a uniform gap | Constant Gap choice; Path Gap | Current headless Stage 20J; wizard exposure remains planned |
 | `paths.endpoint_policy` | Constant-gap open paths extend tangentially beyond the padded generation bounds | Extend Beyond Canvas; Wrap Around Endpoint stays unavailable | Current headless Stage 20J policy; capability/wizard exposure planned and wrap-around deferred |
-| `regions.realize.scale` | Regions scale about their reference | Scale choice and amount | Stage 20Q |
-| `regions.realize.constant_gap` | Region boundaries offset by distance | Constant Gap choice and signed Grow/Neutral/Shrink amount | Stage 20Q |
-| `response.fill_range` | Output supports document/channel response range | Minimum Fill / Maximum Fill in Review and main inspector | Current marks and paths; planned regions |
+| `regions.realize.scale` | Regions scale about their reference | Scale choice and normalized fill range | Accepted Stage 20S |
+| `regions.realize.uniform_offset` | Regions resize by positive-region uniform offset | UniformOffset choice and normalized fill range | Accepted Stage 20S |
+| `response.fill_range` | Output supports document/channel response range | Minimum Fill / Maximum Fill in Review and main inspector | Current marks, paths, and regions |
 | `output.composite` | More than one ordered realized output exists | Ordered Outputs page | Stage 20R |
 
 The dotted “stacked” and “even gaps” guide studies appear to describe two site
@@ -211,9 +213,9 @@ Availability terms:
 
 - **Current engine**: accepted Stage 20A–20R authority exists; Stage 20F owns only bounded
   authoring exposure, not the final wizard.
-- **Accepted 20O–20R / Planned 20S+**: Stages 20L–20R name accepted headless
-  primitives; later rows name planned headless capabilities. Their wizard
-  exposure may remain separately planned.
+- **Accepted headless 20O–20S / Planned Stage 21 wizard exposure**: Stages
+  20L–20S name accepted headless primitives; the Pattern Wizard remains a
+  separately planned Stage 21 UI milestone.
 - **Future contract**: the supplied asset expresses intent, but no existing
   stage contract yet owns all required behavior.
 - **Advanced/deferred**: excluded from the primary workflow until justified.
@@ -235,8 +237,8 @@ Availability terms:
 | Triagrid — Lines | Three fixed straight directions -> paths | `family.grid`, `guides.count.3`, `guides.fixed_straight`, `guides.raw_paths`, `paths.raw` | Spacing/phase only; guide-editor explanation | Current headless Stage 20I; wizard card planned | `triangrid.svg` |
 | Triagrid — Marks | Three fixed directions -> intersection sites -> marks | Prior row plus `sites.intersections`, `marks.at_sites`, `marks.shape` | Intersection set; mark controls | Current engine | `triangrid-dots.svg` |
 | Tetragrid | Four fixed straight directions -> selected product | `family.grid`, `guides.count.4`, `guides.fixed_straight` plus chosen use flags | Advanced spacing/phase and supported use only | Advanced/deferred | `tetragrid.svg` |
-| Guide Cells | Closed faces from eligible guides -> regions | `family.grid`, `regions.guide_faces`, then a region-realization flag | Guide topology; Scale or Constant Gap region controls | Complete headless Stage 20P and 20Q; wizard exposure remains planned | `CellsGrid.svg` |
-| Grid Voronoi | Grid sites -> Voronoi -> regions | A valid grid site source plus `regions.voronoi`, then a region-realization flag | Site source; Voronoi; region controls | Complete headless Stage 20O and 20Q; wizard exposure remains planned | `Voronoi_GridFamily.svg` |
+| Guide Cells | Closed faces from eligible guides -> regions | `family.grid`, `regions.guide_faces`, then a region-realization flag | Guide topology; Scale or UniformOffset normalized-fill controls | Complete headless Stage 20S; wizard exposure remains planned | `CellsGrid.svg` |
+| Grid Voronoi | Grid sites -> Voronoi -> regions | A valid grid site source plus `regions.voronoi`, then a region-realization flag | Site source; Voronoi; Scale/UniformOffset normalized-fill controls | Complete headless Stage 20S; wizard exposure remains planned | `Voronoi_GridFamily.svg` |
 
 The `GridShapesMaster.svg` layer labelled “triangrid-curve - does not work -
 invalid intersections” is treated as a negative design witness: Triagrid and
@@ -251,7 +253,7 @@ Tetragrid must not enable `guides.editable_curve`.
 | Clustered Dispersion — Marks | Clustered sites -> marks | `family.dispersion`, `generator.density`, `generator.seed`, `sites.dispersed`, `sites.exclusion`, `marks.at_sites` | Cluster density/spread/strength; exclusion; mark controls | Current engine | Uses the dispersion family visuals |
 | Connected Dispersion | Dispersed sites -> bounded connection program -> paths | Dispersion flags plus `sites.connections`, `paths.raw` and a path-spacing choice | Minimum/maximum links; maximum distance; selection bias; seed; path controls | Accepted headless 20M; wizard card remains planned | `poisson-disc-connected.svg` |
 | Traveling Route | Weighted or unweighted sites -> one ordered route -> path | A site source plus `sites.connections`, `sites.tsp_route`, `paths.raw` | Open/closed route; deterministic route settings; path controls | Deferred separate program decision | `TSP_example.png` |
-| Dispersion Voronoi | Dispersed sites -> Voronoi -> regions | Dispersion site flags plus `regions.voronoi` and a region-realization flag | Distribution; Voronoi; Scale or Constant Gap | Complete headless Stage 20O and 20Q; wizard exposure remains planned | Reuses the Voronoi structural thumbnail with a dispersion source |
+| Dispersion Voronoi | Dispersed sites -> Voronoi -> regions | Dispersion site flags plus `regions.voronoi` and a region-realization flag | Distribution; Voronoi; Scale or UniformOffset normalized fill | Complete headless Stage 20S; wizard exposure remains planned | Reuses the Voronoi structural thumbnail with a dispersion source |
 
 ### Parametric baselines
 
@@ -352,7 +354,7 @@ flowchart TD
 
     R0 --> RR[Configure region realization]
     RR -->|Scale| O
-    RR -->|Constant Gap| RG[Grow / Neutral / Shrink]
+    RR -->|UniformOffset| RG[Normalized fill range]
     RG --> O
 
     M2 --> O
@@ -392,7 +394,7 @@ example:
 - `Grid › Two Guides › Intersections › Marks › Custom Shape`
 - `Dispersion › Even › Connections › Constant Gap Paths`
 - `Parametric › Spiral: Square › Sites Along Curve › Marks`
-- `Grid › Two Guides › Guide Cells › Constant Gap Regions`
+- `Grid › Two Guides › Guide Cells › UniformOffset Regions`
 
 ## Subeditor boundaries
 
@@ -499,15 +501,15 @@ geometry or inventing frontend-only document state. The approved order is:
 | 20N | **Complete at `b8701686042a69fcd1ac68a4038adbad4c0ccdc9`:** ordered per-output settings, current-only document-v5/preset-v3 transition, independently keyed realization/cache units, and canonical filled-region/render foundation; concrete region sources and heterogeneous output remain deferred. |
 | 20O | **Complete at `7ab97f01ec372ab1e6201b3913742476a1511c02`:** ordinary Voronoi regions from eligible `FamilySiteSet` products, including along-guide and `AlongParametricCurveSites`; direct raw `ParametricPaths` are excluded. Exact duplicates co-own regions; Spade remains private; authored v5/v3 persistence, fixed solid Full, and final clipping only. |
 | 20P | **Complete at `cd531eb65dd2e161e62f355905ad936b8c1ca3c4`:** guide-arrangement faces from two or three selected straight or authored-open guide dimensions, with deterministic bounded canonical regions, authored v5/v3 persistence, and final clipping. The production 0/60/120 witness proves equal physical spacing and three-line equilateral faces; existing generic one-through-four guide support is unchanged and Stage 20P adds no four-guide behavior or evidence. |
-| 20Q | **Complete at `071f3604098c0660a876fbe30050a64223fe41b3`:** fill-only Full, Scale, and Constant Gap region realization with reference/area-average sampling. |
+| 20Q | **Complete at `071f3604098c0660a876fbe30050a64223fe41b3`:** historical fill-only Full, Scale, and Constant Gap region realization with reference/area-average sampling; superseded for current region authority by Stage 20S Scale/UniformOffset. |
 | 20R | **Complete at `458c9a981dd349999240a18052e055a71c7b6c3c`:** ordered typed composite outputs and site-use dependency filters. |
-| 20S | Headless capability completion and ordinary serialized gallery recipes. |
+| 20S | **Complete at `55651dee7c744c2aa207924bf0dbb7737609942d`:** headless capabilities/descriptors and ordinary serialized 16-card gallery recipes; wizard exposure remains Stage 21. |
 | 21 | Pattern Wizard gallery, adaptive pages, Review, and nested subeditors. |
 | 22 | Headless frame/media authority, frame sequences/export, and simple start/end transitions. |
 | 23 | Temporal GTK with descriptor-driven start/end pins only. |
 
-Stages 20G–20R are accepted headless authority; Stage 20S and Stage 21–23
-remain separately gated. TSP,
+Stages 20G–20S are accepted headless authority; a separately gated final Stage
+20 scrub precedes planned Stages 21–23. TSP,
 aligned curved-guide sampling, wrap-around constant-gap
 endpoints, user-defined motifs, additional parametric forms, and the Tetragrid
 decision remain deferred rather than silently entering a listed stage.
@@ -548,7 +550,7 @@ contracts before UI work:
 - whether wrap-around Constant Gap endpoints belong with Stage 20M connection
   programs or a later separate contract; Stage 20J accepts tangential extension
   beyond the padded generation bounds only;
-- region fill/outline and Scale versus Constant Gap defaults;
+- region fill/outline and Scale versus UniformOffset defaults;
 - additional parametric generator forms beyond the accepted Stage 20K set and
   their coverage model;
 - whether Tetragrid has enough artistic value to retain; and

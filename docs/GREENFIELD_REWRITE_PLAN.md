@@ -1900,7 +1900,10 @@ reusable geometry-owned compact line/cubic centerline offset service. Coverage,
 crossing cleanup, component identity, current-v4 persistence, Stage 20I outline
 reuse, native RGBA PNG/SVG output, and the Holiday regression remain within the
 accepted authority split. The user accepted Stage 20J on 2026-08-22;
-publication remains separate.
+publication remains separate. This historical terminology is retained for the
+accepted checkpoint: current Stage 20S authority calls `NormalOffset` positive
+parallel-centerline spacing and does not reuse it for region negative-space or
+absolute-gap computation.
 
 **Stage 20K — Complete at implementation checkpoint
 `f848ff995c9e30f89a85fbc01b5b8d97cc8de3d5`.**
@@ -1994,13 +1997,15 @@ spacing and three-line equilateral faces. Existing generic one-through-four
 guide support remains unchanged; Stage 20P adds no four-guide Guide Faces
 behavior or evidence. Direct raw `ParametricPaths` remain Guide-Faces-ineligible,
 while typed parametric site/Voronoi mechanisms remain valid. Stage 20R is now
-complete; Stage 20S remains Planned and separately gated.
+complete; at that checkpoint, Stage 20S remained Planned and separately gated.
 
 **Stage 20Q — Complete at implementation checkpoint
 `071f3604098c0660a876fbe30050a64223fe41b3`.** The user reaccepted Filled-region
 Realization on 2026-08-26 after the repaired implementation passed independent
 review, focused verification, strict checks, protected-input and architecture
-gates, semantic-map reconciliation, and intrinsic native PNG/SVG inspection.
+gates, read-only semantic-map impact/navigation/freshness reconciliation (not
+`semantic-map check` or architecture authority), and intrinsic native PNG/SVG
+inspection.
 Positive ConstantGap shrinks and negative ConstantGap grows; convex outward
 growth uses subdivided smooth cubic round joins, while inward shrink uses
 tangent intersection plus crossing/coincident-branch dissolution. The
@@ -2011,7 +2016,10 @@ is intentionally transparent; sparse authored-cubic coverage reflects six
 complete bounded faces, not raster resolution. Schema-v5/preset-v3 persists
 authored intent only, and the headless, final-clip-only, and
 no-four-guide/raw-ParametricPaths boundaries remain in force. Publication
-remains separate; Stage 20S remains separately gated.
+remains separate. This historical Stage 20Q record is superseded for current
+region authority by Stage 20S normalized positive-only Scale/UniformOffset
+fill; no Full or ConstantGap branch, absolute gap, or negative-space geometry
+is current behavior. Stage 20S remains separately gated.
 
 **Stage 20R — Complete at implementation checkpoint
 `458c9a981dd349999240a18052e055a71c7b6c3c`.** The user accepted the bounded
@@ -2032,15 +2040,27 @@ publication, or Stage 20S work. The implementation checkpoint is
 `458c9a981dd349999240a18052e055a71c7b6c3c`; the documentation closeout is
 tracked separately.
 
-**Remaining Stage 20N+ — Stage 20S Planned.** The user accepted the revised headless
+**Remaining Stage 20N+ — Stage 20S Complete at implementation commit
+`55651dee7c744c2aa207924bf0dbb7737609942d`.** The user accepted the revised headless
 remainder roadmap on 2026-08-24 under
 [`STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md`](STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md).
 Stage 20Q and 20R are complete; 20S completes headless capability projection
 and ordinary gallery recipes. Stage 21 owns all remaining pattern-authoring GTK work, Stage 22 owns
 the complete headless frame/media/sequence/simple-transition pipeline, and
-Stage 23 owns temporal GTK with start/end pins only. Every remaining row remains Planned
-and separately gated; Stage 20S remains separately planned and is not
-authorized by this roadmap entry.
+Stage 23 owns temporal GTK with start/end pins only. Stage 20S completed its
+headless implementation, including capability/descriptors, strict nested
+preset-v3 DTO rejection, the 16-card registry after retiring
+`regions-plus-marks`, normalized positive-only Scale/UniformOffset regions,
+RGB-component/seed evidence, CoverCanvas spirals, and centered-local curved
+guides. The user accepted it on 2026-08-26 after independent review/re-review,
+verified evidence, and parent intrinsic RGB/alpha inspection. `semantic-map
+check` is unavailable and inapplicable because Toniator has no semantic-map
+architecture schema; project documentation is authority and
+`scripts/validate_architecture.sh` is mechanical validation only. Its durable
+documentation checkpoint is pending without an assigned hash. A separately
+gated final scrub of all Stage 20 work must occur before Stage 21; Stages 21–23
+remain Planned, while push, publication, and every later stage remain separately
+gated.
 
 Every mechanism must enter through the Stage 14 typed schema, Stage 15 generic
 pipeline, Stage 17 command/descriptor contract, canonical geometry, and

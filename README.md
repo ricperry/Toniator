@@ -328,7 +328,9 @@ component identity, Stage 20I outline reuse, and additive current-v4
 persistence. Intrinsic raster/vector, compact cubic, divergent Holiday,
 Inkscape, and private Sway/AT-SPI witnesses passed. Automated wlroots evidence
 is not manual GNOME/Mutter review. The Pattern Wizard remains separately
-gated.
+gated. This is retained checkpoint terminology only: current `NormalOffset`
+means positive parallel-centerline spacing and is not region absolute-gap or
+negative-space computation.
 
 Stage 20K is **Complete at implementation checkpoint
 `f848ff995c9e30f89a85fbc01b5b8d97cc8de3d5`** under
@@ -402,8 +404,8 @@ fixed solid Full regions and final canvas clipping. Existing generic
 one-through-four guide support remains unchanged; Stage 20P adds no four-guide
 Guide Faces behavior or evidence. Direct raw `ParametricPaths` remain
 Guide-Faces-ineligible, while typed parametric site/Voronoi mechanisms remain
-valid. Stage 20R is now complete; Stage 20S remains Planned and separately
-gated.
+valid. Stage 20R is now complete; at that historical checkpoint, Stage 20S
+remained Planned and separately gated.
 
 Stage 20Q is complete at implementation checkpoint
 `071f3604098c0660a876fbe30050a64223fe41b3`. It adds headless fill-only
@@ -420,8 +422,10 @@ triangular line rings; the authored-cubic outward witness uses fixed `-40` gap
 for 20-unit outward edge growth and 40-unit neighbor overlap with smooth joins.
 Collapse evidence is intentionally transparent. Sparse authored-cubic coverage
 reflects six complete bounded faces, not raster resolution. The user reaccepted
-Stage 20Q on 2026-08-26; publication remains separate and Stage 20S remains
-planned and separately gated.
+Stage 20Q on 2026-08-26; publication remains separate. This historical
+Full/ConstantGap account is superseded for current authority by Stage 20S
+normalized positive-only Scale/UniformOffset fill, with no absolute region gap
+or negative-space computation.
 
 Stage 20R is complete at implementation checkpoint
 `458c9a981dd349999240a18052e055a71c7b6c3c`. It lifts the one-output gate and
@@ -438,6 +442,24 @@ regions are kept in separate visual witnesses; a cross-channel witness covers
 connections in one channel and regions in another. No GTK workflow, renderer
 topology repair, compatibility adapter, or Stage 20S work is included. The
 user accepted Stage 20R on 2026-08-26; publication remains separate.
+
+Stage 20S is complete at implementation checkpoint
+`55651dee7c744c2aa207924bf0dbb7737609942d`. The user accepted the headless
+capability and gallery-recipe completion on 2026-08-26 after independent review
+and re-review, focused verification, verified evidence, and parent intrinsic
+RGB/alpha inspection. It provides typed capability/descriptors, strict nested
+preset-v3 DTO rejection, a 16-card registry after retiring
+`regions-plus-marks`, normalized positive-only Scale/UniformOffset fill in
+`0.0..=2.0` with zero-region omission, and no negative-space or absolute region
+gap. Ordinary evidence uses matching R/G/B source components and
+pairwise-distinct typed seeds, while CoverCanvas/variable-width spiral and
+centered-local curved-guide corrections remain headless. No GTK workflow or
+compatibility adapter was added. Project documentation remains architecture
+authority; `scripts/validate_architecture.sh` is mechanical validation only,
+and `semantic-map check` is unavailable because Toniator has no corresponding
+architecture schema. The durable documentation checkpoint has no assigned hash
+yet. A separately gated final scrub of all Stage 20 work precedes planned Stage
+21; Stages 22–23 remain Planned, and push/publication remain separate.
 
 Low-resolution fixtures and outputs are supplementary only. Every future stage
 that exercises source loading, sampling, rendering, preview, or export must

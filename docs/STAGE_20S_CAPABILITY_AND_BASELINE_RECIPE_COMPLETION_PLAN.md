@@ -1,8 +1,9 @@
 # Stage 20S — Capability and Baseline Recipe Completion
 
-Status: **Accepted awaiting checkpoint** (2026-08-26). This document records
-the bounded Stage 20S agreement and remains subordinate to the protected
-project specifications and `docs/GREENFIELD_REWRITE_PLAN.md`.
+Status: **Complete at implementation commit
+`55651dee7c744c2aa207924bf0dbb7737609942d`** (accepted 2026-08-26). This
+document records the bounded Stage 20S agreement and remains subordinate to the
+protected project specifications and `docs/GREENFIELD_REWRITE_PLAN.md`.
 
 ## Objective
 
@@ -140,7 +141,8 @@ Toniator has no semantic-map architecture schema; project documentation is the
 architecture authority, while `scripts/validate_architecture.sh` is the
 mechanical validation check. The user accepted Stage 20S on 2026-08-26 after
 independent review and re-review, focused verification, parent intrinsic
-RGB/alpha visual inspection, and durable-document reconciliation. The
-implementation checkpoint is pending, and this acceptance authorizes its local
-creation; push, publication, and later-stage work remain unauthorized and
-separately gated.
+RGB/alpha visual inspection, and durable-document reconciliation. This durable
+documentation closeout awaits a separate checkpoint whose hash is not yet
+assigned; push, publication, and later-stage work remain unauthorized and
+separately gated. A final scrub of all Stage 20 work remains separately gated
+before Stage 21.

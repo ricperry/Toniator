@@ -657,30 +657,32 @@ checkpoint is `458c9a981dd349999240a18052e055a71c7b6c3c`. The subsequent
 documentation closeout is tracked separately. At that checkpoint, Stage 20S
 remained Planned and separately gated.
 
-**Stage 20S — Accepted awaiting checkpoint.** The user authorized bounded headless capability
+**Stage 20S — Complete at implementation commit
+`55651dee7c744c2aa207924bf0dbb7737609942d`.** The user authorized bounded headless capability
 and baseline-recipe completion on 2026-08-26 from Stage 20R documentation
 checkpoint `88455d703bab4d0c4932b70ba8a4337c299867da` and implementation
 checkpoint `458c9a981dd349999240a18052e055a71c7b6c3c`. The approved contract is
 recorded in
 [`STAGE_20S_CAPABILITY_AND_BASELINE_RECIPE_COMPLETION_PLAN.md`](docs/STAGE_20S_CAPABILITY_AND_BASELINE_RECIPE_COMPLETION_PLAN.md).
-Implementation, focused checks, evidence, and parent visual inspection are
-complete. The version-2 catalog contains exactly 16 entries after explicit
-retirement of the temporary `regions-plus-marks` maze-debug recipe, without a
-replacement card. Only directly invalidated or new artifacts were regenerated.
-Independent read-only review found nested preset-v3 unknown-field acceptance;
-the correction and re-review passed. `semantic-map check` is unavailable and
-inapplicable because Toniator has no semantic-map architecture schema; project
-documentation is architecture authority, while
-`scripts/validate_architecture.sh` is the mechanical validation check. GTK
-behavior, compatibility adapters, metadata-based evaluator
-dispatch, and Stage 21 remain excluded. The user accepted Stage 20S on
-2026-08-26 after independent review and re-review, focused verification, parent
-intrinsic RGB/alpha visual inspection, and durable-document reconciliation.
-The Stage 20S implementation checkpoint is pending, and this acceptance
-authorizes its local creation; push, publication, and later-stage work remain
+The accepted headless implementation supplies capability projection and
+descriptors, strict nested preset-v3 DTO rejection, and a version-2 16-card
+registry after retiring `regions-plus-marks`. Regions use normalized
+positive-only Scale/UniformOffset fill in `0.0..=2.0`, omit zero fill, and do
+not compute negative space or absolute region gaps. Ordinary evidence uses
+matching R/G/B source components and pairwise-distinct typed seeds; it also
+includes CoverCanvas/variable-width spirals and corrected centered-local curved
+guides. `semantic-map check` is unavailable and inapplicable because Toniator
+has no semantic-map architecture schema; project documentation is architecture
+authority, while `scripts/validate_architecture.sh` is the mechanical check.
+GTK work and compatibility adapters remain excluded. The user accepted Stage
+20S on 2026-08-26 after independent review and re-review, focused verification,
+verified evidence, parent intrinsic RGB/alpha inspection, and durable-document
+reconciliation. This documentation closeout awaits a separate checkpoint whose
+hash is not yet assigned; push, publication, and later-stage work remain
 unauthorized and separately gated.
 
-**Remaining Stage 20N+ — Stage 20R Complete; Stage 20S Accepted awaiting checkpoint.** The user accepted the revised remainder
+**Remaining Stage 20N+ — Stage 20R Complete; Stage 20S Complete at
+`55651dee7c744c2aa207924bf0dbb7737609942d`.** The user accepted the revised remainder
 roadmap on 2026-08-24 under
 [`STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md`](docs/STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md).
 The accepted order after completed 20Q is 20R composites and site-use filters;

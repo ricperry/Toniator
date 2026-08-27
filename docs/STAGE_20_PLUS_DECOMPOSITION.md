@@ -41,13 +41,24 @@ Stage 20Q is Complete at implementation checkpoint
 `071f3604098c0660a876fbe30050a64223fe41b3` and was reaccepted on 2026-08-26.
 Stage 20R is Complete at implementation checkpoint
 `458c9a981dd349999240a18052e055a71c7b6c3c` and was accepted on 2026-08-26
-after independent review and parent verification. Stages 20S and later Stages
-21–23 remain Planned and separately gated by their own contracts; publication
-remains separate. The accepted revised remainder roadmap is
+after independent review and parent verification. Stage 20S is Complete at
+implementation checkpoint `55651dee7c744c2aa207924bf0dbb7737609942d` and was
+accepted on 2026-08-26 after review/re-review, verified evidence, and parent
+intrinsic RGB/alpha inspection. A separately gated final scrub of all Stage 20
+work remains required before Stage 21; Stages 21–23 remain Planned and
+separately gated by their own contracts, and publication remains separate. The
+accepted revised remainder roadmap is
 [`STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md`](STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md).
 Stage 19B is complete at
 implementation checkpoint `b0b84e4`. Stage 20A is complete at implementation
 checkpoint `b7fbd81`.
+
+Historical Stage 20J absolute-gap/Constant Gap and Stage 20Q
+Full/ConstantGap/negative-gap wording below records accepted checkpoint
+contracts only. Stage 20S supersedes current authority with positive
+parallel-centerline NormalOffset paths and normalized positive-only
+Scale/UniformOffset region fill, without absolute region-gap or negative-space
+computation.
 
 This document records the approved Stage 20E split and Stage 20E1 acceptance
 after the Stage 20D acceptance checkpoint. The Stage 20E1 checkpoint records
@@ -121,9 +132,9 @@ Multiframe/transition authority remains absent.
 | Adjacency/topology | Accepted geometry-owned `SiteAdjacency`, nearest/random/tree connection programs, straight-grid wall-maze face/dual authority, bounded Guide Faces arrangement construction, and Stage 20R site-use dependency evaluation | Masks/walks and TSP remain absent. | 20L/20M/20P/20R are accepted; site-use dependencies remain derived. | **Structural:** graph rule/program/seed miss family-derived topology and downstream. |
 | Regions/cells/faces | Geometry-owned canonical-region contract, ordinary Voronoi source, Guide Faces source, fill treatments/sampling, and render fill boundary | Composites remain absent; canvas must not create cells or close topology. | Completed 20O Voronoi, 20P Guide Faces, and 20Q realization. | **Structural:** region source changes miss family; treatment changes miss realization/downstream; final clip stays consumer-only. |
 | Modulation/sampling | `PatternModulation` boundary, source mapping and mark response; random weighting is explicitly structural | Current modulation is minimal and must not be conflated with site generation or presentation. | Extend only after output kinds exist, beginning with 20I/20N/20Q. | **Modulation/source** when sampled values alter geometry/paint; artwork-weighted placement is explicitly structural. |
-| Realization | `PatternOutputLayer`, ordered per-output settings, canonical circle/closed-shape marks, guide paths, connected thickness response, reusable compact stroke outlines, treated canonical-region fill units, ordinary Voronoi and Guide Faces regions, sampled region paint, and ordered Stage 20R composite outputs | Renderer-side topology repair and hidden z-order shortcuts remain absent. | Completed 20O regions, 20P Guide Faces, 20Q realization, and 20R composites; 20S capability/recipe completion remains planned. | **Realization:** prototype, geometry response, path/region treatment, or filter miss realization/downstream while retaining family. |
+| Realization | `PatternOutputLayer`, ordered per-output settings, canonical circle/closed-shape marks, guide paths, connected thickness response, reusable compact stroke outlines, treated canonical-region fill units, ordinary Voronoi and Guide Faces regions, sampled region paint, and ordered Stage 20R composite outputs | Renderer-side topology repair and hidden z-order shortcuts remain absent. | Completed 20O regions, 20P Guide Faces, 20Q realization, 20R composites, and 20S capability/recipe completion. | **Realization:** prototype, geometry response, path/region treatment, or filter miss realization/downstream while retaining family. |
 | Per-channel transforms/controls | `DocumentPatternSettings`, `ChannelPatternInstance`, `Document::effective_channel_pattern`, appearance, mapping, and descriptor/command/history authority | Stage 20G owns document-base settings and channel replacement/delta intent; future controls must continue using the domain projection and descriptors. | 20N generalizes per-output authority; Stage 21 owns pattern UI and Stage 23 owns start/end transition exposure. | Effective layout is **structural**; output response is **realization**; sampled response is **modulation/source**; opacity/visibility/color are **presentation**. |
-| Canonical geometry/render/export | Canonical circles, closed marks, guide paths, compact filled strokes, treated ordinary Voronoi and Guide Faces canonical regions, ordered Stage 20R renderer scenes, and engine preview/raster/SVG consumers | Renderers must not generate or repair topology and apply only the final canvas clip. | Completed 20O, 20P, 20Q, and 20R output production; 20S recipes remain planned. | Canonical content follows structural/realization changes; raster target/AA/background are **presentation** consumers. |
+| Canonical geometry/render/export | Canonical circles, closed marks, guide paths, compact filled strokes, treated ordinary Voronoi and Guide Faces canonical regions, ordered Stage 20R renderer scenes, and engine preview/raster/SVG consumers | Renderers must not generate or repair topology and apply only the final canvas clip. | Completed 20O, 20P, 20Q, and 20R output production; 20S recipes are complete. | Canonical content follows structural/realization changes; raster target/AA/background are **presentation** consumers. |
 | Persistence/presets/UI | domain/IO current-v5 pattern bundles, keyed settings/deltas, authored structures, and pure preset-v3 records; app private drafts/commands/descriptors | Temporal values and future region/composite intent remain absent; presets/UI must not own evaluator state. | 20S completes headless recipes; Stage 21 owns pattern UI and Stage 23 temporal UI. | Persisted structural/realization/modulation/presentation values use their existing invalidation class; never persist derived sites/topology/regions/caches. |
 
 The classification is deliberate: structural values select source structure,
@@ -143,10 +154,9 @@ resource-editing exposure. It is not the final Pattern Wizard.
 Effective document/channel authority, read-only capability projection,
 canonical paths/strokes, normal offsets, the Stage 20N multi-output/
 canonical-region foundation, concrete regions, and Stage 20R composites are
-accepted. Stage 20K is complete at implementation checkpoint
-`f848ff995c9e30f89a85fbc01b5b8d97cc8de3d5`; the roadmap now proceeds to
-headless capability/gallery completion in Stage 20S. The
-capability-driven Pattern Wizard follows in Stage 21. A wizard page never
+accepted. Stage 20S is complete at implementation checkpoint
+`55651dee7c744c2aa207924bf0dbb7737609942d`; a separately gated final Stage 20
+scrub precedes the capability-driven Pattern Wizard in Stage 21. A wizard page never
 creates its own engine semantics.
 
 ```text
@@ -189,7 +199,7 @@ faces, cells, offsets, caches and scheduler results.
 | 20P Guide Arrangement Faces | **Complete at `cd531eb65dd2e161e62f355905ad936b8c1ca3c4`:** complete off-canvas faces from two or three selected straight or authored-open guide arrangements, using the production family evaluator, shared centered origin, deterministic canonical regions, fixed Full rendering, and final clipping. The 0/60/120 witness proves equal physical spacing and three-line equilateral faces. | Curved Triagrid/Tetragrid editing, four-guide Guide Faces behavior/evidence. | geometry/patterns; 20B/20D/20M/20N. | Arrangement/coverage/degeneracy tests plus intrinsic two-guide, three-guide, authored-cubic, and off-canvas evidence. | None. | User accepted 2026-08-25; publication remains separate. |
 | 20Q Filled-region Realization | **Complete at `071f3604098c0660a876fbe30050a64223fe41b3`:** fill-only Full, Scale, and Constant Gap treatments; reference/area-average sampling; positive-gap shrink and negative-gap growth; subdivided smooth cubic round joins for convex outward growth; tangent-intersection/crossing/coincident-branch dissolution for inward shrink; transparent collapse and sampled paint. | Region outlines, wall complements, fallback marks. | geometry/sampling/patterns/render; 20N/20O/20P. | Repaired offset/collapse/winding/sampling/clipping tests plus intrinsic native PNG/SVG artifacts. | None. | User reaccepted 2026-08-26; publication remains separate. |
 | 20R Composite Outputs | **Complete at `458c9a981dd349999240a18052e055a71c7b6c3c`:** ordered typed marks, paths, and regions with a site-use dependency DAG, persistence, invalidation, independently keyed output caches, request-wide composite limits, and canonical consumption. Connection, maze, and sampled-region visual witnesses remain isolated; a cross-channel witness verifies that connections and regions remain separate when authored in different channels. | Hidden renderer z-order shortcuts, GTK workflow, compatibility adapters, and Stage 20S work. | domain/patterns/render/io/engine; 20E2/20I/20N–20Q. | DAG/filter/order/persistence/cache/PNG-SVG tests plus intrinsic native/SVG evidence. | None. | User accepted 2026-08-26; documentation closeout follows the implementation checkpoint. |
-| 20S Capability and Gallery Completion | Capability witnesses and ordinary serialized baseline recipes covering all accepted headless outputs; unsupported cards absent. | GTK gallery/wizard pages. | domain/patterns/io; 20H/20R. | Recipe reconstruction and capability-completeness tests. | None. | Planned; separate contract and gate. |
+| 20S Capability and Gallery Completion | **Complete at `55651dee7c744c2aa207924bf0dbb7737609942d`:** capabilities/descriptors, strict nested preset-v3 DTOs, 16-card ordinary registry, normalized Scale/UniformOffset regions, RGB component/seed evidence, spirals, and curved-guide repairs. | GTK gallery/wizard pages and compatibility adapters. | domain/patterns/io; 20H/20R. | Focused capability/recipe/persistence/cache/render evidence and parent intrinsic RGB/alpha inspection. | None. | User accepted 2026-08-26; durable-doc checkpoint and final Stage 20 scrub remain gated before Stage 21. |
 | 21 Pattern-authoring GTK | Document/channel gallery, Use as is/Edit, adaptive pages, Review, nested Guide Curve/Shape Editors, and region/composite workflows. Removes provisional direct routes and replaces automatic `GuideCustomAlongLayout` promotion with artist-selected guide use. | Frontend geometry/evaluator authority; temporal controls. | app; 20G/20H/20S. | Private Sway, AT-SPI, WayVNC, canonical-output, and human GNOME/Mutter review. | Yes. | Planned; separate contract and gate. |
 | 22 Headless Temporal Pipeline | Still/multiframe source authority, deterministic selection, bounded CLI/export sequences, and simple start/end interpolation. | Temporal GTK, arbitrary keyframes, timeline lanes. | domain/sampling/io/engine/cli/render. | Decode/identity/cache/persistence/sequence/interpolation/frame-parity tests and numbered PNG/SVG artifacts. | None. | Planned; separate contract and gate. |
 | 23 Temporal GTK | Descriptor-driven start/end pins on eligible continuous values only. | Frontend interpolation authority, arbitrary keyframes, multiple segments, editable curves, timeline lanes, dope sheet. | app; 22. | Private Sway, accessibility, canonical-frame checks, and human GNOME/Mutter review. | Yes. | Planned; separate contract and gate. |
