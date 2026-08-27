@@ -552,6 +552,7 @@ fn canonicalize_ring<F: Fn() -> bool>(
         .copied()
         .map(normalize_segment)
         .collect::<Result<Vec<_>, _>>()?;
+    collapse_line_rounding_seams(&mut segments)?;
     if segments.iter().any(is_zero_segment) {
         return Err(CanonicalRegionError::new(
             "region.geometry.zero_length",
@@ -740,6 +741,73 @@ fn normalize_segment(segment: CurveSegment) -> Result<CurveSegment, CanonicalReg
             )
         }),
     }
+}
+
+/// Collapses only consecutive sub-ULP line seams before canonical topology validation.
+///
+/// A producer or positive affine resize can round one shared line vertex through two nearby
+/// constructions. The seam has no representable positive extent at the established coordinate
+/// scale, so this function rebuilds the closed line ring without it. Cubic rings remain exactly
+/// untouched, and no inter-region, complement, or negative-space measurement occurs.
+///
+/// # Errors
+///
+/// Returns the stable zero-length diagnostic when seam collapse would leave fewer than three
+/// distinct line vertices, and the stable finite diagnostic if reconstruction cannot remain finite.
+fn collapse_line_rounding_seams(
+    segments: &mut Vec<CurveSegment>,
+) -> Result<(), CanonicalRegionError> {
+    if !segments
+        .iter()
+        .all(|segment| matches!(segment, CurveSegment::Line(_)))
+    {
+        return Ok(());
+    }
+    let mut points = segments
+        .iter()
+        .map(|segment| match segment {
+            CurveSegment::Line(line) => line.start(),
+            CurveSegment::CubicBezier(_) => unreachable!("all-line guard retains only lines"),
+        })
+        .collect::<Vec<_>>();
+    let coordinate_scale = points.iter().fold(1.0_f64, |scale, point| {
+        scale.max(point.x.abs()).max(point.y.abs())
+    });
+    let seam_tolerance = 128.0 * f64::EPSILON * coordinate_scale;
+    loop {
+        let duplicate = (0..points.len()).find(|&index| {
+            let next = (index + 1) % points.len();
+            let dx = points[index].x - points[next].x;
+            let dy = points[index].y - points[next].y;
+            dx.hypot(dy) <= seam_tolerance
+        });
+        let Some(index) = duplicate else {
+            break;
+        };
+        if points.len() <= 3 {
+            return Err(CanonicalRegionError::new(
+                "region.geometry.zero_length",
+                "canonical-region rings cannot contain zero-length segments",
+            ));
+        }
+        points.remove((index + 1) % points.len());
+    }
+    let mut rebuilt = Vec::with_capacity(points.len());
+    for index in 0..points.len() {
+        let next = (index + 1) % points.len();
+        rebuilt.push(
+            LineSegment::new(points[index], points[next])
+                .map(CurveSegment::Line)
+                .map_err(|_| {
+                    CanonicalRegionError::new(
+                        "region.geometry.finite",
+                        "canonical-region coordinates must be finite",
+                    )
+                })?,
+        );
+    }
+    *segments = rebuilt;
+    Ok(())
 }
 
 /// Rejects exact degenerate line segments and cubics with no construction extent.
@@ -1086,6 +1154,42 @@ mod tests {
             negative.regions()[0].ring.start().y.to_bits(),
             0.0_f64.to_bits()
         );
+    }
+
+    /// Proves sub-ULP consecutive line seams collapse before validation while
+    /// a materially positive short line edge remains part of canonical geometry.
+    #[test]
+    fn canonical_line_seam_cleanup_preserves_positive_short_edges() {
+        let seam = CurvePath::polyline(
+            vec![
+                Point2::new(-3.0, -3.0),
+                Point2::new(-3.0 + 2.0e-15, -3.0),
+                Point2::new(7.0, -3.0),
+                Point2::new(7.0, 7.0),
+                Point2::new(-3.0, 7.0),
+                Point2::new(-3.0 - 2.0e-15, -3.0),
+            ],
+            PathClosure::Closed,
+        )
+        .expect("finite seam ring connects");
+        let cleaned = build_canonical_regions(triangle_proposal(seam))
+            .expect("sub-ULP seam canonicalizes without self-contact");
+        assert_eq!(cleaned.regions()[0].ring.segments().len(), 4);
+
+        let short_edge = CurvePath::polyline(
+            vec![
+                Point2::new(0.0, 0.0),
+                Point2::new(1.0e-6, 0.0),
+                Point2::new(10.0, 0.0),
+                Point2::new(10.0, 10.0),
+                Point2::new(0.0, 10.0),
+            ],
+            PathClosure::Closed,
+        )
+        .expect("finite short-edge ring connects");
+        let retained = build_canonical_regions(triangle_proposal(short_edge))
+            .expect("positive short edge remains canonical");
+        assert_eq!(retained.regions()[0].ring.segments().len(), 5);
     }
 
     /// Proves exact polynomial cubic area and extrema-derived bounds survive canonical orientation.

@@ -4,7 +4,7 @@ use toniator_domain::{
     ArtworkWeightResponse, CanvasSpec, CoveragePolicy, DensityMetric2D, PatternDefinition,
     PatternDefinitionId, PatternMechanism, PatternMechanismId, PatternOutputLayerId,
     RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy, SourceMapping,
-    SourceMappingComponent, SourcePlacement, VisibleMarkSizingPolicy, validate_pattern_definition,
+    SourceMappingComponent, SourcePlacement, validate_pattern_definition,
 };
 use toniator_patterns::{
     GridInspectRequest, MarkResponse, RandomSiteDiagnostics, StructuralProductCapability,
@@ -239,9 +239,9 @@ fn zero_seed_is_repeatable_distinct_and_quality_metrics_separate_processes() {
     assert!(pairwise_minimum(&even) >= 7.0);
 }
 
+/// Proves minimum-center exclusion and bounded unsatisfied diagnostics remain truthful.
 #[test]
-/// Proves exclusion constraints and bounded unsatisfied diagnostics remain truthful.
-fn center_and_visible_mark_exclusion_preserve_spacing_and_report_unsatisfiable_density() {
+fn minimum_center_exclusion_preserves_spacing_and_reports_unsatisfiable_density() {
     let center = output(&definition(
         RandomSiteCharacter::RawUniform,
         SiteDensityModulation::Uniform,
@@ -249,16 +249,6 @@ fn center_and_visible_mark_exclusion_preserve_spacing_and_report_unsatisfiable_d
         64,
     ));
     assert!(pairwise_minimum(&center) >= 9.0);
-    let visible = output(&definition(
-        RandomSiteCharacter::RawUniform,
-        SiteDensityModulation::Uniform,
-        SiteExclusionPolicy::VisibleMarkMargin {
-            margin: 1.5,
-            sizing: VisibleMarkSizingPolicy::MaximumSupportRadius,
-        },
-        64,
-    ));
-    assert!(pairwise_minimum(&visible) >= 9.5);
     let constrained = output(&definition(
         RandomSiteCharacter::Even {
             minimum_center_distance: 40.0,

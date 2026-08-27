@@ -3,9 +3,9 @@ use toniator_domain::{
     AuthoredStructureKind, CanvasSpec, ChannelId, Document, DocumentHistory, DocumentSession,
     GeneralizedSiteProductDraft, GuideDimensionDraft, MarkOrientation, MarkOrientationDraft,
     MarkPrototype, PatternDefinitionDraft, PatternDefinitionRecipe, PatternMechanism,
-    PatternOutputLayer, PatternStructureRecipe, PresetMetadata, PresetRecord, RandomSiteCharacter,
-    SiteDensityModulation, SiteExclusionPolicy, SourceMapping, SourceMappingComponent,
-    SourceReference,
+    PatternOutputLayer, PatternOutputRealization, PatternStructureRecipe, PresetMetadata,
+    PresetRecord, RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy, SourceMapping,
+    SourceMappingComponent, SourceReference,
 };
 use toniator_patterns::{BUNDLED_PRESET_REGISTRY_VERSION, PresetRegistry};
 
@@ -34,9 +34,33 @@ fn bundled_registry_is_stable_and_reconstructs_every_entry() {
         .iter()
         .map(|entry| entry.metadata.id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(ids, vec!["even-random-circles", "straight-grid-circles"]);
+    assert_eq!(ids.len(), 16, "the temporary maze-debug recipe is retired");
+    assert_eq!(
+        ids,
+        vec![
+            "clustered-dispersion-random-links",
+            "even-random-circles",
+            "grid-voronoi-scale",
+            "one-guide-lines",
+            "residual-sites-along-guide",
+            "round-spiral-line",
+            "round-spiral-marks",
+            "source-weighted-dispersion-voronoi",
+            "square-spiral-marks",
+            "straight-grid-circles",
+            "three-guide-cells-scale",
+            "three-guide-maze",
+            "triagrid-custom-shape-marks",
+            "triagrid-spanning-tree",
+            "two-guide-cells-uniform-offset",
+            "two-guide-maze",
+        ]
+    );
     for id in ids {
         assert!(registry.reconstruct(id).is_some());
+        registry
+            .apply_to_selected(&mut history(), ChannelId(1), id)
+            .expect("every bundled recipe materializes through the ordinary history boundary");
     }
 }
 
@@ -137,10 +161,7 @@ fn recipe_compound_variants_use_transition_drafts_and_preserve_payloads() {
                 strength: 0.75,
                 response: ArtworkWeightResponse::Smoothstep,
             },
-            exclusion: SiteExclusionPolicy::VisibleMarkMargin {
-                margin: 1.5,
-                sizing: toniator_domain::VisibleMarkSizingPolicy::MaximumSupportRadius,
-            },
+            exclusion: SiteExclusionPolicy::MinimumCenterDistance { minimum: 1.5 },
             maximum_attempts: 100,
             maximum_neighbor_checks: 100,
         }),
@@ -204,7 +225,7 @@ fn recipe_compound_variants_use_transition_drafts_and_preserve_payloads() {
     assert!(matches!(
         definition.mechanisms[2],
         PatternMechanism::SiteExclusion {
-            policy: SiteExclusionPolicy::VisibleMarkMargin { .. },
+            policy: SiteExclusionPolicy::MinimumCenterDistance { minimum: 1.5 },
             ..
         }
     ));
@@ -220,8 +241,8 @@ fn recipe_compound_variants_use_transition_drafts_and_preserve_payloads() {
         _ => unreachable!(),
     };
     assert!(matches!(
-        definition.output_layers[0],
-        toniator_domain::PatternOutputLayer::MarkPrototype {
+        definition.output_layers[0].realization,
+        toniator_domain::PatternOutputRealization::MarkPrototype {
             orientation: MarkOrientation::GuideTangent { dimension_id },
             ..
         } if dimension_id == dimensions[1].id
@@ -385,8 +406,11 @@ fn shape_preset_materialization_is_atomic_and_uses_an_ordinary_typed_reference()
         .expect("the selected channel targets the materialized definition");
     assert!(matches!(
         definition.output_layers.as_slice(),
-        [PatternOutputLayer::MarkPrototype {
-            prototype: MarkPrototype::AuthoredClosedShape { structure_id },
+        [PatternOutputLayer {
+            realization: PatternOutputRealization::MarkPrototype {
+                prototype: MarkPrototype::AuthoredClosedShape { structure_id },
+                ..
+            },
             ..
         }] if *structure_id == structure.id()
     ));

@@ -7,10 +7,10 @@ use toniator_domain::{
     MarkOrientation, MarkOrientationKind, MarkOutputCapabilityProjection, MarkPrototype,
     MarkPrototypeKind, PatternCapabilityScope, PatternDefinition, PatternDefinitionBundle,
     PatternDefinitionId, PatternFamilyCapabilityProjection, PatternGeometryResponse,
-    PatternMechanismId, PatternOutputCapabilityProjection, PatternOutputLayer,
-    PatternOutputLayerId, PatternOutputSettings, RandomCharacterKind, RandomSiteCharacter,
-    SiteDensityModulation, SiteExclusionPolicy, SourceMapping, SourceMappingComponent,
-    SourcePlacement, SourceReference,
+    PatternMechanismId, PatternOutputCapabilityProjection, PatternOutputLayerId,
+    PatternOutputRealization, PatternOutputSettings, PropertyTarget, RandomCharacterKind,
+    RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy, SourceMapping,
+    SourceMappingComponent, SourcePlacement, SourceReference,
 };
 
 /// Builds the current modeled document used to verify base and effective authority scopes.
@@ -112,7 +112,8 @@ fn closed_shape(id: u64) -> AuthoredStructure {
     .expect("closed shape validates")
 }
 
-/// Proves document-base and inherited channel projection use the same resolved legacy recipe.
+/// Proves document-base and inherited channel projection preserve one resolved
+/// structural recipe while exposing their intentionally different edit scopes.
 #[test]
 fn base_and_inherited_channel_project_the_same_legacy_structure() {
     let document = default_document();
@@ -122,7 +123,22 @@ fn base_and_inherited_channel_project_the_same_legacy_structure() {
     let inherited = document
         .pattern_capabilities(PatternCapabilityScope::Channel(ChannelId(1)))
         .expect("inherited projection resolves");
-    assert_eq!(base, inherited);
+    assert_eq!(base.definition_id, inherited.definition_id);
+    assert_eq!(base.features, inherited.features);
+    assert_eq!(base.family, inherited.family);
+    assert_eq!(base.outputs, inherited.outputs);
+    assert!(base.active_controls.iter().all(|descriptor| {
+        !matches!(
+            descriptor.target,
+            PropertyTarget::Channel(_) | PropertyTarget::ChannelOutput(_, _)
+        )
+    }));
+    assert!(inherited.active_controls.iter().any(|descriptor| {
+        matches!(
+            descriptor.target,
+            PropertyTarget::Channel(_) | PropertyTarget::ChannelOutput(_, _)
+        )
+    }));
     assert_eq!(
         base.family,
         PatternFamilyCapabilityProjection::Grid(toniator_domain::GridCapabilityProjection {
@@ -337,7 +353,9 @@ fn typed_and_generic_guides_project_counts_products_and_active_resources() {
             additional_margin: 0.0,
         },
     );
-    let PatternOutputLayer::MarkPrototype { prototype, .. } = &mut generic.output_layers[0] else {
+    let PatternOutputRealization::MarkPrototype { prototype, .. } =
+        &mut generic.output_layers[0].realization
+    else {
         panic!("generic definition owns marks")
     };
     *prototype = MarkPrototype::AuthoredClosedShape {
@@ -413,21 +431,6 @@ fn dispersion_variants_are_deterministic_and_missing_scope_is_an_error() {
             RandomCharacterKind::Even,
             toniator_domain::DensityModulationKind::ArtworkWeighted,
             toniator_domain::ExclusionKind::MinimumCenterDistance,
-        ),
-        (
-            RandomSiteCharacter::Clustered {
-                cluster_density: 0.5,
-                cluster_spread: 2.0,
-                cluster_strength: 0.5,
-            },
-            SiteDensityModulation::Uniform,
-            SiteExclusionPolicy::VisibleMarkMargin {
-                margin: 0.0,
-                sizing: toniator_domain::VisibleMarkSizingPolicy::MaximumSupportRadius,
-            },
-            RandomCharacterKind::Clustered,
-            toniator_domain::DensityModulationKind::Uniform,
-            toniator_domain::ExclusionKind::VisibleMarkMargin,
         ),
     ];
     for (

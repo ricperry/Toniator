@@ -26,16 +26,17 @@ use toniator_domain::{
     DocumentPatternSettings, GeneralizedSiteProductDraft, GuideDimension, GuideDimensionDraft,
     GuideDimensionId, GuidePrototype, GuideRepetition, HalftoneChannelModel, HalftoneChannelRole,
     MarkGeometryResponse, MarkGeometryResponseDelta, MarkOrientation, MarkOrientationDraft,
-    MarkPrototype, MazeProgram, ModeledChannelState, ParametricCurve, PathStrokeStyle,
-    PatternDefinition, PatternDefinitionBundle, PatternDefinitionDraft, PatternDefinitionId,
-    PatternDefinitionRecipe, PatternGeometryResponse, PatternMechanismId, PatternOutputLayerId,
-    PatternOutputRealizationRecipe, PatternOutputResponseDelta, PatternOutputSettings,
-    PatternOutputSettingsRecipe, PatternStructureRecipe, PresetMetadata, PresetRecord,
-    RandomSiteCharacter, RegionGeometryResponse, RegionGeometryResponseDelta,
-    RegionSamplingStrategy, RegionSourceIntent, SiteDensityModulation, SiteExclusionPolicy,
-    SiteUseFilterRecipe, SourceComponent, SourceMapping, SourceMappingComponent, SourcePlacement,
-    SourceReference, SourceReferenceId, SpiralCurve, SpiralShape, StraightGuideDimension,
-    StraightGuideRepetition, ValidationError, VisibleMarkSizingPolicy,
+    MarkPrototype, MazeProgram, ModeledChannelState, ParametricCurve, ParametricCurveSiteDraft,
+    PathStrokeStyle, PatternDefinition, PatternDefinitionBundle, PatternDefinitionDraft,
+    PatternDefinitionId, PatternDefinitionRecipe, PatternGeometryResponse, PatternMechanismId,
+    PatternOutputLayerId, PatternOutputRealizationRecipe, PatternOutputResponseDelta,
+    PatternOutputSettings, PatternOutputSettingsRecipe, PatternStructureRecipe, PresetMetadata,
+    PresetRecord, RandomSiteCharacter, RegionGeometryResponse, RegionGeometryResponseDelta,
+    RegionResizeAlgorithm, RegionSamplingStrategy, RegionSourceIntent, SiteDensityModulation,
+    SiteExclusionPolicy, SiteUseFilterRecipe, SourceComponent, SourceMapping,
+    SourceMappingComponent, SourcePlacement, SourceReference, SourceReferenceId,
+    SpiralCoveragePolicy, SpiralCurve, SpiralShape, StraightGuideDimension,
+    StraightGuideRepetition, ValidationError,
 };
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
@@ -814,12 +815,14 @@ struct VersionEnvelope {
     document_schema_version: u32,
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PresetEnvelopeDto {
     preset_format_version: u32,
     metadata: PresetMetadataDto,
     recipe: PresetRecipeDto,
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PresetMetadataDto {
     id: String,
     name: String,
@@ -828,11 +831,13 @@ struct PresetMetadataDto {
     thumbnail: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PresetRecipeDto {
     structure: PresetStructureRecipeDto,
     output_settings: Vec<PatternOutputSettingsRecipeDtoV3>,
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PatternOutputSettingsRecipeDtoV3 {
     source_filter: SiteUseFilterRecipeDtoV3,
     response: PatternGeometryResponseDto,
@@ -840,6 +845,7 @@ struct PatternOutputSettingsRecipeDtoV3 {
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum SiteUseFilterRecipeDtoV3 {
     All,
     SitesUsedBy { output_index: usize },
@@ -847,6 +853,7 @@ enum SiteUseFilterRecipeDtoV3 {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum PresetStructureRecipeDto {
     StraightGrid {
         name: String,
@@ -868,6 +875,14 @@ enum PresetStructureRecipeDto {
         exclusion: SiteExclusionPolicyDtoV4,
         maximum_attempts: u32,
         maximum_neighbor_checks: u32,
+    },
+    ParametricCurve {
+        name: String,
+        coverage: CoverageDtoV4,
+        curve: ParametricCurveDtoV4,
+        spiral_coverage: SpiralCoveragePolicyDtoV3,
+        repetition: GuideRepetitionDtoV4,
+        sites: Option<ParametricCurveSiteRecipeDtoV3>,
     },
     ConnectionPaths {
         definition: Box<PresetStructureRecipeDto>,
@@ -896,8 +911,24 @@ enum PresetStructureRecipeDto {
     },
 }
 
+/// Current preset-v3 tagged recipe-only spiral materialization intent.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SpiralCoveragePolicyDtoV3 {
+    Fixed,
+    CoverCanvas,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParametricCurveSiteRecipeDtoV3 {
+    interval: f64,
+    phase: f64,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum PatternOutputRealizationRecipeDtoV3 {
     Marks,
     StructuralPaths {
@@ -917,6 +948,7 @@ enum PatternOutputRealizationRecipeDtoV3 {
     },
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GuideDimensionDraftDto {
     baseline_angle_degrees: f64,
     phase: f64,
@@ -924,6 +956,7 @@ struct GuideDimensionDraftDto {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum GeneralizedSiteProductDraftDto {
     Intersections {
         dimension_indices: Vec<usize>,
@@ -937,6 +970,7 @@ enum GeneralizedSiteProductDraftDto {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 enum MarkOrientationDraftDto {
     Fixed,
     GuideTangent { dimension_index: usize },
@@ -1190,18 +1224,7 @@ enum ArtworkWeightResponseDtoV4 {
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum SiteExclusionPolicyDtoV4 {
     None,
-    MinimumCenterDistance {
-        minimum: f64,
-    },
-    VisibleMarkMargin {
-        margin: f64,
-        sizing: VisibleMarkSizingPolicyDtoV4,
-    },
-}
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum VisibleMarkSizingPolicyDtoV4 {
-    MaximumSupportRadius,
+    MinimumCenterDistance { minimum: f64 },
 }
 #[derive(Serialize, Deserialize)]
 struct StraightGuideDimensionDtoV4 {
@@ -1700,6 +1723,27 @@ impl PresetStructureRecipeDto {
                 maximum_attempts: *maximum_attempts,
                 maximum_neighbor_checks: *maximum_neighbor_checks,
             },
+            PatternStructureRecipe::ParametricCurve {
+                name,
+                coverage: definition_coverage,
+                curve,
+                spiral_coverage,
+                repetition,
+                sites,
+            } => Self::ParametricCurve {
+                name: name.clone(),
+                coverage: coverage(definition_coverage),
+                curve: ParametricCurveDtoV4::from_domain(curve),
+                spiral_coverage: match spiral_coverage {
+                    SpiralCoveragePolicy::Fixed => SpiralCoveragePolicyDtoV3::Fixed,
+                    SpiralCoveragePolicy::CoverCanvas => SpiralCoveragePolicyDtoV3::CoverCanvas,
+                },
+                repetition: GuideRepetitionDtoV4::from_domain(repetition),
+                sites: sites.as_ref().map(|sites| ParametricCurveSiteRecipeDtoV3 {
+                    interval: sites.interval,
+                    phase: sites.phase,
+                }),
+            },
             PatternStructureRecipe::ConnectionPaths {
                 definition,
                 program,
@@ -1806,6 +1850,27 @@ impl PresetStructureRecipeDto {
                 exclusion: exclusion.into_domain(),
                 maximum_attempts,
                 maximum_neighbor_checks,
+            }),
+            Self::ParametricCurve {
+                name,
+                coverage: stored_coverage,
+                curve,
+                spiral_coverage,
+                repetition,
+                sites,
+            } => Ok(PatternStructureRecipe::ParametricCurve {
+                name,
+                coverage: coverage_from(stored_coverage),
+                curve: curve.into_domain(),
+                spiral_coverage: match spiral_coverage {
+                    SpiralCoveragePolicyDtoV3::Fixed => SpiralCoveragePolicy::Fixed,
+                    SpiralCoveragePolicyDtoV3::CoverCanvas => SpiralCoveragePolicy::CoverCanvas,
+                },
+                repetition: repetition.into_domain(),
+                sites: sites.map(|sites| ParametricCurveSiteDraft {
+                    interval: sites.interval,
+                    phase: sites.phase,
+                }),
             }),
             Self::ConnectionPaths {
                 definition,
@@ -2054,23 +2119,22 @@ enum PatternGeometryResponseDto {
     Regions { response: RegionResponseDtoV5 },
 }
 
-/// Current v5 tagged authored treatment for a region output.
+/// Current-v5 region response with one positive-geometry resize algorithm and shared fills.
 #[derive(Serialize, Deserialize)]
-#[serde(tag = "treatment", rename_all = "snake_case", deny_unknown_fields)]
-enum RegionResponseDtoV5 {
-    Full {
-        sampling: RegionSamplingStrategyDtoV5,
-    },
-    Scale {
-        sampling: RegionSamplingStrategyDtoV5,
-        minimum_scale: f64,
-        maximum_scale: f64,
-    },
-    ConstantGap {
-        sampling: RegionSamplingStrategyDtoV5,
-        minimum_gap: f64,
-        maximum_gap: f64,
-    },
+#[serde(deny_unknown_fields)]
+struct RegionResponseDtoV5 {
+    algorithm: RegionResizeAlgorithmDtoV5,
+    sampling: RegionSamplingStrategyDtoV5,
+    minimum_fill: f64,
+    maximum_fill: f64,
+}
+
+/// Current-v5 positive-geometry region resize selector.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RegionResizeAlgorithmDtoV5 {
+    Scale,
+    UniformOffset,
 }
 
 /// Current v5 sampling selector; absence is intentionally rejected by serde.
@@ -2088,18 +2152,12 @@ enum ChannelGeometryResponseDeltaDto {
     Regions { delta: RegionResponseDeltaDtoV5 },
 }
 
-/// Current v5 tagged region endpoint delta record.
+/// Current-v5 additive fill-endpoint delta record shared by both algorithms.
 #[derive(Serialize, Deserialize)]
-#[serde(tag = "treatment", rename_all = "snake_case", deny_unknown_fields)]
-enum RegionResponseDeltaDtoV5 {
-    Scale {
-        minimum_scale_delta: Option<f64>,
-        maximum_scale_delta: Option<f64>,
-    },
-    ConstantGap {
-        minimum_gap_delta: Option<f64>,
-        maximum_gap_delta: Option<f64>,
-    },
+#[serde(deny_unknown_fields)]
+struct RegionResponseDeltaDtoV5 {
+    minimum_fill_delta: Option<f64>,
+    maximum_fill_delta: Option<f64>,
 }
 
 impl PatternGeometryResponseDto {
@@ -2159,57 +2217,41 @@ impl ChannelGeometryResponseDeltaDto {
 }
 
 impl RegionResponseDtoV5 {
-    /// Projects current authored region treatment without resolving effective channel values.
+    /// Projects current authored region resize intent without resolving effective channel values.
     fn from_domain(value: &RegionGeometryResponse) -> Self {
-        match value {
-            RegionGeometryResponse::Full { sampling } => Self::Full {
-                sampling: RegionSamplingStrategyDtoV5::from_domain(*sampling),
-            },
-            RegionGeometryResponse::Scale {
-                sampling,
-                minimum_scale,
-                maximum_scale,
-            } => Self::Scale {
-                sampling: RegionSamplingStrategyDtoV5::from_domain(*sampling),
-                minimum_scale: *minimum_scale,
-                maximum_scale: *maximum_scale,
-            },
-            RegionGeometryResponse::ConstantGap {
-                sampling,
-                minimum_gap,
-                maximum_gap,
-            } => Self::ConstantGap {
-                sampling: RegionSamplingStrategyDtoV5::from_domain(*sampling),
-                minimum_gap: *minimum_gap,
-                maximum_gap: *maximum_gap,
-            },
+        Self {
+            algorithm: RegionResizeAlgorithmDtoV5::from_domain(value.algorithm),
+            sampling: RegionSamplingStrategyDtoV5::from_domain(value.sampling),
+            minimum_fill: value.minimum_fill,
+            maximum_fill: value.maximum_fill,
         }
     }
 
-    /// Rebuilds one current authored region treatment for domain validation.
+    /// Rebuilds one current authored region response for domain validation.
     fn into_domain(self) -> RegionGeometryResponse {
+        RegionGeometryResponse {
+            algorithm: self.algorithm.into_domain(),
+            sampling: self.sampling.into_domain(),
+            minimum_fill: self.minimum_fill,
+            maximum_fill: self.maximum_fill,
+        }
+    }
+}
+
+impl RegionResizeAlgorithmDtoV5 {
+    /// Projects the stable algorithm tag without evaluating region geometry.
+    fn from_domain(value: RegionResizeAlgorithm) -> Self {
+        match value {
+            RegionResizeAlgorithm::Scale => Self::Scale,
+            RegionResizeAlgorithm::UniformOffset => Self::UniformOffset,
+        }
+    }
+
+    /// Rebuilds the stable algorithm tag without evaluating region geometry.
+    fn into_domain(self) -> RegionResizeAlgorithm {
         match self {
-            Self::Full { sampling } => RegionGeometryResponse::Full {
-                sampling: sampling.into_domain(),
-            },
-            Self::Scale {
-                sampling,
-                minimum_scale,
-                maximum_scale,
-            } => RegionGeometryResponse::Scale {
-                sampling: sampling.into_domain(),
-                minimum_scale,
-                maximum_scale,
-            },
-            Self::ConstantGap {
-                sampling,
-                minimum_gap,
-                maximum_gap,
-            } => RegionGeometryResponse::ConstantGap {
-                sampling: sampling.into_domain(),
-                minimum_gap,
-                maximum_gap,
-            },
+            Self::Scale => RegionResizeAlgorithm::Scale,
+            Self::UniformOffset => RegionResizeAlgorithm::UniformOffset,
         }
     }
 }
@@ -2232,42 +2274,18 @@ impl RegionSamplingStrategyDtoV5 {
 }
 
 impl RegionResponseDeltaDtoV5 {
-    /// Projects treatment-compatible endpoint delta intent without materialization.
+    /// Projects algorithm-compatible fill endpoint delta intent without materialization.
     fn from_domain(value: &RegionGeometryResponseDelta) -> Self {
-        match value {
-            RegionGeometryResponseDelta::Scale {
-                minimum_scale_delta,
-                maximum_scale_delta,
-            } => Self::Scale {
-                minimum_scale_delta: *minimum_scale_delta,
-                maximum_scale_delta: *maximum_scale_delta,
-            },
-            RegionGeometryResponseDelta::ConstantGap {
-                minimum_gap_delta,
-                maximum_gap_delta,
-            } => Self::ConstantGap {
-                minimum_gap_delta: *minimum_gap_delta,
-                maximum_gap_delta: *maximum_gap_delta,
-            },
+        Self {
+            minimum_fill_delta: value.minimum_fill_delta,
+            maximum_fill_delta: value.maximum_fill_delta,
         }
     }
-    /// Rebuilds treatment-compatible endpoint delta intent without materialization.
+    /// Rebuilds algorithm-compatible fill endpoint delta intent without materialization.
     fn into_domain(self) -> RegionGeometryResponseDelta {
-        match self {
-            Self::Scale {
-                minimum_scale_delta,
-                maximum_scale_delta,
-            } => RegionGeometryResponseDelta::Scale {
-                minimum_scale_delta,
-                maximum_scale_delta,
-            },
-            Self::ConstantGap {
-                minimum_gap_delta,
-                maximum_gap_delta,
-            } => RegionGeometryResponseDelta::ConstantGap {
-                minimum_gap_delta,
-                maximum_gap_delta,
-            },
+        RegionGeometryResponseDelta {
+            minimum_fill_delta: self.minimum_fill_delta,
+            maximum_fill_delta: self.maximum_fill_delta,
         }
     }
 }
@@ -3106,10 +3124,6 @@ impl SiteExclusionPolicyDtoV4 {
             SiteExclusionPolicy::MinimumCenterDistance { minimum } => {
                 Self::MinimumCenterDistance { minimum: *minimum }
             }
-            SiteExclusionPolicy::VisibleMarkMargin { margin, sizing } => Self::VisibleMarkMargin {
-                margin: *margin,
-                sizing: VisibleMarkSizingPolicyDtoV4::from_domain(*sizing),
-            },
         }
     }
     fn into_domain(self) -> SiteExclusionPolicy {
@@ -3118,23 +3132,6 @@ impl SiteExclusionPolicyDtoV4 {
             Self::MinimumCenterDistance { minimum } => {
                 SiteExclusionPolicy::MinimumCenterDistance { minimum }
             }
-            Self::VisibleMarkMargin { margin, sizing } => SiteExclusionPolicy::VisibleMarkMargin {
-                margin,
-                sizing: sizing.into_domain(),
-            },
-        }
-    }
-}
-
-impl VisibleMarkSizingPolicyDtoV4 {
-    fn from_domain(value: VisibleMarkSizingPolicy) -> Self {
-        match value {
-            VisibleMarkSizingPolicy::MaximumSupportRadius => Self::MaximumSupportRadius,
-        }
-    }
-    fn into_domain(self) -> VisibleMarkSizingPolicy {
-        match self {
-            Self::MaximumSupportRadius => VisibleMarkSizingPolicy::MaximumSupportRadius,
         }
     }
 }

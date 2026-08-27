@@ -1,10 +1,11 @@
 use std::cell::Cell;
 
-use toniator_domain::{PatternMechanismId, PatternOutputLayerId};
+use toniator_domain::{PatternMechanismId, PatternOutputLayerId, RegionResizeAlgorithm};
 use toniator_geometry::{
     Bounds, FamilySite, FamilySiteId, FamilySiteProvenance, FamilySiteSet, NominalCellBasis,
-    Point2, SiteScope, Vector2, VoronoiRegionLimits, VoronoiRegionRequest,
-    build_voronoi_regions_cancellable,
+    Point2, RegionTreatment, RegionTreatmentLimits, RegionTreatmentRequest, SiteScope, Vector2,
+    VoronoiRegionLimits, VoronoiRegionRequest, build_voronoi_regions_cancellable,
+    treat_region_requests_cancellable,
 };
 
 /// Builds a finite random-provenance family whose order remains authoritative to the adapter.
@@ -99,6 +100,45 @@ fn guard_family_produces_canonical_center_region() {
         }])
     );
     assert_eq!(diagnostics.site_groups, 9);
+}
+
+/// Proves an ordinary Voronoi cell uses one positive-region UniformOffset to double radius at fill two.
+#[test]
+fn voronoi_cell_uniform_offset_fill_two_targets_four_times_area() {
+    let family = sites(&[
+        (-10.0, -10.0),
+        (0.0, -10.0),
+        (10.0, -10.0),
+        (-10.0, 0.0),
+        (0.0, 0.0),
+        (10.0, 0.0),
+        (-10.0, 10.0),
+        (0.0, 10.0),
+        (10.0, 10.0),
+    ]);
+    let (regions, _) = build_voronoi_regions_cancellable(
+        &family,
+        request(),
+        VoronoiRegionLimits::default(),
+        || false,
+    )
+    .expect("ordinary Voronoi cell builds");
+    let resized = treat_region_requests_cancellable(
+        PatternOutputLayerId(44),
+        &regions,
+        &[RegionTreatmentRequest {
+            base_region_id: regions.regions()[0].id.clone(),
+            reference: None,
+            treatment: Some(RegionTreatment {
+                algorithm: RegionResizeAlgorithm::UniformOffset,
+                fill: 2.0,
+            }),
+        }],
+        RegionTreatmentLimits::default(),
+        || false,
+    )
+    .expect("ordinary Voronoi uniform offset resolves");
+    assert!((resized.regions.regions()[0].area - regions.regions()[0].area * 4.0).abs() < 1e-6);
 }
 
 /// Proves exact duplicate positions retain all sorted owners while avoiding one insertion.

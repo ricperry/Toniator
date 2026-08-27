@@ -12,7 +12,7 @@ use toniator_domain::{
 };
 use toniator_io::{PRESET_FORMAT_VERSION, load_preset, save_preset};
 
-/// Proves current preset persistence retains treatment and sampling tags through one v3 round trip.
+/// Proves current v3 persistence retains algorithm, sampling, and fill endpoints through one round trip.
 #[test]
 fn stage20q_preset_v3_round_trip_retains_typed_region_intent_only() {
     let mut recipe = PatternDefinitionRecipe::regions(PatternStructureRecipe::StraightGrid(
@@ -24,12 +24,12 @@ fn stage20q_preset_v3_round_trip_retains_typed_region_intent_only() {
             },
         },
     ));
-    recipe.output_settings[0].response =
-        PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap {
-            sampling: RegionSamplingStrategy::AreaAverage,
-            minimum_gap: -2.0,
-            maximum_gap: 3.0,
-        });
+    recipe.output_settings[0].response = PatternGeometryResponse::Regions(RegionGeometryResponse {
+        algorithm: toniator_domain::RegionResizeAlgorithm::UniformOffset,
+        sampling: RegionSamplingStrategy::AreaAverage,
+        minimum_fill: 0.25,
+        maximum_fill: 1.5,
+    });
     let preset = PresetRecord {
         metadata: PresetMetadata {
             id: "stage20q-io".into(),
@@ -50,8 +50,10 @@ fn stage20q_preset_v3_round_trip_retains_typed_region_intent_only() {
         "\"preset_format_version\": {}",
         PRESET_FORMAT_VERSION
     )));
-    assert!(bytes.contains("\"treatment\": \"constant_gap\""));
+    assert!(bytes.contains("\"algorithm\": \"uniform_offset\""));
     assert!(bytes.contains("\"sampling\": \"area_average\""));
+    assert!(bytes.contains("\"minimum_fill\": 0.25"));
+    assert!(bytes.contains("\"maximum_fill\": 1.5"));
     assert!(!bytes.contains("treated_regions"));
     assert_eq!(load_preset(&path).expect("current v3 preset loads"), preset);
     fs::remove_file(path).expect("test-only preset removes");

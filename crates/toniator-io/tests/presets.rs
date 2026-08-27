@@ -2,8 +2,9 @@ use std::{fs, path::PathBuf};
 
 use toniator_domain::{
     AuthoredCurveSegment, AuthoredPoint2, AuthoredStructureDraft, AuthoredStructureKind,
-    CoveragePolicy, GuideDimensionDraft, MarkOrientationDraft, PatternDefinitionDraft,
-    PatternDefinitionRecipe, PatternStructureRecipe, PresetMetadata, PresetRecord,
+    CoveragePolicy, CurveRepetition, CurveWinding, GuideDimensionDraft, MarkOrientationDraft,
+    ParametricCurve, ParametricCurveSiteDraft, PatternDefinitionDraft, PatternDefinitionRecipe,
+    PatternStructureRecipe, PresetMetadata, PresetRecord, SpiralCurve, SpiralShape,
 };
 use toniator_io::{PRESET_FORMAT_VERSION, load_preset, save_preset};
 
@@ -97,6 +98,267 @@ fn preset_round_trips_through_versioned_standalone_io() {
     assert!(text.contains(&format!(
         "\"preset_format_version\": {PRESET_FORMAT_VERSION}"
     )));
+}
+
+/// Round-trips the v3 tagged parametric recipe without allocating document-owned IDs.
+#[test]
+fn parametric_recipe_round_trips_without_a_preset_format_bump() {
+    let preset = PresetRecord {
+        metadata: PresetMetadata {
+            id: "parametric-v3".into(),
+            name: "Parametric v3".into(),
+            category: "Test".into(),
+            description: "ID-free parametric recipe serialization fixture.".into(),
+            thumbnail: None,
+        },
+        recipe: PatternDefinitionRecipe::marks(PatternStructureRecipe::ParametricCurve {
+            name: "Square spiral".into(),
+            coverage: CoveragePolicy {
+                guard_steps: 2,
+                additional_margin: 0.0,
+            },
+            curve: ParametricCurve::Spiral(SpiralCurve {
+                shape: SpiralShape::Square,
+                turns: 5.0,
+                radial_spacing: 16.0,
+                phase_degrees: 0.0,
+                winding: CurveWinding::Clockwise,
+            }),
+            spiral_coverage: toniator_domain::SpiralCoveragePolicy::Fixed,
+            repetition: CurveRepetition::Single,
+            sites: Some(ParametricCurveSiteDraft {
+                interval: 16.0,
+                phase: 0.0,
+            }),
+        }),
+    };
+    let path = validation_directory().join("parametric-v3.preset.json");
+    save_preset(&path, &preset).expect("current parametric recipe saves");
+    assert_eq!(
+        load_preset(&path).expect("current parametric recipe reloads"),
+        preset
+    );
+    let text = fs::read_to_string(&path).expect("derived preset remains readable");
+    assert_eq!(
+        text,
+        r#"{
+  "preset_format_version": 3,
+  "metadata": {
+    "id": "parametric-v3",
+    "name": "Parametric v3",
+    "category": "Test",
+    "description": "ID-free parametric recipe serialization fixture.",
+    "thumbnail": null
+  },
+  "recipe": {
+    "structure": {
+      "kind": "parametric_curve",
+      "name": "Square spiral",
+      "coverage": {
+        "guard_steps": 2,
+        "additional_margin": 0.0
+      },
+      "curve": {
+        "kind": "spiral",
+        "shape": "square",
+        "turns": 5.0,
+        "radial_spacing": 16.0,
+        "phase_degrees": 0.0,
+        "winding": "clockwise"
+      },
+      "spiral_coverage": "fixed",
+      "repetition": {
+        "kind": "single"
+      },
+      "sites": {
+        "interval": 16.0,
+        "phase": 0.0
+      }
+    },
+    "output_settings": [
+      {
+        "source_filter": {
+          "kind": "all"
+        },
+        "response": {
+          "kind": "marks",
+          "response": {
+            "minimum_fill": 0.0,
+            "maximum_fill": 1.0
+          }
+        }
+      }
+    ]
+  }
+}"#
+    );
+    fs::write(&path, text.replace("\"fixed\"", "\"unknown\""))
+        .expect("malformed coverage policy writes");
+    assert!(
+        load_preset(&path).is_err(),
+        "unknown coverage policy is rejected"
+    );
+}
+
+/// Rejects unknown and obsolete v3 preset fields before any recipe reaches domain validation.
+#[test]
+fn preset_v3_rejects_unknown_envelope_and_obsolete_recipe_fields() {
+    let directory = validation_directory();
+    let unknown = directory.join("unknown-envelope-field.preset.json");
+    fs::write(
+        &unknown,
+        r#"{"preset_format_version":3,"metadata":{"id":"x","name":"X","category":"Test","description":"Test","thumbnail":null},"recipe":{"structure":{"kind":"straight_grid","name":"Grid","coverage":{"guard_steps":2,"additional_margin":0}},"output_settings":[{"source_filter":{"kind":"all"},"response":{"kind":"marks","minimum_fill":0.25,"maximum_fill":0.85}}]},"obsolete":true}"#,
+    )
+    .expect("derived malformed preset writes");
+    assert!(load_preset(&unknown).is_err());
+
+    let obsolete = directory.join("obsolete-structure-field.preset.json");
+    fs::write(
+        &obsolete,
+        r#"{"preset_format_version":3,"metadata":{"id":"x","name":"X","category":"Test","description":"Test","thumbnail":null},"recipe":{"structure":{"kind":"straight_grid","name":"Grid","coverage":{"guard_steps":2,"additional_margin":0},"legacy_diameter":2},"output_settings":[{"source_filter":{"kind":"all"},"response":{"kind":"marks","minimum_fill":0.25,"maximum_fill":0.85}}]}}"#,
+    )
+    .expect("derived obsolete preset writes");
+    assert!(load_preset(&obsolete).is_err());
+
+    let retired_visible_margin = directory.join("retired-visible-mark-margin.preset.json");
+    fs::write(
+        &retired_visible_margin,
+        r#"{"preset_format_version":3,"metadata":{"id":"x","name":"X","category":"Test","description":"Test","thumbnail":null},"recipe":{"structure":{"kind":"straight_grid","name":"Grid","coverage":{"guard_steps":2,"additional_margin":0},"visible_mark_margin":1},"output_settings":[{"source_filter":{"kind":"all"},"response":{"kind":"marks","minimum_fill":0.25,"maximum_fill":0.85}}]}}"#,
+    )
+    .expect("derived retired-field preset writes");
+    assert!(
+        load_preset(&retired_visible_margin).is_err(),
+        "current preset-v3 strictly rejects the retired visible-mark margin field"
+    );
+}
+
+/// Rejects unknown or retired fields inside current preset-v3 parametric and
+/// generalized-recipe nested DTOs before domain recipe validation can discard them.
+#[test]
+fn preset_v3_rejects_unknown_nested_recipe_fields() {
+    let directory = validation_directory();
+    let parametric = serde_json::json!({
+        "preset_format_version": 3,
+        "metadata": {
+            "id": "nested-parametric",
+            "name": "Nested Parametric",
+            "category": "Test",
+            "description": "Nested DTO strictness fixture.",
+            "thumbnail": null
+        },
+        "recipe": {
+            "structure": {
+                "kind": "parametric_curve",
+                "name": "Round spiral",
+                "coverage": { "guard_steps": 2, "additional_margin": 0.0 },
+                "curve": {
+                    "kind": "spiral",
+                    "shape": "round",
+                    "turns": 2.0,
+                    "radial_spacing": 8.0,
+                    "phase_degrees": 0.0,
+                    "winding": "clockwise"
+                },
+                "spiral_coverage": "fixed",
+                "repetition": { "kind": "single" },
+                "sites": { "interval": 8.0, "phase": 0.0 }
+            },
+            "output_settings": [{
+                "source_filter": { "kind": "all" },
+                "response": {
+                    "kind": "marks",
+                    "response": { "minimum_fill": 0.25, "maximum_fill": 0.85 }
+                }
+            }]
+        }
+    });
+    let generalized = serde_json::json!({
+        "preset_format_version": 3,
+        "metadata": {
+            "id": "nested-generalized",
+            "name": "Nested Generalized",
+            "category": "Test",
+            "description": "Nested DTO strictness fixture.",
+            "thumbnail": null
+        },
+        "recipe": {
+            "structure": {
+                "kind": "generalized_straight_guides",
+                "name": "One guide",
+                "coverage": { "guard_steps": 2, "additional_margin": 0.0 },
+                "dimensions": [{
+                    "baseline_angle_degrees": 0.0,
+                    "phase": 0.0,
+                    "spacing_multiplier": 1.0
+                }],
+                "product": {
+                    "kind": "along_guides",
+                    "dimension_indices": [0],
+                    "interval_multiplier": 1.0,
+                    "phase": 0.0
+                },
+                "orientation": { "kind": "guide_tangent", "dimension_index": 0 }
+            },
+            "output_settings": [{
+                "source_filter": { "kind": "all" },
+                "response": {
+                    "kind": "marks",
+                    "response": { "minimum_fill": 0.25, "maximum_fill": 0.85 }
+                }
+            }]
+        }
+    });
+
+    let valid_parametric = directory.join("nested-parametric-valid.preset.json");
+    fs::write(
+        &valid_parametric,
+        serde_json::to_vec_pretty(&parametric).expect("valid parametric fixture serializes"),
+    )
+    .expect("valid parametric fixture writes");
+    assert!(
+        load_preset(&valid_parametric).is_ok(),
+        "the unmodified current-v3 parametric fixture remains accepted"
+    );
+
+    let valid_generalized = directory.join("nested-generalized-valid.preset.json");
+    fs::write(
+        &valid_generalized,
+        serde_json::to_vec_pretty(&generalized).expect("valid generalized fixture serializes"),
+    )
+    .expect("valid generalized fixture writes");
+    assert!(
+        load_preset(&valid_generalized).is_ok(),
+        "the unmodified current-v3 generalized fixture remains accepted"
+    );
+
+    let mut unknown_sites = parametric.clone();
+    unknown_sites["recipe"]["structure"]["sites"]["obsolete_interval"] = serde_json::json!(4.0);
+    let mut unknown_dimension = generalized.clone();
+    unknown_dimension["recipe"]["structure"]["dimensions"][0]["obsolete_baseline"] =
+        serde_json::json!(45.0);
+    let mut unknown_product = generalized.clone();
+    unknown_product["recipe"]["structure"]["product"]["obsolete_product"] = serde_json::json!(true);
+    let mut unknown_orientation = generalized;
+    unknown_orientation["recipe"]["structure"]["orientation"]["obsolete_orientation"] =
+        serde_json::json!(true);
+
+    for (name, malformed) in [
+        ("unknown-parametric-sites", unknown_sites),
+        ("unknown-guide-dimension", unknown_dimension),
+        ("unknown-generalized-product", unknown_product),
+        ("unknown-mark-orientation", unknown_orientation),
+    ] {
+        let path = directory.join(format!("{name}.preset.json"));
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&malformed).expect("malformed fixture serializes"),
+        )
+        .expect("malformed fixture writes");
+        assert!(
+            load_preset(&path).is_err(),
+            "current-v3 rejects the nested {name} field instead of silently discarding it"
+        );
+    }
 }
 
 /// Rejects malformed, unknown-version, invalid-metadata, and invalid-recipe

@@ -162,10 +162,10 @@ fn guide_face_document_v5_round_trips_without_derived_state() {
             source: RegionSourceIntent::GuideFaces { dimensions, .. },
         } if dimensions.len() == 3
     ));
-    assert!(matches!(
+    assert_eq!(
         bundle.output_settings[0].response,
-        PatternGeometryResponse::Regions(RegionGeometryResponse::Full { .. })
-    ));
+        PatternGeometryResponse::Regions(RegionGeometryResponse::default())
+    );
     let file = fs::File::open(&path).expect("archive opens");
     let mut archive = zip::ZipArchive::new(file).expect("current archive");
     let mut document_json = String::new();

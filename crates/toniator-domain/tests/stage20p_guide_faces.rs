@@ -39,7 +39,7 @@ fn three_guide_structure() -> PatternStructureRecipe {
     }
 }
 
-/// Proves Guide Faces is a complete validated fixed-Full region recipe, not an evaluator-side intent.
+/// Proves Guide Faces is a complete validated default-response recipe, not evaluator-side intent.
 #[test]
 fn guide_face_recipe_requires_ordered_straight_dimensions() {
     let recipe = PatternDefinitionRecipe::guide_faces(three_guide_structure(), vec![0, 1, 2]);
@@ -54,10 +54,10 @@ fn guide_face_recipe_requires_ordered_straight_dimensions() {
         recipe: recipe.clone(),
     };
     validate_preset_record(&record).expect("valid Guide Faces recipe");
-    assert!(matches!(
+    assert_eq!(
         recipe.output_settings[0].response,
-        PatternGeometryResponse::Regions(RegionGeometryResponse::Full { .. })
-    ));
+        PatternGeometryResponse::Regions(RegionGeometryResponse::default())
+    );
     let invalid = PatternDefinitionRecipe::guide_faces(three_guide_structure(), vec![1, 0]);
     assert!(
         validate_preset_record(&PresetRecord {

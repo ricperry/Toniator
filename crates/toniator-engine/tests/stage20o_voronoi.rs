@@ -415,12 +415,12 @@ fn parametric_site_regions_evaluate_and_cache() {
     scheduler.shutdown().expect("shutdown");
 }
 
-/// Proves Full plus solid regions reuse their output realization when only decoded source identity changes.
+/// Proves normalized region fill sampling invalidates realization when decoded source changes.
 ///
-/// The source cache must miss because the immutable raster and vector inputs differ, while the
-/// source-independent Full region cache unit and its family remain reusable.
+/// The source cache and sampled-fill realization miss because immutable raster and vector inputs
+/// differ, while the source-independent Voronoi producer family remains reusable.
 #[test]
-fn full_solid_region_cache_omits_source_and_mapping_identity() {
+fn normalized_region_fill_cache_includes_source_and_mapping_identity() {
     let source_id = SourceReferenceId::new("stage20q-full-solid-cache").expect("source ID");
     let session =
         DocumentSession::new(voronoi_document(180.0, 120.0, source_id.clone())).expect("session");
@@ -456,7 +456,7 @@ fn full_solid_region_cache_omits_source_and_mapping_identity() {
     assert_eq!(diagnostics.channels[0].family, CacheDisposition::Hit);
     assert_eq!(
         diagnostics.channels[0].outputs[0].realization,
-        CacheDisposition::Hit
+        CacheDisposition::Miss
     );
     scheduler.shutdown().expect("scheduler shutdown");
 }

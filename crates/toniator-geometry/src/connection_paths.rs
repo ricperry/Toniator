@@ -484,7 +484,12 @@ fn decompose(
             )
         })?;
         let sequences = trails_for_component(&edges, work)?;
-        for vertices in sequences {
+        let mut open_sequences = Vec::new();
+        reserve_connection(&mut open_sequences, sequences.len().saturating_add(1))?;
+        for sequence in sequences {
+            append_curve_path_fragments(&mut open_sequences, sequence)?;
+        }
+        for vertices in open_sequences {
             work.tick()?;
             if all.len() >= limits.maximum_trails {
                 return Err(ConnectionPathError::new(
@@ -797,24 +802,43 @@ fn trails_for_component(
     for (vertex, incoming) in reversed.into_iter().skip(1) {
         work.tick()?;
         if augmented[incoming.expect("every nonstart vertex has an edge")].virtual_edge {
-            if current.len() > 1 {
-                if current[0] > *current.last().expect("open") {
-                    current.reverse();
-                }
-                output.push(current);
-            }
+            append_curve_path_fragments(&mut output, current)?;
             current = vec![vertex];
         } else {
             current.push(vertex);
         }
     }
-    if current.len() > 1 {
-        if current[0] > *current.last().expect("open") {
-            current.reverse();
-        }
-        output.push(current);
-    }
+    append_curve_path_fragments(&mut output, current)?;
     Ok(output)
+}
+
+/// Appends one or more edge-continuous fragments that satisfy the fixed `CurvePath` segment
+/// bound without changing any trail that already fits that representation.
+///
+/// Consecutive fragments overlap by one endpoint, so every selected edge appears exactly once
+/// across the emitted sequences. Allocation failure is reported before `decompose` publishes a
+/// `ConnectionPath`; empty and one-vertex inputs remain absent because they own no edge.
+fn append_curve_path_fragments(
+    output: &mut Vec<Vec<FamilySiteId>>,
+    mut trail: Vec<FamilySiteId>,
+) -> Result<(), ConnectionPathError> {
+    if trail.len() <= 1 {
+        return Ok(());
+    }
+    if trail[0] > *trail.last().expect("nonempty connection trail") {
+        trail.reverse();
+    }
+    const MAXIMUM_SEGMENTS: usize = 4_096;
+    let mut start = 0usize;
+    while start + 1 < trail.len() {
+        let end = trail.len().min(start.saturating_add(MAXIMUM_SEGMENTS + 1));
+        let mut fragment = Vec::new();
+        reserve_connection(&mut fragment, end - start)?;
+        fragment.extend_from_slice(&trail[start..end]);
+        output.push(fragment);
+        start = end - 1;
+    }
+    Ok(())
 }
 
 /// Returns the opposite canonical endpoint of one non-loop edge.
@@ -978,6 +1002,7 @@ impl ConnectionHasher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use toniator_domain::PatternMechanismId;
 
     /// Maps a representational vector-reservation failure onto the stable connection allocation path.
     #[test]
@@ -985,5 +1010,32 @@ mod tests {
         let mut values = Vec::<u8>::new();
         let error = reserve_connection(&mut values, usize::MAX).expect_err("overflow rejects");
         assert_eq!(error.path(), "connection.allocation");
+    }
+
+    /// Splits an oversized Euler trail only at shared endpoints so the fixed curve-path bound
+    /// cannot reject a dense valid connection component or duplicate a selected edge.
+    #[test]
+    fn oversized_trail_fragments_preserve_every_edge_once_and_openly() {
+        let trail = (0..=4_097)
+            .map(|ordinal| FamilySiteId {
+                mechanism_id: PatternMechanismId(91),
+                ordinal,
+            })
+            .collect::<Vec<_>>();
+        let mut fragments = Vec::new();
+        append_curve_path_fragments(&mut fragments, trail.clone()).expect("fragmentation succeeds");
+        assert_eq!(fragments.len(), 2);
+        assert!(fragments.iter().all(|fragment| fragment.len() <= 4_097));
+        assert_eq!(fragments[0].last(), fragments[1].first());
+        let emitted = fragments
+            .iter()
+            .flat_map(|fragment| fragment.windows(2))
+            .map(|edge| (edge[0], edge[1]))
+            .collect::<Vec<_>>();
+        let expected = trail
+            .windows(2)
+            .map(|edge| (edge[0], edge[1]))
+            .collect::<Vec<_>>();
+        assert_eq!(emitted, expected);
     }
 }

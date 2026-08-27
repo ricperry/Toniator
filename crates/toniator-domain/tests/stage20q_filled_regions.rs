@@ -10,7 +10,7 @@ use toniator_domain::{
     RegionSamplingStrategy, validate_preset_record,
 };
 
-/// Proves public preset validation owns typed treatment bounds rather than accepting a fallback.
+/// Proves public preset validation owns finite ordered 0.0..=2.0 fill bounds for both algorithms.
 #[test]
 fn stage20q_typed_responses_validate_only_their_compatible_numeric_contract() {
     let valid = |response| PresetRecord {
@@ -35,28 +35,24 @@ fn stage20q_typed_responses_validate_only_their_compatible_numeric_contract() {
             recipe
         },
     };
-    for response in [
-        RegionGeometryResponse::Full {
-            sampling: RegionSamplingStrategy::ReferencePoint,
-        },
-        RegionGeometryResponse::Scale {
-            sampling: RegionSamplingStrategy::AreaAverage,
-            minimum_scale: 0.0,
-            maximum_scale: 2.0,
-        },
-        RegionGeometryResponse::ConstantGap {
-            sampling: RegionSamplingStrategy::AreaAverage,
-            minimum_gap: -3.0,
-            maximum_gap: 4.0,
-        },
+    for algorithm in [
+        toniator_domain::RegionResizeAlgorithm::Scale,
+        toniator_domain::RegionResizeAlgorithm::UniformOffset,
     ] {
-        validate_preset_record(&valid(response)).expect("finite ordered treatment validates");
+        validate_preset_record(&valid(RegionGeometryResponse {
+            algorithm,
+            sampling: RegionSamplingStrategy::AreaAverage,
+            minimum_fill: 0.0,
+            maximum_fill: 2.0,
+        }))
+        .expect("finite ordered fill response validates");
     }
-    let error = validate_preset_record(&valid(RegionGeometryResponse::Scale {
+    let error = validate_preset_record(&valid(RegionGeometryResponse {
+        algorithm: toniator_domain::RegionResizeAlgorithm::Scale,
         sampling: RegionSamplingStrategy::ReferencePoint,
-        minimum_scale: -0.1,
-        maximum_scale: 1.0,
+        minimum_fill: -0.1,
+        maximum_fill: 1.0,
     }))
-    .expect_err("Scale cannot become negative");
-    assert_eq!(error.path(), "pattern.region.scale.range");
+    .expect_err("fill cannot become negative");
+    assert_eq!(error.path(), "pattern.region.fill.range");
 }

@@ -1740,7 +1740,7 @@ fn inspector_field_label(field: PropertyFieldId) -> String {
         PropertyFieldId::GuideArcStartAngle => "Arc start angle".into(),
         PropertyFieldId::GuideArcSweepAngle => "Arc sweep angle".into(),
         PropertyFieldId::GuideRepetition => "Guide repetition".into(),
-        PropertyFieldId::GuideOffsetSpacing => "Offset gap".into(),
+        PropertyFieldId::GuideOffsetSpacing => "Normal offset spacing".into(),
         PropertyFieldId::GuideOffsetSides => "Offset sides".into(),
         PropertyFieldId::GuideOffsetCleanup => "Offset cleanup".into(),
         PropertyFieldId::GuideStackDirection => "Stack direction".into(),
@@ -1768,8 +1768,6 @@ fn inspector_field_label(field: PropertyFieldId) -> String {
         PropertyFieldId::ExclusionMinimumCenterDistance => {
             "Exclusion minimum center distance".into()
         }
-        PropertyFieldId::VisibleMarkMargin => "Visible-mark margin".into(),
-        PropertyFieldId::VisibleMarkSizingPolicy => "Visible-mark sizing policy".into(),
         PropertyFieldId::RandomMaximumAttempts => "Maximum random attempts".into(),
         PropertyFieldId::RandomMaximumNeighborChecks => "Maximum neighbor checks".into(),
         PropertyFieldId::OutputSiteProduct => "Mark placement".into(),
@@ -1822,12 +1820,6 @@ fn enum_choice_label(choice: PropertyEnumChoice) -> &'static str {
         PropertyEnumChoice::Exclusion(toniator_domain::ExclusionKind::MinimumCenterDistance) => {
             "Minimum center distance"
         }
-        PropertyEnumChoice::Exclusion(toniator_domain::ExclusionKind::VisibleMarkMargin) => {
-            "Visible-mark margin"
-        }
-        PropertyEnumChoice::VisibleMarkSizingPolicy(
-            toniator_domain::VisibleMarkSizingPolicy::MaximumSupportRadius,
-        ) => "Maximum support radius",
         PropertyEnumChoice::MarkPrototype(toniator_domain::MarkPrototypeKind::Circle) => "Circle",
         PropertyEnumChoice::MarkPrototype(
             toniator_domain::MarkPrototypeKind::AuthoredClosedShape,
@@ -1936,8 +1928,6 @@ fn is_pattern_editor_advanced_safety_descriptor(field: PropertyFieldId) -> bool 
             | PropertyFieldId::ArtworkWeightResponse
             | PropertyFieldId::RandomExclusion
             | PropertyFieldId::ExclusionMinimumCenterDistance
-            | PropertyFieldId::VisibleMarkMargin
-            | PropertyFieldId::VisibleMarkSizingPolicy
             | PropertyFieldId::RandomMaximumAttempts
             | PropertyFieldId::RandomMaximumNeighborChecks
     )
@@ -6262,10 +6252,6 @@ fn structural_command_for_input(
                 minimum_center_distance: number(input)?,
             }
         }
-        PropertyFieldId::VisibleMarkMargin => PatternDefinitionEdit::SetVisibleMarkMargin {
-            mechanism_id: mechanism_id()?,
-            margin: number(input)?,
-        },
         PropertyFieldId::RandomMaximumAttempts => PatternDefinitionEdit::SetRandomMaximumAttempts {
             mechanism_id: mechanism_id()?,
             maximum_attempts: count(input)?,
@@ -6329,15 +6315,6 @@ fn structural_command_for_input(
                 }
             }
             _ => return Err("Expected an artwork response choice.".to_owned()),
-        },
-        PropertyFieldId::VisibleMarkSizingPolicy => match choice(input)? {
-            PropertyEnumChoice::VisibleMarkSizingPolicy(sizing) => {
-                PatternDefinitionEdit::SetVisibleMarkSizingPolicy {
-                    mechanism_id: mechanism_id()?,
-                    sizing,
-                }
-            }
-            _ => return Err("Expected a visible-mark sizing choice.".to_owned()),
         },
         PropertyFieldId::OutputPrototype => match choice(input)? {
             PropertyEnumChoice::MarkPrototype(_) => PatternDefinitionEdit::SetOutputMarkPrototype {
@@ -8423,10 +8400,7 @@ mod tests {
                 PropertyFieldId::RandomExclusion,
                 PropertyEnumChoice::Exclusion(ExclusionKind::MinimumCenterDistance),
             ),
-            (
-                PropertyFieldId::RandomExclusion,
-                PropertyEnumChoice::Exclusion(ExclusionKind::VisibleMarkMargin),
-            ),
+            (PropertyFieldId::RandomExclusion,),
         ] {
             let descriptor = private_descriptor(draft.document(), selected, field);
             let command = private_draft_command_for_input(

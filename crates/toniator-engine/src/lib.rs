@@ -817,51 +817,45 @@ mod stage20q_region_cache_tests {
         })
     }
 
-    /// Proves treatment envelopes use the typed Scale and signed ConstantGap extrema only.
+    /// Proves resize envelopes use the shared normalized fill maximum for both algorithms.
     #[test]
-    fn region_support_uses_outward_scale_and_gap_extrema() {
-        let scale = RegionGeometryResponse::Scale {
+    fn region_support_uses_outward_normalized_fill_extrema() {
+        let scale = RegionGeometryResponse {
+            algorithm: toniator_domain::RegionResizeAlgorithm::Scale,
             sampling: toniator_domain::RegionSamplingStrategy::ReferencePoint,
-            minimum_scale: 0.0,
-            maximum_scale: 1.75,
+            minimum_fill: 0.0,
+            maximum_fill: 1.75,
         };
-        let inward_gap = RegionGeometryResponse::ConstantGap {
+        let unit_offset = RegionGeometryResponse {
+            algorithm: toniator_domain::RegionResizeAlgorithm::UniformOffset,
             sampling: toniator_domain::RegionSamplingStrategy::ReferencePoint,
-            minimum_gap: 2.0,
-            maximum_gap: 4.0,
-        };
-        let outward_gap = RegionGeometryResponse::ConstantGap {
-            sampling: toniator_domain::RegionSamplingStrategy::AreaAverage,
-            minimum_gap: -8.0,
-            maximum_gap: 3.0,
+            minimum_fill: 0.0,
+            maximum_fill: 1.0,
         };
         assert_eq!(
             region_treatment_outward_support(&scale, 10.0).expect("finite scale support"),
             7.5
         );
         assert_eq!(
-            region_treatment_outward_support(&inward_gap, 10.0).expect("inward gap has no growth"),
+            region_treatment_outward_support(&unit_offset, 10.0).expect("unit fill has no growth"),
             0.0
-        );
-        assert_eq!(
-            region_treatment_outward_support(&outward_gap, 10.0).expect("outward gap growth"),
-            4.0
         );
     }
 
     /// Proves invalid support arithmetic fails before a family evaluator can allocate candidates.
     #[test]
     fn region_support_rejects_nonfinite_and_overflowing_inputs() {
-        let nonfinite = RegionGeometryResponse::Scale {
+        let nonfinite = RegionGeometryResponse {
+            algorithm: toniator_domain::RegionResizeAlgorithm::Scale,
             sampling: toniator_domain::RegionSamplingStrategy::ReferencePoint,
-            minimum_scale: 0.0,
-            maximum_scale: f64::INFINITY,
+            minimum_fill: 0.0,
+            maximum_fill: f64::INFINITY,
         };
         assert_eq!(
             region_treatment_outward_support(&nonfinite, 1.0)
-                .expect_err("nonfinite scale rejects")
+                .expect_err("nonfinite fill rejects")
                 .path(),
-            "region.treatment.coverage.maximum_scale"
+            "region.resize.coverage.maximum_fill"
         );
         assert_eq!(
             checked_region_support_add(f64::MAX, f64::MAX)
@@ -871,16 +865,18 @@ mod stage20q_region_cache_tests {
         );
     }
 
-    /// Proves Full plus solid preserves the accepted source-independent realization cache behavior.
+    /// Proves every normalized region response keeps source identity because fill is sampled.
     #[test]
-    fn full_solid_region_output_omits_sampling_identity() {
-        let full =
-            toniator_domain::PatternGeometryResponse::Regions(RegionGeometryResponse::Full {
-                sampling: toniator_domain::RegionSamplingStrategy::AreaAverage,
-            });
-        assert!(!output_sampling_required(&full, &solid_paint()));
+    fn normalized_region_output_requires_sampling_identity_for_solid_and_sampled_paint() {
+        let response = toniator_domain::PatternGeometryResponse::Regions(RegionGeometryResponse {
+            algorithm: toniator_domain::RegionResizeAlgorithm::Scale,
+            sampling: toniator_domain::RegionSamplingStrategy::AreaAverage,
+            minimum_fill: 0.0,
+            maximum_fill: 1.0,
+        });
+        assert!(output_sampling_required(&response, &solid_paint()));
         assert!(output_sampling_required(
-            &full,
+            &response,
             &ChannelPaint::SampledSource
         ));
     }
@@ -888,12 +884,12 @@ mod stage20q_region_cache_tests {
     /// Proves numeric treatment and sampled-paint paths remain source-sensitive cache consumers.
     #[test]
     fn sampled_or_treated_region_output_requires_sampling_identity() {
-        let scale =
-            toniator_domain::PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
-                sampling: toniator_domain::RegionSamplingStrategy::ReferencePoint,
-                minimum_scale: 0.5,
-                maximum_scale: 1.5,
-            });
+        let scale = toniator_domain::PatternGeometryResponse::Regions(RegionGeometryResponse {
+            algorithm: toniator_domain::RegionResizeAlgorithm::Scale,
+            sampling: toniator_domain::RegionSamplingStrategy::ReferencePoint,
+            minimum_fill: 0.5,
+            maximum_fill: 1.5,
+        });
         assert!(output_sampling_required(&scale, &solid_paint()));
         assert!(output_sampling_required(
             &scale,
@@ -2066,7 +2062,7 @@ pub enum RegionProducerCacheDiagnostics {
 /// Requested source sampling facts replayed with one filled-region output cache hit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RegionSamplingCacheDiagnostics {
-    /// Stores the response-selected strategy even when Full plus solid performs no sample.
+    /// Stores the response-selected strategy for normalized source-sampled fill.
     pub strategy: toniator_domain::RegionSamplingStrategy,
     /// Counts complete untreated bases sampled by the typed patterns realizer.
     pub sampled_bases: usize,
@@ -2075,12 +2071,10 @@ pub struct RegionSamplingCacheDiagnostics {
 /// Typed treatment classification retained with bounded retained-region facts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RegionTreatmentCacheKind {
-    /// Replays untreated canonical geometry.
-    Full,
     /// Applies a per-base affine scale.
     Scale,
-    /// Applies a per-base signed normal gap.
-    ConstantGap,
+    /// Applies a per-base signed normal offset to match normalized positive area.
+    UniformOffset,
 }
 
 /// Treatment facts replayed from one independently cached filled-region output unit.
@@ -3294,20 +3288,17 @@ fn completed_region_diagnostics(
     realization: toniator_patterns::RegionOutputRealizationDiagnostics,
     producer: RegionProducerCacheDiagnostics,
 ) -> RegionRealizationDiagnostics {
-    let (strategy, kind) = match response {
-        RegionGeometryResponse::Full { sampling } => (*sampling, RegionTreatmentCacheKind::Full),
-        RegionGeometryResponse::Scale { sampling, .. } => {
-            (*sampling, RegionTreatmentCacheKind::Scale)
-        }
-        RegionGeometryResponse::ConstantGap { sampling, .. } => {
-            (*sampling, RegionTreatmentCacheKind::ConstantGap)
+    let kind = match response.algorithm {
+        toniator_domain::RegionResizeAlgorithm::Scale => RegionTreatmentCacheKind::Scale,
+        toniator_domain::RegionResizeAlgorithm::UniformOffset => {
+            RegionTreatmentCacheKind::UniformOffset
         }
     };
     RegionRealizationDiagnostics {
         source_identity: (realization.sampled_bases > 0).then(|| source.identity().clone()),
         producer,
         sampling: RegionSamplingCacheDiagnostics {
-            strategy,
+            strategy: response.sampling,
             sampled_bases: realization.sampled_bases,
         },
         treatment: RegionTreatmentCacheDiagnostics {
@@ -4306,6 +4297,12 @@ fn required_support_radius_for_outputs(
 
 /// Derives one output's conservative family support request from its explicit capability.
 ///
+/// Ordinary straight/grid Voronoi producers already expand their guard candidates inside the
+/// family evaluator, so their base support retains only authored additional margin. Finite
+/// parametric and random-site producers require the explicit guard envelope here because their
+/// fixed curve or stochastic site source cannot synthesize it from the output alone. Every Region
+/// response then adds only its positive normalized-fill outward extent.
+///
 /// # Errors
 ///
 /// Returns patterns-owned guide-spacing or nominal-cell diagnostics without evaluating a family.
@@ -4356,7 +4353,10 @@ fn required_support_radius_for_output(
                     family.product,
                     toniator_patterns::StructuralProductCapability::AlongGuideSites
                 ) && family.parametric_curve.is_some();
-                if parametric_guard {
+                let producer_guard = parametric_guard
+                    || family.product
+                        == toniator_patterns::StructuralProductCapability::RandomSites;
+                if producer_guard {
                     checked_region_support_add(
                         definition.coverage.additional_margin,
                         f64::from(definition.coverage.guard_steps) * nominal_extent,
@@ -4407,10 +4407,11 @@ fn region_response_for_output(
     }
 }
 
-/// Computes the response-owned outward envelope extension without constructing region geometry.
+/// Computes a conservative response-owned positive-region outward envelope without geometry work.
 ///
-/// Scale uses the producer's maximum nominal cell or guide spacing, while a negative constant
-/// gap grows its boundary by half the signed gap. Full does not broaden the accepted family.
+/// Both resize algorithms use the same normalized radius multiplier. The producer's nominal
+/// extent is therefore scaled only by `maximum_fill - 1`, never by an inter-region gap or a
+/// complement-space measurement.
 ///
 /// # Errors
 ///
@@ -4426,27 +4427,13 @@ fn region_treatment_outward_support(
             "region treatment requires a finite positive producer extent",
         ));
     }
-    let outward = match response {
-        RegionGeometryResponse::Full { .. } => 0.0,
-        RegionGeometryResponse::Scale { maximum_scale, .. } => {
-            if !maximum_scale.is_finite() {
-                return Err(EvaluationError::new(
-                    "region.treatment.coverage.maximum_scale",
-                    "scale treatment maximum must be finite",
-                ));
-            }
-            (maximum_scale - 1.0).max(0.0) * nominal_extent
-        }
-        RegionGeometryResponse::ConstantGap { minimum_gap, .. } => {
-            if !minimum_gap.is_finite() {
-                return Err(EvaluationError::new(
-                    "region.treatment.coverage.minimum_gap",
-                    "constant-gap treatment minimum must be finite",
-                ));
-            }
-            (-minimum_gap).max(0.0) / 2.0
-        }
-    };
+    if !response.maximum_fill.is_finite() {
+        return Err(EvaluationError::new(
+            "region.resize.coverage.maximum_fill",
+            "region maximum fill must be finite",
+        ));
+    }
+    let outward = (response.maximum_fill - 1.0).max(0.0) * nominal_extent;
     if !outward.is_finite() {
         return Err(EvaluationError::new(
             "region.treatment.coverage.support",
@@ -4531,8 +4518,8 @@ struct DocumentRealizationCacheKey {
 /// Constructs the independent cache identity for one ordered output realization.
 ///
 /// The key excludes aggregate scene state while including every source, mapping, response,
-/// algorithm, and bounded-work input that can change this output's canonical geometry. Full solid
-/// replay deliberately omits sampling and treatment policy because it cannot consume either.
+/// algorithm, and bounded-work input that can change this output's canonical geometry. Region
+/// outputs always retain their normalized source-sampling intent in this identity.
 ///
 /// # Errors
 ///
@@ -4555,9 +4542,7 @@ fn document_realization_cache_key(
     let region_sampling_limits = sampling_required.then(|| limits.region_sampling_limits());
     let region_treatment_limits = matches!(
         &output_setting.response,
-        toniator_domain::PatternGeometryResponse::Regions(
-            RegionGeometryResponse::Scale { .. } | RegionGeometryResponse::ConstantGap { .. }
-        )
+        toniator_domain::PatternGeometryResponse::Regions(_)
     )
     .then(|| limits.region_treatment_limits());
     Ok(DocumentRealizationCacheKey {
@@ -4649,20 +4634,14 @@ fn document_realization_cache_key(
 
 /// Reports whether one output's realization consumes decoded source and mapping identity.
 ///
-/// Full solid region output is an exact canonical replay, so it deliberately avoids source
-/// sampling and leaves source/mapping identity out of its cache key. Every other output either
-/// maps geometry or derives sampled paint and therefore remains source-sensitive.
+/// Every current output maps geometry or derives sampled paint. In particular, every region
+/// output samples its complete untreated producer region to resolve its normalized fill.
 fn output_sampling_required(
     response: &toniator_domain::PatternGeometryResponse,
     paint: &ChannelPaint,
 ) -> bool {
-    !matches!(
-        (response, paint),
-        (
-            toniator_domain::PatternGeometryResponse::Regions(RegionGeometryResponse::Full { .. }),
-            ChannelPaint::Solid(_)
-        )
-    )
+    let _ = (response, paint);
+    true
 }
 
 /// Cache-only identity of the complete untreated region producer and its deterministic references.
@@ -4791,15 +4770,8 @@ enum DocumentResponseIdentity {
 /// Cache-key-only authored/effective region treatment identity without a derived sample table.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum RegionResponseIdentity {
-    Full {
-        sampling: toniator_domain::RegionSamplingStrategy,
-    },
-    Scale {
-        sampling: toniator_domain::RegionSamplingStrategy,
-        minimum: u64,
-        maximum: u64,
-    },
-    ConstantGap {
+    Resize {
+        algorithm: toniator_domain::RegionResizeAlgorithm,
         sampling: toniator_domain::RegionSamplingStrategy,
         minimum: u64,
         maximum: u64,
@@ -4808,28 +4780,11 @@ enum RegionResponseIdentity {
 
 /// Converts validated effective region response input into a cache-only typed identity.
 fn region_response_identity(response: &RegionGeometryResponse) -> RegionResponseIdentity {
-    match response {
-        RegionGeometryResponse::Full { sampling } => RegionResponseIdentity::Full {
-            sampling: *sampling,
-        },
-        RegionGeometryResponse::Scale {
-            sampling,
-            minimum_scale,
-            maximum_scale,
-        } => RegionResponseIdentity::Scale {
-            sampling: *sampling,
-            minimum: minimum_scale.to_bits(),
-            maximum: maximum_scale.to_bits(),
-        },
-        RegionGeometryResponse::ConstantGap {
-            sampling,
-            minimum_gap,
-            maximum_gap,
-        } => RegionResponseIdentity::ConstantGap {
-            sampling: *sampling,
-            minimum: minimum_gap.to_bits(),
-            maximum: maximum_gap.to_bits(),
-        },
+    RegionResponseIdentity::Resize {
+        algorithm: response.algorithm,
+        sampling: response.sampling,
+        minimum: response.minimum_fill.to_bits(),
+        maximum: response.maximum_fill.to_bits(),
     }
 }
 
@@ -4919,10 +4874,10 @@ pub(crate) mod test_support {
         HalftoneChannelModel, MarkGeometryResponse, MarkOrientation, MarkPrototype, OffsetCleanup,
         OffsetSides, ParametricCurve, PathStrokeStyle, PatternDefinition, PatternDefinitionBundle,
         PatternDefinitionEdit, PatternDefinitionId, PatternGeometryResponse, PatternMechanismId,
-        PatternOutputLayer, PatternOutputLayerId, PatternOutputSettings, RegionGeometryResponse,
-        RegionSourceIntent, SiteUseFilter, SourceComponent, SourcePlacement, SourceReference,
-        SourceReferenceId, SpiralCurve, SpiralShape, StraightGuideDimension,
-        StraightGuideRepetition,
+        PatternOutputLayer, PatternOutputLayerId, PatternOutputSettings, RandomSiteCharacter,
+        RegionGeometryResponse, RegionSourceIntent, SiteDensityModulation, SiteExclusionPolicy,
+        SiteUseFilter, SourceComponent, SourcePlacement, SourceReference, SourceReferenceId,
+        SpiralCurve, SpiralShape, StraightGuideDimension, StraightGuideRepetition,
     };
 
     use super::*;
@@ -5415,10 +5370,11 @@ pub(crate) mod test_support {
         let document = session.document();
         let mut bundle = document.pattern_definition_bundles()[0].clone();
         bundle.output_settings[0].response =
-            PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
+            PatternGeometryResponse::Regions(RegionGeometryResponse {
+                algorithm: toniator_domain::RegionResizeAlgorithm::Scale,
                 sampling,
-                minimum_scale: 0.75,
-                maximum_scale: 1.25,
+                minimum_fill: 0.75,
+                maximum_fill: 1.25,
             });
         DocumentSession::new(
             Document::with_source_topology_and_authored_structures(
@@ -5439,6 +5395,269 @@ pub(crate) mod test_support {
             .expect("scaled Region document validates"),
         )
         .expect("scaled Region session starts")
+    }
+
+    /// Proves straight-guide Voronoi support relies on its evaluator-owned guard while random
+    /// and finite parametric producers retain closure support and maximum-fill-two coverage.
+    #[test]
+    fn voronoi_region_support_avoids_straight_guard_double_count_and_keeps_parametric_envelope() {
+        let straight = modeled_scaled_voronoi_session();
+        let straight_document = straight.document();
+        let straight_definition = &straight_document.pattern_definition_bundles()[0].definition;
+        let straight_effective = straight_document
+            .effective_channel_pattern(CHANNEL_ID)
+            .expect("straight Voronoi channel resolves");
+        let straight_plan = toniator_patterns::resolve_document_pattern_pipeline(
+            straight_document,
+            straight_definition,
+        )
+        .expect("straight Voronoi plan resolves");
+        let straight_nominal = maximum_nominal_cell_diameter(
+            &straight_plan.family,
+            straight_document.canvas(),
+            &straight_effective.density,
+        )
+        .expect("straight Voronoi nominal extent is finite");
+        let straight_support = required_support_radius_for_output(
+            straight_document.canvas(),
+            &straight_effective,
+            straight_definition,
+            &straight_plan.family,
+            straight_plan
+                .ordered_outputs
+                .first()
+                .expect("straight Voronoi has one Region output"),
+        )
+        .expect("straight Voronoi support resolves");
+        assert_eq!(
+            straight_support,
+            0.25 * straight_nominal,
+            "straight/grid family evaluation already owns its configured guard candidates"
+        );
+
+        let random_definition = PatternDefinition::random_sites(
+            PatternDefinitionId(920),
+            "random Voronoi closure",
+            PatternMechanismId(921),
+            PatternMechanismId(922),
+            PatternMechanismId(923),
+            PatternMechanismId(924),
+            PatternOutputLayerId(122),
+            RandomSiteCharacter::RawUniform,
+            17,
+            SiteDensityModulation::Uniform,
+            SiteExclusionPolicy::None,
+            8_192,
+            8_192,
+            CoveragePolicy {
+                guard_steps: 2,
+                additional_margin: 0.0,
+            },
+        );
+        let random_mark_plan = toniator_patterns::resolve_pattern_pipeline(&random_definition)
+            .expect("random mark plan resolves before Region closure planning");
+        let mut random_region_definition = random_definition.clone();
+        random_region_definition.output_layers = vec![PatternOutputLayer::all(
+            PatternOutputLayerId(122),
+            PatternOutputRealization::Regions {
+                source: RegionSourceIntent::VoronoiSites {
+                    site_mechanism_id: PatternMechanismId(924),
+                },
+            },
+        )];
+        let random_region_plan =
+            toniator_patterns::resolve_pattern_pipeline(&random_region_definition)
+                .expect("random Voronoi plan resolves");
+        assert_eq!(
+            random_mark_plan.family, random_region_plan.family,
+            "changing only the output leaves the random family identity untouched"
+        );
+        let random_nominal = maximum_nominal_cell_diameter(
+            &random_region_plan.family,
+            straight_document.canvas(),
+            &straight_effective.density,
+        )
+        .expect("random Voronoi nominal extent is finite");
+        let random_region_support = required_support_radius_for_output(
+            straight_document.canvas(),
+            &straight_effective,
+            &random_region_definition,
+            &random_region_plan.family,
+            random_region_plan
+                .ordered_outputs
+                .first()
+                .expect("random Voronoi has one Region output"),
+        )
+        .expect("random Voronoi support resolves");
+        assert_eq!(
+            random_region_support,
+            2.25 * random_nominal,
+            "random Voronoi adds producer closure plus its positive fill-one-quarter extension"
+        );
+        let random_mark_support = required_support_radius_for_output(
+            straight_document.canvas(),
+            &straight_effective,
+            &random_definition,
+            &random_mark_plan.family,
+            random_mark_plan
+                .ordered_outputs
+                .first()
+                .expect("random marks retain one output"),
+        )
+        .expect("random mark support resolves");
+        assert_eq!(
+            random_mark_support, random_nominal,
+            "random marks retain their established maximum-fill family request"
+        );
+
+        let parametric_response = RegionGeometryResponse {
+            algorithm: toniator_domain::RegionResizeAlgorithm::Scale,
+            sampling: toniator_domain::RegionSamplingStrategy::ReferencePoint,
+            minimum_fill: 0.0,
+            maximum_fill: 2.0,
+        };
+        let parametric_document = stage20q_parametric_voronoi_document(
+            SourceReferenceId::new("parametric-support").expect("source ID validates"),
+            parametric_response,
+        );
+        let parametric_definition = &parametric_document.pattern_definition_bundles()[0].definition;
+        let parametric_effective = parametric_document
+            .effective_channel_pattern(CHANNEL_ID)
+            .expect("parametric Voronoi channel resolves");
+        let parametric_plan = toniator_patterns::resolve_document_pattern_pipeline(
+            &parametric_document,
+            parametric_definition,
+        )
+        .expect("parametric Voronoi plan resolves");
+        let parametric_nominal = maximum_nominal_cell_diameter(
+            &parametric_plan.family,
+            parametric_document.canvas(),
+            &parametric_effective.density,
+        )
+        .expect("parametric Voronoi nominal extent is finite");
+        let parametric_support = required_support_radius_for_output(
+            parametric_document.canvas(),
+            &parametric_effective,
+            parametric_definition,
+            &parametric_plan.family,
+            parametric_plan
+                .ordered_outputs
+                .first()
+                .expect("parametric Voronoi has one Region output"),
+        )
+        .expect("parametric Voronoi support resolves");
+        assert_eq!(
+            parametric_support,
+            f64::from(parametric_definition.coverage.guard_steps) * parametric_nominal
+                + parametric_nominal,
+            "finite parametric sites retain guard coverage and fill two adds one positive radius"
+        );
+    }
+
+    /// Proves raw uniform Voronoi producers with no exclusion retain deterministic guarded
+    /// closure sites and bounded relevant regions without turning their process into Poisson spacing.
+    #[test]
+    fn raw_uniform_voronoi_uses_producer_closure_without_exclusion_semantics() {
+        let base = modeled_scaled_voronoi_session();
+        let base_document = base.document();
+        let definition_id = base_document.pattern_settings().definition_id;
+        let output_layer_id = PatternOutputLayerId(122);
+        let site_mechanism_id = PatternMechanismId(934);
+        let mut definition = PatternDefinition::random_sites(
+            definition_id,
+            "raw uniform Voronoi closure",
+            PatternMechanismId(931),
+            PatternMechanismId(932),
+            PatternMechanismId(933),
+            site_mechanism_id,
+            output_layer_id,
+            RandomSiteCharacter::RawUniform,
+            17,
+            SiteDensityModulation::Uniform,
+            SiteExclusionPolicy::None,
+            8_192,
+            8_192,
+            CoveragePolicy {
+                guard_steps: 2,
+                additional_margin: 0.0,
+            },
+        );
+        definition.output_layers = vec![PatternOutputLayer::all(
+            output_layer_id,
+            PatternOutputRealization::Regions {
+                source: RegionSourceIntent::VoronoiSites { site_mechanism_id },
+            },
+        )];
+        let document = Document::with_source_topology_and_authored_structures(
+            base_document.id(),
+            base_document.canvas().clone(),
+            base_document.source().clone(),
+            vec![bundle_with_sole_response(
+                definition,
+                PatternGeometryResponse::Regions(RegionGeometryResponse::default()),
+            )],
+            base_document.pattern_settings().clone(),
+            base_document
+                .channel_model()
+                .expect("modeled Voronoi channel model remains present"),
+            base_document
+                .channel_topology()
+                .expect("modeled Voronoi topology remains present")
+                .clone(),
+            Vec::new(),
+        )
+        .expect("raw uniform Voronoi document validates");
+        let session = DocumentSession::new(document).expect("raw uniform Voronoi session starts");
+        let bytes = valid_document_bytes();
+        let first = evaluate_cached_document(
+            document_request(&session, Arc::clone(&bytes)),
+            EvaluationLimits::default(),
+            &DocumentDerivedCache::default(),
+            &NeverCancelled,
+        )
+        .expect("guarded raw uniform Voronoi regions remain bounded");
+        let diagnostics = first.transaction.families[0]
+            .1
+            .random_diagnostics()
+            .expect("random family publishes deterministic coverage diagnostics");
+        assert!(
+            diagnostics.guard_sites > 0,
+            "producer closure retains guard sites"
+        );
+        assert_eq!(
+            diagnostics.canvas_sites + diagnostics.guard_sites,
+            diagnostics.achieved_sites,
+            "every accepted raw site is classified as canvas or producer guard"
+        );
+        assert_eq!(
+            diagnostics.rejected_by_exclusion, 0,
+            "RawUniform with SiteExclusionPolicy::None retains no Poisson-style exclusion"
+        );
+        let second = evaluate_cached_document(
+            document_request(&session, bytes),
+            EvaluationLimits::default(),
+            &DocumentDerivedCache::default(),
+            &NeverCancelled,
+        )
+        .expect("raw uniform Voronoi replay remains bounded");
+        assert_eq!(
+            diagnostics,
+            second.transaction.families[0]
+                .1
+                .random_diagnostics()
+                .expect("replayed random family retains coverage diagnostics"),
+            "same request retains the exact expected producer guard-site accounting"
+        );
+        assert_eq!(
+            first.result.channels()[0].family_identity(),
+            second.result.channels()[0].family_identity(),
+            "same raw seed and guarded producer request keep family identity deterministic"
+        );
+        assert_eq!(
+            first.result.channels()[0].realization_identity(),
+            second.result.channels()[0].realization_identity(),
+            "same bounded positive Voronoi regions keep realization identity deterministic"
+        );
     }
 
     /// Builds an ordinary Voronoi session whose SourceColorAlpha channel consumes sampled region paint.
@@ -6579,9 +6798,7 @@ pub(crate) mod test_support {
 
     /// Writes a direct geometry-render split witness after production cubic Guide Faces retain one component per base.
     ///
-    /// The witness deliberately bypasses document persistence only because the production authored-cubic
-    /// outward-gap case below has no safe split at the bounded native settings. It still consumes the
-    /// geometry-owned canonical treatment and the ordinary renderer without frontend topology work.
+    /// The witness remains legacy Stage 20Q evidence only and is not part of current normalized resize coverage.
     fn stage20q_write_direct_split_witness(output: &Path) {
         let output_layer_id = PatternOutputLayerId(20_709);
         let source = build_canonical_regions_cancellable(
@@ -6626,7 +6843,10 @@ pub(crate) mod test_support {
         let request = RegionTreatmentRequest {
             base_region_id: base.id.clone(),
             reference: Some(Point2::new(150.0, 100.0)),
-            treatment: Some(RegionTreatment::ConstantGap(14.0)),
+            treatment: Some(RegionTreatment {
+                algorithm: toniator_domain::RegionResizeAlgorithm::UniformOffset,
+                fill: 0.5,
+            }),
         };
         let treated = treat_region_requests_cancellable(
             output_layer_id,
@@ -6785,39 +7005,45 @@ pub(crate) mod test_support {
         let sources = SourceBundle::new([source]).expect("one embedded source validates");
         let cases = [
             (
-                "full-reference-solid",
-                RegionGeometryResponse::Full {
+                "unit-reference-solid",
+                RegionGeometryResponse {
+                    algorithm: toniator_domain::RegionResizeAlgorithm::Scale,
                     sampling: toniator_domain::RegionSamplingStrategy::ReferencePoint,
+                    minimum_fill: 1.0,
+                    maximum_fill: 1.0,
                 },
                 false,
                 1.0,
             ),
             (
                 "scale-reference-sampled-opacity",
-                RegionGeometryResponse::Scale {
+                RegionGeometryResponse {
+                    algorithm: toniator_domain::RegionResizeAlgorithm::Scale,
                     sampling: toniator_domain::RegionSamplingStrategy::ReferencePoint,
-                    minimum_scale: 0.0,
-                    maximum_scale: 1.35,
+                    minimum_fill: 0.0,
+                    maximum_fill: 1.35,
                 },
                 true,
                 0.62,
             ),
             (
                 "scale-area-average-sampled",
-                RegionGeometryResponse::Scale {
+                RegionGeometryResponse {
+                    algorithm: toniator_domain::RegionResizeAlgorithm::Scale,
                     sampling: toniator_domain::RegionSamplingStrategy::AreaAverage,
-                    minimum_scale: 0.5,
-                    maximum_scale: 1.25,
+                    minimum_fill: 0.5,
+                    maximum_fill: 1.25,
                 },
                 true,
                 0.62,
             ),
             (
                 "scale-collapse-empty",
-                RegionGeometryResponse::Scale {
+                RegionGeometryResponse {
+                    algorithm: toniator_domain::RegionResizeAlgorithm::Scale,
                     sampling: toniator_domain::RegionSamplingStrategy::ReferencePoint,
-                    minimum_scale: 0.0,
-                    maximum_scale: 0.0,
+                    minimum_fill: 0.0,
+                    maximum_fill: 0.0,
                 },
                 false,
                 1.0,
@@ -6985,20 +7211,20 @@ pub(crate) mod test_support {
         fs::write(output.join("MANIFEST.fragment.md"), manifest).expect("manifest fragment writes");
     }
 
-    /// Generates production Guide Face ConstantGap evidence from one observed engine invocation each.
+    /// Generates production Guide Face UniformOffset evidence from one observed engine invocation each.
     ///
     /// These witnesses preserve the current v5 document boundary, final-canvas-only rendering,
     /// and test-only snapshot provenance. No four-guide or raw-parametric-path producer is used.
     #[test]
-    #[ignore = "writes Stage 20Q Guide Face ConstantGap validation artifacts"]
-    fn generate_stage20q_guide_face_constant_gap_artifacts() {
+    #[ignore = "writes superseded Stage 20Q Guide Face UniformOffset validation artifacts"]
+    fn generate_stage20q_guide_face_uniform_offset_artifacts() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let output = root.join("target/validation/stage20q/guide-faces");
         fs::create_dir_all(&output).expect("Guide Face validation directory exists");
         let raster_input = root.join("assets/raster-sample.png");
         let vector_input = root.join("assets/vector-sample.svg");
         let mut manifest = String::from(
-            "# Stage 20Q Guide Face ConstantGap fragment\n\n\
+            "# Stage 20Q Guide Face UniformOffset fragment\n\n\
              Every case saves and reloads a current schema-v5 document, then exports the one normal \
              engine evaluation to raw RGBA PNG and raw SVG plus an Inkscape SVG raster.\n\n",
         );
@@ -7011,24 +7237,25 @@ pub(crate) mod test_support {
                     height: 1024.0,
                 },
             ),
-            RegionGeometryResponse::ConstantGap {
+            RegionGeometryResponse {
+                algorithm: toniator_domain::RegionResizeAlgorithm::UniformOffset,
                 sampling: toniator_domain::RegionSamplingStrategy::ReferencePoint,
-                minimum_gap: 24.0,
-                maximum_gap: 24.0,
+                minimum_fill: 0.65,
+                maximum_fill: 0.65,
             },
         );
         let (two_result, two_evidence) = stage20q_write_guide_face_case(
             &output,
-            "two-guide-raster-inward-gap-reference-solid",
+            "two-guide-raster-uniform-offset-reference-solid",
             two_guide,
             &raster_input,
             EmbeddedSourceFormat::Png,
             SourceFormatHint::Png,
-            "production two-guide inward ConstantGap / ReferencePoint / solid",
+            "production two-guide UniformOffset fill / ReferencePoint / solid",
         );
         assert!(
             !two_evidence.provenance.is_empty(),
-            "moderate positive gap retains two-guide components"
+            "moderate positive-region UniformOffset retains two-guide components"
         );
         assert_eq!(
             two_result.raster().width(),
@@ -7036,7 +7263,7 @@ pub(crate) mod test_support {
             "renderer performs only final native canvas clipping"
         );
         manifest.push_str(
-            "- `two-guide-raster-inward-gap-reference-solid`: 1024×1024 raster source, positive inward gap, ReferencePoint and solid paint.\n",
+            "- `two-guide-raster-uniform-offset-reference-solid`: 1024×1024 raster source, positive-region UniformOffset fill, ReferencePoint and solid paint.\n",
         );
 
         let collapse = stage20q_region_response_session(
@@ -7050,28 +7277,29 @@ pub(crate) mod test_support {
                 ),
                 64.0,
             ),
-            RegionGeometryResponse::ConstantGap {
+            RegionGeometryResponse {
+                algorithm: toniator_domain::RegionResizeAlgorithm::UniformOffset,
                 sampling: toniator_domain::RegionSamplingStrategy::ReferencePoint,
-                minimum_gap: 16.0,
-                maximum_gap: 16.0,
+                minimum_fill: 0.0,
+                maximum_fill: 0.0,
             },
         );
         let (collapse_result, collapse_evidence) = stage20q_write_guide_face_case(
             &output,
-            "two-guide-raster-inward-gap-collapse",
+            "two-guide-raster-zero-fill-collapse",
             collapse,
             &raster_input,
             EmbeddedSourceFormat::Png,
             SourceFormatHint::Png,
-            "production two-guide collapsing inward ConstantGap",
+            "production two-guide zero UniformOffset fill",
         );
         assert!(
             collapse_evidence.provenance.is_empty(),
-            "positive inward gap collapses every dense two-guide component"
+            "zero normalized fill omits every dense two-guide component"
         );
         assert_eq!(collapse_result.raster().width(), 1024);
         manifest.push_str(
-            "- `two-guide-raster-inward-gap-collapse`: 1024×1024 raster source, positive inward gap collapse to empty treated geometry.\n",
+            "- `two-guide-raster-zero-fill-collapse`: 1024×1024 raster source, zero normalized fill omits treated geometry.\n",
         );
 
         let three_base = stage20q_region_response_session(
@@ -7086,21 +7314,22 @@ pub(crate) mod test_support {
                     height: 620.0,
                 },
             ),
-            RegionGeometryResponse::ConstantGap {
+            RegionGeometryResponse {
+                algorithm: toniator_domain::RegionResizeAlgorithm::UniformOffset,
                 sampling: toniator_domain::RegionSamplingStrategy::AreaAverage,
-                minimum_gap: 18.0,
-                maximum_gap: 18.0,
+                minimum_fill: 0.7,
+                maximum_fill: 0.7,
             },
         );
         let three_guide = stage20q_sampled_region_session(three_base.document().clone(), 0.58);
         let (three_result, three_evidence) = stage20q_write_guide_face_case(
             &output,
-            "three-guide-vector-inward-gap-area-average-sampled-opacity",
+            "three-guide-vector-uniform-offset-area-average-sampled-opacity",
             three_guide,
             &vector_input,
             EmbeddedSourceFormat::Svg,
             SourceFormatHint::Svg,
-            "production 0/60/120 three-guide inward ConstantGap / AreaAverage / sampled paint / opacity",
+            "production 0/60/120 three-guide UniformOffset fill / AreaAverage / sampled paint / opacity",
         );
         assert_production_equilateral_untreated_faces(&three_evidence.untreated_regions);
         let treated_line_faces: Vec<_> = three_evidence
@@ -7120,7 +7349,7 @@ pub(crate) mod test_support {
                 && treated_line_faces
                     .iter()
                     .all(|region| region.ring.segments().len() == 3),
-            "inward-shrunk three-guide line faces retain separated triangular rings"
+            "UniformOffset-resized three-guide line faces retain triangular rings"
         );
         assert_eq!(
             three_evidence.sampling,
@@ -7147,7 +7376,7 @@ pub(crate) mod test_support {
         assert_eq!(three_result.raster().width(), 900);
         assert_eq!(three_result.raster().height(), 620);
         manifest.push_str(
-            "- `three-guide-vector-inward-gap-area-average-sampled-opacity`: production 0/60/120 equilateral untreated faces, positive inward gap, complete AreaAverage sampling, sampled paint, and opacity 0.58 at 900×620.\n",
+            "- `three-guide-vector-uniform-offset-area-average-sampled-opacity`: production 0/60/120 equilateral untreated faces, normalized positive-region UniformOffset fill, complete AreaAverage sampling, sampled paint, and opacity 0.58 at 900×620.\n",
         );
 
         let cubic_base = stage20q_region_response_session(
@@ -7155,21 +7384,22 @@ pub(crate) mod test_support {
                 width: 900.0,
                 height: 620.0,
             }),
-            RegionGeometryResponse::ConstantGap {
+            RegionGeometryResponse {
+                algorithm: toniator_domain::RegionResizeAlgorithm::UniformOffset,
                 sampling: toniator_domain::RegionSamplingStrategy::AreaAverage,
-                minimum_gap: -40.0,
-                maximum_gap: -40.0,
+                minimum_fill: 1.25,
+                maximum_fill: 1.25,
             },
         );
         let cubic = stage20q_sampled_region_session(cubic_base.document().clone(), 0.71);
         let (cubic_result, cubic_evidence) = stage20q_write_guide_face_case(
             &output,
-            "authored-cubic-vector-outward-gap-area-average-sampled",
+            "authored-cubic-vector-uniform-offset-area-average-sampled",
             cubic,
             &vector_input,
             EmbeddedSourceFormat::Svg,
             SourceFormatHint::Svg,
-            "production authored-cubic Guide Faces / outward ConstantGap / AreaAverage / sampled paint",
+            "production authored-cubic Guide Faces / UniformOffset fill / AreaAverage / sampled paint",
         );
         assert!(
             cubic_evidence
@@ -7207,7 +7437,7 @@ pub(crate) mod test_support {
                     (cubic.start().x - cubic.end().x).hypot(cubic.start().y - cubic.end().y)
                         > 1.0e-6
                 }),
-            "authored-cubic outward evidence contains no zero-length cubic seam"
+            "authored-cubic UniformOffset evidence contains no zero-length cubic seam"
         );
         assert!(
             cubic_result
@@ -7217,12 +7447,12 @@ pub(crate) mod test_support {
                 .any(|pixel| pixel[3] != 0)
         );
         manifest.push_str(
-            "- `authored-cubic-vector-outward-gap-area-average-sampled`: genuinely authored cubic Guide Faces at 900×620 with sampled AreaAverage outward ConstantGap treatment.\n",
+            "- `authored-cubic-vector-uniform-offset-area-average-sampled`: genuinely authored cubic Guide Faces at 900×620 with sampled AreaAverage UniformOffset treatment.\n",
         );
 
         stage20q_write_direct_split_witness(&output);
         manifest.push_str(
-            "- `crossing-split-direct-geometry-render`: direct geometry/render narrow-neck inward-gap witness. The bounded production authored-cubic outward-gap case retained one component per base, so this explicitly labeled direct case proves deterministic split ordinals, positive winding, base provenance, replay identity, and final-canvas rendering without claiming document/source sampling evidence.\n",
+            "- `crossing-split-direct-geometry-render`: direct geometry/render narrow-neck positive-region offset witness. The bounded production authored-cubic UniformOffset case retained one component per base, so this explicitly labeled direct case proves deterministic split ordinals, positive winding, base provenance, replay identity, and final-canvas rendering without claiming document/source sampling evidence.\n",
         );
 
         fs::write(output.join("MANIFEST.fragment.md"), manifest)
@@ -7729,9 +7959,10 @@ pub(crate) mod test_support {
         );
     }
 
-    /// Proves unused sampling policy stays outside the Full-plus-solid Region realization key.
+    /// Proves normalized Region sampling-limit changes rekey realization work without rebuilding
+    /// the source-independent structural family.
     #[test]
-    fn full_solid_region_cache_omits_unused_sampling_limits() {
+    fn normalized_solid_region_cache_rekeys_sampling_limits_without_refamily() {
         let session = modeled_voronoi_session();
         let bytes = valid_document_bytes();
         let mut cache = DocumentDerivedCache::default();
@@ -7741,7 +7972,7 @@ pub(crate) mod test_support {
             &cache,
             &NeverCancelled,
         )
-        .expect("Full solid Region evaluates");
+        .expect("normalized solid Region evaluates");
         let baseline_fingerprint = baseline.result.channels()[0]
             .realization_identity()
             .to_owned();
@@ -7753,24 +7984,38 @@ pub(crate) mod test_support {
                 max_flattened_segments: default_sampling.max_flattened_segments - 1,
                 ..default_sampling
             })
-            .expect("nonzero unused sampling policy");
+            .expect("nonzero normalized sampling policy");
         let replay = evaluate_cached_document(
             document_request(&session, bytes),
             irrelevant_policy,
             &cache,
             &NeverCancelled,
         )
-        .expect("Full solid Region replay evaluates");
+        .expect("normalized solid Region replay evaluates");
+        assert_eq!(
+            replay.diagnostics.aggregate.family,
+            CacheDisposition::Hit,
+            "sampling limits affect Region realization, not structural family generation"
+        );
         assert_eq!(
             replay.diagnostics.aggregate.realization,
-            CacheDisposition::Hit
+            CacheDisposition::Miss,
+            "normalized Region fill always samples untreated positive bases"
         );
-        assert_eq!(replay.diagnostics.aggregate.scene, CacheDisposition::Hit);
-        assert_eq!(replay.diagnostics.aggregate.raster, CacheDisposition::Hit);
+        assert_eq!(
+            replay.diagnostics.aggregate.scene,
+            CacheDisposition::Hit,
+            "unchanged canonical Region identity reuses scene assembly after resampling"
+        );
+        assert_eq!(
+            replay.diagnostics.aggregate.raster,
+            CacheDisposition::Hit,
+            "unchanged canonical Region identity reuses raster assembly after resampling"
+        );
         assert_eq!(
             replay.result.channels()[0].realization_identity(),
             baseline_fingerprint,
-            "evaluation policy remains outside accepted Full geometry identity"
+            "sampling work policy rekeys the cache without changing canonical Region identity"
         );
     }
 
@@ -9028,10 +9273,11 @@ pub(crate) mod test_support {
                 definition,
                 output_settings: vec![PatternOutputSettings {
                     output_layer_id: region_id,
-                    response: PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
+                    response: PatternGeometryResponse::Regions(RegionGeometryResponse {
+                        algorithm: toniator_domain::RegionResizeAlgorithm::Scale,
                         sampling: toniator_domain::RegionSamplingStrategy::AreaAverage,
-                        minimum_scale: 0.62,
-                        maximum_scale: 0.9,
+                        minimum_fill: 0.62,
+                        maximum_fill: 0.9,
                     }),
                 }],
             }],

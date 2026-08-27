@@ -342,7 +342,7 @@ pub enum CurveRepetition {
         direction_degrees: f64,
         spacing_multiplier: f64,
     },
-    /// Repeats one guide along its local normals at an authored absolute document-space gap.
+    /// Repeats one guide by an authored absolute normal displacement in document space.
     NormalOffset {
         spacing: f64,
         sides: OffsetSides,
@@ -370,6 +370,43 @@ pub struct SpiralCurve {
     pub radial_spacing: f64,
     pub phase_degrees: f64,
     pub winding: CurveWinding,
+}
+
+/// Selects whether a preset recipe keeps its authored finite spiral turns or
+/// derives fixed turns once from the receiving document canvas at materialization.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpiralCoveragePolicy {
+    /// Preserves the recipe's finite `SpiralCurve::turns` exactly.
+    Fixed,
+    /// Derives enough fixed turns for the centered spiral to reach every canvas corner.
+    CoverCanvas,
+}
+
+/// Converts recipe-only canvas coverage intent into the existing finite spiral
+/// field during materialization without mutating manually authored curves.
+fn materialize_recipe_spiral_curve(
+    curve: &ParametricCurve,
+    policy: SpiralCoveragePolicy,
+    canvas: &CanvasSpec,
+) -> Result<ParametricCurve, ValidationError> {
+    let ParametricCurve::Spiral(spiral) = curve;
+    if policy == SpiralCoveragePolicy::Fixed {
+        return Ok(curve.clone());
+    }
+    let corner_radius = (canvas.width * 0.5).hypot(canvas.height * 0.5);
+    // The final whole revolution keeps every phase direction at or beyond the
+    // corner radius; endpoint radius alone would leave phase-dependent gaps.
+    let turns = (corner_radius / spiral.radial_spacing).ceil() + 1.0;
+    if !turns.is_finite() || turns <= 0.0 {
+        return Err(ValidationError::new(
+            "preset.recipe.parametric.cover_canvas",
+            "canvas coverage cannot derive finite positive spiral turns",
+        ));
+    }
+    Ok(ParametricCurve::Spiral(SpiralCurve {
+        turns,
+        ..spiral.clone()
+    }))
 }
 
 /// Selects the exact local construction family for a spiral source.
@@ -512,7 +549,7 @@ pub enum PatternGeometryResponse {
     Marks(MarkGeometryResponse),
     /// Defines normalized round-brush widths for a guide-path output.
     Connected(ConnectedGeometryResponse),
-    /// Stage 20O ordinary cells have one fixed treatment.
+    /// Defines one current-format source-driven region fill response.
     Regions(RegionGeometryResponse),
 }
 
@@ -526,47 +563,52 @@ pub enum RegionSamplingStrategy {
     AreaAverage,
 }
 
-/// The fill-only response for one canonical region output.
+/// Selects the only current geometric resize algorithm for a region output.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RegionResizeAlgorithm {
+    /// Scales the untreated region about its producer-owned source reference.
+    #[default]
+    Scale,
+    /// Uniformly shrinks or grows each positive region's own curve/path; it never measures gaps.
+    UniformOffset,
+}
+
+/// Stores one source-driven normalized linear-radius region-fill response.
+///
+/// `0.0` omits the realization, `1.0` retains its natural boundary, and `2.0` doubles its
+/// geometric radius. Both algorithms consume the same finite ordered `0.0..=2.0` endpoints;
+/// this model stores intent only and does not calculate any region geometry or negative space.
 #[derive(Clone, Debug, PartialEq)]
-pub enum RegionGeometryResponse {
-    /// Retains the complete untreated canonical region.
-    Full { sampling: RegionSamplingStrategy },
-    /// Scales the complete region around its producer-owned source reference.
-    Scale {
-        sampling: RegionSamplingStrategy,
-        minimum_scale: f64,
-        maximum_scale: f64,
-    },
-    /// Offsets the complete region by half the signed authored gap value.
-    ConstantGap {
-        sampling: RegionSamplingStrategy,
-        minimum_gap: f64,
-        maximum_gap: f64,
-    },
+pub struct RegionGeometryResponse {
+    /// Selects Scale or UniformOffset for the individual positive realization.
+    pub algorithm: RegionResizeAlgorithm,
+    /// Selects the source sampling strategy before the later geometry realization consumes fill.
+    pub sampling: RegionSamplingStrategy,
+    /// Stores the inclusive lower linear-radius fill endpoint.
+    pub minimum_fill: f64,
+    /// Stores the inclusive upper linear-radius fill endpoint.
+    pub maximum_fill: f64,
 }
 
 impl Default for RegionGeometryResponse {
-    /// Supplies the explicit current-format identity treatment.
+    /// Supplies the current Scale/ReferencePoint authored fill range of 0.0 through 1.0.
     fn default() -> Self {
-        Self::Full {
+        Self {
+            algorithm: RegionResizeAlgorithm::Scale,
             sampling: RegionSamplingStrategy::ReferencePoint,
+            minimum_fill: 0.0,
+            maximum_fill: 1.0,
         }
     }
 }
 
-/// Optional additive endpoint intent for a non-identity region treatment.
+/// Stores optional additive normalized-fill endpoint intent independently of algorithm choice.
 #[derive(Clone, Debug, PartialEq)]
-pub enum RegionGeometryResponseDelta {
-    /// Retains absent scale endpoints as inheritance rather than materialized effective values.
-    Scale {
-        minimum_scale_delta: Option<f64>,
-        maximum_scale_delta: Option<f64>,
-    },
-    /// Retains absent gap endpoints as inheritance rather than materialized effective values.
-    ConstantGap {
-        minimum_gap_delta: Option<f64>,
-        maximum_gap_delta: Option<f64>,
-    },
+pub struct RegionGeometryResponseDelta {
+    /// Adds to the lower fill endpoint independently of the current algorithm.
+    pub minimum_fill_delta: Option<f64>,
+    /// Adds to the upper fill endpoint independently of the current algorithm.
+    pub maximum_fill_delta: Option<f64>,
 }
 
 /// One structural-output response bound atomically to an output-layer identity.
@@ -937,16 +979,9 @@ fn validate_response_delta_kind(
     match (base, delta) {
         (PatternGeometryResponse::Marks(_), ChannelGeometryResponseDelta::Marks(_))
         | (PatternGeometryResponse::Connected(_), ChannelGeometryResponseDelta::Connected(_))
-        | (
-            PatternGeometryResponse::Regions(RegionGeometryResponse::Scale { .. }),
-            ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::Scale { .. }),
-        )
-        | (
-            PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap { .. }),
-            ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::ConstantGap {
-                ..
-            }),
-        ) => validate_region_response_delta(delta),
+        | (PatternGeometryResponse::Regions(_), ChannelGeometryResponseDelta::Regions(_)) => {
+            validate_region_response_delta(delta)
+        }
         _ => Err(ValidationError::new(
             "channel.pattern.output_deltas.kind",
             "channel output response delta must match its base response kind",
@@ -954,7 +989,7 @@ fn validate_response_delta_kind(
     }
 }
 
-/// Validates only the finite optional endpoint intent permitted by a matching region treatment.
+/// Validates only the finite optional endpoint intent permitted by a matching region response.
 ///
 /// # Errors
 ///
@@ -963,14 +998,10 @@ fn validate_region_response_delta(
     delta: &ChannelGeometryResponseDelta,
 ) -> Result<(), ValidationError> {
     let values: &[Option<f64>] = match delta {
-        ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::Scale {
-            minimum_scale_delta,
-            maximum_scale_delta,
-        }) => &[*minimum_scale_delta, *maximum_scale_delta],
-        ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::ConstantGap {
-            minimum_gap_delta,
-            maximum_gap_delta,
-        }) => &[*minimum_gap_delta, *maximum_gap_delta],
+        ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta {
+            minimum_fill_delta,
+            maximum_fill_delta,
+        }) => &[*minimum_fill_delta, *maximum_fill_delta],
         _ => return Ok(()),
     };
     for value in values.iter().flatten() {
@@ -1000,36 +1031,14 @@ fn apply_response_delta(
             maximum_thickness: base.maximum_thickness
                 + delta.maximum_thickness_delta.unwrap_or(0.0),
         }),
-        (
-            PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
-                sampling,
-                minimum_scale,
-                maximum_scale,
-            }),
-            ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::Scale {
-                minimum_scale_delta,
-                maximum_scale_delta,
-            }),
-        ) => PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
-            sampling: *sampling,
-            minimum_scale: minimum_scale + minimum_scale_delta.unwrap_or(0.0),
-            maximum_scale: maximum_scale + maximum_scale_delta.unwrap_or(0.0),
-        }),
-        (
-            PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap {
-                sampling,
-                minimum_gap,
-                maximum_gap,
-            }),
-            ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::ConstantGap {
-                minimum_gap_delta,
-                maximum_gap_delta,
-            }),
-        ) => PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap {
-            sampling: *sampling,
-            minimum_gap: minimum_gap + minimum_gap_delta.unwrap_or(0.0),
-            maximum_gap: maximum_gap + maximum_gap_delta.unwrap_or(0.0),
-        }),
+        (PatternGeometryResponse::Regions(base), ChannelGeometryResponseDelta::Regions(delta)) => {
+            PatternGeometryResponse::Regions(RegionGeometryResponse {
+                algorithm: base.algorithm,
+                sampling: base.sampling,
+                minimum_fill: base.minimum_fill + delta.minimum_fill_delta.unwrap_or(0.0),
+                maximum_fill: base.maximum_fill + delta.maximum_fill_delta.unwrap_or(0.0),
+            })
+        }
         _ => {
             return Err(ValidationError::new(
                 "channel.pattern.output_deltas.kind",
@@ -1047,17 +1056,9 @@ fn validate_pattern_geometry_response(
     match response {
         PatternGeometryResponse::Marks(value) => validate_mark_response(value),
         PatternGeometryResponse::Connected(value) => validate_connected_response(value),
-        PatternGeometryResponse::Regions(RegionGeometryResponse::Full { .. }) => Ok(()),
-        PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
-            minimum_scale,
-            maximum_scale,
-            ..
-        }) => validate_region_scale_response(*minimum_scale, *maximum_scale),
-        PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap {
-            minimum_gap,
-            maximum_gap,
-            ..
-        }) => validate_region_gap_response(*minimum_gap, *maximum_gap),
+        PatternGeometryResponse::Regions(value) => {
+            validate_region_fill_response(value.minimum_fill, value.maximum_fill)
+        }
     }
 }
 
@@ -1106,31 +1107,18 @@ pub struct ConnectedGeometryResponseDelta {
 pub enum ChannelGeometryResponseDelta {
     Marks(MarkGeometryResponseDelta),
     Connected(ConnectedGeometryResponseDelta),
-    /// Carries treatment-compatible additive endpoint intent for a region output.
+    /// Carries algorithm-compatible additive fill intent for a region output.
     Regions(RegionGeometryResponseDelta),
 }
 
-/// Validates the finite ordered, nonnegative Scale treatment endpoints.
-fn validate_region_scale_response(minimum: f64, maximum: f64) -> Result<(), ValidationError> {
-    validate_finite(minimum, "pattern.region.scale.minimum")?;
-    validate_finite(maximum, "pattern.region.scale.maximum")?;
-    if minimum < 0.0 || maximum < minimum {
+/// Validates the finite ordered normalized linear-radius fill range for both algorithms.
+fn validate_region_fill_response(minimum: f64, maximum: f64) -> Result<(), ValidationError> {
+    validate_finite(minimum, "pattern.region.fill.minimum")?;
+    validate_finite(maximum, "pattern.region.fill.maximum")?;
+    if !(0.0..=2.0).contains(&minimum) || !(0.0..=2.0).contains(&maximum) || maximum < minimum {
         return Err(ValidationError::new(
-            "pattern.region.scale.range",
-            "region Scale endpoints must be nonnegative and ordered",
-        ));
-    }
-    Ok(())
-}
-
-/// Validates finite ordered signed ConstantGap treatment endpoints.
-fn validate_region_gap_response(minimum: f64, maximum: f64) -> Result<(), ValidationError> {
-    validate_finite(minimum, "pattern.region.gap.minimum")?;
-    validate_finite(maximum, "pattern.region.gap.maximum")?;
-    if maximum < minimum {
-        return Err(ValidationError::new(
-            "pattern.region.gap.range",
-            "region ConstantGap endpoints must be ordered",
+            "pattern.region.fill.range",
+            "region fill endpoints must be ordered within 0.0 through 2.0",
         ));
     }
     Ok(())
@@ -1173,9 +1161,67 @@ pub enum PatternCapabilityScope {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PatternCapabilityProjection {
     pub definition_id: PatternDefinitionId,
+    /// Canonical-order workflow flags derived from the accepted structural definition.
+    pub features: Vec<PatternCapabilityFlag>,
+    /// Scope-filtered authoritative descriptors; this value never copies descriptor metadata.
+    pub active_controls: Vec<PropertyDescriptor>,
     pub family: PatternFamilyCapabilityProjection,
     /// Ordered structural output facts paired with their authoritative base or effective response.
     pub outputs: Vec<PatternOutputCapabilityRecord>,
+}
+
+/// Typed, value-free workflow vocabulary derived from the current definition.
+///
+/// Declaration order is canonical order. Flags are presentation hints only and
+/// never participate in persistence, evaluation, renderer dispatch, or identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PatternCapabilityFlag {
+    Grid,
+    Dispersion,
+    Parametric,
+    Hybrid,
+    Density,
+    DeterministicSeed,
+    GuideCount,
+    GuideSpacing,
+    GuidePhase,
+    EditableGuide,
+    FixedStraightGuides,
+    RawPathGuides,
+    IntersectionSites,
+    AlongGuideSites,
+    AlongCurveSites,
+    DispersedSites,
+    WeightedSites,
+    ExclusionSites,
+    ConnectionSites,
+    Marks,
+    Shape,
+    Orientation,
+    RawPaths,
+    StackedPaths,
+    NormalOffsetPaths,
+    ExtendBeyondCanvas,
+    Voronoi,
+    GuideFaces,
+    ScaleRegions,
+    UniformOffsetRegions,
+    ReferencePointSampling,
+    AreaAverageSampling,
+    SampledPaint,
+    FillRangeResponse,
+    Composites,
+    SitesUsedBy,
+    SitesUnusedBy,
+}
+
+impl PatternCapabilityProjection {
+    /// Returns whether every requested value-free workflow flag is active.
+    pub fn supports_all(&self, required: &[PatternCapabilityFlag]) -> bool {
+        required
+            .iter()
+            .all(|flag| self.features.binary_search(flag).is_ok())
+    }
 }
 
 /// One definition-order output projection with no frontend-owned response interpretation.
@@ -1331,19 +1377,11 @@ pub enum RegionSourceCapabilityKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegionOutputCapabilityProjection {
     pub source: RegionSourceCapabilityKind,
-    /// Lists all currently supported fill-only treatment tags in domain order.
-    pub supported_treatments: Vec<RegionTreatmentCapability>,
-    /// Lists source-sampling strategies available to every supported treatment.
+    /// Lists all current positive-geometry resize algorithms in domain order.
+    pub supported_algorithms: Vec<RegionResizeAlgorithm>,
+    /// Lists source-sampling strategies available to every supported algorithm.
     pub sampling_strategies: Vec<RegionSamplingStrategy>,
     pub sampled_paint: bool,
-}
-
-/// Payload-free region treatment tag exposed through capability projection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RegionTreatmentCapability {
-    Full,
-    Scale,
-    ConstantGap,
 }
 
 /// The only supported guide-path join policy in Stage 20I.
@@ -1562,23 +1600,19 @@ pub enum MarkGeometryFieldEdit {
     MaximumFill(f64),
 }
 
-/// Selects one numeric effective endpoint of a compatible region treatment.
+/// Selects one numeric effective fill endpoint shared by both region resize algorithms.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RegionGeometryFieldEdit {
-    /// Edits only the Scale lower endpoint while preserving an absent upper delta.
-    MinimumScale(f64),
-    /// Edits only the Scale upper endpoint while preserving an absent lower delta.
-    MaximumScale(f64),
-    /// Edits only the ConstantGap lower endpoint while preserving an absent upper delta.
-    MinimumGap(f64),
-    /// Edits only the ConstantGap upper endpoint while preserving an absent lower delta.
-    MaximumGap(f64),
+    /// Edits only the lower normalized fill endpoint while preserving an absent upper delta.
+    MinimumFill(f64),
+    /// Edits only the upper normalized fill endpoint while preserving an absent lower delta.
+    MaximumFill(f64),
 }
 
 /// Atomically replaces the persisted region response owned by one structural output.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PatternOutputSettingsEdit {
-    /// Replaces a region treatment, sampling strategy, and its typed endpoints together.
+    /// Replaces a region algorithm, sampling strategy, and shared fill endpoints together.
     SetRegionResponse {
         output_layer_id: PatternOutputLayerId,
         response: RegionGeometryResponse,
@@ -1661,29 +1695,8 @@ impl PatternOutputSettingsEdit {
                     response: after, ..
                 },
             ) => {
-                let family = matches!(
-                    (before, after),
-                    (
-                        RegionGeometryResponse::Full { .. },
-                        RegionGeometryResponse::Scale { .. }
-                    ) | (
-                        RegionGeometryResponse::Full { .. },
-                        RegionGeometryResponse::ConstantGap { .. }
-                    ) | (
-                        RegionGeometryResponse::Scale { .. },
-                        RegionGeometryResponse::Full { .. }
-                    ) | (
-                        RegionGeometryResponse::Scale { .. },
-                        RegionGeometryResponse::ConstantGap { .. }
-                    ) | (
-                        RegionGeometryResponse::ConstantGap { .. },
-                        RegionGeometryResponse::Full { .. }
-                    ) | (
-                        RegionGeometryResponse::ConstantGap { .. },
-                        RegionGeometryResponse::Scale { .. }
-                    )
-                ) || region_response_sampling(before)
-                    != region_response_sampling(after);
+                let family = before.algorithm != after.algorithm
+                    || region_response_sampling(before) != region_response_sampling(after);
                 Ok(if family {
                     InvalidationLevel::Family
                 } else {
@@ -2381,13 +2394,9 @@ mod stage20r_domain_tests {
     }
 }
 
-/// Returns the persisted sampling tag without exposing any treatment endpoint payload.
+/// Returns the persisted sampling tag without exposing resize or fill payloads.
 const fn region_response_sampling(response: &RegionGeometryResponse) -> RegionSamplingStrategy {
-    match response {
-        RegionGeometryResponse::Full { sampling }
-        | RegionGeometryResponse::Scale { sampling, .. }
-        | RegionGeometryResponse::ConstantGap { sampling, .. } => *sampling,
-    }
+    response.sampling
 }
 
 /// The source component selected by a channel's authoritative source mapping.
@@ -2756,26 +2765,12 @@ pub enum ArtworkWeightResponse {
     Smoothstep,
 }
 
-/// Size policy used by a visible-mark exclusion constraint.  The current
-/// maximum-support policy is conservative: every realized circle is bounded
-/// by the family support radius, so the stated separation survives realization.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum VisibleMarkSizingPolicy {
-    MaximumSupportRadius,
-}
-
 /// Collision behavior remains independent from candidate character and
 /// density modulation.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SiteExclusionPolicy {
     None,
-    MinimumCenterDistance {
-        minimum: f64,
-    },
-    VisibleMarkMargin {
-        margin: f64,
-        sizing: VisibleMarkSizingPolicy,
-    },
+    MinimumCenterDistance { minimum: f64 },
 }
 
 /// A typed reusable structural mechanism.  Stage 14 retains only the accepted
@@ -3308,6 +3303,60 @@ impl PatternDefinition {
             coverage,
         }
     }
+
+    /// Constructs an existing parametric-family definition from explicit document-owned IDs.
+    ///
+    /// The optional site intent selects a circle-mark output; its absence
+    /// selects the raw structural path output. Validation remains the caller's
+    /// publication gate and this constructor owns no evaluator state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn parametric_curve(
+        id: PatternDefinitionId,
+        name: impl Into<String>,
+        curve_id: PatternMechanismId,
+        site_id: Option<PatternMechanismId>,
+        output_id: PatternOutputLayerId,
+        curve: ParametricCurve,
+        repetition: CurveRepetition,
+        sites: Option<ParametricCurveSiteDraft>,
+        coverage: CoveragePolicy,
+    ) -> Self {
+        let mut mechanisms = vec![PatternMechanism::ParametricCurveSource {
+            id: curve_id,
+            curve,
+            repetition,
+        }];
+        let output = if let (Some(site_id), Some(sites)) = (site_id, sites) {
+            mechanisms.push(PatternMechanism::AlongParametricCurveSites {
+                id: site_id,
+                curve_mechanism_id: curve_id,
+                interval: sites.interval,
+                phase: sites.phase,
+            });
+            PatternOutputRealization::MarkPrototype {
+                site_mechanism_id: site_id,
+                prototype: MarkPrototype::Circle,
+                orientation: MarkOrientation::Fixed,
+            }
+        } else {
+            PatternOutputRealization::ParametricPaths {
+                curve_mechanism_id: curve_id,
+                style: PathStrokeStyle::default(),
+            }
+        };
+        Self {
+            id,
+            name: name.into(),
+            family: PatternFamily::ParametricCurve {
+                curve_mechanism_id: curve_id,
+                site_mechanism_id: site_id,
+            },
+            mechanisms,
+            output_layers: vec![PatternOutputLayer::all(output_id, output)],
+            modulation: PatternModulation,
+            coverage,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -3830,7 +3879,9 @@ impl Document {
                 })
                 .collect()
         });
-        project_validated_pattern_definition(&bundle.definition, &settings)
+        let mut projection = project_validated_pattern_definition(&bundle.definition, &settings)?;
+        projection.active_controls = capability_active_controls(self, scope, definition_id);
+        Ok(projection)
     }
 
     /// Builds a stale-aware density-delta command from desired effective
@@ -4127,7 +4178,6 @@ impl Document {
     /// # Errors
     ///
     /// Returns a stable branch, channel, or finite/range failure without changing persisted intent.
-    #[allow(unused_assignments, unused_mut, unused_variables)]
     pub fn set_channel_region_response_field_for_effective(
         &self,
         channel_id: ChannelId,
@@ -4168,202 +4218,38 @@ impl Document {
             .iter()
             .find(|delta| delta.output_layer_id == output_layer_id)
             .map(|entry| entry.delta.clone());
-        let delta = match (desired, base, existing, edit) {
-            (
-                PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
-                    mut minimum_scale,
-                    mut maximum_scale,
-                    ..
-                }),
-                PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
-                    minimum_scale: base_minimum,
-                    maximum_scale: base_maximum,
-                    ..
-                }),
-                Some(ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::Scale {
-                    mut minimum_scale_delta,
-                    mut maximum_scale_delta,
-                })),
-                RegionGeometryFieldEdit::MinimumScale(value),
-            ) => {
-                minimum_scale = value;
-                minimum_scale_delta = Some(value - base_minimum);
-                validate_region_scale_response(minimum_scale, maximum_scale)?;
-                ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::Scale {
-                    minimum_scale_delta,
-                    maximum_scale_delta,
-                })
-            }
-            (
-                PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
-                    minimum_scale,
-                    mut maximum_scale,
-                    ..
-                }),
-                PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
-                    minimum_scale: base_minimum,
-                    maximum_scale: base_maximum,
-                    ..
-                }),
-                Some(ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::Scale {
-                    minimum_scale_delta,
-                    mut maximum_scale_delta,
-                })),
-                RegionGeometryFieldEdit::MaximumScale(value),
-            ) => {
-                maximum_scale = value;
-                maximum_scale_delta = Some(value - base_maximum);
-                validate_region_scale_response(minimum_scale, maximum_scale)?;
-                ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::Scale {
-                    minimum_scale_delta,
-                    maximum_scale_delta,
-                })
-            }
-            (
-                PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
-                    mut minimum_scale,
-                    maximum_scale,
-                    ..
-                }),
-                PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
-                    minimum_scale: base_minimum,
-                    maximum_scale: _,
-                    ..
-                }),
-                None,
-                RegionGeometryFieldEdit::MinimumScale(value),
-            ) => {
-                minimum_scale = value;
-                validate_region_scale_response(minimum_scale, maximum_scale)?;
-                ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::Scale {
-                    minimum_scale_delta: Some(value - base_minimum),
-                    maximum_scale_delta: None,
-                })
-            }
-            (
-                PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
-                    minimum_scale,
-                    mut maximum_scale,
-                    ..
-                }),
-                PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
-                    minimum_scale: _,
-                    maximum_scale: base_maximum,
-                    ..
-                }),
-                None,
-                RegionGeometryFieldEdit::MaximumScale(value),
-            ) => {
-                maximum_scale = value;
-                validate_region_scale_response(minimum_scale, maximum_scale)?;
-                ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::Scale {
-                    minimum_scale_delta: None,
-                    maximum_scale_delta: Some(value - base_maximum),
-                })
-            }
-            (
-                PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap {
-                    mut minimum_gap,
-                    mut maximum_gap,
-                    ..
-                }),
-                PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap {
-                    minimum_gap: base_minimum,
-                    maximum_gap: base_maximum,
-                    ..
-                }),
-                Some(ChannelGeometryResponseDelta::Regions(
-                    RegionGeometryResponseDelta::ConstantGap {
-                        mut minimum_gap_delta,
-                        mut maximum_gap_delta,
-                    },
-                )),
-                RegionGeometryFieldEdit::MinimumGap(value),
-            ) => {
-                minimum_gap = value;
-                minimum_gap_delta = Some(value - base_minimum);
-                validate_region_gap_response(minimum_gap, maximum_gap)?;
-                ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::ConstantGap {
-                    minimum_gap_delta,
-                    maximum_gap_delta,
-                })
-            }
-            (
-                PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap {
-                    minimum_gap,
-                    mut maximum_gap,
-                    ..
-                }),
-                PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap {
-                    minimum_gap: _,
-                    maximum_gap: base_maximum,
-                    ..
-                }),
-                Some(ChannelGeometryResponseDelta::Regions(
-                    RegionGeometryResponseDelta::ConstantGap {
-                        minimum_gap_delta,
-                        mut maximum_gap_delta,
-                    },
-                )),
-                RegionGeometryFieldEdit::MaximumGap(value),
-            ) => {
-                maximum_gap = value;
-                maximum_gap_delta = Some(value - base_maximum);
-                validate_region_gap_response(minimum_gap, maximum_gap)?;
-                ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::ConstantGap {
-                    minimum_gap_delta,
-                    maximum_gap_delta,
-                })
-            }
-            (
-                PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap {
-                    mut minimum_gap,
-                    maximum_gap,
-                    ..
-                }),
-                PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap {
-                    minimum_gap: base_minimum,
-                    maximum_gap: _,
-                    ..
-                }),
-                None,
-                RegionGeometryFieldEdit::MinimumGap(value),
-            ) => {
-                minimum_gap = value;
-                validate_region_gap_response(minimum_gap, maximum_gap)?;
-                ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::ConstantGap {
-                    minimum_gap_delta: Some(value - base_minimum),
-                    maximum_gap_delta: None,
-                })
-            }
-            (
-                PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap {
-                    minimum_gap,
-                    mut maximum_gap,
-                    ..
-                }),
-                PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap {
-                    minimum_gap: _,
-                    maximum_gap: base_maximum,
-                    ..
-                }),
-                None,
-                RegionGeometryFieldEdit::MaximumGap(value),
-            ) => {
-                maximum_gap = value;
-                validate_region_gap_response(minimum_gap, maximum_gap)?;
-                ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::ConstantGap {
-                    minimum_gap_delta: None,
-                    maximum_gap_delta: Some(value - base_maximum),
-                })
-            }
-            _ => {
-                return Err(ValidationError::new(
-                    "channel.pattern.geometry_response",
-                    "region field edit requires a matching non-identity treatment and delta",
-                ));
-            }
+        let (PatternGeometryResponse::Regions(desired), PatternGeometryResponse::Regions(base)) =
+            (desired, base)
+        else {
+            return Err(ValidationError::new(
+                "channel.pattern.geometry_response",
+                "region field edit requires a region response",
+            ));
         };
+        let mut minimum_fill_delta = existing.as_ref().and_then(|delta| match delta {
+            ChannelGeometryResponseDelta::Regions(delta) => delta.minimum_fill_delta,
+            _ => None,
+        });
+        let mut maximum_fill_delta = existing.as_ref().and_then(|delta| match delta {
+            ChannelGeometryResponseDelta::Regions(delta) => delta.maximum_fill_delta,
+            _ => None,
+        });
+        let mut desired = desired;
+        match edit {
+            RegionGeometryFieldEdit::MinimumFill(value) => {
+                desired.minimum_fill = value;
+                minimum_fill_delta = Some(value - base.minimum_fill);
+            }
+            RegionGeometryFieldEdit::MaximumFill(value) => {
+                desired.maximum_fill = value;
+                maximum_fill_delta = Some(value - base.maximum_fill);
+            }
+        }
+        validate_region_fill_response(desired.minimum_fill, desired.maximum_fill)?;
+        let delta = ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta {
+            minimum_fill_delta,
+            maximum_fill_delta,
+        });
         Ok(DocumentCommand::SetChannelOutputResponseDelta {
             base: self.pattern_settings.clone(),
             channel_id,
@@ -4668,27 +4554,11 @@ impl Document {
                             .find(|setting| setting.output_layer_id == output.id())
                             .map(|setting| &setting.response)
                         {
-                            Some(PatternGeometryResponse::Regions(
-                                RegionGeometryResponse::Full { .. },
-                            )) => &[
-                                PropertyFieldId::RegionTreatment,
+                            Some(PatternGeometryResponse::Regions(_)) => &[
+                                PropertyFieldId::RegionResizeAlgorithm,
                                 PropertyFieldId::RegionSampling,
-                            ],
-                            Some(PatternGeometryResponse::Regions(
-                                RegionGeometryResponse::Scale { .. },
-                            )) => &[
-                                PropertyFieldId::RegionTreatment,
-                                PropertyFieldId::RegionSampling,
-                                PropertyFieldId::RegionMinimumScale,
-                                PropertyFieldId::RegionMaximumScale,
-                            ],
-                            Some(PatternGeometryResponse::Regions(
-                                RegionGeometryResponse::ConstantGap { .. },
-                            )) => &[
-                                PropertyFieldId::RegionTreatment,
-                                PropertyFieldId::RegionSampling,
-                                PropertyFieldId::RegionMinimumGap,
-                                PropertyFieldId::RegionMaximumGap,
+                                PropertyFieldId::RegionMinimumFill,
+                                PropertyFieldId::RegionMaximumFill,
                             ],
                             _ => &[],
                         },
@@ -4931,14 +4801,12 @@ impl Document {
                         }
                     }
                     PatternMechanism::SiteExclusion { policy, .. } => {
-                        let visible =
-                            matches!(policy, SiteExclusionPolicy::VisibleMarkMargin { .. });
                         descriptors.push(descriptor_with_runtime_context(
                             PropertyFieldId::RandomExclusion,
                             target,
                             DescriptorRuntimeContext::Exclusion {
-                                dependency: if visible { PropertyDependency::VisibleMarkExclusion } else { PropertyDependency::RandomProcess },
-                                support: if visible { StructuralSupportConstraint::VisibleMarkMarginUsesMaximumRealizedSupport } else { StructuralSupportConstraint::None },
+                                dependency: PropertyDependency::RandomProcess,
+                                support: StructuralSupportConstraint::None,
                             },
                         ));
                         match policy {
@@ -4948,14 +4816,6 @@ impl Document {
                                     PropertyFieldId::ExclusionMinimumCenterDistance,
                                     target,
                                 ))
-                            }
-                            SiteExclusionPolicy::VisibleMarkMargin { .. } => {
-                                for field in [
-                                    PropertyFieldId::VisibleMarkMargin,
-                                    PropertyFieldId::VisibleMarkSizingPolicy,
-                                ] {
-                                    descriptors.push(descriptor_from_contract(field, target));
-                                }
                             }
                         }
                     }
@@ -5372,63 +5232,29 @@ impl Document {
                         PatternGeometryResponse::Connected(response),
                     ) => PropertyCurrentValueKind::FiniteF64(response.maximum_thickness),
                     (
-                        PropertyFieldId::RegionTreatment,
+                        PropertyFieldId::RegionResizeAlgorithm,
                         PatternOutputRealization::Regions { .. },
                         PatternGeometryResponse::Regions(response),
-                    ) => PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::RegionTreatment(
-                        match response {
-                            RegionGeometryResponse::Full { .. } => RegionTreatmentCapability::Full,
-                            RegionGeometryResponse::Scale { .. } => {
-                                RegionTreatmentCapability::Scale
-                            }
-                            RegionGeometryResponse::ConstantGap { .. } => {
-                                RegionTreatmentCapability::ConstantGap
-                            }
-                        },
-                    )),
+                    ) => PropertyCurrentValueKind::EnumChoice(
+                        PropertyEnumChoice::RegionResizeAlgorithm(response.algorithm),
+                    ),
                     (
                         PropertyFieldId::RegionSampling,
                         PatternOutputRealization::Regions { .. },
                         PatternGeometryResponse::Regions(response),
                     ) => PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::RegionSampling(
-                        match response {
-                            RegionGeometryResponse::Full { sampling }
-                            | RegionGeometryResponse::Scale { sampling, .. }
-                            | RegionGeometryResponse::ConstantGap { sampling, .. } => *sampling,
-                        },
+                        response.sampling,
                     )),
                     (
-                        PropertyFieldId::RegionMinimumScale,
+                        PropertyFieldId::RegionMinimumFill,
                         PatternOutputRealization::Regions { .. },
-                        PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
-                            minimum_scale,
-                            ..
-                        }),
-                    ) => PropertyCurrentValueKind::FiniteF64(*minimum_scale),
+                        PatternGeometryResponse::Regions(response),
+                    ) => PropertyCurrentValueKind::FiniteF64(response.minimum_fill),
                     (
-                        PropertyFieldId::RegionMaximumScale,
+                        PropertyFieldId::RegionMaximumFill,
                         PatternOutputRealization::Regions { .. },
-                        PatternGeometryResponse::Regions(RegionGeometryResponse::Scale {
-                            maximum_scale,
-                            ..
-                        }),
-                    ) => PropertyCurrentValueKind::FiniteF64(*maximum_scale),
-                    (
-                        PropertyFieldId::RegionMinimumGap,
-                        PatternOutputRealization::Regions { .. },
-                        PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap {
-                            minimum_gap,
-                            ..
-                        }),
-                    ) => PropertyCurrentValueKind::FiniteF64(*minimum_gap),
-                    (
-                        PropertyFieldId::RegionMaximumGap,
-                        PatternOutputRealization::Regions { .. },
-                        PatternGeometryResponse::Regions(RegionGeometryResponse::ConstantGap {
-                            maximum_gap,
-                            ..
-                        }),
-                    ) => PropertyCurrentValueKind::FiniteF64(*maximum_gap),
+                        PatternGeometryResponse::Regions(response),
+                    ) => PropertyCurrentValueKind::FiniteF64(response.maximum_fill),
                     _ => {
                         unreachable!("output response descriptor must match structural output kind")
                     }
@@ -5827,40 +5653,18 @@ impl Document {
                 }
                 _ => PropertyInheritance::Inherited,
             },
-            PropertyFieldId::RegionMinimumScale => match output_delta {
-                Some(ChannelGeometryResponseDelta::Regions(
-                    RegionGeometryResponseDelta::Scale {
-                        minimum_scale_delta: Some(_),
-                        ..
-                    },
-                )) => PropertyInheritance::Explicit,
+            PropertyFieldId::RegionMinimumFill => match output_delta {
+                Some(ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta {
+                    minimum_fill_delta: Some(_),
+                    ..
+                })) => PropertyInheritance::Explicit,
                 _ => PropertyInheritance::Inherited,
             },
-            PropertyFieldId::RegionMaximumScale => match output_delta {
-                Some(ChannelGeometryResponseDelta::Regions(
-                    RegionGeometryResponseDelta::Scale {
-                        maximum_scale_delta: Some(_),
-                        ..
-                    },
-                )) => PropertyInheritance::Explicit,
-                _ => PropertyInheritance::Inherited,
-            },
-            PropertyFieldId::RegionMinimumGap => match output_delta {
-                Some(ChannelGeometryResponseDelta::Regions(
-                    RegionGeometryResponseDelta::ConstantGap {
-                        minimum_gap_delta: Some(_),
-                        ..
-                    },
-                )) => PropertyInheritance::Explicit,
-                _ => PropertyInheritance::Inherited,
-            },
-            PropertyFieldId::RegionMaximumGap => match output_delta {
-                Some(ChannelGeometryResponseDelta::Regions(
-                    RegionGeometryResponseDelta::ConstantGap {
-                        maximum_gap_delta: Some(_),
-                        ..
-                    },
-                )) => PropertyInheritance::Explicit,
+            PropertyFieldId::RegionMaximumFill => match output_delta {
+                Some(ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta {
+                    maximum_fill_delta: Some(_),
+                    ..
+                })) => PropertyInheritance::Explicit,
                 _ => PropertyInheritance::Inherited,
             },
             PropertyFieldId::DefinitionSelection => {
@@ -5963,40 +5767,18 @@ impl Document {
                     .map(|entry| &entry.delta);
                 match (descriptor.field, delta) {
                     (
-                        PropertyFieldId::RegionMinimumScale,
-                        Some(ChannelGeometryResponseDelta::Regions(
-                            RegionGeometryResponseDelta::Scale {
-                                minimum_scale_delta: Some(value),
-                                ..
-                            },
-                        )),
+                        PropertyFieldId::RegionMinimumFill,
+                        Some(ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta {
+                            minimum_fill_delta: Some(value),
+                            ..
+                        })),
                     ) => Some(PropertyCurrentValueKind::FiniteF64(*value)),
                     (
-                        PropertyFieldId::RegionMaximumScale,
-                        Some(ChannelGeometryResponseDelta::Regions(
-                            RegionGeometryResponseDelta::Scale {
-                                maximum_scale_delta: Some(value),
-                                ..
-                            },
-                        )),
-                    ) => Some(PropertyCurrentValueKind::FiniteF64(*value)),
-                    (
-                        PropertyFieldId::RegionMinimumGap,
-                        Some(ChannelGeometryResponseDelta::Regions(
-                            RegionGeometryResponseDelta::ConstantGap {
-                                minimum_gap_delta: Some(value),
-                                ..
-                            },
-                        )),
-                    ) => Some(PropertyCurrentValueKind::FiniteF64(*value)),
-                    (
-                        PropertyFieldId::RegionMaximumGap,
-                        Some(ChannelGeometryResponseDelta::Regions(
-                            RegionGeometryResponseDelta::ConstantGap {
-                                maximum_gap_delta: Some(value),
-                                ..
-                            },
-                        )),
+                        PropertyFieldId::RegionMaximumFill,
+                        Some(ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta {
+                            maximum_fill_delta: Some(value),
+                            ..
+                        })),
                     ) => Some(PropertyCurrentValueKind::FiniteF64(*value)),
                     _ => None,
                 }
@@ -6949,6 +6731,46 @@ impl Document {
                 validate_definition(&definition)?;
                 Ok(definition)
             }
+            PatternStructureRecipe::ParametricCurve {
+                name,
+                coverage,
+                curve,
+                spiral_coverage,
+                repetition,
+                sites,
+            } => {
+                let definition_id = self.allocate_definition_id()?;
+                let curve_id = self.allocate_mechanism_id()?;
+                let site_id = sites
+                    .as_ref()
+                    .map(|_| {
+                        curve_id
+                            .0
+                            .checked_add(1)
+                            .map(PatternMechanismId)
+                            .ok_or_else(|| {
+                                ValidationError::new(
+                                    "pattern_definitions.mechanisms.id",
+                                    "document mechanism ID space is exhausted",
+                                )
+                            })
+                    })
+                    .transpose()?;
+                let curve = materialize_recipe_spiral_curve(curve, *spiral_coverage, &self.canvas)?;
+                let definition = PatternDefinition::parametric_curve(
+                    definition_id,
+                    name.clone(),
+                    curve_id,
+                    site_id,
+                    self.allocate_output_layer_id()?,
+                    curve,
+                    repetition.clone(),
+                    sites.clone(),
+                    coverage.clone(),
+                );
+                validate_definition(&definition)?;
+                Ok(definition)
+            }
             PatternStructureRecipe::ConnectionPaths { .. }
             | PatternStructureRecipe::MazeWalls { .. }
             | PatternStructureRecipe::AuthoredClosedShapeMarks { .. }
@@ -6975,6 +6797,7 @@ impl Document {
     ) -> Result<(), ValidationError> {
         match recipe {
             PatternStructureRecipe::StraightGrid(_) => Ok(()),
+            PatternStructureRecipe::ParametricCurve { .. } => Ok(()),
             PatternStructureRecipe::GeneralizedStraightGuides {
                 coverage,
                 dimensions,
@@ -8328,21 +8151,6 @@ fn recipe_exclusion_transition(
                 VariantTransitionValue::FiniteF64(*minimum),
             )],
         ),
-        SiteExclusionPolicy::VisibleMarkMargin { margin, sizing } => (
-            ExclusionKind::VisibleMarkMargin,
-            vec![
-                (
-                    PropertyFieldId::VisibleMarkMargin,
-                    VariantTransitionValue::FiniteF64(*margin),
-                ),
-                (
-                    PropertyFieldId::VisibleMarkSizingPolicy,
-                    VariantTransitionValue::EnumChoice(
-                        PropertyEnumChoice::VisibleMarkSizingPolicy(*sizing),
-                    ),
-                ),
-            ],
-        ),
     }
 }
 
@@ -9037,42 +8845,6 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
                 .find(|mechanism| mechanism.id() == *mechanism_id)
             {
                 *current = *minimum_center_distance;
-            }
-        }
-        PatternDefinitionEdit::SetVisibleMarkMargin {
-            mechanism_id,
-            margin,
-        } => {
-            if let Some(PatternMechanism::SiteExclusion {
-                policy:
-                    SiteExclusionPolicy::VisibleMarkMargin {
-                        margin: current, ..
-                    },
-                ..
-            }) = definition
-                .mechanisms
-                .iter_mut()
-                .find(|mechanism| mechanism.id() == *mechanism_id)
-            {
-                *current = *margin;
-            }
-        }
-        PatternDefinitionEdit::SetVisibleMarkSizingPolicy {
-            mechanism_id,
-            sizing,
-        } => {
-            if let Some(PatternMechanism::SiteExclusion {
-                policy:
-                    SiteExclusionPolicy::VisibleMarkMargin {
-                        sizing: current, ..
-                    },
-                ..
-            }) = definition
-                .mechanisms
-                .iter_mut()
-                .find(|mechanism| mechanism.id() == *mechanism_id)
-            {
-                *current = *sizing;
             }
         }
         PatternDefinitionEdit::SetRandomMaximumAttempts {
@@ -9872,20 +9644,6 @@ fn remap_definition_edit_for_duplicate(
             mechanism_id: mechanism(*mechanism_id),
             minimum_center_distance: *minimum_center_distance,
         },
-        PatternDefinitionEdit::SetVisibleMarkMargin {
-            mechanism_id,
-            margin,
-        } => PatternDefinitionEdit::SetVisibleMarkMargin {
-            mechanism_id: mechanism(*mechanism_id),
-            margin: *margin,
-        },
-        PatternDefinitionEdit::SetVisibleMarkSizingPolicy {
-            mechanism_id,
-            sizing,
-        } => PatternDefinitionEdit::SetVisibleMarkSizingPolicy {
-            mechanism_id: mechanism(*mechanism_id),
-            sizing: *sizing,
-        },
         PatternDefinitionEdit::SetRandomMaximumAttempts {
             mechanism_id,
             maximum_attempts,
@@ -10558,28 +10316,6 @@ fn validate_definition_edit(
                 "field is inactive for the current exclusion policy",
             )),
         },
-        PatternDefinitionEdit::SetVisibleMarkMargin {
-            mechanism_id,
-            margin,
-        } => match validate_exclusion_target(definition, *mechanism_id)? {
-            SiteExclusionPolicy::VisibleMarkMargin { .. } => validate_nonnegative_finite(
-                *margin,
-                "pattern_definitions.mechanisms.site_exclusion.margin",
-            ),
-            _ => Err(ValidationError::new(
-                "pattern_definitions.mechanisms.site_exclusion.margin",
-                "field is inactive for the current exclusion policy",
-            )),
-        },
-        PatternDefinitionEdit::SetVisibleMarkSizingPolicy { mechanism_id, .. } => {
-            match validate_exclusion_target(definition, *mechanism_id)? {
-                SiteExclusionPolicy::VisibleMarkMargin { .. } => Ok(()),
-                _ => Err(ValidationError::new(
-                    "pattern_definitions.mechanisms.site_exclusion.sizing",
-                    "field is inactive for the current exclusion policy",
-                )),
-            }
-        }
         PatternDefinitionEdit::SetRandomMaximumAttempts {
             mechanism_id,
             maximum_attempts,
@@ -12132,11 +11868,204 @@ fn project_validated_pattern_definition(
             ),
         }),
     };
+    let mut feature_set = BTreeSet::new();
+    match &family {
+        PatternFamilyCapabilityProjection::Grid(grid) => {
+            feature_set.extend([
+                PatternCapabilityFlag::Grid,
+                PatternCapabilityFlag::Density,
+                PatternCapabilityFlag::GuideCount,
+            ]);
+            if grid.guides.spacing {
+                feature_set.insert(PatternCapabilityFlag::GuideSpacing);
+            }
+            if grid.guides.phase {
+                feature_set.insert(PatternCapabilityFlag::GuidePhase);
+            }
+            if grid.guides.editable_curve {
+                feature_set.insert(PatternCapabilityFlag::EditableGuide);
+            }
+            if !grid.guides.prototype_kinds.is_empty() {
+                feature_set.insert(PatternCapabilityFlag::RawPathGuides);
+            } else {
+                feature_set.insert(PatternCapabilityFlag::FixedStraightGuides);
+            }
+            feature_set.insert(match grid.site_product {
+                GuideSiteProductCapability::Intersections => {
+                    PatternCapabilityFlag::IntersectionSites
+                }
+                GuideSiteProductCapability::AlongGuides => PatternCapabilityFlag::AlongGuideSites,
+            });
+        }
+        PatternFamilyCapabilityProjection::Dispersion(dispersion) => {
+            feature_set.extend([
+                PatternCapabilityFlag::Dispersion,
+                PatternCapabilityFlag::Density,
+                PatternCapabilityFlag::DeterministicSeed,
+                PatternCapabilityFlag::DispersedSites,
+            ]);
+            if matches!(
+                dispersion.density_modulation,
+                DensityModulationKind::ArtworkWeighted
+            ) {
+                feature_set.insert(PatternCapabilityFlag::WeightedSites);
+            }
+            if !matches!(dispersion.exclusion, ExclusionKind::None) {
+                feature_set.insert(PatternCapabilityFlag::ExclusionSites);
+            }
+        }
+        PatternFamilyCapabilityProjection::Parametric(parametric) => {
+            feature_set.insert(PatternCapabilityFlag::Parametric);
+            if parametric.generator.density {
+                feature_set.insert(PatternCapabilityFlag::Density);
+            }
+            if parametric.raw_paths {
+                feature_set.insert(PatternCapabilityFlag::RawPaths);
+            }
+            if parametric.sites_along_curve {
+                feature_set.insert(PatternCapabilityFlag::AlongCurveSites);
+            }
+            if parametric.normal_offset {
+                feature_set.insert(PatternCapabilityFlag::NormalOffsetPaths);
+            }
+            if matches!(
+                definition.mechanisms.first(),
+                Some(PatternMechanism::ParametricCurveSource {
+                    repetition: CurveRepetition::TransformStack { .. },
+                    ..
+                })
+            ) {
+                feature_set.insert(PatternCapabilityFlag::StackedPaths);
+            }
+            feature_set.insert(PatternCapabilityFlag::ExtendBeyondCanvas);
+        }
+    }
+    if outputs.len() > 1 {
+        feature_set.extend([
+            PatternCapabilityFlag::Hybrid,
+            PatternCapabilityFlag::Composites,
+        ]);
+    }
+    for output in &outputs {
+        match &output.structural {
+            PatternOutputCapabilityProjection::Marks(mark) => {
+                feature_set.insert(PatternCapabilityFlag::Marks);
+                if mark.fill_range {
+                    feature_set.insert(PatternCapabilityFlag::FillRangeResponse);
+                }
+                if mark.prototype != MarkPrototypeKind::Circle {
+                    feature_set.insert(PatternCapabilityFlag::Shape);
+                }
+                if mark.orientation != MarkOrientationKind::Fixed {
+                    feature_set.insert(PatternCapabilityFlag::Orientation);
+                }
+            }
+            PatternOutputCapabilityProjection::GuidePaths(_) => {
+                feature_set.extend([
+                    PatternCapabilityFlag::RawPaths,
+                    PatternCapabilityFlag::StackedPaths,
+                    PatternCapabilityFlag::ExtendBeyondCanvas,
+                ]);
+                if definition.mechanisms.iter().any(|mechanism| {
+                    matches!(
+                        mechanism,
+                        PatternMechanism::GuideDimensions { dimensions, .. }
+                            if dimensions.iter().any(|dimension| matches!(
+                                dimension.repetition,
+                                GuideRepetition::TransformStack { .. }
+                            ))
+                    )
+                }) {
+                    feature_set.insert(PatternCapabilityFlag::StackedPaths);
+                }
+            }
+            PatternOutputCapabilityProjection::ConnectionPaths(_) => {
+                feature_set.extend([
+                    PatternCapabilityFlag::ConnectionSites,
+                    PatternCapabilityFlag::RawPaths,
+                ]);
+            }
+            PatternOutputCapabilityProjection::MazeWalls(_) => {
+                feature_set.extend([
+                    PatternCapabilityFlag::Hybrid,
+                    PatternCapabilityFlag::ConnectionSites,
+                    PatternCapabilityFlag::RawPaths,
+                ]);
+            }
+            PatternOutputCapabilityProjection::Regions(region) => {
+                feature_set.extend([
+                    PatternCapabilityFlag::ScaleRegions,
+                    PatternCapabilityFlag::UniformOffsetRegions,
+                    PatternCapabilityFlag::ReferencePointSampling,
+                    PatternCapabilityFlag::AreaAverageSampling,
+                    PatternCapabilityFlag::SampledPaint,
+                    PatternCapabilityFlag::FillRangeResponse,
+                ]);
+                match region.source {
+                    RegionSourceCapabilityKind::OrdinaryVoronoi { .. } => {
+                        feature_set.insert(PatternCapabilityFlag::Voronoi);
+                    }
+                    RegionSourceCapabilityKind::GuideFaces { .. } => {
+                        feature_set.insert(PatternCapabilityFlag::GuideFaces);
+                    }
+                }
+            }
+        }
+        match output.source_filter {
+            SiteUseFilter::All => {}
+            SiteUseFilter::SitesUsedBy { .. } => {
+                feature_set.insert(PatternCapabilityFlag::SitesUsedBy);
+            }
+            SiteUseFilter::SitesUnusedBy { .. } => {
+                feature_set.insert(PatternCapabilityFlag::SitesUnusedBy);
+            }
+        }
+    }
     Ok(PatternCapabilityProjection {
         definition_id: definition.id,
+        features: feature_set.into_iter().collect(),
+        active_controls: Vec::new(),
         family,
         outputs,
     })
+}
+
+/// Retains only descriptor authorities that belong to a requested capability scope.
+fn capability_active_controls(
+    document: &Document,
+    scope: PatternCapabilityScope,
+    definition_id: PatternDefinitionId,
+) -> Vec<PropertyDescriptor> {
+    document
+        .property_descriptors()
+        .into_iter()
+        .filter(|descriptor| match (scope, descriptor.target) {
+            (PatternCapabilityScope::DocumentBase, PropertyTarget::Document) => {
+                !matches!(descriptor.field, PropertyFieldId::SourceReference)
+            }
+            (PatternCapabilityScope::Channel(channel_id), PropertyTarget::Channel(target))
+                if target == channel_id =>
+            {
+                matches!(
+                    descriptor.field,
+                    PropertyFieldId::DefinitionSelection
+                        | PropertyFieldId::DensityAcrossX
+                        | PropertyFieldId::DensityAcrossY
+                        | PropertyFieldId::RotationDegrees
+                        | PropertyFieldId::ShapeRotationDegrees
+                )
+            }
+            (
+                PatternCapabilityScope::Channel(channel_id),
+                PropertyTarget::ChannelOutput(target, _),
+            ) => target == channel_id,
+            (_, PropertyTarget::Definition(id)) => id == definition_id,
+            (_, PropertyTarget::Mechanism(id, _)) => id == definition_id,
+            (_, PropertyTarget::OutputLayer(id, _)) => id == definition_id,
+            (_, PropertyTarget::GuideDimension(id, _, _)) => id == definition_id,
+            _ => false,
+        })
+        .collect()
 }
 
 /// Projects one accepted mark output without exposing renderer behavior or payload IDs.
@@ -12164,10 +12093,9 @@ fn project_output_capability(
                         dimensions: dimensions.clone(),
                     },
                 },
-                supported_treatments: vec![
-                    RegionTreatmentCapability::Full,
-                    RegionTreatmentCapability::Scale,
-                    RegionTreatmentCapability::ConstantGap,
+                supported_algorithms: vec![
+                    RegionResizeAlgorithm::Scale,
+                    RegionResizeAlgorithm::UniformOffset,
                 ],
                 sampling_strategies: vec![
                     RegionSamplingStrategy::ReferencePoint,
@@ -12292,7 +12220,6 @@ fn exclusion_kind(policy: &SiteExclusionPolicy) -> ExclusionKind {
     match policy {
         SiteExclusionPolicy::None => ExclusionKind::None,
         SiteExclusionPolicy::MinimumCenterDistance { .. } => ExclusionKind::MinimumCenterDistance,
-        SiteExclusionPolicy::VisibleMarkMargin { .. } => ExclusionKind::VisibleMarkMargin,
     }
 }
 
@@ -12493,10 +12420,6 @@ fn validate_site_exclusion(policy: &SiteExclusionPolicy) -> Result<(), Validatio
         SiteExclusionPolicy::MinimumCenterDistance { minimum } => validate_positive_finite(
             *minimum,
             "pattern_definitions.mechanisms.site_exclusion.minimum",
-        ),
-        SiteExclusionPolicy::VisibleMarkMargin { margin, .. } => validate_nonnegative_finite(
-            *margin,
-            "pattern_definitions.mechanisms.site_exclusion.margin",
         ),
     }
 }
@@ -13152,14 +13075,10 @@ fn validate_channel_pattern_instance(
             ChannelGeometryResponseDelta::Connected(value) => {
                 (value.minimum_thickness_delta, value.maximum_thickness_delta)
             }
-            ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::Scale {
-                minimum_scale_delta,
-                maximum_scale_delta,
-            }) => (*minimum_scale_delta, *maximum_scale_delta),
-            ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::ConstantGap {
-                minimum_gap_delta,
-                maximum_gap_delta,
-            }) => (*minimum_gap_delta, *maximum_gap_delta),
+            ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta {
+                minimum_fill_delta,
+                maximum_fill_delta,
+            }) => (*minimum_fill_delta, *maximum_fill_delta),
         };
         if let Some(value) = minimum {
             validate_finite(
@@ -13552,8 +13471,6 @@ pub enum PropertyFieldId {
     ArtworkWeightResponse,
     RandomExclusion,
     ExclusionMinimumCenterDistance,
-    VisibleMarkMargin,
-    VisibleMarkSizingPolicy,
     RandomMaximumAttempts,
     RandomMaximumNeighborChecks,
     OutputSiteProduct,
@@ -13582,12 +13499,10 @@ pub enum PropertyFieldId {
     ParametricStackSpacingMultiplier,
     AlongParametricInterval,
     AlongParametricPhase,
-    RegionTreatment,
+    RegionResizeAlgorithm,
     RegionSampling,
-    RegionMinimumScale,
-    RegionMaximumScale,
-    RegionMinimumGap,
-    RegionMaximumGap,
+    RegionMinimumFill,
+    RegionMaximumFill,
 }
 
 /// The authoritative descriptor order.  Keeping this list beside the field
@@ -13660,8 +13575,6 @@ pub const PROPERTY_FIELD_IDS: &[PropertyFieldId] = &[
     PropertyFieldId::ArtworkWeightResponse,
     PropertyFieldId::RandomExclusion,
     PropertyFieldId::ExclusionMinimumCenterDistance,
-    PropertyFieldId::VisibleMarkMargin,
-    PropertyFieldId::VisibleMarkSizingPolicy,
     PropertyFieldId::RandomMaximumAttempts,
     PropertyFieldId::RandomMaximumNeighborChecks,
     PropertyFieldId::OutputSiteProduct,
@@ -13690,12 +13603,10 @@ pub const PROPERTY_FIELD_IDS: &[PropertyFieldId] = &[
     PropertyFieldId::ParametricStackSpacingMultiplier,
     PropertyFieldId::AlongParametricInterval,
     PropertyFieldId::AlongParametricPhase,
-    PropertyFieldId::RegionTreatment,
+    PropertyFieldId::RegionResizeAlgorithm,
     PropertyFieldId::RegionSampling,
-    PropertyFieldId::RegionMinimumScale,
-    PropertyFieldId::RegionMaximumScale,
-    PropertyFieldId::RegionMinimumGap,
-    PropertyFieldId::RegionMaximumGap,
+    PropertyFieldId::RegionMinimumFill,
+    PropertyFieldId::RegionMaximumFill,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -13730,7 +13641,6 @@ pub enum PropertyEnumChoice {
     DensityModulation(DensityModulationKind),
     ArtworkWeightResponse(ArtworkWeightResponse),
     Exclusion(ExclusionKind),
-    VisibleMarkSizingPolicy(VisibleMarkSizingPolicy),
     MarkPrototype(MarkPrototypeKind),
     MarkOrientation(MarkOrientationKind),
     SiteUseFilter(SiteUseFilterKind),
@@ -13740,7 +13650,7 @@ pub enum PropertyEnumChoice {
     SpiralShape(SpiralShape),
     CurveWinding(CurveWinding),
     CurveRepetition(GuideRepetitionKind),
-    RegionTreatment(RegionTreatmentCapability),
+    RegionResizeAlgorithm(RegionResizeAlgorithm),
     RegionSampling(RegionSamplingStrategy),
     OffsetSides(OffsetSides),
     OffsetCleanup(OffsetCleanup),
@@ -13766,7 +13676,6 @@ pub enum DensityModulationKind {
 pub enum ExclusionKind {
     None,
     MinimumCenterDistance,
-    VisibleMarkMargin,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MarkPrototypeKind {
@@ -13831,7 +13740,6 @@ pub enum PropertyDependency {
     ClusteredRandomProcess,
     ArtworkWeightedDensity,
     MinimumCenterExclusion,
-    VisibleMarkExclusion,
     MarkPrototypeOutput,
     AuthoredClosedShapeMark,
     GuidedOutputOrientation,
@@ -13857,7 +13765,6 @@ pub enum PropertyApplicability {
     ClusteredRandomProcess,
     ArtworkWeightedDensity,
     MinimumCenterExclusion,
-    VisibleMarkExclusion,
     MarkPrototypeOutput,
     AuthoredClosedShapeMark,
     GuidedOutputOrientation,
@@ -13877,8 +13784,6 @@ pub enum StructuralSupportConstraint {
     None,
     /// The active maximum fill derives the conservative family coverage envelope.
     MaximumFillDefinesCoverage,
-    /// Visible-mark exclusion derives its separation from active realized support.
-    VisibleMarkMarginUsesMaximumRealizedSupport,
 }
 
 /// Validation shape for stable references. Collection fields carry their
@@ -13957,8 +13862,6 @@ pub enum PropertyCommandKind {
     SetArtworkWeightResponse,
     SetExclusionVariant,
     SetExclusionMinimumCenterDistance,
-    SetVisibleMarkMargin,
-    SetVisibleMarkSizingPolicy,
     SetRandomMaximumAttempts,
     SetRandomMaximumNeighborChecks,
     SetOutputSiteProduct,
@@ -14473,7 +14376,6 @@ fn property_value_for_mechanism(
                 SiteExclusionPolicy::MinimumCenterDistance { .. } => {
                     ExclusionKind::MinimumCenterDistance
                 }
-                SiteExclusionPolicy::VisibleMarkMargin { .. } => ExclusionKind::VisibleMarkMargin,
             }))
         }
         (
@@ -14483,22 +14385,6 @@ fn property_value_for_mechanism(
                 ..
             },
         ) => PropertyCurrentValueKind::FiniteF64(*minimum),
-        (
-            PropertyFieldId::VisibleMarkMargin,
-            PatternMechanism::SiteExclusion {
-                policy: SiteExclusionPolicy::VisibleMarkMargin { margin, .. },
-                ..
-            },
-        ) => PropertyCurrentValueKind::FiniteF64(*margin),
-        (
-            PropertyFieldId::VisibleMarkSizingPolicy,
-            PatternMechanism::SiteExclusion {
-                policy: SiteExclusionPolicy::VisibleMarkMargin { sizing, .. },
-                ..
-            },
-        ) => PropertyCurrentValueKind::EnumChoice(PropertyEnumChoice::VisibleMarkSizingPolicy(
-            *sizing,
-        )),
         (
             PropertyFieldId::RandomMaximumAttempts,
             PatternMechanism::RandomSiteProduct {
@@ -14796,32 +14682,6 @@ fn exclusion_transition_fields(
                 VariantTransitionValue::FiniteF64(minimum),
                 Vec::new(),
             )])
-        }
-        ExclusionKind::VisibleMarkMargin => {
-            let (margin, sizing) = if base == choice {
-                match policy {
-                    SiteExclusionPolicy::VisibleMarkMargin { margin, sizing } => (*margin, *sizing),
-                    _ => unreachable!("base selector is current"),
-                }
-            } else {
-                (0.0, VisibleMarkSizingPolicy::MaximumSupportRadius)
-            };
-            Ok(vec![
-                transition_field(
-                    PropertyFieldId::VisibleMarkMargin,
-                    target,
-                    VariantTransitionValue::FiniteF64(margin),
-                    Vec::new(),
-                ),
-                transition_field(
-                    PropertyFieldId::VisibleMarkSizingPolicy,
-                    target,
-                    VariantTransitionValue::EnumChoice(
-                        PropertyEnumChoice::VisibleMarkSizingPolicy(sizing),
-                    ),
-                    Vec::new(),
-                ),
-            ])
         }
     }
 }
@@ -15259,22 +15119,6 @@ fn transition_draft_edit(
                         )?,
                     }
                 }
-                ExclusionKind::VisibleMarkMargin => {
-                    let sizing =
-                        match transition_choice(draft, PropertyFieldId::VisibleMarkSizingPolicy)? {
-                            PropertyEnumChoice::VisibleMarkSizingPolicy(value) => value,
-                            _ => {
-                                return Err(ValidationError::new(
-                                    "transition_draft.value",
-                                    "visible-mark sizing choice is invalid",
-                                ));
-                            }
-                        };
-                    SiteExclusionPolicy::VisibleMarkMargin {
-                        margin: transition_f64(draft, PropertyFieldId::VisibleMarkMargin)?,
-                        sizing,
-                    }
-                }
             };
             Ok(PatternDefinitionEdit::SetExclusionVariant {
                 mechanism_id,
@@ -15404,13 +15248,11 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::MarkMaximumFill
             | PropertyFieldId::ConnectedMinimumThickness
             | PropertyFieldId::ConnectedMaximumThickness
-            | PropertyFieldId::RegionMinimumScale
-            | PropertyFieldId::RegionMaximumScale
-            | PropertyFieldId::RegionMinimumGap
-            | PropertyFieldId::RegionMaximumGap => {
+            | PropertyFieldId::RegionMinimumFill
+            | PropertyFieldId::RegionMaximumFill => {
                 PropertyCommandKind::SetChannelGeometryResponseDelta
             }
-            PropertyFieldId::RegionTreatment | PropertyFieldId::RegionSampling => {
+            PropertyFieldId::RegionResizeAlgorithm | PropertyFieldId::RegionSampling => {
                 PropertyCommandKind::SetRegionResponse
             }
             PropertyFieldId::ShapeRotationDegrees => {
@@ -15499,10 +15341,6 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::ExclusionMinimumCenterDistance => {
                 PropertyCommandKind::SetExclusionMinimumCenterDistance
             }
-            PropertyFieldId::VisibleMarkMargin => PropertyCommandKind::SetVisibleMarkMargin,
-            PropertyFieldId::VisibleMarkSizingPolicy => {
-                PropertyCommandKind::SetVisibleMarkSizingPolicy
-            }
             PropertyFieldId::RandomMaximumAttempts => PropertyCommandKind::SetRandomMaximumAttempts,
             PropertyFieldId::RandomMaximumNeighborChecks => {
                 PropertyCommandKind::SetRandomMaximumNeighborChecks
@@ -15570,7 +15408,6 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::ArtworkWeightMappingPlacement
             | PropertyFieldId::ArtworkWeightResponse
             | PropertyFieldId::RandomExclusion
-            | PropertyFieldId::VisibleMarkSizingPolicy
             | PropertyFieldId::OutputPrototype
             | PropertyFieldId::OutputOrientation
             | PropertyFieldId::OutputSiteUseFilterKind
@@ -15584,7 +15421,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::ParametricRepetition
             | PropertyFieldId::ParametricOffsetSides
             | PropertyFieldId::ParametricOffsetCleanup => PropertyValueKind::EnumChoice,
-            PropertyFieldId::RegionTreatment | PropertyFieldId::RegionSampling => {
+            PropertyFieldId::RegionResizeAlgorithm | PropertyFieldId::RegionSampling => {
                 PropertyValueKind::EnumChoice
             }
             _ => PropertyValueKind::FiniteF64,
@@ -15600,7 +15437,6 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::RandomDensityModulation => DENSITY_MODULATION_CHOICES,
             PropertyFieldId::ArtworkWeightResponse => ARTWORK_RESPONSE_CHOICES,
             PropertyFieldId::RandomExclusion => EXCLUSION_CHOICES,
-            PropertyFieldId::VisibleMarkSizingPolicy => VISIBLE_MARK_SIZING_POLICY_CHOICES,
             PropertyFieldId::OutputPrototype => MARK_PROTOTYPE_CHOICES,
             PropertyFieldId::OutputOrientation => MARK_ORIENTATION_CHOICES,
             PropertyFieldId::OutputSiteUseFilterKind => SITE_USE_FILTER_CHOICES,
@@ -15614,7 +15450,7 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::ParametricOffsetSides => OFFSET_SIDES_CHOICES,
             PropertyFieldId::ParametricOffsetCleanup => OFFSET_CLEANUP_CHOICES,
             PropertyFieldId::ConnectionProgram => CONNECTION_PROGRAM_CHOICES,
-            PropertyFieldId::RegionTreatment => REGION_TREATMENT_CHOICES,
+            PropertyFieldId::RegionResizeAlgorithm => REGION_RESIZE_ALGORITHM_CHOICES,
             PropertyFieldId::RegionSampling => REGION_SAMPLING_CHOICES,
             _ => &[],
         },
@@ -15649,18 +15485,12 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::MarkMaximumFill
             | PropertyFieldId::ConnectedMinimumThickness
             | PropertyFieldId::ConnectedMaximumThickness => fill_bounds(),
-            PropertyFieldId::RegionMinimumScale | PropertyFieldId::RegionMaximumScale => {
-                Some(PropertyBounds {
-                    minimum: Some(0.0),
-                    minimum_inclusive: true,
-                    maximum: None,
-                    maximum_inclusive: false,
-                })
+            PropertyFieldId::RegionMinimumFill | PropertyFieldId::RegionMaximumFill => {
+                fill_bounds()
             }
             PropertyFieldId::CoverageAdditionalMargin
             | PropertyFieldId::ModeledMappingGain
             | PropertyFieldId::ArtworkWeightMappingGain
-            | PropertyFieldId::VisibleMarkMargin
             | PropertyFieldId::IntersectionMergeEpsilon => nonnegative_bounds(),
             PropertyFieldId::ColorRed
             | PropertyFieldId::ColorGreen
@@ -15690,12 +15520,8 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::IntersectionMergeEpsilon
             | PropertyFieldId::RandomEvenMinimumCenterDistance
             | PropertyFieldId::RandomClusterSpread
-            | PropertyFieldId::ExclusionMinimumCenterDistance
-            | PropertyFieldId::VisibleMarkMargin => PropertyUnit::DocumentDistance,
+            | PropertyFieldId::ExclusionMinimumCenterDistance => PropertyUnit::DocumentDistance,
             PropertyFieldId::ConnectionMaximumDistance => PropertyUnit::DocumentDistance,
-            PropertyFieldId::RegionMinimumGap | PropertyFieldId::RegionMaximumGap => {
-                PropertyUnit::DocumentDistance
-            }
             PropertyFieldId::GuideArcCenterX
             | PropertyFieldId::GuideArcCenterY
             | PropertyFieldId::GuideArcRadius
@@ -15785,9 +15611,6 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::ExclusionMinimumCenterDistance => {
                 PropertyApplicability::MinimumCenterExclusion
             }
-            PropertyFieldId::VisibleMarkMargin | PropertyFieldId::VisibleMarkSizingPolicy => {
-                PropertyApplicability::VisibleMarkExclusion
-            }
             PropertyFieldId::RandomMaximumAttempts
             | PropertyFieldId::RandomMaximumNeighborChecks => PropertyApplicability::RandomProcess,
             PropertyFieldId::OutputSiteProduct
@@ -15828,13 +15651,12 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::OutputOrientationDimension
             | PropertyFieldId::OutputSiteUseFilterKind
             | PropertyFieldId::OutputSiteUseFilterReference => InvalidationLevel::Realization,
-            PropertyFieldId::RegionTreatment | PropertyFieldId::RegionSampling => {
+            PropertyFieldId::RegionResizeAlgorithm | PropertyFieldId::RegionSampling => {
                 InvalidationLevel::Family
             }
-            PropertyFieldId::RegionMinimumScale
-            | PropertyFieldId::RegionMaximumScale
-            | PropertyFieldId::RegionMinimumGap
-            | PropertyFieldId::RegionMaximumGap => InvalidationLevel::Realization,
+            PropertyFieldId::RegionMinimumFill | PropertyFieldId::RegionMaximumFill => {
+                InvalidationLevel::Realization
+            }
             PropertyFieldId::Paint
             | PropertyFieldId::ColorRed
             | PropertyFieldId::ColorGreen
@@ -15885,8 +15707,6 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
                 | PropertyFieldId::ArtworkWeightResponse
                 | PropertyFieldId::RandomExclusion
                 | PropertyFieldId::ExclusionMinimumCenterDistance
-                | PropertyFieldId::VisibleMarkMargin
-                | PropertyFieldId::VisibleMarkSizingPolicy
                 | PropertyFieldId::RandomMaximumAttempts
                 | PropertyFieldId::RandomMaximumNeighborChecks
                 | PropertyFieldId::OutputSiteProduct
@@ -15906,11 +15726,6 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
         structural_support: match field {
             PropertyFieldId::MarkMaximumFill => {
                 StructuralSupportConstraint::MaximumFillDefinesCoverage
-            }
-            PropertyFieldId::RandomExclusion
-            | PropertyFieldId::VisibleMarkMargin
-            | PropertyFieldId::VisibleMarkSizingPolicy => {
-                StructuralSupportConstraint::VisibleMarkMarginUsesMaximumRealizedSupport
             }
             _ => StructuralSupportConstraint::None,
         },
@@ -15993,12 +15808,7 @@ const ARTWORK_RESPONSE_CHOICES: &[PropertyEnumChoice] = &[
 const EXCLUSION_CHOICES: &[PropertyEnumChoice] = &[
     PropertyEnumChoice::Exclusion(ExclusionKind::None),
     PropertyEnumChoice::Exclusion(ExclusionKind::MinimumCenterDistance),
-    PropertyEnumChoice::Exclusion(ExclusionKind::VisibleMarkMargin),
 ];
-const VISIBLE_MARK_SIZING_POLICY_CHOICES: &[PropertyEnumChoice] =
-    &[PropertyEnumChoice::VisibleMarkSizingPolicy(
-        VisibleMarkSizingPolicy::MaximumSupportRadius,
-    )];
 const MARK_PROTOTYPE_CHOICES: &[PropertyEnumChoice] = &[
     PropertyEnumChoice::MarkPrototype(MarkPrototypeKind::Circle),
     PropertyEnumChoice::MarkPrototype(MarkPrototypeKind::AuthoredClosedShape),
@@ -16048,10 +15858,9 @@ const OFFSET_SIDES_CHOICES: &[PropertyEnumChoice] = &[
 const OFFSET_CLEANUP_CHOICES: &[PropertyEnumChoice] = &[PropertyEnumChoice::OffsetCleanup(
     OffsetCleanup::DissolveCrossings,
 )];
-const REGION_TREATMENT_CHOICES: &[PropertyEnumChoice] = &[
-    PropertyEnumChoice::RegionTreatment(RegionTreatmentCapability::Full),
-    PropertyEnumChoice::RegionTreatment(RegionTreatmentCapability::Scale),
-    PropertyEnumChoice::RegionTreatment(RegionTreatmentCapability::ConstantGap),
+const REGION_RESIZE_ALGORITHM_CHOICES: &[PropertyEnumChoice] = &[
+    PropertyEnumChoice::RegionResizeAlgorithm(RegionResizeAlgorithm::Scale),
+    PropertyEnumChoice::RegionResizeAlgorithm(RegionResizeAlgorithm::UniformOffset),
 ];
 const REGION_SAMPLING_CHOICES: &[PropertyEnumChoice] = &[
     PropertyEnumChoice::RegionSampling(RegionSamplingStrategy::ReferencePoint),
@@ -16079,7 +15888,6 @@ const fn dependency_for_contract(
         PropertyApplicability::ClusteredRandomProcess => PropertyDependency::ClusteredRandomProcess,
         PropertyApplicability::ArtworkWeightedDensity => PropertyDependency::ArtworkWeightedDensity,
         PropertyApplicability::MinimumCenterExclusion => PropertyDependency::MinimumCenterExclusion,
-        PropertyApplicability::VisibleMarkExclusion => PropertyDependency::VisibleMarkExclusion,
         PropertyApplicability::MarkPrototypeOutput => PropertyDependency::MarkPrototypeOutput,
         PropertyApplicability::AuthoredClosedShapeMark => {
             PropertyDependency::AuthoredClosedShapeMark
@@ -16201,10 +16009,8 @@ const fn property_authority(field: PropertyFieldId, target: PropertyTarget) -> P
             | PropertyFieldId::ShapeRotationDegrees
             | PropertyFieldId::MarkMinimumFill
             | PropertyFieldId::MarkMaximumFill
-            | PropertyFieldId::RegionMinimumScale
-            | PropertyFieldId::RegionMaximumScale
-            | PropertyFieldId::RegionMinimumGap
-            | PropertyFieldId::RegionMaximumGap
+            | PropertyFieldId::RegionMinimumFill
+            | PropertyFieldId::RegionMaximumFill
             | PropertyFieldId::DefinitionSelection => PropertyAuthority::ChannelDelta,
             PropertyFieldId::TranslationX
             | PropertyFieldId::TranslationY
@@ -16242,10 +16048,8 @@ const fn property_reset_capable(field: PropertyFieldId, target: PropertyTarget) 
             | PropertyFieldId::ShapeRotationDegrees
             | PropertyFieldId::MarkMinimumFill
             | PropertyFieldId::MarkMaximumFill
-            | PropertyFieldId::RegionMinimumScale
-            | PropertyFieldId::RegionMaximumScale
-            | PropertyFieldId::RegionMinimumGap
-            | PropertyFieldId::RegionMaximumGap
+            | PropertyFieldId::RegionMinimumFill
+            | PropertyFieldId::RegionMaximumFill
             | PropertyFieldId::DefinitionSelection
     )
 }
@@ -16363,6 +16167,15 @@ pub enum PatternStructureRecipe {
         maximum_attempts: u32,
         maximum_neighbor_checks: u32,
     },
+    /// ID-free intent for the existing finite parametric family and optional equal-arc sites.
+    ParametricCurve {
+        name: String,
+        coverage: CoveragePolicy,
+        curve: ParametricCurve,
+        spiral_coverage: SpiralCoveragePolicy,
+        repetition: CurveRepetition,
+        sites: Option<ParametricCurveSiteDraft>,
+    },
     /// Wraps one eligible ID-free site-family recipe with authored connection intent.
     /// Materialization retains the allocated output and site-product IDs while replacing only
     /// its mark output; graphs, paths, diagnostics, and limits remain derived-only.
@@ -16400,6 +16213,13 @@ pub enum PatternStructureRecipe {
         definition: Box<PatternStructureRecipe>,
         outputs: Vec<PatternOutputRealizationRecipe>,
     },
+}
+
+/// ID-free equal-arc site intent for a parametric recipe.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ParametricCurveSiteDraft {
+    pub interval: f64,
+    pub phase: f64,
 }
 
 /// One ID-free output realization authored in preset painter order.
@@ -16714,15 +16534,35 @@ fn validate_pattern_structure_recipe(
                 SiteExclusionPolicy::MinimumCenterDistance { minimum } => {
                     validate_positive_finite(*minimum, "preset.recipe.exclusion.minimum")?
                 }
-                SiteExclusionPolicy::VisibleMarkMargin { margin, .. } => {
-                    validate_nonnegative_finite(*margin, "preset.recipe.exclusion.margin")?
-                }
             }
             if *maximum_attempts == 0 || *maximum_neighbor_checks == 0 {
                 return Err(ValidationError::new(
                     "preset.recipe.random_work",
                     "maximum attempts and neighbor checks must be nonzero",
                 ));
+            }
+            Ok(())
+        }
+        PatternStructureRecipe::ParametricCurve {
+            name,
+            coverage,
+            curve,
+            spiral_coverage: _,
+            repetition,
+            sites,
+        } => {
+            validate_definition_draft(&PatternDefinitionDraft {
+                name: name.clone(),
+                coverage: coverage.clone(),
+            })?;
+            validate_parametric_curve(curve)?;
+            validate_guide_repetition(repetition)?;
+            if let Some(sites) = sites {
+                validate_positive_finite(
+                    sites.interval,
+                    "preset.recipe.parametric.sites.interval",
+                )?;
+                validate_finite(sites.phase, "preset.recipe.parametric.sites.phase")?;
             }
             Ok(())
         }
@@ -16892,7 +16732,9 @@ fn validate_recipe_output_settings(
     }
     let connected = matches!(
         recipe.structure,
-        PatternStructureRecipe::ConnectionPaths { .. } | PatternStructureRecipe::MazeWalls { .. }
+        PatternStructureRecipe::ConnectionPaths { .. }
+            | PatternStructureRecipe::MazeWalls { .. }
+            | PatternStructureRecipe::ParametricCurve { sites: None, .. }
     );
     let regions = matches!(
         recipe.structure,
@@ -17039,6 +16881,13 @@ fn validate_connection_recipe(
             "preset.recipe.connection.program",
             "maze and spanning-tree programs require an intersection site recipe",
         )),
+        PatternStructureRecipe::ParametricCurve { sites: Some(_), .. } if nearest_or_random => {
+            Ok(())
+        }
+        PatternStructureRecipe::ParametricCurve { .. } => Err(ValidationError::new(
+            "preset.recipe.connection.program",
+            "connection recipes require a site-producing family recipe",
+        )),
         PatternStructureRecipe::ConnectionPaths { .. }
         | PatternStructureRecipe::MazeWalls { .. }
         | PatternStructureRecipe::AuthoredClosedShapeMarks { .. }
@@ -17073,6 +16922,7 @@ fn validate_maze_recipe(
             "maze recipes require two or three straight guide intersection dimensions",
         )),
         PatternStructureRecipe::RandomSites { .. }
+        | PatternStructureRecipe::ParametricCurve { .. }
         | PatternStructureRecipe::ConnectionPaths { .. }
         | PatternStructureRecipe::MazeWalls { .. }
         | PatternStructureRecipe::AuthoredClosedShapeMarks { .. }
@@ -17310,14 +17160,6 @@ pub enum PatternDefinitionEdit {
     SetExclusionMinimumCenterDistance {
         mechanism_id: PatternMechanismId,
         minimum_center_distance: f64,
-    },
-    SetVisibleMarkMargin {
-        mechanism_id: PatternMechanismId,
-        margin: f64,
-    },
-    SetVisibleMarkSizingPolicy {
-        mechanism_id: PatternMechanismId,
-        sizing: VisibleMarkSizingPolicy,
     },
     SetRandomMaximumAttempts {
         mechanism_id: PatternMechanismId,
@@ -17909,9 +17751,6 @@ impl PatternDefinitionEdit {
                     SiteExclusionPolicy::MinimumCenterDistance { .. } => {
                         ExclusionKind::MinimumCenterDistance
                     }
-                    SiteExclusionPolicy::VisibleMarkMargin { .. } => {
-                        ExclusionKind::VisibleMarkMargin
-                    }
                 })),
             ),
             Edit::SetExclusionMinimumCenterDistance {
@@ -17920,16 +17759,6 @@ impl PatternDefinitionEdit {
             } => (
                 PropertyFieldId::ExclusionMinimumCenterDistance,
                 PropertyFieldValue::FiniteF64(*minimum_center_distance),
-            ),
-            Edit::SetVisibleMarkMargin { margin, .. } => (
-                PropertyFieldId::VisibleMarkMargin,
-                PropertyFieldValue::FiniteF64(*margin),
-            ),
-            Edit::SetVisibleMarkSizingPolicy { sizing, .. } => (
-                PropertyFieldId::VisibleMarkSizingPolicy,
-                PropertyFieldValue::EnumChoice(PropertyEnumChoice::VisibleMarkSizingPolicy(
-                    *sizing,
-                )),
             ),
             Edit::SetRandomMaximumAttempts {
                 maximum_attempts, ..
@@ -18528,29 +18357,15 @@ impl DocumentCommand {
                         }
                         Ok(())
                     }
-                    ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta::Scale {
-                        minimum_scale_delta,
-                        maximum_scale_delta,
+                    ChannelGeometryResponseDelta::Regions(RegionGeometryResponseDelta {
+                        minimum_fill_delta,
+                        maximum_fill_delta,
                     }) => {
-                        if let Some(value) = minimum_scale_delta {
-                            validate_finite(*value, "channel.pattern.region_delta.minimum_scale")?;
+                        if let Some(value) = minimum_fill_delta {
+                            validate_finite(*value, "channel.pattern.region_delta.minimum_fill")?;
                         }
-                        if let Some(value) = maximum_scale_delta {
-                            validate_finite(*value, "channel.pattern.region_delta.maximum_scale")?;
-                        }
-                        Ok(())
-                    }
-                    ChannelGeometryResponseDelta::Regions(
-                        RegionGeometryResponseDelta::ConstantGap {
-                            minimum_gap_delta,
-                            maximum_gap_delta,
-                        },
-                    ) => {
-                        if let Some(value) = minimum_gap_delta {
-                            validate_finite(*value, "channel.pattern.region_delta.minimum_gap")?;
-                        }
-                        if let Some(value) = maximum_gap_delta {
-                            validate_finite(*value, "channel.pattern.region_delta.maximum_gap")?;
+                        if let Some(value) = maximum_fill_delta {
+                            validate_finite(*value, "channel.pattern.region_delta.maximum_fill")?;
                         }
                         Ok(())
                     }

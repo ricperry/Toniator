@@ -2,14 +2,18 @@ use toniator_domain::{
     AuthoredCurveSegment, AuthoredPoint2, AuthoredStructure, AuthoredStructureId,
     AuthoredStructureKind, CanvasSpec, CoveragePolicy, DensityMetric2D, Document, DocumentId,
     GeneralizedSiteProduct, GuideDimension, GuideDimensionId, GuidePrototype, GuideRepetition,
-    MarkOrientation, OffsetCleanup, OffsetSides, PatternDefinition, PatternDefinitionId,
-    PatternMechanismId, PatternOutputLayerId, SourceReference,
+    MarkOrientation, OffsetCleanup, OffsetSides, PatternDefinition, PatternDefinitionBundle,
+    PatternDefinitionId, PatternGeometryResponse, PatternMechanismId, PatternOutputLayerId,
+    PatternOutputRealization, PatternOutputSettings, SourceComponent, SourcePlacement,
+    SourceReference,
 };
 use toniator_geometry::{AffineTransform2D, FamilySiteProvenance, Point2, SiteScope, Vector2};
 use toniator_patterns::{
-    GridInspectRequest, directional_spacing, evaluate_document_typed_family_cancellable,
-    resolve_document_pattern_pipeline, resolve_pattern_pipeline,
+    GridInspectRequest, MarkResponse, directional_spacing,
+    evaluate_document_typed_family_cancellable, maximum_nominal_cell_diameter,
+    realize_typed_diagnostic_outputs, resolve_document_pattern_pipeline, resolve_pattern_pipeline,
 };
+use toniator_sampling::{SourceFormatHint, decode_source};
 
 /// Builds a document-aware generic guide definition with the fixed Stage 20D root identities.
 fn definition(
@@ -34,20 +38,52 @@ fn definition(
 
 /// Builds the modeled document boundary that owns supplied generic-guide resources.
 fn document(definition: PatternDefinition, structures: Vec<AuthoredStructure>) -> Document {
-    let base = Document::new_default_document(
+    document_with_canvas(
+        definition,
+        structures,
         CanvasSpec {
             width: 100.0,
             height: 100.0,
         },
-        SourceReference::Unassigned,
     )
-    .unwrap();
+}
+
+/// Builds the modeled document boundary at an explicit canvas for support-bound tests.
+fn document_with_canvas(
+    definition: PatternDefinition,
+    structures: Vec<AuthoredStructure>,
+    canvas: CanvasSpec,
+) -> Document {
+    let base = Document::new_default_document(canvas, SourceReference::Unassigned).unwrap();
     Document::with_source_topology_and_authored_structures(
         DocumentId(1),
         base.canvas().clone(),
         SourceReference::Unassigned,
-        vec![definition],
-        base.pattern_settings().clone(),
+        vec![PatternDefinitionBundle {
+            output_settings: definition
+                .output_layers
+                .iter()
+                .map(|output| PatternOutputSettings {
+                    output_layer_id: output.id(),
+                    response: match &output.realization {
+                        PatternOutputRealization::CircularMarks { .. }
+                        | PatternOutputRealization::MarkPrototype { .. } => {
+                            PatternGeometryResponse::Marks(toniator_domain::MarkGeometryResponse {
+                                minimum_fill: 0.0,
+                                maximum_fill: 1.0,
+                            })
+                        }
+                        _ => panic!("curved guide fixtures own only mark outputs"),
+                    },
+                })
+                .collect(),
+            definition: definition.clone(),
+        }],
+        {
+            let mut settings = base.pattern_settings().clone();
+            settings.definition_id = definition.id;
+            settings
+        },
         base.channel_model().unwrap().to_owned(),
         base.channel_topology().unwrap().clone(),
         structures,
@@ -662,14 +698,10 @@ fn diagnostic_cubic_stops_when_terminal_extensions_cross() {
             phase: 0.0,
         },
     );
-    let base = Document::new_default_document(
-        CanvasSpec {
-            width: 320.0,
-            height: 320.0,
-        },
-        SourceReference::Unassigned,
-    )
-    .expect("diagnostic base document validates");
+    let diagnostic_canvas = CanvasSpec {
+        width: 320.0,
+        height: 320.0,
+    };
     let structure = AuthoredStructure::new(
         AuthoredStructureId(61),
         AuthoredStructureKind::OpenPath,
@@ -681,21 +713,7 @@ fn diagnostic_cubic_stops_when_terminal_extensions_cross() {
         }],
     )
     .expect("diagnostic cubic validates");
-    let document = Document::with_source_topology_and_authored_structures(
-        DocumentId(61),
-        base.canvas().clone(),
-        SourceReference::Unassigned,
-        vec![definition.clone()],
-        base.pattern_settings().clone(),
-        base.channel_model()
-            .expect("default channel model")
-            .to_owned(),
-        base.channel_topology()
-            .expect("default channel topology")
-            .clone(),
-        vec![structure],
-    )
-    .expect("diagnostic document validates");
+    let document = document_with_canvas(definition.clone(), vec![structure], diagnostic_canvas);
     let output = evaluate_document_typed_family_cancellable(
         &document,
         &definition,
@@ -841,4 +859,108 @@ fn normal_offset_one_sided_collapse_fails_coverage_atomically() {
     )
     .expect_err("stationary one-sided guide cannot prove coverage");
     assert_eq!(error.path(), "coverage.curved_guides.normal_offset");
+}
+
+/// Proves a 77.5-unit NormalOffset transverse basis expands the positive
+/// AlongGuide support bound and realizes maximum-fill marks on an anisotropic canvas.
+#[test]
+fn normal_offset_along_guides_bound_their_transverse_basis_before_mark_realization() {
+    let canvas = CanvasSpec {
+        width: 225.0,
+        height: 155.0,
+    };
+    let density = DensityMetric2D {
+        across_x: 16.0,
+        across_y: 16.0 * 155.0 / 225.0,
+        aspect_locked: true,
+    };
+    let definition = definition(
+        vec![GuideDimension {
+            id: GuideDimensionId(77),
+            baseline_angle_degrees: 0.0,
+            phase: 0.0,
+            prototype: GuidePrototype::AuthoredOpenPath {
+                structure_id: AuthoredStructureId(77),
+            },
+            repetition: GuideRepetition::NormalOffset {
+                spacing: 77.5,
+                sides: OffsetSides::Both,
+                cleanup: OffsetCleanup::DissolveCrossings,
+            },
+        }],
+        GeneralizedSiteProduct::AlongGuides {
+            dimensions: vec![GuideDimensionId(77)],
+            interval_multiplier: 1.0,
+            phase: 0.0,
+        },
+    );
+    let curve = AuthoredStructure::new(
+        AuthoredStructureId(77),
+        AuthoredStructureKind::OpenPath,
+        vec![AuthoredCurveSegment::CubicBezier {
+            start: AuthoredPoint2 {
+                x: -0.25 * canvas.width,
+                y: 17.0 / 24.0 * canvas.height,
+            },
+            control_1: AuthoredPoint2 {
+                x: 0.125 * canvas.width,
+                y: 5.0 / 24.0 * canvas.height,
+            },
+            control_2: AuthoredPoint2 {
+                x: 0.75 * canvas.width,
+                y: 5.0 / 24.0 * canvas.height,
+            },
+            end: AuthoredPoint2 {
+                x: 1.25 * canvas.width,
+                y: 17.0 / 24.0 * canvas.height,
+            },
+        }],
+    )
+    .expect("shallow authored cubic validates");
+    let document = document_with_canvas(definition.clone(), vec![curve], canvas.clone());
+    let plan = resolve_document_pattern_pipeline(&document, &definition)
+        .expect("normal-offset pipeline resolves");
+    let maximum = maximum_nominal_cell_diameter(&plan.family, &canvas, &density)
+        .expect("normal-offset bound remains finite");
+    assert!((maximum - (225.0 / 16.0 + 77.5)).abs() <= 1e-12);
+    let request = GridInspectRequest {
+        canvas: canvas.clone(),
+        density: density.clone(),
+        rotation_degrees: 0.0,
+        translation_x: 0.0,
+        translation_y: 0.0,
+        guard_steps: 2,
+        support_radius: maximum,
+        max_family_candidates: 100_000,
+    };
+    let family =
+        evaluate_document_typed_family_cancellable(&document, &definition, &request, &|| false)
+            .expect("normal-offset sites fit the planned positive support");
+    assert!(
+        family
+            .site_set()
+            .sites()
+            .iter()
+            .all(|site| { site.nominal_cell_basis.diameter() <= maximum })
+    );
+    let source = decode_source(
+        &std::fs::read("../../assets/raster-sample.png").expect("fixture reads"),
+        SourceFormatHint::Png,
+    )
+    .expect("fixture decodes");
+    let marks = realize_typed_diagnostic_outputs(
+        &family,
+        &plan,
+        &source,
+        &canvas,
+        SourcePlacement::StretchToCanvas,
+        SourceComponent::Luminance,
+        MarkResponse {
+            minimum_fill: 2.0,
+            maximum_fill: 2.0,
+            rotation_offset_degrees: 0.0,
+        },
+    )
+    .expect("maximum-fill marks realize within the planned support");
+    assert!(!marks.output.marks.is_empty());
 }

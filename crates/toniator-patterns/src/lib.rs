@@ -10,16 +10,18 @@ use std::{
 
 use serde::Serialize;
 use toniator_domain::{
-    ArtworkWeightResponse, AuthoredStructureId, CanvasSpec, ChannelId, ChannelPaint,
-    ConnectionProgram, DensityMetric2D, Document, DocumentCommand, DocumentHistory,
-    DocumentSessionError, EffectivePatternOutputSettings, GuideDimension, GuideDimensionDraft,
-    GuideDimensionId, GuidePrototype, GuideRepetition, MarkOrientation, MarkOrientationDraft,
-    MarkPrototype, MazeProgram, OffsetCleanup, OffsetSides, ParametricCurve, PatternDefinition,
-    PatternDefinitionRecipe, PatternFamily, PatternGeometryResponse, PatternMechanism,
-    PatternMechanismId, PatternModulation, PatternOutputLayerId, PatternOutputRealization,
-    PatternStructureRecipe, PresetMetadata, PresetRecord, RandomSiteCharacter, RegionSourceIntent,
-    SiteDensityModulation, SiteExclusionPolicy, SiteUseFilter, SourceMapping,
-    StraightGuideDimension, VisibleMarkSizingPolicy, pattern_output_evaluation_order,
+    ArtworkWeightResponse, AuthoredCurveSegment, AuthoredPoint2, AuthoredStructureDraft,
+    AuthoredStructureId, AuthoredStructureKind, CanvasSpec, ChannelId, ChannelPaint,
+    ConnectionProgram, CurveRepetition, CurveWinding, DensityMetric2D, Document, DocumentCommand,
+    DocumentHistory, DocumentSessionError, EffectivePatternOutputSettings, GuideDimension,
+    GuideDimensionDraft, GuideDimensionId, GuidePrototype, GuideRepetition, MarkOrientation,
+    MarkOrientationDraft, MarkPrototype, MazeProgram, OffsetCleanup, OffsetSides, ParametricCurve,
+    PatternCapabilityFlag, PatternCapabilityScope, PatternDefinition, PatternDefinitionRecipe,
+    PatternFamily, PatternGeometryResponse, PatternMechanism, PatternMechanismId,
+    PatternModulation, PatternOutputLayerId, PatternOutputRealization, PatternStructureRecipe,
+    PresetMetadata, PresetRecord, RandomSiteCharacter, RegionResizeAlgorithm, RegionSourceIntent,
+    SiteDensityModulation, SiteExclusionPolicy, SiteUseFilter, SourceMapping, SourceReference,
+    SpiralCurve, SpiralShape, StraightGuideDimension, pattern_output_evaluation_order,
 };
 pub use toniator_geometry::{
     AffineTransform2D, Bounds, CONNECTION_PATH_CONTRACT_ID, CONNECTION_TRAIL_CONTRACT_ID,
@@ -61,13 +63,84 @@ pub const FIRST_DIMENSION_ID: GuideDimensionId = GuideDimensionId(1);
 pub const SECOND_DIMENSION_ID: GuideDimensionId = GuideDimensionId(2);
 
 /// The stable version of the built-in registry ordering and metadata contract.
-pub const BUNDLED_PRESET_REGISTRY_VERSION: u32 = 1;
+pub const BUNDLED_PRESET_REGISTRY_VERSION: u32 = 2;
 
 /// Immutable, deterministic preset registry owned by the pattern/schema layer.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PresetRegistry {
     version: u32,
     entries: Vec<PresetRecord>,
+    catalog_entries: Vec<PresetCatalogEntry>,
+}
+
+/// Builds one catalog mark recipe with the approved normalized response range.
+fn mark_recipe(structure: PatternStructureRecipe) -> PatternDefinitionRecipe {
+    let mut recipe = PatternDefinitionRecipe::marks(structure);
+    recipe.output_settings[0].response =
+        PatternGeometryResponse::Marks(toniator_domain::MarkGeometryResponse {
+            minimum_fill: 0.25,
+            maximum_fill: 0.85,
+        });
+    recipe
+}
+
+/// Builds one catalog connected recipe with the approved normalized response range.
+fn path_recipe(structure: PatternStructureRecipe) -> PatternDefinitionRecipe {
+    let mut recipe = PatternDefinitionRecipe::connected(structure);
+    recipe.output_settings[0].response =
+        PatternGeometryResponse::Connected(toniator_domain::ConnectedGeometryResponse {
+            minimum_thickness: 0.15,
+            maximum_thickness: 0.65,
+        });
+    recipe
+}
+
+/// Builds a catalog Voronoi recipe with an explicit existing region response.
+fn voronoi_recipe(
+    structure: PatternStructureRecipe,
+    response: toniator_domain::RegionGeometryResponse,
+) -> PatternDefinitionRecipe {
+    let mut recipe = PatternDefinitionRecipe::regions(structure);
+    recipe.output_settings[0].response = PatternGeometryResponse::Regions(response);
+    recipe
+}
+
+/// Builds a catalog Guide Faces recipe with an explicit existing region response.
+fn guide_face_recipe(
+    structure: PatternStructureRecipe,
+    dimensions: Vec<usize>,
+    response: toniator_domain::RegionGeometryResponse,
+) -> PatternDefinitionRecipe {
+    let mut recipe = PatternDefinitionRecipe::guide_faces(structure, dimensions);
+    recipe.output_settings[0].response = PatternGeometryResponse::Regions(response);
+    recipe
+}
+
+/// Builds the normalized finite four-edge diamond used by the triagrid mark card.
+fn diamond_shape() -> AuthoredStructureDraft {
+    let points = [
+        AuthoredPoint2 { x: 0.0, y: -1.0 },
+        AuthoredPoint2 { x: 1.0, y: 0.0 },
+        AuthoredPoint2 { x: 0.0, y: 1.0 },
+        AuthoredPoint2 { x: -1.0, y: 0.0 },
+    ];
+    AuthoredStructureDraft::new(
+        AuthoredStructureKind::ClosedShape,
+        (0..points.len())
+            .map(|index| AuthoredCurveSegment::Line {
+                start: points[index],
+                end: points[(index + 1) % points.len()],
+            })
+            .collect(),
+    )
+    .expect("fixed normalized diamond is finite and closed")
+}
+
+/// Gallery-only preset metadata that remains outside persistence and evaluation identity.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PresetCatalogEntry {
+    pub preset: PresetRecord,
+    pub required_features: Vec<PatternCapabilityFlag>,
 }
 
 #[cfg(test)]
@@ -259,77 +332,439 @@ impl PresetRegistry {
             }
             previous = Some(entry.metadata.id.as_str());
         }
-        Ok(Self { version, entries })
+        let catalog_entries = entries
+            .iter()
+            .cloned()
+            .map(|preset| PresetCatalogEntry {
+                preset,
+                required_features: Vec::new(),
+            })
+            .collect();
+        Ok(Self {
+            version,
+            entries,
+            catalog_entries,
+        })
     }
 
     /// Returns the versioned built-in pure-schema registry in stable ID order.
     pub fn bundled() -> Self {
-        Self::new(
+        let coverage = || toniator_domain::CoveragePolicy {
+            guard_steps: 2,
+            additional_margin: 0.0,
+        };
+        let metadata = |id: &str, name: &str, category: &str, description: &str| PresetMetadata {
+            id: id.into(),
+            name: name.into(),
+            category: category.into(),
+            description: description.into(),
+            thumbnail: None,
+        };
+        let grid = |name: &str, angles: &[f64], along: bool| {
+            PatternStructureRecipe::GeneralizedStraightGuides {
+                name: name.into(),
+                coverage: coverage(),
+                dimensions: angles
+                    .iter()
+                    .map(|angle| GuideDimensionDraft {
+                        baseline_angle_degrees: *angle,
+                        phase: 0.0,
+                        spacing_multiplier: 1.0,
+                    })
+                    .collect(),
+                product: if along {
+                    toniator_domain::GeneralizedSiteProductDraft::AlongGuides {
+                        dimension_indices: vec![0],
+                        interval_multiplier: 1.0,
+                        phase: 0.0,
+                    }
+                } else {
+                    toniator_domain::GeneralizedSiteProductDraft::Intersections {
+                        dimension_indices: (0..angles.len()).collect(),
+                        merge_epsilon: 1e-9,
+                    }
+                },
+                orientation: MarkOrientationDraft::Fixed,
+            }
+        };
+        let tangent_grid = |name: &str, angles: &[f64]| {
+            let mut recipe = grid(name, angles, false);
+            let PatternStructureRecipe::GeneralizedStraightGuides { orientation, .. } = &mut recipe
+            else {
+                unreachable!("grid helper always returns generalized straight guides")
+            };
+            *orientation = MarkOrientationDraft::GuideTangent { dimension_index: 0 };
+            recipe
+        };
+        let random = |name: &str, character: RandomSiteCharacter, seed: u32| {
+            PatternStructureRecipe::RandomSites {
+                name: name.into(),
+                coverage: coverage(),
+                character,
+                seed,
+                density_modulation: SiteDensityModulation::Uniform,
+                exclusion: SiteExclusionPolicy::None,
+                maximum_attempts: 16_000_000,
+                maximum_neighbor_checks: 16_000_000,
+            }
+        };
+        let adjacency = toniator_domain::ConnectionAdjacencyIntent {
+            maximum_degree: 6,
+            maximum_distance: 48.0,
+        };
+        let mut registry = Self::new(
             BUNDLED_PRESET_REGISTRY_VERSION,
             vec![
                 PresetRecord {
-                    metadata: PresetMetadata {
-                        id: "even-random-circles".into(),
-                        name: "Even Random Circles".into(),
-                        category: "Random sites".into(),
-                        description: "Evenly separated deterministic circular marks.".into(),
-                        thumbnail: Some("builtin:even-random-circles".into()),
-                    },
-                    recipe: PatternDefinitionRecipe::marks(PatternStructureRecipe::RandomSites {
-                        name: "Even random circles".into(),
-                        coverage: toniator_domain::CoveragePolicy {
-                            guard_steps: 2,
-                            additional_margin: 0.0,
+                    metadata: metadata(
+                        "clustered-dispersion-random-links",
+                        "Clustered Connections",
+                        "Connections",
+                        "Clustered sites with deterministic random links.",
+                    ),
+                    recipe: path_recipe(PatternStructureRecipe::ConnectionPaths {
+                        definition: Box::new(random(
+                            "Clustered connections",
+                            RandomSiteCharacter::Clustered {
+                                cluster_density: 1.0,
+                                cluster_spread: 16.0,
+                                cluster_strength: 0.5,
+                            },
+                            43,
+                        )),
+                        program: ConnectionProgram::RandomLinks {
+                            adjacency: toniator_domain::ConnectionAdjacencyIntent {
+                                maximum_degree: 3,
+                                maximum_distance: 48.0,
+                            },
+                            minimum_degree: 1,
+                            seed: 43,
                         },
-                        character: RandomSiteCharacter::Even {
-                            minimum_center_distance: 8.0,
-                        },
-                        seed: 19,
-                        density_modulation: SiteDensityModulation::Uniform,
-                        exclusion: SiteExclusionPolicy::None,
-                        maximum_attempts: 16_000_000,
-                        maximum_neighbor_checks: 16_000_000,
+                        style: Default::default(),
                     }),
                 },
                 PresetRecord {
-                    metadata: PresetMetadata {
-                        id: "straight-grid-circles".into(),
-                        name: "Straight Grid Circles".into(),
-                        category: "Guides".into(),
-                        description: "Two rotated, offset straight guides with circular marks."
-                            .into(),
-                        thumbnail: Some("builtin:straight-grid-circles".into()),
-                    },
-                    recipe: PatternDefinitionRecipe::marks(
-                        PatternStructureRecipe::GeneralizedStraightGuides {
-                            name: "Straight grid circles".into(),
-                            coverage: toniator_domain::CoveragePolicy {
-                                guard_steps: 2,
-                                additional_margin: 0.0,
-                            },
-                            dimensions: vec![
-                                GuideDimensionDraft {
-                                    baseline_angle_degrees: 17.0,
-                                    phase: 0.23,
-                                    spacing_multiplier: 0.82,
-                                },
-                                GuideDimensionDraft {
-                                    baseline_angle_degrees: 107.0,
-                                    phase: -0.31,
-                                    spacing_multiplier: 1.18,
-                                },
-                            ],
-                            product: toniator_domain::GeneralizedSiteProductDraft::Intersections {
-                                dimension_indices: vec![0, 1],
-                                merge_epsilon: 1e-9,
-                            },
-                            orientation: MarkOrientationDraft::Fixed,
+                    metadata: metadata(
+                        "even-random-circles",
+                        "Even Dispersion Marks",
+                        "Dispersion",
+                        "Even sites with deterministic circle marks.",
+                    ),
+                    recipe: mark_recipe(random(
+                        "Even random circles",
+                        RandomSiteCharacter::Even {
+                            minimum_center_distance: 8.0,
+                        },
+                        19,
+                    )),
+                },
+                PresetRecord {
+                    metadata: metadata(
+                        "grid-voronoi-scale",
+                        "Grid Voronoi",
+                        "Regions",
+                        "Two-guide intersections with source-driven Scale fill from 0.0 through its natural boundary at 1.0.",
+                    ),
+                    recipe: voronoi_recipe(
+                        grid("Grid Voronoi", &[0.0, 90.0], false),
+                        toniator_domain::RegionGeometryResponse {
+                            algorithm: RegionResizeAlgorithm::Scale,
+                            sampling: toniator_domain::RegionSamplingStrategy::ReferencePoint,
+                            minimum_fill: 0.0,
+                            maximum_fill: 1.0,
                         },
                     ),
                 },
+                PresetRecord {
+                    metadata: metadata(
+                        "one-guide-lines",
+                        "One Guide Lines",
+                        "Guides",
+                        "One straight guide dimension as structural paths.",
+                    ),
+                    recipe: path_recipe(PatternStructureRecipe::OrderedOutputs {
+                        definition: Box::new(grid("One guide lines", &[0.0], true)),
+                        outputs: vec![
+                            toniator_domain::PatternOutputRealizationRecipe::StructuralPaths {
+                                style: Default::default(),
+                            },
+                        ],
+                    }),
+                },
+                PresetRecord {
+                    metadata: metadata(
+                        "residual-sites-along-guide",
+                        "Connected and Residual Sites",
+                        "Composites",
+                        "Nearest links followed by residual equal-arc marks.",
+                    ),
+                    recipe: composite_connection_marks(
+                        grid("Residual guide sites", &[0.0], true),
+                        ConnectionProgram::NearestLinks {
+                            adjacency: toniator_domain::ConnectionAdjacencyIntent {
+                                maximum_degree: 3,
+                                maximum_distance: 48.0,
+                            },
+                        },
+                        true,
+                    ),
+                },
+                PresetRecord {
+                    metadata: metadata(
+                        "round-spiral-line",
+                        "Round Spiral Line",
+                        "Parametric",
+                        "One canvas-covering clockwise round spiral path.",
+                    ),
+                    recipe: path_recipe(PatternStructureRecipe::ParametricCurve {
+                        name: "Round spiral line".into(),
+                        coverage: coverage(),
+                        curve: ParametricCurve::Spiral(SpiralCurve {
+                            shape: SpiralShape::Round,
+                            turns: 5.0,
+                            radial_spacing: 16.0,
+                            phase_degrees: 0.0,
+                            winding: CurveWinding::Clockwise,
+                        }),
+                        spiral_coverage: toniator_domain::SpiralCoveragePolicy::CoverCanvas,
+                        repetition: CurveRepetition::Single,
+                        sites: None,
+                    }),
+                },
+                PresetRecord {
+                    metadata: metadata(
+                        "round-spiral-marks",
+                        "Round Spiral Marks",
+                        "Parametric",
+                        "Canvas-covering clockwise round spiral with equal-arc circle marks.",
+                    ),
+                    recipe: mark_recipe(PatternStructureRecipe::ParametricCurve {
+                        name: "Round spiral marks".into(),
+                        coverage: coverage(),
+                        curve: ParametricCurve::Spiral(SpiralCurve {
+                            shape: SpiralShape::Round,
+                            turns: 5.0,
+                            radial_spacing: 16.0,
+                            phase_degrees: 0.0,
+                            winding: CurveWinding::Clockwise,
+                        }),
+                        spiral_coverage: toniator_domain::SpiralCoveragePolicy::CoverCanvas,
+                        repetition: CurveRepetition::Single,
+                        sites: Some(toniator_domain::ParametricCurveSiteDraft {
+                            interval: 16.0,
+                            phase: 0.0,
+                        }),
+                    }),
+                },
+                PresetRecord {
+                    metadata: metadata(
+                        "source-weighted-dispersion-voronoi",
+                        "Source-Weighted Voronoi",
+                        "Regions",
+                        "Luminance-weighted dispersed Voronoi regions.",
+                    ),
+                    recipe: voronoi_recipe(
+                        PatternStructureRecipe::RandomSites {
+                            name: "Source weighted Voronoi".into(),
+                            coverage: coverage(),
+                            character: RandomSiteCharacter::RawUniform,
+                            seed: 23,
+                            density_modulation: SiteDensityModulation::ArtworkWeighted {
+                                mapping: toniator_domain::SourceMapping::canonical(
+                                    toniator_domain::SourceMappingComponent::Luminance,
+                                ),
+                                strength: 0.75,
+                                response: ArtworkWeightResponse::Linear,
+                            },
+                            exclusion: SiteExclusionPolicy::None,
+                            maximum_attempts: 16_000_000,
+                            maximum_neighbor_checks: 16_000_000,
+                        },
+                        toniator_domain::RegionGeometryResponse {
+                            algorithm: RegionResizeAlgorithm::Scale,
+                            sampling: toniator_domain::RegionSamplingStrategy::AreaAverage,
+                            minimum_fill: 0.65,
+                            maximum_fill: 0.90,
+                        },
+                    ),
+                },
+                PresetRecord {
+                    metadata: metadata(
+                        "square-spiral-marks",
+                        "Square Spiral Marks",
+                        "Parametric",
+                        "Equal-arc circle marks on a square spiral.",
+                    ),
+                    recipe: mark_recipe(PatternStructureRecipe::ParametricCurve {
+                        name: "Square spiral marks".into(),
+                        coverage: coverage(),
+                        curve: ParametricCurve::Spiral(SpiralCurve {
+                            shape: SpiralShape::Square,
+                            turns: 5.0,
+                            radial_spacing: 16.0,
+                            phase_degrees: 0.0,
+                            winding: CurveWinding::Clockwise,
+                        }),
+                        spiral_coverage: toniator_domain::SpiralCoveragePolicy::CoverCanvas,
+                        repetition: CurveRepetition::Single,
+                        sites: Some(toniator_domain::ParametricCurveSiteDraft {
+                            interval: 16.0,
+                            phase: 0.0,
+                        }),
+                    }),
+                },
+                PresetRecord {
+                    metadata: metadata(
+                        "straight-grid-circles",
+                        "Straight Grid Circles",
+                        "Marks",
+                        "Two-guide intersection circle marks with guide-tangent orientation.",
+                    ),
+                    recipe: mark_recipe(tangent_grid("Straight grid circles", &[0.0, 90.0])),
+                },
+                PresetRecord {
+                    metadata: metadata(
+                        "three-guide-cells-scale",
+                        "Three-Guide Cells",
+                        "Regions",
+                        "Phase-aligned equilateral Guide Faces with positive-region Scale resizing.",
+                    ),
+                    recipe: guide_face_recipe(
+                        grid("Three guide cells", &[0.0, 60.0, 120.0], false),
+                        vec![0, 1, 2],
+                        toniator_domain::RegionGeometryResponse {
+                            algorithm: RegionResizeAlgorithm::Scale,
+                            sampling: toniator_domain::RegionSamplingStrategy::AreaAverage,
+                            minimum_fill: 0.65,
+                            maximum_fill: 0.90,
+                        },
+                    ),
+                },
+                PresetRecord {
+                    metadata: metadata(
+                        "three-guide-maze",
+                        "Three-Guide Maze",
+                        "Connections",
+                        "Triangular recursive-backtracker maze.",
+                    ),
+                    recipe: path_recipe(PatternStructureRecipe::MazeWalls {
+                        definition: Box::new(grid("Three guide maze", &[0.0, 60.0, 120.0], false)),
+                        program: toniator_domain::MazeProgram {
+                            algorithm: toniator_domain::GridMazeAlgorithm::RecursiveBacktracker,
+                            seed: 31,
+                        },
+                        style: Default::default(),
+                    }),
+                },
+                PresetRecord {
+                    metadata: metadata(
+                        "triagrid-custom-shape-marks",
+                        "Triagrid Diamond Marks",
+                        "Marks",
+                        "Three-guide intersection diamond marks.",
+                    ),
+                    recipe: mark_recipe(PatternStructureRecipe::AuthoredClosedShapeMarks {
+                        definition: Box::new(grid(
+                            "Triagrid diamond marks",
+                            &[0.0, 60.0, 120.0],
+                            false,
+                        )),
+                        shape: diamond_shape(),
+                    }),
+                },
+                PresetRecord {
+                    metadata: metadata(
+                        "triagrid-spanning-tree",
+                        "Triagrid Spanning Tree",
+                        "Connections",
+                        "Three-guide randomized-Prim spanning tree.",
+                    ),
+                    recipe: path_recipe(PatternStructureRecipe::ConnectionPaths {
+                        definition: Box::new(grid(
+                            "Triagrid spanning tree",
+                            &[0.0, 60.0, 120.0],
+                            false,
+                        )),
+                        program: ConnectionProgram::GridSpanningTree {
+                            adjacency,
+                            algorithm: toniator_domain::GridSpanningTreeAlgorithm::RandomizedPrim,
+                            seed: 47,
+                        },
+                        style: Default::default(),
+                    }),
+                },
+                PresetRecord {
+                    metadata: metadata(
+                        "two-guide-cells-uniform-offset",
+                        "Two-Guide Cells",
+                        "Regions",
+                        "Rectangular Guide Faces with positive-region uniform offset resizing.",
+                    ),
+                    recipe: guide_face_recipe(
+                        grid("Two guide cells", &[0.0, 90.0], false),
+                        vec![0, 1],
+                        toniator_domain::RegionGeometryResponse {
+                            algorithm: RegionResizeAlgorithm::UniformOffset,
+                            sampling: toniator_domain::RegionSamplingStrategy::ReferencePoint,
+                            minimum_fill: 0.0,
+                            maximum_fill: 1.0,
+                        },
+                    ),
+                },
+                PresetRecord {
+                    metadata: metadata(
+                        "two-guide-maze",
+                        "Two-Guide Maze",
+                        "Connections",
+                        "Rectangular recursive-backtracker maze.",
+                    ),
+                    recipe: path_recipe(PatternStructureRecipe::MazeWalls {
+                        definition: Box::new(grid("Two guide maze", &[0.0, 90.0], false)),
+                        program: toniator_domain::MazeProgram {
+                            algorithm: toniator_domain::GridMazeAlgorithm::RecursiveBacktracker,
+                            seed: 29,
+                        },
+                        style: Default::default(),
+                    }),
+                },
             ],
         )
-        .expect("bundled preset literals satisfy registry validation")
+        .expect("bundled preset literals satisfy registry validation");
+        let requirement_document = Document::new_default_document(
+            CanvasSpec {
+                width: 120.0,
+                height: 80.0,
+            },
+            SourceReference::Unassigned,
+        )
+        .expect("fixed catalog requirement document validates");
+        registry.catalog_entries = registry
+            .entries
+            .iter()
+            .cloned()
+            .map(|preset| {
+                let base = requirement_document.pattern_settings().clone();
+                let base_definition = requirement_document.pattern_definition_bundles()[0]
+                    .definition
+                    .clone();
+                let (candidate, _) = requirement_document
+                    .apply_command(&DocumentCommand::ReplaceDocumentPatternDefinitionRecipe {
+                        base,
+                        base_definition,
+                        recipe: preset.recipe.clone(),
+                    })
+                    .expect("validated bundled recipe materializes for its requirements");
+                let required_features = candidate
+                    .pattern_capabilities(PatternCapabilityScope::DocumentBase)
+                    .expect("materialized bundled recipe projects requirements")
+                    .features;
+                PresetCatalogEntry {
+                    required_features,
+                    preset,
+                }
+            })
+            .collect();
+        registry
     }
 
     /// Returns this registry format version without exposing mutable state.
@@ -340,6 +775,63 @@ impl PresetRegistry {
     /// Returns records in their validated stable order.
     pub fn entries(&self) -> &[PresetRecord] {
         &self.entries
+    }
+
+    /// Returns nonserialized catalog records and their gallery-only feature requirements.
+    pub fn catalog_entries(&self) -> &[PresetCatalogEntry] {
+        &self.catalog_entries
+    }
+
+    /// Returns catalog entries whose cloned reconstruction projects every requested feature.
+    ///
+    /// Failure to reconstruct is treated as unavailable so callers never need
+    /// a frontend diagnostic inventory for unsupported cards.
+    pub fn available_for(
+        &self,
+        document: &Document,
+        scope: PatternCapabilityScope,
+    ) -> Vec<&PresetCatalogEntry> {
+        self.catalog_entries
+            .iter()
+            .filter(|entry| {
+                let command = match scope {
+                    PatternCapabilityScope::DocumentBase => {
+                        let base = document.pattern_settings().clone();
+                        let Some(base_definition) = document
+                            .pattern_definition_bundles()
+                            .iter()
+                            .find(|bundle| bundle.definition.id == base.definition_id)
+                            .map(|bundle| bundle.definition.clone())
+                        else {
+                            return false;
+                        };
+                        DocumentCommand::ReplaceDocumentPatternDefinitionRecipe {
+                            base,
+                            base_definition,
+                            recipe: entry.preset.recipe.clone(),
+                        }
+                    }
+                    PatternCapabilityScope::Channel(channel_id) => {
+                        let Some(base_definition) =
+                            document.pattern_definition_for(channel_id).cloned()
+                        else {
+                            return false;
+                        };
+                        DocumentCommand::ReplaceChannelPatternDefinitionOverrideRecipe {
+                            base: document.pattern_settings().clone(),
+                            channel_id,
+                            base_definition,
+                            recipe: entry.preset.recipe.clone(),
+                        }
+                    }
+                };
+                document
+                    .apply_command(&command)
+                    .ok()
+                    .and_then(|(candidate, _)| candidate.pattern_capabilities(scope).ok())
+                    .is_some_and(|projection| projection.supports_all(&entry.required_features))
+            })
+            .collect()
     }
 
     /// Finds one entry by its stable metadata ID.
@@ -460,6 +952,48 @@ impl PresetRegistry {
             recipe,
             affected_channels,
         })
+    }
+}
+
+/// Builds the approved connection-plus-residual-marks painter-order composite.
+fn composite_connection_marks(
+    definition: PatternStructureRecipe,
+    program: ConnectionProgram,
+    residual: bool,
+) -> PatternDefinitionRecipe {
+    PatternDefinitionRecipe {
+        structure: PatternStructureRecipe::OrderedOutputs {
+            definition: Box::new(definition),
+            outputs: vec![
+                toniator_domain::PatternOutputRealizationRecipe::ConnectionPaths {
+                    program,
+                    style: Default::default(),
+                },
+                toniator_domain::PatternOutputRealizationRecipe::Marks,
+            ],
+        },
+        output_settings: vec![
+            toniator_domain::PatternOutputSettingsRecipe {
+                source_filter: toniator_domain::SiteUseFilterRecipe::All,
+                response: PatternGeometryResponse::Connected(
+                    toniator_domain::ConnectedGeometryResponse {
+                        minimum_thickness: 0.15,
+                        maximum_thickness: 0.65,
+                    },
+                ),
+            },
+            toniator_domain::PatternOutputSettingsRecipe {
+                source_filter: if residual {
+                    toniator_domain::SiteUseFilterRecipe::SitesUnusedBy { output_index: 0 }
+                } else {
+                    toniator_domain::SiteUseFilterRecipe::SitesUsedBy { output_index: 0 }
+                },
+                response: PatternGeometryResponse::Marks(toniator_domain::MarkGeometryResponse {
+                    minimum_fill: 0.25,
+                    maximum_fill: 0.85,
+                }),
+            },
+        ],
     }
 }
 
@@ -1082,11 +1616,10 @@ impl Error for RegionOutputRealizationError {}
 
 /// Realizes exactly one accepted untreated region output with one typed effective response.
 ///
-/// Full plus solid paint bypasses source sampling and returns the accepted canonical-region
-/// fingerprint unchanged. Every other path samples each complete untreated base exactly once,
-/// interpolates Scale/Gap endpoints from that base scalar, omits exact-zero-alpha sampled bases,
-/// delegates topology to geometry, and aligns sampled paint through treated-to-base provenance.
-/// Renderers receive only closed canonical rings and never construct topology.
+/// Every path samples each complete untreated base exactly once, maps that scalar linearly into
+/// the effective normalized fill range, omits zero fill and exact-zero-alpha sampled bases before
+/// geometry, and aligns sampled paint through retained positive-region provenance. Renderers
+/// receive only closed canonical rings and never construct topology.
 ///
 /// # Errors
 ///
@@ -1198,56 +1731,6 @@ fn realize_region_output_cancellable_impl(
         ));
     };
     let references_by_id = region_reference_table(untreated, references)?;
-    let full_solid = matches!(
-        response,
-        toniator_domain::RegionGeometryResponse::Full { .. }
-    ) && matches!(paint, ChannelPaint::Solid(_));
-    if full_solid {
-        let realization = TypedRegionOutputRealization {
-            regions: untreated.clone(),
-            paints: None,
-            fingerprint: untreated.fingerprint().to_owned(),
-            diagnostics: RegionOutputRealizationDiagnostics {
-                sampled_bases: 0,
-                retained_regions: untreated.regions().len(),
-            },
-        };
-        #[cfg(feature = "test-evidence")]
-        {
-            let identity_requests: Vec<_> = untreated
-                .regions()
-                .iter()
-                .map(|region| RegionTreatmentRequest {
-                    base_region_id: region.id.clone(),
-                    reference: references_by_id.get(&region.id).copied(),
-                    treatment: Some(RegionTreatment::Full),
-                })
-                .collect();
-            let identity_treated = RegionTreatmentResult {
-                regions: untreated.clone(),
-                provenance: untreated
-                    .regions()
-                    .iter()
-                    .map(|region| RegionTreatmentProvenance {
-                        treated_region_id: region.id.clone(),
-                        base_region_id: region.id.clone(),
-                    })
-                    .collect(),
-            };
-            record_region_evaluation_evidence(
-                evidence,
-                untreated,
-                references,
-                response,
-                &[],
-                &identity_requests,
-                &identity_treated,
-                &realization.fingerprint,
-                realization.diagnostics,
-            );
-        }
-        return Ok(realization);
-    }
     let source = source.ok_or(region_realization_error(
         "sampling.region.source",
         "region sampling requires a decoded source field",
@@ -1343,11 +1826,6 @@ fn record_region_evaluation_evidence(
     let Some(sink) = sink else {
         return;
     };
-    let sampling = match response {
-        toniator_domain::RegionGeometryResponse::Full { sampling }
-        | toniator_domain::RegionGeometryResponse::Scale { sampling, .. }
-        | toniator_domain::RegionGeometryResponse::ConstantGap { sampling, .. } => *sampling,
-    };
     *sink = Some(RegionEvaluationEvidence {
         untreated_regions: untreated.clone(),
         untreated_region_ids: untreated
@@ -1356,7 +1834,7 @@ fn record_region_evaluation_evidence(
             .map(|region| region.id.clone())
             .collect(),
         references: references.to_vec(),
-        sampling,
+        sampling: response.sampling,
         samples: samples.to_vec(),
         treatments: treatments.to_vec(),
         treated_regions: treated.regions.clone(),
@@ -1448,12 +1926,7 @@ fn sample_untreated_regions(
     limits: RegionSamplingLimits,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<RegionSourceSample>, RegionOutputRealizationError> {
-    let sampling = match response {
-        toniator_domain::RegionGeometryResponse::Full { sampling }
-        | toniator_domain::RegionGeometryResponse::Scale { sampling, .. }
-        | toniator_domain::RegionGeometryResponse::ConstantGap { sampling, .. } => *sampling,
-    };
-    match sampling {
+    match response.sampling {
         toniator_domain::RegionSamplingStrategy::ReferencePoint => untreated
             .regions()
             .iter()
@@ -1475,7 +1948,7 @@ fn sample_untreated_regions(
     }
 }
 
-/// Interpolates one sampled scalar into the typed response range without midpoint authority.
+/// Interpolates one sampled scalar linearly into the typed normalized fill range.
 ///
 /// # Errors
 ///
@@ -1484,26 +1957,16 @@ fn interpolated_region_treatment(
     response: &toniator_domain::RegionGeometryResponse,
     sample: f64,
 ) -> Result<RegionTreatment, RegionOutputRealizationError> {
-    let interpolate = |minimum: f64, maximum: f64| minimum + sample * (maximum - minimum);
-    match response {
-        toniator_domain::RegionGeometryResponse::Full { .. } => Ok(RegionTreatment::Full),
-        toniator_domain::RegionGeometryResponse::Scale {
-            minimum_scale,
-            maximum_scale,
-            ..
-        } => Ok(RegionTreatment::Scale(interpolate(
-            *minimum_scale,
-            *maximum_scale,
-        ))),
-        toniator_domain::RegionGeometryResponse::ConstantGap {
-            minimum_gap,
-            maximum_gap,
-            ..
-        } => Ok(RegionTreatment::ConstantGap(interpolate(
-            *minimum_gap,
-            *maximum_gap,
-        ))),
+    if !sample.is_finite() {
+        return Err(region_realization_error(
+            "region.resize.response.sample",
+            "region source response must remain finite",
+        ));
     }
+    Ok(RegionTreatment {
+        algorithm: response.algorithm,
+        fill: response.minimum_fill + sample * (response.maximum_fill - response.minimum_fill),
+    })
 }
 
 /// Aligns sampled base paint with every retained treated component through explicit geometry provenance.
@@ -1620,17 +2083,18 @@ mod stage20q_region_realizer_tests {
         }
     }
 
-    /// Builds the matching effective Full response without requiring document-level inheritance setup.
+    /// Builds the matching effective unit-fill response without document-level inheritance setup.
     fn stage20q_full_setting(
         output_layer_id: PatternOutputLayerId,
     ) -> EffectivePatternOutputSettings {
         EffectivePatternOutputSettings {
             output_layer_id,
-            response: PatternGeometryResponse::Regions(
-                toniator_domain::RegionGeometryResponse::Full {
-                    sampling: toniator_domain::RegionSamplingStrategy::ReferencePoint,
-                },
-            ),
+            response: PatternGeometryResponse::Regions(toniator_domain::RegionGeometryResponse {
+                algorithm: RegionResizeAlgorithm::Scale,
+                sampling: toniator_domain::RegionSamplingStrategy::ReferencePoint,
+                minimum_fill: 1.0,
+                maximum_fill: 1.0,
+            }),
         }
     }
 
@@ -1671,9 +2135,9 @@ mod stage20q_region_realizer_tests {
         (regions, references)
     }
 
-    /// Verifies Full plus solid paint bypasses source sampling and preserves accepted region identity.
+    /// Verifies normalized unit fill still requires its source-sampling authority.
     #[test]
-    fn stage20q_full_solid_replays_untreated_fingerprint_without_source() {
+    fn stage20q_unit_fill_rejects_missing_source() {
         let capability = stage20q_capability();
         let setting = stage20q_full_setting(capability.layer_id);
         let (untreated, references) = stage20q_untreated();
@@ -1698,10 +2162,8 @@ mod stage20q_region_realizer_tests {
             RegionTreatmentLimits::default(),
             &|| false,
         )
-        .unwrap();
-        assert_eq!(result.fingerprint, untreated.fingerprint());
-        assert_eq!(result.regions, untreated);
-        assert_eq!(result.diagnostics.sampled_bases, 0);
+        .expect_err("normalized fill requires source sampling");
+        assert_eq!(result.path(), "sampling.region.source");
     }
 
     /// Verifies an effective response targeting a different output is rejected before sampling.
@@ -1779,12 +2241,18 @@ mod stage20q_region_realizer_tests {
                 RegionTreatmentRequest {
                     base_region_id: untreated.regions()[0].id.clone(),
                     reference: Some(Point2::new(0.0, 0.0)),
-                    treatment: Some(RegionTreatment::Scale(0.5)),
+                    treatment: Some(RegionTreatment {
+                        algorithm: RegionResizeAlgorithm::Scale,
+                        fill: 0.5,
+                    }),
                 },
                 RegionTreatmentRequest {
                     base_region_id: untreated.regions()[1].id.clone(),
                     reference: None,
-                    treatment: Some(RegionTreatment::ConstantGap(0.0)),
+                    treatment: Some(RegionTreatment {
+                        algorithm: RegionResizeAlgorithm::UniformOffset,
+                        fill: 1.0,
+                    }),
                 },
             ],
             RegionTreatmentLimits::default(),
@@ -4539,7 +5007,8 @@ fn straight_intersection_basis(
     })
 }
 
-/// Bounds every possible Stage 20E1 nominal-cell diagonal before family allocation.
+/// Bounds every possible Stage 20E1 nominal-cell diagonal before family allocation,
+/// including generic AlongGuide tangent intervals and resolved transverse spacing.
 ///
 /// # Errors
 ///
@@ -4632,7 +5101,14 @@ pub fn maximum_nominal_cell_diameter(
         StructuralProductCapability::AlongGuideSites => {
             let along_multiplier = family.along_interval_multiplier.unwrap_or(1.0);
             if family.generic_guides.is_some() {
-                maximum_directional_spacing * (along_multiplier + 1.0)
+                // A generic AlongGuide site owns one tangent interval selected
+                // from document density plus its guide's resolved transverse
+                // basis. NormalOffset may make that transverse spacing larger
+                // than density, so the positive axis sum conservatively bounds
+                // every realized two-axis nominal-cell diameter before support
+                // allocation without changing any family identity.
+                maximum_directional_spacing * along_multiplier
+                    + generic_spacing_bound()?.max(maximum_directional_spacing)
             } else {
                 let resolved_spacing = selected_spacing_bound(&family.dimensions)?;
                 resolved_spacing * (along_multiplier + 1.0)
@@ -5526,13 +6002,10 @@ fn required_exclusion_distance(random: &RandomSiteCapability, support: f64) -> f
     random_neighborhood(random, support)
 }
 
-fn exclusion_distance(policy: &SiteExclusionPolicy, support: f64) -> f64 {
+fn exclusion_distance(policy: &SiteExclusionPolicy, _support: f64) -> f64 {
     match policy {
         SiteExclusionPolicy::None => 0.0,
         SiteExclusionPolicy::MinimumCenterDistance { minimum } => *minimum,
-        SiteExclusionPolicy::VisibleMarkMargin { margin, sizing } => match sizing {
-            VisibleMarkSizingPolicy::MaximumSupportRadius => support * 2.0 + margin,
-        },
     }
 }
 
@@ -5667,13 +6140,6 @@ fn random_family_fingerprint(
         SiteExclusionPolicy::MinimumCenterDistance { minimum } => {
             bytes.push(2);
             bytes.extend(minimum.to_bits().to_le_bytes());
-        }
-        SiteExclusionPolicy::VisibleMarkMargin { margin, sizing } => {
-            bytes.push(3);
-            bytes.extend(margin.to_bits().to_le_bytes());
-            bytes.push(match sizing {
-                VisibleMarkSizingPolicy::MaximumSupportRadius => 1,
-            });
         }
     }
     bytes.extend(random.maximum_attempts.to_le_bytes());

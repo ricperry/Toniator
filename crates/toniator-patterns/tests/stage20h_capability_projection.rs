@@ -36,15 +36,15 @@ fn document_for(definition: PatternDefinition, structures: Vec<AuthoredStructure
                 .iter()
                 .map(|output| PatternOutputSettings {
                     output_layer_id: output.id(),
-                    response: match output {
-                        toniator_domain::PatternOutputLayer::CircularMarks { .. }
-                        | toniator_domain::PatternOutputLayer::MarkPrototype { .. } => {
+                    response: match &output.realization {
+                        toniator_domain::PatternOutputRealization::CircularMarks { .. }
+                        | toniator_domain::PatternOutputRealization::MarkPrototype { .. } => {
                             PatternGeometryResponse::Marks(toniator_domain::MarkGeometryResponse {
                                 minimum_fill: 0.0,
                                 maximum_fill: 1.0,
                             })
                         }
-                        toniator_domain::PatternOutputLayer::Regions { .. } => {
+                        toniator_domain::PatternOutputRealization::Regions { .. } => {
                             PatternGeometryResponse::Regions(RegionGeometryResponse::default())
                         }
                         _ => panic!("Stage 20H fixture owns only mark outputs"),
@@ -138,10 +138,7 @@ fn definition_only_pipeline_products_match_domain_projection() {
             },
             19,
             SiteDensityModulation::Uniform,
-            SiteExclusionPolicy::VisibleMarkMargin {
-                margin: 0.0,
-                sizing: toniator_domain::VisibleMarkSizingPolicy::MaximumSupportRadius,
-            },
+            SiteExclusionPolicy::MinimumCenterDistance { minimum: 1.0 },
             10_000,
             10_000,
             CoveragePolicy {
@@ -227,9 +224,6 @@ fn definition_only_pipeline_products_match_domain_projection() {
                         SiteExclusionPolicy::None => toniator_domain::ExclusionKind::None,
                         SiteExclusionPolicy::MinimumCenterDistance { .. } => {
                             toniator_domain::ExclusionKind::MinimumCenterDistance
-                        }
-                        SiteExclusionPolicy::VisibleMarkMargin { .. } => {
-                            toniator_domain::ExclusionKind::VisibleMarkMargin
                         }
                     }
                 );

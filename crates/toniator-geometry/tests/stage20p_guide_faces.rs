@@ -2,12 +2,14 @@
 
 use std::cell::Cell;
 
-use toniator_domain::{GuideDimensionId, PatternMechanismId, PatternOutputLayerId};
+use toniator_domain::{
+    GuideDimensionId, PatternMechanismId, PatternOutputLayerId, RegionResizeAlgorithm,
+};
 use toniator_geometry::{
     Bounds, CanonicalRegionSourceId, CubicBezierSegment, CurvePath, CurveSegment, GuideFaceLimits,
-    GuideFaceRequest, GuideFaceResult, PathClosure, Point2, StructuralPathInstance,
-    StructuralPathInstanceId, StructuralPathSet, StructuralPathSourceId,
-    build_guide_faces_cancellable,
+    GuideFaceRequest, GuideFaceResult, PathClosure, Point2, RegionTreatment, RegionTreatmentLimits,
+    RegionTreatmentRequest, StructuralPathInstance, StructuralPathInstanceId, StructuralPathSet,
+    StructuralPathSourceId, build_guide_faces_cancellable, treat_region_requests_cancellable,
 };
 
 /// Creates a deterministic ordered guide set for public guide-face integration tests.
@@ -214,6 +216,31 @@ fn rectangular_and_phase_aligned_triangular_arrangements_are_canonical() {
     }
 }
 
+/// Proves a current rectangular Guide Face uses UniformOffset fill two to double geometric radius.
+#[test]
+fn guide_face_uniform_offset_fill_two_targets_four_times_area() {
+    let output =
+        build_guide_faces_cancellable(rectangular_request(), GuideFaceLimits::default(), || false)
+            .expect("rectangular Guide Faces build");
+    let base = &output.regions.regions()[0];
+    let resized = treat_region_requests_cancellable(
+        PatternOutputLayerId(9),
+        &output.regions,
+        &[RegionTreatmentRequest {
+            base_region_id: base.id.clone(),
+            reference: None,
+            treatment: Some(RegionTreatment {
+                algorithm: RegionResizeAlgorithm::UniformOffset,
+                fill: 2.0,
+            }),
+        }],
+        RegionTreatmentLimits::default(),
+        || false,
+    )
+    .expect("Guide Face uniform offset resolves");
+    assert!((resized.regions.regions()[0].area - base.area * 4.0).abs() < 1e-6);
+}
+
 /// Proves a non-straight cubic guide boundary remains present in a canonical closed face.
 #[test]
 fn authored_cubic_boundary_is_not_flattened_or_dropped() {
@@ -270,6 +297,43 @@ fn authored_cubic_boundary_is_not_flattened_or_dropped() {
             .iter()
             .all(|(_, centroid)| centroid.is_finite()),
         "cubic Green-moment centroids remain finite",
+    );
+    let requests = output
+        .regions
+        .regions()
+        .iter()
+        .map(|region| RegionTreatmentRequest {
+            base_region_id: region.id.clone(),
+            reference: None,
+            treatment: Some(RegionTreatment {
+                algorithm: RegionResizeAlgorithm::UniformOffset,
+                fill: 1.25,
+            }),
+        })
+        .collect::<Vec<_>>();
+    let resized = treat_region_requests_cancellable(
+        PatternOutputLayerId(9),
+        &output.regions,
+        &requests,
+        RegionTreatmentLimits::default(),
+        || false,
+    )
+    .expect("current authored cubic Guide Faces use the bounded UniformOffset fallback");
+    assert!(!resized.regions.regions().is_empty());
+    let base_area: f64 = output
+        .regions
+        .regions()
+        .iter()
+        .map(|region| region.area)
+        .sum();
+    let resized_area: f64 = resized
+        .regions
+        .regions()
+        .iter()
+        .map(|region| region.area)
+        .sum();
+    assert!(
+        (resized_area - base_area * 1.25 * 1.25).abs() <= base_area * 1.25 * 1.25 * 1.0e-6 + 1.0e-9
     );
 }
 

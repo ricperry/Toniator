@@ -467,8 +467,11 @@ line/cubic centerline offsets, tangential padded-domain endpoint extension,
 deterministic crossing dissolution, Stage 20I outline reuse, and current-v4
 persistence. Focused domain, geometry, patterns, engine, IO, render, CLI/SVG,
 Holiday, and private Sway/AT-SPI evidence is green; independent re-review has
-no remaining finding. Automated wlroots evidence is not manual GNOME/Mutter
-review. The user explicitly accepted Stage 20J on 2026-08-22; publication,
+no remaining finding. This historical absolute-gap wording is superseded for
+current terminology: `NormalOffset` now denotes positive parallel-centerline
+spacing and never region negative-space or absolute-gap computation. Automated
+wlroots evidence is not manual GNOME/Mutter review. The user explicitly
+accepted Stage 20J on 2026-08-22; publication,
 later Stage 20M+ work, protected specification changes, and Legacy work remain
 separate.
 
@@ -574,7 +577,7 @@ final clipping. Eligible `FamilySiteSet` products include along-guide and
 It adds guard-inclusive realization, exact-duplicate co-ownership, bounded
 geometry-private Spade topology, and fixed solid Full regions without a
 channel-specific region treatment. Independent re-review and final artifact
-inspection passed. Stage 20R is now complete; Stage 20S remains Planned and
+inspection passed. At that checkpoint, Stage 20S remained Planned and
 separately gated.
 
 **Stage 20P — Complete at implementation checkpoint
@@ -604,7 +607,8 @@ site/Voronoi mechanisms remain valid. Do not push, publish, or begin Stage
 headless filled-region realization on 2026-08-26 after the repaired
 implementation passed independent review and parent verification confirmed the focused
 tests, current foundations, strict checks, architecture and protected-input gates,
-semantic-map freshness, artifact hashes, RGB/alpha statistics, and intrinsic native/SVG
+read-only semantic-map impact/navigation/freshness evidence (not `semantic-map check`
+or architecture authority), artifact hashes, RGB/alpha statistics, and intrinsic native/SVG
 raster inspections under
 [`STAGE_20Q_FILLED_REGION_REALIZATION_PLAN.md`](docs/STAGE_20Q_FILLED_REGION_REALIZATION_PLAN.md).
 It realizes only fill-only `Full`, `Scale`, and `ConstantGap` treatments for accepted
@@ -619,8 +623,11 @@ intersection plus crossing/coincident-branch dissolution. The three-guide eviden
 positive inward gap and triangular line rings. The authored-cubic outward witness uses a
 fixed -40 gap (20-unit outward edge growth and 40-unit neighbor overlap) with smooth joins.
 Collapse evidence is intentionally transparent; sparse authored-cubic coverage reflects
-six complete bounded faces, not raster resolution. Publication remains separate; Stage 20R
-is complete and Stage 20S remains separately gated.
+six complete bounded faces, not raster resolution. This historical Stage 20Q
+record is superseded for current region authority by normalized positive-only
+Scale/UniformOffset fill; Full, ConstantGap, absolute-gap, and negative-space
+region geometry are not current behavior. Publication remains separate; Stage
+20R is complete and Stage 20S remains separately gated.
 
 **Stage 20R — Complete at implementation checkpoint
 `458c9a981dd349999240a18052e055a71c7b6c3c`.** Authorized implementation began on 2026-08-26
@@ -647,18 +654,41 @@ issue. Parent verification then reran the complete authorized gate matrix and
 directly inspected representative native and SVG-rasterized evidence in RGB
 and alpha. The user accepted Stage 20R on 2026-08-26; its implementation
 checkpoint is `458c9a981dd349999240a18052e055a71c7b6c3c`. The subsequent
-documentation closeout is tracked separately. Stage 20S remains Planned and
-separately gated.
+documentation closeout is tracked separately. At that checkpoint, Stage 20S
+remained Planned and separately gated.
 
-**Remaining Stage 20N+ — Stage 20R Complete; Stage 20S Planned.** The user accepted the revised remainder
+**Stage 20S — Accepted awaiting checkpoint.** The user authorized bounded headless capability
+and baseline-recipe completion on 2026-08-26 from Stage 20R documentation
+checkpoint `88455d703bab4d0c4932b70ba8a4337c299867da` and implementation
+checkpoint `458c9a981dd349999240a18052e055a71c7b6c3c`. The approved contract is
+recorded in
+[`STAGE_20S_CAPABILITY_AND_BASELINE_RECIPE_COMPLETION_PLAN.md`](docs/STAGE_20S_CAPABILITY_AND_BASELINE_RECIPE_COMPLETION_PLAN.md).
+Implementation, focused checks, evidence, and parent visual inspection are
+complete. The version-2 catalog contains exactly 16 entries after explicit
+retirement of the temporary `regions-plus-marks` maze-debug recipe, without a
+replacement card. Only directly invalidated or new artifacts were regenerated.
+Independent read-only review found nested preset-v3 unknown-field acceptance;
+the correction and re-review passed. `semantic-map check` is unavailable and
+inapplicable because Toniator has no semantic-map architecture schema; project
+documentation is architecture authority, while
+`scripts/validate_architecture.sh` is the mechanical validation check. GTK
+behavior, compatibility adapters, metadata-based evaluator
+dispatch, and Stage 21 remain excluded. The user accepted Stage 20S on
+2026-08-26 after independent review and re-review, focused verification, parent
+intrinsic RGB/alpha visual inspection, and durable-document reconciliation.
+The Stage 20S implementation checkpoint is pending, and this acceptance
+authorizes its local creation; push, publication, and later-stage work remain
+unauthorized and separately gated.
+
+**Remaining Stage 20N+ — Stage 20R Complete; Stage 20S Accepted awaiting checkpoint.** The user accepted the revised remainder
 roadmap on 2026-08-24 under
 [`STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md`](docs/STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md).
 The accepted order after completed 20Q is 20R composites and site-use filters;
 then 20S headless capability/gallery recipe
 completion. Stage 21 owns pattern-authoring GTK, Stage 22 owns all headless
 frame/media/sequence/simple-transition work, and Stage 23 owns temporal GTK
-with start/end pins. Stage 20S and Stages 21–23 remain Planned and separately
-gated.
+with start/end pins. A separately gated final scrub of all Stage 20 work must
+occur before Stage 21. Stages 21–23 remain Planned and separately gated.
 
 ## Maintenance rules
 
