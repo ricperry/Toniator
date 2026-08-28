@@ -1,6 +1,6 @@
 # Toniator Progress Tracker
 
-Last updated: **2026-08-27**. The durable execution contract is
+Last updated: **2026-08-28**. The durable execution contract is
 [GREENFIELD_REWRITE_PLAN.md](docs/GREENFIELD_REWRITE_PLAN.md). Normative
 architecture remains in the five protected [Project Specification files](Project%20Specification/Addendum.md).
 
@@ -729,7 +729,96 @@ pattern-authoring GTK, Stage 22 owns all headless
 frame/media/sequence/simple-transition work, and Stage 23 owns temporal GTK
 with start/end pins. The integrated final scrub is complete at the checkpoint
 above. The separately authorized GTK4/Blueprint re-baseline is complete in
-checkpoint `ToniatorGUI`; Stages 21–23 remain Planned and separately gated.
+checkpoint `ToniatorGUI`; Stage 21A is separately tracked below, while Stage
+21B and Stages 22–23 remain Planned and separately gated.
+
+**Stage 21A — Main Window and Still-Image Import — Complete at commit
+`3028193b787960fb402b0af6807d6e8e8ab174db`.**
+The user authorized the first bounded Stage 21 checkpoint on 2026-08-27. The
+user accepted it on 2026-08-28 after implementation, focused verification,
+direct artifact and private-harness inspection, and independent re-review.
+This stage owns
+the density/density-aspect authority and current-only document schema v6,
+expanded single-still source decoding/import, explicit ALL-versus-channel
+inspector targeting, the compact non-mutating pattern candidate plus atomic
+Apply Pattern behavior, capability-filtered common settings, and the private
+Advanced Settings modal. Focused tests, system-dav1d checks, Clippy, formatting,
+architecture validation, intrinsic native PNG/SVG inspection, and private
+Sway/AT-SPI/grim evidence pass. Automated wlroots evidence is not human
+GNOME/Mutter or native-portal acceptance. Stage 21B Pattern Wizard and personal
+preset-library work remains Planned and separately gated; Stage 21A acceptance
+satisfies only its sequencing prerequisite. No push or publication is implied
+by this transition.
+
+The subsequent human acceptance pass found duplicate decoration, queued-preview
+status, persistent-error, density-control, dense-family, and long-render
+feedback defects. The bounded correction registers the Blueprint header as the
+native titlebar; makes errors dismissible and clears obsolete preview failures;
+projects Density as inverse **Pattern zoom level** with **Pattern aspect**;
+removes default application-authored creative work ceilings while retaining
+machine representation, fallible incremental allocation, cancellation, and
+explicit test limits; and publishes ticketed fixed-weight progress in one
+overlay with an overall bar, a current-stage bar, visible percentages, and
+stage text through family, ordered-output, scene, raster, and final-publication
+work.
+The final fresh/direct zoom reference is longest-axis normalized:
+`100 × sqrt(min(width, height) / max(width, height))` at aspect `1.0`, yielding
+square 100×100, 2:1 100×50, and 1:2 50×100 coverage without rewriting stored
+schema-v6 Density. The first source-backed workspace exposes its pending stages
+before idle viewport submission; source-less New remains empty. Dispersion now
+retains final accepted sites while releasing transient parent/spatial storage,
+cache results share immutable scene/raster values, and raster composition uses
+only an accumulator plus one layer with fallible allocation rather than an
+estimate-based creative refusal. AreaAverage reuses worker-local clip buffers,
+reports completed source cells, and duplicate inner-loop progress is coalesced
+before frontend delivery instead of accumulating unbounded queued messages.
+Its sampling contract now classifies literal decoded-source pixel footprints
+by an inclusive 50% exact-coverage threshold: selected pixels contribute their
+full mapped values once, fractional coverage never scales a pixel value, and
+complete off-source geometry retains repeated unit footprints with nearest-edge
+clamping. Indexed Rayon region work preserves deterministic input-order results,
+checked request-wide counts, cancellation, and completed-footprint progress.
+Guide-path thickness now samples at the nominal pattern interval rather than
+half-pixel source supersampling; curved-centerline refinement remains separate
+and current retained-sample response is linear. Advanced Settings clarifies that connected
+minimum thickness zero is a source-driven lower bound: positive sampled ink
+remains visible, while all-zero response produces no contours.
+Every bundled pattern now accepts channel layout rotation except
+source-weighted site placement, whose capability projection omits Rotation,
+whose channel commands reject it, and whose evaluator receives zero rotation.
+Named recipe/topology/structural transitions prune only an incompatible channel
+rotation delta while shared base rotation remains dormant. Rotated canonical
+strokes use a fallible row-active edge schedule and sparse nonzero-winding spans
+with bounded cancellation polling rather than rescanning every edge and pixel
+inside each widened axis-aligned bounds. The complete sixteen-preset engine
+matrix reaches realization, scene construction, and rasterization with nonzero
+rotation for every eligible recipe.
+Focused parametric, generic-guide, random, scheduler, renderer, app, CLI, and
+dense three-guide checks pass. All sixteen bundled recipes evaluate after the
+density increase, and the independent correction re-review found no remaining
+blocker. Fresh private Sway evidence shows one titlebar, dismissible errors,
+inverse zoom controls, and determinate output/raster progress for both immutable
+source types. That was the first ready-for-acceptance state; the user then
+reopened the performance and memory gate covered below.
+
+The reopened performance and memory gate is complete. Every bundled preset was
+run in a separate process against both immutable sources at intrinsic dimensions
+with baseline, Pattern zoom `0.80`/`1.40`, Pattern aspect `2.0`/`0.5`, eligible
+rotation `17`/`89.5`, response minimum `0`/`0.25`, response maximum `1`/`0.75`,
+combined zoom `0.80` plus rotation `17`, and capability-valid shape-rotation and
+region-sampling cases. All eligible final cases pass; the Source-Weighted
+Dispersion + Voronoi preset reports its exact expected rotation rejection.
+Guide-Face peak-RSS reductions range from 59.8% to 84.8% in the recorded
+isolated comparisons.
+Private Sway evidence covers the asynchronous 128×72 Advanced Settings preview,
+two-level progress, one-modal behavior, Apply/Undo, compact normal and narrow
+layouts, and Cancel-while-pending followed by immediate reopen without stale
+publication. Independent review found no blocking correctness or lifetime
+defect. The stress runner accepts one case per invocation, so complete-matrix
+orchestration is external; the recorded claims are limited to the mutation list
+above and do not include translation. Automated wlroots evidence remains
+non-human and non-Mutter. The user accepted Stage 21A on 2026-08-28. No push,
+publication, or Stage 21B work has begun.
 
 ## Maintenance rules
 

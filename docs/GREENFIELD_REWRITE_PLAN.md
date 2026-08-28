@@ -814,10 +814,11 @@ accepted current successful completion commits it.
   deliberately applied to every created channel. Canonical role mappings and
   paints replace the old global render `--source-component` and `--color`;
   those low-level controls remain available to `inspect marks`.
-- Add `--background transparent|black|white` for PNG, defaulting to
-  transparent. It is a final-consumer choice and is never inferred from model.
-  Explicit black/white background with SVG fails clearly; SVG remains
-  transparent.
+- Add `--background transparent|black|white` for PNG. When omitted, the
+  final-consumer default is black for RGB, white for CMYK, and transparent for
+  SourceColorAlpha; an explicit choice overrides that model-sensitive default
+  without entering document, scene, or cache identity. Explicit black/white
+  background with SVG fails clearly; ordinary SVG remains transparent.
 - PNG encoding remains sRGB/sRGBA for every model. CMYK denotes halftone
   topology and fixed composition, never a CMYK file encoding.
 - `inspect grid` and `inspect marks` retain their diagnostic roles and never
@@ -1006,8 +1007,9 @@ it.
 
 CLI tests prove every model uses the authoritative document path, inspect
 commands remain diagnostics, obsolete `--mode` render semantics are rejected,
-background is consumer-only with transparent default, SVG rejects opaque
-background, and PNG is always sRGB/sRGBA.
+background is consumer-only with RGB-black, CMYK-white, and
+SourceColorAlpha-transparent omitted defaults, SVG rejects opaque background,
+and PNG is always sRGB/sRGBA.
 
 Run focused crate tests within every substage and a proportional workspace
 boundary check before its review stop. Stage 9E owns the one complete final
@@ -2060,8 +2062,11 @@ architecture schema; project documentation is authority and
 integrated final scrub is complete at implementation checkpoint
 `dc7e988200c5be4d22791ca1d231336caac19a24` (accepted 2026-08-27); its durable
 architecture and concurrency record includes the full-resolution scaling
-proof. Stages 21–23 remain Planned. The GTK4/Blueprint re-baseline is recorded
-below; push, publication, and every later stage remain separately gated.
+proof. Stage 21A is complete at implementation checkpoint
+`3028193b787960fb402b0af6807d6e8e8ab174db` and was user-accepted on
+2026-08-28. Stage 21B and Stages 22–23 remain Planned. The GTK4/Blueprint
+re-baseline is recorded below; push, publication, and every later stage remain
+separately gated.
 
 **Final Stage 20 scrub — Complete at implementation checkpoint
 `dc7e988200c5be4d22791ca1d231336caac19a24`.** The user accepted the integrated
@@ -2076,7 +2081,7 @@ unit; deterministic per-site, per-region, and per-pixel work uses the bounded
 shared Rayon pool, while global topology, dependency/budget traversal, painter
 order, and publication remain serial. The retired `regions-plus-marks` debug
 tool remains absent. The GTK4/Blueprint re-baseline is recorded below; Stage
-21, publication, and push remain separately gated.
+21A is separately gated from Stage 21B, publication, and push.
 
 ## GTK4/Blueprint re-baseline
 
@@ -2099,6 +2104,122 @@ covered raster and SVG inputs, normal and narrow layouts, sidebar visibility,
 Pattern Editor reflow, draft/discard actions, and accessible control actions.
 The evidence is automated wlroots evidence and native artifact inspection; it
 does not claim manual GNOME Shell/Mutter acceptance.
+
+## Stage 21 — Main Window and Pattern Wizard
+
+Stage 21 is split into two sequential, separately accepted checkpoints on the
+`ToniatorGUI` branch. Stage 21B may not begin before explicit Stage 21A
+acceptance. Each checkpoint has one writer, focused verification, independent
+review, and a user-owned acceptance transition; neither checkpoint authorizes
+a push.
+
+### Stage 21A — Main Window and Still-Image Import
+
+**Complete at implementation checkpoint
+`3028193b787960fb402b0af6807d6e8e8ab174db`; user-accepted 2026-08-28.**
+
+Replace stored axis counts/lock with the Addendum's positive Density and
+Density-aspect authority, additive channel deltas, current-only schema v6, and
+strict v5 rejection. Extend exact-byte still-source persistence and decoder
+identity to PNG, SVG, JPEG/JPG, WebP, BMP, TIFF, OpenEXR, and AVIF while
+rejecting animated WebP/AVIF and multipage TIFF. AVIF uses the open-source
+system dav1d backend; OpenEXR stays linear with finite normalized clamping and
+no implicit tone mapping or color-management policy.
+
+The Open dialog begins with one combined **All supported files** filter. The
+main inspector defaults to runtime-only **ALL**, never a fabricated channel;
+ordinary ALL edits preserve channel deltas. A compact non-mutating recipe
+dropdown separates selection from **Apply Pattern** and shows non-catalog
+recipes as **Custom pattern**. Applying to ALL discloses affected channels and
+atomically replaces the base recipe while clearing only pattern-relative
+channel overrides/deltas described by the Addendum; one Undo restores the
+exact former intent. Named-channel replacement retains its existing pruning
+boundary. **Edit Pattern** remains visible and accessibly disabled for 21B.
+
+Inline controls come only from capability-active descriptors and keep frequent
+layout, rotation/offset, visibility, and opacity values. Named channels expose
+inheritance and typed reset actions. The main inspector projects effective
+Density as inverse **Pattern zoom level** (`1.0` default; smaller means more
+geometry, larger means less) and labels unchanged Density aspect as **Pattern
+aspect** without creating new persisted or evaluator authority. The fresh/direct
+reference is `100 × sqrt(min(width, height) / max(width, height))` at aspect
+`1.0`: it is resolution independent and resolves to approximately 100 sites on
+the long edge (square 100×100, 2:1 100×50, 1:2 50×100); a loaded schema-v6
+document retains its stored Density. One
+Blueprint-owned **Advanced Settings** modal holds Source and Output instance controls in a cloned history with a
+canonical private preview; Apply squashes once and Cancel/close discards. It
+does not expose structural recipe, ordered-output, or topology editing. The
+single modal presents before preview work begins and evaluates only its bounded
+source proxy on a private cancelable scheduler. Current-ticket progress is
+visible in the modal, newer edits supersede older work, stale completions are
+rejected, and repeated activation presents the existing modal rather than
+creating another private history.
+
+Normal app/CLI evaluation does not impose application-authored pattern-work
+ceilings; checked arithmetic, fallible allocation, cancellation, and stale
+publication rejection remain active, while explicit finite policies stay
+available to tests and constrained callers. The main canvas replaces its
+pending spinner with one overlay containing a ticketed monotonic overall bar,
+a current-stage bar, and visible artist-facing percentages/phase text.
+Preparation/decode, family geometry, ordered output realization, scene, raster,
+and final publication contribute fixed weights; stale progress cannot update
+the current canvas. The first source-backed workspace exposes that same
+pending state on the visible canvas before idle viewport submission; source-less
+New remains empty. Expensive family loops, site-bound output work
+including existing parallel workers, canonical raster primitives, and final
+pixel-processing phases report completed units within those weights.
+AreaAverage reports completed source-cell intersections, while identical
+inner-loop observations are coalesced at per-mille resolution before frontend
+delivery. Progress
+remains observational and cannot alter geometry, pixels, cache identity,
+cancellation, or atomic publication.
+AreaAverage maps the canvas to literal decoded-source pixel footprints and
+uses an inclusive 50% exact-coverage threshold: selected pixels contribute
+their complete mapped scalar and associated color/alpha values once, rejected
+pixels contribute nothing, and the selected full pixels are averaged equally.
+Complete untreated off-source geometry retains one unit footprint per sample
+position with nearest-edge clamping. Indexed parallel region work preserves
+stable source-order accumulation, request-wide checked work accounting,
+cancellation, and coalesced completed-footprint progress without fractional
+pixel weighting.
+Unbounded creative intent does not authorize eager infallible allocation from
+derived counts: variable-size random populations and their spatial lookup grow
+through fallible incremental reservations with cancellation, while
+machine-unrepresentable counts fail before allocation.
+Random dispersion retains only accepted final sites plus transient parent/spatial
+working data, releases the latter after generation, and preserves deterministic
+provenance. Cached results Arc-share immutable scene/raster payloads. Raster
+composition holds only an accumulator plus one transient layer, uses fallible
+pixel/byte allocation, and never rejects valid creative work by estimate.
+Guide-path thickness samples source response once per nominal pattern interval,
+or once per decoded-source-pixel footprint when the pattern is denser, rather
+than supersampling every source pixel. Curved centerline refinement remains
+independent and current response interpolation is linear.
+Every current pattern supports layout rotation except artwork-weighted
+source-document site placement. Capability projection omits that incompatible
+control, channel commands reject it, effective evaluation uses zero rotation,
+and named structural transitions prune only the affected channel delta while
+leaving shared base rotation dormant. Canonical-stroke rasterization uses a
+fallible row-active edge schedule and sparse nonzero-winding spans with bounded
+cancellation checks, preserving exact coverage while avoiding rotated
+axis-aligned-bounds scans.
+
+### Stage 21B — Pattern Wizard and Personal Preset Library
+
+Stage 21A acceptance satisfies this stage's sequencing prerequisite but does
+not authorize implementation. When Stage 21B is separately authorized, enable
+**Edit Pattern** as the capability-driven private
+Pattern Wizard and integrate the accepted Guide Curve and Shape Editors as
+nested subeditors. Cover all sixteen current bundled recipes, structural
+breadcrumb/review navigation, stale-preview rejection, ALL/named-channel
+publication, and custom drafts without requiring a save.
+
+Add a layered immutable built-in plus user preset-v3 registry. Personal files
+use safe atomic regular-file storage in a configurable absolute XDG data
+directory, with versioned XDG config, unique `user-*` IDs, case-insensitive
+unique names, corrupt-file isolation, and non-authoritative canonical-pipeline
+thumbnails. Directory changes switch libraries without moving or deleting old
+content. Cloud sync, a database, and preset import/export remain out of scope.
 
 Every mechanism must enter through the Stage 14 typed schema, Stage 15 generic
 pipeline, Stage 17 command/descriptor contract, canonical geometry, and

@@ -495,7 +495,7 @@ for RGB, white for CMYK, and fixed neutral mid-gray for SourceColorAlpha. It
 does not modify the document, `RenderScene`, raster bytes, SVG, or export
 background.
 
-PNG export background is an independent final-consumer choice:
+PNG export background is a final-consumer choice:
 
 ```bash
 --background transparent
@@ -503,11 +503,22 @@ PNG export background is an independent final-consumer choice:
 --background white
 ```
 
-The default is transparent. Black or white explicitly composites the final
-scene onto that background. PNG remains sRGB/sRGBA for every halftone channel
-model; selecting CMYK never creates CMYK-encoded PNG data. SVG remains
-transparent unless a later explicitly authorized SVG-background feature is
-added.
+When the user does not make an explicit choice, the default follows the
+authoritative halftone channel model: pure black for RGB, pure white for CMYK,
+and transparent for SourceColorAlpha. Black preserves a representative viewing
+condition for additive RGB output when a PNG is displayed outside Toniator and
+allows the opaque result to be added over another color by a downstream image
+compositor. White is the corresponding representative backing for subtractive
+CMYK output. An explicit `--background` choice overrides the model-sensitive
+default without changing the document, model, canonical scene, scene identity,
+or cache identity.
+
+Black or white composites the final transparent scene onto that background.
+PNG remains sRGB/sRGBA for every halftone channel model; selecting CMYK never
+creates CMYK-encoded PNG data. SVG remains transparent unless a later
+explicitly authorized SVG-background feature is added. Gallery thumbnails may
+add an explicitly documented presentation background without changing ordinary
+SVG export semantics or becoming canonical evaluation output.
 
 PNG rasterization also exposes a user-selectable antialiasing option:
 
@@ -669,7 +680,7 @@ pub enum Interpolation {
 
 Continuous channel settings may transition:
 
-- Density X/Y.
+- Density and density aspect.
 - Rotation.
 - X/Y offset.
 - Shape size.
@@ -983,8 +994,7 @@ Channel-editor edits must rebuild the correct pipeline layers.
 
 These must regenerate guides/sites and every dependent stage:
 
-- Density X/Y.
-- Density aspect or lock.
+- Density and density aspect.
 - Rotation.
 - X/Y translation.
 - Canvas dimensions.
@@ -1000,6 +1010,17 @@ Family guides/sites
 ```
 
 Grid translation must update the pattern coordinate frame and regenerate sufficient off-canvas structure. It must not move already clipped geometry.
+
+Pattern rotation is available for every current pattern except a definition
+whose site placement uses `ArtworkWeighted` source-document density. That
+placement owns its source-coordinate relationship: capability projection omits
+Rotation, channel-rotation command construction and validation reject it, and
+the evaluator receives an effective rotation of zero. A document-base rotation
+may remain stored and dormant for later compatible base definitions. A named
+channel replacement or structural edit that selects artwork-weighted placement
+prunes only that channel's incompatible rotation delta together with any
+already-incompatible output-response deltas; translation, appearance/source,
+and unrelated channel intent remain unchanged.
 
 ### 10.2 Realization rebuild
 
@@ -1137,14 +1158,20 @@ The CLI must not depend on GTK or libadwaita.
 - Guard generation naturally closes cells/faces.
 - Final clipping is clean.
 - Rotation and translation leave no edge gaps.
+- Every current definition accepts nonzero pattern rotation through complete
+  realization and rasterization except artwork-weighted site placement, which
+  omits and rejects Rotation and evaluates at zero degrees.
+- Rotated thin-stroke raster coverage retains exact nonzero-winding parity at
+  disjoint, nested, coincident/opposite, antialiasing-off, and clipped-boundary
+  cases while traversing only row-active edges and nonzero spans.
 
 ### CLI
 
 - `--help`, `-i`, and `-o` work conventionally.
 - Output extension chooses PNG/SVG.
 - `--channel-model rgb|cmyk|source-color-alpha` selects authoritative topology.
-- `--background transparent|black|white` is consumer-only and defaults to transparent.
-- Halftone channel model never selects export background or PNG encoding.
+- `--background transparent|black|white` is consumer-only; when omitted, RGB defaults to black, CMYK to white, and SourceColorAlpha to transparent.
+- The halftone channel model selects only that omitted PNG consumer default; an explicit background overrides it and the model never selects PNG encoding.
 - PNG output is always sRGB/sRGBA; SVG remains transparent.
 - All primary channel settings are headlessly overridable.
 - GTK and CLI produce equivalent canonical geometry.
@@ -1329,3 +1356,151 @@ SVG decoder output must be unpremultiplied to retain straight RGBA; the normal
 precision and zero-alpha caveats of that conversion remain applicable. Raw
 hidden RGB remains available for source inspection, but does not affect the
 alpha-associated color-derived mark response.
+
+---
+
+## 17. Stage 21 density, still-source, and ALL authority
+
+This section supersedes the earlier stored `across_x`, `across_y`, and
+`aspect_locked` representation. A current document stores one finite positive
+**Density** and one finite positive **Density aspect**. `density²` is the
+approximate geometry count. Density aspect is `spacing_x / spacing_y`: `1.0`
+is 1:1, `2.0` is 2:1 horizontal spacing, and `0.5` is 1:2.
+
+For a canvas with positive finite `width` and `height`, the domain resolves
+evaluator inputs as:
+
+```text
+across_x = density × sqrt(width / (height × aspect))
+across_y = density × sqrt((height × aspect) / width)
+```
+
+For fresh documents and direct still-image imports, the default Density is
+`100 × sqrt(min(width, height) / max(width, height))`, with aspect `1.0`.
+This is pixel-resolution independent: it resolves to approximately 100 sites
+on the longest edge and proportional coverage on the short edge (square
+100×100, 2:1 landscape 100×50, and 1:2 portrait 50×100). Opening a current
+schema-v6 document never rewrites its stored Density. Density and aspect affect
+generated site positions and baseline curve layout. They do not scale mark
+prototypes or authored closed shapes; regions change only as their source sites
+and resulting boundaries change. Channels retain optional additive density and
+aspect deltas as one atomic pair. Reset removes that pair and restores
+inheritance.
+
+The artist-facing main inspector presents effective density as **Pattern zoom
+level**, where `zoom = default_density / effective_density`. `1.0` is the
+aspect-normalized fresh/direct reference above; a smaller value zooms out and
+produces more geometry, while a larger value zooms in and produces less
+geometry. The adjacent **Pattern aspect** control presents the authoritative
+density aspect unchanged. These are presentation projections only: documents,
+commands, channel deltas, cache identity, and evaluator inputs retain Density
+and Density aspect as the sole authority.
+
+Normal app and CLI evaluation impose no application-authored upper count on
+requested pattern geometry or derived realization work. Machine addressability,
+checked arithmetic, fallible allocation, deterministic approximation depth,
+cancellation, and stale-result rejection remain mandatory. Explicit finite
+limits remain injectable for focused tests and constrained headless callers,
+but are not the default creative policy.
+Unbounded creative intent must not become an eager infallible allocation from
+an untrusted derived count. Variable-size generation grows through fallible
+incremental reservations and polls cancellation; counts that exceed machine
+representation fail with a stable diagnostic before allocation. Random
+dispersion builds accepted final sites directly, uses their positions for
+spatial conflict checks, and releases clustered-parent and spatial working
+storage when generation ends. Cached diagnostic and complete-document results
+share immutable scene/raster values rather than deep-cloning them. Raster
+composition retains at most one complete accumulator and one complete transient
+layer, uses fallible full-pixel and final-byte allocation, and never refuses
+valid creative work from an estimate alone.
+The schema-v6 random-site `maximum_attempts` and
+`maximum_neighbor_checks` members remain reserved nonzero recipe data during
+this checkpoint; they are omitted from active controls, family identity, and
+normal evaluation and therefore do not impose a creative-work ceiling.
+Random placement publishes its best deterministic result after a complete
+geometry-derived no-progress sweep. This convergence rule scales with the
+requested padded population and, for even dispersion, the exclusion-sized
+cells covering the generation domain; it is not an application-authored count
+ceiling and physical packing saturation is not a render failure.
+
+Guide-path thickness samples source response at the pattern's useful spatial
+scale. Straight guides use an interval no smaller than the guide's nominal
+pattern-spacing basis or one decoded-source-pixel footprint, whichever is
+larger; they do not supersample every source pixel. Curved guides may add
+samples only for independent centerline-flatness requirements. Linear response
+between the retained samples is the current default, and the sampling interval
+does not change pattern-site Density authority.
+
+Canonical-stroke rasterization flattens each outline once, schedules edges by
+the pixel-row intervals where they can contribute, and traverses only active
+nonzero-winding X spans. It does not scan every flattened edge or every pixel
+in a rotated stroke's axis-aligned bounds for every row. Traversal polls
+cancellation at bounded intervals and preserves strict half-open crossings,
+nonzero winding, antialiasing samples, final raster clipping, source-over
+composition, canonical geometry, and raster/cache identity.
+
+Main-preview workers publish ticketed, monotonic progress that is excluded from
+document and cache identity. The first source-backed render queues and exposes
+the same pending stages on the visible canvas before idle viewport submission;
+source-less New remains empty. Fixed coordinator weights are 20% for preparation
+and source decode, 25% for per-channel family geometry, 45% for ordered output
+realization, 5% for scene composition, 4% for preview rasterization, and 1% for
+final publication. Frontends discard stale-ticket progress and present one
+overlay with an overall bar above a current-stage bar, visible percentage/stage
+labels, and the last accepted preview retained until the new result is atomically
+accepted.
+Expensive dispersion-parent/candidate, straight multi-guide
+intersection/merge, parametric construction, generic-guide expansion,
+curve-contact/merge, and along-curve sampling loops report completed units
+within their fixed family share. Ordered-output realization
+reports completed site-bound work, including progress observed from parallel
+workers, within its fixed output share. AreaAverage reports completed prepared
+source-cell intersections rather than cancellation-poll frequency. Rasterization reports only completed
+canonical primitives and completed final composition, background, and
+quantization phases within its fixed raster share. The scheduler serializes
+and coalesces these observations at per-mille resolution, including exact
+duplicate suppression, so concurrently reported progress remains monotonic and
+responsive without flooding the frontend. Progress is observational only: it does not change canonical
+geometry, pixels, cancellation semantics, cache identity, or atomic
+publication.
+
+AreaAverage uses literal decoded-source pixel footprints. Canvas edges map to
+the outer edges of the decoded pixel array. A pixel is included when the exact
+intersection of its footprint with the complete untreated region covers at
+least 50% of that footprint; an included pixel contributes its complete mapped
+scalar and associated color/alpha values once, while a pixel below the
+threshold contributes nothing. Fractional coverage never multiplies a pixel
+value. The result is the equal-weight average of the included full pixels.
+Finite off-source footprints remain part of the complete untreated region and
+use the nearest edge pixel, once per unit footprint, rather than collapsing an
+exterior band into one sample. Candidate footprints are classified in stable
+source order inside indexed parallel region work. Request-wide checked counts,
+fallible working storage, cancellation, coalesced progress, deterministic
+publication order, and stale-result rejection remain mandatory.
+
+The current-only document schema is version 6. Obsolete version-5 documents
+are rejected rather than migrated or adapted. Preset format v3 remains the
+unchanged recipe-only authority and does not acquire document settings.
+
+The still-source boundary accepts PNG, SVG, JPEG/JPG, WebP, BMP, TIFF,
+OpenEXR, and AVIF. A `.toniator` container preserves the exact original source
+bytes and explicit source format. Only single-image sources are supported
+before the separately gated temporal-media stage: animated WebP/AVIF and
+multipage TIFF fail rather than selecting one frame. Supported non-deep RGB or
+RGBA OpenEXR decodes as linear floating-point data. Each channel is made
+finite and clamped to normalized `0.0..=1.0` without hidden tone mapping or
+color-management policy. Decoder-contract identity changes when this behavior
+changes.
+
+The main inspector has a runtime-only **ALL** target and real named-channel
+targets. ALL is never represented by a fabricated channel ID. New and Open
+select ALL by default; channel-model and topology changes preserve it.
+Ordinary ALL edits change document-base settings while retaining channel
+deltas. A preset applied to ALL atomically replaces the base recipe and clears
+every channel's pattern replacement plus density, density-aspect,
+pattern-rotation, shape-rotation, and output-response deltas. The operation
+first discloses affected channels, is one undoable command, and Undo restores
+the exact former base and channel intent. Translation, source mapping, paint,
+color, opacity, and visibility remain untouched. Applying a preset to a named
+channel retains selected-channel replacement and prunes only deltas made
+incompatible by that replacement.

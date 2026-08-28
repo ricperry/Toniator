@@ -10,8 +10,8 @@ baseline sources, with native review artifacts under `target/validation/`.
 
 Stage 10's accepted view-only GTK/libadwaita preview is checkpointed at
 `980af50` and opens with
-`toniator-app [PATH]` (zero or one local PNG/SVG path) or its Open action. PNG
-decoded dimensions and SVG intrinsic/`viewBox` dimensions define the
+`toniator-app [PATH]` (zero or one local supported still-image path) or its Open
+action. Decoded raster dimensions and SVG intrinsic/`viewBox` dimensions define the
 authoritative canvas and aspect; the app has no canvas override. A visible
 selector switches among RGB, CMYK, and SourceColorAlpha evaluation. Evaluation
 is asynchronous, and only source loads and completions accepted for the
@@ -34,7 +34,7 @@ history persistence remain planned.
 Stage 12 portable `.toniator` persistence is complete at checkpoint `dd7ca56`.
 The headless `toniator-io` boundary writes and loads deterministic version-1
 ZIP containers containing the complete supported document and the exact
-embedded PNG/SVG source bytes. Canonical v1 saves contain exactly
+embedded source bytes. Canonical v1 saves contain exactly
 `document.json` and one embedded source entry in normalized, uncompressed
 Stored form; the reader also tolerates Deflated required files and one exact
 empty `sources/` directory marker from a benign manual repack. Other topology
@@ -44,9 +44,10 @@ available. Loading reconstructs a fresh document/history at revision zero,
 and history, dirty state, and filesystem source paths are not serialized.
 
 Stage 13A GTK document lifecycle is complete at checkpoint `36c7b44`.
-`toniator-app [PATH]` accepts zero or one local PNG, SVG, or `.toniator` path at
-startup. New creates an untitled, unsourced document; Open accepts direct
-PNG/SVG artwork or a `.toniator` container; Save and Save As write `.toniator`
+`toniator-app [PATH]` accepts zero or one supported still image or `.toniator`
+path at startup. New creates an untitled, unsourced document; Open accepts
+direct PNG, SVG, JPEG/JPG, WebP, BMP, TIFF, OpenEXR, AVIF, or a `.toniator`
+container; Save and Save As write `.toniator`
 documents (direct artwork uses Save As); and Close plus window close share a
 Cancel/Discard/Save confirmation when work is unsaved. The app-owned workspace
 keeps the headless history and immutable source bundle, while dirty state
@@ -72,7 +73,9 @@ unaffected.
 
 The GTK Export action writes native PNG or editable SVG. PNG options are
 consumer-only transparent/black/white backing, antialiasing, and an optional
-`WIDTHxHEIGHT` output target; SVG remains transparent semantic vector output.
+`WIDTHxHEIGHT` output target. If backing is not explicitly chosen, RGB defaults
+to black, CMYK to white, and SourceColorAlpha to transparent. SVG remains
+transparent semantic vector output.
 Output targets are checked against the renderer's allocation safety limit.
 Exports rerasterize the unchanged canonical scene and do not resize the
 authoritative document or preview canvas, or mutate document, source,
@@ -491,6 +494,96 @@ accessible control actions. These are automated wlroots evidence and direct
 native artifact inspection; they do not claim manual GNOME Shell/Mutter
 acceptance.
 
+Stage 21A is complete at implementation checkpoint
+`3028193b787960fb402b0af6807d6e8e8ab174db` on the existing `ToniatorGUI`
+branch and was user-accepted on 2026-08-28. Current documents use schema v6 only:
+positive Density and Density aspect replace stored axis counts/lock, channel
+deltas remain additive/resettable, and obsolete v5 documents are rejected.
+The main inspector presents effective Density as inverse **Pattern zoom
+level** (`1.0` default, smaller for more geometry, larger for less) and presents
+Density aspect as **Pattern aspect**; persistence, history, cache identity, and
+evaluation continue to use Density/Density aspect exclusively.
+For fresh documents and direct still-image imports, `1.0` uses the
+resolution-independent reference `100 × sqrt(min(width, height) / max(width,
+height))` at aspect `1.0`: approximately square 100×100, 2:1 100×50, and 1:2
+50×100 site coverage. Opening a schema-v6 `.toniator` preserves its stored
+Density unchanged.
+Normal app and CLI renders have no application-authored geometry/work-count
+ceiling; overflow checks, fallible allocation, cancellation, deterministic
+approximation bounds, and stale-result rejection remain enforced. Long main
+previews expose ticketed determinate progress in one overlay with an overall
+bar above a current-stage bar and visible percentages through
+source decode, family generation, output realization, scene composition,
+rasterization, and final publication. Expensive family loops, site-bound
+output work (including parallel workers), canonical raster primitives, and
+final pixel-processing phases advance within their fixed stage shares.
+AreaAverage advances from completed source cells, and duplicate inner-loop
+observations are coalesced before they can accumulate in the frontend queue;
+this observation does not alter geometry, pixels, cache identity, or atomic
+publication.
+AreaAverage classifies each literal decoded-source pixel footprint by exact
+polygon overlap: coverage of at least 50% includes that pixel's full mapped
+value once, while lower coverage contributes nothing. It never scales a pixel
+value by fractional coverage. Indexed region batches remain Rayon-parallel and
+publish results in deterministic input order.
+The first source-backed workspace exposes the same pending stages on the
+visible canvas before idle viewport submission; source-less New remains empty.
+Derived counts never authorize eager infallible allocation: dispersion builds
+accepted final sites directly, releases transient parent/spatial storage, and
+fails machine-unrepresentable work before allocation. Cached results share
+immutable scene/raster values. Raster composition retains only an accumulator
+and one transient layer with fallible full-pixel/final-byte allocation, never
+an estimate-based creative refusal.
+Guide-path thickness uses one source-response sample per nominal pattern
+interval (or decoded-source-pixel footprint for denser patterns) instead of
+half-pixel supersampling every long guide; centerline curvature retains its
+independent geometric refinement and the current response interpolation is
+linear.
+Pattern rotation is available for every current pattern definition except
+source-weighted site placement. Source-weighted capability views omit Rotation and reject
+channel-rotation commands; their effective evaluator rotation is zero. Named
+replacement/structural transitions prune only an incompatible channel rotation
+delta, while shared base rotation remains dormant for later compatible
+patterns. Canonical-stroke rasterization schedules flattened edges by active
+row and visits only nonzero-winding spans, with bounded cancellation polling,
+so rotating long guide strokes no longer expands work to every pixel and every
+edge in their full axis-aligned bounds.
+The tracked Holiday v5 file remains only as an explicit rejection-test witness.
+Preset-v3 recipes remain unchanged. Still import now covers PNG, SVG,
+JPEG/JPG, WebP, BMP, TIFF, OpenEXR, and AVIF with exact embedded-byte
+round-trips, single-image enforcement, native dav1d AVIF decoding, and linear
+finite-clamped OpenEXR handling without implicit tone mapping.
+
+The main inspector defaults to runtime-only **ALL** or a real named channel.
+Its compact recipe dropdown is non-mutating until **Apply Pattern**; applying
+to ALL discloses and clears pattern-relative channel intent in one exactly
+undoable transaction. Capability-valid common controls, visible inheritance
+and reset actions, and the Blueprint-owned private-history **Advanced
+Settings** dialog are included. **Edit Pattern** remains accessibly disabled:
+the Pattern Wizard and personal preset library are the separately gated Stage
+21B. Stage 21A acceptance satisfies its sequencing prerequisite but does not
+authorize Stage 21B implementation, which remains separately gated.
+
+Advanced Settings presents one modal immediately and evaluates only a bounded
+source proxy on its own cancelable scheduler. Its status exposes current
+private-preview progress; newer edits cancel/supersede older tickets, stale
+results cannot replace the private texture, and repeated activation returns to
+the existing modal rather than opening another. Apply still publishes exactly
+one main-history change, while Cancel/close discards the draft.
+
+The final isolated stress matrix exercised all sixteen bundled recipes with
+both immutable sources at intrinsic `1024×1024` PNG and `900×620` SVG sizes,
+including zoom, aspect, eligible rotation, response endpoints, combined
+zoom/rotation, shape rotation, and both region-sampling strategies. Every
+eligible final case passed; artwork-weighted rotation retained its explicit
+rejection. The largest measured Guide Faces cases now use roughly 60–85% less
+peak RSS than the pre-fix runs, and directly inspected native PNG/SVG witnesses
+cover rotated One Guide Lines, rotated Three-Guide Cells, colored
+Source-Weighted Voronoi, and zero-minimum Two-Guide Maze response. Private
+Sway/AT-SPI/grim evidence remains automated non-human, non-Mutter evidence.
+The user accepted Stage 21A on 2026-08-28; no additional automated native-file-
+portal inspection is claimed.
+
 Low-resolution fixtures and outputs are supplementary only. Every future stage
 that exercises source loading, sampling, rendering, preview, or export must
 also test the immutable PNG at its natural 1024×1024 dimensions and the SVG at
@@ -499,9 +592,9 @@ boundary.
 
 ## Build and run
 
-On Fedora, install the GTK4 development files (GTK 4.10 or newer) and
-`blueprint-compiler`; these are required by the `toniator-app` dependencies and
-build script. Then launch the preview with:
+On Fedora, the GTK4 development files (GTK 4.10 or newer) and
+`blueprint-compiler` build the GTK resources; `libdav1d-devel` supplies the
+open-source native AVIF decoder dependency. Then launch the preview with:
 
 ```bash
 cargo run --bin toniator-app -- assets/raster-sample.png

@@ -1,16 +1,20 @@
 # Toniator Pattern Wizard Plan
 
-Status: **approved future-work plan; Stage 20S headless authority is complete
-and Pattern Wizard implementation remains gated in Stage 21** (accepted
-2026-08-22; Stage 20S closeout reconciled 2026-08-26).
+Status: **approved future-work plan; Stage 21A is complete and accepted, while
+Pattern Wizard implementation remains separately gated in Stage 21B**
+(accepted 2026-08-22; Stage 20S closeout reconciled 2026-08-26; Stage 21A
+accepted 2026-08-28).
 
 This document records the intended replacement direction for the artist-facing
-Pattern Editor workflow. It does not authorize implementation, change the
-accepted Stage 20F–20S ledger state, or begin Stage 21. The
-user-authorized normative effective-pattern direction is recorded in the
-protected specifications and implemented by accepted Stage 20G authority.
-The complete Pattern Wizard remains a separately gated Stage 21 UI milestone
-after the accepted Stage 20N–20S headless capabilities it exposes exist. The
+Pattern Editor workflow. It does not itself authorize additional
+implementation, change the accepted Stage 20F–20S ledger state, or begin Stage
+21B. Stage 21A is separately authorized and tracked as the main-window and
+still-import checkpoint, complete at
+`3028193b787960fb402b0af6807d6e8e8ab174db`. The user-authorized normative effective-pattern
+direction is recorded in the protected specifications and implemented by
+accepted Stage 20G authority. The complete Pattern Wizard remains a separately
+gated Stage 21B UI milestone requiring separate implementation authorization.
+Stage 21A acceptance satisfies only its sequencing prerequisite. The
 2026-08-24 accepted remainder roadmap is
 [`STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md`](STAGE_20N_20S_HEADLESS_PATTERN_COMPLETION_PLAN.md).
 
@@ -82,7 +86,7 @@ Resetting a channel delta restores inheritance.
 | Effective setting | Document value | Channel value | Capability visibility |
 |---|---|---|---|
 | Pattern | Document recipe | Optional replacement recipe | Always |
-| Pattern rotation | Base angle | Additive angle delta | All patterns |
+| Pattern rotation | Base angle | Additive angle delta | All patterns except artwork-weighted site placement |
 | Shape rotation | Base mark angle | Additive angle delta | Mark realization only |
 | Minimum / maximum fill | Base response range | Additive minimum / maximum deltas | Realizations declaring `response.fill_range` |
 | Density / detail | Base density | Additive density delta | Generators declaring `generator.density` |
@@ -503,13 +507,15 @@ geometry or inventing frontend-only document state. The approved order is:
 | 20P | **Complete at `cd531eb65dd2e161e62f355905ad936b8c1ca3c4`:** guide-arrangement faces from two or three selected straight or authored-open guide dimensions, with deterministic bounded canonical regions, authored v5/v3 persistence, and final clipping. The production 0/60/120 witness proves equal physical spacing and three-line equilateral faces; existing generic one-through-four guide support is unchanged and Stage 20P adds no four-guide behavior or evidence. |
 | 20Q | **Complete at `071f3604098c0660a876fbe30050a64223fe41b3`:** historical fill-only Full, Scale, and Constant Gap region realization with reference/area-average sampling; superseded for current region authority by Stage 20S Scale/UniformOffset. |
 | 20R | **Complete at `458c9a981dd349999240a18052e055a71c7b6c3c`:** ordered typed composite outputs and site-use dependency filters. |
-| 20S | **Complete at `55651dee7c744c2aa207924bf0dbb7737609942d`:** headless capabilities/descriptors and ordinary serialized 16-card gallery recipes; wizard exposure remains Stage 21. |
-| 21 | Pattern Wizard gallery, adaptive pages, Review, and nested subeditors. |
+| 20S | **Complete at `55651dee7c744c2aa207924bf0dbb7737609942d`:** headless capabilities/descriptors and ordinary serialized 16-card gallery recipes; wizard exposure remains Stage 21B. |
+| 21A | **Complete at `3028193b787960fb402b0af6807d6e8e8ab174db`:** main window, density/schema-v6 transition, expanded single-still import, ALL/named inspector, compact pattern apply, and private Advanced Settings; user accepted 2026-08-28. |
+| 21B | **Planned and separately gated:** Pattern Wizard gallery, adaptive pages, Review, nested subeditors, and layered built-in/personal preset-v3 library. |
 | 22 | Headless frame/media authority, frame sequences/export, and simple start/end transitions. |
 | 23 | Temporal GTK with descriptor-driven start/end pins only. |
 
-Stages 20G–20S are accepted headless authority; a separately gated final Stage
-20 scrub precedes planned Stages 21–23. TSP,
+Stages 20G–20S are accepted headless authority; the separately gated final
+Stage 20 scrub precedes the separately gated Stage 21A/21B work and planned
+Stages 22–23. TSP,
 aligned curved-guide sampling, wrap-around constant-gap
 endpoints, user-defined motifs, additional parametric forms, and the Tetragrid
 decision remain deferred rather than silently entering a listed stage.
@@ -517,6 +523,64 @@ decision remain deferred rather than silently entering a listed stage.
 The final wizard must remain a projection of ordinary typed recipes. No preset
 name, thumbnail, family label, or wizard page is permitted to select hidden
 renderer behavior.
+
+## Stage 21 accepted split and gates
+
+Stage 21A and Stage 21B are sequential, separately accepted checkpoints.
+Stage 21A is complete at `3028193b787960fb402b0af6807d6e8e8ab174db`
+after focused verification, independent re-review, and user acceptance on
+2026-08-28. Stage 21B remains Planned and separately gated; accepting Stage
+21A does not authorize its implementation.
+Stage 21A owns the current-only Density/Density-aspect and schema-v6 transition,
+expanded single-still import, runtime-only ALL target, compact non-mutating
+recipe selection plus explicit Apply, capability-filtered common controls, and
+the cloned-history Advanced Settings modal. Its main inspector projects
+effective Density as inverse **Pattern zoom level** and displays unchanged
+Density aspect as **Pattern aspect**; those labels do not alter recipe, document,
+or evaluator authority. Its fresh/direct `1.0` reference is
+`100 × sqrt(min(width, height) / max(width, height))` at aspect `1.0`, so it is
+resolution independent and resolves to square 100×100, 2:1 100×50, and 1:2
+50×100 coverage; loaded schema-v6 Density remains stored. Normal preview evaluation has no application-authored
+pattern-work ceiling; variable populations use fallible cancellation-aware
+growth rather than eager count-sized allocation. Preview evaluation reports
+ticketed, fixed-weight progress through an overall bar above a current-stage
+bar in one main-canvas overlay without allowing stale updates; the first source-backed workspace
+shows that pending state before idle viewport submission while source-less New
+remains empty. Completed work inside expensive
+family loops, ordered-output site processing, existing parallel workers, and
+preview raster primitives advances within those fixed weights. AreaAverage
+reports completed source-cell intersections and duplicate inner-loop updates
+are coalesced before frontend delivery, without becoming geometry, pixel, or
+cache authority. **Edit Pattern** remains visible and
+accessibly disabled. Stage 21A does not create a personal preset library or
+begin wizard pages. Random dispersion builds final accepted sites directly and
+releases transient parent/spatial storage; cache results Arc-share immutable
+scene/raster values; raster composition retains only an accumulator and one
+layer with fallible allocation and no estimate-based creative refusal.
+Guide-path thickness sampling follows the nominal pattern interval instead of
+half-pixel supersampling each source pixel; current retained-sample response is
+linear and curved centerline refinement remains independent.
+Pattern rotation remains capability-driven for every bundled recipe except
+artwork-weighted source-document site placement. That exception omits and
+rejects the control and resolves zero evaluator rotation; named transitions
+prune only an incompatible channel delta, while compatible shared base intent
+stays dormant. Row-active sparse nonzero-winding stroke rasterization keeps
+rotated guide previews bounded to contributing edges/spans with responsive
+cancellation.
+
+When separately authorized, Stage 21B may enable **Edit Pattern**. The wizard
+starts from the current dropdown candidate without first applying it,
+uses capability-driven pages and canonical private preview, integrates the
+Guide Curve and Shape Editors as nested drafts, and publishes once to its entry
+target. Its gallery and main dropdown share immutable built-ins and safe
+user-owned preset-v3 files under a configurable XDG data directory. Built-ins
+cannot be renamed, overwritten, or deleted; malformed user files are isolated
+with nonfatal warnings and are never rewritten automatically.
+
+TSP, aligned curved-guide sampling, wraparound endpoints, extra parametric
+forms, animated media, Tetragrid promotion, cloud synchronization, a preset
+database, and preset import/export remain deferred. A user preset is optional
+for a custom wizard draft; saving and applying are separate decisions.
 
 ## Stage 20F boundary
 
@@ -537,23 +601,17 @@ organization as the future product design, and this plan does not authorize
 replacing it yet. `GuideCustomAlongLayout` remains a Stage 20F compatibility
 convenience and migrates in Stage 21 to an artist-selected guide use.
 
-## Decisions required before wizard implementation
+## Deferred beyond Stage 21
 
-The following remain deliberately outside Stage 20F and require explicit
-contracts before UI work:
+The following remain deliberately outside the accepted Stage 21 split and
+require later explicit contracts:
 
-- whether aligned sites across a curved guide stack are a distinct supported
-  sampling mode;
-- the initial connection programs and their legal degree/distance rules;
-- whether the traveling-salesperson route is open, closed, or both, and its
-  deterministic work limits;
-- whether wrap-around Constant Gap endpoints belong with Stage 20M connection
-  programs or a later separate contract; Stage 20J accepts tangential extension
-  beyond the padded generation bounds only;
-- region fill/outline and Scale versus UniformOffset defaults;
-- additional parametric generator forms beyond the accepted Stage 20K set and
-  their coverage model;
-- whether Tetragrid has enough artistic value to retain; and
+- aligned sampling across curved guide stacks;
+- traveling-salesperson routing and its deterministic work limits;
+- wraparound path/offset endpoints;
+- additional parametric forms beyond the accepted round and square spirals;
+- animated media and temporal controls, which belong to Stages 22–23; and
+- any decision to promote Tetragrid into the curated catalog.
 
 The document-level pattern plus channel-delta schema direction is normative;
 its exact current-only serialization, validation, and command shape are owned

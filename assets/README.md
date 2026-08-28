@@ -18,36 +18,30 @@ The video fixture is not part of the current still-image Stage 6 evaluation
 gate. Exercise it only in a later explicitly approved multiframe or animation
 stage.
 
-## Authorized current-format `.toniator` test case
+## Obsolete-schema rejection witness
 
-`HolidayMugs_2024_2025.toniator` is a tracked real-world current-format
-`.toniator` test case authorized for current-format validation and round-trip
-checks. It is not an immutable migration/source baseline and must not be
-regenerated or treated as a byte-frozen v1 fixture without a separate policy
-decision.
+`HolidayMugs_2024_2025.toniator` is a tracked real-world container-v1,
+document-schema-v5 test case. Stage 21A's current-only schema-v6 boundary uses
+it solely to prove that obsolete documents are rejected rather than migrated.
+Preserve its bytes and hash; do not regenerate it or treat it as a current-
+format round-trip fixture.
 
 | File | Role | SHA-256 |
 | --- | --- | --- |
-| `HolidayMugs_2024_2025.toniator` | Authorized current-format real-world test case. | `253e3977ed0a9447ad9d4bf4df789ac51db7bec07721b51495206b261ba70d4b` |
+| `HolidayMugs_2024_2025.toniator` | Obsolete schema-v5 rejection witness. | `253e3977ed0a9447ad9d4bf4df789ac51db7bec07721b51495206b261ba70d4b` |
 
-The final Stage 20 current-format port uses container version 1 and document
-schema version 5. Its ordered definition bundles, output settings, authored
-resources, filters, and channel deltas are current intent only. It is not a
-frozen source or migration baseline.
+## Current schema-v6 persistence fixtures
 
-## Current normalized-fill persistence fixtures
-
-`raster-sample.toniator` and `vector-sample.toniator` are current schema-v5
+`raster-sample.toniator` and `vector-sample.toniator` are current schema-v6
 containers derived from the immutable still-image baselines at their intrinsic
-canvases. Their per-channel 2.0/9.0 legacy diameters become
-0.1414213562373095/0.6363961030678927 fill against their 10×10 representative
-nominal cell, preserving average mark diameters. They are current-format
-validation inputs, not migration fixtures.
+canvases. They retain the normalized-fill intent and use the Stage 21A
+Density/Density-aspect document authority. They are current-format validation
+inputs, not migration fixtures.
 
 | File | SHA-256 |
 | --- | --- |
-| `raster-sample.toniator` | `5430f1cf720b503de24babad7616fddbdb43ce03b6eddb79321001332224db3b` |
-| `vector-sample.toniator` | `4b06e818443b91ef76edf146a63cfc60fa9bfa0fa136add811c0b71b798aeb36` |
+| `raster-sample.toniator` | `e8b60e11e1d84ad578feb9fbf6dd479ff1a20601f031d2fd9e8a64862d0806a6` |
+| `vector-sample.toniator` | `8a0f9960c79a7e5c4e848a2a8512afe12dc0980ba7f9840577cf412a552589e6` |
 
 ## Stage 10 small-preview regressions
 
