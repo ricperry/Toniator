@@ -2204,6 +2204,26 @@ fallible row-active edge schedule and sparse nonzero-winding spans with bounded
 cancellation checks, preserving exact coverage while avoiding rotated
 axis-aligned-bounds scans.
 
+### Headless Curve Motif prerequisite — verified, awaiting user acceptance
+
+This separately bounded headless checkpoint follows Stage 21A; it does not
+resume Stage 21B or add GTK. It adds one `CurveMotifPaths` recipe authority:
+one one-dimension generalized straight-guide Along Guides family, an embedded
+validated authored open motif resource, existing connected path stroke style,
+and independent odd-row mirror/optional phase. Adjacent sites are exact motif
+cadence endpoints; stable guide provenance determines rows and Euclidean parity.
+The optional odd-row phase receives padded coverage before final clipping.
+
+Completed rows use the ordinary canonical source-sampled variable-width stroke,
+paint, preview, PNG, and SVG pipeline. Descriptor-backed mirror/phase commands,
+undo/redo, resource-edit invalidation, cache identity, cancellation, fallible
+growth, shared-Rayon row work, and monotonic progress are headless authority.
+Current-only persistence is document-v7/preset-v4, container-v1 unchanged;
+v6/v3 reject. The bundled registry remains exactly sixteen entries. Intrinsic
+composed artifacts use both immutable sources. User acceptance and a checkpoint
+remain separate; GTK, the gallery card, personal presets, reusable shape
+storage, and wizard design work remain paused in Stage 21B.
+
 ### Stage 21B — Pattern Wizard and Personal Preset Library
 
 Stage 21A acceptance satisfies this stage's sequencing prerequisite but does

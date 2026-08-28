@@ -742,6 +742,7 @@ fn apply_recipe_to_rgb(
                 PatternOutputRealization::MarkPrototype { .. } => "mark_prototype",
                 PatternOutputRealization::GuidePaths { .. } => "guide_paths",
                 PatternOutputRealization::ParametricPaths { .. } => "parametric_paths",
+                PatternOutputRealization::CurveMotifPaths { .. } => "curve_motif_paths",
                 PatternOutputRealization::ConnectionPaths { .. } => "connection_paths",
                 PatternOutputRealization::MazeWalls { .. } => "maze_walls",
                 PatternOutputRealization::Regions { .. } => "regions",

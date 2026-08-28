@@ -1504,3 +1504,40 @@ the exact former base and channel intent. Translation, source mapping, paint,
 color, opacity, and visibility remain untouched. Applying a preset to a named
 channel retains selected-channel replacement and prunes only deltas made
 incompatible by that replacement.
+
+---
+
+## 18. Headless Curve Motif prerequisite
+
+The separately verified headless Curve Motif prerequisite follows Stage 21A and
+precedes any resumed Stage 21B wizard work. `CurveMotifPaths` wraps exactly one
+one-dimension generalized straight-guide **Along Guides** recipe and one
+document-owned validated authored **open** path. Closed, empty, coincident-end
+point, two-guide, wrong-family, missing-resource, and nonfinite layout inputs
+reject; there is no external motif file, per-tile path authority, smoothing, or
+renderer-specific motif path.
+
+Adjacent Along Guides sites define the longitudinal cadence. Each authored
+motif copy maps its distinct endpoints exactly to adjacent sites, and stable
+guide-instance provenance groups copies into one continuous open path per row.
+Even rows retain the authored path. Odd rows use Euclidean guide-index parity
+and may mirror across their tangent axis and then translate by an optional
+finite fraction strictly between zero and one of one site interval. A phased
+row receives one extra automatic guard interval before final clipping. Existing
+guide spacing/phase, Density/Density aspect, rotation, and translation remain
+the only row-layout authority.
+
+Curve Motif uses the existing source-driven connected stroke response,
+canonical variable-width path realization, paint, preview, PNG, and SVG
+pipeline. Mirror and optional phase are exact typed descriptor/command fields
+with `Realization` invalidation; an edit of the referenced motif resource also
+invalidates realization unless another use requires the stronger Family
+boundary. Parallel row work uses the shared Rayon pool, checked/fallible growth,
+cancellation polling, and coalesced monotonic completed segment/row progress.
+
+This prerequisite advances current-only persistence to document schema **v7**
+and preset format **v4** while retaining container v1. v6 documents and v3
+presets reject without adapters. Preset-v4 embeds motif geometry and layout.
+The sixteen-entry bundled catalog remains unchanged; a future Curve Motif
+gallery card and personal-preset/shape-library work remain separately gated in
+Stage 21B.

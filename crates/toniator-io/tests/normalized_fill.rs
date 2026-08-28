@@ -56,9 +56,9 @@ fn first_mark_response(document: &Document) -> &MarkGeometryResponse {
     }
 }
 
-/// Proves current v5 round-trips deterministic normalized fill fields without a migration path.
+/// Proves current v7 round-trips deterministic normalized fill fields without a migration path.
 #[test]
-fn current_v5_round_trips_normalized_fill_deterministically() {
+fn current_v7_round_trips_normalized_fill_deterministically() {
     let (document, sources) = current_document();
     let first = temporary("first.toniator");
     let second = temporary("second.toniator");
@@ -69,7 +69,7 @@ fn current_v5_round_trips_normalized_fill_deterministically() {
         fs::read(&second).expect("second bytes")
     );
 
-    let loaded = load(&first).expect("current v5 archive loads");
+    let loaded = load(&first).expect("current v7 archive loads");
     assert_eq!(loaded.versions().document(), DOCUMENT_SCHEMA_VERSION);
     let response = first_mark_response(loaded.document());
     assert_eq!(
@@ -152,7 +152,6 @@ fn current_baseline_fixtures_retain_authoritative_normalized_fill() {
             "vector-sample.toniator",
             (0.141_421_356_237_309_5, 0.636_396_103_067_892_7),
         ),
-        ("HolidayMugs_2024_2025.toniator", (0.0, 2.0)),
     ] {
         let loaded = load(&assets.join(name)).expect("current fixture loads");
         let response = first_mark_response(loaded.document());

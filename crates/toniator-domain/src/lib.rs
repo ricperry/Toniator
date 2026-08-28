@@ -793,6 +793,7 @@ fn bundle_from_definition(definition: PatternDefinition) -> PatternDefinitionBun
                 }
                 PatternOutputRealization::GuidePaths { .. }
                 | PatternOutputRealization::ParametricPaths { .. }
+                | PatternOutputRealization::CurveMotifPaths { .. }
                 | PatternOutputRealization::ConnectionPaths { .. }
                 | PatternOutputRealization::MazeWalls { .. } => {
                     PatternGeometryResponse::Connected(ConnectedGeometryResponse {
@@ -1027,6 +1028,7 @@ fn validate_response_for_output(
         &output.realization,
         PatternOutputRealization::GuidePaths { .. }
             | PatternOutputRealization::ParametricPaths { .. }
+            | PatternOutputRealization::CurveMotifPaths { .. }
             | PatternOutputRealization::ConnectionPaths { .. }
             | PatternOutputRealization::MazeWalls { .. }
     );
@@ -1276,6 +1278,7 @@ pub enum PatternCapabilityFlag {
     Shape,
     Orientation,
     RawPaths,
+    CurveMotifPaths,
     StackedPaths,
     NormalOffsetPaths,
     ExtendBeyondCanvas,
@@ -1381,6 +1384,8 @@ pub enum PatternOutputCapabilityProjection {
     Marks(MarkOutputCapabilityProjection),
     /// Reports the structural guide-path output without evaluator or renderer authority.
     GuidePaths(GuidePathOutputCapabilityProjection),
+    /// Reports Curve Motif alternate-row authority without exposing derived row paths.
+    CurveMotifPaths(CurveMotifPathOutputCapabilityProjection),
     /// Reports authored connection controls without exposing a derived graph or path collection.
     ConnectionPaths(ConnectionPathOutputCapabilityProjection),
     /// Reports authored conventional wall-maze controls without exposing derived arrangement state.
@@ -1400,6 +1405,16 @@ pub struct MarkOutputCapabilityProjection {
 /// Describes the only accepted Stage 20I stroke style.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GuidePathOutputCapabilityProjection {
+    pub round_join: bool,
+    pub round_cap: bool,
+    pub thickness_range: bool,
+}
+
+/// Read-only Curve Motif controls projected from one validated output layer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CurveMotifPathOutputCapabilityProjection {
+    pub mirror_alternate_rows: bool,
+    pub alternate_row_phase: Option<f64>,
     pub round_join: bool,
     pub round_cap: bool,
     pub thickness_range: bool,
@@ -3105,7 +3120,7 @@ impl SiteUseFilter {
 }
 
 /// One typed output realization independent of its stable identity and site filter.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum PatternOutputRealization {
     CircularMarks {
         site_mechanism_id: PatternMechanismId,
@@ -3125,6 +3140,14 @@ pub enum PatternOutputRealization {
         curve_mechanism_id: PatternMechanismId,
         style: PathStrokeStyle,
     },
+    /// Chains one document-owned open motif between consecutive Along Guides sites.
+    CurveMotifPaths {
+        site_mechanism_id: PatternMechanismId,
+        structure_id: AuthoredStructureId,
+        style: PathStrokeStyle,
+        mirror_alternate_rows: bool,
+        alternate_row_phase: Option<f64>,
+    },
     /// Consumes one typed site product as deterministic positive connection paths.
     ConnectionPaths {
         site_mechanism_id: PatternMechanismId,
@@ -3140,6 +3163,8 @@ pub enum PatternOutputRealization {
     /// Consumes one eligible reusable site product as ordinary canonical Voronoi regions.
     Regions { source: RegionSourceIntent },
 }
+
+impl Eq for PatternOutputRealization {}
 
 /// One stable ordered output record. Stored vector order is authoritative painter order.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3219,6 +3244,9 @@ impl PatternOutputLayer {
                 site_mechanism_id, ..
             }
             | PatternOutputRealization::MazeWalls {
+                site_mechanism_id, ..
+            } => Some(*site_mechanism_id),
+            PatternOutputRealization::CurveMotifPaths {
                 site_mechanism_id, ..
             } => Some(*site_mechanism_id),
             PatternOutputRealization::Regions {
@@ -4599,6 +4627,7 @@ impl Document {
                         ..
                     } if *structure_id == id
                 )
+                || matches!(&layer.realization, PatternOutputRealization::CurveMotifPaths { structure_id, .. } if *structure_id == id)
             })
         })
     }
@@ -4734,6 +4763,7 @@ impl Document {
                         ],
                         PatternOutputRealization::GuidePaths { .. }
                         | PatternOutputRealization::ParametricPaths { .. }
+                        | PatternOutputRealization::CurveMotifPaths { .. }
                         | PatternOutputRealization::ConnectionPaths { .. }
                         | PatternOutputRealization::MazeWalls { .. } => &[
                             PropertyFieldId::ConnectedMinimumThickness,
@@ -5092,6 +5122,19 @@ impl Document {
                 }
                 if matches!(
                     &layer.realization,
+                    PatternOutputRealization::CurveMotifPaths { .. }
+                ) {
+                    descriptors.push(descriptor_from_contract(
+                        PropertyFieldId::CurveMotifMirrorAlternateRows,
+                        target,
+                    ));
+                    descriptors.push(descriptor_from_contract(
+                        PropertyFieldId::CurveMotifAlternateRowPhase,
+                        target,
+                    ));
+                }
+                if matches!(
+                    &layer.realization,
                     PatternOutputRealization::CircularMarks { .. }
                         | PatternOutputRealization::MarkPrototype { .. }
                 ) {
@@ -5431,6 +5474,7 @@ impl Document {
                         PropertyFieldId::ConnectedMinimumThickness,
                         PatternOutputRealization::GuidePaths { .. }
                         | PatternOutputRealization::ParametricPaths { .. }
+                        | PatternOutputRealization::CurveMotifPaths { .. }
                         | PatternOutputRealization::ConnectionPaths { .. }
                         | PatternOutputRealization::MazeWalls { .. },
                         PatternGeometryResponse::Connected(response),
@@ -5439,6 +5483,7 @@ impl Document {
                         PropertyFieldId::ConnectedMaximumThickness,
                         PatternOutputRealization::GuidePaths { .. }
                         | PatternOutputRealization::ParametricPaths { .. }
+                        | PatternOutputRealization::CurveMotifPaths { .. }
                         | PatternOutputRealization::ConnectionPaths { .. }
                         | PatternOutputRealization::MazeWalls { .. },
                         PatternGeometryResponse::Connected(response),
@@ -5730,6 +5775,20 @@ impl Document {
                         PropertyFieldId::MazeSeed,
                         PatternOutputRealization::MazeWalls { program, .. },
                     ) => PropertyCurrentValueKind::U32(program.seed),
+                    (
+                        PropertyFieldId::CurveMotifMirrorAlternateRows,
+                        PatternOutputRealization::CurveMotifPaths {
+                            mirror_alternate_rows,
+                            ..
+                        },
+                    ) => PropertyCurrentValueKind::Boolean(*mirror_alternate_rows),
+                    (
+                        PropertyFieldId::CurveMotifAlternateRowPhase,
+                        PatternOutputRealization::CurveMotifPaths {
+                            alternate_row_phase,
+                            ..
+                        },
+                    ) => PropertyCurrentValueKind::OptionalFiniteF64(*alternate_row_phase),
                     (
                         PropertyFieldId::OutputSiteProduct,
                         PatternOutputRealization::CircularMarks {
@@ -6354,10 +6413,34 @@ impl Document {
                 &recipe.output_settings,
             );
         }
-        let (definition_recipe, shape_draft, connection, maze, voronoi, guide_faces) =
+        let (definition_recipe, shape_draft, curve_motif, connection, maze, voronoi, guide_faces) =
             match &recipe.structure {
-                PatternStructureRecipe::AuthoredClosedShapeMarks { definition, shape } => {
-                    (definition.as_ref(), Some(shape), None, None, false, None)
+                PatternStructureRecipe::AuthoredClosedShapeMarks { definition, shape } => (
+                    definition.as_ref(),
+                    Some(shape),
+                    None,
+                    None,
+                    None,
+                    false,
+                    None,
+                ),
+                PatternStructureRecipe::CurveMotifPaths {
+                    definition,
+                    motif,
+                    style,
+                    mirror_alternate_rows,
+                    alternate_row_phase,
+                } => {
+                    validate_curve_motif_recipe(definition, motif, *alternate_row_phase)?;
+                    (
+                        definition.as_ref(),
+                        None,
+                        Some((*style, *mirror_alternate_rows, *alternate_row_phase, motif)),
+                        None,
+                        None,
+                        false,
+                        None,
+                    )
                 }
                 PatternStructureRecipe::ConnectionPaths {
                     definition,
@@ -6367,6 +6450,7 @@ impl Document {
                     validate_connection_recipe(definition, program)?;
                     (
                         definition.as_ref(),
+                        None,
                         None,
                         Some((program, *style)),
                         None,
@@ -6384,13 +6468,14 @@ impl Document {
                         definition.as_ref(),
                         None,
                         None,
+                        None,
                         Some((program, *style)),
                         false,
                         None,
                     )
                 }
                 PatternStructureRecipe::VoronoiRegions { definition } => {
-                    (definition.as_ref(), None, None, None, true, None)
+                    (definition.as_ref(), None, None, None, None, true, None)
                 }
                 PatternStructureRecipe::GuideFaceRegions {
                     definition,
@@ -6400,10 +6485,11 @@ impl Document {
                     None,
                     None,
                     None,
+                    None,
                     false,
                     Some(dimension_indices.as_slice()),
                 ),
-                _ => (&recipe.structure, None, None, None, false, None),
+                _ => (&recipe.structure, None, None, None, None, false, None),
             };
         let neutral = self.allocate_neutral_definition_from_recipe(definition_recipe)?;
         let mut candidate = self.clone();
@@ -6478,6 +6564,50 @@ impl Document {
             )];
             validate_definition(definition)?;
         }
+        let curve_motif_structure =
+            if let Some((style, mirror_alternate_rows, alternate_row_phase, motif)) = curve_motif {
+                let structure_id = next_authored_structure_id(&candidate.authored_structures)?;
+                let structure = AuthoredStructure::new(
+                    structure_id,
+                    AuthoredStructureKind::OpenPath,
+                    motif.segments().to_vec(),
+                )?;
+                let definition = candidate
+                    .pattern_definition_bundles
+                    .iter_mut()
+                    .find(|definition| definition.id == neutral.id)
+                    .expect("fresh recipe definition");
+                let output = definition.output_layers.first().ok_or_else(|| {
+                    ValidationError::new(
+                        "pattern_definitions.recipe.curve_motif",
+                        "Curve Motif recipe materialized an incompatible output",
+                    )
+                })?;
+                let (output_id, site_mechanism_id) = (
+                    output.id,
+                    output.site_mechanism_id().ok_or_else(|| {
+                        ValidationError::new(
+                            "pattern_definitions.recipe.curve_motif",
+                            "Curve Motif requires an Along Guides site product",
+                        )
+                    })?,
+                );
+                definition.output_layers = vec![PatternOutputLayer::all(
+                    output_id,
+                    PatternOutputRealization::CurveMotifPaths {
+                        site_mechanism_id,
+                        structure_id,
+                        style,
+                        mirror_alternate_rows,
+                        alternate_row_phase,
+                    },
+                )];
+                candidate.authored_structures.push(structure.clone());
+                validate_definition(definition)?;
+                Some(structure)
+            } else {
+                None
+            };
         if voronoi {
             let definition = candidate
                 .pattern_definition_bundles
@@ -6610,7 +6740,7 @@ impl Document {
         let bundle = bind_recipe_output_settings(definition, &recipe.output_settings)?;
         Ok(MaterializedPatternDefinitionRecipe {
             bundle,
-            authored_structure,
+            authored_structure: authored_structure.or(curve_motif_structure),
         })
     }
 
@@ -7015,6 +7145,7 @@ impl Document {
             PatternStructureRecipe::ConnectionPaths { .. }
             | PatternStructureRecipe::MazeWalls { .. }
             | PatternStructureRecipe::AuthoredClosedShapeMarks { .. }
+            | PatternStructureRecipe::CurveMotifPaths { .. }
             | PatternStructureRecipe::VoronoiRegions { .. }
             | PatternStructureRecipe::GuideFaceRegions { .. }
             | PatternStructureRecipe::OrderedOutputs { .. } => {
@@ -7299,6 +7430,7 @@ impl Document {
             PatternStructureRecipe::ConnectionPaths { .. }
             | PatternStructureRecipe::MazeWalls { .. }
             | PatternStructureRecipe::AuthoredClosedShapeMarks { .. }
+            | PatternStructureRecipe::CurveMotifPaths { .. }
             | PatternStructureRecipe::VoronoiRegions { .. }
             | PatternStructureRecipe::GuideFaceRegions { .. }
             | PatternStructureRecipe::OrderedOutputs { .. } => {
@@ -7696,6 +7828,19 @@ impl Document {
                         curve_mechanism_id: remap_mechanism(*curve_mechanism_id),
                         style: *style,
                     },
+                    PatternOutputRealization::CurveMotifPaths {
+                        site_mechanism_id,
+                        structure_id,
+                        style,
+                        mirror_alternate_rows,
+                        alternate_row_phase,
+                    } => PatternOutputRealization::CurveMotifPaths {
+                        site_mechanism_id: remap_mechanism(*site_mechanism_id),
+                        structure_id: *structure_id,
+                        style: *style,
+                        mirror_alternate_rows: *mirror_alternate_rows,
+                        alternate_row_phase: *alternate_row_phase,
+                    },
                     PatternOutputRealization::ConnectionPaths {
                         site_mechanism_id,
                         program,
@@ -7976,6 +8121,7 @@ impl Document {
                                 | PatternOutputRealization::ParametricPaths { .. }
                                 | PatternOutputRealization::ConnectionPaths { .. }
                                 | PatternOutputRealization::MazeWalls { .. }
+                                | PatternOutputRealization::CurveMotifPaths { .. }
                         )
                     })
                 })
@@ -8101,7 +8247,54 @@ fn validate_definition_guide_references(
             ));
         }
     }
+    for layer in &definition.output_layers {
+        let PatternOutputRealization::CurveMotifPaths { structure_id, .. } = &layer.realization
+        else {
+            continue;
+        };
+        let structure = structures
+            .iter()
+            .find(|structure| structure.id == *structure_id)
+            .ok_or(ValidationError::new(
+                "pattern_definitions.output_layers.curve_motif.reference",
+                "Curve Motif references a missing authored open path",
+            ))?;
+        if structure.kind != AuthoredStructureKind::OpenPath
+            || structure.segments.first().map(AuthoredCurveSegment::start)
+                == structure.segments.last().map(AuthoredCurveSegment::end)
+        {
+            return Err(ValidationError::new(
+                "pattern_definitions.output_layers.curve_motif.path",
+                "Curve Motif requires a distinct-endpoint authored open path",
+            ));
+        }
+    }
     Ok(())
+}
+
+/// Returns whether changing an authored resource must rebuild family geometry.
+///
+/// A curve motif consumes its open path only during realization, while an
+/// authored guide changes the family producer itself. Closed mark shapes are
+/// likewise realization-only. The scan intentionally considers every
+/// definition, because a shared resource can have mixed-strength uses.
+fn authored_structure_edit_requires_family(
+    document: &Document,
+    structure_id: AuthoredStructureId,
+) -> bool {
+    document.pattern_definition_bundles.iter().any(|bundle| {
+        bundle.definition.mechanisms.iter().any(|mechanism| {
+            matches!(
+                mechanism,
+                PatternMechanism::GuideDimensions { dimensions, .. }
+                    if dimensions.iter().any(|dimension| matches!(
+                        dimension.prototype,
+                        GuidePrototype::AuthoredOpenPath { structure_id: referenced }
+                            if referenced == structure_id
+                    ))
+            )
+        })
+    })
 }
 
 fn next_id(values: impl Iterator<Item = u64>, path: &'static str) -> Result<u64, ValidationError> {
@@ -9184,6 +9377,7 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
                     }
                     PatternOutputRealization::GuidePaths { .. }
                     | PatternOutputRealization::ParametricPaths { .. }
+                    | PatternOutputRealization::CurveMotifPaths { .. }
                     | PatternOutputRealization::ConnectionPaths { .. }
                     | PatternOutputRealization::MazeWalls { .. }
                     | PatternOutputRealization::Regions { .. } => {}
@@ -9296,6 +9490,38 @@ fn apply_definition_edit(definition: &mut PatternDefinition, edit: &PatternDefin
             output_layer_id,
             seed,
         } => apply_maze_program(definition, *output_layer_id, |current| current.seed = *seed),
+        PatternDefinitionEdit::SetCurveMotifMirrorAlternateRows {
+            output_layer_id,
+            mirror_alternate_rows,
+        } => {
+            if let Some(PatternOutputRealization::CurveMotifPaths {
+                mirror_alternate_rows: current,
+                ..
+            }) = definition
+                .output_layers
+                .iter_mut()
+                .find(|layer| layer.id() == *output_layer_id)
+                .map(|layer| &mut layer.realization)
+            {
+                *current = *mirror_alternate_rows;
+            }
+        }
+        PatternDefinitionEdit::SetCurveMotifAlternateRowPhase {
+            output_layer_id,
+            alternate_row_phase,
+        } => {
+            if let Some(PatternOutputRealization::CurveMotifPaths {
+                alternate_row_phase: current,
+                ..
+            }) = definition
+                .output_layers
+                .iter_mut()
+                .find(|layer| layer.id() == *output_layer_id)
+                .map(|layer| &mut layer.realization)
+            {
+                *current = *alternate_row_phase;
+            }
+        }
         PatternDefinitionEdit::SetGuideFaceDimensions {
             output_layer_id,
             dimensions,
@@ -10004,6 +10230,20 @@ fn remap_definition_edit_for_duplicate(
         } => PatternDefinitionEdit::SetMazeSeed {
             output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
             seed: *seed,
+        },
+        PatternDefinitionEdit::SetCurveMotifMirrorAlternateRows {
+            output_layer_id,
+            mirror_alternate_rows,
+        } => PatternDefinitionEdit::SetCurveMotifMirrorAlternateRows {
+            output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
+            mirror_alternate_rows: *mirror_alternate_rows,
+        },
+        PatternDefinitionEdit::SetCurveMotifAlternateRowPhase {
+            output_layer_id,
+            alternate_row_phase,
+        } => PatternDefinitionEdit::SetCurveMotifAlternateRowPhase {
+            output_layer_id: remap_output_layer_id(source, duplicate, *output_layer_id),
+            alternate_row_phase: *alternate_row_phase,
         },
         PatternDefinitionEdit::SetGuideFaceDimensions {
             output_layer_id,
@@ -10772,6 +11012,39 @@ fn validate_definition_edit(
             candidate.seed = *seed;
             candidate.validate()
         }
+        PatternDefinitionEdit::SetCurveMotifMirrorAlternateRows {
+            output_layer_id, ..
+        } => matches!(
+            &validate_output_layer_target(definition, *output_layer_id)?.realization,
+            PatternOutputRealization::CurveMotifPaths { .. }
+        )
+        .then_some(())
+        .ok_or(ValidationError::new(
+            "pattern_definitions.output_layers.curve_motif",
+            "command targets an output without Curve Motif configuration",
+        )),
+        PatternDefinitionEdit::SetCurveMotifAlternateRowPhase {
+            output_layer_id,
+            alternate_row_phase,
+        } => {
+            if alternate_row_phase
+                .is_some_and(|phase| !(phase.is_finite() && 0.0 < phase && phase < 1.0))
+            {
+                return Err(ValidationError::new(
+                    "pattern_definitions.output_layers.curve_motif.alternate_row_phase",
+                    "Curve Motif alternate row phase must be finite and strictly between zero and one",
+                ));
+            }
+            matches!(
+                &validate_output_layer_target(definition, *output_layer_id)?.realization,
+                PatternOutputRealization::CurveMotifPaths { .. }
+            )
+            .then_some(())
+            .ok_or(ValidationError::new(
+                "pattern_definitions.output_layers.curve_motif",
+                "command targets an output without Curve Motif configuration",
+            ))
+        }
         PatternDefinitionEdit::SetGuideFaceDimensions {
             output_layer_id,
             dimensions,
@@ -10843,6 +11116,9 @@ fn validate_property_field_projection(
         (
             PropertyValueKind::FiniteF64,
             PropertyFieldValue::FiniteF64(_)
+        ) | (
+            PropertyValueKind::OptionalFiniteF64,
+            PropertyFieldValue::OptionalFiniteF64(_)
         ) | (PropertyValueKind::U32, PropertyFieldValue::U32(_))
             | (PropertyValueKind::Boolean, PropertyFieldValue::Boolean(_))
             | (
@@ -10873,6 +11149,19 @@ fn validate_property_field_projection(
                 ));
             }
             value
+        }
+        PropertyFieldValue::OptionalFiniteF64(value) => {
+            if let Some(value) = value {
+                if !value.is_finite() {
+                    return Err(ValidationError::new(
+                        "command.field",
+                        "enabled optional value must be finite",
+                    ));
+                }
+                value
+            } else {
+                return Ok(());
+            }
         }
         PropertyFieldValue::U32(value) => value as f64,
         PropertyFieldValue::EnumChoice(choice) => {
@@ -11241,6 +11530,10 @@ fn validate_mark_prototype_output_target(
             "pattern_definitions.output_layers",
             "command targets a parametric-path output without a mark-prototype configuration",
         )),
+        PatternOutputRealization::CurveMotifPaths { .. } => Err(ValidationError::new(
+            "pattern_definitions.output_layers",
+            "command targets a Curve Motif output without a mark-prototype configuration",
+        )),
         PatternOutputRealization::ConnectionPaths { .. } => Err(ValidationError::new(
             "pattern_definitions.output_layers",
             "command targets a connection-path output without a mark-prototype configuration",
@@ -11325,6 +11618,12 @@ fn validate_output_orientation(
 fn definition_edit_invalidation(edit: &PatternDefinitionEdit) -> InvalidationLevel {
     if matches!(edit, PatternDefinitionEdit::SetGuideFaceDimensions { .. }) {
         InvalidationLevel::Family
+    } else if matches!(
+        edit,
+        PatternDefinitionEdit::SetCurveMotifMirrorAlternateRows { .. }
+            | PatternDefinitionEdit::SetCurveMotifAlternateRowPhase { .. }
+    ) {
+        InvalidationLevel::Realization
     } else {
         property_field_contract(edit.field_projection().field).invalidation
     }
@@ -12269,6 +12568,13 @@ fn project_validated_pattern_definition(
                     PatternCapabilityFlag::ExtendBeyondCanvas,
                 ]);
             }
+            PatternOutputCapabilityProjection::CurveMotifPaths(_) => {
+                feature_set.extend([
+                    PatternCapabilityFlag::CurveMotifPaths,
+                    PatternCapabilityFlag::RawPaths,
+                    PatternCapabilityFlag::AlongGuideSites,
+                ]);
+            }
             PatternOutputCapabilityProjection::ConnectionPaths(_) => {
                 feature_set.extend([
                     PatternCapabilityFlag::ConnectionSites,
@@ -12442,6 +12748,22 @@ fn project_output_capability(
             },
         ));
     }
+    if let PatternOutputRealization::CurveMotifPaths {
+        mirror_alternate_rows,
+        alternate_row_phase,
+        ..
+    } = &output.realization
+    {
+        return Ok(PatternOutputCapabilityProjection::CurveMotifPaths(
+            CurveMotifPathOutputCapabilityProjection {
+                mirror_alternate_rows: *mirror_alternate_rows,
+                alternate_row_phase: *alternate_row_phase,
+                round_join: true,
+                round_cap: true,
+                thickness_range: true,
+            },
+        ));
+    }
     if let PatternOutputRealization::ConnectionPaths { program, .. } = &output.realization {
         let (program_kind, minimum_degree, seed) = match program {
             ConnectionProgram::NearestLinks { .. } => {
@@ -12502,7 +12824,8 @@ fn project_output_capability(
             mark_orientation_kind(orientation),
         ),
         PatternOutputRealization::GuidePaths { .. }
-        | PatternOutputRealization::ParametricPaths { .. } => {
+        | PatternOutputRealization::ParametricPaths { .. }
+        | PatternOutputRealization::CurveMotifPaths { .. } => {
             unreachable!("handled above")
         }
         PatternOutputRealization::ConnectionPaths { .. }
@@ -13297,6 +13620,32 @@ fn validate_generalized_output_layers(
             )),
         };
     }
+    if let [
+        PatternOutputRealization::CurveMotifPaths {
+            site_mechanism_id,
+            alternate_row_phase,
+            ..
+        },
+    ] = layers
+    {
+        if *site_mechanism_id != site_id
+            || !matches!(site_mechanism, PatternMechanism::AlongGuideSites { dimensions: selected, .. } if selected.len() == 1)
+        {
+            return Err(ValidationError::new(
+                "pattern_definitions.output_layers.curve_motif",
+                "Curve Motif output requires its one-dimensional Along Guides site product",
+            ));
+        }
+        if alternate_row_phase
+            .is_some_and(|phase| !(phase.is_finite() && 0.0 < phase && phase < 1.0))
+        {
+            return Err(ValidationError::new(
+                "pattern_definitions.output_layers.curve_motif.alternate_row_phase",
+                "Curve Motif alternate row phase must be finite and strictly between zero and one",
+            ));
+        }
+        return Ok(());
+    }
     let [
         PatternOutputRealization::MarkPrototype {
             site_mechanism_id,
@@ -13797,6 +14146,8 @@ pub enum PropertyFieldId {
     ConnectionMinimumDegree,
     ConnectionSeed,
     MazeSeed,
+    CurveMotifMirrorAlternateRows,
+    CurveMotifAlternateRowPhase,
     ParametricShape,
     ParametricTurns,
     ParametricRadialSpacing,
@@ -13901,6 +14252,8 @@ pub const PROPERTY_FIELD_IDS: &[PropertyFieldId] = &[
     PropertyFieldId::ConnectionMinimumDegree,
     PropertyFieldId::ConnectionSeed,
     PropertyFieldId::MazeSeed,
+    PropertyFieldId::CurveMotifMirrorAlternateRows,
+    PropertyFieldId::CurveMotifAlternateRowPhase,
     PropertyFieldId::ParametricShape,
     PropertyFieldId::ParametricTurns,
     PropertyFieldId::ParametricRadialSpacing,
@@ -13935,6 +14288,8 @@ pub enum PropertyTarget {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PropertyValueKind {
     FiniteF64,
+    /// Represents an explicitly enabled finite number or an authored disabled state.
+    OptionalFiniteF64,
     U32,
     Boolean,
     StableIdReference,
@@ -14086,6 +14441,8 @@ pub enum PropertyApplicability {
     RandomLinkProgram,
     SeededConnectionProgram,
     MazeWallProgram,
+    /// Restricts an output control to the Curve Motif path realization.
+    CurveMotifPathOutput,
     CurrentPaint,
     CurrentDensityModulation,
     CurrentExclusion,
@@ -14195,6 +14552,8 @@ pub enum PropertyCommandKind {
     SetConnectionMinimumDegree,
     SetConnectionSeed,
     SetMazeSeed,
+    SetCurveMotifMirrorAlternateRows,
+    SetCurveMotifAlternateRowPhase,
     SetCoverageGuardSteps,
     SetCoverageAdditionalMargin,
 }
@@ -14252,6 +14611,8 @@ pub struct PropertyCurrentValue {
 #[derive(Clone, Debug, PartialEq)]
 pub enum PropertyCurrentValueKind {
     FiniteF64(f64),
+    /// Preserves an optional finite field without encoding its disabled state as a number.
+    OptionalFiniteF64(Option<f64>),
     U32(u32),
     Boolean(bool),
     EnumChoice(PropertyEnumChoice),
@@ -15716,6 +16077,12 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             }
             PropertyFieldId::ConnectionSeed => PropertyCommandKind::SetConnectionSeed,
             PropertyFieldId::MazeSeed => PropertyCommandKind::SetMazeSeed,
+            PropertyFieldId::CurveMotifMirrorAlternateRows => {
+                PropertyCommandKind::SetCurveMotifMirrorAlternateRows
+            }
+            PropertyFieldId::CurveMotifAlternateRowPhase => {
+                PropertyCommandKind::SetCurveMotifAlternateRowPhase
+            }
             PropertyFieldId::CoverageGuardSteps => PropertyCommandKind::SetCoverageGuardSteps,
             PropertyFieldId::CoverageAdditionalMargin => {
                 PropertyCommandKind::SetCoverageAdditionalMargin
@@ -15733,7 +16100,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::OutputAuthoredClosedShape => PropertyValueKind::StableIdReference,
             PropertyFieldId::ModeledMappingInverted
             | PropertyFieldId::ArtworkWeightMappingInverted
-            | PropertyFieldId::Visibility => PropertyValueKind::Boolean,
+            | PropertyFieldId::Visibility
+            | PropertyFieldId::CurveMotifMirrorAlternateRows => PropertyValueKind::Boolean,
+            PropertyFieldId::CurveMotifAlternateRowPhase => PropertyValueKind::OptionalFiniteF64,
             PropertyFieldId::CoverageGuardSteps
             | PropertyFieldId::RandomSeed
             | PropertyFieldId::ConnectionMaximumDegree
@@ -15825,6 +16194,12 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
                 maximum_inclusive: true,
             }),
             PropertyFieldId::ConnectionMaximumDistance => positive_bounds(),
+            PropertyFieldId::CurveMotifAlternateRowPhase => Some(PropertyBounds {
+                minimum: Some(0.0),
+                minimum_inclusive: false,
+                maximum: Some(1.0),
+                maximum_inclusive: false,
+            }),
             PropertyFieldId::MarkMinimumFill
             | PropertyFieldId::MarkMaximumFill
             | PropertyFieldId::ConnectedMinimumThickness
@@ -15858,7 +16233,9 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::GuideArcStartAngle
             | PropertyFieldId::GuideArcSweepAngle
             | PropertyFieldId::GuideStackDirection => PropertyUnit::Degrees,
-            PropertyFieldId::GuidePhase | PropertyFieldId::AlongGuidePhase => PropertyUnit::Phase,
+            PropertyFieldId::GuidePhase
+            | PropertyFieldId::AlongGuidePhase
+            | PropertyFieldId::CurveMotifAlternateRowPhase => PropertyUnit::Phase,
             PropertyFieldId::TranslationX
             | PropertyFieldId::TranslationY
             | PropertyFieldId::CoverageAdditionalMargin
@@ -15977,6 +16354,10 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             PropertyFieldId::ConnectionMinimumDegree => PropertyApplicability::RandomLinkProgram,
             PropertyFieldId::ConnectionSeed => PropertyApplicability::SeededConnectionProgram,
             PropertyFieldId::MazeSeed => PropertyApplicability::MazeWallProgram,
+            PropertyFieldId::CurveMotifMirrorAlternateRows
+            | PropertyFieldId::CurveMotifAlternateRowPhase => {
+                PropertyApplicability::CurveMotifPathOutput
+            }
             _ => PropertyApplicability::Always,
         },
         invalidation: match field {
@@ -15985,6 +16366,8 @@ pub const fn property_field_contract(field: PropertyFieldId) -> PropertyFieldCon
             | PropertyFieldId::MarkMaximumFill
             | PropertyFieldId::ConnectedMinimumThickness
             | PropertyFieldId::ConnectedMaximumThickness
+            | PropertyFieldId::CurveMotifMirrorAlternateRows
+            | PropertyFieldId::CurveMotifAlternateRowPhase
             | PropertyFieldId::ShapeRotationDegrees
             | PropertyFieldId::LegacyMappingComponent
             | PropertyFieldId::LegacyMappingPlacement
@@ -16258,7 +16641,8 @@ const fn dependency_for_contract(
         PropertyApplicability::ConnectionPathOutput
         | PropertyApplicability::RandomLinkProgram
         | PropertyApplicability::SeededConnectionProgram
-        | PropertyApplicability::MazeWallProgram => PropertyDependency::Always,
+        | PropertyApplicability::MazeWallProgram
+        | PropertyApplicability::CurveMotifPathOutput => PropertyDependency::Always,
         PropertyApplicability::CurrentPaint
         | PropertyApplicability::CurrentDensityModulation
         | PropertyApplicability::CurrentExclusion => dynamic,
@@ -16566,6 +16950,17 @@ pub enum PatternStructureRecipe {
     AuthoredClosedShapeMarks {
         definition: Box<PatternStructureRecipe>,
         shape: AuthoredStructureDraft,
+    },
+    /// Wraps one one-dimension Along Guides recipe with one embedded open-path motif.
+    ///
+    /// The materializer allocates the resource and output atomically; the cadence remains the
+    /// wrapped family site's interval rather than becoming a second motif-size control.
+    CurveMotifPaths {
+        definition: Box<PatternStructureRecipe>,
+        motif: AuthoredStructureDraft,
+        style: PathStrokeStyle,
+        mirror_alternate_rows: bool,
+        alternate_row_phase: Option<f64>,
     },
     /// Wraps one ID-free site family with ordinary Stage 20O Voronoi intent.
     VoronoiRegions {
@@ -16977,6 +17372,15 @@ fn validate_pattern_structure_recipe(
             }
             validate_pattern_structure_recipe(definition)
         }
+        PatternStructureRecipe::CurveMotifPaths {
+            definition,
+            motif,
+            alternate_row_phase,
+            ..
+        } => {
+            validate_curve_motif_recipe(definition, motif, *alternate_row_phase)?;
+            validate_pattern_structure_recipe(definition)
+        }
         PatternStructureRecipe::VoronoiRegions { definition } => {
             if matches!(
                 definition.as_ref(),
@@ -17112,6 +17516,7 @@ fn validate_recipe_output_settings(
         recipe.structure,
         PatternStructureRecipe::ConnectionPaths { .. }
             | PatternStructureRecipe::MazeWalls { .. }
+            | PatternStructureRecipe::CurveMotifPaths { .. }
             | PatternStructureRecipe::ParametricCurve { sites: None, .. }
     );
     let regions = matches!(
@@ -17269,6 +17674,7 @@ fn validate_connection_recipe(
         PatternStructureRecipe::ConnectionPaths { .. }
         | PatternStructureRecipe::MazeWalls { .. }
         | PatternStructureRecipe::AuthoredClosedShapeMarks { .. }
+        | PatternStructureRecipe::CurveMotifPaths { .. }
         | PatternStructureRecipe::VoronoiRegions { .. }
         | PatternStructureRecipe::GuideFaceRegions { .. }
         | PatternStructureRecipe::OrderedOutputs { .. } => Err(ValidationError::new(
@@ -17304,6 +17710,7 @@ fn validate_maze_recipe(
         | PatternStructureRecipe::ConnectionPaths { .. }
         | PatternStructureRecipe::MazeWalls { .. }
         | PatternStructureRecipe::AuthoredClosedShapeMarks { .. }
+        | PatternStructureRecipe::CurveMotifPaths { .. }
         | PatternStructureRecipe::VoronoiRegions { .. }
         | PatternStructureRecipe::GuideFaceRegions { .. }
         | PatternStructureRecipe::OrderedOutputs { .. } => Err(ValidationError::new(
@@ -17311,6 +17718,67 @@ fn validate_maze_recipe(
             "maze recipes require an unwrapped straight guide intersection family",
         )),
     }
+}
+
+/// Validates the Curve Motif wrapper without allocating IDs or evaluating geometry.
+///
+/// # Errors
+///
+/// Returns a stable recipe diagnostic when the wrapped family is not exactly one-dimensional
+/// Along Guides, the embedded path is not a distinct-endpoint open path, or the optional odd-row
+/// phase is not a finite open unit fraction.
+fn validate_curve_motif_recipe(
+    definition: &PatternStructureRecipe,
+    motif: &AuthoredStructureDraft,
+    alternate_row_phase: Option<f64>,
+) -> Result<(), ValidationError> {
+    let PatternStructureRecipe::GeneralizedStraightGuides {
+        dimensions,
+        product,
+        ..
+    } = definition
+    else {
+        return Err(ValidationError::new(
+            "pattern_definitions.recipe.curve_motif.family",
+            "Curve Motif requires one generalized straight-guide family",
+        ));
+    };
+    if dimensions.len() != 1
+        || !matches!(product, GeneralizedSiteProductDraft::AlongGuides { dimension_indices, .. } if dimension_indices.as_slice() == [0])
+    {
+        return Err(ValidationError::new(
+            "pattern_definitions.recipe.curve_motif.family",
+            "Curve Motif requires exactly one Along Guides dimension",
+        ));
+    }
+    if motif.kind() != AuthoredStructureKind::OpenPath {
+        return Err(ValidationError::new(
+            "pattern_definitions.recipe.curve_motif.path",
+            "Curve Motif requires an authored open path",
+        ));
+    }
+    let segments = motif.segments();
+    let first = segments
+        .first()
+        .expect("validated authored draft is nonempty")
+        .start();
+    let last = segments
+        .last()
+        .expect("validated authored draft is nonempty")
+        .end();
+    if first == last {
+        return Err(ValidationError::new(
+            "pattern_definitions.recipe.curve_motif.endpoints",
+            "Curve Motif endpoints must be distinct",
+        ));
+    }
+    if alternate_row_phase.is_some_and(|phase| !(phase.is_finite() && 0.0 < phase && phase < 1.0)) {
+        return Err(ValidationError::new(
+            "pattern_definitions.recipe.curve_motif.alternate_row_phase",
+            "Curve Motif alternate row phase must be finite and strictly between zero and one",
+        ));
+    }
+    Ok(())
 }
 
 /// A typed structural edit. It has no UI/editor state and can be applied only
@@ -17597,6 +18065,16 @@ pub enum PatternDefinitionEdit {
         output_layer_id: PatternOutputLayerId,
         seed: u32,
     },
+    /// Changes whether odd provenance rows mirror across their tangent axis.
+    SetCurveMotifMirrorAlternateRows {
+        output_layer_id: PatternOutputLayerId,
+        mirror_alternate_rows: bool,
+    },
+    /// Changes the validated optional odd-row cadence fraction without moving guide layout.
+    SetCurveMotifAlternateRowPhase {
+        output_layer_id: PatternOutputLayerId,
+        alternate_row_phase: Option<f64>,
+    },
     /// Replaces the ordered two-or-three Guide Faces source dimensions of one region output.
     /// This typed structural operation deliberately has no property descriptor.
     SetGuideFaceDimensions {
@@ -17826,6 +18304,8 @@ pub enum DocumentCommand {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PropertyFieldValue {
     FiniteF64(f64),
+    /// Carries the exact enabled or disabled state of an optional finite property.
+    OptionalFiniteF64(Option<f64>),
     U32(u32),
     Boolean(bool),
     StableIdReference,
@@ -18226,6 +18706,20 @@ impl PatternDefinitionEdit {
             Edit::SetMazeSeed { seed, .. } => {
                 (PropertyFieldId::MazeSeed, PropertyFieldValue::U32(*seed))
             }
+            Edit::SetCurveMotifMirrorAlternateRows {
+                mirror_alternate_rows,
+                ..
+            } => (
+                PropertyFieldId::CurveMotifMirrorAlternateRows,
+                PropertyFieldValue::Boolean(*mirror_alternate_rows),
+            ),
+            Edit::SetCurveMotifAlternateRowPhase {
+                alternate_row_phase,
+                ..
+            } => (
+                PropertyFieldId::CurveMotifAlternateRowPhase,
+                PropertyFieldValue::OptionalFiniteF64(*alternate_row_phase),
+            ),
             Edit::SetGuideFaceDimensions { .. } => (
                 // This projection is intentionally unreachable from command classification;
                 // it retains a total public method for generic callers.
@@ -19737,12 +20231,7 @@ impl DocumentCommand {
                     else {
                         unreachable!("authored replacement classification matches its command")
                     };
-                    let replacement = after
-                        .authored_structure(base_structure.id)
-                        .expect("validated authored replacement preserves its target");
-                    if base_structure.kind == AuthoredStructureKind::OpenPath
-                        || replacement.kind == AuthoredStructureKind::OpenPath
-                    {
+                    if authored_structure_edit_requires_family(before, base_structure.id()) {
                         InvalidationLevel::Family
                     } else {
                         InvalidationLevel::Realization
@@ -19780,6 +20269,10 @@ impl DocumentCommand {
                                     prototype: MarkPrototype::AuthoredClosedShape { structure_id },
                                     ..
                                 } if *structure_id == base_structure.id()
+                            ) || matches!(
+                                &layer.realization,
+                                PatternOutputRealization::CurveMotifPaths { structure_id, .. }
+                                    if *structure_id == base_structure.id()
                             ))
                                 })
                             })
@@ -20613,22 +21106,20 @@ fn squash_result(before: &Document, after: &Document) -> DraftSquashResult {
         level = strongest_invalidation(level, InvalidationLevel::ChannelTopology);
     }
     for id in &changed_structures {
-        let kind = before
-            .authored_structure(*id)
-            .or_else(|| after.authored_structure(*id))
-            .map(AuthoredStructure::kind);
         level = strongest_invalidation(
             level,
-            match kind {
-                Some(AuthoredStructureKind::ClosedShape) => InvalidationLevel::Realization,
-                _ => InvalidationLevel::Family,
+            if authored_structure_edit_requires_family(before, *id)
+                || authored_structure_edit_requires_family(after, *id)
+            {
+                InvalidationLevel::Family
+            } else {
+                InvalidationLevel::Realization
             },
         );
     }
     if !changed_definitions.is_empty() {
         level = strongest_invalidation(level, InvalidationLevel::Family);
     }
-    let uses = after.authored_structure_uses();
     let affected_channels = after
         .channel_ids()
         .into_iter()
@@ -20638,18 +21129,11 @@ fn squash_result(before: &Document, after: &Document) -> DraftSquashResult {
                 || source_changed
                 || changed_channels.contains(channel_id)
                 || definition_id.is_some_and(|id| changed_definitions.contains(&id))
-                || uses.iter().any(|usage| match usage {
-                    AuthoredStructureUse::Guide {
-                        channel_id: owner,
-                        structure_id,
-                        ..
-                    }
-                    | AuthoredStructureUse::Mark {
-                        channel_id: owner,
-                        structure_id,
-                        ..
-                    } => owner == channel_id && changed_structures.contains(structure_id),
-                })
+                || channel_references_changed_authored_structure(
+                    after,
+                    *channel_id,
+                    &changed_structures,
+                )
         })
         .collect();
     DraftSquashResult {
@@ -20657,6 +21141,45 @@ fn squash_result(before: &Document, after: &Document) -> DraftSquashResult {
         affected_channels,
         invalidation: level,
     }
+}
+
+/// Returns whether one effective channel owns any changed authored resource.
+///
+/// The check covers family-owned guides and realization-owned marks and Curve
+/// Motifs without exposing a frontend selection projection for motif resources.
+fn channel_references_changed_authored_structure(
+    document: &Document,
+    channel_id: ChannelId,
+    changed_structures: &HashSet<AuthoredStructureId>,
+) -> bool {
+    document
+        .pattern_definition_id_for(channel_id)
+        .and_then(|definition_id| document.definition(definition_id))
+        .is_some_and(|definition| {
+            definition.mechanisms.iter().any(|mechanism| {
+                matches!(
+                    mechanism,
+                    PatternMechanism::GuideDimensions { dimensions, .. }
+                        if dimensions.iter().any(|dimension| matches!(
+                            dimension.prototype,
+                            GuidePrototype::AuthoredOpenPath { structure_id }
+                                if changed_structures.contains(&structure_id)
+                        ))
+                )
+            }) || definition.output_layers.iter().any(|layer| {
+                matches!(
+                    &layer.realization,
+                    PatternOutputRealization::MarkPrototype {
+                        prototype: MarkPrototype::AuthoredClosedShape { structure_id },
+                        ..
+                    } if changed_structures.contains(structure_id)
+                ) || matches!(
+                    &layer.realization,
+                    PatternOutputRealization::CurveMotifPaths { structure_id, .. }
+                        if changed_structures.contains(structure_id)
+                )
+            })
+        })
 }
 
 /// Chooses the strongest pipeline invalidation using the established authority ordering.

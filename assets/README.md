@@ -21,7 +21,7 @@ stage.
 ## Obsolete-schema rejection witness
 
 `HolidayMugs_2024_2025.toniator` is a tracked real-world container-v1,
-document-schema-v5 test case. Stage 21A's current-only schema-v6 boundary uses
+document-schema-v5 test case. The current-only schema-v7 boundary uses
 it solely to prove that obsolete documents are rejected rather than migrated.
 Preserve its bytes and hash; do not regenerate it or treat it as a current-
 format round-trip fixture.
@@ -30,18 +30,19 @@ format round-trip fixture.
 | --- | --- | --- |
 | `HolidayMugs_2024_2025.toniator` | Obsolete schema-v5 rejection witness. | `253e3977ed0a9447ad9d4bf4df789ac51db7bec07721b51495206b261ba70d4b` |
 
-## Current schema-v6 persistence fixtures
+## Current schema-v7 persistence fixtures
 
-`raster-sample.toniator` and `vector-sample.toniator` are current schema-v6
+`raster-sample.toniator` and `vector-sample.toniator` are current schema-v7
 containers derived from the immutable still-image baselines at their intrinsic
-canvases. They retain the normalized-fill intent and use the Stage 21A
-Density/Density-aspect document authority. They are current-format validation
-inputs, not migration fixtures.
+canvases. They retain normalized-fill intent, use the Stage 21A
+Density/Density-aspect authority, and carry the post-21A Curve Motif
+document-v7 boundary. They are current-format validation inputs, not migration
+fixtures.
 
 | File | SHA-256 |
 | --- | --- |
-| `raster-sample.toniator` | `e8b60e11e1d84ad578feb9fbf6dd479ff1a20601f031d2fd9e8a64862d0806a6` |
-| `vector-sample.toniator` | `8a0f9960c79a7e5c4e848a2a8512afe12dc0980ba7f9840577cf412a552589e6` |
+| `raster-sample.toniator` | `637bb411ac52cd7a0c8b4f343cccac0f50d54d0202113da7268d1b103a49efdf` |
+| `vector-sample.toniator` | `ffe7d23a168eae795760db333ecddfaa1aee9fe84765ac00ba13bc753f1aff81` |
 
 ## Stage 10 small-preview regressions
 

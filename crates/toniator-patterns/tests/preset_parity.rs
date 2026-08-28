@@ -53,6 +53,7 @@ fn recipe_uses_artwork_weighted_density(recipe: &PatternStructureRecipe) -> bool
         PatternStructureRecipe::ConnectionPaths { definition, .. }
         | PatternStructureRecipe::MazeWalls { definition, .. }
         | PatternStructureRecipe::AuthoredClosedShapeMarks { definition, .. }
+        | PatternStructureRecipe::CurveMotifPaths { definition, .. }
         | PatternStructureRecipe::VoronoiRegions { definition }
         | PatternStructureRecipe::GuideFaceRegions { definition, .. }
         | PatternStructureRecipe::OrderedOutputs { definition, .. } => {

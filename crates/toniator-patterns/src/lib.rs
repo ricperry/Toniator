@@ -6,7 +6,10 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     error::Error,
     fmt,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -35,8 +38,8 @@ pub use toniator_geometry::{
     ConnectionPathLimits, ConnectionPathSet, CubicBezierSegment, CurveError, CurvePath,
     CurveSegment, FamilySite, FamilySiteError, FamilySiteId, FamilySiteProvenance, FamilySiteSet,
     GUIDE_FACE_CONTRACT_ID, GuideFaceLimits, GuideFaceRequest, GuideInstanceId,
-    GuideIntersectionProvenance, IntersectionSite, MAZE_WALL_CONTRACT_ID, MazeGuideAxis,
-    MazeLimits, MazeProgramResult, MazeWallPathId, NominalCellBasis,
+    GuideIntersectionProvenance, IntersectionSite, LineSegment, MAZE_WALL_CONTRACT_ID,
+    MazeGuideAxis, MazeLimits, MazeProgramResult, MazeWallPathId, NominalCellBasis,
     PATH_OFFSET_ALGORITHM_CONTRACT_ID, PathClosure, PathLocation, PathOffsetCleanup,
     PathOffsetEndpointPolicy, PathOffsetLimits, PathOffsetRequest, PathOffsetResult, Point2,
     REGION_TREATMENT_CONTRACT_ID, RegionReference, RegionTreatment, RegionTreatmentError,
@@ -1110,7 +1113,7 @@ pub struct OutputCapability {
 }
 
 /// Typed realization payload retained in cache/provenance identity.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum OutputCapabilityPayload {
     Marks {
         prototype: MarkPrototype,
@@ -1119,6 +1122,14 @@ pub enum OutputCapabilityPayload {
     GuidePaths {
         guide_mechanism_id: PatternMechanismId,
         style: toniator_domain::PathStrokeStyle,
+    },
+    /// Curve Motif carries only document-authoritative recipe fields until row paths are derived.
+    CurveMotifPaths {
+        site_mechanism_id: PatternMechanismId,
+        structure_id: AuthoredStructureId,
+        style: toniator_domain::PathStrokeStyle,
+        mirror_alternate_rows: bool,
+        alternate_row_phase: Option<f64>,
     },
     /// Connection selection remains authored while graph/path products are derived at evaluation time.
     ConnectionPaths {
@@ -1136,6 +1147,8 @@ pub enum OutputCapabilityPayload {
     Regions { source: RegionSourceIntent },
 }
 
+impl Eq for OutputCapabilityPayload {}
+
 impl OutputCapability {
     /// Returns mark authority only when this output is a mark layer.
     pub fn marks(&self) -> Option<(&MarkPrototype, &MarkOrientation)> {
@@ -1145,6 +1158,7 @@ impl OutputCapability {
                 orientation,
             } => Some((prototype, orientation)),
             OutputCapabilityPayload::GuidePaths { .. } => None,
+            OutputCapabilityPayload::CurveMotifPaths { .. } => None,
             OutputCapabilityPayload::ConnectionPaths { .. } => None,
             OutputCapabilityPayload::MazeWalls { .. } => None,
             OutputCapabilityPayload::Regions { .. } => None,
@@ -1159,6 +1173,7 @@ impl OutputCapability {
                 guide_mechanism_id,
                 style,
             } => Some((guide_mechanism_id, style)),
+            OutputCapabilityPayload::CurveMotifPaths { .. } => None,
             OutputCapabilityPayload::ConnectionPaths { .. } => None,
             OutputCapabilityPayload::MazeWalls { .. } => None,
             OutputCapabilityPayload::Regions { .. } => None,
@@ -1208,6 +1223,514 @@ impl OutputCapability {
             _ => None,
         }
     }
+}
+
+/// Chains an open motif between adjacent Along Guides sites in deterministic guide-instance order.
+///
+/// Rows are grouped by their stable guide provenance, not by site ordinal. Odd negative guide
+/// indices use Euclidean parity. The returned paths retain the shared endpoint exactly once per
+/// join and remain open so the ordinary canonical stroke realizer owns sampling and outlines.
+///
+/// # Errors
+///
+/// Returns a stable motif diagnostic when sites lack consecutive Along Guides provenance, the
+/// motif endpoint basis is degenerate, a row cannot form finite transformed segments, or a
+/// cancellation request arrives before output publication.
+///
+/// # Panics
+///
+/// Panics only if the caller's synchronized progress callback poisons the internal reporting lock.
+pub fn chain_curve_motif_rows_cancellable(
+    sites: &FamilySiteSet,
+    motif: &CurvePath,
+    mirror_alternate_rows: bool,
+    alternate_row_phase: Option<f64>,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<Vec<CurvePath>, PatternPipelineError> {
+    chain_curve_motif_rows_with_progress_cancellable(
+        sites,
+        motif,
+        mirror_alternate_rows,
+        alternate_row_phase,
+        is_cancelled,
+        &|_, _| {},
+    )
+}
+
+/// Chains motif rows while reporting completed stable guide rows in output order.
+///
+/// The callback observes only completed rows and never changes row geometry,
+/// Rayon scheduling, or the ordered result. It may be called from worker
+/// threads and therefore must be thread-safe.
+///
+/// # Panics
+///
+/// Panics only if the caller's synchronized progress callback poisons the internal reporting lock.
+fn chain_curve_motif_rows_with_progress_cancellable(
+    sites: &FamilySiteSet,
+    motif: &CurvePath,
+    mirror_alternate_rows: bool,
+    alternate_row_phase: Option<f64>,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+    progress: &(dyn Fn(usize, usize) + Sync),
+) -> Result<Vec<CurvePath>, PatternPipelineError> {
+    let start = motif.start();
+    let end = motif.end();
+    let source_axis = Vector2::new(end.x - start.x, end.y - start.y);
+    let source_length_squared = source_axis.dot(source_axis);
+    if !source_length_squared.is_finite() || source_length_squared <= 0.0 {
+        return Err(PatternPipelineError::new(
+            "curve_motif.endpoints",
+            "Curve Motif requires distinct finite path endpoints",
+        ));
+    }
+    if alternate_row_phase.is_some_and(|value| !(value.is_finite() && 0.0 < value && value < 1.0)) {
+        return Err(PatternPipelineError::new(
+            "curve_motif.alternate_row_phase",
+            "Curve Motif alternate row phase must be finite and strictly between zero and one",
+        ));
+    }
+    let mut rows = BTreeMap::<GuideInstanceId, Vec<(i64, Point2)>>::new();
+    for site in sites.sites() {
+        let FamilySiteProvenance::AlongGuide {
+            guide_id, sequence, ..
+        } = site.provenance
+        else {
+            return Err(PatternPipelineError::new(
+                "curve_motif.sites",
+                "Curve Motif requires Along Guides site provenance",
+            ));
+        };
+        rows.entry(guide_id)
+            .or_default()
+            .push((sequence, site.position));
+    }
+    let row_specs = rows
+        .into_iter()
+        .map(|(guide_id, mut row)| {
+            row.sort_by_key(|(sequence, _)| *sequence);
+            (guide_id, row)
+        })
+        .collect::<Vec<_>>();
+    let motif_segment_count = motif.segments().len();
+    let mut total_work = 0_usize;
+    for (_, row) in &row_specs {
+        for pair in row.windows(2) {
+            if pair[1]
+                .0
+                .checked_sub(pair[0].0)
+                .filter(|difference| *difference == 1)
+                .is_none()
+            {
+                return Err(PatternPipelineError::new(
+                    "curve_motif.sites",
+                    "Curve Motif Along Guides sequences must be unique and consecutive",
+                ));
+            }
+        }
+        let copies = row.len().saturating_sub(1);
+        let segment_work = copies.checked_mul(motif_segment_count).ok_or_else(|| {
+            PatternPipelineError::new(
+                "curve_motif.allocation",
+                "Curve Motif segment work count overflows addressable memory",
+            )
+        })?;
+        total_work = total_work
+            .checked_add(segment_work)
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| {
+                PatternPipelineError::new(
+                    "curve_motif.allocation",
+                    "Curve Motif progress work count overflows addressable memory",
+                )
+            })?;
+    }
+    let completed_work = AtomicUsize::new(0);
+    let reported_work = AtomicUsize::new(0);
+    let progress_lock = Mutex::new(());
+    let report_completed_work = |increment: usize| {
+        let completed = completed_work.fetch_add(increment, Ordering::AcqRel) + increment;
+        let _guard = progress_lock
+            .lock()
+            .expect("Curve Motif progress lock poisoned");
+        loop {
+            let previous = reported_work.load(Ordering::Acquire);
+            if completed <= previous {
+                return;
+            }
+            if reported_work
+                .compare_exchange(previous, completed, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                progress(completed, total_work);
+                return;
+            }
+        }
+    };
+    row_specs
+        .par_iter()
+        .map(|(guide_id, row)| {
+            if is_cancelled() {
+                return Err(PatternPipelineError::new(
+                    "evaluation.cancelled",
+                    "evaluation was cancelled",
+                ));
+            }
+            let odd = guide_id.index.rem_euclid(2) == 1;
+            let mirror = odd && mirror_alternate_rows;
+            let phase = if odd {
+                alternate_row_phase.unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            let row_axis = row
+                .windows(2)
+                .next()
+                .map(|pair| Vector2::new(pair[1].1.x - pair[0].1.x, pair[1].1.y - pair[0].1.y))
+                .unwrap_or(Vector2::new(0.0, 0.0));
+            let row_translate = row_axis.scale(phase);
+            let mut segments = Vec::new();
+            let copy_count = row.len().saturating_sub(1);
+            let segment_capacity =
+                copy_count
+                    .checked_mul(motif.segments().len())
+                    .ok_or_else(|| {
+                        PatternPipelineError::new(
+                            "curve_motif.allocation",
+                            "Curve Motif segment count overflows addressable memory",
+                        )
+                    })?;
+            reserve_stage20m(
+                &mut segments,
+                segment_capacity,
+                "curve_motif.allocation",
+                "Curve Motif segment allocation failed",
+            )?;
+            for pair in row.windows(2) {
+                if is_cancelled() {
+                    return Err(PatternPipelineError::new(
+                        "evaluation.cancelled",
+                        "evaluation was cancelled",
+                    ));
+                }
+                let destination_axis =
+                    Vector2::new(pair[1].1.x - pair[0].1.x, pair[1].1.y - pair[0].1.y);
+                if !destination_axis.x.is_finite()
+                    || !destination_axis.y.is_finite()
+                    || destination_axis.dot(destination_axis) <= 0.0
+                {
+                    return Err(PatternPipelineError::new(
+                        "curve_motif.cadence",
+                        "Curve Motif adjacent sites must remain distinct and finite",
+                    ));
+                }
+                let mapped_start = segments.last().map(CurveSegment::end).unwrap_or_else(|| {
+                    Point2::new(pair[0].1.x + row_translate.x, pair[0].1.y + row_translate.y)
+                });
+                let mapped_end =
+                    Point2::new(pair[1].1.x + row_translate.x, pair[1].1.y + row_translate.y);
+                let map = |point: Point2| -> Result<Point2, PatternPipelineError> {
+                    if point == start {
+                        return Ok(mapped_start);
+                    }
+                    if point == end {
+                        return Ok(mapped_end);
+                    }
+                    let relative = Vector2::new(point.x - start.x, point.y - start.y);
+                    let along = relative.dot(source_axis) / source_length_squared;
+                    let across = relative.dot(source_axis.perpendicular()) / source_length_squared;
+                    let signed_across = if mirror { -across } else { across };
+                    let normal = destination_axis.perpendicular();
+                    let result = Point2::new(
+                        pair[0].1.x
+                            + row_translate.x
+                            + destination_axis.x * along
+                            + normal.x * signed_across,
+                        pair[0].1.y
+                            + row_translate.y
+                            + destination_axis.y * along
+                            + normal.y * signed_across,
+                    );
+                    result.is_finite().then_some(result).ok_or_else(|| {
+                        PatternPipelineError::new(
+                            "curve_motif.numeric",
+                            "Curve Motif mapping must remain finite",
+                        )
+                    })
+                };
+                for segment in motif.segments() {
+                    let transformed = match segment {
+                        CurveSegment::Line(line) => CurveSegment::Line(
+                            LineSegment::new(map(line.start())?, map(line.end())?).map_err(
+                                |_| {
+                                    PatternPipelineError::new(
+                                        "curve_motif.numeric",
+                                        "Curve Motif mapping must remain finite",
+                                    )
+                                },
+                            )?,
+                        ),
+                        CurveSegment::CubicBezier(cubic) => CurveSegment::CubicBezier(
+                            CubicBezierSegment::new(
+                                map(cubic.start())?,
+                                map(cubic.control_1())?,
+                                map(cubic.control_2())?,
+                                map(cubic.end())?,
+                            )
+                            .map_err(|_| {
+                                PatternPipelineError::new(
+                                    "curve_motif.numeric",
+                                    "Curve Motif mapping must remain finite",
+                                )
+                            })?,
+                        ),
+                    };
+                    segments.push(transformed);
+                    report_completed_work(1);
+                }
+            }
+            if segments.is_empty() {
+                report_completed_work(1);
+                return Ok(None);
+            }
+            let path = CurvePath::new(segments, PathClosure::Open).map_err(|_| {
+                PatternPipelineError::new(
+                    "curve_motif.continuity",
+                    "Curve Motif rows must chain exact consecutive endpoints",
+                )
+            })?;
+            report_completed_work(1);
+            Ok(Some(path))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|rows| {
+            let mut paths = Vec::new();
+            reserve_stage20m(
+                &mut paths,
+                rows.len(),
+                "curve_motif.allocation",
+                "Curve Motif row allocation failed",
+            )?;
+            for row in rows.into_iter().flatten() {
+                paths.push(row);
+            }
+            Ok(paths)
+        })?
+}
+
+/// Realizes chained Curve Motif rows through the existing source-sampled variable-width outline machinery.
+///
+/// This path owns only motif centerline construction. It reuses the same profile sampling, round
+/// outline, and canonical-stroke types as guide paths, so renderers retain no motif-specific code.
+///
+/// # Errors
+///
+/// Returns motif chaining, source sampling, cancellation, allocation, or outline diagnostics
+/// without returning partially realized rows.
+#[allow(clippy::too_many_arguments)]
+pub fn realize_curve_motif_canonical_strokes_cancellable(
+    family_fingerprint: &str,
+    sites: &FamilySiteSet,
+    motif: &CurvePath,
+    structure_id: AuthoredStructureId,
+    style: toniator_domain::PathStrokeStyle,
+    mirror_alternate_rows: bool,
+    alternate_row_phase: Option<f64>,
+    source: &SourceField,
+    canvas: &CanvasSpec,
+    mapping: SourceMapping,
+    response: StrokeResponse,
+    max_profile_samples: usize,
+    max_outline_segments: usize,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+    progress: &(dyn Fn(usize, usize) + Sync),
+) -> Result<CanonicalStrokeRealization, PatternPipelineError> {
+    let rows = chain_curve_motif_rows_with_progress_cancellable(
+        sites,
+        motif,
+        mirror_alternate_rows,
+        alternate_row_phase,
+        is_cancelled,
+        progress,
+    )?;
+    let mut strokes = Vec::new();
+    reserve_stage20m(
+        &mut strokes,
+        rows.len(),
+        "curve_motif.allocation",
+        "Curve Motif stroke allocation failed",
+    )?;
+    let mut profile_samples = 0_usize;
+    let mut outline_segments = 0_usize;
+    let mut identity = Fnv1a64State::new();
+    identity.write(family_fingerprint.bytes());
+    identity.write(CANONICAL_STROKE_OUTLINE_CONTRACT_ID.bytes());
+    identity.write(structure_id.0.to_le_bytes());
+    identity.write(u8::from(mirror_alternate_rows).to_le_bytes());
+    identity.write(alternate_row_phase.unwrap_or(-1.0).to_bits().to_le_bytes());
+    identity.write(response.minimum_thickness.to_bits().to_le_bytes());
+    identity.write(response.maximum_thickness.to_bits().to_le_bytes());
+    for (row_ordinal, path) in rows.into_iter().enumerate() {
+        if is_cancelled() {
+            return Err(PatternPipelineError::new(
+                "evaluation.cancelled",
+                "evaluation was cancelled",
+            ));
+        }
+        let first_copy_end = path
+            .segments()
+            .get(motif.segments().len().saturating_sub(1))
+            .ok_or(PatternPipelineError::new(
+                "curve_motif.cadence",
+                "Curve Motif row must retain one complete adjacent-site copy",
+            ))?
+            .end();
+        let start = path.start();
+        let nominal_basis = (first_copy_end.x - start.x).hypot(first_copy_end.y - start.y);
+        if !nominal_basis.is_finite() || nominal_basis <= 0.0 {
+            return Err(PatternPipelineError::new(
+                "curve_motif.cadence",
+                "Curve Motif row interval must be finite and positive",
+            ));
+        }
+        let path_id = StructuralPathInstanceId::guide_dimension(
+            GuideDimensionId(structure_id.0),
+            i64::try_from(row_ordinal).map_err(|_| {
+                PatternPipelineError::new(
+                    "curve_motif.identity",
+                    "Curve Motif row index exceeds structural identity bounds",
+                )
+            })?,
+            0,
+        );
+        let pixel_footprint = (canvas.width / f64::from(source.identity().width))
+            .min(canvas.height / f64::from(source.identity().height));
+        let profile_sample_interval = nominal_basis.max(pixel_footprint);
+        let mut profile = Vec::new();
+        for (segment_index, segment) in path.segments().iter().enumerate() {
+            let start_sample = stroke_sample(
+                segment,
+                segment_index,
+                0.0,
+                source,
+                canvas,
+                mapping,
+                response,
+                nominal_basis,
+            )?;
+            let end_sample = stroke_sample(
+                segment,
+                segment_index,
+                1.0,
+                source,
+                canvas,
+                mapping,
+                response,
+                nominal_basis,
+            )?;
+            if profile.last().is_none_or(|previous: &StrokeProfileSample| {
+                previous.location != start_sample.location
+            }) {
+                if profile_samples >= max_profile_samples {
+                    return Err(PatternPipelineError::new(
+                        "curve_motif.profile_limit",
+                        "Curve Motif profile exceeds the sample limit",
+                    ));
+                }
+                profile.push(start_sample);
+                profile_samples += 1;
+            }
+            append_adaptive_stroke_interval(
+                segment,
+                segment_index,
+                0.0,
+                start_sample,
+                1.0,
+                end_sample,
+                0,
+                profile_sample_interval,
+                source,
+                canvas,
+                mapping,
+                response,
+                nominal_basis,
+                &mut profile,
+                &mut profile_samples,
+                max_profile_samples,
+                is_cancelled,
+            )?;
+        }
+        let outline = build_variable_width_outline_cancellable(
+            &path,
+            &profile
+                .iter()
+                .map(|sample| VariableWidthPathSample {
+                    location: sample.location,
+                    width: sample.width,
+                })
+                .collect::<Vec<_>>(),
+            style,
+            1.0 / 8.0,
+            VariableWidthOutlineLimits::new(
+                max_outline_segments.saturating_sub(outline_segments).max(1),
+            )
+            .map_err(|_| {
+                PatternPipelineError::new(
+                    "curve_motif.outline_limit",
+                    "Curve Motif outline limit must be nonzero",
+                )
+            })?,
+            is_cancelled,
+        )
+        .map_err(|error| PatternPipelineError::new(error.path(), error.message()))?;
+        outline_segments = outline_segments
+            .checked_add(
+                outline
+                    .contours
+                    .iter()
+                    .map(|contour| contour.segments.len())
+                    .sum::<usize>(),
+            )
+            .ok_or(PatternPipelineError::new(
+                "curve_motif.outline_limit",
+                "Curve Motif outline exceeds the segment limit",
+            ))?;
+        if outline_segments > max_outline_segments {
+            return Err(PatternPipelineError::new(
+                "curve_motif.outline_limit",
+                "Curve Motif outline exceeds the segment limit",
+            ));
+        }
+        for sample in &profile {
+            identity.write(sample.center.x.to_bits().to_le_bytes());
+            identity.write(sample.center.y.to_bits().to_le_bytes());
+            identity.write(sample.normalized_thickness.to_bits().to_le_bytes());
+        }
+        strokes.push(
+            CanonicalStroke::new(
+                path_id,
+                Some(structure_id),
+                path,
+                nominal_basis,
+                style,
+                profile,
+                outline,
+            )
+            .map_err(|_| {
+                PatternPipelineError::new(
+                    "curve_motif.stroke",
+                    "Curve Motif canonical stroke geometry must remain finite",
+                )
+            })?,
+        );
+    }
+    Ok(CanonicalStrokeRealization {
+        family_fingerprint: family_fingerprint.to_owned(),
+        realization_fingerprint: identity.finish(),
+        source_identity: source.identity().clone(),
+        response,
+        strokes,
+    })
 }
 
 /// Typed family/modulation/output plan. Modulation has no variants in the
@@ -1528,6 +2051,10 @@ pub fn validate_output_realization_binding(
     match (&capability.payload, &setting.response) {
         (OutputCapabilityPayload::Marks { .. }, PatternGeometryResponse::Marks(_))
         | (OutputCapabilityPayload::GuidePaths { .. }, PatternGeometryResponse::Connected(_))
+        | (
+            OutputCapabilityPayload::CurveMotifPaths { .. },
+            PatternGeometryResponse::Connected(_),
+        )
         | (
             OutputCapabilityPayload::ConnectionPaths { .. },
             PatternGeometryResponse::Connected(_),
@@ -2913,6 +3440,28 @@ pub fn resolve_pattern_pipeline(
                     style: *style,
                 },
             }),
+            PatternOutputRealization::CurveMotifPaths {
+                site_mechanism_id: source_id,
+                structure_id,
+                style,
+                mirror_alternate_rows,
+                alternate_row_phase,
+            } if *source_id == site_mechanism_id
+                && product == StructuralProductCapability::AlongGuideSites =>
+            {
+                ordered_outputs.push(OutputCapability {
+                    layer_id: output.id,
+                    source_filter: output.source_filter,
+                    consumes: product,
+                    payload: OutputCapabilityPayload::CurveMotifPaths {
+                        site_mechanism_id: *source_id,
+                        structure_id: *structure_id,
+                        style: *style,
+                        mirror_alternate_rows: *mirror_alternate_rows,
+                        alternate_row_phase: *alternate_row_phase,
+                    },
+                })
+            }
             PatternOutputRealization::ConnectionPaths {
                 site_mechanism_id: source_id,
                 program,
@@ -8920,6 +9469,12 @@ pub const MAX_STROKE_OUTLINE_SEGMENTS: usize = 524_288;
 /// Caps adaptive centerline/width subdivision deterministically.
 pub const MAX_STROKE_SUBDIVISION_DEPTH: u8 = 48;
 const STROKE_CENTERLINE_TOLERANCE: f64 = 1.0 / 64.0;
+/// Bounds the permitted normalized source-response interpolation error for one profile interval.
+///
+/// This is an internal canonical-outline sampling tolerance, not artist-facing motif sizing or
+/// a renderer setting. It prevents a sharp source transition from becoming a long, thin tapered
+/// outline wedge between two otherwise widely spaced cadence samples.
+const STROKE_RESPONSE_TOLERANCE: f64 = 1.0 / 64.0;
 
 /// Realizes ordered guide paths into reusable finite filled outlines.
 ///
@@ -9976,10 +10531,10 @@ fn stroke_sample(
 
 /// Appends the right endpoint once centerline shape and pattern-scale response spacing are resolved.
 ///
-/// Source response is sampled no more densely than once per nominal pattern-spacing basis (or
-/// once per source-pixel footprint for denser patterns). This retains thickness variation at the
-/// pattern's own useful resolution without turning each long guide into a source-pixel supersample.
-/// Curved centerlines retain their independent geometric flatness refinement.
+/// Source response is sampled at nominal pattern-spacing or source-pixel-footprint resolution
+/// unless its midpoint departs materially from linear interpolation. That bounded extra
+/// refinement preserves an abrupt source-driven zero-width break instead of manufacturing a
+/// long thin taper; curved centerlines retain their independent geometric flatness refinement.
 ///
 /// # Errors
 ///
@@ -10029,11 +10584,15 @@ fn append_adaptive_stroke_interval(
         + (middle.center.y - chord_middle.y).powi(2))
     .sqrt();
     let centerline_error = midpoint_error.max(cubic_subcurve_flatness(segment, left_t, right_t));
+    let response_error = (middle.normalized_thickness
+        - (left.normalized_thickness + right.normalized_thickness) * 0.5)
+        .abs();
     let interval = ((right.center.x - left.center.x).powi(2)
         + (right.center.y - left.center.y).powi(2))
     .sqrt();
-    let refine =
-        centerline_error > STROKE_CENTERLINE_TOLERANCE || interval > profile_sample_interval;
+    let refine = centerline_error > STROKE_CENTERLINE_TOLERANCE
+        || response_error > STROKE_RESPONSE_TOLERANCE
+        || interval > profile_sample_interval;
     if refine {
         if depth >= MAX_STROKE_SUBDIVISION_DEPTH {
             return Err(PatternPipelineError::new(
@@ -10830,6 +11389,25 @@ fn append_output_capability_identity(bytes: &mut Vec<u8>, output: &OutputCapabil
         } => {
             bytes.push(2);
             bytes.extend(guide_mechanism_id.0.to_le_bytes());
+            bytes.push(match style.join {
+                toniator_domain::StrokeJoin::Round => 1,
+            });
+            bytes.push(match style.cap {
+                toniator_domain::StrokeCap::Round => 1,
+            });
+        }
+        OutputCapabilityPayload::CurveMotifPaths {
+            site_mechanism_id,
+            structure_id,
+            style,
+            mirror_alternate_rows,
+            alternate_row_phase,
+        } => {
+            bytes.push(7);
+            bytes.extend(site_mechanism_id.0.to_le_bytes());
+            bytes.extend(structure_id.0.to_le_bytes());
+            bytes.push(u8::from(*mirror_alternate_rows));
+            bytes.extend(alternate_row_phase.unwrap_or(-1.0).to_bits().to_le_bytes());
             bytes.push(match style.join {
                 toniator_domain::StrokeJoin::Round => 1,
             });

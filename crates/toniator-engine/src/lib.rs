@@ -2052,7 +2052,7 @@ fn realization_contract_key_for_output(
     })
 }
 
-/// Hashes resolved authored closed-shape content so a resource replacement cannot reuse stale marks.
+/// Hashes resolved authored mark or Curve Motif content so a resource replacement cannot reuse stale output.
 ///
 /// The typed definition retains a stable resource ID, but cache reuse additionally depends on the
 /// resource's exact closure, segment kinds, and construction-point bits. Missing or malformed
@@ -2066,27 +2066,29 @@ fn resolved_shape_content_identity(
     definition: &PatternDefinition,
     output_layer_id: toniator_domain::PatternOutputLayerId,
 ) -> Result<String, EvaluationError> {
-    let mut bytes = b"toniator-stage-20e2-resolved-shape-content-v1".to_vec();
+    let mut bytes = b"toniator-stage-21b-resolved-authored-content-v1".to_vec();
     for output in &definition.output_layers {
         if output.id != output_layer_id {
             continue;
         }
-        let PatternOutputRealization::MarkPrototype { prototype, .. } = &output.realization else {
-            continue;
-        };
-        let toniator_domain::MarkPrototype::AuthoredClosedShape { structure_id } = prototype else {
-            continue;
+        let structure_id = match &output.realization {
+            PatternOutputRealization::MarkPrototype {
+                prototype: toniator_domain::MarkPrototype::AuthoredClosedShape { structure_id },
+                ..
+            }
+            | PatternOutputRealization::CurveMotifPaths { structure_id, .. } => *structure_id,
+            _ => continue,
         };
         let structure = document
-            .authored_structure(*structure_id)
+            .authored_structure(structure_id)
             .ok_or(EvaluationError::new(
-                "evaluation.mark_shape.reference",
-                "authored closed-shape mark resource is missing",
+                "evaluation.authored_output.reference",
+                "authored output resource is missing",
             ))?;
         let path = CurvePath::from_authored_structure(structure).map_err(|_| {
             EvaluationError::new(
-                "evaluation.mark_shape.geometry",
-                "authored closed-shape mark resource is not valid curve geometry",
+                "evaluation.authored_output.geometry",
+                "authored output resource is not valid curve geometry",
             )
         })?;
         bytes.extend(structure_id.0.to_le_bytes());
@@ -2129,7 +2131,7 @@ fn resolved_shape_content_identity(
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     Ok(format!(
-        "toniator-stage-20e2-shape-content-v1:fnv1a64:{hash:016x}"
+        "toniator-stage-21b-authored-content-v1:fnv1a64:{hash:016x}"
     ))
 }
 
@@ -3657,7 +3659,10 @@ fn evaluate_cached_document_impl(
                             rotation_degrees: effective.pattern_rotation_degrees,
                             translation_x: effective.translation_x,
                             translation_y: effective.translation_y,
-                            guard_steps: definition.coverage.guard_steps,
+                            guard_steps: curve_motif_phase_guard_steps(
+                                definition.coverage.guard_steps,
+                                &plan.ordered_outputs,
+                            )?,
                             support_radius: required_support_radius_for_outputs(
                                 document.canvas(),
                                 effective,
@@ -3838,8 +3843,10 @@ fn evaluate_cached_document_impl(
             {
                 Some((_, realization)) => (Arc::clone(realization), CacheDisposition::Hit, None),
                 None => {
-                    let (realization, region_performance) =
-                        match evaluate_stage(EvaluationStage::Realization, cancellation, || {
+                    let (realization, region_performance) = match evaluate_stage(
+                        EvaluationStage::Realization,
+                        cancellation,
+                        || {
                             evaluate_document_output(
                                 document,
                                 definition,
@@ -3867,6 +3874,10 @@ fn evaluate_cached_document_impl(
                                         return true;
                                     }
                                     if output_capability.regions().is_none()
+                                        && !matches!(
+                                            &output_capability.payload,
+                                            toniator_patterns::OutputCapabilityPayload::CurveMotifPaths { .. }
+                                        )
                                         && let Ok(previous) = output_progress_units.fetch_update(
                                             Ordering::Relaxed,
                                             Ordering::Relaxed,
@@ -3881,14 +3892,15 @@ fn evaluate_cached_document_impl(
                                 },
                                 &report_output_progress,
                             )
-                        }) {
-                            Err(EvaluationRunError::Evaluation(error))
-                                if error.path() == "evaluation.cancelled" =>
-                            {
-                                return Err(EvaluationRunError::Cancelled);
-                            }
-                            result => result?,
-                        };
+                        },
+                    ) {
+                        Err(EvaluationRunError::Evaluation(error))
+                            if error.path() == "evaluation.cancelled" =>
+                        {
+                            return Err(EvaluationRunError::Cancelled);
+                        }
+                        result => result?,
+                    };
                     (
                         Arc::new(realization),
                         CacheDisposition::Miss,
@@ -5217,7 +5229,10 @@ fn evaluate_document_channel(
             rotation_degrees: effective.pattern_rotation_degrees,
             translation_x: effective.translation_x,
             translation_y: effective.translation_y,
-            guard_steps: definition.coverage.guard_steps,
+            guard_steps: curve_motif_phase_guard_steps(
+                definition.coverage.guard_steps,
+                &plan.ordered_outputs,
+            )?,
             support_radius: required_support_radius_for_outputs(
                 document.canvas(),
                 effective,
@@ -5360,6 +5375,67 @@ fn evaluate_document_channel(
             "evaluation.output_binding",
             "realization capability targets a missing authored output",
         ))?;
+    if let PatternOutputRealization::CurveMotifPaths {
+        structure_id,
+        style,
+        mirror_alternate_rows,
+        alternate_row_phase,
+        ..
+    } = authored_output.realization
+    {
+        let toniator_domain::PatternGeometryResponse::Connected(response) =
+            &output_setting.response
+        else {
+            return Err(EvaluationError::new(
+                "evaluation.stroke.response",
+                "Curve Motif output requires the connected response branch",
+            ));
+        };
+        let ChannelPaint::Solid(_) = channel.paint else {
+            return Err(EvaluationError::new(
+                "evaluation.stroke.paint",
+                "Curve Motif output requires solid channel paint",
+            ));
+        };
+        let structure = document
+            .authored_structure(structure_id)
+            .ok_or(EvaluationError::new(
+                "evaluation.curve_motif.resource",
+                "Curve Motif output references a missing document-owned open path",
+            ))?;
+        let motif = CurvePath::from_authored_structure(structure).map_err(|_| {
+            EvaluationError::new(
+                "evaluation.curve_motif.resource",
+                "Curve Motif output requires a valid document-owned open path",
+            )
+        })?;
+        let realization = toniator_patterns::realize_curve_motif_canonical_strokes_cancellable(
+            family.family_fingerprint(),
+            family.site_set(),
+            &motif,
+            structure_id,
+            style,
+            mirror_alternate_rows,
+            alternate_row_phase,
+            source,
+            document.canvas(),
+            channel.mapping,
+            toniator_patterns::StrokeResponse {
+                minimum_thickness: response.minimum_thickness,
+                maximum_thickness: response.maximum_thickness,
+            },
+            max_stroke_profile_samples,
+            max_stroke_outline_segments,
+            is_cancelled,
+            progress,
+        )
+        .map_err(EvaluationError::from_pipeline)?;
+        return Ok((
+            cache_stroke_realization(realization),
+            SiteUsageSet::empty_non_site(),
+            None,
+        ));
+    }
     if matches!(
         authored_output.realization,
         PatternOutputRealization::GuidePaths { .. }
@@ -5635,6 +5711,82 @@ fn document_family_key_supports(
     comparable == *requested && candidate_support >= requested_support
 }
 
+/// Adds one longitudinal guard interval when phase-shifted Curve Motif rows need padded coverage.
+///
+/// The authored coverage guard remains the row-layout authority. This derived
+/// interval exists only while producing the family envelope and is included in
+/// the family key, so phase-shifted output cannot reuse an under-covered cache.
+///
+/// # Errors
+///
+/// Returns a stable overflow diagnostic if a persisted guard count cannot
+/// accommodate the extra phase coverage interval.
+fn curve_motif_phase_guard_steps(
+    authored_guard_steps: u32,
+    outputs: &[toniator_patterns::OutputCapability],
+) -> Result<u32, EvaluationError> {
+    let needs_extra_interval = outputs.iter().any(|output| {
+        matches!(
+            &output.payload,
+            toniator_patterns::OutputCapabilityPayload::CurveMotifPaths {
+                alternate_row_phase: Some(_),
+                ..
+            }
+        )
+    });
+    if needs_extra_interval {
+        authored_guard_steps
+            .checked_add(1)
+            .ok_or(EvaluationError::new(
+                "curve_motif.coverage.guard_steps",
+                "Curve Motif phase coverage guard overflows the persisted guard count",
+            ))
+    } else {
+        Ok(authored_guard_steps)
+    }
+}
+
+/// Adds exactly one derived guard interval only for phase-shifted Curve Motif outputs.
+#[cfg(test)]
+#[test]
+fn curve_motif_phase_guard_steps_adds_one_interval_and_rejects_overflow() {
+    let phased = toniator_patterns::OutputCapability {
+        layer_id: toniator_domain::PatternOutputLayerId(1),
+        source_filter: toniator_domain::SiteUseFilter::All,
+        consumes: toniator_patterns::StructuralProductCapability::AlongGuideSites,
+        payload: toniator_patterns::OutputCapabilityPayload::CurveMotifPaths {
+            site_mechanism_id: toniator_domain::PatternMechanismId(2),
+            structure_id: toniator_domain::AuthoredStructureId(3),
+            style: toniator_domain::PathStrokeStyle::default(),
+            mirror_alternate_rows: true,
+            alternate_row_phase: Some(0.25),
+        },
+    };
+    let mut unphased = phased.clone();
+    let toniator_patterns::OutputCapabilityPayload::CurveMotifPaths {
+        alternate_row_phase,
+        ..
+    } = &mut unphased.payload
+    else {
+        unreachable!("fixture remains Curve Motif")
+    };
+    *alternate_row_phase = None;
+    assert_eq!(
+        curve_motif_phase_guard_steps(2, &[unphased]).expect("base guard"),
+        2
+    );
+    assert_eq!(
+        curve_motif_phase_guard_steps(2, std::slice::from_ref(&phased)).expect("phase guard"),
+        3
+    );
+    assert_eq!(
+        curve_motif_phase_guard_steps(u32::MAX, &[phased])
+            .expect_err("phase guard overflow rejects")
+            .path(),
+        "curve_motif.coverage.guard_steps"
+    );
+}
+
 /// Builds one modeled-channel family cache key including resolved authored guide content.
 ///
 /// This remains a cache identity only: document capability resolution supplies `family`,
@@ -5664,7 +5816,7 @@ fn document_family_cache_key(
                 effective.translation_x.to_bits(),
                 effective.translation_y.to_bits(),
             ),
-            guard_steps: definition.coverage.guard_steps,
+            guard_steps: curve_motif_phase_guard_steps(definition.coverage.guard_steps, outputs)?,
             required_support_radius: required_support_radius_for_outputs(
                 canvas, effective, definition, family, outputs,
             )?
@@ -6350,6 +6502,7 @@ pub(crate) mod test_support {
                     }
                     PatternOutputRealization::GuidePaths { .. }
                     | PatternOutputRealization::ParametricPaths { .. }
+                    | PatternOutputRealization::CurveMotifPaths { .. }
                     | PatternOutputRealization::ConnectionPaths { .. }
                     | PatternOutputRealization::MazeWalls { .. } => {
                         PatternGeometryResponse::Connected(ConnectedGeometryResponse {

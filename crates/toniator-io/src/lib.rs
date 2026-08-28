@@ -41,10 +41,10 @@ use toniator_domain::{
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 pub const CONTAINER_VERSION: u32 = 1;
-pub const DOCUMENT_SCHEMA_VERSION: u32 = 6;
+pub const DOCUMENT_SCHEMA_VERSION: u32 = 7;
 /// Standalone pure-schema preset JSON format version. It is deliberately
 /// independent from the `.toniator` container and document schema versions.
-pub const PRESET_FORMAT_VERSION: u32 = 3;
+pub const PRESET_FORMAT_VERSION: u32 = 4;
 pub const MAX_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_DOCUMENT_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_SOURCE_BYTES: u64 = 128 * 1024 * 1024;
@@ -525,7 +525,7 @@ fn declared_zip_entry_count(file: &mut File, length: u64) -> Result<usize, LoadE
     Ok(scanned_entries)
 }
 
-/// Loads one current-v6 document through the immutable container-v1 dispatch pipeline.
+/// Loads one current-v7 document through the immutable container-v1 dispatch pipeline.
 ///
 /// Raw central-directory cardinality is retained before `zip` can collapse duplicate names;
 /// topology, limits, integrity, and current-domain validation then complete transactionally.
@@ -663,7 +663,7 @@ pub fn load(path: &Path) -> Result<LoadedDocument, LoadError> {
     }
     let (current, manifest) = match envelope.document_schema_version {
         DOCUMENT_SCHEMA_VERSION => {
-            let stored: StoredDocumentDtoV6 =
+            let stored: StoredDocumentDtoV7 =
                 serde_json::from_slice(&document_bytes).map_err(|error| LoadError::Json {
                     context: error.to_string(),
                 })?;
@@ -763,7 +763,7 @@ fn ensure_supported_file_compression(
     })
 }
 
-/// Saves one fully source-backed current document using deterministic v6 JSON
+/// Saves one fully source-backed current document using deterministic v7 JSON
 /// inside the immutable v1 ZIP container layout.
 pub fn save(path: &Path, document: &Document, sources: &SourceBundle) -> Result<(), SaveError> {
     document.validate().map_err(save_domain_error)?;
@@ -771,13 +771,13 @@ pub fn save(path: &Path, document: &Document, sources: &SourceBundle) -> Result<
         SourceReference::Assigned(id) => id,
         SourceReference::Unassigned => {
             return Err(SaveError::SourceDocumentMismatch {
-                context: "v6 saving requires an assigned document source".into(),
+                context: "v7 saving requires an assigned document source".into(),
             });
         }
     };
     if sources.len() != 1 {
         return Err(SaveError::SourceDocumentMismatch {
-            context: "v6 saving requires exactly one embedded source".into(),
+            context: "v7 saving requires exactly one embedded source".into(),
         });
     }
     let source = sources
@@ -790,7 +790,7 @@ pub fn save(path: &Path, document: &Document, sources: &SourceBundle) -> Result<
             context: error.context().into(),
         }
     })?;
-    let dto = StoredDocumentDtoV6::from_domain(document, source, entry_name.clone())?;
+    let dto = StoredDocumentDtoV7::from_domain(document, source, entry_name.clone())?;
     let mut document_json = serde_json::to_vec(&dto).map_err(|error| SaveError::Archive {
         context: error.to_string(),
     })?;
@@ -1057,6 +1057,13 @@ enum PresetStructureRecipeDto {
         definition: Box<PresetStructureRecipeDto>,
         segments: Vec<AuthoredCurveSegmentDtoV6>,
     },
+    CurveMotifPaths {
+        definition: Box<PresetStructureRecipeDto>,
+        segments: Vec<AuthoredCurveSegmentDtoV6>,
+        style: PathStrokeStyle,
+        mirror_alternate_rows: bool,
+        alternate_row_phase: Option<f64>,
+    },
     VoronoiRegions {
         definition: Box<PresetStructureRecipeDto>,
     },
@@ -1070,7 +1077,7 @@ enum PresetStructureRecipeDto {
     },
 }
 
-/// Current preset-v3 tagged recipe-only spiral materialization intent.
+/// Current preset-v4 tagged recipe-only spiral materialization intent.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum SpiralCoveragePolicyDtoV3 {
@@ -1145,7 +1152,7 @@ struct SourceManifestDto {
     display_name: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
-struct StoredDocumentDtoV6 {
+struct StoredDocumentDtoV7 {
     container_version: u32,
     document_schema_version: u32,
     document: DocumentDtoV6,
@@ -1156,12 +1163,12 @@ struct CurrentDocumentDto {
     document: DocumentDtoV6,
 }
 
-impl StoredDocumentDtoV6 {
-    /// Projects a validated document and its matching source into the exact v6 archive envelope.
+impl StoredDocumentDtoV7 {
+    /// Projects a validated document and its matching source into the exact v7 archive envelope.
     ///
     /// # Errors
     ///
-    /// Returns a save error when the document cannot be represented by current-v6 persistence.
+    /// Returns a save error when the document cannot be represented by current-v7 persistence.
     fn from_domain(
         document: &Document,
         source: &EmbeddedSource,
@@ -1195,7 +1202,7 @@ struct DocumentDtoV6 {
     authored_structures: Vec<AuthoredStructureDtoV6>,
 }
 
-/// Current-v6 persistence representation of one document-owned authored structure.
+/// Current-v7 persistence representation of one document-owned authored structure.
 #[derive(Serialize, Deserialize)]
 struct AuthoredStructureDtoV6 {
     id: u64,
@@ -1203,7 +1210,7 @@ struct AuthoredStructureDtoV6 {
     segments: Vec<AuthoredCurveSegmentDtoV6>,
 }
 
-/// Current-v6 persistence representation of declared authored-structure topology.
+/// Current-v7 persistence representation of declared authored-structure topology.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum AuthoredStructureKindDtoV6 {
@@ -1211,7 +1218,7 @@ enum AuthoredStructureKindDtoV6 {
     ClosedShape,
 }
 
-/// Current-v6 persistence representation of one explicit authored construction segment.
+/// Current-v7 persistence representation of one explicit authored construction segment.
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum AuthoredCurveSegmentDtoV6 {
@@ -1227,7 +1234,7 @@ enum AuthoredCurveSegmentDtoV6 {
     },
 }
 
-/// Current-v6 persistence representation of one authored finite coordinate pair.
+/// Current-v7 persistence representation of one authored finite coordinate pair.
 #[derive(Serialize, Deserialize)]
 struct AuthoredPointDtoV6 {
     x: f64,
@@ -1249,14 +1256,14 @@ struct PatternDefinitionDtoV6 {
     coverage: CoverageDtoV6,
 }
 
-/// Current-v6 atomic structural definition and ordered response authority.
+/// Current-v7 atomic structural definition and ordered response authority.
 #[derive(Serialize, Deserialize)]
 struct PatternDefinitionBundleDtoV6 {
     definition: PatternDefinitionDtoV6,
     output_settings: Vec<PatternOutputSettingsDtoV6>,
 }
 
-/// Current-v6 persisted base response keyed to one structural output layer.
+/// Current-v7 persisted base response keyed to one structural output layer.
 #[derive(Serialize, Deserialize)]
 struct PatternOutputSettingsDtoV6 {
     output_layer_id: u64,
@@ -1429,7 +1436,7 @@ enum GuideRepetitionDtoV6 {
     },
 }
 
-/// Current-v6 analytic intent for the bounded parametric source vocabulary.
+/// Current-v7 analytic intent for the bounded parametric source vocabulary.
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ParametricCurveDtoV6 {
@@ -1442,7 +1449,7 @@ enum ParametricCurveDtoV6 {
     },
 }
 
-/// Current-v6 round/square discriminant for one spiral source.
+/// Current-v7 round/square discriminant for one spiral source.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum SpiralShapeDtoV6 {
@@ -1450,7 +1457,7 @@ enum SpiralShapeDtoV6 {
     Square,
 }
 
-/// Current-v6 winding discriminant for one spiral source.
+/// Current-v7 winding discriminant for one spiral source.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum CurveWindingDtoV6 {
@@ -1458,7 +1465,7 @@ enum CurveWindingDtoV6 {
     CounterClockwise,
 }
 
-/// Persisted current-v6 signed-side intent for normal-offset guide repetition.
+/// Persisted current-v7 signed-side intent for normal-offset guide repetition.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum OffsetSidesDtoV6 {
@@ -1467,7 +1474,7 @@ enum OffsetSidesDtoV6 {
     Both,
 }
 
-/// Persisted current-v6 cleanup discriminant for normal-offset guide repetition.
+/// Persisted current-v7 cleanup discriminant for normal-offset guide repetition.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum OffsetCleanupDtoV6 {
@@ -1499,7 +1506,7 @@ impl GuideDimensionDtoV6 {
 }
 
 impl GuidePrototypeDtoV6 {
-    /// Projects a persisted generic-guide prototype into deterministic current-v6 fields.
+    /// Projects a persisted generic-guide prototype into deterministic current-v7 fields.
     fn from_domain(value: &GuidePrototype) -> Self {
         match value {
             GuidePrototype::AuthoredOpenPath { structure_id } => Self::AuthoredOpenPath {
@@ -1541,7 +1548,7 @@ impl GuidePrototypeDtoV6 {
 }
 
 impl GuideRepetitionDtoV6 {
-    /// Projects a bounded generic-guide repetition variant into current-v6 intent fields.
+    /// Projects a bounded generic-guide repetition variant into current-v7 intent fields.
     fn from_domain(value: &GuideRepetition) -> Self {
         match value {
             GuideRepetition::Single => Self::Single,
@@ -1636,6 +1643,13 @@ enum PatternOutputRealizationDtoV6 {
     ParametricPaths {
         curve_mechanism_id: u64,
         style: PathStrokeStyle,
+    },
+    CurveMotifPaths {
+        site_mechanism_id: u64,
+        structure_id: u64,
+        style: PathStrokeStyle,
+        mirror_alternate_rows: bool,
+        alternate_row_phase: Option<f64>,
     },
     ConnectionPaths {
         site_mechanism_id: u64,
@@ -1932,6 +1946,23 @@ impl PresetStructureRecipeDto {
                         .collect(),
                 }
             }
+            PatternStructureRecipe::CurveMotifPaths {
+                definition,
+                motif,
+                style,
+                mirror_alternate_rows,
+                alternate_row_phase,
+            } => Self::CurveMotifPaths {
+                definition: Box::new(Self::from_domain(definition)),
+                segments: motif
+                    .segments()
+                    .iter()
+                    .map(AuthoredCurveSegmentDtoV6::from_domain)
+                    .collect(),
+                style: *style,
+                mirror_alternate_rows: *mirror_alternate_rows,
+                alternate_row_phase: *alternate_row_phase,
+            },
             PatternStructureRecipe::VoronoiRegions { definition } => Self::VoronoiRegions {
                 definition: Box::new(Self::from_domain(definition)),
             },
@@ -2067,6 +2098,31 @@ impl PresetStructureRecipeDto {
                 Ok(PatternStructureRecipe::AuthoredClosedShapeMarks {
                     definition: Box::new(definition.into_domain()?),
                     shape,
+                })
+            }
+            Self::CurveMotifPaths {
+                definition,
+                segments,
+                style,
+                mirror_alternate_rows,
+                alternate_row_phase,
+            } => {
+                let motif = AuthoredStructureDraft::new(
+                    AuthoredStructureKind::OpenPath,
+                    segments
+                        .into_iter()
+                        .map(AuthoredCurveSegmentDtoV6::into_domain)
+                        .collect(),
+                )
+                .map_err(|error| PresetIoError {
+                    context: error.to_string(),
+                })?;
+                Ok(PatternStructureRecipe::CurveMotifPaths {
+                    definition: Box::new(definition.into_domain()?),
+                    motif,
+                    style,
+                    mirror_alternate_rows,
+                    alternate_row_phase,
                 })
             }
             Self::VoronoiRegions { definition } => Ok(PatternStructureRecipe::VoronoiRegions {
@@ -2264,7 +2320,7 @@ struct ChannelPatternInstanceDto {
     output_response_deltas: Vec<PatternOutputResponseDeltaDtoV6>,
 }
 
-/// Current-v6 optional channel response intent keyed to a structural output.
+/// Current-v7 optional channel response intent keyed to a structural output.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PatternOutputResponseDeltaDtoV6 {
@@ -2279,7 +2335,7 @@ enum PatternGeometryResponseDto {
     Regions { response: RegionResponseDtoV6 },
 }
 
-/// Current-v6 region response with one positive-geometry resize algorithm and shared fills.
+/// Current-v7 region response with one positive-geometry resize algorithm and shared fills.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RegionResponseDtoV6 {
@@ -2289,7 +2345,7 @@ struct RegionResponseDtoV6 {
     maximum_fill: f64,
 }
 
-/// Current-v6 positive-geometry region resize selector.
+/// Current-v7 positive-geometry region resize selector.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum RegionResizeAlgorithmDtoV6 {
@@ -2297,7 +2353,7 @@ enum RegionResizeAlgorithmDtoV6 {
     UniformOffset,
 }
 
-/// Current v6 sampling selector; absence is intentionally rejected by serde.
+/// Current v7 sampling selector; absence is intentionally rejected by serde.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum RegionSamplingStrategyDtoV6 {
@@ -2312,7 +2368,7 @@ enum ChannelGeometryResponseDeltaDto {
     Regions { delta: RegionResponseDeltaDtoV6 },
 }
 
-/// Current-v6 additive fill-endpoint delta record shared by both algorithms.
+/// Current-v7 additive fill-endpoint delta record shared by both algorithms.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RegionResponseDeltaDtoV6 {
@@ -2609,18 +2665,18 @@ dto_enum!(
 );
 
 impl DocumentDtoV6 {
-    /// Projects an authoritative document into deterministic current-v6 persistence without runtime state.
+    /// Projects an authoritative document into deterministic current-v7 persistence without runtime state.
     ///
     /// # Errors
     ///
     /// Returns a save error for an unassigned source or incoherent channel configuration before an
-    /// archive is written; an empty authored store is omitted to preserve current-v6 bytes.
+    /// archive is written; an empty authored store is omitted to preserve current-v7 bytes.
     fn from_domain(document: &Document) -> Result<Self, SaveError> {
         let source_reference_id = match document.source() {
             SourceReference::Assigned(id) => id.as_str().to_owned(),
             SourceReference::Unassigned => {
                 return Err(SaveError::SourceDocumentMismatch {
-                    context: "v6 saving requires an assigned document source".into(),
+                    context: "v7 saving requires an assigned document source".into(),
                 });
             }
         };
@@ -2728,7 +2784,7 @@ impl DocumentDtoV6 {
 }
 
 impl AuthoredStructureDtoV6 {
-    /// Projects one validated domain-owned structure into deterministic current-v6 persistence fields.
+    /// Projects one validated domain-owned structure into deterministic current-v7 persistence fields.
     fn from_domain(value: &AuthoredStructure) -> Self {
         Self {
             id: value.id().0,
@@ -2759,7 +2815,7 @@ impl AuthoredStructureDtoV6 {
 }
 
 impl AuthoredStructureKindDtoV6 {
-    /// Converts declared domain topology into its stable current-v6 string representation.
+    /// Converts declared domain topology into its stable current-v7 string representation.
     fn from_domain(value: AuthoredStructureKind) -> Self {
         match value {
             AuthoredStructureKind::OpenPath => Self::OpenPath,
@@ -2767,7 +2823,7 @@ impl AuthoredStructureKindDtoV6 {
         }
     }
 
-    /// Converts stable current-v6 topology into its domain-owned enum.
+    /// Converts stable current-v7 topology into its domain-owned enum.
     fn into_domain(self) -> AuthoredStructureKind {
         match self {
             Self::OpenPath => AuthoredStructureKind::OpenPath,
@@ -2777,7 +2833,7 @@ impl AuthoredStructureKindDtoV6 {
 }
 
 impl AuthoredCurveSegmentDtoV6 {
-    /// Projects one explicit domain segment into the matching tagged current-v6 representation.
+    /// Projects one explicit domain segment into the matching tagged current-v7 representation.
     fn from_domain(value: &AuthoredCurveSegment) -> Self {
         match value {
             AuthoredCurveSegment::Line { start, end } => Self::Line {
@@ -2798,7 +2854,7 @@ impl AuthoredCurveSegmentDtoV6 {
         }
     }
 
-    /// Converts one tagged current-v6 segment without inferring closure, winding, or render semantics.
+    /// Converts one tagged current-v7 segment without inferring closure, winding, or render semantics.
     fn into_domain(self) -> AuthoredCurveSegment {
         match self {
             Self::Line { start, end } => AuthoredCurveSegment::Line {
@@ -2821,7 +2877,7 @@ impl AuthoredCurveSegmentDtoV6 {
 }
 
 impl AuthoredPointDtoV6 {
-    /// Projects one authored coordinate pair into deterministic current-v6 numeric fields.
+    /// Projects one authored coordinate pair into deterministic current-v7 numeric fields.
     fn from_domain(value: AuthoredPoint2) -> Self {
         Self {
             x: value.x,
@@ -2886,7 +2942,7 @@ impl PatternDefinitionDtoV6 {
 }
 
 impl PatternDefinitionBundleDtoV6 {
-    /// Projects one complete v6 structural-and-response bundle without derived state.
+    /// Projects one complete v7 structural-and-response bundle without derived state.
     fn from_domain(value: &PatternDefinitionBundle) -> Self {
         Self {
             definition: PatternDefinitionDtoV6::from_domain(&value.definition),
@@ -2901,7 +2957,7 @@ impl PatternDefinitionBundleDtoV6 {
         }
     }
 
-    /// Rebuilds one complete v6 bundle for domain-owned alignment validation.
+    /// Rebuilds one complete v7 bundle for domain-owned alignment validation.
     fn into_domain(self) -> Result<PatternDefinitionBundle, ValidationError> {
         Ok(PatternDefinitionBundle {
             definition: self.definition.into_domain(),
@@ -3363,6 +3419,19 @@ impl PatternOutputLayerDtoV6 {
                 curve_mechanism_id: curve_mechanism_id.0,
                 style: *style,
             },
+            toniator_domain::PatternOutputRealization::CurveMotifPaths {
+                site_mechanism_id,
+                structure_id,
+                style,
+                mirror_alternate_rows,
+                alternate_row_phase,
+            } => PatternOutputRealizationDtoV6::CurveMotifPaths {
+                site_mechanism_id: site_mechanism_id.0,
+                structure_id: structure_id.0,
+                style: *style,
+                mirror_alternate_rows: *mirror_alternate_rows,
+                alternate_row_phase: *alternate_row_phase,
+            },
             toniator_domain::PatternOutputRealization::ConnectionPaths {
                 site_mechanism_id,
                 program,
@@ -3437,6 +3506,19 @@ impl PatternOutputLayerDtoV6 {
             } => toniator_domain::PatternOutputRealization::ParametricPaths {
                 curve_mechanism_id: PatternMechanismId(curve_mechanism_id),
                 style,
+            },
+            PatternOutputRealizationDtoV6::CurveMotifPaths {
+                site_mechanism_id,
+                structure_id,
+                style,
+                mirror_alternate_rows,
+                alternate_row_phase,
+            } => toniator_domain::PatternOutputRealization::CurveMotifPaths {
+                site_mechanism_id: PatternMechanismId(site_mechanism_id),
+                structure_id: toniator_domain::AuthoredStructureId(structure_id),
+                style,
+                mirror_alternate_rows,
+                alternate_row_phase,
             },
             PatternOutputRealizationDtoV6::ConnectionPaths {
                 site_mechanism_id,
@@ -4044,7 +4126,7 @@ impl PaintDto {
 mod stage20p_tests {
     use super::*;
 
-    /// Proves v6 persists only keyed guide-face authoring intent and no derived arrangement state.
+    /// Proves v7 persists only keyed guide-face authoring intent and no derived arrangement state.
     #[test]
     fn guide_face_source_round_trips_without_derived_regions() {
         let source = RegionSourceIntent::GuideFaces {
@@ -4062,7 +4144,7 @@ mod stage20r_tests {
     use super::*;
     use toniator_domain::{ConnectionAdjacencyIntent, ConnectionProgram};
 
-    /// Proves schema-v6 output records persist both reference-filter variants and stable IDs.
+    /// Proves schema-v7 output records persist both reference-filter variants and stable IDs.
     #[test]
     fn output_filters_round_trip_as_authored_state() {
         for source_filter in [
@@ -4099,7 +4181,7 @@ mod stage20r_tests {
         assert!(serde_json::from_str::<PatternOutputLayerDtoV6>(malformed).is_err());
     }
 
-    /// Proves preset-v3 filter references remain ID-free recipe-local indices.
+    /// Proves preset-v4 filter references remain ID-free recipe-local indices.
     #[test]
     fn preset_filter_reference_round_trips_without_document_ids() {
         let setting = PatternOutputSettingsRecipe {
@@ -4118,7 +4200,7 @@ mod stage20r_tests {
         assert!(!json.contains("output_layer_id"));
     }
 
-    /// Proves preset-v3 persists one family plus ordered heterogeneous realizations and local filters.
+    /// Proves preset-v4 persists one family plus ordered heterogeneous realizations and local filters.
     #[test]
     fn ordered_composite_preset_round_trips_deterministically() {
         let record = PresetRecord {

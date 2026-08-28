@@ -6,7 +6,6 @@ use std::{
 };
 
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use toniator_domain::{
     CanvasSpec, ChannelGeometryResponseDelta, ChannelId, DensityMetricDelta2D, Document,
     DocumentCommand, DocumentHistory, DocumentSession, MarkGeometryResponseDelta,
@@ -78,7 +77,7 @@ fn rewrite_schema_version(source: &Path, destination: &Path, version: u32) {
             let text = String::from_utf8(bytes).expect("document JSON is UTF-8");
             bytes = text
                 .replacen(
-                    "\"document_schema_version\":6",
+                    "\"document_schema_version\":7",
                     &format!("\"document_schema_version\":{version}"),
                     1,
                 )
@@ -263,9 +262,9 @@ fn port_v4_fixture_to_v5(path: &Path) {
     fs::rename(temporary, path).expect("port atomically replaces fixture");
 }
 
-/// Loads the tracked sample containers as strict v6 fixtures with exact source bytes.
+/// Loads the tracked sample containers as strict current-v7 fixtures with exact source bytes.
 #[test]
-fn tracked_sample_fixtures_are_current_v6_with_exact_sources() {
+fn tracked_sample_fixtures_are_current_v7_with_exact_sources() {
     for (fixture, source, format) in [
         (
             "raster-sample.toniator",
@@ -279,7 +278,7 @@ fn tracked_sample_fixtures_are_current_v6_with_exact_sources() {
         ),
     ] {
         let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets");
-        let loaded = load(&assets.join(fixture)).expect("tracked v6 fixture loads");
+        let loaded = load(&assets.join(fixture)).expect("tracked v7 fixture loads");
         let embedded = loaded
             .sources()
             .entries()
@@ -300,9 +299,9 @@ fn holiday_v5_fixture_is_not_migrated_implicitly() {
     assert!(matches!(error, LoadError::Version { .. }));
 }
 
-/// Saves deterministic v6 density/aspect deltas and omits every effective projection.
+/// Saves deterministic v7 density/aspect deltas and omits every effective projection.
 #[test]
-fn v6_save_is_deterministic_and_serializes_only_base_plus_authored_deltas() {
+fn v7_save_is_deterministic_and_serializes_only_base_plus_authored_deltas() {
     let (document, sources) = source_backed_document();
     let document = document
         .apply_command(&DocumentCommand::SetChannelDensityDelta {
@@ -347,12 +346,12 @@ fn v6_save_is_deterministic_and_serializes_only_base_plus_authored_deltas() {
         fs::read(&second).expect("second reads")
     );
     let text = document_json(&first);
-    assert!(text.contains("\"document_schema_version\":6"));
+    assert!(text.contains("\"document_schema_version\":7"));
     assert!(text.contains("\"pattern_settings\""));
     assert!(text.contains("\"pattern_instance\""));
     assert!(!text.contains("EffectiveChannelPatternInstance"));
     assert!(!text.contains("effective_channel_pattern"));
-    let loaded = load(&first).expect("v6 reloads");
+    let loaded = load(&first).expect("v7 reloads");
     assert_eq!(loaded.document(), &document);
     let instance = loaded
         .document()
@@ -382,13 +381,13 @@ fn v6_save_is_deterministic_and_serializes_only_base_plus_authored_deltas() {
     fs::remove_file(second).expect("second temporary removes");
 }
 
-/// Rejects document schemas one through five without a migration or fallback decoder.
+/// Rejects document schemas one through six without a migration or fallback decoder.
 #[test]
-fn document_versions_one_through_five_are_rejected() {
+fn document_versions_one_through_six_are_rejected() {
     let (document, sources) = source_backed_document();
     let current = temporary("current.toniator");
     save(&current, &document, &sources).expect("current save succeeds");
-    for version in 1..=5 {
+    for version in 1..=6 {
         let stale = temporary(&format!("schema-{version}.toniator"));
         rewrite_schema_version(&current, &stale, version);
         let error = load(&stale).expect_err("obsolete schema rejects");
@@ -403,10 +402,10 @@ fn document_versions_one_through_five_are_rejected() {
     fs::remove_file(current).expect("current temporary removes");
 }
 
-/// Keeps preset v3 deterministic and materializes the same ID-free recipe at either authority scope.
+/// Keeps preset v4 deterministic and materializes the same ID-free recipe at either authority scope.
 #[test]
-fn preset_v3_bytes_reconstruct_document_base_or_channel_override() {
-    assert_eq!(PRESET_FORMAT_VERSION, 3);
+fn preset_v4_bytes_reconstruct_document_base_or_channel_override() {
+    assert_eq!(PRESET_FORMAT_VERSION, 4);
     let preset = PresetRecord {
         metadata: PresetMetadata {
             id: "stage20g-grid".into(),
@@ -433,9 +432,24 @@ fn preset_v3_bytes_reconstruct_document_base_or_channel_override() {
     assert_eq!(bytes, fs::read(&second).expect("second preset reads"));
     assert_eq!(load_preset(&first).expect("preset reloads"), preset);
     assert_eq!(
-        format!("{:x}", Sha256::digest(&bytes)),
-        "b6212326e0a2ef94edd16c60e84c73d3c5dad338402a977a3aedb7d38584e44d"
+        serde_json::from_slice::<serde_json::Value>(&bytes).expect("current preset JSON")["preset_format_version"],
+        serde_json::json!(4)
     );
+    let obsolete = temporary("preset-v3.json");
+    let mut obsolete_json: serde_json::Value = serde_json::from_slice(&bytes).expect("preset JSON");
+    obsolete_json["preset_format_version"] = serde_json::json!(3);
+    fs::write(
+        &obsolete,
+        serde_json::to_vec(&obsolete_json).expect("obsolete preset JSON"),
+    )
+    .expect("obsolete preset writes");
+    assert!(
+        load_preset(&obsolete)
+            .expect_err("preset v3 rejects")
+            .context()
+            .contains("unsupported preset format version 3")
+    );
+    fs::remove_file(obsolete).expect("obsolete preset removes");
 
     let (document, _) = source_backed_document();
     let base_definition = document.pattern_definition_bundles()[0].definition.clone();

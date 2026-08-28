@@ -554,6 +554,18 @@ JPEG/JPG, WebP, BMP, TIFF, OpenEXR, and AVIF with exact embedded-byte
 round-trips, single-image enforcement, native dav1d AVIF decoding, and linear
 finite-clamped OpenEXR handling without implicit tone mapping.
 
+The separately verified headless Curve Motif prerequisite now supersedes that
+current persistence boundary with document schema v7 and preset format v4
+(container v1 unchanged); v6 documents and v3 presets reject. It chains one
+embedded authored open path across adjacent one-guide Along Guides sites into
+continuous canonical variable-width stroke rows. Odd provenance rows can mirror
+and then use an optional fractional interval phase, while guide layout remains
+the sole layout authority and phase receives padded coverage. The implementation
+uses ordinary source sampling, paint, PNG, and SVG paths, keeps the bundled
+catalog at sixteen entries, and remains awaiting user acceptance. Its future
+gallery card, Pattern Wizard, personal presets, and reusable shape storage stay
+paused in separately gated Stage 21B.
+
 The main inspector defaults to runtime-only **ALL** or a real named channel.
 Its compact recipe dropdown is non-mutating until **Apply Pattern**; applying
 to ALL discloses and clears pattern-relative channel intent in one exactly

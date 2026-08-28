@@ -257,6 +257,20 @@ The app production workflow was not changed. Current app test fixtures were
 ported mechanically to final headless authority, so a private Wayland GTK run
 is not an applicable acceptance boundary for this headless closeout.
 
+## Post-Stage-20 Curve Motif prerequisite
+
+This section records a later headless authority and does not revise Stage 20
+history or its checkpoint-era v5/v3 persistence statements. After Stage 21A,
+the verified, user-acceptance-pending Curve Motif prerequisite introduces one
+open authored path chained across one-guide Along Guides rows. It reuses Stage
+20I canonical variable-width strokes, source sampling, ordered painter output,
+cache transactions, cancellation, and shared-Rayon work; no renderer branch
+or GTK workflow is added. Stable guide provenance supplies rows, exact adjacent
+sites supply cadence, and odd rows compose tangent-axis mirror before optional
+fractional phase translation. Document-v7/preset-v4 are its current-only
+persistence boundary, container v1 and the sixteen-card registry remain
+unchanged, and Stage 21B gallery/personal-preset work stays paused.
+
 ## Deferred boundaries
 
 The GTK4-only/Blueprint re-baseline, Pattern Wizard/gallery UI, Stage 21
