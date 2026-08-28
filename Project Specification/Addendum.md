@@ -1509,7 +1509,7 @@ incompatible by that replacement.
 
 ## 18. Headless Curve Motif prerequisite
 
-The separately verified headless Curve Motif prerequisite follows Stage 21A and
+The separately accepted headless Curve Motif prerequisite follows Stage 21A and
 precedes any resumed Stage 21B wizard work. `CurveMotifPaths` wraps exactly one
 one-dimension generalized straight-guide **Along Guides** recipe and one
 document-owned validated authored **open** path. Closed, empty, coincident-end

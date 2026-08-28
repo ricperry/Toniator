@@ -1,10 +1,10 @@
 # Toniator Pattern Wizard Plan
 
-Status: **approved future-work plan; Stage 21A is complete and accepted, the
-headless Curve Motif prerequisite is verified awaiting user acceptance, and
+Status: **approved future-work plan; Stage 21A and the headless Curve Motif
+prerequisite are complete and accepted, and
 Pattern Wizard implementation remains separately gated in Stage 21B**
 (accepted 2026-08-22; Stage 20S closeout reconciled 2026-08-26; Stage 21A
-accepted 2026-08-28).
+and the Curve Motif prerequisite accepted 2026-08-28).
 
 This document records the intended replacement direction for the artist-facing
 Pattern Editor workflow. It does not itself authorize additional
@@ -510,7 +510,7 @@ geometry or inventing frontend-only document state. The approved order is:
 | 20R | **Complete at `458c9a981dd349999240a18052e055a71c7b6c3c`:** ordered typed composite outputs and site-use dependency filters. |
 | 20S | **Complete at `55651dee7c744c2aa207924bf0dbb7737609942d`:** headless capabilities/descriptors and ordinary serialized 16-card gallery recipes; wizard exposure remains Stage 21B. |
 | 21A | **Complete at `3028193b787960fb402b0af6807d6e8e8ab174db`:** main window, density/schema-v6 transition, expanded single-still import, ALL/named inspector, compact pattern apply, and private Advanced Settings; user accepted 2026-08-28. |
-| Curve Motif prerequisite | **Verified awaiting user acceptance:** headless one-guide Along Guides open-path chaining, typed alternate-row mirror/optional phase, canonical variable-width stroke realization, document-v7/preset-v4 persistence, and no added catalog card. |
+| Curve Motif prerequisite | **Complete at `b8826c95f3be2abd13d0e007cd59c49c2ce16915`:** accepted headless one-guide Along Guides open-path chaining, typed alternate-row mirror/optional phase, canonical variable-width stroke realization, document-v7/preset-v4 persistence, and no added catalog card. |
 | 21B | **Planned and separately gated:** Pattern Wizard gallery (including a future Curve Motif card), adaptive pages, Review, nested subeditors, and layered built-in/personal preset storage. |
 | 22 | Headless frame/media authority, frame sequences/export, and simple start/end transitions. |
 | 23 | Temporal GTK with descriptor-driven start/end pins only. |
@@ -529,8 +529,9 @@ renderer behavior.
 ## Stage 21 accepted split and gates
 
 Stage 21A and Stage 21B are sequential, separately accepted checkpoints. The
-headless Curve Motif prerequisite is a separate verified checkpoint between
-them; it does not enable the wizard.
+headless Curve Motif prerequisite is a separately accepted checkpoint between
+them, complete at `b8826c95f3be2abd13d0e007cd59c49c2ce16915`; it does not
+enable the wizard.
 Stage 21A is complete at `3028193b787960fb402b0af6807d6e8e8ab174db`
 after focused verification, independent re-review, and user acceptance on
 2026-08-28. Stage 21B remains Planned and separately gated; accepting Stage

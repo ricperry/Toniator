@@ -820,7 +820,8 @@ above and do not include translation. Automated wlroots evidence remains
 non-human and non-Mutter. The user accepted Stage 21A on 2026-08-28. No push,
 publication, or Stage 21B work has begun.
 
-**Stage 21B prerequisite — Headless Curve Motif — Accepted awaiting checkpoint.**
+**Stage 21B prerequisite — Headless Curve Motif — Complete at commit
+`b8826c95f3be2abd13d0e007cd59c49c2ce16915`.**
 The user authorized this separately accepted headless checkpoint on 2026-08-28.
 It adds one authored open motif chained across one-guide Along Guides rows,
 including composable alternate-row mirror/phase and existing source-driven
@@ -834,10 +835,10 @@ corrected through canonical response refinement and a higher existing Pattern
 density evidence recipe without adding motif-size authority. The isolated
 release performance/memory gate also passed all 28 intrinsic evaluator-only
 cases under timeout/RSS supervision with cold 24-worker evaluation and warm
-full cache hits. The user accepted this headless prerequisite on 2026-08-28.
-A local checkpoint remains pending. Stage 21B stays paused and requires
-separate planning completion and implementation authorization after this
-checkpoint is recorded.
+full cache hits. The user accepted this headless prerequisite on 2026-08-28,
+and the local implementation checkpoint is
+`b8826c95f3be2abd13d0e007cd59c49c2ce16915`. Stage 21B stays Planned and
+requires separate planning completion and implementation authorization.
 
 ## Maintenance rules
 

@@ -2204,7 +2204,7 @@ fallible row-active edge schedule and sparse nonzero-winding spans with bounded
 cancellation checks, preserving exact coverage while avoiding rotated
 axis-aligned-bounds scans.
 
-### Headless Curve Motif prerequisite — verified, awaiting user acceptance
+### Headless Curve Motif prerequisite — complete at `b8826c95f3be2abd13d0e007cd59c49c2ce16915`
 
 This separately bounded headless checkpoint follows Stage 21A; it does not
 resume Stage 21B or add GTK. It adds one `CurveMotifPaths` recipe authority:
@@ -2220,9 +2220,11 @@ undo/redo, resource-edit invalidation, cache identity, cancellation, fallible
 growth, shared-Rayon row work, and monotonic progress are headless authority.
 Current-only persistence is document-v7/preset-v4, container-v1 unchanged;
 v6/v3 reject. The bundled registry remains exactly sixteen entries. Intrinsic
-composed artifacts use both immutable sources. User acceptance and a checkpoint
-remain separate; GTK, the gallery card, personal presets, reusable shape
-storage, and wizard design work remain paused in Stage 21B.
+composed artifacts use both immutable sources. The user accepted this headless
+prerequisite on 2026-08-28 and its implementation checkpoint is
+`b8826c95f3be2abd13d0e007cd59c49c2ce16915`; GTK, the gallery card, personal
+presets, reusable shape storage, and wizard design work remain paused in Stage
+21B.
 
 ### Stage 21B — Pattern Wizard and Personal Preset Library
 

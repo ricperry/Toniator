@@ -261,7 +261,8 @@ is not an applicable acceptance boundary for this headless closeout.
 
 This section records a later headless authority and does not revise Stage 20
 history or its checkpoint-era v5/v3 persistence statements. After Stage 21A,
-the verified, user-acceptance-pending Curve Motif prerequisite introduces one
+the accepted Curve Motif prerequisite at
+`b8826c95f3be2abd13d0e007cd59c49c2ce16915` introduces one
 open authored path chained across one-guide Along Guides rows. It reuses Stage
 20I canonical variable-width strokes, source sampling, ordered painter output,
 cache transactions, cancellation, and shared-Rayon work; no renderer branch
