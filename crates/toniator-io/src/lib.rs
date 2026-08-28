@@ -40,6 +40,9 @@ use toniator_domain::{
 };
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
+/// Current-only XDG personal preset and authored-resource library authority.
+pub mod personal_library;
+
 pub const CONTAINER_VERSION: u32 = 1;
 pub const DOCUMENT_SCHEMA_VERSION: u32 = 7;
 /// Standalone pure-schema preset JSON format version. It is deliberately

@@ -1046,6 +1046,7 @@ struct AdvancedOutputAnchor {
 enum AdvancedOutputStructuralKind {
     Marks,
     GuidePaths,
+    CurveMotifPaths,
     ConnectionPaths,
     MazeWalls,
     Regions,
@@ -2263,9 +2264,16 @@ fn reference_label(reference: &PropertyReferenceValue) -> String {
     }
 }
 
+/// Formats one typed descriptor value without inventing editable GTK authority.
+///
+/// Optional finite values retain their explicit disabled state instead of presenting a fabricated
+/// numeric phase. Stable references remain artist-facing labels rather than allocation IDs.
 fn current_display(value: &PropertyCurrentValueKind) -> String {
     match value {
         PropertyCurrentValueKind::FiniteF64(value) => format!("{value:.4}"),
+        PropertyCurrentValueKind::OptionalFiniteF64(value) => value
+            .map(|value| format!("{value:.4}"))
+            .unwrap_or_else(|| "Disabled".into()),
         PropertyCurrentValueKind::U32(value) => value.to_string(),
         PropertyCurrentValueKind::Boolean(value) => value.to_string(),
         PropertyCurrentValueKind::EnumChoice(value) => enum_choice_label(*value).into(),
@@ -3186,6 +3194,9 @@ fn advanced_output_anchor(
         }
         toniator_domain::PatternOutputCapabilityProjection::GuidePaths(_) => {
             AdvancedOutputStructuralKind::GuidePaths
+        }
+        toniator_domain::PatternOutputCapabilityProjection::CurveMotifPaths(_) => {
+            AdvancedOutputStructuralKind::CurveMotifPaths
         }
         toniator_domain::PatternOutputCapabilityProjection::ConnectionPaths(_) => {
             AdvancedOutputStructuralKind::ConnectionPaths
@@ -5710,6 +5721,16 @@ fn append_draft_descriptor_control(
             });
             control.add_controller(focus);
             label.set_mnemonic_widget(Some(&control));
+            row.append(&label);
+            row.append(&control);
+            control.upcast()
+        }
+        PropertyCurrentValueKind::OptionalFiniteF64(value) => {
+            let text = value
+                .map(|value| format!("{value:.4}"))
+                .unwrap_or_else(|| "Disabled".into());
+            let control = gtk::Label::new(Some(&text));
+            control.set_xalign(1.0);
             row.append(&label);
             row.append(&control);
             control.upcast()
@@ -9541,6 +9562,22 @@ mod tests {
     use super::*;
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+    /// Preserves the optional Curve Motif phase state in read-only app projections.
+    ///
+    /// The presentation distinguishes a disabled phase from a finite fraction without creating a
+    /// frontend-owned default or accepting nonfinite input.
+    #[test]
+    fn optional_finite_display_preserves_enabled_and_disabled_states() {
+        assert_eq!(
+            current_display(&PropertyCurrentValueKind::OptionalFiniteF64(Some(0.25))),
+            "0.2500"
+        );
+        assert_eq!(
+            current_display(&PropertyCurrentValueKind::OptionalFiniteF64(None)),
+            "Disabled"
+        );
+    }
+
     /// Proves the GTK zoom projection is inverse, finite-positive, and lossless.
     ///
     /// The test does not mutate document authority: Density remains the schema
@@ -11807,6 +11844,37 @@ mod tests {
         assert!(values.iter().any(|value| {
             value.descriptor.field == PropertyFieldId::ArtworkWeightMappingComponent
         }));
+    }
+
+    /// Keeps Curve Motif output locators structurally distinct from ordinary guide paths.
+    ///
+    /// The app reads the domain capability projection after ordinary preset materialization and
+    /// retains only painter position plus structural kind; it does not inspect motif geometry or
+    /// create renderer authority.
+    #[test]
+    fn curve_motif_advanced_output_anchor_uses_its_typed_structural_kind() {
+        let mut workspace = direct_png_workspace();
+        let channel_id = authoritative_channel_ids(workspace.document())[0];
+        PresetRegistry::bundled()
+            .apply_to_selected(&mut workspace.history, channel_id, "curve-motif-rows")
+            .expect("Curve Motif preset creates one selected copy");
+        let output = workspace
+            .document()
+            .pattern_capabilities(PatternCapabilityScope::Channel(channel_id))
+            .expect("Curve Motif capabilities project")
+            .outputs
+            .into_iter()
+            .next()
+            .expect("Curve Motif has one output");
+        let anchor = advanced_output_anchor(
+            workspace.document(),
+            PropertyTarget::ChannelOutput(channel_id, output.output_layer_id),
+        )
+        .expect("Curve Motif output resolves one stable anchor");
+        assert_eq!(
+            anchor.structural_kind,
+            AdvancedOutputStructuralKind::CurveMotifPaths
+        );
     }
 
     /// Routes repeated output fields through structural anchors across ID renewal and rejects a meaningful reorder.

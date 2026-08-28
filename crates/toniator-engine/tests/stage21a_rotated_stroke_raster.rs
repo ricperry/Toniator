@@ -187,8 +187,8 @@ fn every_bundled_preset_completes_bounded_rotated_engine_evaluation() {
     let registry = PresetRegistry::bundled();
     assert_eq!(
         registry.entries().len(),
-        16,
-        "the complete bundled-preset matrix retains every catalog recipe"
+        17,
+        "the complete bundled-preset matrix retains every current catalog recipe"
     );
     for (ordinal, entry) in registry.entries().iter().enumerate() {
         let source_id = format!("stage21a-bundled-matrix-{ordinal}");

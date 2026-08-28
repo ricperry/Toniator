@@ -17,7 +17,7 @@ fn validation_directory() -> PathBuf {
     directory
 }
 
-/// Round-trips a preset-v3 ID-free self-intersecting shape recipe without allocating IDs.
+/// Round-trips a preset-v4 ID-free self-intersecting shape recipe without allocating IDs.
 #[test]
 fn authored_closed_shape_preset_round_trips_as_embedded_recipe_geometry() {
     let points = [
@@ -100,13 +100,13 @@ fn preset_round_trips_through_versioned_standalone_io() {
     )));
 }
 
-/// Round-trips the v3 tagged parametric recipe without allocating document-owned IDs.
+/// Round-trips the v4 tagged parametric recipe without allocating document-owned IDs.
 #[test]
 fn parametric_recipe_round_trips_without_a_preset_format_bump() {
     let preset = PresetRecord {
         metadata: PresetMetadata {
-            id: "parametric-v3".into(),
-            name: "Parametric v3".into(),
+            id: "parametric-v4".into(),
+            name: "Parametric v4".into(),
             category: "Test".into(),
             description: "ID-free parametric recipe serialization fixture.".into(),
             thumbnail: None,
@@ -132,7 +132,7 @@ fn parametric_recipe_round_trips_without_a_preset_format_bump() {
             }),
         }),
     };
-    let path = validation_directory().join("parametric-v3.preset.json");
+    let path = validation_directory().join("parametric-v4.preset.json");
     save_preset(&path, &preset).expect("current parametric recipe saves");
     assert_eq!(
         load_preset(&path).expect("current parametric recipe reloads"),
@@ -142,10 +142,10 @@ fn parametric_recipe_round_trips_without_a_preset_format_bump() {
     assert_eq!(
         text,
         r#"{
-  "preset_format_version": 3,
+  "preset_format_version": 4,
   "metadata": {
-    "id": "parametric-v3",
-    "name": "Parametric v3",
+    "id": "parametric-v4",
+    "name": "Parametric v4",
     "category": "Test",
     "description": "ID-free parametric recipe serialization fixture.",
     "thumbnail": null
@@ -200,14 +200,14 @@ fn parametric_recipe_round_trips_without_a_preset_format_bump() {
     );
 }
 
-/// Rejects unknown and obsolete v3 preset fields before any recipe reaches domain validation.
+/// Rejects unknown and obsolete current preset-v4 fields before any recipe reaches domain validation.
 #[test]
-fn preset_v3_rejects_unknown_envelope_and_obsolete_recipe_fields() {
+fn preset_v4_rejects_unknown_envelope_and_obsolete_recipe_fields() {
     let directory = validation_directory();
     let unknown = directory.join("unknown-envelope-field.preset.json");
     fs::write(
         &unknown,
-        r#"{"preset_format_version":3,"metadata":{"id":"x","name":"X","category":"Test","description":"Test","thumbnail":null},"recipe":{"structure":{"kind":"straight_grid","name":"Grid","coverage":{"guard_steps":2,"additional_margin":0}},"output_settings":[{"source_filter":{"kind":"all"},"response":{"kind":"marks","minimum_fill":0.25,"maximum_fill":0.85}}]},"obsolete":true}"#,
+        r#"{"preset_format_version":4,"metadata":{"id":"x","name":"X","category":"Test","description":"Test","thumbnail":null},"recipe":{"structure":{"kind":"straight_grid","name":"Grid","coverage":{"guard_steps":2,"additional_margin":0}},"output_settings":[{"source_filter":{"kind":"all"},"response":{"kind":"marks","response":{"minimum_fill":0.25,"maximum_fill":0.85}}}]},"obsolete":true}"#,
     )
     .expect("derived malformed preset writes");
     assert!(load_preset(&unknown).is_err());
@@ -215,7 +215,7 @@ fn preset_v3_rejects_unknown_envelope_and_obsolete_recipe_fields() {
     let obsolete = directory.join("obsolete-structure-field.preset.json");
     fs::write(
         &obsolete,
-        r#"{"preset_format_version":3,"metadata":{"id":"x","name":"X","category":"Test","description":"Test","thumbnail":null},"recipe":{"structure":{"kind":"straight_grid","name":"Grid","coverage":{"guard_steps":2,"additional_margin":0},"legacy_diameter":2},"output_settings":[{"source_filter":{"kind":"all"},"response":{"kind":"marks","minimum_fill":0.25,"maximum_fill":0.85}}]}}"#,
+        r#"{"preset_format_version":4,"metadata":{"id":"x","name":"X","category":"Test","description":"Test","thumbnail":null},"recipe":{"structure":{"kind":"straight_grid","name":"Grid","coverage":{"guard_steps":2,"additional_margin":0},"legacy_diameter":2},"output_settings":[{"source_filter":{"kind":"all"},"response":{"kind":"marks","response":{"minimum_fill":0.25,"maximum_fill":0.85}}}]}}"#,
     )
     .expect("derived obsolete preset writes");
     assert!(load_preset(&obsolete).is_err());
@@ -223,22 +223,22 @@ fn preset_v3_rejects_unknown_envelope_and_obsolete_recipe_fields() {
     let retired_visible_margin = directory.join("retired-visible-mark-margin.preset.json");
     fs::write(
         &retired_visible_margin,
-        r#"{"preset_format_version":3,"metadata":{"id":"x","name":"X","category":"Test","description":"Test","thumbnail":null},"recipe":{"structure":{"kind":"straight_grid","name":"Grid","coverage":{"guard_steps":2,"additional_margin":0},"visible_mark_margin":1},"output_settings":[{"source_filter":{"kind":"all"},"response":{"kind":"marks","minimum_fill":0.25,"maximum_fill":0.85}}]}}"#,
+        r#"{"preset_format_version":4,"metadata":{"id":"x","name":"X","category":"Test","description":"Test","thumbnail":null},"recipe":{"structure":{"kind":"straight_grid","name":"Grid","coverage":{"guard_steps":2,"additional_margin":0},"visible_mark_margin":1},"output_settings":[{"source_filter":{"kind":"all"},"response":{"kind":"marks","response":{"minimum_fill":0.25,"maximum_fill":0.85}}}]}}"#,
     )
     .expect("derived retired-field preset writes");
     assert!(
         load_preset(&retired_visible_margin).is_err(),
-        "current preset-v3 strictly rejects the retired visible-mark margin field"
+        "current preset-v4 strictly rejects the retired visible-mark margin field"
     );
 }
 
-/// Rejects unknown or retired fields inside current preset-v3 parametric and
+/// Rejects unknown or retired fields inside current preset-v4 parametric and
 /// generalized-recipe nested DTOs before domain recipe validation can discard them.
 #[test]
-fn preset_v3_rejects_unknown_nested_recipe_fields() {
+fn preset_v4_rejects_unknown_nested_recipe_fields() {
     let directory = validation_directory();
     let parametric = serde_json::json!({
-        "preset_format_version": 3,
+        "preset_format_version": 4,
         "metadata": {
             "id": "nested-parametric",
             "name": "Nested Parametric",
@@ -273,7 +273,7 @@ fn preset_v3_rejects_unknown_nested_recipe_fields() {
         }
     });
     let generalized = serde_json::json!({
-        "preset_format_version": 3,
+        "preset_format_version": 4,
         "metadata": {
             "id": "nested-generalized",
             "name": "Nested Generalized",
@@ -317,7 +317,7 @@ fn preset_v3_rejects_unknown_nested_recipe_fields() {
     .expect("valid parametric fixture writes");
     assert!(
         load_preset(&valid_parametric).is_ok(),
-        "the unmodified current-v3 parametric fixture remains accepted"
+        "the unmodified current-v4 parametric fixture remains accepted"
     );
 
     let valid_generalized = directory.join("nested-generalized-valid.preset.json");
@@ -328,7 +328,7 @@ fn preset_v3_rejects_unknown_nested_recipe_fields() {
     .expect("valid generalized fixture writes");
     assert!(
         load_preset(&valid_generalized).is_ok(),
-        "the unmodified current-v3 generalized fixture remains accepted"
+        "the unmodified current-v4 generalized fixture remains accepted"
     );
 
     let mut unknown_sites = parametric.clone();
@@ -356,7 +356,7 @@ fn preset_v3_rejects_unknown_nested_recipe_fields() {
         .expect("malformed fixture writes");
         assert!(
             load_preset(&path).is_err(),
-            "current-v3 rejects the nested {name} field instead of silently discarding it"
+            "current-v4 rejects the nested {name} field instead of silently discarding it"
         );
     }
 }

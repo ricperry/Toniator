@@ -199,17 +199,12 @@ fn curve_motif_ordinary_aspect_and_channel_rotation_preserve_connected_paths() {
     assert!(strokes.any(|stroke| stroke.path.segments().len() > 1));
 }
 
-/// Preserves the fixed sixteen-entry bundled catalog while each current recipe round-trips as preset-v4.
+/// Proves the seventeenth bundled Curve Motif card materializes and round-trips as preset-v4.
 #[test]
-fn existing_bundled_recipes_materialize_and_round_trip_without_a_curve_motif_card() {
+fn bundled_curve_motif_card_materializes_and_round_trips_as_preset_v4() {
     let registry = PresetRegistry::bundled();
-    assert_eq!(registry.entries().len(), 16);
-    assert!(
-        registry
-            .entries()
-            .iter()
-            .all(|entry| !entry.metadata.id.contains("curve-motif"))
-    );
+    assert_eq!(registry.entries().len(), 17);
+    assert!(registry.find("curve-motif-rows").is_some());
     let document = Document::new_default_document(
         CanvasSpec {
             width: 96.0,

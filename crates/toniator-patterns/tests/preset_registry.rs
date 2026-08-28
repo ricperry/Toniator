@@ -7,7 +7,9 @@ use toniator_domain::{
     PresetRecord, RandomSiteCharacter, SiteDensityModulation, SiteExclusionPolicy, SourceMapping,
     SourceMappingComponent, SourceReference,
 };
-use toniator_patterns::{BUNDLED_PRESET_REGISTRY_VERSION, PresetRegistry};
+use toniator_patterns::{
+    BUNDLED_PRESET_REGISTRY_VERSION, LayeredPresetCatalog, PresetOrigin, PresetRegistry,
+};
 
 /// Builds a modeled document history whose initial RGB definition is shared by
 /// all three channels, exercising default copy and explicit shared semantics.
@@ -34,11 +36,16 @@ fn bundled_registry_is_stable_and_reconstructs_every_entry() {
         .iter()
         .map(|entry| entry.metadata.id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(ids.len(), 16, "the temporary maze-debug recipe is retired");
+    assert_eq!(
+        ids.len(),
+        17,
+        "Curve Motif is the seventeenth ordinary built-in"
+    );
     assert_eq!(
         ids,
         vec![
             "clustered-dispersion-random-links",
+            "curve-motif-rows",
             "even-random-circles",
             "grid-voronoi-scale",
             "one-guide-lines",
@@ -62,6 +69,123 @@ fn bundled_registry_is_stable_and_reconstructs_every_entry() {
             .apply_to_selected(&mut history(), ChannelId(1), id)
             .expect("every bundled recipe materializes through the ordinary history boundary");
     }
+}
+
+/// Combines personal records deterministically without allowing a display-name dispatch surface.
+#[test]
+fn layered_catalog_orders_personal_entries_and_applies_by_id() {
+    let registry = PresetRegistry::bundled();
+    let mut zulu = registry.find("even-random-circles").unwrap().clone();
+    zulu.metadata.id = "user-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into();
+    zulu.metadata.name = "Zulu personal".into();
+    let mut alpha = zulu.clone();
+    alpha.metadata.id = "user-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into();
+    alpha.metadata.name = "alpha personal".into();
+    let catalog = LayeredPresetCatalog::new(&registry, vec![zulu, alpha])
+        .expect("valid personal records combine with immutable built-ins");
+    assert!(
+        catalog.entries()[..registry.entries().len()]
+            .iter()
+            .all(|entry| entry.origin == PresetOrigin::BuiltIn)
+    );
+    assert_eq!(
+        catalog.entries()[registry.entries().len()..]
+            .iter()
+            .map(|entry| entry.preset.metadata.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha personal", "Zulu personal"]
+    );
+    catalog
+        .apply_to_document_base(&mut history(), "user-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+        .expect("stable personal ID applies through the ordinary document command");
+}
+
+/// Rejects invalid personal IDs and case-insensitive catalog name collisions before lookup is exposed.
+#[test]
+fn layered_catalog_rejects_ambiguous_personal_records() {
+    let registry = PresetRegistry::bundled();
+    let mut invalid_id = registry.find("even-random-circles").unwrap().clone();
+    invalid_id.metadata.id = "not-a-user-id".into();
+    invalid_id.metadata.name = "Personal marks".into();
+    assert!(LayeredPresetCatalog::new(&registry, vec![invalid_id]).is_err());
+
+    let mut first = registry.find("even-random-circles").unwrap().clone();
+    first.metadata.id = "user-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into();
+    first.metadata.name = "Personal marks".into();
+    let mut duplicate_name = first.clone();
+    duplicate_name.metadata.id = "user-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into();
+    duplicate_name.metadata.name = "personal MARKS".into();
+    assert!(LayeredPresetCatalog::new(&registry, vec![first, duplicate_name]).is_err());
+}
+
+/// Isolates a personal name collision with immutable built-in authority without hiding its warning.
+#[test]
+fn layered_catalog_warns_and_omits_personal_built_in_name_collisions() {
+    let registry = PresetRegistry::bundled();
+    let mut personal = registry.find("even-random-circles").unwrap().clone();
+    personal.metadata.id = "user-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into();
+    personal.metadata.name = "EVEN DISPERSION MARKS".into();
+    let catalog = LayeredPresetCatalog::new(&registry, vec![personal])
+        .expect("personal built-in name collision remains nonfatal");
+    assert_eq!(catalog.entries().len(), registry.entries().len());
+    assert_eq!(catalog.warnings().len(), 1);
+    assert_eq!(
+        catalog.warnings()[0].id,
+        "user-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    );
+    assert!(
+        catalog
+            .find("user-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+            .is_none()
+    );
+}
+
+/// Pins the seventeenth card to the accepted asymmetric Along Guides Curve Motif authority.
+#[test]
+fn curve_motif_card_uses_the_accepted_row_cadence_and_phase_recipe() {
+    let registry = PresetRegistry::bundled();
+    let record = registry
+        .find("curve-motif-rows")
+        .expect("seventeenth Curve Motif card exists");
+    let PatternStructureRecipe::CurveMotifPaths {
+        definition,
+        motif,
+        mirror_alternate_rows,
+        alternate_row_phase,
+        ..
+    } = &record.recipe.structure
+    else {
+        panic!("Curve Motif card retains its ordinary Curve Motif recipe")
+    };
+    let PatternStructureRecipe::GeneralizedStraightGuides {
+        coverage,
+        dimensions,
+        product,
+        orientation,
+        ..
+    } = definition.as_ref()
+    else {
+        panic!("Curve Motif card retains one generalized guide family")
+    };
+    assert_eq!(coverage.guard_steps, 2);
+    assert_eq!(dimensions.len(), 1);
+    assert_eq!(dimensions[0].phase, 0.125);
+    assert_eq!(dimensions[0].spacing_multiplier, 1.0);
+    assert!(matches!(
+        product,
+        GeneralizedSiteProductDraft::AlongGuides {
+            dimension_indices,
+            interval_multiplier: 1.0,
+            phase: 0.25,
+        } if dimension_indices == &vec![0]
+    ));
+    assert!(matches!(
+        orientation,
+        MarkOrientationDraft::GuideTangent { dimension_index: 0 }
+    ));
+    assert_eq!(motif.segments().len(), 3);
+    assert!(*mirror_alternate_rows);
+    assert_eq!(*alternate_row_phase, Some(0.25));
 }
 
 /// Pins the Source-Weighted Voronoi catalog recipe to its full-range Scale and AreaAverage response.

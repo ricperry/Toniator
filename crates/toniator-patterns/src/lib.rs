@@ -72,7 +72,7 @@ pub const FIRST_DIMENSION_ID: GuideDimensionId = GuideDimensionId(1);
 pub const SECOND_DIMENSION_ID: GuideDimensionId = GuideDimensionId(2);
 
 /// The stable version of the built-in registry ordering and metadata contract.
-pub const BUNDLED_PRESET_REGISTRY_VERSION: u32 = 2;
+pub const BUNDLED_PRESET_REGISTRY_VERSION: u32 = 3;
 
 /// Versioned cache-identity contract for typed filled-region realization.
 ///
@@ -152,11 +152,284 @@ fn diamond_shape() -> AuthoredStructureDraft {
     .expect("fixed normalized diamond is finite and closed")
 }
 
+/// Builds the accepted asymmetric open three-line Curve Motif payload.
+fn curve_motif_shape() -> AuthoredStructureDraft {
+    let points = [
+        AuthoredPoint2 { x: 0.0, y: 0.0 },
+        AuthoredPoint2 { x: 0.32, y: 0.27 },
+        AuthoredPoint2 { x: 0.7, y: -0.18 },
+        AuthoredPoint2 { x: 1.0, y: 0.0 },
+    ];
+    AuthoredStructureDraft::new(
+        AuthoredStructureKind::OpenPath,
+        points
+            .windows(2)
+            .map(|points| AuthoredCurveSegment::Line {
+                start: points[0],
+                end: points[1],
+            })
+            .collect(),
+    )
+    .expect("fixed asymmetric Curve Motif is a valid open path")
+}
+
 /// Gallery-only preset metadata that remains outside persistence and evaluation identity.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PresetCatalogEntry {
     pub preset: PresetRecord,
     pub required_features: Vec<PatternCapabilityFlag>,
+}
+
+/// The storage authority of one layered preset record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresetOrigin {
+    /// One immutable recipe bundled with the application.
+    BuiltIn,
+    /// One current-version recipe loaded from the active personal library.
+    Personal,
+}
+
+/// One validated preset record together with its immutable catalog origin.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayeredPresetEntry {
+    pub origin: PresetOrigin,
+    pub preset: PresetRecord,
+}
+
+/// A deterministic combined built-in and personal preset catalog.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayeredPresetCatalog {
+    entries: Vec<LayeredPresetEntry>,
+    warnings: Vec<LayeredPresetCatalogWarning>,
+}
+
+/// One isolated personal-preset conflict that keeps immutable bundled authority usable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LayeredPresetCatalogWarning {
+    pub id: String,
+    pub message: String,
+}
+
+/// Stable validation failure for combining built-in and personal preset records.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LayeredPresetCatalogError {
+    message: String,
+}
+
+impl LayeredPresetCatalogError {
+    /// Returns the stable combined-catalog validation message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for LayeredPresetCatalogError {
+    /// Formats the stable combined-catalog validation message.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl Error for LayeredPresetCatalogError {}
+
+impl LayeredPresetCatalog {
+    /// Combines immutable built-ins with validated personal preset-v4 records.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable error when a built-in authority is invalid, a personal ID is not
+    /// canonical, a personal record is invalid, or personal records collide with one another.
+    /// A personal name that collides with an immutable built-in is instead isolated as a warning.
+    pub fn new(
+        built_ins: &PresetRegistry,
+        mut personal: Vec<PresetRecord>,
+    ) -> Result<Self, LayeredPresetCatalogError> {
+        let mut ids = BTreeSet::new();
+        let mut names = BTreeSet::new();
+        for record in built_ins.entries() {
+            toniator_domain::validate_preset_record(record).map_err(|error| {
+                LayeredPresetCatalogError {
+                    message: format!("bundled preset authority is invalid: {error}"),
+                }
+            })?;
+            if !ids.insert(record.metadata.id.clone())
+                || !names.insert(record.metadata.name.to_lowercase())
+            {
+                return Err(LayeredPresetCatalogError {
+                    message: "bundled preset authority has duplicate IDs or names".into(),
+                });
+            }
+        }
+        for record in &personal {
+            if !toniator_domain::is_personal_library_id(&record.metadata.id) {
+                return Err(LayeredPresetCatalogError {
+                    message:
+                        "personal preset IDs must use the canonical user-<lowercase UUID> form"
+                            .into(),
+                });
+            }
+            toniator_domain::validate_preset_record(record).map_err(|error| {
+                LayeredPresetCatalogError {
+                    message: error.to_string(),
+                }
+            })?;
+        }
+        personal.sort_by(|left, right| {
+            left.metadata
+                .name
+                .to_lowercase()
+                .cmp(&right.metadata.name.to_lowercase())
+                .then_with(|| left.metadata.id.cmp(&right.metadata.id))
+        });
+        let mut entries = Vec::with_capacity(built_ins.entries().len() + personal.len());
+        entries.extend(
+            built_ins
+                .entries()
+                .iter()
+                .cloned()
+                .map(|preset| LayeredPresetEntry {
+                    origin: PresetOrigin::BuiltIn,
+                    preset,
+                }),
+        );
+        let mut warnings = Vec::new();
+        for record in personal {
+            if ids.contains(&record.metadata.id) {
+                return Err(LayeredPresetCatalogError {
+                    message: "preset IDs must be unique across the layered catalog".into(),
+                });
+            }
+            let normalized_name = record.metadata.name.to_lowercase();
+            if names.contains(&normalized_name) {
+                if built_ins
+                    .entries()
+                    .iter()
+                    .any(|built_in| built_in.metadata.name.to_lowercase() == normalized_name)
+                {
+                    warnings.push(LayeredPresetCatalogWarning {
+                        id: record.metadata.id,
+                        message: "personal preset name conflicts with an immutable built-in".into(),
+                    });
+                    continue;
+                }
+                return Err(LayeredPresetCatalogError {
+                    message:
+                        "personal preset names must be case-insensitively unique across the layered catalog"
+                            .into(),
+                });
+            }
+            ids.insert(record.metadata.id.clone());
+            names.insert(normalized_name);
+            entries.push(LayeredPresetEntry {
+                origin: PresetOrigin::Personal,
+                preset: record,
+            });
+        }
+        Ok(Self { entries, warnings })
+    }
+
+    /// Returns records in deterministic built-in-first and personal-name order.
+    pub fn entries(&self) -> &[LayeredPresetEntry] {
+        &self.entries
+    }
+
+    /// Returns isolated nonfatal personal-preset conflicts in deterministic personal-name order.
+    pub fn warnings(&self) -> &[LayeredPresetCatalogWarning] {
+        &self.warnings
+    }
+
+    /// Finds one record solely by its stable identifier.
+    pub fn find(&self, id: &str) -> Option<&LayeredPresetEntry> {
+        self.entries
+            .iter()
+            .find(|entry| entry.preset.metadata.id == id)
+    }
+
+    /// Reconstructs one ID-free recipe without display-name behavior.
+    pub fn reconstruct(&self, id: &str) -> Option<PatternDefinitionRecipe> {
+        self.find(id).map(|entry| entry.preset.recipe.clone())
+    }
+
+    /// Applies one layered record to a selected channel through the authoritative history boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns the ordinary document-session failure, including a stable unknown-ID validation
+    /// error, without mutating history for failed lookup or validation.
+    pub fn apply_to_selected(
+        &self,
+        history: &mut DocumentHistory,
+        channel_id: ChannelId,
+        id: &str,
+    ) -> Result<toniator_domain::CommandResult, DocumentSessionError> {
+        let recipe = self.recipe_for(id)?;
+        let base_definition = history
+            .document()
+            .pattern_definition_for(channel_id)
+            .cloned()
+            .ok_or_else(|| unknown_channel_error(channel_id))?;
+        history.apply(
+            &DocumentCommand::ReplaceChannelPatternDefinitionOverrideRecipe {
+                base: history.document().pattern_settings().clone(),
+                channel_id,
+                base_definition,
+                recipe,
+            },
+        )
+    }
+
+    /// Applies one layered record as the document base through the authoritative history boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns the ordinary document-session failure, including a stable unknown-ID validation
+    /// error, without mutating history for failed lookup or validation.
+    pub fn apply_to_document_base(
+        &self,
+        history: &mut DocumentHistory,
+        id: &str,
+    ) -> Result<toniator_domain::CommandResult, DocumentSessionError> {
+        let recipe = self.recipe_for(id)?;
+        let base = history.document().pattern_settings().clone();
+        let base_definition = history
+            .document()
+            .pattern_definition_bundles()
+            .iter()
+            .find(|definition| definition.id == base.definition_id)
+            .map(|bundle| bundle.definition.clone())
+            .ok_or_else(missing_document_base_definition_error)?;
+        history.apply(&DocumentCommand::ReplaceDocumentPatternDefinitionRecipe {
+            base,
+            base_definition,
+            recipe,
+        })
+    }
+
+    /// Resolves one recipe or returns the stable unknown-ID session error.
+    fn recipe_for(&self, id: &str) -> Result<PatternDefinitionRecipe, DocumentSessionError> {
+        self.reconstruct(id).ok_or_else(|| {
+            DocumentSessionError::Validation(toniator_domain::ValidationError::new(
+                "preset.id",
+                "preset ID is not present in this catalog",
+            ))
+        })
+    }
+}
+
+/// Builds the stable selected-channel lookup failure without relying on document invariants.
+fn unknown_channel_error(_channel_id: ChannelId) -> DocumentSessionError {
+    DocumentSessionError::Validation(toniator_domain::ValidationError::new(
+        "preset.channel_id",
+        "channel is not present in this document",
+    ))
+}
+
+/// Builds the stable missing-base-definition failure without panicking on corrupted history state.
+fn missing_document_base_definition_error() -> DocumentSessionError {
+    DocumentSessionError::Validation(toniator_domain::ValidationError::new(
+        "preset.document_base.definition_id",
+        "document base definition is not present in this document",
+    ))
 }
 
 #[cfg(test)]
@@ -458,6 +731,41 @@ impl PresetRegistry {
                         },
                         style: Default::default(),
                     }),
+                },
+                PresetRecord {
+                    metadata: metadata(
+                        "curve-motif-rows",
+                        "Curve Motif",
+                        "Guides",
+                        "One asymmetric open motif chained at Along Guides cadence.",
+                    ),
+                    recipe: PatternDefinitionRecipe::connected(
+                        PatternStructureRecipe::CurveMotifPaths {
+                            definition: Box::new(
+                                PatternStructureRecipe::GeneralizedStraightGuides {
+                                    name: "Curve motif rows".into(),
+                                    coverage: coverage(),
+                                    dimensions: vec![GuideDimensionDraft {
+                                        baseline_angle_degrees: 0.0,
+                                        phase: 0.125,
+                                        spacing_multiplier: 1.0,
+                                    }],
+                                    product: toniator_domain::GeneralizedSiteProductDraft::AlongGuides {
+                                        dimension_indices: vec![0],
+                                        interval_multiplier: 1.0,
+                                        phase: 0.25,
+                                    },
+                                    orientation: MarkOrientationDraft::GuideTangent {
+                                        dimension_index: 0,
+                                    },
+                                },
+                            ),
+                            motif: curve_motif_shape(),
+                            style: Default::default(),
+                            mirror_alternate_rows: true,
+                            alternate_row_phase: Some(0.25),
+                        },
+                    ),
                 },
                 PresetRecord {
                     metadata: metadata(

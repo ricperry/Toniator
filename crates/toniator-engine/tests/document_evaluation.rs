@@ -208,12 +208,12 @@ fn assert_bundled_recipe_evaluates_after_density_increase(record: &toniator_doma
     );
 }
 
-/// Proves every bundled Stage 21A recipe recomputes canonical output after a
+/// Proves every bundled Stage 21B registry recipe recomputes canonical output after a
 /// document-base density increase on the immutable intrinsic PNG.
 #[test]
 fn every_bundled_recipe_evaluates_after_density_increase() {
     let registry = PresetRegistry::bundled();
-    assert_eq!(registry.entries().len(), 16);
+    assert_eq!(registry.entries().len(), 17);
     for record in registry.entries() {
         assert_bundled_recipe_evaluates_after_density_increase(record);
     }

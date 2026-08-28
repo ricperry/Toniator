@@ -78,6 +78,133 @@ pub enum AuthoredStructureKind {
     ClosedShape,
 }
 
+/// One stable personal-library identifier supplied by the frontend or filesystem boundary.
+///
+/// Personal-library identities are deliberately separate from document-scoped numeric structure
+/// IDs. The domain validates their canonical textual form but never generates them.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PersonalResourceId(String);
+
+impl PersonalResourceId {
+    /// Validates and retains one canonical `user-<lowercase UUID>` identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable identifier diagnostic when the value is not the required lowercase UUID
+    /// spelling. Generation remains a frontend responsibility.
+    pub fn new(value: String) -> Result<Self, ValidationError> {
+        if !is_personal_library_id(&value) {
+            return Err(ValidationError::new(
+                "personal_resource.id",
+                "must use the canonical user-<lowercase UUID> form",
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the canonical immutable identifier text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Returns whether one string uses the canonical `user-<lowercase UUID>` personal ID form.
+pub fn is_personal_library_id(value: &str) -> bool {
+    let Some(uuid) = value.strip_prefix("user-") else {
+        return false;
+    };
+    if uuid.len() != 36 {
+        return false;
+    }
+    uuid.chars().enumerate().all(|(index, character)| {
+        matches!(index, 8 | 13 | 18 | 23)
+            .then_some(character == '-')
+            .unwrap_or_else(|| character.is_ascii_digit() || matches!(character, 'a'..='f'))
+    })
+}
+
+/// The typed personal-library bucket for one exact authored geometry payload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PersonalAuthoredResourceKind {
+    Shape,
+    Motif,
+}
+
+impl PersonalAuthoredResourceKind {
+    /// Returns the only authored topology valid for this persisted resource bucket.
+    pub const fn structure_kind(self) -> AuthoredStructureKind {
+        match self {
+            Self::Shape => AuthoredStructureKind::ClosedShape,
+            Self::Motif => AuthoredStructureKind::OpenPath,
+        }
+    }
+}
+
+/// A validated current-only reusable authored geometry record.
+///
+/// It remains independent from document ownership: presets embed the exact geometry they need,
+/// while a future editor may copy this payload into a document-owned structure.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PersonalAuthoredResource {
+    id: PersonalResourceId,
+    name: String,
+    kind: PersonalAuthoredResourceKind,
+    draft: AuthoredStructureDraft,
+}
+
+impl PersonalAuthoredResource {
+    /// Validates one reusable geometry record without allocating document identities.
+    ///
+    /// # Errors
+    ///
+    /// Returns an ID, name, or topology diagnostic before any filesystem or document mutation.
+    pub fn new(
+        id: PersonalResourceId,
+        name: String,
+        kind: PersonalAuthoredResourceKind,
+        draft: AuthoredStructureDraft,
+    ) -> Result<Self, ValidationError> {
+        if name.trim().is_empty() || name.chars().any(char::is_control) {
+            return Err(ValidationError::new(
+                "personal_resource.name",
+                "must be nonempty printable text",
+            ));
+        }
+        if draft.kind() != kind.structure_kind() {
+            return Err(ValidationError::new(
+                "personal_resource.kind",
+                "resource kind must match its authored geometry topology",
+            ));
+        }
+        Ok(Self {
+            id,
+            name,
+            kind,
+            draft,
+        })
+    }
+
+    /// Returns the stable filesystem-owned identity.
+    pub fn id(&self) -> &PersonalResourceId {
+        &self.id
+    }
+
+    /// Returns the printable artist-facing resource name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the typed library bucket for this geometry.
+    pub const fn kind(&self) -> PersonalAuthoredResourceKind {
+        self.kind
+    }
+
+    /// Returns the exact validated authored geometry payload.
+    pub fn draft(&self) -> &AuthoredStructureDraft {
+        &self.draft
+    }
+}
+
 /// One deterministic typed consumer of a document-owned authored structure.
 ///
 /// This projection names only persisted document identifiers. Presentation labels, ordinals, and
